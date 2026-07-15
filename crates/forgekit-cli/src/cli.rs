@@ -3,7 +3,11 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "forgekit", version, about = "Tooling for ForgeKit apps (spec §12)")]
+#[command(
+    name = "forgekit",
+    version,
+    about = "Tooling for ForgeKit apps (spec §12)"
+)]
 pub struct Cli {
     /// Target device id or name (prefix match allowed).
     #[arg(short = 'd', long = "device-id", global = true, value_name = "ID")]
@@ -88,7 +92,13 @@ mod tests {
     fn parses_create_dir_with_defaults() {
         let cli = Cli::parse_from(["forgekit", "create", "myapp"]);
         match cli.command {
-            Command::Create { dir, org, project_name, overwrite, .. } => {
+            Command::Create {
+                dir,
+                org,
+                project_name,
+                overwrite,
+                ..
+            } => {
                 assert_eq!(dir, "myapp");
                 assert_eq!(org, "com.example");
                 assert_eq!(project_name, None);
@@ -111,7 +121,13 @@ mod tests {
             "--overwrite",
         ]);
         match cli.command {
-            Command::Create { dir, org, project_name, overwrite, .. } => {
+            Command::Create {
+                dir,
+                org,
+                project_name,
+                overwrite,
+                ..
+            } => {
                 assert_eq!(dir, "/tmp/x");
                 assert_eq!(org, "dev.f0x");
                 assert_eq!(project_name.as_deref(), Some("my_app"));

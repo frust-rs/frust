@@ -53,7 +53,9 @@ fn scaffolded_project_builds_against_the_real_facade() {
             "--project-name",
             "fk_e2e_app",
             "--forgekit-path",
-            forgekit_path.to_str().expect("forgekit_path is valid UTF-8"),
+            forgekit_path
+                .to_str()
+                .expect("forgekit_path is valid UTF-8"),
         ])
         .status()
         .expect("failed to spawn `forgekit create`");

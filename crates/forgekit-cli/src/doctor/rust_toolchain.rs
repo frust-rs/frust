@@ -28,7 +28,10 @@ impl Validator for RustToolchainValidator {
                 }
                 None => {
                     status = Status::Partial;
-                    messages.push(format!("could not parse rustc version from: {}", out.stdout.trim()));
+                    messages.push(format!(
+                        "could not parse rustc version from: {}",
+                        out.stdout.trim()
+                    ));
                 }
             },
             _ => {
@@ -66,16 +69,27 @@ mod tests {
     use crate::process::{FakeProcessRunner, Output};
 
     fn ok(stdout: &str) -> Output {
-        Output { success: true, stdout: stdout.to_string(), stderr: String::new() }
+        Output {
+            success: true,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        }
     }
 
     #[test]
     fn passes_when_version_meets_minimum() {
         let runner = FakeProcessRunner::new()
-            .with("rustc --version", ok("rustc 1.91.1 (ed61e7d7e 2025-11-07)\n"))
+            .with(
+                "rustc --version",
+                ok("rustc 1.91.1 (ed61e7d7e 2025-11-07)\n"),
+            )
             .with("cargo --version", ok("cargo 1.91.1\n"));
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = RustToolchainValidator.validate(&ctx);
         assert_eq!(result.status, Status::Pass);
     }
@@ -86,16 +100,26 @@ mod tests {
             .with("rustc --version", ok("rustc 1.70.0 (abc 2023-01-01)\n"))
             .with("cargo --version", ok("cargo 1.70.0\n"));
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = RustToolchainValidator.validate(&ctx);
         assert_eq!(result.status, Status::Fail);
     }
 
     #[test]
     fn fails_when_rustc_missing() {
-        let runner = FakeProcessRunner::new().missing("rustc --version").with("cargo --version", ok("cargo 1.91.1"));
+        let runner = FakeProcessRunner::new()
+            .missing("rustc --version")
+            .with("cargo --version", ok("cargo 1.91.1"));
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = RustToolchainValidator.validate(&ctx);
         assert_eq!(result.status, Status::Fail);
         assert!(result.messages.iter().any(|m| m.contains("rustup.rs")));
@@ -103,7 +127,10 @@ mod tests {
 
     #[test]
     fn parses_version_string() {
-        assert_eq!(parse_version("rustc 1.88.0 (deadbeef 2025-01-01)"), Some((1, 88, 0)));
+        assert_eq!(
+            parse_version("rustc 1.88.0 (deadbeef 2025-01-01)"),
+            Some((1, 88, 0))
+        );
         assert_eq!(parse_version("garbage"), None);
     }
 }

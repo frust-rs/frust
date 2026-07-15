@@ -21,8 +21,11 @@ impl Validator for MobileTargetsValidator {
         match ctx.runner.run("rustup", &["target", "list", "--installed"]) {
             Ok(out) if out.success => {
                 let installed: HashSet<&str> = out.stdout.lines().map(str::trim).collect();
-                let missing: Vec<&str> =
-                    REQUIRED_TARGETS.iter().copied().filter(|t| !installed.contains(t)).collect();
+                let missing: Vec<&str> = REQUIRED_TARGETS
+                    .iter()
+                    .copied()
+                    .filter(|t| !installed.contains(t))
+                    .collect();
                 if missing.is_empty() {
                     Validation {
                         status: Status::Pass,
@@ -31,7 +34,10 @@ impl Validator for MobileTargetsValidator {
                 } else {
                     Validation {
                         status: Status::Partial,
-                        messages: vec![format!("missing targets. Run: rustup target add {}", missing.join(" "))],
+                        messages: vec![format!(
+                            "missing targets. Run: rustup target add {}",
+                            missing.join(" ")
+                        )],
                     }
                 }
             }
@@ -50,7 +56,11 @@ mod tests {
     use crate::process::{FakeProcessRunner, Output};
 
     fn ok(stdout: &str) -> Output {
-        Output { success: true, stdout: stdout.to_string(), stderr: String::new() }
+        Output {
+            success: true,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        }
     }
 
     #[test]
@@ -60,17 +70,27 @@ mod tests {
             ok("aarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\naarch64-apple-ios\naarch64-apple-ios-sim\n"),
         );
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = MobileTargetsValidator.validate(&ctx);
         assert_eq!(result.status, Status::Pass);
     }
 
     #[test]
     fn partial_when_some_targets_missing() {
-        let runner = FakeProcessRunner::new()
-            .with("rustup target list --installed", ok("aarch64-linux-android\n"));
+        let runner = FakeProcessRunner::new().with(
+            "rustup target list --installed",
+            ok("aarch64-linux-android\n"),
+        );
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = MobileTargetsValidator.validate(&ctx);
         assert_eq!(result.status, Status::Partial);
         assert!(result.messages[0].contains("rustup target add"));
@@ -81,7 +101,11 @@ mod tests {
     fn fails_when_rustup_missing() {
         let runner = FakeProcessRunner::new().missing("rustup target list --installed");
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = MobileTargetsValidator.validate(&ctx);
         assert_eq!(result.status, Status::Fail);
     }

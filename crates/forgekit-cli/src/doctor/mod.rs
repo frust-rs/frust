@@ -69,7 +69,10 @@ pub fn default_validators() -> Vec<Box<dyn Validator>> {
 
 /// Runs every validator against `ctx`, in order.
 pub fn run_all(ctx: &DoctorCtx, validators: &[Box<dyn Validator>]) -> Vec<(String, Validation)> {
-    validators.iter().map(|v| (v.name().to_string(), v.validate(ctx))).collect()
+    validators
+        .iter()
+        .map(|v| (v.name().to_string(), v.validate(ctx)))
+        .collect()
 }
 
 /// Test-only [`EnvLookup`] with an in-memory map, shared by validator unit tests.

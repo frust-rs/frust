@@ -6,7 +6,9 @@
 //! threaded through [`LayoutCtx`]) and emits the resulting glyph runs during
 //! paint.
 
-use forgekit_core::{BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget};
+use forgekit_core::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+};
 use forgekit_text::{TextContext, TextLayout, TextStyle};
 use kurbo::Size;
 use peniko::Color;
@@ -92,11 +94,7 @@ impl Widget for TextWidget {
         // "lay out on a single line per hard break".
         let max_width = {
             let w = bc.max().width;
-            if w.is_finite() {
-                Some(w as f32)
-            } else {
-                None
-            }
+            if w.is_finite() { Some(w as f32) } else { None }
         };
         let text_ctx = ctx.text_context::<TextContext>();
         let layout = text_ctx.layout(&self.content, &self.style, max_width);

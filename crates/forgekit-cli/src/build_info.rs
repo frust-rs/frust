@@ -82,7 +82,11 @@ impl BuildInfo {
             defines.insert(key.to_string(), value.to_string());
         }
 
-        Ok(BuildInfo { mode, flavor: args.flavor, defines })
+        Ok(BuildInfo {
+            mode,
+            flavor: args.flavor,
+            defines,
+        })
     }
 }
 
@@ -102,14 +106,28 @@ mod tests {
 
     #[test]
     fn explicit_flag_overrides_default() {
-        let info = BuildInfo::from_args(BuildArgs { release: true, ..args() }, BuildMode::Debug).unwrap();
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                release: true,
+                ..args()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap();
         assert_eq!(info.mode, BuildMode::Release);
     }
 
     #[test]
     fn conflicting_mode_flags_rejected() {
-        let err =
-            BuildInfo::from_args(BuildArgs { debug: true, release: true, ..args() }, BuildMode::Debug).unwrap_err();
+        let err = BuildInfo::from_args(
+            BuildArgs {
+                debug: true,
+                release: true,
+                ..args()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap_err();
         assert_eq!(err, BuildInfoError::ConflictingModes);
     }
 
@@ -123,28 +141,49 @@ mod tests {
             BuildMode::Release,
         )
         .unwrap();
-        assert_eq!(info.defines.get("API_URL").map(String::as_str), Some("https://example.com"));
+        assert_eq!(
+            info.defines.get("API_URL").map(String::as_str),
+            Some("https://example.com")
+        );
         assert_eq!(info.defines.get("DEBUG_UI").map(String::as_str), Some("1"));
     }
 
     #[test]
     fn rejects_define_without_equals() {
-        let err = BuildInfo::from_args(BuildArgs { defines: vec!["NOVALUE".into()], ..args() }, BuildMode::Release)
-            .unwrap_err();
+        let err = BuildInfo::from_args(
+            BuildArgs {
+                defines: vec!["NOVALUE".into()],
+                ..args()
+            },
+            BuildMode::Release,
+        )
+        .unwrap_err();
         assert_eq!(err, BuildInfoError::InvalidDefine("NOVALUE".into()));
     }
 
     #[test]
     fn rejects_define_with_empty_key() {
-        let err = BuildInfo::from_args(BuildArgs { defines: vec!["=value".into()], ..args() }, BuildMode::Release)
-            .unwrap_err();
+        let err = BuildInfo::from_args(
+            BuildArgs {
+                defines: vec!["=value".into()],
+                ..args()
+            },
+            BuildMode::Release,
+        )
+        .unwrap_err();
         assert_eq!(err, BuildInfoError::InvalidDefine("=value".into()));
     }
 
     #[test]
     fn flavor_passes_through() {
-        let info =
-            BuildInfo::from_args(BuildArgs { flavor: Some("paid".into()), ..args() }, BuildMode::Debug).unwrap();
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                flavor: Some("paid".into()),
+                ..args()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap();
         assert_eq!(info.flavor.as_deref(), Some("paid"));
     }
 }

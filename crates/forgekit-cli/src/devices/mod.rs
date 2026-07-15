@@ -48,14 +48,21 @@ pub trait DeviceDiscovery {
 
 /// The v1 discoverer set (spec §12.4), in report order.
 pub fn default_discoverers() -> Vec<Box<dyn DeviceDiscovery>> {
-    vec![Box::new(AndroidDeviceDiscovery), Box::new(IosSimulatorDiscovery), Box::new(IosPhysicalDiscovery)]
+    vec![
+        Box::new(AndroidDeviceDiscovery),
+        Box::new(IosSimulatorDiscovery),
+        Box::new(IosPhysicalDiscovery),
+    ]
 }
 
 /// Runs every discoverer against `runner`, aggregating devices and notes.
 /// A discoverer erroring out (rather than returning `Ok(DiscoveryResult)`)
 /// is downgraded to a note — a single flaky discoverer must not blank the
 /// whole `forgekit devices` listing.
-pub fn discover_all(runner: &dyn ProcessRunner, discoverers: &[Box<dyn DeviceDiscovery>]) -> (Vec<Device>, Vec<String>) {
+pub fn discover_all(
+    runner: &dyn ProcessRunner,
+    discoverers: &[Box<dyn DeviceDiscovery>],
+) -> (Vec<Device>, Vec<String>) {
     let mut devices = Vec::new();
     let mut notes = Vec::new();
     for discoverer in discoverers {

@@ -1,4 +1,4 @@
-use super::{DeviceDiscovery, Device, DiscoveryResult, Kind, Platform};
+use super::{Device, DeviceDiscovery, DiscoveryResult, Kind, Platform};
 use crate::process::ProcessRunner;
 use anyhow::Result;
 use serde::Deserialize;
@@ -20,7 +20,9 @@ impl DeviceDiscovery for IosSimulatorDiscovery {
             _ => {
                 return Ok(DiscoveryResult {
                     devices: Vec::new(),
-                    notes: vec!["xcrun simctl not found; iOS simulator discovery skipped".to_string()],
+                    notes: vec![
+                        "xcrun simctl not found; iOS simulator discovery skipped".to_string(),
+                    ],
                 });
             }
         };
@@ -58,7 +60,10 @@ fn parse_simctl_list(stdout: &str) -> Result<DiscoveryResult> {
             }
         }
     }
-    Ok(DiscoveryResult { devices, notes: Vec::new() })
+    Ok(DiscoveryResult {
+        devices,
+        notes: Vec::new(),
+    })
 }
 
 #[cfg(test)]

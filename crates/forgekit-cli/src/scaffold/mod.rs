@@ -5,14 +5,15 @@
 pub mod context;
 pub mod renderer;
 
-#[allow(unused_imports)] // NameError: public API surface for future callers matching on variants
-pub use context::{title_case, validate_project_name, NameError, TemplateContext};
+#[allow(unused_imports)]
+// NameError: public API surface for future callers matching on variants
+pub use context::{NameError, TemplateContext, title_case, validate_project_name};
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
-use include_dir::{include_dir, Dir};
+use anyhow::{Context, Result, anyhow, bail};
+use include_dir::{Dir, include_dir};
 
 /// The `templates/app/` tree, embedded into the `forgekit` binary at
 /// compile time so `forgekit create` works standalone without a repo
@@ -66,7 +67,9 @@ impl Source<'_> {
                 .get_file(relative)
                 .map(|f| f.contents().to_vec())
                 .ok_or_else(|| {
-                    anyhow!("template file `{relative}` missing from embedded template (manifest drift)")
+                    anyhow!(
+                        "template file `{relative}` missing from embedded template (manifest drift)"
+                    )
                 }),
             Source::Dir(root) => fs::read(root.join(relative))
                 .with_context(|| format!("reading template file `{relative}`")),
@@ -157,8 +160,10 @@ mod tests {
     fn unique_temp_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir()
-            .join(format!("forgekit-cli-test-{tag}-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "forgekit-cli-test-{tag}-{}-{n}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         dir
     }

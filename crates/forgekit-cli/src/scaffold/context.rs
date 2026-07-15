@@ -38,7 +38,10 @@ impl TemplateContext {
     /// Android/iOS templates (spec Phase 2/3) will add keys like
     /// `androidIdentifier`/`iosIdentifier` here.
     pub fn path_vars(&self) -> BTreeMap<&'static str, String> {
-        BTreeMap::from([("project_name", self.project_name.clone()), ("org", self.org.clone())])
+        BTreeMap::from([
+            ("project_name", self.project_name.clone()),
+            ("org", self.org.clone()),
+        ])
     }
 }
 
@@ -47,9 +50,9 @@ impl TemplateContext {
 const RUST_KEYWORDS: &[&str] = &[
     "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
     "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
-    "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use",
-    "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final",
-    "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+    "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
 ];
 
 /// Why a project name was rejected. Every variant carries an actionable
@@ -59,15 +62,16 @@ const RUST_KEYWORDS: &[&str] = &[
 pub enum NameError {
     #[error("project name cannot be empty")]
     Empty,
-    #[error(
-        "project name `{name}` must start with a lowercase letter (a-z), not `{first}`"
-    )]
+    #[error("project name `{name}` must start with a lowercase letter (a-z), not `{first}`")]
     InvalidStart { name: String, first: char },
     #[error(
         "project name `{name}` may only contain lowercase letters, digits, and underscores{}",
         suggestion.as_ref().map(|s| format!(" (try `{s}`)")).unwrap_or_default()
     )]
-    InvalidChars { name: String, suggestion: Option<String> },
+    InvalidChars {
+        name: String,
+        suggestion: Option<String>,
+    },
     #[error("project name `{name}` is a Rust keyword and cannot be used as a crate name")]
     Keyword { name: String },
 }
@@ -80,18 +84,33 @@ pub fn validate_project_name(name: &str) -> Result<(), NameError> {
         None => return Err(NameError::Empty),
     };
     if !first.is_ascii_lowercase() {
-        return Err(NameError::InvalidStart { name: name.to_string(), first });
+        return Err(NameError::InvalidStart {
+            name: name.to_string(),
+            first,
+        });
     }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-        let candidate: String =
-            name.chars().map(|c| if c == '-' { '_' } else { c }).collect();
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        let candidate: String = name
+            .chars()
+            .map(|c| if c == '-' { '_' } else { c })
+            .collect();
         let suggestion = (candidate != name
-            && candidate.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+            && candidate
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
         .then_some(candidate);
-        return Err(NameError::InvalidChars { name: name.to_string(), suggestion });
+        return Err(NameError::InvalidChars {
+            name: name.to_string(),
+            suggestion,
+        });
     }
     if RUST_KEYWORDS.contains(&name) {
-        return Err(NameError::Keyword { name: name.to_string() });
+        return Err(NameError::Keyword {
+            name: name.to_string(),
+        });
     }
     Ok(())
 }

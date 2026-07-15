@@ -10,8 +10,17 @@ impl Validator for CargoNdkValidator {
     fn validate(&self, ctx: &DoctorCtx) -> Validation {
         match ctx.runner.run("cargo", &["ndk", "--version"]) {
             Ok(out) if out.success => {
-                let version = out.stdout.lines().next().unwrap_or("cargo-ndk").trim().to_string();
-                Validation { status: Status::Pass, messages: vec![version] }
+                let version = out
+                    .stdout
+                    .lines()
+                    .next()
+                    .unwrap_or("cargo-ndk")
+                    .trim()
+                    .to_string();
+                Validation {
+                    status: Status::Pass,
+                    messages: vec![version],
+                }
             }
             _ => Validation {
                 status: Status::Fail,
@@ -31,10 +40,18 @@ mod tests {
     fn passes_when_cargo_ndk_present() {
         let runner = FakeProcessRunner::new().with(
             "cargo ndk --version",
-            Output { success: true, stdout: "cargo-ndk 3.5.4\n".to_string(), stderr: String::new() },
+            Output {
+                success: true,
+                stdout: "cargo-ndk 3.5.4\n".to_string(),
+                stderr: String::new(),
+            },
         );
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = CargoNdkValidator.validate(&ctx);
         assert_eq!(result.status, Status::Pass);
     }
@@ -43,7 +60,11 @@ mod tests {
     fn fails_when_cargo_ndk_missing() {
         let runner = FakeProcessRunner::new().missing("cargo ndk --version");
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = CargoNdkValidator.validate(&ctx);
         assert_eq!(result.status, Status::Fail);
         assert!(result.messages[0].contains("cargo install cargo-ndk"));

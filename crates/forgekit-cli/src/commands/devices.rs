@@ -30,7 +30,12 @@ pub fn run(verbose: bool) -> Result<u8> {
 }
 
 fn print_table(devices: &[Device]) {
-    let name_width = devices.iter().map(|d| d.name.len()).max().unwrap_or(4).max(4);
+    let name_width = devices
+        .iter()
+        .map(|d| d.name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
     let id_width = devices.iter().map(|d| d.id.len()).max().unwrap_or(2).max(2);
     for device in devices {
         println!(

@@ -110,7 +110,10 @@ mod tests {
         // Below the minimum snaps up.
         assert_eq!(bc.constrain(Size::new(5.0, 5.0)), Size::new(10.0, 10.0));
         // Above the maximum snaps down.
-        assert_eq!(bc.constrain(Size::new(200.0, 200.0)), Size::new(100.0, 100.0));
+        assert_eq!(
+            bc.constrain(Size::new(200.0, 200.0)),
+            Size::new(100.0, 100.0)
+        );
         // Within range is untouched.
         assert_eq!(bc.constrain(Size::new(50.0, 40.0)), Size::new(50.0, 40.0));
     }
@@ -132,7 +135,10 @@ mod tests {
         let bc = BoxConstraints::tight(Size::new(42.0, 24.0));
         assert!(bc.is_tight());
         assert_eq!(bc.min(), bc.max());
-        assert_eq!(bc.constrain(Size::new(1000.0, 1000.0)), Size::new(42.0, 24.0));
+        assert_eq!(
+            bc.constrain(Size::new(1000.0, 1000.0)),
+            Size::new(42.0, 24.0)
+        );
     }
 
     #[test]

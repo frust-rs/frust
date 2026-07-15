@@ -74,15 +74,26 @@ impl FakeProcessRunner {
 
     /// Register a response (success or failed-exit) for an exact invocation.
     pub fn with(mut self, key: impl Into<String>, output: Output) -> Self {
-        self.responses.insert(key.into(), FakeOutcome::Output(output));
+        self.responses
+            .insert(key.into(), FakeOutcome::Output(output));
         self
     }
 
     /// Register a response that also writes `content` to the path following
     /// `--json-output` in the invocation's args.
-    pub fn with_file(mut self, key: impl Into<String>, output: Output, content: impl Into<String>) -> Self {
-        self.responses
-            .insert(key.into(), FakeOutcome::OutputWithFile { output, content: content.into() });
+    pub fn with_file(
+        mut self,
+        key: impl Into<String>,
+        output: Output,
+        content: impl Into<String>,
+    ) -> Self {
+        self.responses.insert(
+            key.into(),
+            FakeOutcome::OutputWithFile {
+                output,
+                content: content.into(),
+            },
+        );
         self
     }
 
@@ -95,7 +106,10 @@ impl FakeProcessRunner {
 
 #[cfg(test)]
 fn invocation_key(cmd: &str, args: &[&str]) -> String {
-    std::iter::once(cmd).chain(args.iter().copied()).collect::<Vec<_>>().join(" ")
+    std::iter::once(cmd)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -114,8 +128,10 @@ impl ProcessRunner for FakeProcessRunner {
         match matched {
             Some(FakeOutcome::Output(output)) => Ok(output.clone()),
             Some(FakeOutcome::OutputWithFile { output, content }) => {
-                if let Some(path) =
-                    args.iter().position(|a| *a == "--json-output").and_then(|pos| args.get(pos + 1))
+                if let Some(path) = args
+                    .iter()
+                    .position(|a| *a == "--json-output")
+                    .and_then(|pos| args.get(pos + 1))
                 {
                     std::fs::write(path, content)
                         .with_context(|| format!("fake runner: failed to write {path}"))?;
@@ -137,7 +153,11 @@ mod tests {
     fn exact_match_returns_registered_output() {
         let runner = FakeProcessRunner::new().with(
             "rustc --version",
-            Output { success: true, stdout: "rustc 1.91.1\n".into(), stderr: String::new() },
+            Output {
+                success: true,
+                stdout: "rustc 1.91.1\n".into(),
+                stderr: String::new(),
+            },
         );
         let out = runner.run("rustc", &["--version"]).unwrap();
         assert!(out.success);
@@ -160,13 +180,20 @@ mod tests {
     fn prefix_match_handles_dynamic_trailing_arg() {
         let runner = FakeProcessRunner::new().with_file(
             "xcrun devicectl list devices --json-output",
-            Output { success: true, stdout: String::new(), stderr: String::new() },
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
             r#"{"result":{"devices":[]}}"#,
         );
         let tmp = std::env::temp_dir().join("forgekit-test-devicectl-prefix-match.json");
         let tmp_str = tmp.to_string_lossy().to_string();
         let out = runner
-            .run("xcrun", &["devicectl", "list", "devices", "--json-output", &tmp_str])
+            .run(
+                "xcrun",
+                &["devicectl", "list", "devices", "--json-output", &tmp_str],
+            )
             .unwrap();
         assert!(out.success);
         let content = std::fs::read_to_string(&tmp).unwrap();

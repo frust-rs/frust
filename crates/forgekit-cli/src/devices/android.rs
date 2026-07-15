@@ -1,4 +1,4 @@
-use super::{DeviceDiscovery, Device, DiscoveryResult, Kind, Platform};
+use super::{Device, DeviceDiscovery, DiscoveryResult, Kind, Platform};
 use crate::process::ProcessRunner;
 use anyhow::Result;
 
@@ -65,8 +65,17 @@ fn parse_adb_devices(stdout: &str) -> DiscoveryResult {
             }
         }
         let name = model.or(device_field).unwrap_or(id).replace('_', " ");
-        let kind = if id.starts_with("emulator-") { Kind::Emulator } else { Kind::PhysicalDevice };
-        devices.push(Device { id: id.to_string(), name, platform: Platform::Android, kind });
+        let kind = if id.starts_with("emulator-") {
+            Kind::Emulator
+        } else {
+            Kind::PhysicalDevice
+        };
+        devices.push(Device {
+            id: id.to_string(),
+            name,
+            platform: Platform::Android,
+            kind,
+        });
     }
 
     DiscoveryResult { devices, notes }

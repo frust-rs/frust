@@ -16,7 +16,8 @@ use minijinja::{Environment, UndefinedBehavior};
 pub fn render(template: &str, vars: &BTreeMap<&str, String>) -> Result<String> {
     let mut env = Environment::new();
     env.set_undefined_behavior(UndefinedBehavior::Strict);
-    env.render_str(template, vars).context("rendering template content")
+    env.render_str(template, vars)
+        .context("rendering template content")
 }
 
 /// Expands placeholder path segments.
@@ -57,8 +58,11 @@ mod tests {
 
     #[test]
     fn render_substitutes_known_vars() {
-        let out = render("name = \"{{ project_name }}\"", &vars(&[("project_name", "my_app")]))
-            .unwrap();
+        let out = render(
+            "name = \"{{ project_name }}\"",
+            &vars(&[("project_name", "my_app")]),
+        )
+        .unwrap();
         assert_eq!(out, "name = \"my_app\"");
     }
 

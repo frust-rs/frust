@@ -12,7 +12,10 @@ impl Validator for XcodeValidator {
 
     fn validate(&self, ctx: &DoctorCtx) -> Validation {
         if !ctx.is_macos {
-            return Validation { status: Status::Pass, messages: vec!["skipped (not macOS)".to_string()] };
+            return Validation {
+                status: Status::Pass,
+                messages: vec!["skipped (not macOS)".to_string()],
+            };
         }
 
         let select_ok = matches!(ctx.runner.run("xcode-select", &["-p"]), Ok(out) if out.success);
@@ -31,11 +34,16 @@ impl Validator for XcodeValidator {
                 },
                 Some(major) => Validation {
                     status: Status::Fail,
-                    messages: vec![format!("Xcode {major} found, but ForgeKit requires Xcode {MIN_XCODE_MAJOR}+.")],
+                    messages: vec![format!(
+                        "Xcode {major} found, but ForgeKit requires Xcode {MIN_XCODE_MAJOR}+."
+                    )],
                 },
                 None => Validation {
                     status: Status::Partial,
-                    messages: vec![format!("could not parse Xcode version from: {}", out.stdout.trim())],
+                    messages: vec![format!(
+                        "could not parse Xcode version from: {}",
+                        out.stdout.trim()
+                    )],
                 },
             },
             _ => Validation {
@@ -60,14 +68,22 @@ mod tests {
     use crate::process::{FakeProcessRunner, Output};
 
     fn ok(stdout: &str) -> Output {
-        Output { success: true, stdout: stdout.to_string(), stderr: String::new() }
+        Output {
+            success: true,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        }
     }
 
     #[test]
     fn skips_cleanly_on_non_macos() {
         let runner = FakeProcessRunner::new();
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: false };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
         let result = XcodeValidator.validate(&ctx);
         assert_eq!(result.status, Status::Pass);
     }
@@ -75,10 +91,20 @@ mod tests {
     #[test]
     fn passes_when_xcode_15_plus() {
         let runner = FakeProcessRunner::new()
-            .with("xcode-select -p", ok("/Applications/Xcode.app/Contents/Developer\n"))
-            .with("xcodebuild -version", ok("Xcode 15.4\nBuild version 15F31d\n"));
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "xcodebuild -version",
+                ok("Xcode 15.4\nBuild version 15F31d\n"),
+            );
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = XcodeValidator.validate(&ctx);
         assert_eq!(result.status, Status::Pass);
     }
@@ -86,10 +112,20 @@ mod tests {
     #[test]
     fn fails_when_xcode_too_old() {
         let runner = FakeProcessRunner::new()
-            .with("xcode-select -p", ok("/Applications/Xcode.app/Contents/Developer\n"))
-            .with("xcodebuild -version", ok("Xcode 14.3\nBuild version 14E222b\n"));
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "xcodebuild -version",
+                ok("Xcode 14.3\nBuild version 14E222b\n"),
+            );
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = XcodeValidator.validate(&ctx);
         assert_eq!(result.status, Status::Fail);
     }
@@ -98,7 +134,11 @@ mod tests {
     fn fails_when_xcode_select_fails() {
         let runner = FakeProcessRunner::new().missing("xcode-select -p");
         let env = FakeEnv::new();
-        let ctx = DoctorCtx { runner: &runner, env: &env, is_macos: true };
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
         let result = XcodeValidator.validate(&ctx);
         assert_eq!(result.status, Status::Fail);
     }

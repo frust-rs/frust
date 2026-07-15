@@ -232,7 +232,10 @@ mod tests {
         let mut scene = RecordingScene::default();
         let mut ctx = PaintCtx::new(Point::new(5.0, 7.0), Size::new(50.0, 20.0));
         w.paint(&mut ctx, &mut scene);
-        assert_eq!(scene.rects, vec![(Point::new(5.0, 7.0), Size::new(50.0, 20.0))]);
+        assert_eq!(
+            scene.rects,
+            vec![(Point::new(5.0, 7.0), Size::new(50.0, 20.0))]
+        );
     }
 
     #[test]

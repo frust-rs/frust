@@ -68,7 +68,10 @@ fn resolve_forgekit_path(overridden: Option<&str>) -> String {
         return path.to_string();
     }
     let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../forgekit");
-    raw.canonicalize().unwrap_or(raw).to_string_lossy().into_owned()
+    raw.canonicalize()
+        .unwrap_or(raw)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Infers a project name from `dir`'s basename, resolving `.`/`..`
@@ -76,12 +79,21 @@ fn resolve_forgekit_path(overridden: Option<&str>) -> String {
 /// `fs::canonicalize`.
 fn infer_project_name(dir: &Path) -> Result<String> {
     let cwd = std::env::current_dir().context("reading current directory")?;
-    let absolute = if dir.is_absolute() { dir.to_path_buf() } else { cwd.join(dir) };
+    let absolute = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        cwd.join(dir)
+    };
     let normalized = normalize_lexically(&absolute);
     normalized
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .with_context(|| format!("`{}` has no basename to use as a project name", dir.display()))
+        .with_context(|| {
+            format!(
+                "`{}` has no basename to use as a project name",
+                dir.display()
+            )
+        })
 }
 
 fn normalize_lexically(path: &Path) -> PathBuf {
@@ -104,7 +116,10 @@ mod tests {
 
     #[test]
     fn infer_project_name_uses_dir_basename() {
-        assert_eq!(infer_project_name(Path::new("/tmp/my_app")).unwrap(), "my_app");
+        assert_eq!(
+            infer_project_name(Path::new("/tmp/my_app")).unwrap(),
+            "my_app"
+        );
     }
 
     #[test]
@@ -116,6 +131,9 @@ mod tests {
 
     #[test]
     fn infer_project_name_resolves_trailing_parent_dir() {
-        assert_eq!(infer_project_name(Path::new("/tmp/foo/../my_app")).unwrap(), "my_app");
+        assert_eq!(
+            infer_project_name(Path::new("/tmp/foo/../my_app")).unwrap(),
+            "my_app"
+        );
     }
 }

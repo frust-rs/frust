@@ -105,9 +105,8 @@ where
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {
-                self.fatal = Some(
-                    anyhow::Error::from(err).context("forgekit: failed to create window"),
-                );
+                self.fatal =
+                    Some(anyhow::Error::from(err).context("forgekit: failed to create window"));
                 event_loop.exit();
                 return;
             }
@@ -117,20 +116,17 @@ where
         let (width, height) = (size.width.max(1), size.height.max(1));
         // spec §11: single-threaded here — the CPU/GPU render-thread split lands
         // in a later phase; for the preview shell one thread is sufficient.
-        let renderer = match pollster::block_on(self.render_cx.create_surface(
-            window.clone(),
-            width,
-            height,
-        ))
-        .context("forgekit: failed to create render surface")
-        {
-            Ok(renderer) => renderer,
-            Err(err) => {
-                self.fatal = Some(err);
-                event_loop.exit();
-                return;
-            }
-        };
+        let renderer =
+            match pollster::block_on(self.render_cx.create_surface(window.clone(), width, height))
+                .context("forgekit: failed to create render surface")
+            {
+                Ok(renderer) => renderer,
+                Err(err) => {
+                    self.fatal = Some(err);
+                    event_loop.exit();
+                    return;
+                }
+            };
 
         self.window = Some(window.clone());
         self.renderer = Some(renderer);

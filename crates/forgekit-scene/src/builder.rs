@@ -83,8 +83,8 @@ impl<'a> SceneBuilder<'a> {
 mod tests {
     use super::*;
     use crate::glyph::{FontHandle, Glyph};
-    use peniko::color::palette::css::RED;
     use peniko::FontData;
+    use peniko::color::palette::css::RED;
 
     fn red_brush() -> Brush {
         Brush::Solid(RED)

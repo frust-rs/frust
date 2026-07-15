@@ -1,4 +1,4 @@
-use super::{DeviceDiscovery, Device, DiscoveryResult, Kind, Platform};
+use super::{Device, DeviceDiscovery, DiscoveryResult, Kind, Platform};
 use crate::process::ProcessRunner;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -18,7 +18,10 @@ impl DeviceDiscovery for IosPhysicalDiscovery {
         let tmp_path = tmp_json_path();
         let tmp_str = tmp_path.to_string_lossy().to_string();
 
-        let run_result = runner.run("xcrun", &["devicectl", "list", "devices", "--json-output", &tmp_str]);
+        let run_result = runner.run(
+            "xcrun",
+            &["devicectl", "list", "devices", "--json-output", &tmp_str],
+        );
 
         match run_result {
             Ok(out) if out.success => {}
@@ -92,7 +95,9 @@ fn parse_devicectl_output(content: &str) -> Result<DiscoveryResult> {
         if device.connection_properties.tunnel_state != "connected" {
             notes.push(format!(
                 "skipping {} ({}): {}",
-                device.device_properties.name, device.identifier, device.connection_properties.tunnel_state
+                device.device_properties.name,
+                device.identifier,
+                device.connection_properties.tunnel_state
             ));
             continue;
         }
