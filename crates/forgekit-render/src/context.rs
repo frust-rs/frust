@@ -272,6 +272,23 @@ impl RenderContext {
             })
             .await
             .map_err(|e| anyhow!("forgekit-render: failed to create GPU device: {e}"))?;
+
+        // Route wgpu's uncaptured errors to the log instead of its default
+        // handler, which aborts the process by panicking ("Handling wgpu errors
+        // as fatal by default"). A UI framework must survive a driver's
+        // *transient* GPU error and recover on a later frame rather than crash —
+        // e.g. the Android emulator's SwiftShader path can raise a one-off
+        // swapchain-acquire validation error under load, which used to wedge the
+        // app into a per-frame panic loop (the surface stayed `SurfaceReady` and
+        // every subsequent `render` re-hit the fatal handler). Pairing this with
+        // the `Invalid`-acquire → reconfigure recovery (see [`crate::lifecycle`])
+        // lets the swapchain rebuild and rendering resume. Genuine API misuse is
+        // still surfaced — loudly, at error level — just without killing the
+        // process across the FFI boundary.
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            log::error!("forgekit-render: uncaptured wgpu error: {error}");
+        }));
+
         self.device = Some(DeviceHandle {
             adapter,
             device,

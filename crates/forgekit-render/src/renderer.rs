@@ -350,9 +350,6 @@ impl SurfaceRenderer {
                 Ok(FrameOutcome::SurfaceLost)
             }
             AcquireAction::Skip => Ok(FrameOutcome::Skipped),
-            AcquireAction::Fail => Err(anyhow!(
-                "forgekit-render: swapchain acquire failed (validation error)"
-            )),
         }
     }
 }

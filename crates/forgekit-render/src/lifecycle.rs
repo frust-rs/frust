@@ -105,7 +105,12 @@ pub(crate) enum AcquireStatus {
     Lost,
     /// `Timeout`/`Occluded`: transient; skip this frame.
     Transient,
-    /// `Validation`: a hard error the caller cannot recover from.
+    /// `Validation`: the swapchain raised a validation error on acquire (observed
+    /// under the Android emulator's SwiftShader driver as a one-off hiccup).
+    /// Treated as recoverable — reconfigure the surface and retry — rather than
+    /// a hard failure that would wedge the app, since the uncaptured-error
+    /// handler (see [`crate::context`]) already prevents the process-killing
+    /// panic wgpu would otherwise raise.
     Invalid,
 }
 
@@ -123,8 +128,6 @@ pub(crate) enum AcquireAction {
     Lose,
     /// Skip this frame; report [`FrameOutcome::Skipped`].
     Skip,
-    /// Surface a hard error to the caller.
-    Fail,
 }
 
 /// Pure acquire-error policy (spec §8.1).
@@ -134,7 +137,10 @@ pub(crate) fn decide_acquire(status: AcquireStatus) -> AcquireAction {
         AcquireStatus::Outdated => AcquireAction::Reconfigure,
         AcquireStatus::Lost => AcquireAction::Lose,
         AcquireStatus::Transient => AcquireAction::Skip,
-        AcquireStatus::Invalid => AcquireAction::Fail,
+        // A validation error on acquire is treated like `Outdated`: rebuild the
+        // swapchain and ask for a redraw. Recovering (rather than `Fail`ing)
+        // keeps a transient driver hiccup from permanently freezing the surface.
+        AcquireStatus::Invalid => AcquireAction::Reconfigure,
     }
 }
 
@@ -302,6 +308,11 @@ mod tests {
             decide_acquire(AcquireStatus::Transient),
             AcquireAction::Skip
         );
-        assert_eq!(decide_acquire(AcquireStatus::Invalid), AcquireAction::Fail);
+        // A validation error on acquire recovers by reconfiguring the surface,
+        // not by failing — a transient SwiftShader hiccup must not wedge the app.
+        assert_eq!(
+            decide_acquire(AcquireStatus::Invalid),
+            AcquireAction::Reconfigure
+        );
     }
 }

@@ -264,6 +264,20 @@ mod tests {
             lib_rs.contains("forgekit::ios_app!(AppState, app_logic)"),
             "{lib_rs}"
         );
+        // The generated demo is the Phase 4A interactive counter: −/+ buttons,
+        // a rebuild-driven checkbox list, and a slider inside a scroll view. The
+        // `app_logic` keeps the `-> impl View<AppState> + use<>` shape so a fresh
+        // scaffold compiles for both mobile targets.
+        assert!(
+            lib_rs
+                .contains("pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<>")
+                && lib_rs.contains("Button(\"+\"")
+                && lib_rs.contains("Button(\"-\"")
+                && lib_rs.contains("Checkbox(")
+                && lib_rs.contains("Slider(")
+                && lib_rs.contains("scroll_view(Column("),
+            "{lib_rs}"
+        );
         assert!(dest.join("src/main.rs").exists());
         assert!(dest.join(".gitignore").exists());
         assert!(dest.join("assets/.gitkeep").exists());

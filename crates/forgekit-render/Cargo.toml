@@ -12,6 +12,7 @@ peniko.workspace = true
 kurbo.workspace = true
 forgekit-scene.workspace = true
 anyhow.workspace = true
+log.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_system_properties.workspace = true
