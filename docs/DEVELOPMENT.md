@@ -32,7 +32,8 @@ is no automated pixel-diff test yet, so a person must look at the window.
 # Standard verify gate (run before considering any change done):
 cargo build --workspace --locked \
   && cargo test --workspace \
-  && cargo clippy --workspace --all-targets -- -D warnings
+  && cargo clippy --workspace --all-targets -- -D warnings \
+  && cargo fmt --check
 ```
 
 **Manual/gated tests** (not part of the default `cargo test --workspace`
@@ -73,10 +74,7 @@ deliberately, not floating:
 
 ## Known Issues
 
-### `cargo fmt --check` fails repo-wide
+### Formatting
 
-The installed `rustfmt` does not yet support the workspace's edition-2024
-style edition, so `cargo fmt --check` currently reports diffs across the
-codebase that do not reflect real style violations. **Do not treat `cargo
-fmt --check` as an enforced gate** until this mismatch is resolved — it is
-not part of the verify command above.
+The codebase is formatted with `rustfmt` using default settings (no
+`rustfmt.toml`). `cargo fmt --check` is part of the verify gate above.
