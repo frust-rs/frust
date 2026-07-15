@@ -17,6 +17,9 @@
 //! * [`event`] — layer 2 input: [`InputEvent`](event::InputEvent)/
 //!   [`PointerEvent`](event::PointerEvent) and the [`EventCtx`](event::EventCtx)
 //!   handlers mutate state through.
+//! * [`input`] — pure gesture helpers: slop/wheel constants, a
+//!   [`VelocityTracker`](input::VelocityTracker), and the fling-decay math the
+//!   interactive widgets build on.
 //! * [`layout`] — the [`BoxConstraints`](layout::BoxConstraints) box model.
 //! * [`tree`] — the [`WidgetTree`](tree::WidgetTree) arena wrapper and
 //!   [`WidgetPod`](tree::WidgetPod).
@@ -25,6 +28,7 @@
 
 pub mod app;
 pub mod event;
+pub mod input;
 pub mod layout;
 pub mod tree;
 pub mod view;
@@ -34,6 +38,10 @@ pub use app::RenderRoot;
 pub use event::{
     EventCtx, EventOutcome, EventResult, InputEvent, PointerButton, PointerEvent, PointerPhase,
     ScrollDelta,
+};
+pub use input::{
+    FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,
+    WHEEL_LINE_PX, fling_decay, fling_displacement,
 };
 pub use layout::BoxConstraints;
 pub use tree::{WidgetPod, WidgetTree};

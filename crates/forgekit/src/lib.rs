@@ -44,10 +44,21 @@
 
 pub use forgekit_core::view::{AnyView, View, any};
 pub use forgekit_widgets::{
-    Align, AlignView, Alignment, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
-    MainAxisAlignment, Padding, PaddingView, Row, SizedBox, SizedBoxView, Stack, StackView,
-    TextView, flexible, inflexible, text,
+    Align, AlignView, Alignment, Axis, Button, ButtonView, Checkbox, CheckboxView, Column,
+    CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector, GestureDetectorView,
+    MainAxisAlignment, Padding, PaddingView, Row, ScrollView, SizedBox, SizedBoxView, Slider,
+    SliderView, Stack, StackView, TextView, button, checkbox, flexible, inflexible, scroll_view,
+    slider, text,
 };
+
+/// Pure input/gesture helpers (slop constants, [`input::VelocityTracker`], the
+/// fling-decay math) re-exported for app authors and advanced widgets.
+pub mod input {
+    pub use forgekit_core::input::{
+        FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,
+        WHEEL_LINE_PX, fling_decay, fling_displacement,
+    };
+}
 
 // Re-export the Android JNI-bridge macro so generated apps write
 // `forgekit::android_app!(AppState, app_logic)` (spec §10.1). `pub use` of a

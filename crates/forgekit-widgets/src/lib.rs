@@ -18,11 +18,18 @@
 //! `&mut Box<dyn Widget>` to drive `AnyView`'s type-erased reconciliation.
 
 mod align;
+mod button;
+mod checkbox;
 mod flex;
+mod gesture;
 mod padding;
+mod scroll;
 mod sized;
+mod slider;
 mod stack;
 mod text;
+
+use std::rc::Rc;
 
 use forgekit_core::{
     AnyView, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, PointerPhase,
@@ -30,14 +37,59 @@ use forgekit_core::{
 };
 
 pub use align::{Align, AlignView, AlignWidget, Alignment};
+pub use button::{Button, ButtonView, ButtonWidget, button};
+pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox};
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
     flexible, inflexible,
 };
+pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
+pub use scroll::{ScrollView, ScrollWidget, scroll_view};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
+pub use slider::{Slider, SliderView, SliderWidget, slider};
 pub use stack::{Stack, StackView, StackWidget};
 pub use text::{TextView, TextWidget, text};
+
+/// A widget-held, `State`-erased app-state callback adapter (see
+/// [`erase_callback`]).
+pub(crate) type ErasedCallback = Box<dyn FnMut(&mut EventCtx)>;
+
+/// A widget-held, `State`-erased callback adapter carrying one value argument
+/// (see [`erase_callback_arg`]).
+pub(crate) type ErasedArgCallback<A> = Box<dyn FnMut(&mut EventCtx, A)>;
+
+/// A view-held, typed callback carrying one value argument (Checkbox's `bool`,
+/// Slider's `f64`), erased to [`ErasedArgCallback`] on build.
+pub(crate) type TypedArgCallback<State, A> = std::rc::Rc<dyn Fn(&mut State, A)>;
+
+/// Erase a view-held `Rc<dyn Fn(&mut State)>` app-state callback into the
+/// widget-held [`ErasedCallback`] adapter the interactive widgets invoke during
+/// the event pass.
+///
+/// The closure recovers the concrete `State` from the type-erased [`EventCtx`]
+/// with [`EventCtx::state_mut`] (the downcast happens *inside* the adapter), so
+/// the widget itself stays non-generic over `State`. Closures aren't comparable,
+/// so `build`/`rebuild` reinstall the adapter unconditionally — it's cheap.
+pub(crate) fn erase_callback<State: 'static>(callback: &Rc<dyn Fn(&mut State)>) -> ErasedCallback {
+    let callback = callback.clone();
+    Box::new(move |ctx: &mut EventCtx| {
+        let state = ctx.state_mut::<State>();
+        callback(state);
+    })
+}
+
+/// Like [`erase_callback`], but for callbacks that also carry a value argument
+/// (Checkbox's `bool`, Slider's `f64`).
+pub(crate) fn erase_callback_arg<State: 'static, A: 'static>(
+    callback: &TypedArgCallback<State, A>,
+) -> ErasedArgCallback<A> {
+    let callback = callback.clone();
+    Box::new(move |ctx: &mut EventCtx, arg: A| {
+        let state = ctx.state_mut::<State>();
+        callback(state, arg);
+    })
+}
 
 /// Build a [`ChildPod`] wrapping an [`AnyView`]'s element.
 ///
