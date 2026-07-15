@@ -723,6 +723,7 @@ dependencies = [
 name = "forgekit-render"
 version = "0.1.0"
 dependencies = [
+ "android_system_properties",
  "anyhow",
  "forgekit-scene",
  "kurbo",

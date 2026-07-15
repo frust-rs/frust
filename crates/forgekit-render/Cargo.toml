@@ -13,6 +13,9 @@ kurbo.workspace = true
 forgekit-scene.workspace = true
 anyhow.workspace = true
 
+[target.'cfg(target_os = "android")'.dependencies]
+android_system_properties.workspace = true
+
 [dev-dependencies]
 pollster = "0.4"
 vello.workspace = true

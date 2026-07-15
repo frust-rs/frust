@@ -35,6 +35,10 @@ jni = "0.22"
 ndk = "0.9"
 ndk-sys = "0.6"
 android_logger = "0.15"
+# android emulator detection (forgekit-render) — target-gated; already a
+# transitive dep of wgpu-hal on Android, so promoting it to direct adds no
+# new crates/size (see forgekit-render/Cargo.toml)
+android_system_properties = "0.1"
 # intra-workspace
 forgekit-core = { path = "crates/forgekit-core" }
 forgekit-scene = { path = "crates/forgekit-scene" }
