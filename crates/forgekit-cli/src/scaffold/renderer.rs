@@ -48,6 +48,38 @@ pub fn expand_path(relative: &Path, vars: &BTreeMap<&str, String>) -> PathBuf {
     out
 }
 
+/// Strips a trailing `.tmpl` from every *directory* path component (the
+/// terminal file component's own `.tmpl`/`.copy.tmpl` suffix is already
+/// handled by [`crate::scaffold::classify`] before this runs).
+///
+/// This lets an entire template source tree carry a `.tmpl` suffix on its
+/// root directory as a purely organizational marker in `templates/app/`
+/// (spec Phase 2 task 22's `android.tmpl/` — mirrored by `templates/app/`
+/// itself not needing the suffix since it's the manifest root, and future
+/// `ios.tmpl/`) without that suffix leaking into the generated project's
+/// directory name (`android.tmpl/` → `android/`).
+pub fn strip_tmpl_dir_suffixes(relative: &Path) -> PathBuf {
+    let mut components: Vec<Component> = relative.components().collect();
+    let Some(file_component) = components.pop() else {
+        return PathBuf::new();
+    };
+    let mut out = PathBuf::new();
+    for component in components {
+        match component {
+            Component::Normal(segment) => {
+                let segment = segment.to_string_lossy();
+                match segment.strip_suffix(".tmpl") {
+                    Some(stripped) => out.push(stripped),
+                    None => out.push(segment.as_ref()),
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.push(file_component.as_os_str());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +135,38 @@ mod tests {
         // A segment that isn't a known placeholder key is copied verbatim,
         // even if it happens to contain dots.
         let out = expand_path(Path::new("src/lib.rs"), &vars(&[("org", "dev.f0x")]));
+        assert_eq!(out, Path::new("src/lib.rs"));
+    }
+
+    #[test]
+    fn strip_tmpl_dir_suffixes_strips_root_marker_directory() {
+        let out = strip_tmpl_dir_suffixes(Path::new("android.tmpl/build.gradle.kts"));
+        assert_eq!(out, Path::new("android/build.gradle.kts"));
+    }
+
+    #[test]
+    fn strip_tmpl_dir_suffixes_strips_every_matching_intermediate_segment() {
+        let out = strip_tmpl_dir_suffixes(Path::new(
+            "android.tmpl/gradle/wrapper/gradle-wrapper.properties",
+        ));
+        assert_eq!(
+            out,
+            Path::new("android/gradle/wrapper/gradle-wrapper.properties")
+        );
+    }
+
+    #[test]
+    fn strip_tmpl_dir_suffixes_leaves_the_file_component_alone() {
+        // The terminal component's own `.tmpl` suffix is handled upstream
+        // by `classify`, not here — a literal `.tmpl`-suffixed file name
+        // reaching this function is left untouched.
+        let out = strip_tmpl_dir_suffixes(Path::new("android.tmpl/foo.tmpl"));
+        assert_eq!(out, Path::new("android/foo.tmpl"));
+    }
+
+    #[test]
+    fn strip_tmpl_dir_suffixes_no_op_without_tmpl_directories() {
+        let out = strip_tmpl_dir_suffixes(Path::new("src/lib.rs"));
         assert_eq!(out, Path::new("src/lib.rs"));
     }
 }

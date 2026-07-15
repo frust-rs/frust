@@ -106,7 +106,12 @@ pub fn generate(
     let mut written = Vec::with_capacity(manifest.len());
     for entry in &manifest {
         let (mode, logical) = classify(entry);
-        let out_relative = renderer::expand_path(Path::new(logical), &path_vars);
+        // A source-tree directory (e.g. `android.tmpl/`) may itself carry
+        // a `.tmpl` suffix as a purely organizational marker; strip it
+        // before path-placeholder expansion so it doesn't leak into the
+        // generated project (`android.tmpl/` → `android/`).
+        let logical = renderer::strip_tmpl_dir_suffixes(Path::new(logical));
+        let out_relative = renderer::expand_path(&logical, &path_vars);
         let out_path = dest.join(&out_relative);
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent)
@@ -126,9 +131,46 @@ pub fn generate(
                     .with_context(|| format!("writing `{}`", out_path.display()))?;
             }
         }
+        preserve_executable_bit(&out_path)
+            .with_context(|| format!("setting permissions on `{}`", out_path.display()))?;
         written.push(out_relative);
     }
     Ok(written)
+}
+
+/// Filenames the scaffold vendors verbatim that must retain their
+/// executable bit in the generated project. `fs::write` always creates
+/// files with the umask-default (non-executable) mode — `include_dir` has
+/// no permission metadata to read back from the embedded copy, so
+/// "preserve the original mode" isn't available and this has to be a
+/// filename allowlist instead. Currently only the Gradle wrapper script
+/// (spec Phase 2 task 22, `android.tmpl/gradlew`); its Windows counterpart
+/// (`gradlew.bat`) doesn't need a Unix exec bit.
+const EXECUTABLE_FILENAMES: &[&str] = &["gradlew"];
+
+/// Sets the Unix executable bit (`0o755`) on `path` if its file name is in
+/// [`EXECUTABLE_FILENAMES`]. No-op on non-Unix targets and for every other
+/// file (matches the mode `fs::write` already produced, so this never
+/// *removes* permissions).
+fn preserve_executable_bit(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let is_executable = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| EXECUTABLE_FILENAMES.contains(&name));
+        if is_executable {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                .context("chmod +x on vendored executable script")?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// Refuses a non-empty `dest` unless `overwrite` is set, listing the
@@ -235,6 +277,95 @@ mod tests {
 
         let ctx = test_context();
         assert!(generate(&dest, &ctx, None, false).is_ok());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_produces_android_tree_with_stripped_dir_suffix_and_substitutions() {
+        let dest = unique_temp_dir("android-tree");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        // `android.tmpl/` → `android/`: the marker suffix on the source
+        // directory doesn't leak into the generated project.
+        assert!(dest.join("android").is_dir());
+        assert!(!dest.join("android.tmpl").exists());
+
+        let build_gradle = fs::read_to_string(dest.join("android/app/build.gradle.kts")).unwrap();
+        assert!(
+            build_gradle.contains(&format!("\"{}\"", ctx.android_identifier())),
+            "{build_gradle}"
+        );
+
+        // `androidIdentifier` path segment expands to nested package
+        // directories from the dotted `android_identifier` value.
+        let expected_main_activity = dest
+            .join("android/app/src/main/kotlin")
+            .join(ctx.android_identifier().replace('.', "/"))
+            .join("MainActivity.kt");
+        assert!(
+            expected_main_activity.exists(),
+            "expected {}",
+            expected_main_activity.display()
+        );
+        let main_activity = fs::read_to_string(&expected_main_activity).unwrap();
+        assert!(
+            main_activity.contains(&format!("package {}", ctx.android_identifier())),
+            "{main_activity}"
+        );
+
+        // `ForgeKitSurfaceView` stays at the fixed `dev/forgekit/` package
+        // regardless of `android_identifier`.
+        let surface_view =
+            dest.join("android/app/src/main/kotlin/dev/forgekit/ForgeKitSurfaceView.kt");
+        assert!(surface_view.exists());
+        let surface_view_src = fs::read_to_string(&surface_view).unwrap();
+        assert!(surface_view_src.contains("package dev.forgekit"));
+        assert!(
+            surface_view_src.contains(&format!("System.loadLibrary(\"{}\")", ctx.project_name))
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generate_makes_gradlew_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dest = unique_temp_dir("gradlew-exec");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        let gradlew = dest.join("android/gradlew");
+        let mode = fs::metadata(&gradlew).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "gradlew should be executable: {mode:o}"
+        );
+
+        // gradlew.bat is a Windows script; it doesn't need a Unix exec bit.
+        let gradlew_bat = dest.join("android/gradlew.bat");
+        assert!(gradlew_bat.exists());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_copies_gradle_wrapper_jar_as_a_valid_zip() {
+        let dest = unique_temp_dir("wrapper-jar");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        let jar_bytes = fs::read(dest.join("android/gradle/wrapper/gradle-wrapper.jar")).unwrap();
+        // Zip local file header magic — confirms the binary content
+        // survived the embed → generate round-trip byte-for-byte.
+        assert_eq!(&jar_bytes[0..4], b"PK\x03\x04", "not a valid zip/jar");
 
         let _ = fs::remove_dir_all(&dest);
     }

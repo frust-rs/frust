@@ -27,6 +27,7 @@ impl TemplateContext {
             ("description", self.description.clone()),
             ("forgekit_version", self.forgekit_version.clone()),
             ("forgekit_path", self.forgekit_path.clone()),
+            ("android_identifier", self.android_identifier()),
         ])
     }
 
@@ -34,15 +35,43 @@ impl TemplateContext {
     /// `androidIdentifier` model: a directory literally named after a key
     /// renders to that key's value, with dotted values expanding into
     /// nested directories — see [`crate::scaffold::renderer::expand_path`]).
-    /// The v1 desktop-preview template doesn't exercise this, but future
-    /// Android/iOS templates (spec Phase 2/3) will add keys like
-    /// `androidIdentifier`/`iosIdentifier` here.
+    /// The Android template (spec Phase 2 task 22) is the first consumer:
+    /// `android/app/src/main/kotlin/androidIdentifier/` expands to the
+    /// nested package directories for the generated `MainActivity.kt`.
     pub fn path_vars(&self) -> BTreeMap<&'static str, String> {
         BTreeMap::from([
             ("project_name", self.project_name.clone()),
             ("org", self.org.clone()),
+            ("androidIdentifier", self.android_identifier()),
         ])
     }
+
+    /// Derives the Android application id / Kotlin package name from
+    /// `org` + `project_name` (spec Phase 2 task 22): `org.project_name`,
+    /// sanitized to `[a-zA-Z0-9_.]` per Flutter's `androidIdentifier` rule
+    /// (any other character becomes `_`).
+    ///
+    /// Kept in sync with `android_run::project::derive_app_id`
+    /// (`forgekit-cli`'s `crates/forgekit-cli/src/android_run/project.rs`),
+    /// which re-derives the same id as `forgekit run`'s fallback when a
+    /// generated project's `forgekit.toml` has no explicit
+    /// `[android] identifier` — both must produce the same string for a
+    /// given `org`/`project_name` pair.
+    pub fn android_identifier(&self) -> String {
+        sanitize_android_identifier(&format!("{}.{}", self.org, self.project_name))
+    }
+}
+
+fn sanitize_android_identifier(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Rust keywords (2015/2018/2021/2024 strict + reserved), used to reject
@@ -169,6 +198,42 @@ mod tests {
     #[test]
     fn rejects_empty() {
         assert_eq!(validate_project_name(""), Err(NameError::Empty));
+    }
+
+    fn test_context() -> TemplateContext {
+        TemplateContext {
+            project_name: "my_app".into(),
+            title_case_name: "My App".into(),
+            org: "dev.f0x".into(),
+            description: "A new ForgeKit application.".into(),
+            forgekit_version: "0.1.0".into(),
+            forgekit_path: "/path/to/forgekit".into(),
+        }
+    }
+
+    #[test]
+    fn android_identifier_joins_org_and_project_name() {
+        assert_eq!(test_context().android_identifier(), "dev.f0x.my_app");
+    }
+
+    #[test]
+    fn android_identifier_sanitizes_invalid_characters() {
+        let mut ctx = test_context();
+        ctx.org = "dev f0x".into();
+        ctx.project_name = "my-app".into();
+        assert_eq!(ctx.android_identifier(), "dev_f0x.my_app");
+    }
+
+    #[test]
+    fn render_vars_include_android_identifier() {
+        let vars = test_context().render_vars();
+        assert_eq!(vars.get("android_identifier").unwrap(), "dev.f0x.my_app");
+    }
+
+    #[test]
+    fn path_vars_include_camel_case_android_identifier_key() {
+        let vars = test_context().path_vars();
+        assert_eq!(vars.get("androidIdentifier").unwrap(), "dev.f0x.my_app");
     }
 
     #[test]

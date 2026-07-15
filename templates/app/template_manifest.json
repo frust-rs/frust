@@ -4,5 +4,16 @@
   ".gitignore",
   "assets/.gitkeep",
   "src/lib.rs.tmpl",
-  "src/main.rs.tmpl"
+  "src/main.rs.tmpl",
+  "android.tmpl/settings.gradle.kts.tmpl",
+  "android.tmpl/build.gradle.kts",
+  "android.tmpl/gradle.properties",
+  "android.tmpl/gradlew",
+  "android.tmpl/gradlew.bat",
+  "android.tmpl/gradle/wrapper/gradle-wrapper.jar",
+  "android.tmpl/gradle/wrapper/gradle-wrapper.properties",
+  "android.tmpl/app/build.gradle.kts.tmpl",
+  "android.tmpl/app/src/main/AndroidManifest.xml.tmpl",
+  "android.tmpl/app/src/main/kotlin/androidIdentifier/MainActivity.kt.tmpl",
+  "android.tmpl/app/src/main/kotlin/dev/forgekit/ForgeKitSurfaceView.kt.tmpl"
 ]
