@@ -95,6 +95,13 @@ pub fn generate(
 ) -> Result<Vec<PathBuf>> {
     check_destination(dest, overwrite)?;
 
+    // Fail fast (spec Phase 3 task 34): a grammatically invalid derived iOS
+    // bundle identifier is rejected before any file is written, rather than
+    // emitting an Xcode project that `xcodebuild` would later refuse.
+    ctx.validate_ios_identifier().map_err(|err| {
+        anyhow!("invalid iOS bundle identifier derived from `org` + project name: {err}")
+    })?;
+
     let source = match template_dir_override {
         Some(dir) => Source::Dir(dir),
         None => Source::Embedded,
@@ -340,6 +347,84 @@ mod tests {
         assert!(
             surface_view_src.contains(&format!("System.loadLibrary(\"{}\")", ctx.project_name))
         );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_produces_ios_tree_with_stripped_dir_suffix_and_substitutions() {
+        let dest = unique_temp_dir("ios-tree");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        // `ios.tmpl/` → `ios/`: the marker suffix on the source directory
+        // doesn't leak into the generated project, and `Runner.xcodeproj`
+        // (not a `.tmpl` directory) survives intact.
+        assert!(dest.join("ios").is_dir());
+        assert!(!dest.join("ios.tmpl").exists());
+
+        let pbxproj = dest.join("ios/Runner.xcodeproj/project.pbxproj");
+        assert!(pbxproj.exists(), "expected {}", pbxproj.display());
+        // The file-level `.tmpl` suffix was stripped and no rendered file
+        // kept it.
+        assert!(
+            !dest
+                .join("ios/Runner.xcodeproj/project.pbxproj.tmpl")
+                .exists()
+        );
+
+        let pbxproj_src = fs::read_to_string(&pbxproj).unwrap();
+        // `{{ iosIdentifier }}` rendered to the derived (camelCased) bundle id.
+        assert!(
+            pbxproj_src.contains(&format!("\"{}\"", ctx.ios_identifier())),
+            "{pbxproj_src}"
+        );
+        // `{{ project_name }}` rendered into the linker flag / staticlib copy.
+        assert!(
+            pbxproj_src.contains(&format!("-l{}", ctx.project_name)),
+            "{pbxproj_src}"
+        );
+        // No template placeholders survived into the generated project.
+        assert!(!pbxproj_src.contains("{{"), "{pbxproj_src}");
+
+        // The shared scheme (headless `-scheme` builds need it) and Info.plist
+        // both landed.
+        assert!(
+            dest.join("ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme")
+                .exists()
+        );
+        let info_plist = fs::read_to_string(dest.join("ios/Runner/Info.plist")).unwrap();
+        assert!(
+            info_plist.contains("UIApplicationSceneManifest"),
+            "{info_plist}"
+        );
+        assert!(!info_plist.contains("{{"), "{info_plist}");
+
+        // The static Swift sources and bridging header were copied verbatim.
+        assert!(dest.join("ios/Runner/AppDelegate.swift").exists());
+        assert!(dest.join("ios/Runner/SceneDelegate.swift").exists());
+        assert!(dest.join("ios/Runner/ForgeKitView.swift").exists());
+        assert!(
+            dest.join("ios/Runner/ForgeKitViewController.swift")
+                .exists()
+        );
+        assert!(dest.join("ios/Runner/Runner-Bridging-Header.h").exists());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_rejects_org_producing_invalid_ios_bundle_id() {
+        let dest = unique_temp_dir("ios-invalid-id");
+        let mut ctx = test_context();
+        // Whitespace in `org` derives a bundle id with an invalid segment.
+        ctx.org = "dev f0x".into();
+
+        let err = generate(&dest, &ctx, None, false).unwrap_err();
+        assert!(err.to_string().contains("iOS bundle identifier"), "{err}");
+        // Fail-fast: nothing was written.
+        assert!(!dest.join("Cargo.toml").exists());
 
         let _ = fs::remove_dir_all(&dest);
     }

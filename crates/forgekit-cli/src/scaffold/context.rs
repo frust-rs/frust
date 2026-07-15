@@ -28,6 +28,7 @@ impl TemplateContext {
             ("forgekit_version", self.forgekit_version.clone()),
             ("forgekit_path", self.forgekit_path.clone()),
             ("android_identifier", self.android_identifier()),
+            ("iosIdentifier", self.ios_identifier()),
         ])
     }
 
@@ -55,6 +56,28 @@ impl TemplateContext {
     /// produce the same string for a given `org`/`project_name` pair.
     pub fn android_identifier(&self) -> String {
         crate::android_id::derive(&self.org, &self.project_name)
+    }
+
+    /// Derives the iOS bundle identifier from `org` + `project_name` (spec
+    /// Phase 3 task 34) via `crate::ios_id::derive` — the single source of
+    /// truth shared with `ios_run` (task 35), which re-derives the same id
+    /// as `forgekit run`'s fallback when a generated project's
+    /// `forgekit.toml` has no explicit `[ios] identifier`. Exposed to
+    /// templates as the `iosIdentifier` render var; unlike
+    /// `androidIdentifier` it is *not* a path-segment placeholder because
+    /// the iOS template has no identifier-named directories.
+    pub fn ios_identifier(&self) -> String {
+        crate::ios_id::derive(&self.org, &self.project_name)
+    }
+
+    /// Validates the derived iOS bundle identifier (spec Phase 3 task 34's
+    /// scaffold-time fail-fast). Called by [`crate::scaffold::generate`]
+    /// before any file is written so a `forgekit create` whose
+    /// `org`/`project_name` produce a grammatically invalid bundle id errors
+    /// out with an actionable message instead of emitting a project Xcode
+    /// would reject.
+    pub(crate) fn validate_ios_identifier(&self) -> Result<(), crate::ios_id::IdError> {
+        crate::ios_id::validate(&self.ios_identifier())
     }
 }
 
@@ -212,6 +235,40 @@ mod tests {
     fn render_vars_include_android_identifier() {
         let vars = test_context().render_vars();
         assert_eq!(vars.get("android_identifier").unwrap(), "dev.f0x.my_app");
+    }
+
+    #[test]
+    fn ios_identifier_camel_cases_project_name() {
+        // Underscores are invalid in a bundle-id segment, so `my_app`
+        // becomes `myApp` (unlike the Android id, which keeps the underscore).
+        assert_eq!(test_context().ios_identifier(), "dev.f0x.myApp");
+    }
+
+    #[test]
+    fn render_vars_include_ios_identifier() {
+        let vars = test_context().render_vars();
+        assert_eq!(vars.get("iosIdentifier").unwrap(), "dev.f0x.myApp");
+    }
+
+    #[test]
+    fn ios_identifier_is_not_a_path_var() {
+        // The iOS template has no identifier-named directories, so
+        // `iosIdentifier` must not leak into path-segment substitution.
+        assert!(!test_context().path_vars().contains_key("iosIdentifier"));
+    }
+
+    #[test]
+    fn validate_ios_identifier_accepts_derived_id() {
+        assert!(test_context().validate_ios_identifier().is_ok());
+    }
+
+    #[test]
+    fn validate_ios_identifier_rejects_invalid_org() {
+        // An `org` carrying whitespace derives a bundle id with an invalid
+        // segment; scaffold-time validation must reject it (fail-fast).
+        let mut ctx = test_context();
+        ctx.org = "dev f0x".into();
+        assert!(ctx.validate_ios_identifier().is_err());
     }
 
     #[test]
