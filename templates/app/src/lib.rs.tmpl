@@ -21,3 +21,10 @@ pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<> {
     }
     text(state.greeting.clone()).size(32.0)
 }
+
+// Android entry point: stamps out the `Java_dev_forgekit_ForgeKitSurfaceView_native*`
+// JNI exports bound to this app's `AppState`/`app_logic` (spec §10.1). The
+// `#[cfg(target_os = "android")]` gate means the macro expands to nothing on
+// desktop, where `main.rs` drives the app instead.
+#[cfg(target_os = "android")]
+forgekit::android_app!(AppState, app_logic);

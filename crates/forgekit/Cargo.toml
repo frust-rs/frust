@@ -8,5 +8,14 @@ license.workspace = true
 [dependencies]
 forgekit-core = { workspace = true }
 forgekit-widgets = { workspace = true }
-forgekit-shell-desktop = { workspace = true }
+# Depended on unconditionally so the re-exported `android_app!` macro is always
+# available; the crate compiles to (almost) nothing off-Android.
+forgekit-shell-android = { workspace = true }
 anyhow = { workspace = true }
+
+# The desktop preview shell pulls in winit → android-activity, which does not
+# compile for an Android target (and is dead weight there anyway); the Android
+# app is driven by `android_app!`/JNI instead. Gate it off Android so
+# `cargo check --target *-linux-android -p forgekit` builds the whole graph.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+forgekit-shell-desktop = { workspace = true }

@@ -28,6 +28,13 @@ toml = "1"
 anyhow = "1"
 thiserror = "2"
 ctrlc = "3"
+log = "0.4"
+# android shell (JNI bridge) — target-gated; land in Cargo.lock but only
+# compile for `--target *-linux-android` (see forgekit-shell-android/Cargo.toml)
+jni = "0.22"
+ndk = "0.9"
+ndk-sys = "0.6"
+android_logger = "0.15"
 # intra-workspace
 forgekit-core = { path = "crates/forgekit-core" }
 forgekit-scene = { path = "crates/forgekit-scene" }
@@ -35,4 +42,5 @@ forgekit-render = { path = "crates/forgekit-render" }
 forgekit-text = { path = "crates/forgekit-text" }
 forgekit-widgets = { path = "crates/forgekit-widgets" }
 forgekit-shell-desktop = { path = "crates/forgekit-shell-desktop" }
+forgekit-shell-android = { path = "crates/forgekit-shell-android" }
 forgekit = { path = "crates/forgekit" }

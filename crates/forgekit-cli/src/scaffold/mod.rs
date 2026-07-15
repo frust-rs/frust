@@ -231,10 +231,24 @@ mod tests {
 
         let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
         assert!(cargo_toml.contains("my_app"), "{cargo_toml}");
+        // The app crate builds both the Android `cdylib` (JNI bridge) and an
+        // `rlib` for the desktop preview binary (task 24).
+        assert!(
+            cargo_toml.contains("crate-type = [\"cdylib\", \"rlib\"]"),
+            "{cargo_toml}"
+        );
         let forgekit_toml = fs::read_to_string(dest.join("forgekit.toml")).unwrap();
         assert!(forgekit_toml.contains("dev.f0x"), "{forgekit_toml}");
 
         assert!(dest.join("src/lib.rs").exists());
+        // The Android JNI entry point is stamped out by the re-exported macro,
+        // gated to the Android target (task 24).
+        let lib_rs = fs::read_to_string(dest.join("src/lib.rs")).unwrap();
+        assert!(
+            lib_rs.contains("#[cfg(target_os = \"android\")]")
+                && lib_rs.contains("forgekit::android_app!(AppState, app_logic)"),
+            "{lib_rs}"
+        );
         assert!(dest.join("src/main.rs").exists());
         assert!(dest.join(".gitignore").exists());
         assert!(dest.join("assets/.gitkeep").exists());

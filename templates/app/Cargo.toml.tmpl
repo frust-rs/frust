@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
+# bridge); `rlib` keeps the crate usable as a normal Rust library for the desktop
+# `main.rs` preview binary (spec §12.9).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 # NOTE: temporary path dependency pointing at the ForgeKit repo checkout
 # that generated this project (spec §12.3: "forgekit_path" mechanism is

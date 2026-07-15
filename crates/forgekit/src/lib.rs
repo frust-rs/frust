@@ -23,6 +23,13 @@
 pub use forgekit_core::view::View;
 pub use forgekit_widgets::{TextView, text};
 
+// Re-export the Android JNI-bridge macro so generated apps write
+// `forgekit::android_app!(AppState, app_logic)` (spec §10.1). `pub use` of a
+// `#[macro_export]` macro re-exports it on edition 2021+; the macro only expands
+// to real code where its call site is `#[cfg(target_os = "android")]`, so this is
+// inert on desktop.
+pub use forgekit_shell_android::android_app;
+
 /// A ForgeKit application: the app state plus the `app_logic` function that maps
 /// it to a view tree (spec §5).
 ///
@@ -35,6 +42,9 @@ pub use forgekit_widgets::{TextView, text};
 /// infers the view type freshly at the call site, so the exact spec §5 shape —
 /// `App::new(state, app_logic).run()` — compiles for both `impl View` and
 /// concrete-typed `app_logic`.
+// On Android the fields are consumed only by the desktop-gated `run`, so they
+// read as dead there; the app is driven through `android_app!`/JNI instead.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub struct App<State, Logic> {
     state: State,
     logic: Logic,
@@ -50,12 +60,16 @@ impl<State, Logic> App<State, Logic> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl<State: 'static, Logic> App<State, Logic> {
     /// Run the app in the desktop preview window until it is closed (spec §12.9).
     ///
     /// Blocks the calling thread on the platform event loop. Returns once the
     /// window closes, or an error if the window/GPU surface could not be
     /// created. The concrete view type `V` is inferred from `logic`.
+    ///
+    /// Desktop-only: on Android the app is driven by the JNI bridge that
+    /// [`android_app!`] generates, not by this preview loop.
     pub fn run<V>(self) -> anyhow::Result<()>
     where
         V: View<State>,
