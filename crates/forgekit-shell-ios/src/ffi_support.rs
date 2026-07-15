@@ -40,6 +40,16 @@ pub(crate) fn should_render_frame(surface_ready: bool, paused: bool) -> bool {
     surface_ready && !paused
 }
 
+/// Cap on consecutive failed surface-recreate attempts per `SurfaceLost` episode.
+///
+/// `render_frame` fires at CADisplayLink cadence (60–120 Hz); without a cap, a
+/// persistently-failing recreate would retry blocking GPU work plus an ERROR log
+/// every frame, forever — the same failure shape the generated Swift side latches
+/// against for a failed `forgekit_init`. Three attempts is enough to ride out a
+/// transient loss; after that the shell degrades to a single logged failure and
+/// stops (a successful recreate resets the counter).
+pub(crate) const MAX_RECREATE_ATTEMPTS: u8 = 3;
+
 /// Whether a lost surface should be recreated before the next frame/resize.
 ///
 /// Unlike Android (which pairs surface loss with a `surfaceDestroyed`/
@@ -47,12 +57,23 @@ pub(crate) fn should_render_frame(surface_ready: bool, paused: bool) -> bool {
 /// whole lifetime, so nothing external re-drives surface creation after a
 /// `SurfaceLost`. The shell therefore self-heals: on the next `forgekit_resize`
 /// or `forgekit_render_frame` it recreates the surface from the retained layer.
-/// This predicate is that trigger — true **only** in [`SurfacePhase::SurfaceLost`]
-/// (a `NoSurface` handle never exists post-init, and `SurfaceReady` needs no
-/// recovery).
+/// This predicate is that trigger, and it is deliberately narrow:
+///
+/// - only in [`SurfacePhase::SurfaceLost`] (a `NoSurface` handle never exists
+///   post-init, and `SurfaceReady` needs no recovery);
+/// - never while `paused` — recreation is real Metal work, and the paused gate
+///   exists precisely because GPU submission from a backgrounded iOS app can get
+///   the process killed. A loss that coincides with backgrounding recovers on the
+///   first frame/resize after `forgekit_resume`;
+/// - only while under [`MAX_RECREATE_ATTEMPTS`] consecutive failures, so a
+///   persistently-failing recreate cannot become a per-frame retry storm.
 #[inline]
-pub(crate) fn should_recreate_surface(phase: SurfacePhase) -> bool {
-    matches!(phase, SurfacePhase::SurfaceLost)
+pub(crate) fn should_recreate_surface(
+    phase: SurfacePhase,
+    paused: bool,
+    failed_attempts: u8,
+) -> bool {
+    matches!(phase, SurfacePhase::SurfaceLost) && !paused && failed_attempts < MAX_RECREATE_ATTEMPTS
 }
 
 #[cfg(test)]
@@ -93,13 +114,43 @@ mod tests {
 
     #[test]
     fn lost_surface_is_recreated() {
-        // The self-recovery trigger: only `SurfaceLost` asks for a recreate.
-        assert!(should_recreate_surface(SurfacePhase::SurfaceLost));
+        // The self-recovery trigger: `SurfaceLost`, unpaused, under the cap.
+        assert!(should_recreate_surface(SurfacePhase::SurfaceLost, false, 0));
+        assert!(should_recreate_surface(
+            SurfacePhase::SurfaceLost,
+            false,
+            MAX_RECREATE_ATTEMPTS - 1
+        ));
     }
 
     #[test]
     fn ready_and_nosurface_are_not_recreated() {
-        assert!(!should_recreate_surface(SurfacePhase::SurfaceReady));
-        assert!(!should_recreate_surface(SurfacePhase::NoSurface));
+        assert!(!should_recreate_surface(
+            SurfacePhase::SurfaceReady,
+            false,
+            0
+        ));
+        assert!(!should_recreate_surface(SurfacePhase::NoSurface, false, 0));
+    }
+
+    #[test]
+    fn paused_app_never_recreates() {
+        // The paused gate is the process-kill guard; recreation is GPU work and
+        // must wait for resume, exactly like frame submission.
+        assert!(!should_recreate_surface(SurfacePhase::SurfaceLost, true, 0));
+    }
+
+    #[test]
+    fn recreate_stops_at_the_attempt_cap() {
+        assert!(!should_recreate_surface(
+            SurfacePhase::SurfaceLost,
+            false,
+            MAX_RECREATE_ATTEMPTS
+        ));
+        assert!(!should_recreate_surface(
+            SurfacePhase::SurfaceLost,
+            false,
+            u8::MAX
+        ));
     }
 }

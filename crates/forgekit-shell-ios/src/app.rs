@@ -69,6 +69,12 @@ pub struct IosAppHandle {
     /// no-op — Metal command submission from a backgrounded iOS app can get the
     /// process killed (spec §10.2), so this is the Rust-side enforcement point.
     paused: bool,
+    /// Consecutive failed surface-recreate attempts in the current `SurfaceLost`
+    /// episode. Compared against `ffi_support::MAX_RECREATE_ATTEMPTS` so a
+    /// persistently-failing recreate degrades to a logged stop instead of a
+    /// per-CADisplayLink-frame retry storm; reset by a successful recreate
+    /// ([`Self::set_surface`]).
+    recreate_failures: u8,
 }
 
 impl IosAppHandle {
@@ -96,6 +102,7 @@ impl IosAppHandle {
             physical,
             scale,
             paused: false,
+            recreate_failures: 0,
         }
     }
 
@@ -138,6 +145,9 @@ impl IosAppHandle {
     pub(crate) fn set_surface(&mut self, physical: (u32, u32), scale: f32) {
         self.physical = physical;
         self.scale = scale;
+        // A successful recreate ends the SurfaceLost episode; future losses get a
+        // fresh retry budget.
+        self.recreate_failures = 0;
     }
 
     /// Resize the live surface in place (rotation / bounds change). The
@@ -160,6 +170,25 @@ impl IosAppHandle {
     /// Mark the app resumed (`forgekit_resume`): `frame()`s do work again.
     pub(crate) fn resume(&mut self) {
         self.paused = false;
+    }
+
+    /// Whether the app is paused. `pub(crate)` so [`crate::ffi_glue`] can gate
+    /// surface recreation on it — recreation is real Metal work and must obey the
+    /// same backgrounded-no-GPU rule as frame submission.
+    pub(crate) fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Consecutive failed recreate attempts this `SurfaceLost` episode (see the
+    /// field doc).
+    pub(crate) fn recreate_failures(&self) -> u8 {
+        self.recreate_failures
+    }
+
+    /// Record one failed surface-recreate attempt (saturating; the predicate cap
+    /// makes values past `MAX_RECREATE_ATTEMPTS` unreachable in practice).
+    pub(crate) fn record_recreate_failure(&mut self) {
+        self.recreate_failures = self.recreate_failures.saturating_add(1);
     }
 
     /// The current lifecycle phase (spec §8.1). `pub(crate)` so [`crate::ffi_glue`]

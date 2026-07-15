@@ -164,11 +164,17 @@ fn create_handle(
 /// the same layer for the app's lifetime, so nothing external re-drives creation).
 ///
 /// On success the handle's layout inputs are refreshed via
-/// [`IosAppHandle::set_surface`]; on failure the phase stays `SurfaceLost` and the
-/// next `render_frame`/`resize` retries — bounded by the CADisplayLink cadence,
-/// not a busy loop. This is the sole recovery call into
-/// `on_surface_created_from_metal_layer` outside [`create_handle`], and keeps the
-/// `unsafe` confined to this module.
+/// [`IosAppHandle::set_surface`] (which also resets the failure budget). On
+/// failure the phase stays `SurfaceLost` and the failure is recorded: the
+/// `should_recreate_surface` gate at both call sites retries on later
+/// `render_frame`/`resize` entries only while under
+/// [`ffi_support::MAX_RECREATE_ATTEMPTS`](crate::ffi_support::MAX_RECREATE_ATTEMPTS)
+/// consecutive failures — a persistently-failing recreate degrades to a single
+/// "giving up" log line instead of per-frame blocking GPU retries. The same gate
+/// skips recreation entirely while paused (backgrounded GPU work can get the
+/// process killed); a loss during backgrounding recovers after `forgekit_resume`.
+/// This is the sole recovery call into `on_surface_created_from_metal_layer`
+/// outside [`create_handle`], and keeps the `unsafe` confined to this module.
 fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
     // Read the retained pointer before taking the `&mut` borrow of the renderer.
     let metal_layer = app.metal_layer();
@@ -190,7 +196,16 @@ fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
     match result {
         Ok(()) => app.set_surface(physical, scale),
         Err(err) => {
-            log::error!("forgekit-shell-ios: surface recreate failed: {err:#}");
+            app.record_recreate_failure();
+            if app.recreate_failures() >= crate::ffi_support::MAX_RECREATE_ATTEMPTS {
+                log::error!(
+                    "forgekit-shell-ios: surface recreate failed {} times: {err:#}; \
+                     giving up for this SurfaceLost episode (rendering disabled)",
+                    app.recreate_failures()
+                );
+            } else {
+                log::error!("forgekit-shell-ios: surface recreate failed: {err:#}");
+            }
         }
     }
 }
@@ -204,7 +219,11 @@ pub fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             let physical = (width.max(1), height.max(1));
-            if crate::ffi_support::should_recreate_surface(app.phase()) {
+            if crate::ffi_support::should_recreate_surface(
+                app.phase(),
+                app.paused(),
+                app.recreate_failures(),
+            ) {
                 recover_surface(app, physical, scale);
             } else {
                 app.resize(physical, scale);
@@ -222,7 +241,11 @@ pub fn render_frame(handle: *mut c_void) {
     guard("forgekit_render_frame", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
-            if crate::ffi_support::should_recreate_surface(app.phase()) {
+            if crate::ffi_support::should_recreate_surface(
+                app.phase(),
+                app.paused(),
+                app.recreate_failures(),
+            ) {
                 let (physical, scale) = (app.physical(), app.scale());
                 recover_surface(app, physical, scale);
             }
