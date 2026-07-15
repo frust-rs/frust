@@ -1,7 +1,16 @@
 //! Desktop preview entry point (spec §12.9 dev loop).
 
-use {{ project_name }}::{app_logic, AppState};
-
+// On Android the app is driven by the JNI bridge (`android_app!` in `lib.rs`),
+// not this desktop preview binary — and `forgekit::App`/`App::run` are compiled
+// out for the Android target. Gate the desktop `main` accordingly, and provide
+// an empty `main` on Android so this crate's bin target still compiles when
+// `cargo ndk` builds every target for `aarch64-linux-android`.
+#[cfg(not(target_os = "android"))]
 fn main() {
+    use {{ project_name }}::{app_logic, AppState};
+
     forgekit::App::new(AppState::default(), app_logic).run().unwrap();
 }
+
+#[cfg(target_os = "android")]
+fn main() {}

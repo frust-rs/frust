@@ -81,10 +81,19 @@ class ForgeKitSurfaceView(context: Context) :
     }
 
     override fun doFrame(frameTimeNanos: Long) {
-        if (!running || handle == 0L) {
+        if (!running) {
             return
         }
-        nativeOnFrame(handle, frameTimeNanos)
+        // `onResume` starts this loop before the surface exists, so the first
+        // frames run with `handle == 0` (the native side isn't created until
+        // `surfaceCreated`). Keep re-posting regardless — only skip the native
+        // frame call itself while there's no handle — otherwise the loop would
+        // terminate before `surfaceCreated` ever ran and nothing would render.
+        // Once the surface is lost the handle stays valid and the native frame
+        // is a cheap no-op, so re-posting is always correct while `running`.
+        if (handle != 0L) {
+            nativeOnFrame(handle, frameTimeNanos)
+        }
         Choreographer.getInstance().postFrameCallback(this)
     }
 
