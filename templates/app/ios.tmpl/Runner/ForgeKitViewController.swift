@@ -17,6 +17,15 @@ final class ForgeKitViewController: UIViewController {
     private var displayLink: CADisplayLink?
     private var handle: UnsafeMutableRawPointer?
     private var lastDrawableSize: CGSize = .zero
+    // `forgekit_init` failure is session-permanent by design: the shell has
+    // no transient failure mode (the one observed cause, a simulator GPU
+    // missing a required Metal feature, cannot change mid-process). Once
+    // `forgekit_init` returns nil, latch here so every later UIKit layout
+    // pass (rotation, keyboard, autolayout churn, ...) is a no-op instead of
+    // re-running a doomed synchronous `pollster::block_on` adapter/device
+    // request and re-logging the failure. If a transient failure mode is
+    // ever introduced on the Rust side, this is the place to revisit.
+    private var initFailed = false
 
     override func loadView() {
         view = ForgeKitView()
@@ -60,6 +69,8 @@ final class ForgeKitViewController: UIViewController {
     /// Sizes the drawable to the view's pixel bounds and either creates the
     /// native renderer (first valid layout) or resizes it (thereafter).
     private func updateSurface() {
+        guard !initFailed else { return }
+
         let scale = view.contentScaleFactor
         let bounds = view.bounds.size
         let pixelSize = CGSize(
@@ -82,6 +93,13 @@ final class ForgeKitViewController: UIViewController {
                 height,
                 Float(scale)
             )
+            guard handle != nil else {
+                initFailed = true
+                displayLink?.invalidate()
+                displayLink = nil
+                NSLog("ForgeKit: GPU init failed — rendering disabled for this session")
+                return
+            }
             startDisplayLink()
         } else if pixelSize != lastDrawableSize {
             forgekit_resize(handle, width, height, Float(scale))
