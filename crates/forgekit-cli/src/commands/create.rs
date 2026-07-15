@@ -49,9 +49,6 @@ pub fn run(args: CreateArgs) -> Result<u8> {
     println!("Created {} file(s) in {}", written.len(), dest.display());
     println!();
     println!("All done! `{project_name}` is ready.");
-    println!(
-        "Note: it won't build until the `forgekit` facade crate lands (spec §12.3, task 08/09)."
-    );
     println!();
     println!("To run your app:");
     if args.dir != "." {
