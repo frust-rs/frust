@@ -2,6 +2,8 @@
 
 use clap::{Parser, Subcommand};
 
+use crate::build_info::BuildArgs;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "forgekit",
@@ -62,6 +64,12 @@ pub enum Command {
     Devices,
     /// Remove build outputs (cargo target dirs + Gradle/Xcode build dirs).
     Clean,
+    /// Build → install → launch → stream logs on a connected device
+    /// (spec §12.4); no Android device selected → `cargo run` passthrough.
+    Run {
+        #[command(flatten)]
+        build: BuildArgs,
+    },
 }
 
 #[cfg(test)]
@@ -134,6 +142,29 @@ mod tests {
                 assert!(overwrite);
             }
             other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_with_defaults() {
+        let cli = Cli::parse_from(["forgekit", "run"]);
+        match cli.command {
+            Command::Run { build } => {
+                assert!(!build.debug);
+                assert!(!build.profile);
+                assert!(!build.release);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_with_device_and_mode_flags() {
+        let cli = Cli::parse_from(["forgekit", "-d", "emulator-5554", "run", "--release"]);
+        assert_eq!(cli.device_id.as_deref(), Some("emulator-5554"));
+        match cli.command {
+            Command::Run { build } => assert!(build.release),
+            other => panic!("expected Run, got {other:?}"),
         }
     }
 }

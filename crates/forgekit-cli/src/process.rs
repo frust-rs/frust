@@ -4,6 +4,7 @@
 //! shelling out during `cargo test`.
 
 use anyhow::{Context, Result};
+use std::path::Path;
 use std::process::Command;
 
 #[cfg(test)]
@@ -23,6 +24,22 @@ pub struct Output {
 
 pub trait ProcessRunner {
     fn run(&self, cmd: &str, args: &[&str]) -> Result<Output>;
+
+    /// Like [`run`](ProcessRunner::run), but for long-running/streaming
+    /// invocations (`./gradlew`, `adb logcat`, `cargo run`) where the caller
+    /// wants each line of stdout as it arrives rather than only the final
+    /// buffered [`Output`]. `cwd` sets the child's working directory (`None`
+    /// = inherit); `env` adds/overrides environment variables for the child
+    /// only (e.g. `JAVA_HOME` for a `./gradlew` invocation) without touching
+    /// the parent process's environment.
+    fn run_streaming(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<Output>;
 }
 
 /// Shells out for real via [`std::process::Command`].
@@ -38,6 +55,66 @@ impl ProcessRunner for RealProcessRunner {
             success: out.status.success(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    fn run_streaming(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<Output> {
+        use std::io::{BufRead, BufReader, Read};
+        use std::process::Stdio;
+
+        let mut command = Command::new(cmd);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(dir) = cwd {
+            command.current_dir(dir);
+        }
+        for (key, value) in env {
+            command.env(key, value);
+        }
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn `{cmd}`"))?;
+
+        // Drain stderr on a background thread so a child that fills its
+        // stderr pipe while we're blocked reading stdout can't deadlock us.
+        let stderr_handle = child.stderr.take().map(|mut stderr| {
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                let _ = stderr.read_to_string(&mut buf);
+                buf
+            })
+        });
+
+        let mut stdout_lines = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            for line in BufReader::new(stdout).lines() {
+                let line = line.with_context(|| format!("reading stdout from `{cmd}`"))?;
+                on_line(&line);
+                stdout_lines.push(line);
+            }
+        }
+
+        let stderr = stderr_handle
+            .map(|handle| handle.join().unwrap_or_default())
+            .unwrap_or_default();
+        let status = child
+            .wait()
+            .with_context(|| format!("waiting on `{cmd}`"))?;
+
+        Ok(Output {
+            success: status.success(),
+            stdout: stdout_lines.join("\n"),
+            stderr,
         })
     }
 }
@@ -143,6 +220,26 @@ impl ProcessRunner for FakeProcessRunner {
             }
         }
     }
+
+    /// Fakes streaming by resolving the invocation exactly as [`run`](Self::run)
+    /// does, then replaying its `stdout` one line at a time through
+    /// `on_line` before returning the same [`Output`]. `cwd`/`env` are
+    /// ignored — invocation matching is keyed on `cmd`/`args` only, same as
+    /// `run`.
+    fn run_streaming(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        _cwd: Option<&Path>,
+        _env: &[(&str, &str)],
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<Output> {
+        let out = self.run(cmd, args)?;
+        for line in out.stdout.lines() {
+            on_line(line);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +271,30 @@ mod tests {
     fn unregistered_invocation_errs() {
         let runner = FakeProcessRunner::new();
         assert!(runner.run("adb", &["devices", "-l"]).is_err());
+    }
+
+    #[test]
+    fn run_streaming_replays_stdout_lines_then_returns_output() {
+        let runner = FakeProcessRunner::new().with(
+            "adb -s emulator-5554 logcat --pid 1234",
+            Output {
+                success: true,
+                stdout: "line one\nline two\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let mut seen = Vec::new();
+        let out = runner
+            .run_streaming(
+                "adb",
+                &["-s", "emulator-5554", "logcat", "--pid", "1234"],
+                None,
+                &[],
+                &mut |line| seen.push(line.to_string()),
+            )
+            .unwrap();
+        assert_eq!(seen, vec!["line one", "line two"]);
+        assert!(out.success);
     }
 
     #[test]

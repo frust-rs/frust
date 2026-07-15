@@ -3,6 +3,7 @@
 pub mod create;
 pub mod devices;
 pub mod doctor;
+pub mod run;
 
 use crate::cli::{Cli, Command};
 use anyhow::Result;
@@ -34,5 +35,6 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             println!("`forgekit clean` is not implemented yet.");
             Ok(0)
         }
+        Command::Run { build } => run::run(build, cli.device_id, verbose),
     }
 }

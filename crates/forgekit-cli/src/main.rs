@@ -1,9 +1,6 @@
 //! The `forgekit` CLI binary (spec §12).
 
-// `build_info` is scaffolding: `BuildInfo`/`BuildArgs` aren't wired into any
-// command yet (spec Phase 2 `run`/`build` will consume them) so nothing in
-// the non-test build tree constructs them yet — see task 04 notes.
-#[allow(dead_code)]
+mod android_run;
 mod build_info;
 mod cli;
 mod commands;
