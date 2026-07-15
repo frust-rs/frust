@@ -750,6 +750,7 @@ dependencies = [
  "forgekit-core",
  "forgekit-render",
  "forgekit-scene",
+ "forgekit-shell-common",
  "forgekit-text",
  "forgekit-widgets",
  "jni",
@@ -759,6 +760,17 @@ dependencies = [
  "ndk-sys",
  "peniko",
  "pollster",
+]
+
+[[package]]
+name = "forgekit-shell-common"
+version = "0.1.0"
+dependencies = [
+ "forgekit-core",
+ "forgekit-scene",
+ "forgekit-text",
+ "kurbo",
+ "log",
 ]
 
 [[package]]

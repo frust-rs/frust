@@ -1,9 +1,14 @@
 //! The FFI boundary: the non-generic runtime the [`crate::android_app!`]-stamped
-//! `extern "system" fn`s delegate to, plus the *only* `unsafe` in this crate.
+//! `extern "system" fn`s delegate to, and where this crate's `unsafe` is
+//! confined.
 //!
-//! Every entry point here is wrapped in [`crate::ffi_support::guard`] so a panic
-//! is caught and turned into a benign default instead of unwinding across the JNI
-//! boundary (undefined behaviour). The `unsafe` is confined to three things,
+//! The crate's `unsafe` surface is this module plus the
+//! `#[unsafe(no_mangle)]` attributes the [`crate::android_app!`] macro emits on
+//! its generated exports (edition-2024 spells `no_mangle` as an unsafe
+//! attribute). Every entry point here is wrapped in
+//! [`guard`](forgekit_shell_common::guard) so a panic is caught and turned into a
+//! benign default instead of unwinding across the JNI boundary (undefined
+//! behaviour). The `unsafe` *code* in this module is confined to three things,
 //! each with a safety comment: `ANativeWindow_fromSurface` (raw handle →
 //! `NativeWindow`), reconstituting the opaque `jlong` handle
 //! (`Box::from_raw`/`&mut *`), and `Box::into_raw`/`from_raw` for the handle's
@@ -19,8 +24,9 @@ use jni::objects::JObject;
 use jni::sys::{jfloat, jint, jlong};
 use ndk::native_window::NativeWindow;
 
-use crate::app::{AndroidAppHandle, AppTree};
-use crate::ffi_support::guard;
+use forgekit_shell_common::{AppTree, guard};
+
+use crate::app::AndroidAppHandle;
 
 /// Initialise `android_logger` exactly once per process, so `log::*` from any
 /// crate in the graph reaches logcat under the `forgekit` tag.

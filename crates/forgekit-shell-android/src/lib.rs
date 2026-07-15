@@ -13,22 +13,29 @@
 //! Like the desktop shell, this is an integration crate: on Android it composes
 //! `forgekit-core` (the retained tree / `RenderRoot`), `forgekit-scene`,
 //! `forgekit-render` (the `SurfaceRenderer` §8.1 state machine) and
-//! `forgekit-text`, plus the `jni`/`ndk` FFI crates. All of that is
+//! `forgekit-text`, plus the `jni`/`ndk` FFI crates. The platform-agnostic
+//! plumbing (the `AppTree` erasure and the `guard`/`sanitize_scale`/
+//! `logical_size` helpers) is reused from `forgekit-shell-common` rather than
+//! duplicated. All of the JNI/render composition is
 //! `#[cfg(target_os = "android")]`; on every other target only the macro
-//! definition and a few pure host-testable helpers ([`ffi_support`]) compile, so
+//! definition and one pure host-testable helper ([`ffi_support`]) compile, so
 //! the crate is inert in a host `cargo test --workspace`.
 //!
 //! # Unsafe
 //!
 //! This crate is a sanctioned `unsafe` zone (spec §10.1): the framework crates
-//! stay `unsafe`-free, but a platform shell must cross the FFI boundary. All
-//! `unsafe` is confined to [`jni_glue`] — the `extern "system"` entry points,
-//! `Box::into_raw`/`from_raw` for the opaque handle, and
-//! `ANativeWindow_fromSurface` — each with a safety comment.
+//! stay `unsafe`-free, but a platform shell must cross the FFI boundary. The
+//! crate's `unsafe` surface is [`jni_glue`]'s `unsafe` code — the
+//! `ANativeWindow_fromSurface` call, `Box::into_raw`/`from_raw` for the opaque
+//! handle, and reconstituting it as a `&mut` — each with a safety comment, plus
+//! the `#[unsafe(no_mangle)]` attributes the [`android_app!`] macro emits on its
+//! generated `extern "system"` exports (edition 2024 spells `no_mangle` as an
+//! unsafe attribute).
 
-// Pure helpers consumed by the (Android-only) FFI layer and by host unit tests.
-// In a non-test host build nothing calls them, so silence dead-code there while
-// keeping the warning active for the Android target where they must stay used.
+// The one Android-specific pure helper (the opaque-handle liveness check),
+// consumed by the (Android-only) FFI layer and by host unit tests. In a non-test
+// host build nothing calls it, so silence dead-code there while keeping the
+// warning active for the Android target where it must stay used.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod ffi_support;
 
@@ -39,11 +46,14 @@ pub mod jni_glue;
 
 // Re-exports the macro-generated `extern "system" fn`s reach for, so a generated
 // app only needs to depend on `forgekit` (which re-exports `android_app!`), never
-// on `jni`/`forgekit-shell-android` directly. Android-only: the macro body is
-// never expanded off-Android (its call site is `#[cfg(target_os = "android")]`).
+// on `jni`/`forgekit-shell-common`/`forgekit-shell-android` directly. The
+// platform-agnostic erasure lives in `forgekit-shell-common`; it is surfaced
+// through `$crate` here so the macro's `$crate::new_boxed_app`/`$crate::AppTree`
+// paths resolve. Android-only: the macro body is never expanded off-Android (its
+// call site is `#[cfg(target_os = "android")]`).
 #[cfg(target_os = "android")]
 #[doc(hidden)]
-pub use app::{AppTree, new_boxed_app};
+pub use forgekit_shell_common::{AppTree, new_boxed_app};
 
 /// Re-exported `jni` types used verbatim by [`android_app!`]'s expansion.
 ///

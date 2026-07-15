@@ -1,88 +1,23 @@
-//! The Android app runtime: [`AndroidAppHandle`] (the state behind the opaque
-//! JNI handle) and the [`AppTree`] erasure that lets a single non-generic handle
-//! drive any app's `State`/`app_logic`.
+//! The Android app runtime: [`AndroidAppHandle`], the state behind the opaque
+//! JNI handle.
 //!
 //! This module is `#[cfg(target_os = "android")]`; it owns the same resources
 //! the desktop shell's `ShellHandler` does — a [`RenderContext`],
 //! [`SurfaceRenderer`], [`TextContext`], reusable [`Scene`], plus the app tree —
 //! but is driven by Choreographer-posted JNI frames instead of a winit loop.
 //! It contains no `unsafe`; the FFI boundary lives entirely in
-//! [`crate::jni_glue`].
+//! [`crate::jni_glue`]. The `State`/`app_logic` erasure it drives
+//! ([`AppTree`](forgekit_shell_common::AppTree)) is platform-agnostic and lives
+//! in `forgekit-shell-common`.
 
 use std::any::Any;
 
-use forgekit_core::view::View;
-use forgekit_core::{PaintScene, RenderRoot};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
+use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
 use forgekit_text::TextContext;
 use kurbo::{Affine, Size};
 use ndk::native_window::NativeWindow;
-
-use crate::ffi_support::{logical_size, sanitize_scale};
-
-/// Type-erased app tree: the one seam that lets [`AndroidAppHandle`] stay
-/// non-generic while still driving a concrete `State`/`app_logic`/`View`.
-///
-/// Mirrors the desktop facade's erasure approach (a stored generic behind a
-/// non-generic driver): the generated `extern "system" fn`s can't be generic, so
-/// [`crate::android_app!`] instantiates [`new_boxed_app`] with the app's types
-/// and stores the result as a `Box<dyn AppTree>` inside the handle.
-pub trait AppTree {
-    /// Re-run `app_logic` and reconcile the retained tree (spec §5).
-    fn rebuild(&mut self);
-    /// Lay the tree out against a logical (density-independent) size, threading
-    /// the shell-owned [`TextContext`] down type-erased (spec §10.3).
-    fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any);
-    /// Paint the tree into a scene builder.
-    fn paint(&mut self, scene: &mut dyn PaintScene);
-}
-
-/// Concrete [`AppTree`] holding one app's state, logic and retained root.
-struct ErasedApp<State: 'static, Logic, V: View<State>> {
-    state: State,
-    logic: Logic,
-    root: RenderRoot<State, V>,
-}
-
-impl<State, Logic, V> AppTree for ErasedApp<State, Logic, V>
-where
-    State: 'static,
-    V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
-{
-    fn rebuild(&mut self) {
-        // app_logic is cheap by construction (spec §5); a real dirty-tracking
-        // loop would skip this when state is unchanged.
-        let _flags = self.root.rebuild(&mut self.logic, &mut self.state);
-    }
-
-    fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any) {
-        self.root.layout_with_text(logical, text_ctx);
-    }
-
-    fn paint(&mut self, scene: &mut dyn PaintScene) {
-        self.root.paint(scene);
-    }
-}
-
-/// Erase an app's `State`/`app_logic` into a `Box<dyn AppTree>`.
-///
-/// Called by [`crate::android_app!`]'s generated `nativeInit`; kept here (not in
-/// the macro) so the erasure and the trait live together and the macro stays a
-/// thin shim.
-pub fn new_boxed_app<State, Logic, V>(state: State, logic: Logic) -> Box<dyn AppTree>
-where
-    State: 'static,
-    V: View<State>,
-    Logic: FnMut(&mut State) -> V + 'static,
-{
-    Box::new(ErasedApp {
-        state,
-        logic,
-        root: RenderRoot::new(),
-    })
-}
 
 /// Everything a running Android app needs across frames — the state behind the
 /// opaque `jlong` handle the JVM passes back into every native call.

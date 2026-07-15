@@ -1,0 +1,22 @@
+[package]
+name = "forgekit-shell-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Platform-agnostic shell plumbing: no jni/ndk/winit here, so the whole crate
+# compiles on every target (host and `*-linux-android`/iOS) with no cfg
+# gymnastics — it contains no FFI. `AppTree` drives a `RenderRoot` and paints
+# into a `PaintScene` (both `forgekit-core`), threading text/scene resources
+# through type-erased seams; `forgekit-scene`/`forgekit-text` are the layers a
+# concrete shell composes on top of this, kept as deps so the shared erasure and
+# the shells that consume it agree on the same versioned types.
+forgekit-core = { workspace = true }
+forgekit-scene = { workspace = true }
+forgekit-text = { workspace = true }
+kurbo = { workspace = true }
+# `guard` logs a caught panic through the `log` facade only (no android_logger),
+# so it stays platform-free and host-testable.
+log = { workspace = true }

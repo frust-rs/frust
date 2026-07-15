@@ -15,6 +15,11 @@ log = { workspace = true }
 # Android target; on the host this crate is (almost) empty but the macro and the
 # pure helpers still compile so `cargo test --workspace` stays green.
 [target.'cfg(target_os = "android")'.dependencies]
+# Platform-agnostic shell plumbing (AppTree erasure + guard/sanitize_scale/
+# logical_size). Android-gated because nothing off-Android references it: the
+# `android_app!` re-exports and the FFI runtime that consume it are all
+# `#[cfg(target_os = "android")]`.
+forgekit-shell-common = { workspace = true }
 forgekit-core = { workspace = true }
 forgekit-scene = { workspace = true }
 forgekit-render = { workspace = true }
