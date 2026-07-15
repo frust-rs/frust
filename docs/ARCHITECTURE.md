@@ -18,9 +18,10 @@ consumed by app code via the `forgekit` facade crate, and example apps under
 | `forgekit-render` | Layer 4: the wgpu + Vello GPU backend. Encodes a `Scene` into a `vello::Scene` and presents it to a window surface. |
 | `forgekit-text` | Text shaping: wraps Parley font matching/layout into `TextContext`/`TextStyle`/`TextLayout`, converting shaped text into `forgekit-scene::GlyphRun`s. |
 | `forgekit-widgets` | The baseline widget set (currently `Text`/`TextView`) built on `forgekit-core` + `forgekit-text`. |
-| `forgekit-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root, GPU surface, and text context for `cargo run`-based development. |
-| `forgekit` | Facade crate: the public app-author API (`App`, `View`, the widget vocabulary) that composes the crates above into the spec's declarative call shape. |
-| `forgekit-cli` | Standalone `forgekit` binary: project scaffolding, environment doctor, device discovery. Depends on none of the framework crates above. |
+| `forgekit-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root, GPU surface, and text context for `cargo run`-based development. Compiled only for non-Android targets. |
+| `forgekit-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. |
+| `forgekit` | Facade crate: the public app-author API (`App`, `View`, the widget vocabulary, the re-exported `android_app!` macro) that composes the crates above into the spec's declarative call shape. Depends on `forgekit-shell-android` unconditionally and on `forgekit-shell-desktop` only for non-Android targets; `App::run` (the desktop preview loop) is likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI. |
+| `forgekit-cli` | Standalone `forgekit` binary: project scaffolding (including a full Gradle/Kotlin Android project template rendered into `<app>/android/`), environment doctor, device discovery, and the `forgekit run` drive pipeline. Depends on none of the framework crates above. |
 
 ## Layer Dependencies
 
@@ -29,9 +30,10 @@ forgekit-scene  (no vello/wgpu — kurbo + peniko only)
     ├── forgekit-core          (view/widget/layout; depends on scene for the PaintScene bridge)
     ├── forgekit-render        (vello/wgpu — consumes Scene)
     └── forgekit-text          (parley — consumes/produces GlyphRun, no vello/wgpu)
-forgekit-widgets      = core + scene + text
-forgekit-shell-desktop = core + scene + render + text + winit  (the integration point)
-forgekit              = core + widgets + shell-desktop         (app-facing facade)
+forgekit-widgets       = core + scene + text
+forgekit-shell-desktop = core + scene + render + text + winit    (non-Android integration point)
+forgekit-shell-android = core + scene + render + text + jni/ndk  (Android integration point; JNI FFI)
+forgekit               = core + widgets + shell-android (always) + shell-desktop (non-Android only)
 
 forgekit-cli    (independent binary: clap/anyhow/serde/minijinja/include_dir/thiserror only)
 ```
@@ -39,9 +41,9 @@ forgekit-cli    (independent binary: clap/anyhow/serde/minijinja/include_dir/thi
 **Scene-layer purity rule:** `forgekit-scene`'s and `forgekit-text`'s public
 APIs expose only `kurbo` (geometry) and `peniko` (brushes/fonts) types —
 `vello`/`wgpu` types are forbidden there so the GPU backend stays swappable.
-`vello`/`wgpu` types are confined to `forgekit-render`, surfacing at exactly
-two deliberate seams: `RenderContext::create_surface` (takes a
-`wgpu::SurfaceTarget`) and `encode_scene` (returns a `vello::Scene` for shells
+`vello`/`wgpu` types are confined to `forgekit-render`, surfacing at the
+seams `SurfaceRenderer::on_surface_created`/`on_surface_created_from_android_window`
+(surface creation) and `encode_scene` (returns a `vello::Scene` for shells
 that drive their own renderer).
 
 `forgekit-cli` has no compile-time dependency on the rendering stack; it is a
@@ -72,19 +74,37 @@ of the framework.
    must already be shaped into `GlyphRun`s by `forgekit-text` before it can
    reach the scene.
 5. The finished `Scene` is encoded (`forgekit_render::encode_scene`) into a
-   `vello::Scene` and presented to the window surface by `SurfaceRenderer`.
+   `vello::Scene` and presented to the window surface by `SurfaceRenderer`,
+   which is the spec §8.1 surface lifecycle state machine
+   (`SurfacePhase::NoSurface/SurfaceReady/SurfaceLost`,
+   `FrameOutcome::Rendered/Skipped/Redraw/SurfaceLost`) shared by the desktop
+   and Android shells: a surface can be destroyed and recreated at any time
+   (window close, or Android rotation/backgrounding), and rendering is a
+   no-op outside `SurfaceReady`.
+
+**Android frame pipeline:** the same rebuild/layout/paint pipeline runs
+inside JNI callbacks (`forgekit-shell-android`) driven by Kotlin's
+`Choreographer`/`SurfaceHolder.Callback` instead of a winit event loop —
+`nativeOnFrame` drives one rebuild→layout→paint→render pass per posted
+frame, and `nativeOnSurfaceChanged`/`nativeOnSurfaceDestroyed` drive the same
+`SurfaceRenderer` state machine as the desktop shell's resize/suspend events.
 
 **CLI flow:** `Cli` (clap) parses into a `Command`, dispatched to a
 `commands::*` handler. `create` renders a manifest-listed template tree
-(`templates/app/`, embedded at compile time) against a `TemplateContext` —
-each manifest entry is content-rendered (`.tmpl`), copied verbatim
+(`templates/app/`, embedded at compile time, including a full Gradle/Kotlin
+Android project under `android.tmpl/`) against a `TemplateContext` — each
+manifest entry is content-rendered (`.tmpl`), copied verbatim
 (`.copy.tmpl`), or copied as-is, and path segments matching context keys are
 expanded (e.g. an org id into nested directories). `doctor` runs a fixed set
 of `Validator`s and `devices` runs a fixed set of `DeviceDiscovery`
 implementations, both against a shared `DoctorCtx`/`ProcessRunner` — no
-handler ever shells out directly. A `BuildInfo` funnel
-(mode/flavor/`--define`s) exists for the future `run`/`build` commands but
-isn't consumed by any command yet.
+handler ever shells out directly. `run`'s `android_run` module drives a
+device-selected Android build: a `BuildInfo` funnel (mode/flavor/`--define`s,
+currently debug-only) gates the pipeline — preflight (Rust target, cargo-ndk,
+JDK 17+, adb) → `./gradlew assembleDebug` (which invokes `cargo ndk` to build
+the Rust `.so`) → `adb install`/`launch` → a pid-scoped `logcat` stream until
+Ctrl-C. With no Android device selected, `run` falls back to a streamed
+`cargo run` (desktop preview).
 
 ## Key Types
 
@@ -97,8 +117,9 @@ isn't consumed by any command yet.
 | `Scene` / `SceneBuilder` / `Command` | Layer 3 vector display list — the widget/GPU seam. |
 | `GlyphRun` | Shaped-glyph carrier from `forgekit-text` into the scene. |
 | `TextContext` / `TextStyle` / `TextLayout` | Parley-backed text shaping surface. |
-| `RenderContext` / `SurfaceRenderer` | GPU surface setup and per-frame scene presentation. |
-| `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines). |
-| `ProcessRunner` | Seam for every external tool invocation in the CLI; fakeable in tests. |
+| `RenderContext` / `SurfaceRenderer` | `RenderContext` owns the wgpu instance/device pool; `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation. |
+| `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed Android JNI exports; the sole Android app entry point. |
+| `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines); drives both the (unimplemented) `build` command and `run`'s Android pipeline. |
+| `ProcessRunner` | Seam for every external tool invocation in the CLI, including streaming invocations (`run_streaming`) for long-running processes like `gradlew`/`logcat`; fakeable in tests. |
 | `Validator` / `DeviceDiscovery` | Pluggable `doctor`/`devices` checks, each independent and non-fatal on failure. |
 | `TemplateContext` | Render/path substitution variables for `forgekit create`'s scaffold. |

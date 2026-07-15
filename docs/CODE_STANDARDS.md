@@ -2,11 +2,24 @@
 
 ## Language Idioms
 
-- **No `unsafe`** in any framework crate (`forgekit-core`, `forgekit-scene`,
-  `forgekit-render`, `forgekit-text`, `forgekit-widgets`,
-  `forgekit-shell-desktop`, `forgekit`). Where Masonry/xilem-style code would
-  reach for `unsafe` downcasting, use trait upcasting instead: bound a trait
-  on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`.
+- **`unsafe` is confined to two sanctioned platform-FFI boundaries.** Every
+  other crate (`forgekit-core`, `forgekit-scene`, `forgekit-text`,
+  `forgekit-widgets`, `forgekit-shell-desktop`, `forgekit`) stays
+  `unsafe`-free — where Masonry/xilem-style code would reach for `unsafe`
+  downcasting, use trait upcasting instead: bound a trait on `Any` (e.g.
+  `Widget: Any`) and downcast through `&mut dyn Any`. The two exceptions are
+  raw-pointer boundaries a GPU/platform shell cannot avoid, each isolated in
+  one function/module with a `# Safety` doc comment stating the caller
+  contract:
+  - `forgekit-render`'s `create_android_surface` (`lifecycle.rs`) — turns a
+    caller-owned raw `ANativeWindow*` into a `wgpu::Surface`.
+  - `forgekit-shell-android`'s `jni_glue` module — the JNI FFI boundary
+    (`extern "system"` exports, `Box::into_raw`/`from_raw` for the opaque
+    native handle, `ANativeWindow_fromSurface`).
+- **No unwind across FFI.** Every JNI export `forgekit-shell-android` defines
+  is wrapped in a `catch_unwind` guard that logs and returns a benign default
+  instead of unwinding into JVM-owned stack frames — a panic crossing the
+  FFI boundary is undefined behavior, not just a bug.
 - **Type-erase to avoid a downstream crate dependency**, not to avoid writing
   a type. When a lower layer needs to thread a resource owned by a higher
   layer (e.g. `forgekit-core`'s `LayoutCtx` carrying the shell's
@@ -55,6 +68,11 @@
 | Fallible constructor errors | `<Type>Error` enum, `thiserror`-derived | `BuildInfoError`, `NameError` |
 | Test-only fakes | `Fake<Trait>` | `FakeProcessRunner`, `FakeEnv` |
 | Widget pairs | `<Name>View` (declarative) / `<Name>Widget` (retained) | `TextView` / `TextWidget` |
+| JNI exports | `Java_<fixed_package>_<FixedClass>_native<Name>` | `Java_dev_forgekit_ForgeKitSurfaceView_nativeOnFrame` |
+
+JNI export names are LAW: the package/class (`dev.forgekit.ForgeKitSurfaceView`)
+is fixed across every generated app, not app-specific, so the mangled symbol
+stays stable regardless of the app's own package.
 
 ## Anti-patterns
 
