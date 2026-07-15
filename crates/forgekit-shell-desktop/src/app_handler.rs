@@ -10,7 +10,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use forgekit_core::RenderRoot;
 use forgekit_core::view::View;
 use forgekit_render::{RenderContext, SurfaceRenderer};
@@ -51,9 +51,21 @@ where
         scene: Scene::new(),
         window: None,
         renderer: None,
+        fatal: None,
     };
     event_loop.run_app(&mut handler)?;
-    Ok(())
+    finish(handler.fatal)
+}
+
+/// Turns a post-loop `ShellHandler::fatal` into the `run_desktop` result.
+///
+/// Pulled out of `run_desktop` so the "surface a stashed init error as `Err`"
+/// behavior is unit-testable without driving a real winit event loop.
+fn finish(fatal: Option<anyhow::Error>) -> Result<()> {
+    match fatal {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 /// Owns everything a running desktop app needs across frames.
@@ -69,6 +81,10 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     window: Option<Arc<Window>>,
     /// Created alongside the window once a surface is available.
     renderer: Option<SurfaceRenderer>,
+    /// Set when `resumed` hits an unrecoverable init error; `event_loop.exit()`
+    /// only stops the loop (it can't return an `Err`), so the error is stashed
+    /// here and re-raised by `run_desktop` once `run_app` returns.
+    fatal: Option<anyhow::Error>,
 }
 
 impl<State, Logic, V> ApplicationHandler for ShellHandler<State, Logic, V>
@@ -89,7 +105,9 @@ where
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {
-                eprintln!("forgekit: failed to create window: {err}");
+                self.fatal = Some(
+                    anyhow::Error::from(err).context("forgekit: failed to create window"),
+                );
                 event_loop.exit();
                 return;
             }
@@ -103,10 +121,12 @@ where
             window.clone(),
             width,
             height,
-        )) {
+        ))
+        .context("forgekit: failed to create render surface")
+        {
             Ok(renderer) => renderer,
             Err(err) => {
-                eprintln!("forgekit: failed to create render surface: {err}");
+                self.fatal = Some(err);
                 event_loop.exit();
                 return;
             }
@@ -163,6 +183,12 @@ where
                 }
 
                 window.pre_present_notify();
+                // Deliberately log-and-continue rather than fatal: a single
+                // frame's render failure is most often a transient GPU/surface
+                // hiccup (e.g. an out-of-date swapchain image), and killing the
+                // whole app on one bad frame would be worse than skipping it.
+                // Turning *persistent* per-frame failures into a fatal error is
+                // future work — see `fatal` field, used for shell init errors.
                 if let Err(err) =
                     renderer.render(&self.render_cx, &self.scene, peniko::Color::WHITE)
                 {
@@ -172,5 +198,33 @@ where
 
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finish;
+
+    #[test]
+    fn finish_propagates_fatal_error_with_context() {
+        let err = anyhow::anyhow!("boom").context("forgekit: failed to create window");
+        let result = finish(Some(err));
+
+        let err = result.expect_err("a stashed fatal error must surface as Err");
+        assert_eq!(
+            err.to_string(),
+            "forgekit: failed to create window",
+            "the outermost context string must be preserved"
+        );
+        assert_eq!(
+            err.chain().last().unwrap().to_string(),
+            "boom",
+            "the underlying cause must still be reachable via the error chain"
+        );
+    }
+
+    #[test]
+    fn finish_is_ok_on_the_happy_path() {
+        assert!(finish(None).is_ok());
     }
 }
