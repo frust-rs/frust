@@ -8,18 +8,23 @@
 //! [`SurfaceRenderer`].
 //!
 //! `vello`/`wgpu` types are kept out of the public API except at two
-//! deliberate seams: [`RenderContext::create_surface`] takes a
+//! deliberate seams: [`SurfaceRenderer::on_surface_created`] takes a
 //! `wgpu::SurfaceTarget` (the shell must hand over a window), and
 //! [`encode_scene`] exposes `vello::Scene` for shells that drive their own
 //! renderer. Tier selection ([`RenderTier`], [`select_render_tier`]) is stubbed
 //! at `Gpu` until spec Phase 6.
+//!
+//! Surface lifecycle is a first-class state machine (spec §8.1): see
+//! [`SurfaceRenderer`] and [`SurfacePhase`]/[`FrameOutcome`] in [`lifecycle`].
 
 mod context;
 mod convert;
+mod lifecycle;
 mod renderer;
 mod tier;
 
 pub use context::RenderContext;
 pub use convert::encode_scene;
+pub use lifecycle::{FrameOutcome, SurfacePhase};
 pub use renderer::SurfaceRenderer;
 pub use tier::{RenderTier, select_render_tier};

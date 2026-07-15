@@ -13,7 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use forgekit_core::RenderRoot;
 use forgekit_core::view::View;
-use forgekit_render::{RenderContext, SurfaceRenderer};
+use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_text::TextContext;
 use kurbo::{Affine, Size};
@@ -50,7 +50,9 @@ where
         render_cx: RenderContext::new(),
         scene: Scene::new(),
         window: None,
-        renderer: None,
+        // Starts in `NoSurface`; the surface is created in `resumed` once the
+        // window exists, and driven through the §8.1 lifecycle from there.
+        renderer: SurfaceRenderer::new(),
         fatal: None,
     };
     event_loop.run_app(&mut handler)?;
@@ -79,8 +81,9 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     scene: Scene,
     /// Created lazily in `resumed()` (macOS requires window creation there).
     window: Option<Arc<Window>>,
-    /// Created alongside the window once a surface is available.
-    renderer: Option<SurfaceRenderer>,
+    /// The §8.1 surface lifecycle machine; empty (`NoSurface`) until `resumed()`
+    /// creates the surface, and torn down on `suspended()`.
+    renderer: SurfaceRenderer,
     /// Set when `resumed` hits an unrecoverable init error; `event_loop.exit()`
     /// only stops the loop (it can't return an `Err`), so the error is stashed
     /// here and re-raised by `run_desktop` once `run_app` returns.
@@ -94,43 +97,56 @@ where
     Logic: FnMut(&mut State) -> V + 'static,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // `resumed` can fire more than once; only bootstrap the surface once.
-        if self.window.is_some() {
-            return;
-        }
-
-        let attrs = WindowAttributes::default()
-            .with_title(WINDOW_TITLE)
-            .with_inner_size(INITIAL_SIZE);
-        let window = match event_loop.create_window(attrs) {
-            Ok(window) => Arc::new(window),
-            Err(err) => {
-                self.fatal =
-                    Some(anyhow::Error::from(err).context("forgekit: failed to create window"));
-                event_loop.exit();
-                return;
-            }
-        };
-
-        let size = window.inner_size();
-        let (width, height) = (size.width.max(1), size.height.max(1));
-        // spec §11: single-threaded here — the CPU/GPU render-thread split lands
-        // in a later phase; for the preview shell one thread is sufficient.
-        let renderer =
-            match pollster::block_on(self.render_cx.create_surface(window.clone(), width, height))
-                .context("forgekit: failed to create render surface")
-            {
-                Ok(renderer) => renderer,
+        // The window is created once and reused; the surface, by contrast, is
+        // (re)created here every time we resume — `suspended()` tears it down,
+        // mirroring Android's surfaceDestroyed/surfaceCreated so the §8.1
+        // machine stays exercised on desktop too.
+        if self.window.is_none() {
+            let attrs = WindowAttributes::default()
+                .with_title(WINDOW_TITLE)
+                .with_inner_size(INITIAL_SIZE);
+            match event_loop.create_window(attrs) {
+                Ok(window) => self.window = Some(Arc::new(window)),
                 Err(err) => {
-                    self.fatal = Some(err);
+                    self.fatal =
+                        Some(anyhow::Error::from(err).context("forgekit: failed to create window"));
                     event_loop.exit();
                     return;
                 }
-            };
+            }
+        }
 
-        self.window = Some(window.clone());
-        self.renderer = Some(renderer);
+        let window = self
+            .window
+            .clone()
+            .expect("window was just created or already present");
+
+        if self.renderer.phase() != SurfacePhase::SurfaceReady {
+            let size = window.inner_size();
+            let (width, height) = (size.width.max(1), size.height.max(1));
+            // spec §11: single-threaded here — the CPU/GPU render-thread split
+            // lands in a later phase; for the preview shell one thread suffices.
+            if let Err(err) = pollster::block_on(self.renderer.on_surface_created(
+                &mut self.render_cx,
+                window.clone(),
+                width,
+                height,
+            ))
+            .context("forgekit: failed to create render surface")
+            {
+                self.fatal = Some(err);
+                event_loop.exit();
+                return;
+            }
+        }
+
         window.request_redraw();
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // Drop the surface on suspend (spec §8.1): rare on macOS, but keeps the
+        // NoSurface path exercised on desktop and matches Android's lifecycle.
+        self.renderer.on_surface_destroyed();
     }
 
     fn window_event(
@@ -139,7 +155,7 @@ where
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let (Some(window), Some(renderer)) = (self.window.as_ref(), self.renderer.as_mut()) else {
+        let Some(window) = self.window.clone() else {
             return;
         };
 
@@ -147,7 +163,9 @@ where
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
-                renderer.resize(&mut self.render_cx, size.width, size.height);
+                // A resize with no live surface is dropped by the machine.
+                self.renderer
+                    .on_surface_changed(&self.render_cx, size.width, size.height);
                 window.request_redraw();
             }
 
@@ -181,14 +199,36 @@ where
                 window.pre_present_notify();
                 // Deliberately log-and-continue rather than fatal: a single
                 // frame's render failure is most often a transient GPU/surface
-                // hiccup (e.g. an out-of-date swapchain image), and killing the
-                // whole app on one bad frame would be worse than skipping it.
-                // Turning *persistent* per-frame failures into a fatal error is
-                // future work — see `fatal` field, used for shell init errors.
-                if let Err(err) =
-                    renderer.render(&self.render_cx, &self.scene, peniko::Color::WHITE)
+                // hiccup, and killing the whole app on one bad frame would be
+                // worse than skipping it. Turning *persistent* per-frame
+                // failures into a fatal error is future work — see `fatal`.
+                match self
+                    .renderer
+                    .render(&self.render_cx, &self.scene, peniko::Color::WHITE)
                 {
-                    eprintln!("forgekit: render error: {err}");
+                    // Stale swapchain (e.g. mid-resize): reconfigured internally,
+                    // so ask for another frame against the fresh configuration.
+                    Ok(FrameOutcome::Redraw) => window.request_redraw(),
+                    // Surface lost (rare on desktop): recreate it from the same
+                    // window and redraw. On failure, log and wait for the next
+                    // event rather than killing the app.
+                    Ok(FrameOutcome::SurfaceLost) => {
+                        let size = window.inner_size();
+                        let (width, height) = (size.width.max(1), size.height.max(1));
+                        match pollster::block_on(self.renderer.on_surface_created(
+                            &mut self.render_cx,
+                            window.clone(),
+                            width,
+                            height,
+                        )) {
+                            Ok(()) => window.request_redraw(),
+                            Err(err) => {
+                                eprintln!("forgekit: failed to recreate surface: {err}");
+                            }
+                        }
+                    }
+                    Ok(FrameOutcome::Rendered | FrameOutcome::Skipped) => {}
+                    Err(err) => eprintln!("forgekit: render error: {err}"),
                 }
             }
 
