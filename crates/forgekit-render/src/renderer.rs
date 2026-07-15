@@ -104,7 +104,6 @@ impl SurfaceRenderer {
         height: u32,
     ) -> Result<()> {
         let surface = ctx
-            .inner
             .create_surface(
                 window,
                 width.max(1),
@@ -141,10 +140,8 @@ impl SurfaceRenderer {
         // SAFETY: forwarded to the caller's `on_surface_created_from_android_window`
         // contract — `window_ptr` is a valid, acquired ANativeWindow* outliving
         // the surface.
-        let raw =
-            unsafe { crate::lifecycle::create_android_surface(&ctx.inner.instance, window_ptr) }?;
+        let raw = unsafe { crate::lifecycle::create_android_surface(&ctx.instance, window_ptr) }?;
         let surface = ctx
-            .inner
             .create_render_surface(
                 raw,
                 width.max(1),
@@ -185,10 +182,8 @@ impl SurfaceRenderer {
         // SAFETY: forwarded to the caller's `on_surface_created_from_metal_layer`
         // contract — `layer_ptr` is a valid, live CAMetalLayer* outliving the
         // surface.
-        let raw =
-            unsafe { crate::lifecycle::create_metal_surface(&ctx.inner.instance, layer_ptr) }?;
+        let raw = unsafe { crate::lifecycle::create_metal_surface(&ctx.instance, layer_ptr) }?;
         let surface = ctx
-            .inner
             .create_render_surface(raw, width.max(1), height.max(1), wgpu::PresentMode::Fifo)
             .await
             .map_err(|e| anyhow!("forgekit-render: failed to configure Metal surface: {e}"))?;
@@ -202,7 +197,7 @@ impl SurfaceRenderer {
         ctx: &RenderContext,
         surface: vello::util::RenderSurface<'static>,
     ) -> Result<()> {
-        let device = &ctx.inner.devices[surface.dev_id].device;
+        let device = &ctx.device_handle().device;
         let renderer = vello::Renderer::new(device, vello::RendererOptions::default())
             .map_err(|e| anyhow!("forgekit-render: failed to create vello renderer: {e}"))?;
         debug_assert_eq!(
@@ -228,7 +223,7 @@ impl SurfaceRenderer {
             return;
         }
         if let SurfaceState::Ready(ready) = &mut self.state {
-            ctx.inner.resize_surface(&mut ready.surface, width, height);
+            ctx.resize_surface(&mut ready.surface, width, height);
         }
     }
 
@@ -281,7 +276,7 @@ impl SurfaceRenderer {
         vello_scene.reset();
         convert::encode_scene(scene, vello_scene);
 
-        let device_handle = &ctx.inner.devices[ready.surface.dev_id];
+        let device_handle = ctx.device_handle();
         let params = vello::RenderParams {
             base_color,
             width: ready.surface.config.width,
@@ -340,7 +335,7 @@ impl SurfaceRenderer {
                 Ok(FrameOutcome::Rendered)
             }
             AcquireAction::Reconfigure => {
-                ctx.inner.configure_surface(&ready.surface);
+                ctx.configure_surface(&ready.surface);
                 Ok(FrameOutcome::Redraw)
             }
             AcquireAction::Lose => {
