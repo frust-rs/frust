@@ -31,11 +31,14 @@
 use std::any::Any;
 use std::ffi::c_void;
 
+use forgekit_core::event::{InputEvent, PointerButton, PointerEvent, PointerPhase};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
 use forgekit_text::TextContext;
-use kurbo::{Affine, Size};
+use kurbo::{Affine, Point, Size};
+
+use crate::ffi_support::TouchPhase;
 
 /// Everything a running iOS app needs across frames — the state behind the opaque
 /// handle Swift passes back into every C call.
@@ -195,6 +198,33 @@ impl IosAppHandle {
     /// can gate surface recreation on a `SurfaceLost` phase.
     pub(crate) fn phase(&self) -> SurfacePhase {
         self.renderer.phase()
+    }
+
+    /// Deliver one touch contact to the tree (spec §9).
+    ///
+    /// **Coordinate asymmetry vs Android:** UIKit's `touch.location(in:)` is
+    /// already in **logical points**, so — unlike the Android shell, which
+    /// receives physical pixels and divides by the display density — this path
+    /// passes `x`/`y` straight through with no scale division. First-touch only
+    /// in v1: the Swift side forwards a single contact as
+    /// [`PointerButton::Primary`]. The redraw is implicit — the `CADisplayLink`
+    /// loop posts a frame every vsync, so the mutated state is picked up on the
+    /// next `frame()` without an explicit schedule (contrast the desktop shell's
+    /// `request_redraw`).
+    pub(crate) fn dispatch_touch(&mut self, phase: TouchPhase, x: f32, y: f32) {
+        let position = Point::new(x as f64, y as f64);
+        let core_phase = match phase {
+            TouchPhase::Began => PointerPhase::Down,
+            TouchPhase::Moved => PointerPhase::Move,
+            TouchPhase::Ended => PointerPhase::Up,
+            TouchPhase::Cancelled => PointerPhase::Cancel,
+        };
+        let event = InputEvent::Pointer(PointerEvent {
+            phase: core_phase,
+            position,
+            button: PointerButton::Primary,
+        });
+        let _ = self.app.event(&event);
     }
 
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop

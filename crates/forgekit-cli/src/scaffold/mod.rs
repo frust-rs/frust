@@ -355,6 +355,16 @@ mod tests {
         assert!(
             surface_view_src.contains(&format!("System.loadLibrary(\"{}\")", ctx.project_name))
         );
+        // Touch delivery (spec §9): the `nativeOnTouch` export and its
+        // `onTouchEvent` bridge must be present in the generated surface view.
+        assert!(
+            surface_view_src.contains("external fun nativeOnTouch"),
+            "{surface_view_src}"
+        );
+        assert!(
+            surface_view_src.contains("override fun onTouchEvent"),
+            "{surface_view_src}"
+        );
 
         let _ = fs::remove_dir_all(&dest);
     }
@@ -418,6 +428,16 @@ mod tests {
                 .exists()
         );
         assert!(dest.join("ios/Runner/Runner-Bridging-Header.h").exists());
+
+        // Touch delivery (spec §9): the `forgekit_dispatch_touch` export must be
+        // declared in the bridging header and bridged from the view's touch
+        // overrides in `ForgeKitView.swift`.
+        let bridging =
+            fs::read_to_string(dest.join("ios/Runner/Runner-Bridging-Header.h")).unwrap();
+        assert!(bridging.contains("forgekit_dispatch_touch"), "{bridging}");
+        let forgekit_view = fs::read_to_string(dest.join("ios/Runner/ForgeKitView.swift")).unwrap();
+        assert!(forgekit_view.contains("touchesBegan"), "{forgekit_view}");
+        assert!(forgekit_view.contains("var onTouch"), "{forgekit_view}");
 
         let _ = fs::remove_dir_all(&dest);
     }

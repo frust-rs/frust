@@ -12,14 +12,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use forgekit_core::RenderRoot;
+use forgekit_core::event::{InputEvent, PointerButton, PointerEvent, PointerPhase, ScrollDelta};
 use forgekit_core::view::View;
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_text::TextContext;
-use kurbo::{Affine, Size};
+use kurbo::{Affine, Point, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -49,6 +50,7 @@ where
         text_ctx: TextContext::new(),
         render_cx: RenderContext::new(),
         scene: Scene::new(),
+        cursor: Point::ZERO,
         window: None,
         // Starts in `NoSurface`; the surface is created in `resumed` once the
         // window exists, and driven through the §8.1 lifecycle from there.
@@ -70,6 +72,19 @@ fn finish(fatal: Option<anyhow::Error>) -> Result<()> {
     }
 }
 
+/// Convert a winit physical-pixel position into logical (density-independent)
+/// pixels by the window's `scale_factor`.
+///
+/// winit reports `CursorMoved`/`PixelDelta` in **physical** pixels (verified
+/// empirically on macOS — a HiDPI window reports positions at 2× the logical
+/// point value); the widget tree lays out and hit-tests in the same logical
+/// space the layout pass uses (spec §10.3), so every pointer coordinate is
+/// divided by the scale factor at the shell boundary. Pulled out as a free
+/// function so the conversion is unit-testable without a live window.
+fn physical_to_logical(x: f64, y: f64, scale: f64) -> Point {
+    Point::new(x / scale, y / scale)
+}
+
 /// Owns everything a running desktop app needs across frames.
 struct ShellHandler<State: 'static, Logic, V: View<State>> {
     state: State,
@@ -79,6 +94,10 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     render_cx: RenderContext,
     /// Reused across frames; `reset()` each frame rather than reallocated.
     scene: Scene,
+    /// Last known cursor position in logical pixels, updated on every
+    /// `CursorMoved`. `MouseInput` (button press/release) carries no position of
+    /// its own, so it reuses this — mirroring how winit models the two events.
+    cursor: Point,
     /// Created lazily in `resumed()` (macOS requires window creation there).
     window: Option<Arc<Window>>,
     /// The §8.1 surface lifecycle machine; empty (`NoSurface`) until `resumed()`
@@ -88,6 +107,24 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// only stops the loop (it can't return an `Err`), so the error is stashed
     /// here and re-raised by `run_desktop` once `run_app` returns.
     fatal: Option<anyhow::Error>,
+}
+
+impl<State, Logic, V> ShellHandler<State, Logic, V>
+where
+    State: 'static,
+    V: View<State>,
+    Logic: FnMut(&mut State) -> V + 'static,
+{
+    /// Deliver one input event to the tree and schedule a frame if it dirtied
+    /// state. This is the dirty-driven half of the desktop model (spec §8): the
+    /// event pass never repaints, it only sets `needs_redraw`, which we turn into
+    /// a single `request_redraw()` so the `Wait` loop wakes for exactly one frame.
+    fn dispatch(&mut self, window: &Window, event: InputEvent) {
+        let outcome = self.root.event(&mut self.state, &event);
+        if outcome.needs_redraw {
+            window.request_redraw();
+        }
+    }
 }
 
 impl<State, Logic, V> ApplicationHandler for ShellHandler<State, Logic, V>
@@ -169,6 +206,65 @@ where
                 window.request_redraw();
             }
 
+            // Track the cursor in logical space and dispatch a `Move`. We
+            // dispatch on every move (not just while a button is down) so hover
+            // handling can land later without a shell change; a widget that only
+            // cares about drags simply ignores moves with no capture.
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = window.scale_factor();
+                self.cursor = physical_to_logical(position.x, position.y, scale);
+                self.dispatch(
+                    &window,
+                    InputEvent::Pointer(PointerEvent {
+                        phase: PointerPhase::Move,
+                        position: self.cursor,
+                        button: PointerButton::Primary,
+                    }),
+                );
+            }
+
+            // Primary (left) button only in v1; other buttons are ignored until
+            // secondary/middle gestures are specced. The press/release position
+            // is the last `CursorMoved` position (winit carries none on the event).
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let phase = match state {
+                    ElementState::Pressed => PointerPhase::Down,
+                    ElementState::Released => PointerPhase::Up,
+                };
+                self.dispatch(
+                    &window,
+                    InputEvent::Pointer(PointerEvent {
+                        phase,
+                        position: self.cursor,
+                        button: PointerButton::Primary,
+                    }),
+                );
+            }
+
+            // Wheel notches stay `Lines` (the ScrollView widget converts to px at
+            // 40 px/line); precision-trackpad `PixelDelta` is physical, so divide
+            // by the scale factor into logical pixels like every other coordinate.
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Lines(x as f64, y as f64),
+                    MouseScrollDelta::PixelDelta(px) => {
+                        let scale = window.scale_factor();
+                        ScrollDelta::Pixels(px.x / scale, px.y / scale)
+                    }
+                };
+                self.dispatch(
+                    &window,
+                    InputEvent::Scroll {
+                        position: self.cursor,
+                        delta: scroll,
+                    },
+                );
+            }
+
             WindowEvent::RedrawRequested => {
                 // Rebuild the view tree every frame (app_logic is cheap by
                 // construction, spec §5). A real dirty-tracking loop would skip
@@ -239,7 +335,23 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::finish;
+    use super::{finish, physical_to_logical};
+    use kurbo::Point;
+
+    #[test]
+    fn physical_to_logical_divides_by_scale() {
+        // A 2× HiDPI display: a physical (200, 100) cursor is logical (100, 50).
+        assert_eq!(
+            physical_to_logical(200.0, 100.0, 2.0),
+            Point::new(100.0, 50.0)
+        );
+    }
+
+    #[test]
+    fn physical_to_logical_is_identity_at_unit_scale() {
+        // A non-HiDPI display: physical and logical coincide.
+        assert_eq!(physical_to_logical(37.0, 12.0, 1.0), Point::new(37.0, 12.0));
+    }
 
     #[test]
     fn finish_propagates_fatal_error_with_context() {

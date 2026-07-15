@@ -254,6 +254,23 @@ pub fn render_frame(handle: *mut c_void) {
     });
 }
 
+/// `forgekit_dispatch_touch`: deliver one touch contact to the tree (spec §9).
+///
+/// `phase` is the fixed code the Swift `ForgeKitView` touch overrides send
+/// (`0`=began, `1`=moved, `2`=ended, `3`=cancelled — see
+/// [`crate::ffi_support::touch_phase_from_code`]); `x`/`y` are logical points
+/// (`touch.location(in:)`), passed straight through (no scale division — see the
+/// asymmetry note on [`IosAppHandle::dispatch_touch`]). First-touch only in v1.
+pub fn dispatch_touch(handle: *mut c_void, phase: u32, x: f32, y: f32) {
+    guard("forgekit_dispatch_touch", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            let touch_phase = crate::ffi_support::touch_phase_from_code(phase);
+            app.dispatch_touch(touch_phase, x, y);
+        }
+    });
+}
+
 /// `forgekit_pause`: app backgrounded — stop submitting frames (see
 /// [`IosAppHandle::pause`]).
 pub fn pause(handle: *mut c_void) {

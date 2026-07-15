@@ -224,6 +224,24 @@ pub fn native_on_frame(handle: jlong, _frame_time_nanos: jlong) {
     });
 }
 
+/// `nativeOnTouch`: deliver one touch contact to the tree (spec §9).
+///
+/// `action` is the normalised phase code the Kotlin side sends
+/// (`0`=down, `1`=move, `2`=up, `3`=cancel — see
+/// [`crate::ffi_support::touch_phase_from_action`]); `x`/`y` are physical,
+/// view-local pixels (`MotionEvent.x`/`.y`), converted to logical space inside
+/// [`AndroidAppHandle::dispatch_touch`]. Single-pointer in v1: Kotlin forwards
+/// only the primary pointer.
+pub fn native_on_touch(handle: jlong, action: jint, x: jfloat, y: jfloat) {
+    guard("nativeOnTouch", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            let phase = crate::ffi_support::touch_phase_from_action(action);
+            app.dispatch_touch(phase, x, y);
+        }
+    });
+}
+
 /// `nativeOnResume`: activity resumed. Bookkeeping only in v0 — the Choreographer
 /// loop is started/stopped in Kotlin (spec Phase 2 §10.1).
 pub fn native_on_resume(handle: jlong) {

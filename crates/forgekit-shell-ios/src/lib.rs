@@ -57,8 +57,8 @@ pub use forgekit_shell_common::{AppTree, new_boxed_app};
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (spec §10.2, Makepad `app_main!` precedent).
 ///
-/// Stamps out the six `forgekit_*` symbols the generated Swift app declares, each
-/// delegating to the non-generic runtime in [`ffi_glue`]. `forgekit_init`
+/// Stamps out the seven `forgekit_*` symbols the generated Swift app declares,
+/// each delegating to the non-generic runtime in [`ffi_glue`]. `forgekit_init`
 /// constructs the app's erased view tree from `$state_ty::default()` and
 /// `$app_logic` and returns an opaque handle; the rest operate on that handle.
 ///
@@ -110,6 +110,22 @@ macro_rules! ios_app {
         #[unsafe(no_mangle)]
         pub extern "C" fn forgekit_render_frame(handle: *mut ::core::ffi::c_void) {
             $crate::ffi_glue::render_frame(handle)
+        }
+
+        /// `forgekit_dispatch_touch`: deliver one touch contact (spec §9).
+        ///
+        /// `phase` is the fixed code (`0`=began, `1`=moved, `2`=ended,
+        /// `3`=cancelled — an ABI shared with the Swift `ForgeKitView`); `x`/`y`
+        /// are logical points (passed through, no scale division).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn forgekit_dispatch_touch(
+            handle: *mut ::core::ffi::c_void,
+            phase: u32,
+            x: f32,
+            y: f32,
+        ) {
+            $crate::ffi_glue::dispatch_touch(handle, phase, x, y)
         }
 
         /// `forgekit_pause`: app backgrounded — stop submitting frames.

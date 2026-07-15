@@ -2,6 +2,7 @@ package dev.forgekit
 
 import android.content.Context
 import android.view.Choreographer
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -41,6 +42,16 @@ class ForgeKitSurfaceView(context: Context) :
 
     private external fun nativeOnFrame(handle: Long, frameTimeNanos: Long)
 
+    // Touch delivery (spec §9). `action` is a fixed numeric ABI shared with the
+    // Rust `nativeOnTouch` glue — DO NOT renumber without changing both sides:
+    //   0 = down (ACTION_DOWN / ACTION_POINTER_DOWN)
+    //   1 = move (ACTION_MOVE)
+    //   2 = up   (ACTION_UP / ACTION_POINTER_UP)
+    //   3 = cancel (ACTION_CANCEL)
+    // `x`/`y` are physical, view-local pixels (`MotionEvent.x`/`.y`); the Rust
+    // side divides by the display density to get logical coordinates.
+    private external fun nativeOnTouch(handle: Long, action: Int, x: Float, y: Float)
+
     private external fun nativeOnResume(handle: Long)
 
     private external fun nativeOnPause(handle: Long)
@@ -78,6 +89,23 @@ class ForgeKitSurfaceView(context: Context) :
         if (handle != 0L) {
             nativeOnSurfaceDestroyed(handle)
         }
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (handle == 0L) {
+            return false
+        }
+        // Map Android's masked action to our fixed 0..3 ABI (see `nativeOnTouch`).
+        // Single-pointer in v1: we forward the primary pointer's location only.
+        val action = when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> 0
+            MotionEvent.ACTION_MOVE -> 1
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> 2
+            MotionEvent.ACTION_CANCEL -> 3
+            else -> return false
+        }
+        nativeOnTouch(handle, action, event.x, event.y)
+        return true
     }
 
     override fun doFrame(frameTimeNanos: Long) {

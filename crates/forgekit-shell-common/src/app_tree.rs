@@ -9,6 +9,7 @@
 
 use std::any::Any;
 
+use forgekit_core::event::{EventOutcome, InputEvent};
 use forgekit_core::view::View;
 use forgekit_core::{PaintScene, RenderRoot};
 use kurbo::Size;
@@ -29,6 +30,15 @@ pub trait AppTree {
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any);
     /// Paint the tree into a scene builder.
     fn paint(&mut self, scene: &mut dyn PaintScene);
+    /// Deliver one platform input event to the retained tree (spec §9).
+    ///
+    /// Delegates to [`RenderRoot::event`], threading the erased `State` the same
+    /// way [`AppTree::rebuild`] does. The returned [`EventOutcome`] carries
+    /// `needs_redraw`, which the shell honours by scheduling a frame: the desktop
+    /// shell calls `window.request_redraw()`, while the mobile shells' continuous
+    /// Choreographer/`CADisplayLink` loops already produce the next frame. The
+    /// event pass itself never rebuilds or repaints (see [`RenderRoot::event`]).
+    fn event(&mut self, event: &InputEvent) -> EventOutcome;
 }
 
 /// Concrete [`AppTree`] holding one app's state, logic and retained root.
@@ -56,6 +66,10 @@ where
 
     fn paint(&mut self, scene: &mut dyn PaintScene) {
         self.root.paint(scene);
+    }
+
+    fn event(&mut self, event: &InputEvent) -> EventOutcome {
+        self.root.event(&mut self.state, event)
     }
 }
 

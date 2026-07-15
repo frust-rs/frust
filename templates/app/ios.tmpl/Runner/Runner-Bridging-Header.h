@@ -14,6 +14,12 @@
 void *forgekit_init(void *metal_layer, uint32_t width, uint32_t height, float scale);
 void  forgekit_resize(void *handle, uint32_t width, uint32_t height, float scale);
 void  forgekit_render_frame(void *handle);
+// Touch delivery (spec §9). `phase` is a fixed numeric ABI shared with the Rust
+// `forgekit_dispatch_touch` glue — DO NOT renumber without changing both sides:
+//   0 = began, 1 = moved, 2 = ended, 3 = cancelled.
+// `x`/`y` are logical points (`touch.location(in:)`) — already density-scaled,
+// so the Rust side passes them through without dividing by the display scale.
+void  forgekit_dispatch_touch(void *handle, uint32_t phase, float x, float y);
 void  forgekit_pause(void *handle);
 void  forgekit_resume(void *handle);
 void  forgekit_destroy(void *handle);

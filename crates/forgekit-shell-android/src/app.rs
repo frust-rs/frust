@@ -12,12 +12,15 @@
 
 use std::any::Any;
 
+use forgekit_core::event::{InputEvent, PointerButton, PointerEvent, PointerPhase};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
 use forgekit_text::TextContext;
-use kurbo::{Affine, Size};
+use kurbo::{Affine, Point, Size};
 use ndk::native_window::NativeWindow;
+
+use crate::ffi_support::TouchPhase;
 
 /// Everything a running Android app needs across frames — the state behind the
 /// opaque `jlong` handle the JVM passes back into every native call.
@@ -114,6 +117,34 @@ impl AndroidAppHandle {
     /// The current lifecycle phase (spec §8.1).
     pub(crate) fn phase(&self) -> SurfacePhase {
         self.renderer.phase()
+    }
+
+    /// Deliver one touch contact to the tree (spec §9), converting the incoming
+    /// physical view-local coordinates into the logical space the tree lays out
+    /// in — the same `sanitize_scale` value `frame()` uses, so hit-testing and
+    /// layout never disagree.
+    ///
+    /// Single-pointer in v1: the Kotlin side forwards only the primary pointer,
+    /// so every contact is a [`PointerButton::Primary`] event. The redraw the
+    /// tree requests is implicit here — the Choreographer loop already posts a
+    /// frame every vsync, so the mutated state is picked up on the next
+    /// `frame()` without an explicit schedule (contrast the desktop shell's
+    /// `request_redraw`).
+    pub(crate) fn dispatch_touch(&mut self, phase: TouchPhase, x: f32, y: f32) {
+        let scale = sanitize_scale(self.scale);
+        let position = Point::new(x as f64 / scale, y as f64 / scale);
+        let core_phase = match phase {
+            TouchPhase::Down => PointerPhase::Down,
+            TouchPhase::Move => PointerPhase::Move,
+            TouchPhase::Up => PointerPhase::Up,
+            TouchPhase::Cancel => PointerPhase::Cancel,
+        };
+        let event = InputEvent::Pointer(PointerEvent {
+            phase: core_phase,
+            position,
+            button: PointerButton::Primary,
+        });
+        let _ = self.app.event(&event);
     }
 
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop

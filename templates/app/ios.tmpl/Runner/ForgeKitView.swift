@@ -13,4 +13,34 @@ final class ForgeKitView: UIView {
         // Safe: `layerClass` guarantees the backing layer is a CAMetalLayer.
         return layer as! CAMetalLayer
     }
+
+    // Touch delivery (spec §9). We own the gesture logic in Rust, so we handle
+    // the raw UIResponder touch callbacks directly rather than attaching
+    // UIGestureRecognizers. The controller sets `onTouch` to bridge into the
+    // `forgekit_dispatch_touch` FFI call; `phase` is the fixed ABI shared with
+    // the Rust side (0 = began, 1 = moved, 2 = ended, 3 = cancelled).
+    var onTouch: ((UInt32, CGPoint) -> Void)?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        forward(touches, phase: 0)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        forward(touches, phase: 1)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        forward(touches, phase: 2)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        forward(touches, phase: 3)
+    }
+
+    /// Forward the first touch's location (logical points, in this view's space)
+    /// to the Rust side. First-touch only in v1 — multi-touch is future work.
+    private func forward(_ touches: Set<UITouch>, phase: UInt32) {
+        guard let touch = touches.first else { return }
+        onTouch?(phase, touch.location(in: self))
+    }
 }

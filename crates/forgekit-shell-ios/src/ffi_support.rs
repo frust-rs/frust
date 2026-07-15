@@ -27,6 +27,42 @@ pub(crate) fn handle_is_null(handle: *mut c_void) -> bool {
     handle.is_null()
 }
 
+/// A pointer gesture phase, decoupled from `forgekit_core::PointerPhase` so this
+/// module stays host-testable (the core crate is iOS-gated — see the crate's
+/// `Cargo.toml`). [`crate::app`] maps this onto the core phase at the one
+/// iOS-only call site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TouchPhase {
+    /// A touch began.
+    Began,
+    /// A touch moved while down.
+    Moved,
+    /// A touch ended.
+    Ended,
+    /// The touch was cancelled by the system.
+    Cancelled,
+}
+
+/// Map the phase code the Swift `ForgeKitView` touch overrides send into a
+/// [`TouchPhase`].
+///
+/// The Swift side sends a fixed ABI — `touchesBegan` → `0`, `touchesMoved` → `1`,
+/// `touchesEnded` → `2`, `touchesCancelled` → `3` — so this side never sees a
+/// UIKit `UITouch.Phase`. Any unrecognised code (a future phase we don't map, or
+/// a corrupt value) is treated as [`TouchPhase::Cancelled`]: the safe default,
+/// since it releases any in-flight capture rather than stranding a gesture as
+/// perpetually "began".
+#[inline]
+pub(crate) fn touch_phase_from_code(phase: u32) -> TouchPhase {
+    match phase {
+        0 => TouchPhase::Began,
+        1 => TouchPhase::Moved,
+        2 => TouchPhase::Ended,
+        // 3 is the explicit `cancelled`; everything else falls back to it.
+        _ => TouchPhase::Cancelled,
+    }
+}
+
 /// Whether a frame should run its rebuild → layout → paint → render pass.
 ///
 /// A frame does work only when the surface is `SurfaceReady` *and* the app is not
@@ -92,6 +128,21 @@ mod tests {
         let mut local = 0u8;
         let ptr = (&mut local as *mut u8).cast::<c_void>();
         assert!(!handle_is_null(ptr));
+    }
+
+    #[test]
+    fn touch_phase_codes_map_to_phases() {
+        assert_eq!(touch_phase_from_code(0), TouchPhase::Began);
+        assert_eq!(touch_phase_from_code(1), TouchPhase::Moved);
+        assert_eq!(touch_phase_from_code(2), TouchPhase::Ended);
+        assert_eq!(touch_phase_from_code(3), TouchPhase::Cancelled);
+    }
+
+    #[test]
+    fn unknown_touch_phase_falls_back_to_cancelled() {
+        // A future/corrupt code must release capture, not strand a "began".
+        assert_eq!(touch_phase_from_code(4), TouchPhase::Cancelled);
+        assert_eq!(touch_phase_from_code(u32::MAX), TouchPhase::Cancelled);
     }
 
     #[test]

@@ -73,7 +73,7 @@ pub mod __jni {
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (spec §10.1, Makepad `app_main!` precedent).
 ///
-/// Stamps out the seven `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
+/// Stamps out the eight `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
 /// the Kotlin `ForgeKitSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from `$state_ty::default()` and `$app_logic`; the rest operate on
@@ -144,6 +144,23 @@ macro_rules! android_app {
             frame_time_nanos: $crate::__jni::jlong,
         ) {
             $crate::jni_glue::native_on_frame(handle, frame_time_nanos)
+        }
+
+        /// JNI `nativeOnTouch`: deliver one touch contact (spec §9).
+        ///
+        /// `action` is the normalised phase code (`0`=down, `1`=move, `2`=up,
+        /// `3`=cancel — an ABI shared with the Kotlin `ForgeKitSurfaceView`);
+        /// `x`/`y` are physical view-local pixels.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeOnTouch<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            action: $crate::__jni::jint,
+            x: $crate::__jni::jfloat,
+            y: $crate::__jni::jfloat,
+        ) {
+            $crate::jni_glue::native_on_touch(handle, action, x, y)
         }
 
         /// JNI `nativeOnResume`: activity resumed (bookkeeping only in v0).
