@@ -16,20 +16,31 @@ pub(crate) fn handle_is_live(handle: i64) -> bool {
     handle != 0
 }
 
-/// Logical (density-independent) size from a physical pixel size and the
-/// display's scale factor (`density`), mirroring the desktop shell's HiDPI math
-/// (spec task 08): lay out in logical pixels, then scale the scene by `scale` so
-/// glyphs re-rasterise sharp at physical resolution.
+/// Sanitize a raw density (`jfloat`) from JNI into a scale safe to divide or
+/// multiply by: finite and strictly positive, else the `1.0` fallback.
 ///
-/// A non-positive or non-finite `scale` falls back to `1.0` so a bogus density
-/// from the platform can never produce a `NaN`/infinite or zero-divide layout.
+/// The JVM-supplied `density` is untrusted input (spec §8.1's surface state
+/// machine assumes a well-behaved platform, but density arrives through a
+/// separate, unchecked `jfloat` argument); a bogus value here must never
+/// propagate into a `NaN`/infinite or zero-divide layout or paint transform.
+/// [`crate::app::AndroidAppHandle::frame`] must call this exactly once per
+/// frame and reuse the identical result for both layout (`logical_size`) and
+/// the paint transform, so the two passes can never disagree on scale.
 #[inline]
-pub(crate) fn logical_size(physical_width: u32, physical_height: u32, scale: f32) -> (f64, f64) {
-    let scale = if scale.is_finite() && scale > 0.0 {
-        scale as f64
+pub(crate) fn sanitize_scale(raw: f32) -> f64 {
+    if raw.is_finite() && raw > 0.0 {
+        raw as f64
     } else {
         1.0
-    };
+    }
+}
+
+/// Logical (density-independent) size from a physical pixel size and an
+/// already-[`sanitize_scale`]d scale factor, mirroring the desktop shell's
+/// HiDPI math (spec task 08): lay out in logical pixels, then scale the scene
+/// by `scale` so glyphs re-rasterise sharp at physical resolution.
+#[inline]
+pub(crate) fn logical_size(physical_width: u32, physical_height: u32, scale: f64) -> (f64, f64) {
     (
         physical_width as f64 / scale,
         physical_height as f64 / scale,
@@ -80,10 +91,32 @@ mod tests {
     }
 
     #[test]
-    fn logical_size_falls_back_on_bogus_scale() {
+    fn sanitize_scale_passes_through_normal_values() {
+        assert_eq!(sanitize_scale(2.0), 2.0);
+        assert_eq!(sanitize_scale(1.0), 1.0);
+        assert_eq!(sanitize_scale(0.75), 0.75_f64);
+    }
+
+    #[test]
+    fn sanitize_scale_falls_back_on_bogus_values() {
         // Non-positive / non-finite densities must not divide-by-zero or NaN.
+        for bad in [0.0_f32, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                sanitize_scale(bad),
+                1.0,
+                "scale {bad} should fall back to 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn logical_size_falls_back_on_bogus_scale_once_sanitized() {
+        // logical_size trusts its caller to have sanitized `scale` first (the
+        // caller — AndroidAppHandle::frame — must do this exactly once and
+        // reuse the result for both layout and paint).
         for bad in [0.0_f32, -1.0, f32::NAN, f32::INFINITY] {
-            let (w, h) = logical_size(100, 200, bad);
+            let scale = sanitize_scale(bad);
+            let (w, h) = logical_size(100, 200, scale);
             assert_eq!(
                 (w, h),
                 (100.0, 200.0),

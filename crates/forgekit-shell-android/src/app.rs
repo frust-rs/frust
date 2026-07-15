@@ -19,7 +19,7 @@ use forgekit_text::TextContext;
 use kurbo::{Affine, Size};
 use ndk::native_window::NativeWindow;
 
-use crate::ffi_support::logical_size;
+use crate::ffi_support::{logical_size, sanitize_scale};
 
 /// Type-erased app tree: the one seam that lets [`AndroidAppHandle`] stay
 /// non-generic while still driving a concrete `State`/`app_logic`/`View`.
@@ -195,9 +195,12 @@ impl AndroidAppHandle {
 
         self.app.rebuild();
 
-        let (lw, lh) = logical_size(self.physical.0, self.physical.1, self.scale);
+        // Sanitize once per frame; layout and the paint transform below MUST
+        // consume this identical value (an untrusted JNI `jfloat` density
+        // must never let the two passes disagree — see `sanitize_scale`).
+        let scale = sanitize_scale(self.scale);
+        let (lw, lh) = logical_size(self.physical.0, self.physical.1, scale);
         let logical = Size::new(lw, lh);
-        let scale = self.scale as f64;
         {
             let text_ctx: &mut dyn Any = &mut self.text_ctx;
             self.app.layout(logical, text_ctx);
