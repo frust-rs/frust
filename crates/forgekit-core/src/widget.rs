@@ -14,6 +14,7 @@ use forgekit_scene::{GlyphRun, SceneBuilder};
 use kurbo::{Point, Rect, Size};
 use peniko::{Brush, Color};
 
+use crate::event::{EventCtx, EventResult, InputEvent};
 use crate::layout::BoxConstraints;
 
 /// The renderer-agnostic paint target a widget draws into.
@@ -31,8 +32,33 @@ use crate::layout::BoxConstraints;
 /// goes through [`PaintScene::draw_glyph_run`], which carries shaped glyphs from
 /// `forgekit-text`.
 pub trait PaintScene {
-    /// Emit a filled axis-aligned rectangle at `origin` with `size`.
-    fn fill_rect(&mut self, origin: Point, size: Size);
+    /// Emit a filled axis-aligned rectangle at `origin` with `size`, filled with
+    /// the solid `color`.
+    fn fill_rect(&mut self, origin: Point, size: Size, color: Color);
+
+    /// Emit a filled axis-aligned rectangle with uniformly rounded corners.
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation records a real rounded-rect command.
+    fn fill_rounded_rect(&mut self, _origin: Point, _size: Size, _radius: f64, _color: Color) {}
+
+    /// Stroke a straight line from `p0` to `p1` with the given `width` and solid
+    /// `color`.
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation records a real stroked-line command.
+    fn stroke_line(&mut self, _p0: Point, _p1: Point, _width: f64, _color: Color) {}
+
+    /// Push a rectangular clip (at `origin`/`size`) onto the backend clip stack;
+    /// subsequent draws are clipped to it until the matching [`PaintScene::pop_clip`].
+    ///
+    /// Defaulted to a no-op so recorder scenes stay valid; the `SceneBuilder`
+    /// implementation honors the clip by recording a push/pop command pair.
+    fn push_clip(&mut self, _origin: Point, _size: Size) {}
+
+    /// Pop the most recently pushed clip. Defaulted to a no-op; see
+    /// [`PaintScene::push_clip`].
+    fn pop_clip(&mut self) {}
 
     /// Emit a run of *unshaped* text anchored at `origin`.
     ///
@@ -58,14 +84,24 @@ pub trait PaintScene {
 /// [`PaintScene::draw_text`] is intentionally dropped here — text must be shaped
 /// (by `forgekit-text`) into glyph runs before it can be drawn.
 impl PaintScene for SceneBuilder<'_> {
-    fn fill_rect(&mut self, origin: Point, size: Size) {
-        let rect = Rect::new(
-            origin.x,
-            origin.y,
-            origin.x + size.width,
-            origin.y + size.height,
-        );
-        SceneBuilder::fill_rect(self, rect, Brush::Solid(Color::BLACK));
+    fn fill_rect(&mut self, origin: Point, size: Size, color: Color) {
+        SceneBuilder::fill_rect(self, rect_at(origin, size), Brush::Solid(color));
+    }
+
+    fn fill_rounded_rect(&mut self, origin: Point, size: Size, radius: f64, color: Color) {
+        SceneBuilder::fill_rounded_rect(self, rect_at(origin, size), radius, Brush::Solid(color));
+    }
+
+    fn stroke_line(&mut self, p0: Point, p1: Point, width: f64, color: Color) {
+        SceneBuilder::stroke_line(self, p0, p1, width, Brush::Solid(color));
+    }
+
+    fn push_clip(&mut self, origin: Point, size: Size) {
+        SceneBuilder::push_clip(self, rect_at(origin, size));
+    }
+
+    fn pop_clip(&mut self) {
+        SceneBuilder::pop_clip(self);
     }
 
     fn draw_text(&mut self, _origin: Point, _text: &str) {
@@ -75,6 +111,16 @@ impl PaintScene for SceneBuilder<'_> {
     fn draw_glyph_run(&mut self, run: GlyphRun) {
         SceneBuilder::draw_glyph_run(self, run);
     }
+}
+
+/// Build an origin/size pair into the `kurbo::Rect` the scene builder speaks.
+fn rect_at(origin: Point, size: Size) -> Rect {
+    Rect::new(
+        origin.x,
+        origin.y,
+        origin.x + size.width,
+        origin.y + size.height,
+    )
 }
 
 /// Context passed to [`Widget::layout`].
@@ -166,6 +212,17 @@ pub trait Widget: Any {
 
     /// Emit draw commands for this widget into `scene`.
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene);
+
+    /// Handle an input event, optionally mutating application state through
+    /// `ctx` and reporting whether it was consumed.
+    ///
+    /// Defaulted to [`EventResult::Ignored`] so non-interactive widgets (and
+    /// every widget written before Phase 4A) are unaffected. Interactive widgets
+    /// (Button/Checkbox/Slider, task 44) override this; containers forward to
+    /// their [`ChildPod`] children via [`ChildPod::event_child`].
+    fn event(&mut self, _ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
+        EventResult::Ignored
+    }
 }
 
 impl dyn Widget {
@@ -179,9 +236,160 @@ impl dyn Widget {
     }
 }
 
+/// A boxed widget is itself a [`Widget`], delegating every pass to its contents.
+///
+/// This blanket impl is what makes type-erased children work: a
+/// [`crate::view::AnyView`]'s element is a `Box<dyn Widget>`, and
+/// `View::Element` must implement `Widget` — so the box has to be a widget too.
+/// It also lets a `Box<dyn Widget>` be stored inside a [`ChildPod`] like any
+/// concrete widget. `Box<dyn Widget>` is `'static` (hence `Any`), so it satisfies
+/// the `Widget: Any` bound and can be recovered by
+/// [`downcast_mut`](dyn Widget::downcast_mut) during rebuild.
+impl Widget for Box<dyn Widget> {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        (**self).layout(ctx, bc)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        (**self).paint(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        (**self).event(ctx, event)
+    }
+}
+
+/// A container's owned child: a boxed widget plus the layout geometry and
+/// capture bookkeeping the container maintains for it.
+///
+/// Phase 4A containers own their children directly as `ChildPod`s (a `Vec` for
+/// Flex/Stack, named fields for Padding/Align) rather than as arena nodes — the
+/// [`WidgetTree`](crate::tree::WidgetTree) arena stays single-root. This is a
+/// deliberate divergence from the masonry "everything in the arena" model,
+/// recorded in the Phase 4A plan: it needs zero global-id plumbing and no
+/// disjoint-borrow gymnastics for the features 4A ships. Arena-backed children
+/// (for damage tracking / a11y global access) are deferred to a later phase.
+///
+/// `origin`/`size` are in the **container's** local coordinate space;
+/// [`ChildPod::event_child`] translates events into the child's local space and
+/// [`ChildPod::paint_child`] offsets the child's paint origin accordingly.
+pub struct ChildPod {
+    widget: Box<dyn Widget>,
+    origin: Point,
+    size: Size,
+    /// Set when the child captured the pointer, so the container can route
+    /// subsequent moves/releases straight to it (capture-by-recorded-path).
+    /// Cleared by the container on `Up`/`Cancel` via [`ChildPod::set_active`].
+    active: bool,
+}
+
+impl ChildPod {
+    /// Wrap a freshly built child widget at the origin, with zero size until its
+    /// first layout.
+    pub fn new(widget: Box<dyn Widget>) -> Self {
+        Self {
+            widget,
+            origin: Point::ZERO,
+            size: Size::ZERO,
+            active: false,
+        }
+    }
+
+    /// Shared access to the boxed child widget.
+    pub fn widget(&self) -> &dyn Widget {
+        &*self.widget
+    }
+
+    /// Mutable access to the boxed child widget (e.g. to downcast during a
+    /// container's own rebuild).
+    pub fn widget_mut(&mut self) -> &mut dyn Widget {
+        &mut *self.widget
+    }
+
+    /// Replace the boxed child widget (used when a type-changing rebuild swaps
+    /// the underlying widget).
+    pub fn set_widget(&mut self, widget: Box<dyn Widget>) {
+        self.widget = widget;
+    }
+
+    /// The child's origin in the container's coordinate space.
+    pub fn origin(&self) -> Point {
+        self.origin
+    }
+
+    /// The child's resolved size (valid after [`ChildPod::layout_child`]).
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    /// Place the child at `origin` within the container's coordinate space.
+    pub fn set_origin(&mut self, origin: Point) {
+        self.origin = origin;
+    }
+
+    /// Whether this child currently holds the recorded active (captured) path.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Set (or clear) the recorded active path — the container clears this on
+    /// `Up`/`Cancel` when capture auto-releases.
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
+    }
+
+    /// Lay the child out under `bc`, recording and returning its chosen size.
+    pub fn layout_child(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.widget.layout(ctx, bc);
+        self.size = size;
+        size
+    }
+
+    /// Paint the child, offsetting its paint origin by the container's origin
+    /// (`ctx.origin()`) so the child draws at its absolute position.
+    pub fn paint_child(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let child_origin = ctx.origin() + self.origin.to_vec2();
+        let mut child_ctx = PaintCtx::new(child_origin, self.size);
+        self.widget.paint(&mut child_ctx, scene);
+    }
+
+    /// Route an event into the child, translating its position into the child's
+    /// local space and folding the child's redraw/capture flags back into `ctx`.
+    ///
+    /// If the child captured the pointer, this records the active path
+    /// ([`ChildPod::is_active`]); the container clears it on `Up`/`Cancel`.
+    pub fn event_child(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let local = event.translated(-self.origin.to_vec2());
+        let (captured, redraw, result) = {
+            let mut child_ctx = ctx.child_ctx(self.origin, self.size);
+            let result = self.widget.event(&mut child_ctx, &local);
+            (
+                child_ctx.is_pointer_captured(),
+                child_ctx.needs_redraw(),
+                result,
+            )
+        };
+        if captured {
+            self.active = true;
+        }
+        ctx.absorb_child(redraw, captured);
+        result
+    }
+
+    /// Whether `point` (in the container's coordinate space) lies within this
+    /// child's bounds — the container's hit test.
+    pub fn contains(&self, point: Point) -> bool {
+        point.x >= self.origin.x
+            && point.x < self.origin.x + self.size.width
+            && point.y >= self.origin.y
+            && point.y < self.origin.y + self.size.height
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{PointerButton, PointerEvent, PointerPhase};
 
     /// A leaf widget that paints a filled box of a fixed intrinsic size.
     struct FixedBox {
@@ -194,7 +402,7 @@ mod tests {
         }
 
         fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-            scene.fill_rect(ctx.origin(), ctx.size());
+            scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
         }
     }
 
@@ -206,12 +414,51 @@ mod tests {
     }
 
     impl PaintScene for RecordingScene {
-        fn fill_rect(&mut self, origin: Point, size: Size) {
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: Color) {
             self.rects.push((origin, size));
         }
         fn draw_text(&mut self, origin: Point, text: &str) {
             self.texts.push((origin, text.to_string()));
         }
+    }
+
+    /// A leaf widget that records the local position of the last event it saw,
+    /// mutates a `u32` app state, and optionally captures the pointer on `Down`.
+    struct Probe {
+        last_pos: Option<Point>,
+        capture_on_down: bool,
+    }
+
+    impl Widget for Probe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            self.last_pos = Some(event.position());
+            *ctx.state_mut::<u32>() += 1;
+            ctx.request_redraw();
+            if self.capture_on_down
+                && matches!(
+                    event,
+                    InputEvent::Pointer(PointerEvent {
+                        phase: PointerPhase::Down,
+                        ..
+                    })
+                )
+            {
+                ctx.capture_pointer();
+            }
+            EventResult::Handled
+        }
+    }
+
+    fn down(x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
     }
 
     #[test]
@@ -245,5 +492,101 @@ mod tests {
         });
         let concrete = boxed.downcast_mut::<FixedBox>().expect("downcast");
         assert_eq!(concrete.intrinsic, Size::new(3.0, 4.0));
+    }
+
+    #[test]
+    fn boxed_widget_delegates_every_pass() {
+        // The `Box<dyn Widget>: Widget` blanket impl must forward layout/paint/event.
+        let mut boxed: Box<dyn Widget> = Box::new(Probe {
+            last_pos: None,
+            capture_on_down: false,
+        });
+        let mut ctx = LayoutCtx::new();
+        assert_eq!(
+            boxed.layout(&mut ctx, &BoxConstraints::tight(Size::new(4.0, 5.0))),
+            Size::new(4.0, 5.0)
+        );
+        let mut count = 0u32;
+        let mut ectx = EventCtx::new(&mut count, Point::ZERO, Size::new(4.0, 5.0));
+        assert_eq!(
+            boxed.event(&mut ectx, &down(1.0, 1.0)),
+            EventResult::Handled
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn child_pod_layout_and_paint_offset_by_origin() {
+        let mut pod = ChildPod::new(Box::new(FixedBox {
+            intrinsic: Size::new(30.0, 10.0),
+        }));
+        pod.set_origin(Point::new(12.0, 8.0));
+
+        let mut lctx = LayoutCtx::new();
+        let size = pod.layout_child(&mut lctx, &BoxConstraints::loose(Size::new(100.0, 100.0)));
+        assert_eq!(size, Size::new(30.0, 10.0));
+        assert_eq!(pod.size(), Size::new(30.0, 10.0));
+
+        // Paint under a container placed at (100, 200): child draws at the sum.
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::new(100.0, 200.0), Size::new(300.0, 300.0));
+        pod.paint_child(&mut pctx, &mut scene);
+        assert_eq!(
+            scene.rects,
+            vec![(Point::new(112.0, 208.0), Size::new(30.0, 10.0))]
+        );
+    }
+
+    #[test]
+    fn child_pod_translates_event_into_child_space() {
+        let mut pod = ChildPod::new(Box::new(Probe {
+            last_pos: None,
+            capture_on_down: false,
+        }));
+        pod.set_origin(Point::new(10.0, 20.0));
+
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::new(200.0, 200.0));
+        // Event at container-space (25, 35) lands at child-local (15, 15).
+        let result = pod.event_child(&mut ctx, &down(25.0, 35.0));
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(count, 1); // state mutated through the reborrowed context
+        let probe = pod.widget_mut().downcast_mut::<Probe>().unwrap();
+        assert_eq!(probe.last_pos, Some(Point::new(15.0, 15.0)));
+    }
+
+    #[test]
+    fn child_pod_propagates_capture_flag() {
+        let mut pod = ChildPod::new(Box::new(Probe {
+            last_pos: None,
+            capture_on_down: true,
+        }));
+        pod.set_origin(Point::new(5.0, 5.0));
+        assert!(!pod.is_active());
+
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::new(50.0, 50.0));
+        pod.event_child(&mut ctx, &down(6.0, 6.0));
+
+        // The child captured → the pod records the active path and the flag
+        // bubbles up to the parent context.
+        assert!(pod.is_active());
+        assert!(ctx.is_pointer_captured());
+        assert!(ctx.needs_redraw());
+    }
+
+    #[test]
+    fn child_pod_contains_uses_container_space_bounds() {
+        let mut pod = ChildPod::new(Box::new(FixedBox {
+            intrinsic: Size::ZERO,
+        }));
+        pod.set_origin(Point::new(10.0, 10.0));
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(20.0, 20.0)));
+
+        assert!(pod.contains(Point::new(10.0, 10.0))); // top-left inclusive
+        assert!(pod.contains(Point::new(29.9, 29.9)));
+        assert!(!pod.contains(Point::new(30.0, 30.0))); // bottom-right exclusive
+        assert!(!pod.contains(Point::new(9.9, 15.0)));
     }
 }

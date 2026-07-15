@@ -1,6 +1,6 @@
 //! [`SceneBuilder`]: the widget-facing API for recording paint commands into a [`Scene`].
 
-use kurbo::{Affine, Rect};
+use kurbo::{Affine, Point, Rect};
 use peniko::Brush;
 
 use crate::glyph::GlyphRun;
@@ -62,15 +62,43 @@ impl<'a> SceneBuilder<'a> {
         });
     }
 
+    /// Records a filled rounded rectangle (uniform corner `radius`) under the
+    /// current transform.
+    pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f64, brush: Brush) {
+        let transform = self.current_transform();
+        self.scene.push(Command::RoundedRect {
+            rect,
+            radius,
+            brush,
+            transform,
+        });
+    }
+
+    /// Records a stroked line segment from `p0` to `p1` under the current
+    /// transform.
+    pub fn stroke_line(&mut self, p0: Point, p1: Point, width: f64, brush: Brush) {
+        let transform = self.current_transform();
+        self.scene.push(Command::Line {
+            p0,
+            p1,
+            width,
+            brush,
+            transform,
+        });
+    }
+
     /// Records a glyph run, composing its own transform with the current one.
     pub fn draw_glyph_run(&mut self, mut glyph_run: GlyphRun) {
         glyph_run.transform = self.current_transform() * glyph_run.transform;
         self.scene.push(Command::GlyphRun(glyph_run));
     }
 
-    /// Pushes a rectangular clip onto the render backend's clip stack.
+    /// Pushes a rectangular clip onto the render backend's clip stack, recording
+    /// the current transform so the clip is applied in the same space as the
+    /// draws it encloses.
     pub fn push_clip(&mut self, rect: Rect) {
-        self.scene.push(Command::PushClip { rect });
+        let transform = self.current_transform();
+        self.scene.push(Command::PushClip { rect, transform });
     }
 
     /// Pops the most recently pushed clip.
@@ -223,5 +251,68 @@ mod tests {
         assert_eq!(commands.len(), 2);
         assert!(matches!(commands[0], Command::PushClip { .. }));
         assert!(matches!(commands[1], Command::PopClip));
+    }
+
+    #[test]
+    fn rounded_rect_round_trips_radius_and_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((2.0, 3.0));
+        builder.push_transform(translate);
+        let rect = Rect::new(0.0, 0.0, 10.0, 8.0);
+        builder.fill_rounded_rect(rect, 4.0, red_brush());
+
+        match &scene.commands()[0] {
+            Command::RoundedRect {
+                rect: got,
+                radius,
+                transform,
+                ..
+            } => {
+                assert_eq!(*got, rect);
+                assert_eq!(*radius, 4.0);
+                assert_eq!(*transform, translate);
+            }
+            other => panic!("expected RoundedRect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stroke_line_round_trips_endpoints_and_width() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let p0 = Point::new(1.0, 2.0);
+        let p1 = Point::new(9.0, 12.0);
+        builder.stroke_line(p0, p1, 2.5, red_brush());
+
+        match &scene.commands()[0] {
+            Command::Line {
+                p0: g0,
+                p1: g1,
+                width,
+                transform,
+                ..
+            } => {
+                assert_eq!(*g0, p0);
+                assert_eq!(*g1, p1);
+                assert_eq!(*width, 2.5);
+                assert_eq!(*transform, Affine::IDENTITY);
+            }
+            other => panic!("expected Line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_clip_captures_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let scale = Affine::scale(2.0);
+        builder.push_transform(scale);
+        builder.push_clip(Rect::new(0.0, 0.0, 5.0, 5.0));
+
+        match &scene.commands()[0] {
+            Command::PushClip { transform, .. } => assert_eq!(*transform, scale),
+            other => panic!("expected PushClip, got {other:?}"),
+        }
     }
 }

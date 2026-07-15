@@ -10,7 +10,7 @@
 //! `peniko` types, spec §7).
 
 use forgekit_scene::{Command, GlyphRun, Scene};
-use kurbo::{Affine, Rect};
+use kurbo::{Affine, Line, Point, Rect, RoundedRect, Stroke};
 use peniko::{Brush, Fill};
 
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
@@ -20,10 +20,21 @@ use peniko::{Brush, Fill};
 pub(crate) trait SceneSink {
     /// Fill an axis-aligned rectangle with `brush` under `transform`.
     fn fill_rect(&mut self, style: Fill, transform: Affine, brush: &Brush, rect: &Rect);
+    /// Fill an axis-aligned rounded rectangle (uniform corner `radius`).
+    fn fill_rounded_rect(
+        &mut self,
+        style: Fill,
+        transform: Affine,
+        brush: &Brush,
+        rect: &Rect,
+        radius: f64,
+    );
+    /// Stroke a straight line segment from `p0` to `p1` with the given `width`.
+    fn stroke_line(&mut self, transform: Affine, brush: &Brush, p0: Point, p1: Point, width: f64);
     /// Draw a positioned run of glyphs.
     fn draw_glyph_run(&mut self, run: &GlyphRun);
-    /// Push a rectangular clip onto the backend's clip stack.
-    fn push_clip(&mut self, rect: &Rect);
+    /// Push a rectangular clip onto the backend's clip stack, under `transform`.
+    fn push_clip(&mut self, transform: Affine, rect: &Rect);
     /// Pop the most recently pushed clip.
     fn pop_clip(&mut self);
 }
@@ -47,8 +58,21 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
                 brush,
                 transform,
             } => sink.fill_rect(Fill::NonZero, *transform, brush, rect),
+            Command::RoundedRect {
+                rect,
+                radius,
+                brush,
+                transform,
+            } => sink.fill_rounded_rect(Fill::NonZero, *transform, brush, rect, *radius),
+            Command::Line {
+                p0,
+                p1,
+                width,
+                brush,
+                transform,
+            } => sink.stroke_line(*transform, brush, *p0, *p1, *width),
             Command::GlyphRun(run) => sink.draw_glyph_run(run),
-            Command::PushClip { rect } => sink.push_clip(rect),
+            Command::PushClip { rect, transform } => sink.push_clip(*transform, rect),
             Command::PopClip => sink.pop_clip(),
         }
     }
@@ -57,6 +81,25 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
 impl SceneSink for vello::Scene {
     fn fill_rect(&mut self, style: Fill, transform: Affine, brush: &Brush, rect: &Rect) {
         self.fill(style, transform, brush, None, rect);
+    }
+
+    fn fill_rounded_rect(
+        &mut self,
+        style: Fill,
+        transform: Affine,
+        brush: &Brush,
+        rect: &Rect,
+        radius: f64,
+    ) {
+        // `kurbo::RoundedRect` implements `Shape`, so it fills through the same
+        // path as a plain rect (task 41 / RESEARCH.md pinned API).
+        let rounded = RoundedRect::from_rect(*rect, radius);
+        self.fill(style, transform, brush, None, &rounded);
+    }
+
+    fn stroke_line(&mut self, transform: Affine, brush: &Brush, p0: Point, p1: Point, width: f64) {
+        let line = Line::new(p0, p1);
+        self.stroke(&Stroke::new(width), transform, brush, None, &line);
     }
 
     fn draw_glyph_run(&mut self, run: &GlyphRun) {
@@ -76,17 +119,16 @@ impl SceneSink for vello::Scene {
             );
     }
 
-    fn push_clip(&mut self, rect: &Rect) {
+    fn push_clip(&mut self, transform: Affine, rect: &Rect) {
         // A `push_layer` with a plain blend mode clips subsequent draws to the
-        // shape (the clip is implicit in the layer). The scene command carries
-        // no transform, so the clip is applied in the surface's coordinate
-        // space (identity) — sufficient for v0; revisit if widgets need
-        // transformed clips.
+        // shape (the clip is implicit in the layer). The clip is applied under
+        // the command's own transform so it lines up with the (equally
+        // transformed) draws it encloses — e.g. the desktop shell's HiDPI scale.
         self.push_layer(
             Fill::NonZero,
             peniko::BlendMode::default(),
             1.0,
-            Affine::IDENTITY,
+            transform,
             rect,
         );
     }
@@ -110,6 +152,17 @@ mod tests {
             rect: Rect,
             transform: Affine,
         },
+        RoundedRect {
+            rect: Rect,
+            radius: f64,
+            transform: Affine,
+        },
+        Line {
+            p0: Point,
+            p1: Point,
+            width: f64,
+            transform: Affine,
+        },
         GlyphRun {
             font_size: f32,
             glyphs: usize,
@@ -117,6 +170,7 @@ mod tests {
         },
         PushClip {
             rect: Rect,
+            transform: Affine,
         },
         PopClip,
     }
@@ -135,6 +189,38 @@ mod tests {
             });
         }
 
+        fn fill_rounded_rect(
+            &mut self,
+            style: Fill,
+            transform: Affine,
+            _brush: &Brush,
+            rect: &Rect,
+            radius: f64,
+        ) {
+            assert_eq!(style, Fill::NonZero);
+            self.events.push(Event::RoundedRect {
+                rect: *rect,
+                radius,
+                transform,
+            });
+        }
+
+        fn stroke_line(
+            &mut self,
+            transform: Affine,
+            _brush: &Brush,
+            p0: Point,
+            p1: Point,
+            width: f64,
+        ) {
+            self.events.push(Event::Line {
+                p0,
+                p1,
+                width,
+                transform,
+            });
+        }
+
         fn draw_glyph_run(&mut self, run: &GlyphRun) {
             self.events.push(Event::GlyphRun {
                 font_size: run.font_size,
@@ -143,8 +229,11 @@ mod tests {
             });
         }
 
-        fn push_clip(&mut self, rect: &Rect) {
-            self.events.push(Event::PushClip { rect: *rect });
+        fn push_clip(&mut self, transform: Affine, rect: &Rect) {
+            self.events.push(Event::PushClip {
+                rect: *rect,
+                transform,
+            });
         }
 
         fn pop_clip(&mut self) {
@@ -234,13 +323,58 @@ mod tests {
         assert_eq!(
             sink.events,
             vec![
-                Event::PushClip { rect: clip },
+                Event::PushClip {
+                    rect: clip,
+                    transform: Affine::IDENTITY,
+                },
                 Event::FillRect {
                     rect: Rect::new(1.0, 1.0, 2.0, 2.0),
                     transform: Affine::IDENTITY,
                 },
                 Event::PopClip,
             ]
+        );
+    }
+
+    #[test]
+    fn rounded_rect_maps_to_rounded_fill_with_radius() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let rect = Rect::new(0.0, 0.0, 10.0, 8.0);
+        builder.fill_rounded_rect(rect, 3.0, Brush::Solid(RED));
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::RoundedRect {
+                rect,
+                radius: 3.0,
+                transform: Affine::IDENTITY,
+            }]
+        );
+    }
+
+    #[test]
+    fn line_maps_to_stroke_with_endpoints_and_width() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let p0 = Point::new(1.0, 2.0);
+        let p1 = Point::new(7.0, 9.0);
+        builder.stroke_line(p0, p1, 1.5, Brush::Solid(RED));
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::Line {
+                p0,
+                p1,
+                width: 1.5,
+                transform: Affine::IDENTITY,
+            }]
         );
     }
 

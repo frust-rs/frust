@@ -17,6 +17,7 @@ use std::any::Any;
 
 use kurbo::{Point, Size};
 
+use crate::event::{EventCtx, EventOutcome, EventResult, InputEvent, PointerPhase};
 use crate::layout::BoxConstraints;
 use crate::tree::{WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
@@ -35,6 +36,14 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// Monotonic widget-id counter, borrowed by each `BuildCtx`.
     next_id: u64,
     window_size: Size,
+    /// Whether a pointer is currently down-and-captured somewhere in the tree.
+    /// Set on a `Down` whose dispatch requested capture, cleared on `Up`/`Cancel`.
+    /// Root-level mirror of the per-container `active` path bookkeeping.
+    pointer_captured: bool,
+    /// Dirtiness accumulated since the last [`RenderRoot::take_change_flags`] —
+    /// merged from each rebuild so a shell can decide, in one place, whether a
+    /// frame needs layout/paint at all.
+    pending: ChangeFlags,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
 
@@ -47,8 +56,27 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             prev_view: None,
             next_id: 0,
             window_size: Size::ZERO,
+            pointer_captured: false,
+            pending: ChangeFlags::NONE,
             _state: core::marker::PhantomData,
         }
+    }
+
+    /// Whether a captured pointer gesture is currently in flight.
+    pub fn is_pointer_captured(&self) -> bool {
+        self.pointer_captured
+    }
+
+    /// Take (and clear) the dirtiness accumulated since the last call.
+    ///
+    /// A shell can consult this to skip the layout/paint passes when nothing has
+    /// changed and no redraw was requested (a desktop optimisation; the mobile
+    /// continuous-loop shells may ignore it and repaint every tick). Each
+    /// [`RenderRoot::rebuild`] merges its result here; this drains it.
+    pub fn take_change_flags(&mut self) -> ChangeFlags {
+        let flags = self.pending;
+        self.pending = ChangeFlags::NONE;
+        flags
     }
 
     /// The root widget id, once built.
@@ -73,6 +101,14 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ) -> ChangeFlags {
         let view = app_logic(state);
 
+        let flags = self.rebuild_view(view);
+        self.pending |= flags;
+        flags
+    }
+
+    /// The rebuild body, split out so [`RenderRoot::rebuild`] can accumulate the
+    /// result into [`RenderRoot::pending`] in one place.
+    fn rebuild_view(&mut self, view: V) -> ChangeFlags {
         match (self.root_id, self.prev_view.take()) {
             // Reconcile against the previous view of the same type.
             (Some(root_id), Some(prev)) => {
@@ -157,6 +193,66 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             pod.clear_flags();
         }
     }
+
+    /// Deliver an input event to the widget tree, returning what happened.
+    ///
+    /// Builds a root [`EventCtx`] over the (type-erased) `state`, dispatches to
+    /// the root widget — which routes the event down through its container
+    /// children — and folds the result into an [`EventOutcome`]. The outcome's
+    /// `needs_redraw` is set whenever a widget consumed the event or explicitly
+    /// requested a redraw; the shell turns that into a `window.request_redraw()`.
+    ///
+    /// Root capture bookkeeping mirrors the per-container `active`-child model: a
+    /// `Down` whose dispatch requested capture marks a gesture in flight; `Up`
+    /// and `Cancel` release it (never a window-leave — see `research/RESEARCH.md`).
+    ///
+    /// # Reentrancy
+    ///
+    /// This pass **never rebuilds or repaints**. Event handlers mutate `state`
+    /// synchronously through the context; the shell is expected to run a single
+    /// [`RenderRoot::rebuild`] (then layout/paint) *after* the event pass returns,
+    /// driven by the outcome. Rebuilding re-entrantly here would invalidate the
+    /// widget references the dispatch still holds and turn the event→state→view
+    /// feedback into recursion.
+    pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
+        let Some(root_id) = self.root_id else {
+            return EventOutcome::default();
+        };
+        let Some(pod) = self.tree.pod_mut(root_id) else {
+            return EventOutcome::default();
+        };
+
+        let (handled, needs_redraw, captured) = {
+            let state_any: &mut dyn Any = state;
+            let mut ctx = EventCtx::new(state_any, pod.origin(), pod.size());
+            let result = pod.widget_mut().event(&mut ctx, event);
+            let handled = matches!(result, EventResult::Handled);
+            (
+                handled,
+                ctx.needs_redraw() || handled,
+                ctx.is_pointer_captured(),
+            )
+        };
+
+        // Root-level capture path: a captured `Down` opens a gesture; `Up`/`Cancel`
+        // close it. `Move` leaves the flag untouched so it survives the drag.
+        if let InputEvent::Pointer(pointer) = event {
+            match pointer.phase {
+                PointerPhase::Down => {
+                    if captured {
+                        self.pointer_captured = true;
+                    }
+                }
+                PointerPhase::Up | PointerPhase::Cancel => self.pointer_captured = false,
+                PointerPhase::Move => {}
+            }
+        }
+
+        EventOutcome {
+            handled,
+            needs_redraw,
+        }
+    }
 }
 
 impl<State: 'static, V: View<State>> Default for RenderRoot<State, V> {
@@ -229,7 +325,7 @@ mod tests {
         texts: Vec<(Point, String)>,
     }
     impl PaintScene for RecordingScene {
-        fn fill_rect(&mut self, _origin: Point, _size: Size) {}
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: peniko::Color) {}
         fn draw_text(&mut self, origin: Point, text: &str) {
             self.texts.push((origin, text.to_string()));
         }
@@ -326,6 +422,115 @@ mod tests {
         let mut scene2 = RecordingScene::default();
         root.paint(&mut scene2);
         assert_eq!(scene2.texts, vec![(Point::ZERO, "two".to_string())]);
+    }
+
+    // --- Event-pass fixtures: a widget that mutates state on pointer-down. ---
+
+    #[derive(Default)]
+    struct ClickState {
+        clicks: u32,
+    }
+
+    struct ButtonWidget;
+    impl crate::widget::Widget for ButtonWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut crate::event::EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event {
+                match p.phase {
+                    PointerPhase::Down => {
+                        ctx.state_mut::<ClickState>().clicks += 1;
+                        ctx.request_redraw();
+                        ctx.capture_pointer();
+                        return EventResult::Handled;
+                    }
+                    PointerPhase::Up | PointerPhase::Cancel => return EventResult::Handled,
+                    PointerPhase::Move => {}
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    struct ButtonView;
+    impl View<ClickState> for ButtonView {
+        type Element = ButtonWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ButtonWidget {
+            ButtonWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ButtonWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn button_logic(_state: &mut ClickState) -> ButtonView {
+        ButtonView
+    }
+
+    fn pointer(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(crate::event::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: crate::event::PointerButton::Primary,
+        })
+    }
+
+    #[test]
+    fn event_reaches_root_widget_and_mutates_state() {
+        let mut root: RenderRoot<ClickState, ButtonView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut button_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 5.0, 5.0));
+        assert!(outcome.handled);
+        assert!(outcome.needs_redraw);
+        assert_eq!(state.clicks, 1);
+        // A captured Down opens the root gesture.
+        assert!(root.is_pointer_captured());
+    }
+
+    #[test]
+    fn event_before_build_is_a_benign_no_op() {
+        let mut root: RenderRoot<ClickState, ButtonView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 1.0, 1.0));
+        assert_eq!(outcome, EventOutcome::default());
+        assert_eq!(state.clicks, 0);
+    }
+
+    #[test]
+    fn capture_releases_on_pointer_up() {
+        let mut root: RenderRoot<ClickState, ButtonView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut button_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 5.0, 5.0));
+        assert!(root.is_pointer_captured());
+        root.event(&mut state, &pointer(PointerPhase::Up, 5.0, 5.0));
+        assert!(!root.is_pointer_captured());
+    }
+
+    #[test]
+    fn take_change_flags_drains_accumulated_dirtiness() {
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+        root.rebuild(&mut app_logic, &mut state);
+        // First build accumulated LAYOUT|PAINT.
+        let flags = root.take_change_flags();
+        assert!(flags.needs_layout());
+        // Draining leaves it empty until the next rebuild.
+        assert!(root.take_change_flags().is_empty());
     }
 
     // Small test helper: does the boxed widget downcast to `W`?

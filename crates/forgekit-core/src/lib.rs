@@ -12,8 +12,11 @@
 //!   [`BuildCtx`](view::BuildCtx). Views are cheap descriptors produced by
 //!   `fn app_logic(&mut State) -> impl View<State>`.
 //! * [`widget`] — layer 2: the [`Widget`](widget::Widget) trait and its
-//!   layout/paint contexts, plus the [`PaintScene`](widget::PaintScene) paint
-//!   boundary.
+//!   layout/paint/event contexts, the [`PaintScene`](widget::PaintScene) paint
+//!   boundary, and container-owned [`ChildPod`](widget::ChildPod) children.
+//! * [`event`] — layer 2 input: [`InputEvent`](event::InputEvent)/
+//!   [`PointerEvent`](event::PointerEvent) and the [`EventCtx`](event::EventCtx)
+//!   handlers mutate state through.
 //! * [`layout`] — the [`BoxConstraints`](layout::BoxConstraints) box model.
 //! * [`tree`] — the [`WidgetTree`](tree::WidgetTree) arena wrapper and
 //!   [`WidgetPod`](tree::WidgetPod).
@@ -21,13 +24,18 @@
 //!   → paint. This is what the desktop shell (task 08) owns.
 
 pub mod app;
+pub mod event;
 pub mod layout;
 pub mod tree;
 pub mod view;
 pub mod widget;
 
 pub use app::RenderRoot;
+pub use event::{
+    EventCtx, EventOutcome, EventResult, InputEvent, PointerButton, PointerEvent, PointerPhase,
+    ScrollDelta,
+};
 pub use layout::BoxConstraints;
 pub use tree::{WidgetPod, WidgetTree};
-pub use view::{BuildCtx, ChangeFlags, View, WidgetId};
-pub use widget::{LayoutCtx, PaintCtx, PaintScene, Widget};
+pub use view::{AnyView, BuildCtx, ChangeFlags, View, WidgetId, any};
+pub use widget::{ChildPod, LayoutCtx, PaintCtx, PaintScene, Widget};
