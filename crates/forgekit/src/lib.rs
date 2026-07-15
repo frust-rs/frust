@@ -19,9 +19,35 @@
 //!     .run()
 //!     .unwrap();
 //! ```
+//!
+//! ## Layout containers (spec §6.2)
+//!
+//! The primitive containers compose heterogeneous children through
+//! [`any`] (type erasure) into the declarative call shape:
+//!
+//! ```
+//! use forgekit::{Align, Alignment, Column, EdgeInsets, Padding, Row, SizedBox, any, text};
+//!
+//! struct AppState;
+//!
+//! fn app_logic(_state: &mut AppState) -> impl forgekit::View<AppState> + use<> {
+//!     Column(vec![
+//!         any(text("title").size(24.0)),
+//!         any(Row(vec![any(text("left")), any(text("right"))])),
+//!         any(Padding(EdgeInsets::all(8.0), text("padded"))),
+//!         any(Align(Alignment::CENTER, text("centered"))),
+//!         any(SizedBox(Some(0.0), Some(12.0))),
+//!     ])
+//! }
+//! # let _ = app_logic;
+//! ```
 
-pub use forgekit_core::view::View;
-pub use forgekit_widgets::{TextView, text};
+pub use forgekit_core::view::{AnyView, View, any};
+pub use forgekit_widgets::{
+    Align, AlignView, Alignment, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
+    MainAxisAlignment, Padding, PaddingView, Row, SizedBox, SizedBoxView, Stack, StackView,
+    TextView, flexible, inflexible, text,
+};
 
 // Re-export the Android JNI-bridge macro so generated apps write
 // `forgekit::android_app!(AppState, app_logic)` (spec §10.1). `pub use` of a
