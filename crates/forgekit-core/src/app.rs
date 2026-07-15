@@ -13,6 +13,8 @@
 //! type is fixed, so the root's previous view and element are stored typed.
 //! ViewSequence / multiple children are explicitly out of scope (task 08+).
 
+use std::any::Any;
+
 use kurbo::{Point, Size};
 
 use crate::layout::BoxConstraints;
@@ -109,18 +111,37 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Lay out the root widget against `window_size` and record its geometry.
     ///
     /// The root receives loose constraints (zero up to the window size) and is
-    /// placed at the origin. Returns the size the root chose.
+    /// placed at the origin. Returns the size the root chose. No shared
+    /// resources are threaded in; use [`RenderRoot::layout_with_text`] when the
+    /// tree contains text widgets.
     pub fn layout(&mut self, window_size: Size) -> Size {
+        let mut ctx = LayoutCtx::new();
+        self.layout_with_ctx(window_size, &mut ctx)
+    }
+
+    /// Lay out the root widget, threading a shared text-shaping context down to
+    /// text widgets (spec §10.3).
+    ///
+    /// `text_ctx` is the shell-owned `forgekit_text::TextContext`, passed
+    /// type-erased so this crate needs no `forgekit-text` dependency. Text
+    /// widgets recover it via [`crate::widget::LayoutCtx::text_context`].
+    pub fn layout_with_text(&mut self, window_size: Size, text_ctx: &mut dyn Any) -> Size {
+        let mut ctx = LayoutCtx::with_text_context(text_ctx);
+        self.layout_with_ctx(window_size, &mut ctx)
+    }
+
+    /// Shared layout body: hands the root loose window constraints and records
+    /// the size it returns.
+    fn layout_with_ctx(&mut self, window_size: Size, ctx: &mut LayoutCtx<'_>) -> Size {
         self.window_size = window_size;
         let Some(root_id) = self.root_id else {
             return Size::ZERO;
         };
         let bc = BoxConstraints::loose(window_size);
-        let mut ctx = LayoutCtx::new();
         let Some(pod) = self.tree.pod_mut(root_id) else {
             return Size::ZERO;
         };
-        let size = pod.widget_mut().layout(&mut ctx, &bc);
+        let size = pod.widget_mut().layout(ctx, &bc);
         pod.set_layout(Point::ZERO, size);
         size
     }

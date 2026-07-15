@@ -8,4 +8,5 @@ license.workspace = true
 [dependencies]
 tree_arena = { workspace = true }
 kurbo = { workspace = true }
+peniko = { workspace = true }
 forgekit-scene = { workspace = true }

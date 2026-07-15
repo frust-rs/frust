@@ -6,3 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+forgekit-core = { workspace = true }
+forgekit-scene = { workspace = true }
+forgekit-render = { workspace = true }
+forgekit-text = { workspace = true }
+winit = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+pollster = { workspace = true }
+anyhow = { workspace = true }

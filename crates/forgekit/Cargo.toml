@@ -6,3 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+forgekit-core = { workspace = true }
+forgekit-widgets = { workspace = true }
+forgekit-shell-desktop = { workspace = true }
+anyhow = { workspace = true }

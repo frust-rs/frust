@@ -10,48 +10,118 @@
 
 use std::any::Any;
 
-use kurbo::{Point, Size};
+use forgekit_scene::{GlyphRun, SceneBuilder};
+use kurbo::{Point, Rect, Size};
+use peniko::{Brush, Color};
 
 use crate::layout::BoxConstraints;
 
 /// The renderer-agnostic paint target a widget draws into.
 ///
-/// This is a **local trait boundary** standing in for
-/// `forgekit_scene::SceneBuilder`, which task 03 (`03-scene-display-list`) owns.
-/// At the time this task was implemented the `forgekit-scene` crate is still a
-/// stub with no builder type, so paint code is written against this trait
-/// instead of a concrete scene type. When tasks 02 and 03 are merged together,
-/// task 08 reconciles the two — most likely by making `forgekit_scene`'s builder
-/// implement this trait (or by replacing it outright). Keep the surface minimal
-/// so that reconciliation stays cheap.
+/// This trait was introduced (task 02) as a **local stand-in** for
+/// `forgekit_scene::SceneBuilder` while the scene crate was still a stub. Task
+/// 08 reconciles the two *additively*: rather than churn the `Widget::paint`
+/// signature (and every widget/test written against it), `SceneBuilder` now
+/// [implements this trait](#impl-PaintScene-for-SceneBuilder), so widgets keep
+/// painting through `&mut dyn PaintScene` while the shell hands them a real
+/// `SceneBuilder` whose commands reach the GPU backend.
+///
+/// The original `fill_rect`/`draw_text` shape is retained for source
+/// compatibility with existing recorder-style test scenes; real text rendering
+/// goes through [`PaintScene::draw_glyph_run`], which carries shaped glyphs from
+/// `forgekit-text`.
 pub trait PaintScene {
     /// Emit a filled axis-aligned rectangle at `origin` with `size`.
     fn fill_rect(&mut self, origin: Point, size: Size);
 
-    /// Emit a run of text anchored at `origin`.
+    /// Emit a run of *unshaped* text anchored at `origin`.
     ///
-    /// Text shaping/glyph layout is out of scope for layer 2 (it lives in
-    /// `forgekit-text`, task 07); this records intent only.
+    /// This records intent only — glyph shaping lives in `forgekit-text`
+    /// (task 07). Real rendering uses [`PaintScene::draw_glyph_run`]; the
+    /// `SceneBuilder` implementation treats this as a no-op.
     fn draw_text(&mut self, origin: Point, text: &str);
+
+    /// Emit a run of already-shaped glyphs into the scene.
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes (which predate the
+    /// text pipeline) stay valid without modification; the `SceneBuilder`
+    /// implementation overrides it to record a real glyph-run command.
+    fn draw_glyph_run(&mut self, _run: GlyphRun) {}
+}
+
+/// Bridges the provisional [`PaintScene`] boundary onto the real
+/// `forgekit_scene::SceneBuilder` (task 08 reconciliation).
+///
+/// Widgets paint through `&mut dyn PaintScene`; the desktop shell (task 08)
+/// hands them a `SceneBuilder`, so filled rectangles and shaped glyph runs land
+/// in the display list under the builder's current transform. Unshaped
+/// [`PaintScene::draw_text`] is intentionally dropped here — text must be shaped
+/// (by `forgekit-text`) into glyph runs before it can be drawn.
+impl PaintScene for SceneBuilder<'_> {
+    fn fill_rect(&mut self, origin: Point, size: Size) {
+        let rect = Rect::new(
+            origin.x,
+            origin.y,
+            origin.x + size.width,
+            origin.y + size.height,
+        );
+        SceneBuilder::fill_rect(self, rect, Brush::Solid(Color::BLACK));
+    }
+
+    fn draw_text(&mut self, _origin: Point, _text: &str) {
+        // Unshaped text is not renderable; real text arrives as glyph runs.
+    }
+
+    fn draw_glyph_run(&mut self, run: GlyphRun) {
+        SceneBuilder::draw_glyph_run(self, run);
+    }
 }
 
 /// Context passed to [`Widget::layout`].
 ///
-/// Minimal for v0 (only leaf widgets exist until task 08). It exists as a stable
-/// seam so container widgets can later reach child pods without a signature
-/// change.
-pub struct LayoutCtx {
-    _private: (),
+/// Beyond the (still-empty) container seam, it optionally carries the shared,
+/// heavyweight text-shaping context the render root threads down for text
+/// layout (spec §10.3). The resource is **type-erased** (`&mut dyn Any`) so
+/// `forgekit-core` stays independent of `forgekit-text` (and thus of parley);
+/// text widgets recover it with [`LayoutCtx::text_context`].
+pub struct LayoutCtx<'a> {
+    text_ctx: Option<&'a mut dyn Any>,
 }
 
-impl LayoutCtx {
-    /// Create a fresh layout context.
-    pub fn new() -> Self {
-        Self { _private: () }
+impl<'a> LayoutCtx<'a> {
+    /// Create a layout context with no shared resources.
+    ///
+    /// Used by leaf-only unit tests and by containers that never lay out text.
+    pub fn new() -> LayoutCtx<'static> {
+        LayoutCtx { text_ctx: None }
+    }
+
+    /// Create a layout context carrying the shared text-shaping context.
+    ///
+    /// The render root builds this so text widgets can shape their content
+    /// during the layout pass; the concrete type is erased to keep this crate
+    /// free of a `forgekit-text` dependency.
+    pub fn with_text_context(text_ctx: &'a mut dyn Any) -> Self {
+        LayoutCtx {
+            text_ctx: Some(text_ctx),
+        }
+    }
+
+    /// Recover the shared text-shaping context as `&mut T`.
+    ///
+    /// Panics if no context was threaded into this pass, or if its concrete
+    /// type differs from `T` — both are shell-wiring bugs, not runtime-data
+    /// conditions.
+    pub fn text_context<T: Any>(&mut self) -> &mut T {
+        self.text_ctx
+            .as_deref_mut()
+            .expect("no text context threaded into this layout pass")
+            .downcast_mut::<T>()
+            .expect("threaded layout resource is not the expected text-context type")
     }
 }
 
-impl Default for LayoutCtx {
+impl Default for LayoutCtx<'static> {
     fn default() -> Self {
         Self::new()
     }
