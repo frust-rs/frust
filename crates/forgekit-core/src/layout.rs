@@ -15,9 +15,9 @@ fn non_negative(size: Size) -> Size {
 /// Immutable min/max size bounds passed down during layout.
 ///
 /// Invariant: both `min` and `max` are non-negative and `min <= max`
-/// component-wise. The constructors enforce this; callers building a
-/// `BoxConstraints` directly via [`BoxConstraints::new`] are responsible for
-/// upholding it.
+/// component-wise. This is enforced unconditionally by every constructor —
+/// there is no way to construct a `BoxConstraints` that violates it, so
+/// [`constrain`](Self::constrain) can never panic.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoxConstraints {
     min: Size,
@@ -27,12 +27,16 @@ pub struct BoxConstraints {
 impl BoxConstraints {
     /// Construct constraints from explicit `min`/`max` bounds.
     ///
-    /// Both bounds are clamped to be non-negative.
+    /// Both bounds are clamped to be non-negative. If `max` is smaller than
+    /// `min` on either axis (an inverted/inconsistent input), `max` is
+    /// widened up to `min` on that axis — `min` is authoritative, matching
+    /// Flutter's `BoxConstraints` semantics — so the resulting constraints
+    /// always satisfy `min <= max`.
     pub fn new(min: Size, max: Size) -> Self {
-        Self {
-            min: non_negative(min),
-            max: non_negative(max),
-        }
+        let min = non_negative(min);
+        let max = non_negative(max);
+        let max = Size::new(max.width.max(min.width), max.height.max(min.height));
+        Self { min, max }
     }
 
     /// Tight constraints that force an exact `size` (`min == max == size`).
@@ -144,5 +148,33 @@ mod tests {
     fn constructors_reject_negative_sizes() {
         let bc = BoxConstraints::loose(Size::new(-5.0, -5.0));
         assert_eq!(bc.max(), Size::ZERO);
+    }
+
+    #[test]
+    fn new_widens_max_when_one_axis_is_inverted() {
+        // width is inverted (min > max); height is consistent.
+        let bc = BoxConstraints::new(Size::new(100.0, 10.0), Size::new(10.0, 100.0));
+        assert!(bc.min().width <= bc.max().width);
+        assert!(bc.min().height <= bc.max().height);
+        assert_eq!(bc.min(), Size::new(100.0, 10.0));
+        assert_eq!(bc.max(), Size::new(100.0, 100.0));
+
+        // Does not panic and returns a sane, in-range value.
+        let constrained = bc.constrain(Size::new(0.0, 0.0));
+        assert_eq!(constrained, Size::new(100.0, 10.0));
+    }
+
+    #[test]
+    fn new_widens_max_when_both_axes_are_inverted() {
+        let bc = BoxConstraints::new(Size::new(100.0, 100.0), Size::new(10.0, 10.0));
+        assert!(bc.min().width <= bc.max().width);
+        assert!(bc.min().height <= bc.max().height);
+        assert_eq!(bc.min(), Size::new(100.0, 100.0));
+        assert_eq!(bc.max(), Size::new(100.0, 100.0));
+        assert!(bc.is_tight());
+
+        // Does not panic and returns a sane, in-range value.
+        let constrained = bc.constrain(Size::new(1000.0, 1000.0));
+        assert_eq!(constrained, Size::new(100.0, 100.0));
     }
 }
