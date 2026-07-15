@@ -11,9 +11,16 @@ license.workspace = true
 # crate's minimal stderr logger uses `log`, so `log` builds everywhere.
 log = { workspace = true }
 
-# The C-ABI runtime and the whole render/text stack are only ever compiled for an
-# iOS target; on the host this crate is (almost) empty but the macro and the pure
-# helpers still compile so `cargo test --workspace` stays green.
+# Unconditional: `ffi_support`'s pure, host-testable `should_recreate_surface`
+# predicate matches on `forgekit_render::SurfacePhase`, and `ffi_support` is the
+# one module compiled on every target (so its `cargo test --workspace` unit tests
+# stay green). `SurfacePhase` is a plain `Copy` enum — no vello/wgpu types leak
+# through it — and `forgekit-render` is already built by the workspace regardless.
+forgekit-render = { workspace = true }
+
+# The C-ABI runtime and the rest of the render/text stack are only ever compiled
+# for an iOS target; on the host this crate is (almost) empty but the macro and
+# the pure helpers still compile so `cargo test --workspace` stays green.
 [target.'cfg(target_os = "ios")'.dependencies]
 # Platform-agnostic shell plumbing (AppTree erasure + guard/sanitize_scale/
 # logical_size). iOS-gated because nothing off-iOS references it: the `ios_app!`
@@ -22,7 +29,6 @@ log = { workspace = true }
 forgekit-shell-common = { workspace = true }
 forgekit-core = { workspace = true }
 forgekit-scene = { workspace = true }
-forgekit-render = { workspace = true }
 forgekit-text = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }

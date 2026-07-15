@@ -12,14 +12,24 @@
 //!
 //! # Layer lifetime contract
 //!
-//! Unlike the Android handle, this handle owns **no** window/layer field: the
-//! `CAMetalLayer` the surface is built from is owned by Swift (the `UIView`'s
-//! backing layer). The only thing to drop is the `wgpu::Surface` inside
-//! `renderer`. The contract is that the layer outlives the handle — guaranteed by
-//! the Swift side calling `forgekit_destroy` (which drops this handle, and with
-//! it the surface) *before* releasing the view/layer.
+//! This handle retains the Swift-owned `CAMetalLayer` as a raw `*mut c_void`
+//! (`metal_layer`) so the shell can *recreate* the `wgpu::Surface` after a
+//! `SurfaceLost` — iOS never destroys/recreates the layer itself (contrast
+//! Android's window cycle), so without the retained pointer a lost surface would
+//! be terminal (permanent black screen). Retaining the raw pointer is sound
+//! because the layer's ownership stays with Swift and Swift guarantees it
+//! outlives this handle: `forgekit_destroy` drops the handle (and with it the
+//! `wgpu::Surface`) *before* the view/layer is released. The handle never frees
+//! the layer — it only reads the pointer to hand it back to
+//! `on_surface_created_from_metal_layer` at the FFI boundary.
+//!
+//! The `*mut c_void` field makes [`IosAppHandle`] `!Send`/`!Sync` by default,
+//! which is exactly right: every `forgekit_*` call is on the UIKit main thread,
+//! so the handle is never sent across threads and no auto-trait promise is made
+//! about it.
 
 use std::any::Any;
+use std::ffi::c_void;
 
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
@@ -30,9 +40,10 @@ use kurbo::{Affine, Size};
 /// Everything a running iOS app needs across frames — the state behind the opaque
 /// handle Swift passes back into every C call.
 ///
-/// There is deliberately no window/layer field (see the module docs): the
-/// `CAMetalLayer` is Swift-owned, and the `renderer` (which owns the
-/// `wgpu::Surface` built from that layer) is the only thing torn down on drop.
+/// The `renderer` owns the `wgpu::Surface` and is the only thing torn down on
+/// drop; the `metal_layer` pointer it was built from is Swift-owned and merely
+/// retained (never freed) here so a lost surface can be recreated (see the module
+/// docs' *Layer lifetime contract*).
 pub struct IosAppHandle {
     render_cx: RenderContext,
     renderer: SurfaceRenderer,
@@ -40,6 +51,13 @@ pub struct IosAppHandle {
     /// Reused across frames; `reset()` each frame rather than reallocated.
     scene: Scene,
     app: Box<dyn AppTree>,
+    /// The Swift-owned `CAMetalLayer*` this handle's surface was built from,
+    /// retained so the shell can recreate the surface after a `SurfaceLost` (iOS
+    /// keeps the same layer for the app's whole lifetime). Read-only from Rust's
+    /// side — never dropped/freed here (see the module docs' lifetime contract);
+    /// only handed back to `on_surface_created_from_metal_layer` at the FFI
+    /// boundary in [`crate::ffi_glue`], where the `unsafe` stays confined.
+    metal_layer: *mut c_void,
     /// The current surface's physical (pixel) size, updated on create/resize and
     /// divided by `scale` to lay out in logical pixels.
     physical: (u32, u32),
@@ -62,6 +80,7 @@ impl IosAppHandle {
     pub(crate) fn new(
         render_cx: RenderContext,
         renderer: SurfaceRenderer,
+        metal_layer: *mut c_void,
         physical: (u32, u32),
         scale: f32,
         mut app: Box<dyn AppTree>,
@@ -73,10 +92,52 @@ impl IosAppHandle {
             text_ctx: TextContext::new(),
             scene: Scene::new(),
             app,
+            metal_layer,
             physical,
             scale,
             paused: false,
         }
+    }
+
+    /// The retained Swift-owned `CAMetalLayer*` this handle's surface was built
+    /// from, used by [`crate::ffi_glue`] to recreate the surface after a
+    /// `SurfaceLost`. Returns the raw pointer by value (no borrow) so the FFI
+    /// layer can read it before taking a `&mut` via [`renderer_mut`](Self::renderer_mut);
+    /// the actual `unsafe` surface creation stays confined to `ffi_glue`.
+    pub(crate) fn metal_layer(&self) -> *mut c_void {
+        self.metal_layer
+    }
+
+    /// Access to the render context + renderer for the FFI layer to drive an
+    /// `unsafe` surface *recreation* (the one lifecycle transition that crosses the
+    /// raw-pointer boundary), mirroring the Android handle's accessor of the same
+    /// name; the safe transitions have their own methods below.
+    pub(crate) fn renderer_mut(&mut self) -> (&mut RenderContext, &mut SurfaceRenderer) {
+        (&mut self.render_cx, &mut self.renderer)
+    }
+
+    /// The current surface's physical (pixel) size, used by [`crate::ffi_glue`] to
+    /// recreate a lost surface at its last-known dimensions on a `render_frame`
+    /// (a `resize` supplies fresh dimensions instead).
+    pub(crate) fn physical(&self) -> (u32, u32) {
+        self.physical
+    }
+
+    /// The current display scale, retained across a surface recreation on a
+    /// `render_frame` (see [`physical`](Self::physical)).
+    pub(crate) fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// Record the physical size + scale backing a freshly recreated surface.
+    ///
+    /// The `metal_layer` never changes (iOS keeps the same layer for the app's
+    /// lifetime), so — unlike Android's `set_window` — there is no window to swap:
+    /// this only refreshes the layout inputs after a successful recreate in
+    /// [`crate::ffi_glue`]. Safe: touches no raw pointers.
+    pub(crate) fn set_surface(&mut self, physical: (u32, u32), scale: f32) {
+        self.physical = physical;
+        self.scale = scale;
     }
 
     /// Resize the live surface in place (rotation / bounds change). The
@@ -101,8 +162,9 @@ impl IosAppHandle {
         self.paused = false;
     }
 
-    /// The current lifecycle phase (spec §8.1).
-    fn phase(&self) -> SurfacePhase {
+    /// The current lifecycle phase (spec §8.1). `pub(crate)` so [`crate::ffi_glue`]
+    /// can gate surface recreation on a `SurfaceLost` phase.
+    pub(crate) fn phase(&self) -> SurfacePhase {
         self.renderer.phase()
     }
 
@@ -113,7 +175,9 @@ impl IosAppHandle {
     /// A no-op unless the surface is `SurfaceReady` *and* the app is not paused
     /// (see [`crate::ffi_support::should_render_frame`]). On
     /// `FrameOutcome::SurfaceLost` the machine has already dropped the surface;
-    /// recovery waits for the next resize rather than recreating mid-frame.
+    /// this frame becomes a no-op, and the *next* `forgekit_render_frame`/
+    /// `forgekit_resize` FFI entry recreates the surface from the retained
+    /// `metal_layer` (see [`crate::ffi_glue`]) before rendering resumes.
     pub(crate) fn frame(&mut self) {
         let ready = self.phase() == SurfacePhase::SurfaceReady;
         if !crate::ffi_support::should_render_frame(ready, self.paused) {
@@ -150,10 +214,11 @@ impl IosAppHandle {
             // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
             // next CADisplayLink frame draws against the fresh configuration.
             Ok(FrameOutcome::Redraw) => {}
-            // Surface lost: dropped by the machine; wait for the next resize to
-            // recreate it.
+            // Surface lost: dropped by the machine. The next render_frame/resize
+            // FFI entry recreates it from the retained `metal_layer` (see
+            // `ffi_glue`), bounded by the CADisplayLink cadence — not a busy loop.
             Ok(FrameOutcome::SurfaceLost) => {
-                log::warn!("forgekit-shell-ios: surface lost; awaiting resize");
+                log::warn!("forgekit-shell-ios: surface lost; recreating on next frame/resize");
             }
             Ok(FrameOutcome::Rendered | FrameOutcome::Skipped) => {}
             Err(err) => log::error!("forgekit-shell-ios: render error: {err:#}"),

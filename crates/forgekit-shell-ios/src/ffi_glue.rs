@@ -8,10 +8,11 @@
 //! here is wrapped in [`guard`](forgekit_shell_common::guard) so a panic is
 //! caught and turned into a benign default instead of unwinding across the C-ABI
 //! boundary (undefined behaviour). The `unsafe` *code* in this module is confined
-//! to three things, each with a safety comment: the call into
-//! `on_surface_created_from_metal_layer` (raw `CAMetalLayer*` → surface),
-//! `Box::into_raw`/`from_raw` for the opaque handle's lifetime, and
-//! reconstituting the raw handle pointer as a `&mut`.
+//! to three things, each with a safety comment: the calls into
+//! `on_surface_created_from_metal_layer` (raw `CAMetalLayer*` → surface — at init
+//! in [`create_handle`] and on surface recovery in [`recover_surface`]),
+//! `Box::into_raw`/`from_raw` for the opaque handle's lifetime, and reconstituting
+//! the raw handle pointer as a `&mut`.
 
 use std::ffi::c_void;
 use std::io::Write;
@@ -149,30 +150,82 @@ fn create_handle(
     .context("forgekit-shell-ios: failed to create Metal render surface")?;
 
     let app = make_app();
-    let handle = IosAppHandle::new(render_cx, renderer, physical, scale, app);
+    // Retain `metal_layer` in the handle so a later `SurfaceLost` can be recovered
+    // by recreating the surface from it (iOS never re-delivers the layer).
+    let handle = IosAppHandle::new(render_cx, renderer, metal_layer, physical, scale, app);
 
     // SAFETY: hand a uniquely-owned boxed handle to Swift as a raw pointer; it is
     // reclaimed exactly once in `destroy`.
     Ok(Box::into_raw(Box::new(handle)) as *mut c_void)
 }
 
+/// Recreate a lost surface from the handle's retained `CAMetalLayer` at the given
+/// physical size/scale, self-healing the `SurfaceLost` terminal state (iOS keeps
+/// the same layer for the app's lifetime, so nothing external re-drives creation).
+///
+/// On success the handle's layout inputs are refreshed via
+/// [`IosAppHandle::set_surface`]; on failure the phase stays `SurfaceLost` and the
+/// next `render_frame`/`resize` retries — bounded by the CADisplayLink cadence,
+/// not a busy loop. This is the sole recovery call into
+/// `on_surface_created_from_metal_layer` outside [`create_handle`], and keeps the
+/// `unsafe` confined to this module.
+fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
+    // Read the retained pointer before taking the `&mut` borrow of the renderer.
+    let metal_layer = app.metal_layer();
+    let result = {
+        let (render_cx, renderer) = app.renderer_mut();
+        // SAFETY: `metal_layer` is the Swift-owned `CAMetalLayer*` this handle was
+        // created with; Swift guarantees it outlives the handle (it calls
+        // `forgekit_destroy` before releasing the view/layer), so recreating a
+        // surface from it — exactly as `create_handle` did at init — is sound.
+        pollster::block_on(unsafe {
+            renderer.on_surface_created_from_metal_layer(
+                render_cx,
+                metal_layer,
+                physical.0,
+                physical.1,
+            )
+        })
+    };
+    match result {
+        Ok(()) => app.set_surface(physical, scale),
+        Err(err) => {
+            log::error!("forgekit-shell-ios: surface recreate failed: {err:#}");
+        }
+    }
+}
+
 /// `forgekit_resize`: resize the live surface (rotation / bounds change). The
-/// `CAMetalLayer` survives, so this is always a plain in-place resize.
+/// `CAMetalLayer` survives, so a live surface is a plain in-place resize; a
+/// `SurfaceLost` surface is instead recreated from the retained layer at the
+/// incoming dimensions (self-recovery — see [`recover_surface`]).
 pub fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
     guard("forgekit_resize", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
-            app.resize((width.max(1), height.max(1)), scale);
+            let physical = (width.max(1), height.max(1));
+            if crate::ffi_support::should_recreate_surface(app.phase()) {
+                recover_surface(app, physical, scale);
+            } else {
+                app.resize(physical, scale);
+            }
         }
     });
 }
 
 /// `forgekit_render_frame`: run one `CADisplayLink`-driven frame (no-op unless the
-/// surface is ready and the app is not paused).
+/// surface is ready and the app is not paused). If the surface was lost, first
+/// recreate it from the retained layer at the last-known size/scale (self-recovery
+/// — see [`recover_surface`]) so a `SurfaceLost` is no longer a permanent black
+/// screen.
 pub fn render_frame(handle: *mut c_void) {
     guard("forgekit_render_frame", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
+            if crate::ffi_support::should_recreate_surface(app.phase()) {
+                let (physical, scale) = (app.physical(), app.scale());
+                recover_surface(app, physical, scale);
+            }
             app.frame();
         }
     });

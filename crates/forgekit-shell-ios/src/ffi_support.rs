@@ -14,6 +14,8 @@
 
 use std::ffi::c_void;
 
+use forgekit_render::SurfacePhase;
+
 /// Whether an opaque handle from the Swift side is the null sentinel.
 ///
 /// The generated Swift app initialises its handle to `nil`/`null` and every call
@@ -36,6 +38,21 @@ pub(crate) fn handle_is_null(handle: *mut c_void) -> bool {
 #[inline]
 pub(crate) fn should_render_frame(surface_ready: bool, paused: bool) -> bool {
     surface_ready && !paused
+}
+
+/// Whether a lost surface should be recreated before the next frame/resize.
+///
+/// Unlike Android (which pairs surface loss with a `surfaceDestroyed`/
+/// `surfaceCreated` window cycle), iOS keeps the same `CAMetalLayer` for the app's
+/// whole lifetime, so nothing external re-drives surface creation after a
+/// `SurfaceLost`. The shell therefore self-heals: on the next `forgekit_resize`
+/// or `forgekit_render_frame` it recreates the surface from the retained layer.
+/// This predicate is that trigger — true **only** in [`SurfacePhase::SurfaceLost`]
+/// (a `NoSurface` handle never exists post-init, and `SurfaceReady` needs no
+/// recovery).
+#[inline]
+pub(crate) fn should_recreate_surface(phase: SurfacePhase) -> bool {
+    matches!(phase, SurfacePhase::SurfaceLost)
 }
 
 #[cfg(test)]
@@ -72,5 +89,17 @@ mod tests {
     fn frame_is_a_noop_when_surface_not_ready() {
         assert!(!should_render_frame(false, false));
         assert!(!should_render_frame(false, true));
+    }
+
+    #[test]
+    fn lost_surface_is_recreated() {
+        // The self-recovery trigger: only `SurfaceLost` asks for a recreate.
+        assert!(should_recreate_surface(SurfacePhase::SurfaceLost));
+    }
+
+    #[test]
+    fn ready_and_nosurface_are_not_recreated() {
+        assert!(!should_recreate_surface(SurfacePhase::SurfaceReady));
+        assert!(!should_recreate_surface(SurfacePhase::NoSurface));
     }
 }
