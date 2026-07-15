@@ -163,7 +163,8 @@ where
                 }
 
                 window.pre_present_notify();
-                if let Err(err) = renderer.render(&self.render_cx, &self.scene, peniko::Color::WHITE)
+                if let Err(err) =
+                    renderer.render(&self.render_cx, &self.scene, peniko::Color::WHITE)
                 {
                     eprintln!("forgekit: render error: {err}");
                 }
