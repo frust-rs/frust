@@ -54,12 +54,31 @@ pub fn detect(cwd: &Path) -> Result<Project> {
         .with_context(|| format!("reading `{}`", toml_path.display()))?;
     let parsed = parse(&raw).with_context(|| format!("parsing `{}`", toml_path.display()))?;
 
+    let app_id = match parsed.android.and_then(|a| a.identifier) {
+        Some(explicit) => {
+            crate::android_id::validate(&explicit).with_context(|| {
+                format!(
+                    "invalid `[android] identifier` `{explicit}` in `{}`",
+                    toml_path.display()
+                )
+            })?;
+            explicit
+        }
+        None => {
+            let derived = derive_app_id(&parsed.app.org, &parsed.app.name);
+            crate::android_id::validate(&derived).with_context(|| {
+                format!(
+                    "derived Android application id `{derived}` (from `org`/`name` in `{}`) is invalid",
+                    toml_path.display()
+                )
+            })?;
+            derived
+        }
+    };
+
     Ok(Project {
         root: cwd.to_path_buf(),
-        app_id: parsed
-            .android
-            .and_then(|a| a.identifier)
-            .unwrap_or_else(|| derive_app_id(&parsed.app.org, &parsed.app.name)),
+        app_id,
     })
 }
 
@@ -81,29 +100,14 @@ pub fn require_android_dir(root: &Path) -> Result<PathBuf> {
     Ok(android_dir)
 }
 
-/// Derives an Android application id from `org` + `name` the same way
-/// `forgekit create`'s Android template does (spec Phase 2 task 22):
-/// `org.name`, sanitized to `[a-zA-Z0-9_.]` per Flutter's `androidIdentifier`
-/// rules.
-///
-/// NOTE for task 25 (live E2E): keep this in sync with
-/// `scaffold::context`'s `android_identifier` context var if that
-/// derivation lands with different rules — this is the fallback used when
-/// `forgekit.toml` has no explicit `[android] identifier`.
+/// Derives an Android application id from `org` + `name` via
+/// `crate::android_id::derive` — the same derivation
+/// `scaffold::context::TemplateContext::android_identifier` uses when
+/// rendering a new project's Android template. This is the fallback used
+/// when `forgekit.toml` has no explicit `[android] identifier`; the result
+/// is validated by [`detect`] before use.
 fn derive_app_id(org: &str, name: &str) -> String {
-    sanitize(&format!("{org}.{name}"))
-}
-
-fn sanitize(raw: &str) -> String {
-    raw.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    crate::android_id::derive(org, name)
 }
 
 #[cfg(test)]
@@ -164,6 +168,23 @@ mod tests {
         .unwrap();
         let project = detect(&dir).unwrap();
         assert_eq!(project.app_id, "dev.f0x.custom");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_bails_on_hostile_explicit_identifier_before_any_adb_call() {
+        // spec §12.4 injection path: `[android] identifier` flows verbatim
+        // into `adb shell am start -n <id>/…` / `adb shell pidof <id>` if
+        // not validated here — `detect` must reject it before `forgekit
+        // run` ever reaches the adb-invoking pipeline (see android_id.rs).
+        let dir = unique_temp_dir("hostile-explicit");
+        fs::write(
+            dir.join("forgekit.toml"),
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[android]\nidentifier = \"x; rm -rf /\"\n",
+        )
+        .unwrap();
+        let err = detect(&dir).unwrap_err();
+        assert!(err.to_string().contains("identifier"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -14,6 +14,14 @@ pub fn install(runner: &dyn ProcessRunner, device_id: &str, apk_path: &str) -> R
 
 /// `adb -s <id> shell am start -n <appId>/.MainActivity` (spec §12.4 step 6;
 /// `MainActivity` lives in the app's own package, per task 22's template).
+///
+/// `app_id` is interpolated into a device-shell command line
+/// (`adb shell am start -n <id>/…`), so it must already be a
+/// grammar-validated Android application id by the time it reaches here —
+/// `android_run::project::detect` is the single point that resolves
+/// `Project::app_id` and validates it (via `crate::android_id::validate`)
+/// before this function or [`resolve_pid`] ever see it. Do not add another
+/// `app_id` source that skips that validation.
 pub fn launch(runner: &dyn ProcessRunner, device_id: &str, app_id: &str) -> Result<Output> {
     let target = format!("{app_id}/.MainActivity");
     runner.run(
@@ -31,6 +39,11 @@ pub const PID_RETRY_ATTEMPTS: u32 = 10;
 /// 7), retrying up to `max_attempts` times since app start isn't
 /// instantaneous. `sleep` is called between attempts (not after the last)
 /// — injected so tests don't block on a real clock.
+///
+/// Same validated-at-source invariant as [`launch`]: `app_id` is
+/// interpolated into `adb shell pidof <id>` and must already be
+/// grammar-validated by `android_run::project::detect` before it reaches
+/// here.
 pub fn resolve_pid(
     runner: &dyn ProcessRunner,
     device_id: &str,

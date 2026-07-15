@@ -47,31 +47,15 @@ impl TemplateContext {
     }
 
     /// Derives the Android application id / Kotlin package name from
-    /// `org` + `project_name` (spec Phase 2 task 22): `org.project_name`,
-    /// sanitized to `[a-zA-Z0-9_.]` per Flutter's `androidIdentifier` rule
-    /// (any other character becomes `_`).
-    ///
-    /// Kept in sync with `android_run::project::derive_app_id`
-    /// (`forgekit-cli`'s `crates/forgekit-cli/src/android_run/project.rs`),
-    /// which re-derives the same id as `forgekit run`'s fallback when a
-    /// generated project's `forgekit.toml` has no explicit
-    /// `[android] identifier` — both must produce the same string for a
-    /// given `org`/`project_name` pair.
+    /// `org` + `project_name` (spec Phase 2 task 22) via
+    /// `crate::android_id::derive` — the single source of truth shared with
+    /// `android_run::project::derive_app_id`, which re-derives the same id
+    /// as `forgekit run`'s fallback when a generated project's
+    /// `forgekit.toml` has no explicit `[android] identifier`; both must
+    /// produce the same string for a given `org`/`project_name` pair.
     pub fn android_identifier(&self) -> String {
-        sanitize_android_identifier(&format!("{}.{}", self.org, self.project_name))
+        crate::android_id::derive(&self.org, &self.project_name)
     }
-}
-
-fn sanitize_android_identifier(raw: &str) -> String {
-    raw.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 /// Rust keywords (2015/2018/2021/2024 strict + reserved), used to reject

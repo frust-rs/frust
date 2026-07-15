@@ -1,5 +1,6 @@
 //! The `forgekit` CLI binary (spec §12).
 
+mod android_id;
 mod android_run;
 mod build_info;
 mod cli;
