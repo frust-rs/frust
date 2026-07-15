@@ -8,6 +8,7 @@ mod commands;
 mod devices;
 mod doctor;
 mod ios_id;
+mod ios_run;
 mod process;
 mod scaffold;
 

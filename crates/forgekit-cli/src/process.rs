@@ -42,6 +42,16 @@ pub trait ProcessRunner {
     ) -> Result<Output>;
 }
 
+/// Returns the last `n` non-empty lines of `s.trim()`, joined by `\n`. Shared
+/// by every drive pipeline (`android_run`, `ios_run`) that needs to surface a
+/// bounded tail of a failed build's buffered output instead of the caller
+/// scrolling past the full log.
+pub(crate) fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.trim().lines().filter(|line| !line.is_empty()).collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
 /// Strips a trailing `\n` (and a preceding `\r`, for CRLF-terminated
 /// output) from a `read_until(b'\n', ..)`-read line, then lossy-decodes the
 /// remaining bytes to a `String` — mirrors [`RealProcessRunner::run`]'s
@@ -272,6 +282,31 @@ impl ProcessRunner for FakeProcessRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_lines_short_input_returns_all_lines() {
+        let input = "line one\nline two\nline three";
+        assert_eq!(tail_lines(input, 50), "line one\nline two\nline three");
+    }
+
+    #[test]
+    fn tail_lines_long_input_returns_last_n_lines() {
+        let input = (1..=100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail = tail_lines(&input, 50);
+        let tail_lines_vec: Vec<&str> = tail.lines().collect();
+        assert_eq!(tail_lines_vec.len(), 50);
+        assert_eq!(tail_lines_vec.first(), Some(&"line 51"));
+        assert_eq!(tail_lines_vec.last(), Some(&"line 100"));
+    }
+
+    #[test]
+    fn tail_lines_empty_input_returns_empty_string() {
+        assert_eq!(tail_lines("", 50), "");
+        assert_eq!(tail_lines("   \n\n  ", 50), "");
+    }
 
     #[test]
     fn decode_stream_line_replaces_invalid_utf8_lossily() {

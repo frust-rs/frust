@@ -39,13 +39,11 @@ pub fn select_device(devices: &[Device], pattern: Option<&str>) -> DeviceSelecti
             .collect();
         return match matches.as_slice() {
             [] => DeviceSelection::Error(format!("no device matching `{pattern}`")),
-            [device] => {
-                if device.platform == Platform::Ios {
-                    DeviceSelection::Error("iOS run lands in Phase 3".to_string())
-                } else {
-                    DeviceSelection::Auto((*device).clone())
-                }
-            }
+            // Platform/kind-specific handling (Android drive pipeline, iOS
+            // simulator drive pipeline, or a Phase 5 sentinel for physical
+            // iOS devices) is the caller's job — `commands::run::run_on_device`
+            // dispatches on `Device::platform`/`Device::kind`.
+            [device] => DeviceSelection::Auto((*device).clone()),
             many => DeviceSelection::Error(format!(
                 "ambiguous device id `{pattern}`; matches: {}",
                 many.iter()
@@ -189,12 +187,15 @@ mod tests {
     }
 
     #[test]
-    fn dash_d_matching_ios_device_errs_with_phase3_message() {
+    fn dash_d_matching_ios_device_is_auto_selected() {
+        // `select_device` no longer special-cases iOS: platform/kind
+        // dispatch (iOS simulator drive pipeline vs. a Phase 5 sentinel for
+        // physical devices) is `commands::run::run_on_device`'s job.
         let devices = vec![ios("sim1", "iPhone 15")];
-        match select_device(&devices, Some("sim1")) {
-            DeviceSelection::Error(msg) => assert!(msg.contains("iOS run lands in Phase 3")),
-            other => panic!("expected Error, got {other:?}"),
-        }
+        assert_eq!(
+            select_device(&devices, Some("sim1")),
+            DeviceSelection::Auto(devices[0].clone())
+        );
     }
 
     #[test]

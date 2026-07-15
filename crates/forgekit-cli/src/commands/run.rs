@@ -8,9 +8,10 @@ use anyhow::{Context, Result, bail};
 
 use crate::android_run::{self, DeviceSelection};
 use crate::build_info::{BuildArgs, BuildInfo, BuildMode};
-use crate::devices::{self, Device};
+use crate::devices::{self, Device, Kind, Platform};
 use crate::doctor::RealEnv;
-use crate::process::{ProcessRunner, RealProcessRunner};
+use crate::ios_run;
+use crate::process::{ProcessRunner, RealProcessRunner, tail_lines};
 
 pub fn run(build_args: BuildArgs, device_id: Option<String>, verbose: bool) -> Result<u8> {
     let info =
@@ -30,9 +31,29 @@ pub fn run(build_args: BuildArgs, device_id: Option<String>, verbose: bool) -> R
 
     match android_run::select_device(&found, device_id.as_deref()) {
         DeviceSelection::Desktop => run_desktop_fallback(&runner),
-        DeviceSelection::Auto(device) => run_android(&runner, &device),
+        DeviceSelection::Auto(device) => run_on_device(&runner, &device),
         DeviceSelection::Ambiguous(candidates) => select_from_prompt(&runner, &candidates),
         DeviceSelection::Error(message) => bail!(message),
+    }
+}
+
+/// Dispatches a resolved [`Device`] to its platform's drive pipeline (spec
+/// §12.4's Android path, or task 35's iOS simulator path); a physical iOS
+/// device has no signing pipeline yet, so it errors with a Phase 5 note
+/// instead.
+fn run_on_device(runner: &dyn ProcessRunner, device: &Device) -> Result<u8> {
+    match (device.platform, device.kind) {
+        (Platform::Android, _) => run_android(runner, device),
+        (Platform::Ios, Kind::Simulator) => {
+            let cwd = std::env::current_dir().context("reading current directory")?;
+            ios_run::run(runner, &cwd, device)
+        }
+        (Platform::Ios, Kind::PhysicalDevice) => {
+            bail!("iOS physical-device run lands in Phase 5 (requires the signing pipeline)")
+        }
+        (Platform::Ios, Kind::Emulator) => {
+            unreachable!("iOS devices are never discovered as Kind::Emulator")
+        }
     }
 }
 
@@ -69,7 +90,7 @@ fn select_from_prompt(runner: &dyn ProcessRunner, candidates: &[Device]) -> Resu
     let index = android_run::parse_prompt_selection(&input, candidates.len())
         .map_err(|err| anyhow::anyhow!(err))?;
 
-    run_android(runner, &candidates[index])
+    run_on_device(runner, &candidates[index])
 }
 
 /// Drives the full Android pipeline (spec §12.4 steps 3-7) on `device`.
@@ -159,41 +180,40 @@ fn run_android(runner: &dyn ProcessRunner, device: &Device) -> Result<u8> {
     Ok(0)
 }
 
-/// Returns the last `n` non-empty lines of `s.trim()`, joined by `\n`. Used
-/// to surface a bounded tail of `gradlew`'s buffered stderr in the failure
-/// message instead of the caller having to scroll past the full log.
-fn tail_lines(s: &str, n: usize) -> String {
-    let lines: Vec<&str> = s.trim().lines().filter(|line| !line.is_empty()).collect();
-    let start = lines.len().saturating_sub(n);
-    lines[start..].join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::FakeProcessRunner;
 
-    #[test]
-    fn tail_lines_short_input_returns_all_lines() {
-        let input = "line one\nline two\nline three";
-        assert_eq!(tail_lines(input, 50), "line one\nline two\nline three");
+    fn ios_physical_device() -> Device {
+        Device {
+            id: "00008110-000A2D3A3C68801E".to_string(),
+            name: "Ed's iPhone".to_string(),
+            platform: Platform::Ios,
+            kind: Kind::PhysicalDevice,
+        }
     }
 
     #[test]
-    fn tail_lines_long_input_returns_last_n_lines() {
-        let input = (1..=100)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let tail = tail_lines(&input, 50);
-        let tail_lines_vec: Vec<&str> = tail.lines().collect();
-        assert_eq!(tail_lines_vec.len(), 50);
-        assert_eq!(tail_lines_vec.first(), Some(&"line 51"));
-        assert_eq!(tail_lines_vec.last(), Some(&"line 100"));
+    fn run_on_device_bails_with_phase5_note_for_physical_ios_device() {
+        let runner = FakeProcessRunner::new();
+        let err = run_on_device(&runner, &ios_physical_device()).unwrap_err();
+        assert!(err.to_string().contains("lands in Phase 5"), "{err}");
+        assert!(err.to_string().contains("signing pipeline"), "{err}");
     }
 
     #[test]
-    fn tail_lines_empty_input_returns_empty_string() {
-        assert_eq!(tail_lines("", 50), "");
-        assert_eq!(tail_lines("   \n\n  ", 50), "");
+    fn run_rejects_release_mode_with_phase5_note_before_any_device_selection() {
+        // The mode guard fires before device discovery/selection, so this
+        // holds for an iOS-selected context exactly as much as any other —
+        // `run` never gets far enough to shell out for device discovery
+        // (this test would hang/error on a missing `adb`/`xcrun` fixture
+        // otherwise, proving the guard runs first).
+        let build_args = BuildArgs {
+            release: true,
+            ..Default::default()
+        };
+        let err = run(build_args, None, false).unwrap_err();
+        assert!(err.to_string().contains("Phase 5"), "{err}");
     }
 }

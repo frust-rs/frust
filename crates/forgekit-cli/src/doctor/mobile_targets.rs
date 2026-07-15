@@ -1,14 +1,20 @@
 use super::{DoctorCtx, Status, Validation, Validator};
 use std::collections::HashSet;
 
-/// Required Rust compile targets for mobile builds (spec §12.7).
-const REQUIRED_TARGETS: &[&str] = &[
+/// Required Rust compile targets for Android builds (spec §12.7) — checked
+/// on every platform, since `cargo-ndk`/Gradle cross-compile Android from
+/// any host.
+const ANDROID_TARGETS: &[&str] = &[
     "aarch64-linux-android",
     "armv7-linux-androideabi",
     "x86_64-linux-android",
-    "aarch64-apple-ios",
-    "aarch64-apple-ios-sim",
 ];
+
+/// Required Rust compile targets for iOS builds (task 35). Checked only on
+/// macOS: `xcodebuild`/the simulator toolchain don't exist elsewhere, so
+/// flagging these as missing on a non-macOS host would be a false negative
+/// the user can't act on.
+const IOS_TARGETS: &[&str] = &["aarch64-apple-ios", "aarch64-apple-ios-sim"];
 
 pub struct MobileTargetsValidator;
 
@@ -18,10 +24,16 @@ impl Validator for MobileTargetsValidator {
     }
 
     fn validate(&self, ctx: &DoctorCtx) -> Validation {
+        let required: Vec<&str> = if ctx.is_macos {
+            ANDROID_TARGETS.iter().chain(IOS_TARGETS).copied().collect()
+        } else {
+            ANDROID_TARGETS.to_vec()
+        };
+
         match ctx.runner.run("rustup", &["target", "list", "--installed"]) {
             Ok(out) if out.success => {
                 let installed: HashSet<&str> = out.stdout.lines().map(str::trim).collect();
-                let missing: Vec<&str> = REQUIRED_TARGETS
+                let missing: Vec<&str> = required
                     .iter()
                     .copied()
                     .filter(|t| !installed.contains(t))
@@ -95,6 +107,40 @@ mod tests {
         assert_eq!(result.status, Status::Partial);
         assert!(result.messages[0].contains("rustup target add"));
         assert!(result.messages[0].contains("aarch64-apple-ios"));
+    }
+
+    #[test]
+    fn passes_off_macos_without_ios_targets_installed() {
+        // Android-only targets installed, no iOS targets: must still pass,
+        // since iOS targets aren't required off macOS (no fixture matching
+        // an "aarch64-apple-ios*"-inclusive install list is registered).
+        let runner = FakeProcessRunner::new().with(
+            "rustup target list --installed",
+            ok("aarch64-linux-android\narmv7-linux-androideabi\nx86_64-linux-android\n"),
+        );
+        let env = FakeEnv::new();
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let result = MobileTargetsValidator.validate(&ctx);
+        assert_eq!(result.status, Status::Pass);
+    }
+
+    #[test]
+    fn partial_message_omits_ios_targets_off_macos() {
+        let runner = FakeProcessRunner::new().with("rustup target list --installed", ok(""));
+        let env = FakeEnv::new();
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let result = MobileTargetsValidator.validate(&ctx);
+        assert_eq!(result.status, Status::Partial);
+        assert!(!result.messages[0].contains("aarch64-apple-ios"));
+        assert!(result.messages[0].contains("aarch64-linux-android"));
     }
 
     #[test]
