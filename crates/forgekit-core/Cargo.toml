@@ -6,3 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+tree_arena = { workspace = true }
+kurbo = { workspace = true }
+forgekit-scene = { workspace = true }
