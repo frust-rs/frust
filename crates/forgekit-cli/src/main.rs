@@ -10,6 +10,7 @@ mod commands;
 mod devices;
 mod doctor;
 mod process;
+mod scaffold;
 
 use clap::Parser;
 use std::process::ExitCode;

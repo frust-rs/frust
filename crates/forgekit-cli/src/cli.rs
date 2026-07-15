@@ -19,10 +19,38 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Scaffold a new app (Rust + `android/` Gradle project + `ios/` Xcode project).
+    /// Scaffold a new app (spec §12.3 — v1 generates a desktop-preview
+    /// Rust crate; `android/`/`ios/` platform projects land in spec Phase
+    /// 2/3).
     Create {
-        /// Target directory for the new project.
+        /// Target directory for the new project (may be `.`).
         dir: String,
+
+        /// Reverse-DNS organization identifier, e.g. `dev.f0x`.
+        #[arg(long, default_value = "com.example")]
+        org: String,
+
+        /// Project name; defaults to the target directory's basename.
+        #[arg(long = "project-name", value_name = "NAME")]
+        project_name: Option<String>,
+
+        /// One-line project description.
+        #[arg(long, default_value = "A new ForgeKit application.")]
+        description: String,
+
+        /// Overwrite a non-empty target directory.
+        #[arg(long)]
+        overwrite: bool,
+
+        /// Override the embedded template directory (development only).
+        #[arg(long = "template-dir", value_name = "PATH", hide = true)]
+        template_dir: Option<String>,
+
+        /// Override the computed path to the `forgekit` facade crate
+        /// (development only; spec §12.3's temporary `forgekit_path`
+        /// mechanism).
+        #[arg(long = "forgekit-path", value_name = "PATH", hide = true)]
+        forgekit_path: Option<String>,
     },
     /// Validate the ForgeKit toolchain (Rust targets, NDK, Android SDK, Xcode).
     Doctor,
@@ -57,10 +85,38 @@ mod tests {
     }
 
     #[test]
-    fn parses_create_dir() {
+    fn parses_create_dir_with_defaults() {
         let cli = Cli::parse_from(["forgekit", "create", "myapp"]);
         match cli.command {
-            Command::Create { dir } => assert_eq!(dir, "myapp"),
+            Command::Create { dir, org, project_name, overwrite, .. } => {
+                assert_eq!(dir, "myapp");
+                assert_eq!(org, "com.example");
+                assert_eq!(project_name, None);
+                assert!(!overwrite);
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_create_with_options() {
+        let cli = Cli::parse_from([
+            "forgekit",
+            "create",
+            "/tmp/x",
+            "--project-name",
+            "my_app",
+            "--org",
+            "dev.f0x",
+            "--overwrite",
+        ]);
+        match cli.command {
+            Command::Create { dir, org, project_name, overwrite, .. } => {
+                assert_eq!(dir, "/tmp/x");
+                assert_eq!(org, "dev.f0x");
+                assert_eq!(project_name.as_deref(), Some("my_app"));
+                assert!(overwrite);
+            }
             other => panic!("expected Create, got {other:?}"),
         }
     }

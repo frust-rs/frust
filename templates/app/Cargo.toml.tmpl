@@ -1,0 +1,12 @@
+[package]
+name = "{{ project_name }}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# NOTE: temporary path dependency pointing at the ForgeKit repo checkout
+# that generated this project (spec §12.3: "forgekit_path" mechanism is
+# explicitly temporary). Once ForgeKit crates are published, `forgekit
+# create` will emit a version dependency here instead.
+forgekit = { path = "{{ forgekit_path }}" }

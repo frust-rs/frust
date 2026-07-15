@@ -1,0 +1,8 @@
+[
+  "Cargo.toml.tmpl",
+  "forgekit.toml.tmpl",
+  ".gitignore",
+  "assets/.gitkeep",
+  "src/lib.rs.tmpl",
+  "src/main.rs.tmpl"
+]
