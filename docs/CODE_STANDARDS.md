@@ -2,24 +2,35 @@
 
 ## Language Idioms
 
-- **`unsafe` is confined to two sanctioned platform-FFI boundaries.** Every
-  other crate (`forgekit-core`, `forgekit-scene`, `forgekit-text`,
-  `forgekit-widgets`, `forgekit-shell-desktop`, `forgekit`) stays
-  `unsafe`-free — where Masonry/xilem-style code would reach for `unsafe`
-  downcasting, use trait upcasting instead: bound a trait on `Any` (e.g.
-  `Widget: Any`) and downcast through `&mut dyn Any`. The two exceptions are
-  raw-pointer boundaries a GPU/platform shell cannot avoid, each isolated in
-  one function/module with a `# Safety` doc comment stating the caller
-  contract:
-  - `forgekit-render`'s `create_android_surface` (`lifecycle.rs`) — turns a
-    caller-owned raw `ANativeWindow*` into a `wgpu::Surface`.
+- **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.**
+  Every other crate (`forgekit-core`, `forgekit-scene`, `forgekit-text`,
+  `forgekit-widgets`, `forgekit-shell-common`, `forgekit-shell-desktop`,
+  `forgekit`) stays `unsafe`-free — where Masonry/xilem-style code would
+  reach for `unsafe` downcasting, use trait upcasting instead: bound a trait
+  on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`. The
+  sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot
+  avoid, each isolated in one function/module with a `# Safety` doc comment
+  stating the caller contract:
+  - `forgekit-render`'s `create_android_surface`/`create_metal_surface`
+    (`lifecycle.rs`) and the `on_surface_created_from_android_window`/
+    `on_surface_created_from_metal_layer` renderer methods (`renderer.rs`)
+    — turn a caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a
+    `wgpu::Surface`.
   - `forgekit-shell-android`'s `jni_glue` module — the JNI FFI boundary
     (`extern "system"` exports, `Box::into_raw`/`from_raw` for the opaque
-    native handle, `ANativeWindow_fromSurface`).
-- **No unwind across FFI.** Every JNI export `forgekit-shell-android` defines
-  is wrapped in a `catch_unwind` guard that logs and returns a benign default
-  instead of unwinding into JVM-owned stack frames — a panic crossing the
-  FFI boundary is undefined behavior, not just a bug.
+    native handle, `ANativeWindow_fromSurface`) — plus the
+    `#[unsafe(no_mangle)]` attributes the `android_app!` macro emits on its
+    generated exports.
+  - `forgekit-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary
+    (`extern "C"` exports, `Box::into_raw`/`from_raw` for the opaque native
+    handle, the call into `on_surface_created_from_metal_layer`) — plus the
+    `#[unsafe(no_mangle)]` attributes the `ios_app!` macro emits on its
+    generated exports.
+- **No unwind across FFI.** Every platform export both shells define routes
+  through `forgekit-shell-common`'s `guard` helper, which `catch_unwind`s and
+  logs, returning a benign default instead of unwinding into JVM- or
+  Swift-owned stack frames — a panic crossing the FFI boundary is undefined
+  behavior, not just a bug.
 - **Type-erase to avoid a downstream crate dependency**, not to avoid writing
   a type. When a lower layer needs to thread a resource owned by a higher
   layer (e.g. `forgekit-core`'s `LayoutCtx` carrying the shell's

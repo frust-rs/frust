@@ -10,6 +10,12 @@
   (tested with 4.x); JDK 17+ on `JAVA_HOME` (Android Studio's bundled JBR is
   auto-detected as a fallback on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`
   and `ANDROID_NDK_HOME` set. `forgekit doctor` checks all of these.
+- **iOS** (only needed for `forgekit run`/`create`'s iOS output; macOS host
+  only): Xcode 26+ with `xcode-select -p` resolving to it;
+  `rustup target add aarch64-apple-ios-sim aarch64-apple-ios`. A booted
+  Simulator is enough for `forgekit run`; code signing is only needed for a
+  physical device, which `forgekit run` does not yet drive (Phase 5).
+  `forgekit doctor` checks the Rust targets on macOS hosts only.
 - No Docker, CI config, or `.env` setup exists in this repo yet.
 
 ## Build
@@ -34,10 +40,15 @@ is no automated pixel-diff test yet, so a person must look at the window.
 In a generated project, `forgekit run [-d <device>]` builds and launches on a
 connected Android device/emulator (preflight → `gradlew assembleDebug`
 (cargo-ndk builds the Rust `.so`) → `adb install`/`launch` → streamed
-`logcat` until Ctrl-C); currently debug-only (`--release`/`--profile` error
-with a Phase 5 note). With no Android device selected, it falls back to a
+`logcat` until Ctrl-C) or a booted iOS Simulator (preflight → `xcodebuild
+build` (its run-script phase invokes `cargo build` for the simulator triple)
+→ `simctl install` → `simctl launch --console-pty`, streamed, until Ctrl-C);
+currently debug-only for both platforms (`--release`/`--profile` error with
+a Phase 5 note), and a physical iOS device also errors with a Phase 5 note
+(no signing pipeline yet). With no device selected, it falls back to a
 streamed `cargo run` (desktop preview). The first Android build downloads
-Gradle 9.5.x — expect it to take a few minutes.
+Gradle 9.5.x, and the first iOS build compiles the whole Rust dependency
+graph for the simulator target — expect either to take a few minutes.
 
 ## Test
 
@@ -61,9 +72,18 @@ cargo test -p forgekit-render -- --ignored
 # project's full dependency graph (winit/vello/wgpu) — ~30s cold.
 cargo test -p forgekit-cli --test create_e2e -- --ignored
 
+# iOS scaffold test (forgekit-cli): scaffolds a project and runs
+# `xcodebuild -list` + `plutil -lint` against the generated Xcode project
+# (parse-only, no build; needs Xcode on macOS).
+cargo test -p forgekit-cli --test create_ios -- --ignored
+
 # Android compile gate (no device needed): the whole facade graph must
 # compile for the Android target.
 cargo check --target aarch64-linux-android -p forgekit
+
+# iOS compile gate (no device needed; macOS only): the whole facade graph
+# must compile for the iOS Simulator target.
+cargo check --target aarch64-apple-ios-sim -p forgekit
 ```
 
 ### Template development
@@ -106,3 +126,18 @@ An Apple-Silicon Android emulator's default (hardware) GPU path segfaults on
 emulator/driver limitation, not a ForgeKit bug. Use a physical device, or
 boot the emulator with `-gpu swiftshader_indirect` (software Vulkan; slower
 but correct).
+
+### iOS Simulator cannot render (vello 0.9 / wgpu 29)
+
+The iOS Simulator's GPU only exposes the Apple2 Metal feature family, which
+lacks `wgpu::DownlevelFlags::INDIRECT_EXECUTION` — a flag vello 0.9's
+renderer unconditionally requires for its working buffers. This is a
+wgpu-hal-29/vello-0.9 limitation, not fixable under the workspace's version
+pin (see *Version-Pin Policy*). `forgekit-render` detects the missing flag
+up front and fails fast with a clear diagnostic instead of letting vello
+panic every frame; `forgekit run` on a simulator still builds, installs, and
+launches, but the app window stays black and the console logs the adapter
+diagnostic. **Physical iOS devices are unaffected** (Apple7+ GPUs expose the
+flag; verified rendering on an iPhone 13 mini) — this is a simulator-only
+gap, not an iOS-wide one. Use a physical device for a pixel-accurate check
+until a future wgpu/vello upgrade closes the gap.

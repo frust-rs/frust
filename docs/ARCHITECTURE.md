@@ -20,8 +20,10 @@ consumed by app code via the `forgekit` facade crate, and example apps under
 | `forgekit-widgets` | The baseline widget set (currently `Text`/`TextView`) built on `forgekit-core` + `forgekit-text`. |
 | `forgekit-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root, GPU surface, and text context for `cargo run`-based development. Compiled only for non-Android targets. |
 | `forgekit-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. |
-| `forgekit` | Facade crate: the public app-author API (`App`, `View`, the widget vocabulary, the re-exported `android_app!` macro) that composes the crates above into the spec's declarative call shape. Depends on `forgekit-shell-android` unconditionally and on `forgekit-shell-desktop` only for non-Android targets; `App::run` (the desktop preview loop) is likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI. |
-| `forgekit-cli` | Standalone `forgekit` binary: project scaffolding (including a full Gradle/Kotlin Android project template rendered into `<app>/android/`), environment doctor, device discovery, and the `forgekit run` drive pipeline. Depends on none of the framework crates above. |
+| `forgekit-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size` FFI-boundary helpers. Depends on `forgekit-core`/`forgekit-scene`/`forgekit-text` only — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. |
+| `forgekit-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `forgekit_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `forgekit-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. |
+| `forgekit` | Facade crate: the public app-author API (`App`, `View`, the widget vocabulary, the re-exported `android_app!`/`ios_app!` macros) that composes the crates above into the spec's declarative call shape. Depends on `forgekit-shell-android` and `forgekit-shell-ios` unconditionally, and on `forgekit-shell-desktop` only for non-Android targets; `App::run` (the desktop preview loop) is likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
+| `forgekit-cli` | Standalone `forgekit` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `forgekit run` drive pipeline for both platforms. Depends on none of the framework crates above. |
 
 ## Layer Dependencies
 
@@ -31,9 +33,11 @@ forgekit-scene  (no vello/wgpu — kurbo + peniko only)
     ├── forgekit-render        (vello/wgpu — consumes Scene)
     └── forgekit-text          (parley — consumes/produces GlyphRun, no vello/wgpu)
 forgekit-widgets       = core + scene + text
+forgekit-shell-common  = core + scene + text                     (platform-agnostic; no jni/ndk/winit, no unsafe)
 forgekit-shell-desktop = core + scene + render + text + winit    (non-Android integration point)
-forgekit-shell-android = core + scene + render + text + jni/ndk  (Android integration point; JNI FFI)
-forgekit               = core + widgets + shell-android (always) + shell-desktop (non-Android only)
+forgekit-shell-android = core + scene + render + text + shell-common + jni/ndk  (Android integration point; JNI FFI)
+forgekit-shell-ios     = core + scene + render + text + shell-common           (iOS integration point; C-ABI FFI)
+forgekit  = core + widgets + shell-android (always) + shell-ios (always) + shell-desktop (non-Android only)
 
 forgekit-cli    (independent binary: clap/anyhow/serde/minijinja/include_dir/thiserror only)
 ```
@@ -42,9 +46,9 @@ forgekit-cli    (independent binary: clap/anyhow/serde/minijinja/include_dir/thi
 APIs expose only `kurbo` (geometry) and `peniko` (brushes/fonts) types —
 `vello`/`wgpu` types are forbidden there so the GPU backend stays swappable.
 `vello`/`wgpu` types are confined to `forgekit-render`, surfacing at the
-seams `SurfaceRenderer::on_surface_created`/`on_surface_created_from_android_window`
-(surface creation) and `encode_scene` (returns a `vello::Scene` for shells
-that drive their own renderer).
+seams `SurfaceRenderer::on_surface_created`/`on_surface_created_from_android_window`/
+`on_surface_created_from_metal_layer` (surface creation) and `encode_scene`
+(returns a `vello::Scene` for shells that drive their own renderer).
 
 `forgekit-cli` has no compile-time dependency on the rendering stack; it is a
 separate tool that generates and inspects ForgeKit projects, not a consumer
@@ -77,10 +81,10 @@ of the framework.
    `vello::Scene` and presented to the window surface by `SurfaceRenderer`,
    which is the spec §8.1 surface lifecycle state machine
    (`SurfacePhase::NoSurface/SurfaceReady/SurfaceLost`,
-   `FrameOutcome::Rendered/Skipped/Redraw/SurfaceLost`) shared by the desktop
-   and Android shells: a surface can be destroyed and recreated at any time
-   (window close, or Android rotation/backgrounding), and rendering is a
-   no-op outside `SurfaceReady`.
+   `FrameOutcome::Rendered/Skipped/Redraw/SurfaceLost`) shared by every
+   shell: a surface can be destroyed and recreated at any time (window
+   close, or Android rotation/backgrounding), and rendering is a no-op
+   outside `SurfaceReady`.
 
 **Android frame pipeline:** the same rebuild/layout/paint pipeline runs
 inside JNI callbacks (`forgekit-shell-android`) driven by Kotlin's
@@ -88,23 +92,44 @@ inside JNI callbacks (`forgekit-shell-android`) driven by Kotlin's
 `nativeOnFrame` drives one rebuild→layout→paint→render pass per posted
 frame, and `nativeOnSurfaceChanged`/`nativeOnSurfaceDestroyed` drive the same
 `SurfaceRenderer` state machine as the desktop shell's resize/suspend events.
+On rotation/surface-config changes Android recreates the surface (`surfaceChanged`
+tears down and calls `on_surface_created_from_android_window` again).
+
+**iOS frame pipeline:** `forgekit-shell-ios` is driven by the generated
+Swift app instead of an event loop: a UIKit `CADisplayLink` tick calls the
+`forgekit_render_frame` C export once per frame, which runs the same
+rebuild→layout→paint→render pass. Unlike Android, rotation/bounds changes
+call `forgekit_resize` to resize the existing `SurfaceRenderer` surface in
+place (`on_surface_changed`) rather than recreate it — the `CAMetalLayer`
+Swift owns survives the whole app lifetime, so there is no destroy/recreate
+cycle. `forgekit_pause`/`forgekit_resume` (wired to UIKit's resign/become-active
+notifications) gate `forgekit_render_frame` into a no-op while backgrounded,
+since Metal command submission from a suspended app can get the process
+killed.
 
 **CLI flow:** `Cli` (clap) parses into a `Command`, dispatched to a
 `commands::*` handler. `create` renders a manifest-listed template tree
 (`templates/app/`, embedded at compile time, including a full Gradle/Kotlin
-Android project under `android.tmpl/`) against a `TemplateContext` — each
-manifest entry is content-rendered (`.tmpl`), copied verbatim
-(`.copy.tmpl`), or copied as-is, and path segments matching context keys are
-expanded (e.g. an org id into nested directories). `doctor` runs a fixed set
-of `Validator`s and `devices` runs a fixed set of `DeviceDiscovery`
-implementations, both against a shared `DoctorCtx`/`ProcessRunner` — no
-handler ever shells out directly. `run`'s `android_run` module drives a
-device-selected Android build: a `BuildInfo` funnel (mode/flavor/`--define`s,
-currently debug-only) gates the pipeline — preflight (Rust target, cargo-ndk,
-JDK 17+, adb) → `./gradlew assembleDebug` (which invokes `cargo ndk` to build
-the Rust `.so`) → `adb install`/`launch` → a pid-scoped `logcat` stream until
-Ctrl-C. With no Android device selected, `run` falls back to a streamed
-`cargo run` (desktop preview).
+Android project under `android.tmpl/` and a full Xcode/Swift project under
+`ios.tmpl/`) against a `TemplateContext` — each manifest entry is
+content-rendered (`.tmpl`), copied verbatim (`.copy.tmpl`), or copied as-is,
+and path segments matching context keys are expanded (e.g. an org id into
+nested directories). `doctor` runs a fixed set of `Validator`s and `devices`
+runs a fixed set of `DeviceDiscovery` implementations, both against a shared
+`DoctorCtx`/`ProcessRunner` — no handler ever shells out directly. `run`
+dispatches on the selected device's platform/kind: `android_run` drives a
+`BuildInfo`-gated (mode/flavor/`--define`s, currently debug-only) Android
+build — preflight (Rust target, cargo-ndk, JDK 17+, adb) →
+`./gradlew assembleDebug` (invokes `cargo ndk` to build the Rust `.so`) →
+`adb install`/`launch` → a pid-scoped `logcat` stream until Ctrl-C. `ios_run`
+drives the iOS Simulator equivalent: preflight (Xcode, Rust sim target, a
+booted simulator) → `xcodebuild build` (its run-script build phase invokes
+`cargo build` for the simulator/device triple to produce the Rust staticlib)
+→ `simctl install` → `simctl launch --console-pty` (streamed) until Ctrl-C,
+with a best-effort `simctl terminate` cleanup. A physical iOS device is not
+yet driven by `run` — it bails with a Phase 5 (signing pipeline) sentinel.
+With no device selected, `run` falls back to a streamed `cargo run` (desktop
+preview).
 
 ## Key Types
 
@@ -117,9 +142,10 @@ Ctrl-C. With no Android device selected, `run` falls back to a streamed
 | `Scene` / `SceneBuilder` / `Command` | Layer 3 vector display list — the widget/GPU seam. |
 | `GlyphRun` | Shaped-glyph carrier from `forgekit-text` into the scene. |
 | `TextContext` / `TextStyle` / `TextLayout` | Parley-backed text shaping surface. |
-| `RenderContext` / `SurfaceRenderer` | `RenderContext` owns the wgpu instance/device pool; `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation. |
+| `RenderContext` / `SurfaceRenderer` | `RenderContext` owns the wgpu `Instance` and lazily creates/holds the logical `wgpu::Device` itself (adapter-derived limits, not a thin `vello::util` wrapper) so it can request the real adapter limits vello's own device pool cannot; `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation. |
 | `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed Android JNI exports; the sole Android app entry point. |
-| `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines); drives both the (unimplemented) `build` command and `run`'s Android pipeline. |
+| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`forgekit-shell-ios`) is the opaque native handle behind the six `forgekit_*` C exports, mirroring `AndroidAppHandle` (no window field — the `CAMetalLayer` is Swift-owned; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports; the sole iOS app entry point. |
+| `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines); drives both the (unimplemented) `build` command and `run`'s Android/iOS pipelines. |
 | `ProcessRunner` | Seam for every external tool invocation in the CLI, including streaming invocations (`run_streaming`) for long-running processes like `gradlew`/`logcat`; fakeable in tests. |
 | `Validator` / `DeviceDiscovery` | Pluggable `doctor`/`devices` checks, each independent and non-fatal on failure. |
 | `TemplateContext` | Render/path substitution variables for `forgekit create`'s scaffold. |
