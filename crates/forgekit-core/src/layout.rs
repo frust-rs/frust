@@ -29,12 +29,22 @@ impl BoxConstraints {
     ///
     /// Both bounds are clamped to be non-negative. If `max` is smaller than
     /// `min` on either axis (an inverted/inconsistent input), `max` is
-    /// widened up to `min` on that axis — `min` is authoritative, matching
-    /// Flutter's `BoxConstraints` semantics — so the resulting constraints
-    /// always satisfy `min <= max`.
+    /// widened up to `min` on that axis — `min` is authoritative — so the
+    /// resulting constraints always satisfy `min <= max`. Inverted input
+    /// usually indicates an upstream layout bug (e.g. padding subtraction
+    /// underflow), so debug builds print a diagnostic when this correction
+    /// fires; release builds correct silently.
     pub fn new(min: Size, max: Size) -> Self {
         let min = non_negative(min);
         let max = non_negative(max);
+        #[cfg(debug_assertions)]
+        if max.width < min.width || max.height < min.height {
+            eprintln!(
+                "forgekit-core: BoxConstraints::new received inverted bounds \
+                 (min {min:?} > max {max:?}); widening max to min — likely an \
+                 upstream layout bug"
+            );
+        }
         let max = Size::new(max.width.max(min.width), max.height.max(min.height));
         Self { min, max }
     }
