@@ -42,6 +42,22 @@ pub trait ProcessRunner {
     ) -> Result<Output>;
 }
 
+/// Strips a trailing `\n` (and a preceding `\r`, for CRLF-terminated
+/// output) from a `read_until(b'\n', ..)`-read line, then lossy-decodes the
+/// remaining bytes to a `String` — mirrors [`RealProcessRunner::run`]'s
+/// `String::from_utf8_lossy` behavior so `run_streaming` never aborts on
+/// non-UTF-8 byte sequences (e.g. from `logcat`/`gradlew`) the way
+/// `BufRead::lines()`'s `io::Error` on invalid UTF-8 would.
+fn decode_stream_line(mut raw: &[u8]) -> String {
+    if raw.last() == Some(&b'\n') {
+        raw = &raw[..raw.len() - 1];
+        if raw.last() == Some(&b'\r') {
+            raw = &raw[..raw.len() - 1];
+        }
+    }
+    String::from_utf8_lossy(raw).into_owned()
+}
+
 /// Shells out for real via [`std::process::Command`].
 pub struct RealProcessRunner;
 
@@ -87,18 +103,29 @@ impl ProcessRunner for RealProcessRunner {
 
         // Drain stderr on a background thread so a child that fills its
         // stderr pipe while we're blocked reading stdout can't deadlock us.
+        // Read raw bytes to EOF and lossy-decode once, rather than
+        // `read_to_string`, which silently truncates on invalid UTF-8.
         let stderr_handle = child.stderr.take().map(|mut stderr| {
             std::thread::spawn(move || {
-                let mut buf = String::new();
-                let _ = stderr.read_to_string(&mut buf);
-                buf
+                let mut buf = Vec::new();
+                let _ = stderr.read_to_end(&mut buf);
+                String::from_utf8_lossy(&buf).into_owned()
             })
         });
 
         let mut stdout_lines = Vec::new();
         if let Some(stdout) = child.stdout.take() {
-            for line in BufReader::new(stdout).lines() {
-                let line = line.with_context(|| format!("reading stdout from `{cmd}`"))?;
+            let mut reader = BufReader::new(stdout);
+            let mut raw = Vec::new();
+            loop {
+                raw.clear();
+                let n = reader
+                    .read_until(b'\n', &mut raw)
+                    .with_context(|| format!("reading stdout from `{cmd}`"))?;
+                if n == 0 {
+                    break;
+                }
+                let line = decode_stream_line(&raw);
                 on_line(&line);
                 stdout_lines.push(line);
             }
@@ -245,6 +272,42 @@ impl ProcessRunner for FakeProcessRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_stream_line_replaces_invalid_utf8_lossily() {
+        // 0xff is never valid as a UTF-8 lead byte.
+        let raw: &[u8] = &[b'h', b'i', 0xff, b'!', b'\n'];
+        let decoded = decode_stream_line(raw);
+        assert_eq!(decoded, "hi\u{FFFD}!");
+    }
+
+    #[test]
+    fn decode_stream_line_strips_trailing_newline_and_cr() {
+        assert_eq!(decode_stream_line(b"plain\n"), "plain");
+        assert_eq!(decode_stream_line(b"crlf\r\n"), "crlf");
+        assert_eq!(decode_stream_line(b"no-newline"), "no-newline");
+    }
+
+    #[test]
+    fn run_streaming_handles_invalid_utf8_from_a_real_process() {
+        // Spawns a real child (`sh -c printf`) that writes an invalid UTF-8
+        // byte to stdout, proving `run_streaming` lossy-decodes it instead
+        // of erroring the way `BufRead::lines()` would.
+        let runner = RealProcessRunner;
+        let mut seen = Vec::new();
+        let out = runner
+            .run_streaming(
+                "/bin/sh",
+                &["-c", r"printf 'before\xffafter\n'"],
+                None,
+                &[],
+                &mut |line| seen.push(line.to_string()),
+            )
+            .unwrap();
+        assert!(out.success);
+        assert_eq!(seen, vec!["before\u{FFFD}after"]);
+        assert_eq!(out.stdout, "before\u{FFFD}after");
+    }
 
     #[test]
     fn exact_match_returns_registered_output() {

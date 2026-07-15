@@ -104,7 +104,11 @@ fn run_android(runner: &dyn ProcessRunner, device: &Device) -> Result<u8> {
         &mut on_gradle_line,
     )?;
     if !build_out.success {
-        bail!("`./gradlew assembleDebug` failed");
+        let tail = tail_lines(&build_out.stderr, 50);
+        if tail.is_empty() {
+            bail!("`./gradlew assembleDebug` failed");
+        }
+        bail!("`./gradlew assembleDebug` failed:\n{tail}");
     }
     println!(
         "Build finished in {:.1}s.",
@@ -153,4 +157,43 @@ fn run_android(runner: &dyn ProcessRunner, device: &Device) -> Result<u8> {
     android_run::adb::stream_logcat(runner, &device.id, &pid, &mut on_log_line)?;
 
     Ok(0)
+}
+
+/// Returns the last `n` non-empty lines of `s.trim()`, joined by `\n`. Used
+/// to surface a bounded tail of `gradlew`'s buffered stderr in the failure
+/// message instead of the caller having to scroll past the full log.
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.trim().lines().filter(|line| !line.is_empty()).collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tail_lines_short_input_returns_all_lines() {
+        let input = "line one\nline two\nline three";
+        assert_eq!(tail_lines(input, 50), "line one\nline two\nline three");
+    }
+
+    #[test]
+    fn tail_lines_long_input_returns_last_n_lines() {
+        let input = (1..=100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail = tail_lines(&input, 50);
+        let tail_lines_vec: Vec<&str> = tail.lines().collect();
+        assert_eq!(tail_lines_vec.len(), 50);
+        assert_eq!(tail_lines_vec.first(), Some(&"line 51"));
+        assert_eq!(tail_lines_vec.last(), Some(&"line 100"));
+    }
+
+    #[test]
+    fn tail_lines_empty_input_returns_empty_string() {
+        assert_eq!(tail_lines("", 50), "");
+        assert_eq!(tail_lines("   \n\n  ", 50), "");
+    }
 }
