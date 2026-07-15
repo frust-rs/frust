@@ -100,9 +100,11 @@ Swift app instead of an event loop: a UIKit `CADisplayLink` tick calls the
 `forgekit_render_frame` C export once per frame, which runs the same
 rebuild→layout→paint→render pass. Unlike Android, rotation/bounds changes
 call `forgekit_resize` to resize the existing `SurfaceRenderer` surface in
-place (`on_surface_changed`) rather than recreate it — the `CAMetalLayer`
-Swift owns survives the whole app lifetime, so there is no destroy/recreate
-cycle. `forgekit_pause`/`forgekit_resume` (wired to UIKit's resign/become-active
+place (`on_surface_changed`) rather than recreate it, since the `CAMetalLayer`
+Swift owns survives the whole app lifetime. A `SurfaceLost` surface is
+recoverable rather than terminal: the handle retains the layer pointer, and
+the next `forgekit_render_frame`/`forgekit_resize` call recreates the surface
+from it before proceeding. `forgekit_pause`/`forgekit_resume` (wired to UIKit's resign/become-active
 notifications) gate `forgekit_render_frame` into a no-op while backgrounded,
 since Metal command submission from a suspended app can get the process
 killed.
@@ -144,7 +146,7 @@ preview).
 | `TextContext` / `TextStyle` / `TextLayout` | Parley-backed text shaping surface. |
 | `RenderContext` / `SurfaceRenderer` | `RenderContext` owns the wgpu `Instance` and lazily creates/holds the logical `wgpu::Device` itself (adapter-derived limits, not a thin `vello::util` wrapper) so it can request the real adapter limits vello's own device pool cannot; `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation. |
 | `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed Android JNI exports; the sole Android app entry point. |
-| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`forgekit-shell-ios`) is the opaque native handle behind the six `forgekit_*` C exports, mirroring `AndroidAppHandle` (no window field — the `CAMetalLayer` is Swift-owned; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports; the sole iOS app entry point. |
+| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`forgekit-shell-ios`) is the opaque native handle behind the six `forgekit_*` C exports, mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `forgekit_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports; the sole iOS app entry point. |
 | `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines); drives both the (unimplemented) `build` command and `run`'s Android/iOS pipelines. |
 | `ProcessRunner` | Seam for every external tool invocation in the CLI, including streaming invocations (`run_streaming`) for long-running processes like `gradlew`/`logcat`; fakeable in tests. |
 | `Validator` / `DeviceDiscovery` | Pluggable `doctor`/`devices` checks, each independent and non-fatal on failure. |
