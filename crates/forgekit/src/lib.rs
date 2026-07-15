@@ -30,6 +30,12 @@ pub use forgekit_widgets::{TextView, text};
 // inert on desktop.
 pub use forgekit_shell_android::android_app;
 
+// Re-export the iOS C-ABI-bridge macro so generated apps write
+// `forgekit::ios_app!(AppState, app_logic)` (spec §10.2). Unlike `android_app!`,
+// the invocation is unconditional — the macro's generated `forgekit_*` exports
+// are each `#[cfg(target_os = "ios")]`, so it is inert off-iOS.
+pub use forgekit_shell_ios::ios_app;
+
 /// A ForgeKit application: the app state plus the `app_logic` function that maps
 /// it to a view tree (spec §5).
 ///

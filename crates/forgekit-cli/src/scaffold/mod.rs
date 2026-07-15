@@ -238,10 +238,11 @@ mod tests {
 
         let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
         assert!(cargo_toml.contains("my_app"), "{cargo_toml}");
-        // The app crate builds both the Android `cdylib` (JNI bridge) and an
-        // `rlib` for the desktop preview binary (task 24).
+        // The app crate builds the Android `cdylib` (JNI bridge), the iOS
+        // `staticlib` (C-ABI bridge, task 33), and an `rlib` for the desktop
+        // preview binary (task 24).
         assert!(
-            cargo_toml.contains("crate-type = [\"cdylib\", \"rlib\"]"),
+            cargo_toml.contains("crate-type = [\"cdylib\", \"staticlib\", \"rlib\"]"),
             "{cargo_toml}"
         );
         let forgekit_toml = fs::read_to_string(dest.join("forgekit.toml")).unwrap();
@@ -254,6 +255,13 @@ mod tests {
         assert!(
             lib_rs.contains("#[cfg(target_os = \"android\")]")
                 && lib_rs.contains("forgekit::android_app!(AppState, app_logic)"),
+            "{lib_rs}"
+        );
+        // The iOS C-ABI entry point is stamped out by the re-exported `ios_app!`
+        // macro, invoked unconditionally (the macro self-gates its exports to the
+        // iOS target, task 33).
+        assert!(
+            lib_rs.contains("forgekit::ios_app!(AppState, app_logic)"),
             "{lib_rs}"
         );
         assert!(dest.join("src/main.rs").exists());

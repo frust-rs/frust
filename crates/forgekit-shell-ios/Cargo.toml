@@ -1,0 +1,36 @@
+[package]
+name = "forgekit-shell-ios"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Unconditional: the `ios_app!` macro is defined on every target (its generated
+# `forgekit_*` exports are `#[cfg(target_os = "ios")]`, inert elsewhere), and the
+# crate's minimal stderr logger uses `log`, so `log` builds everywhere.
+log = { workspace = true }
+
+# The C-ABI runtime and the whole render/text stack are only ever compiled for an
+# iOS target; on the host this crate is (almost) empty but the macro and the pure
+# helpers still compile so `cargo test --workspace` stays green.
+[target.'cfg(target_os = "ios")'.dependencies]
+# Platform-agnostic shell plumbing (AppTree erasure + guard/sanitize_scale/
+# logical_size). iOS-gated because nothing off-iOS references it: the `ios_app!`
+# re-exports and the FFI runtime that consume it are all
+# `#[cfg(target_os = "ios")]`.
+forgekit-shell-common = { workspace = true }
+forgekit-core = { workspace = true }
+forgekit-scene = { workspace = true }
+forgekit-render = { workspace = true }
+forgekit-text = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+pollster = { workspace = true }
+anyhow = { workspace = true }
+
+# Only the macro-expansion smoke test (`ffi_glue::macro_expansion`) needs a
+# concrete `View` to feed `ios_app!`; the runtime itself stays widget-agnostic
+# (apps bring their own view types through the macro's generics).
+[target.'cfg(target_os = "ios")'.dev-dependencies]
+forgekit-widgets = { workspace = true }

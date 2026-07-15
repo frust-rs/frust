@@ -28,3 +28,10 @@ pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<> {
 // desktop, where `main.rs` drives the app instead.
 #[cfg(target_os = "android")]
 forgekit::android_app!(AppState, app_logic);
+
+// iOS entry point: stamps out the fixed `forgekit_*` C-ABI exports the generated
+// Swift app calls (spec §10.2), bound to this app's `AppState`/`app_logic`. The
+// invocation is unconditional — the macro gates its own generated exports on
+// `target_os = "ios"`, so this expands to nothing on desktop/Android where
+// `main.rs`/`android_app!` drive the app instead.
+forgekit::ios_app!(AppState, app_logic);

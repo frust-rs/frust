@@ -48,4 +48,5 @@ forgekit-widgets = { path = "crates/forgekit-widgets" }
 forgekit-shell-desktop = { path = "crates/forgekit-shell-desktop" }
 forgekit-shell-common = { path = "crates/forgekit-shell-common" }
 forgekit-shell-android = { path = "crates/forgekit-shell-android" }
+forgekit-shell-ios = { path = "crates/forgekit-shell-ios" }
 forgekit = { path = "crates/forgekit" }
