@@ -120,8 +120,10 @@ impl SurfaceRenderer {
     /// `surfaceCreated`), transitioning to [`SurfacePhase::SurfaceReady`].
     ///
     /// Compiled unconditionally so a host `cargo check --target
-    /// aarch64-linux-android` covers it. This is the one unsafe entry point in
-    /// the framework; the raw-pointer handling is isolated in
+    /// aarch64-linux-android` covers it. This is one of the framework's
+    /// sanctioned unsafe entry points (see also
+    /// [`on_surface_created_from_metal_layer`](Self::on_surface_created_from_metal_layer));
+    /// the raw-pointer handling is isolated in
     /// [`crate::lifecycle::create_android_surface`].
     ///
     /// # Safety
@@ -151,6 +153,45 @@ impl SurfaceRenderer {
             )
             .await
             .map_err(|e| anyhow!("forgekit-render: failed to configure Android surface: {e}"))?;
+        self.install_surface(ctx, surface)
+    }
+
+    /// Brings the surface online from a raw `CAMetalLayer*` pointer (iOS/macOS
+    /// Swift shell surface creation), transitioning to
+    /// [`SurfacePhase::SurfaceReady`].
+    ///
+    /// Only compiled on Apple targets (mirrors [`crate::lifecycle::create_metal_surface`]'s
+    /// gating): the raw-pointer handling is isolated there, one of the
+    /// framework's sanctioned unsafe boundaries alongside
+    /// [`on_surface_created_from_android_window`](Self::on_surface_created_from_android_window).
+    ///
+    /// Presentation uses `Fifo` — the only present mode guaranteed on
+    /// iOS/Metal (spec §8; vsync-equivalent, matching the desktop/Android
+    /// `AutoVsync` paths in spirit).
+    ///
+    /// # Safety
+    ///
+    /// `layer_ptr` must be a valid, live `CAMetalLayer*` that outlives the
+    /// surface (and all its `SurfaceTexture`s). See
+    /// [`crate::lifecycle::create_metal_surface`] for the full contract.
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    pub async unsafe fn on_surface_created_from_metal_layer(
+        &mut self,
+        ctx: &mut RenderContext,
+        layer_ptr: *mut c_void,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        // SAFETY: forwarded to the caller's `on_surface_created_from_metal_layer`
+        // contract — `layer_ptr` is a valid, live CAMetalLayer* outliving the
+        // surface.
+        let raw =
+            unsafe { crate::lifecycle::create_metal_surface(&ctx.inner.instance, layer_ptr) }?;
+        let surface = ctx
+            .inner
+            .create_render_surface(raw, width.max(1), height.max(1), wgpu::PresentMode::Fifo)
+            .await
+            .map_err(|e| anyhow!("forgekit-render: failed to configure Metal surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 

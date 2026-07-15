@@ -41,6 +41,50 @@ fn effective_instance_flags(flags: wgpu::InstanceFlags, is_emulator: bool) -> wg
     }
 }
 
+/// Given a base `wgpu::Limits` and whether the process is currently running
+/// on an iOS Simulator, decides the `Limits` a device request should
+/// actually use.
+///
+/// Mitigates [wgpu #7057](https://github.com/gfx-rs/wgpu/issues/7057): the
+/// iOS Simulator is macOS-Metal-backed and requires 256-byte
+/// `min_uniform_buffer_offset_alignment`, but wgpu 29's Metal backend assumes
+/// the (lower) iOS-device value, which trips Metal API validation on the
+/// simulator. Physical iOS devices are unaffected and pass `base` through
+/// unchanged; a `base` whose alignment is already `>= 256` is left alone
+/// (never lowered).
+///
+/// Pure decision logic, mirroring [`effective_instance_flags`]'s split of
+/// pure decision vs. platform lookup — intended call site: `#[cfg(all(target_os
+/// = "ios", target_abi = "sim"))] effective_limits(wgpu::Limits::default(),
+/// true)` feeding a device request's `required_limits`.
+///
+/// **Known limitation — not yet wired to a live call site:** as of `vello`
+/// 0.9.0, the device request this is meant to feed
+/// (`vello::util::RenderContext::new_device`) is a private method that
+/// hardcodes `wgpu::Limits::default()`; there is currently no public hook in
+/// `vello`'s `RenderContext` to supply custom `required_limits` for the
+/// device it creates internally. Wiring this in for real requires either an
+/// upstream `vello` API addition or forgekit-render taking over adapter/device
+/// creation itself (a larger change out of scope here). Kept
+/// `#[allow(dead_code)]` (rather than a `cfg`-conditional one, which would
+/// still warn since no call site exists on any target) until one of those
+/// lands; unit-tested below in the meantime.
+#[allow(dead_code)]
+fn effective_limits(base: wgpu::Limits, is_ios_simulator: bool) -> wgpu::Limits {
+    const IOS_SIMULATOR_MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT: u32 = 256;
+    if is_ios_simulator
+        && base.min_uniform_buffer_offset_alignment
+            < IOS_SIMULATOR_MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT
+    {
+        wgpu::Limits {
+            min_uniform_buffer_offset_alignment: IOS_SIMULATOR_MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT,
+            ..base
+        }
+    } else {
+        base
+    }
+}
+
 /// Detects whether the current process is running on an Android emulator
 /// (goldfish/ranchu), as opposed to a physical device, via the standard
 /// `ro.kernel.qemu` system property (`"1"` on emulators, unset/absent on
@@ -120,5 +164,38 @@ mod tests {
     fn emulator_with_no_debug_flags_stays_empty() {
         let flags = effective_instance_flags(wgpu::InstanceFlags::empty(), true);
         assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn ios_simulator_bumps_alignment_to_256() {
+        let base = wgpu::Limits::default();
+        let limits = effective_limits(base.clone(), true);
+        assert_eq!(limits.min_uniform_buffer_offset_alignment, 256);
+        // Nothing else about the base limits should change.
+        assert_eq!(
+            wgpu::Limits {
+                min_uniform_buffer_offset_alignment: base.min_uniform_buffer_offset_alignment,
+                ..limits.clone()
+            },
+            base
+        );
+    }
+
+    #[test]
+    fn non_simulator_leaves_limits_untouched() {
+        let base = wgpu::Limits::default();
+        let limits = effective_limits(base.clone(), false);
+        assert_eq!(limits, base);
+    }
+
+    #[test]
+    fn base_already_at_or_above_256_is_not_lowered() {
+        let base = wgpu::Limits {
+            min_uniform_buffer_offset_alignment: 512,
+            ..wgpu::Limits::default()
+        };
+        let limits = effective_limits(base.clone(), true);
+        assert_eq!(limits.min_uniform_buffer_offset_alignment, 512);
+        assert_eq!(limits, base);
     }
 }

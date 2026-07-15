@@ -161,9 +161,11 @@ pub enum FrameOutcome {
 
 /// Builds a `wgpu::Surface` from a raw `ANativeWindow` pointer.
 ///
-/// This is the single permitted `unsafe` boundary in the framework: turning a
+/// This is one of the framework's sanctioned `unsafe` boundaries: turning a
 /// caller-owned raw pointer into a GPU surface. It is deliberately isolated in
-/// one function so the safety contract lives in exactly one place.
+/// one function so the safety contract lives in exactly one place. See also
+/// [`create_metal_surface`] (the iOS/macOS counterpart) and
+/// `forgekit-shell-android`'s `jni_glue` module.
 ///
 /// # Safety
 ///
@@ -195,6 +197,44 @@ pub(crate) unsafe fn create_android_surface(
     // valid, acquired `ANativeWindow*` that outlives the returned surface.
     let surface = unsafe { instance.create_surface_unsafe(target) }
         .map_err(|e| anyhow!("forgekit-render: failed to create Android surface: {e}"))?;
+    Ok(surface)
+}
+
+/// Builds a `wgpu::Surface` from a raw `CAMetalLayer*` pointer.
+///
+/// This is one of the framework's sanctioned `unsafe` boundaries (see
+/// [`create_android_surface`] for the sibling Android path): turning a
+/// caller-owned raw pointer into a GPU surface. It is deliberately isolated in
+/// one function so the safety contract lives in exactly one place.
+///
+/// # Safety
+///
+/// `layer_ptr` must be a valid, live `CAMetalLayer*` that the caller (the
+/// Swift shell) owns and that **outlives** the returned [`wgpu::Surface`] and
+/// every `SurfaceTexture` acquired from it — enforced by the
+/// `forgekit_destroy`-before-view-teardown ordering in the generated app. The
+/// caller must drop the surface (and any outstanding textures) before the
+/// layer/view is torn down.
+///
+/// Only compiled on Apple targets: `wgpu::SurfaceTargetUnsafe::CoreAnimationLayer`
+/// is itself Metal-feature-gated in `wgpu` (available whenever `target_vendor
+/// = "apple"`), so this function is gated the same way rather than being
+/// compiled unconditionally like [`create_android_surface`] (whose raw-handle
+/// types are host-available on every platform).
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+pub(crate) unsafe fn create_metal_surface(
+    instance: &wgpu::Instance,
+    layer_ptr: *mut c_void,
+) -> Result<wgpu::Surface<'static>> {
+    if layer_ptr.is_null() {
+        return Err(anyhow!("forgekit-render: null CAMetalLayer pointer"));
+    }
+    let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr);
+
+    // SAFETY: upheld by this function's own safety contract — `layer_ptr` is a
+    // valid, live `CAMetalLayer*` that outlives the returned surface.
+    let surface = unsafe { instance.create_surface_unsafe(target) }
+        .map_err(|e| anyhow!("forgekit-render: failed to create Metal surface: {e}"))?;
     Ok(surface)
 }
 
