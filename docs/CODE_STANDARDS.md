@@ -116,6 +116,43 @@ returning a `vello::*`/`wgpu::*` type.
 this is what lets the GPU backend be swapped later without touching widget
 or text code.
 
+## Interaction Semantics
+
+Conventions for `Widget::event` implementations (spec §9), followed by every
+interactive widget in `forgekit-widgets`:
+
+- **Fire on up-inside, not down.** A press captures the pointer on `Down` and
+  tracks a `pressed` visual on `Move`, but the callback fires only on `Up`
+  and only if the release lands inside the widget's bounds; `Cancel`
+  (platform gesture steal) clears the pressed state without firing:
+
+  ```rust
+  PointerPhase::Up => {
+      if inside(p.position, ctx.size()) {
+          (self.on_press)(ctx);
+      }
+      self.pressed = false;
+  }
+  ```
+
+- **Controlled components never self-mutate.** `Checkbox`/`Slider` report the
+  *requested* value through `on_toggle`/`on_change` and leave `checked`/
+  `value` untouched until the next `rebuild` feeds the app-confirmed value
+  back down — the widget is not its own source of truth. Never flip
+  `self.checked` (or similar) inline in an event handler.
+
+- **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`,
+  `MOUSE_SLOP`), scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`,
+  `FLING_STOP`, `VELOCITY_WINDOW_MS`), and `VelocityTracker` live in
+  `forgekit-core::input`; widgets import them rather than hardcoding a local
+  threshold, so tuning changes in one place and stays consistent everywhere.
+
+- **Events are logical-coordinate by the time they cross `AppTree`.** Every
+  platform boundary (winit, JNI `nativeOnTouch`, the C `forgekit_dispatch_touch`)
+  converts to density-independent logical pixels before building an
+  `InputEvent` — widget/container code never divides by scale factor; only
+  the shell's FFI-boundary helpers do.
+
 ## Testing Patterns
 
 - **Fixture-driven tests for parsers/validators**: register canned

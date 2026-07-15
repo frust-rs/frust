@@ -32,10 +32,18 @@ manifest/lockfile drift is caught (see *Version-Pin Policy*).
 ```bash
 # Desktop preview: opens the example app in a native window.
 cargo run -p hello
+
+# Interactive demo: counter with buttons, a checkbox, a slider, and a
+# scrolling list — exercises the full event pipeline (see
+# docs/ARCHITECTURE.md#data-flow).
+cargo run -p counter
 ```
 
-`cargo run -p hello` is the manual visual gate for rendering changes — there
-is no automated pixel-diff test yet, so a person must look at the window.
+`cargo run -p hello`/`cargo run -p counter` are the manual visual gates for
+rendering and interaction changes respectively — there is no automated
+pixel-diff test yet, so a person must look at the window. `counter` is also
+the demo `forgekit create` scaffolds (`templates/app/src/lib.rs.tmpl`), so
+scaffold changes should be checked against both.
 
 In a generated project, `forgekit run [-d <device>]` builds and launches on a
 connected Android device/emulator (preflight → `gradlew assembleDebug`
