@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 forgekit-core = { workspace = true }
 forgekit-widgets = { workspace = true }
+forgekit-reactive = { workspace = true }
 # Depended on unconditionally so the re-exported `android_app!` macro is always
 # available; the crate compiles to (almost) nothing off-Android.
 forgekit-shell-android = { workspace = true }

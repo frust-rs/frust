@@ -30,6 +30,7 @@ forgekit-shell-common = { workspace = true }
 forgekit-core = { workspace = true }
 forgekit-scene = { workspace = true }
 forgekit-text = { workspace = true }
+forgekit-reactive = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 pollster = { workspace = true }
