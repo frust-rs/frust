@@ -14,16 +14,18 @@
 //! `Box::into_raw`/`from_raw` for the opaque handle's lifetime, and reconstituting
 //! the raw handle pointer as a `&mut`.
 
-use std::ffi::c_void;
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::Write;
 use std::sync::Once;
 
 use anyhow::{Context, Result, bail};
 
+use forgekit_core::event::{EditingState, ImeState};
 use forgekit_render::{RenderContext, SurfaceRenderer};
 use forgekit_shell_common::{AppTree, guard};
 
 use crate::app::IosAppHandle;
+use crate::ffi_support::CaretRect;
 
 /// A minimal `log::Log` writing to stderr, installed once in [`init`].
 ///
@@ -269,6 +271,132 @@ pub fn dispatch_touch(handle: *mut c_void, phase: u32, x: f32, y: f32) {
             app.dispatch_touch(touch_phase, x, y);
         }
     });
+}
+
+/// `forgekit_ime_apply`: push a whole editing state from the Swift `UITextInput`
+/// mirror into the focused widget (the mobile state-sync path — spec §9 / Phase
+/// 4B). Routed to the focused widget as an `ImeEvent::ApplyEditingState` via
+/// [`AppTree::ime_apply`].
+///
+/// `text` is the mirror's UTF-8 bytes; `sel_*`/`comp_*` are **UTF-16 code-unit**
+/// indices (the platform-native unit the `NSMutableString` mirror counts in),
+/// passed opaquely through the [`EditingState`] shell seam — the widget /
+/// `forgekit-text` converts them to Rust byte offsets at its own boundary (task
+/// 52 owns the conversion). `-1` denotes "none" for the composing region.
+///
+/// **Return-key contract:** the Swift side maps the `.done` Return key to an
+/// `insertText("\n")`, so a lone `"\n"` insertion arriving here is the submit
+/// gesture; the `TextInput` widget (task 53) treats a single-line newline insert
+/// as its `on_submit` trigger.
+pub fn ime_apply(
+    handle: *mut c_void,
+    text: *const c_char,
+    sel_base: i32,
+    sel_ext: i32,
+    comp_base: i32,
+    comp_ext: i32,
+) {
+    guard("forgekit_ime_apply", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            // SAFETY: `text` is the Swift mirror's UTF-8 C string, valid and
+            // NUL-terminated for the duration of this call (or null → empty).
+            let text = unsafe { cstr_to_string(text) };
+            let state = EditingState {
+                text,
+                selection_base: sel_base,
+                selection_extent: sel_ext,
+                composing_base: comp_base,
+                composing_extent: comp_ext,
+            };
+            let _ = app.ime_apply(state);
+        }
+    });
+}
+
+/// `forgekit_ime_state_json`: the focused field's IME surface as a heap-allocated,
+/// caller-freed JSON C string (the Swift bridge parses it to drive
+/// `becomeFirstResponder`, seed its mirror, and reconcile after each edit).
+///
+/// Shape matches the Android bridge — see [`crate::ffi_support::ime_state_json`].
+/// Returns a fresh `CString` the caller **must** release via
+/// [`string_free`]/`forgekit_string_free`; a null return (no live handle, or a
+/// text containing an interior NUL) is the "no editing state" sentinel the Swift
+/// side treats as inactive.
+pub fn ime_state_json(handle: *mut c_void) -> *mut c_char {
+    guard("forgekit_ime_state_json", std::ptr::null_mut(), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let json = match unsafe { handle_mut(handle) } {
+            Some(app) => ime_state_to_json(app.ime_state()),
+            None => ime_state_to_json(None),
+        };
+        match CString::new(json) {
+            // Hand the caller ownership of the C string; reclaimed in `string_free`.
+            Ok(cstr) => cstr.into_raw(),
+            // An interior NUL (not expected in editing text) can't cross as a C
+            // string; fall back to the "no state" sentinel rather than corrupting.
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// `forgekit_string_free`: release a C string previously returned by
+/// [`ime_state_json`]/`forgekit_ime_state_json`. Idempotent on null.
+pub fn string_free(s: *mut c_char) {
+    guard("forgekit_string_free", (), || {
+        if s.is_null() {
+            return;
+        }
+        // SAFETY: `s` was produced by `CString::into_raw` in `ime_state_json` and
+        // is reclaimed exactly once here (the Swift side calls this exactly once
+        // per non-null result, via `defer`).
+        drop(unsafe { CString::from_raw(s) });
+    });
+}
+
+/// Decode a Swift-supplied UTF-8 C string into an owned `String` (empty on null).
+///
+/// # Safety
+///
+/// When non-null, `ptr` must be a valid, NUL-terminated C string that stays live
+/// for the duration of this call. Invalid UTF-8 is replaced lossily rather than
+/// rejected (the mirror is always well-formed UTF-16 → UTF-8 in practice).
+unsafe fn cstr_to_string(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    // SAFETY: guaranteed by this fn's contract — `ptr` is a live, NUL-terminated
+    // C string for this call.
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Convert the focused widget's published [`ImeState`] (or its absence) into the
+/// bridge JSON, mapping the logical-pixel caret rect into the flat
+/// caretX/Y/W/H the Swift side expects.
+fn ime_state_to_json(state: Option<ImeState>) -> String {
+    match state {
+        Some(s) => {
+            let caret = s.caret.map(|r| CaretRect {
+                x: r.x0 as f32,
+                y: r.y0 as f32,
+                w: r.width() as f32,
+                h: r.height() as f32,
+            });
+            crate::ffi_support::ime_state_json(
+                s.active,
+                &s.editing.text,
+                s.editing.selection_base,
+                s.editing.selection_extent,
+                s.editing.composing_base,
+                s.editing.composing_extent,
+                caret,
+            )
+        }
+        // No focused field / no published surface: the inactive sentinel.
+        None => crate::ffi_support::ime_state_json(false, "", -1, -1, -1, -1, None),
+    }
 }
 
 /// `forgekit_pause`: app backgrounded — stop submitting frames (see

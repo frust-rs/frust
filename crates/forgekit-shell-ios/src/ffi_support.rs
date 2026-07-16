@@ -13,6 +13,7 @@
 //! ([`crate::ffi_glue`], [`crate::app`]) is `#[cfg(target_os = "ios")]`.
 
 use std::ffi::c_void;
+use std::fmt::Write as _;
 
 use forgekit_render::SurfacePhase;
 
@@ -112,6 +113,109 @@ pub(crate) fn should_recreate_surface(
     matches!(phase, SurfacePhase::SurfaceLost) && !paused && failed_attempts < MAX_RECREATE_ATTEMPTS
 }
 
+/// The focused field's caret rectangle in **logical** pixels (view-local), the
+/// geometry the Swift `UITextInput` bridge approximates `caretRect(for:)` /
+/// `firstRect(for:)` from. Logical points equal view points on iOS (touch
+/// coordinates cross the FFI as `touch.location(in:)`, already logical), so the
+/// Swift side consumes these without any scale conversion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CaretRect {
+    /// Left edge (logical px).
+    pub x: f32,
+    /// Top edge (logical px).
+    pub y: f32,
+    /// Width (logical px).
+    pub w: f32,
+    /// Height (logical px).
+    pub h: f32,
+}
+
+/// Serialize the focused field's IME surface into the Flutter-canonical JSON the
+/// Swift `UITextInput` bridge consumes (the same shape the Android bridge's
+/// `nativeImeState` emits):
+///
+/// ```text
+/// {"active":bool,"text":"...","selBase":n,"selExt":n,"compBase":n,"compExt":n,
+///  "caretX":f,"caretY":f,"caretW":f,"caretH":f}
+/// ```
+///
+/// Selection/composing indices are UTF-16 code units (the platform-native unit,
+/// passed opaquely through the `EditingState` shell seam — see
+/// `forgekit_core::event::EditingState`); `-1` denotes "none". The caret is
+/// logical-pixel; an absent (or non-finite) caret serializes the four caret
+/// fields as `null`. JSON is hand-rolled (no `serde` in the shell) with a tiny
+/// escaper — see [`json_escape_into`].
+pub(crate) fn ime_state_json(
+    active: bool,
+    text: &str,
+    sel_base: i32,
+    sel_ext: i32,
+    comp_base: i32,
+    comp_ext: i32,
+    caret: Option<CaretRect>,
+) -> String {
+    let mut out = String::with_capacity(text.len() + 128);
+    out.push_str("{\"active\":");
+    out.push_str(if active { "true" } else { "false" });
+    out.push_str(",\"text\":\"");
+    json_escape_into(text, &mut out);
+    out.push_str("\",\"selBase\":");
+    let _ = write!(out, "{sel_base}");
+    out.push_str(",\"selExt\":");
+    let _ = write!(out, "{sel_ext}");
+    out.push_str(",\"compBase\":");
+    let _ = write!(out, "{comp_base}");
+    out.push_str(",\"compExt\":");
+    let _ = write!(out, "{comp_ext}");
+    let (cx, cy, cw, ch) = match caret {
+        Some(c) => (Some(c.x), Some(c.y), Some(c.w), Some(c.h)),
+        None => (None, None, None, None),
+    };
+    out.push_str(",\"caretX\":");
+    push_num_or_null(&mut out, cx);
+    out.push_str(",\"caretY\":");
+    push_num_or_null(&mut out, cy);
+    out.push_str(",\"caretW\":");
+    push_num_or_null(&mut out, cw);
+    out.push_str(",\"caretH\":");
+    push_num_or_null(&mut out, ch);
+    out.push('}');
+    out
+}
+
+/// Append `v` as a JSON number, or `null` when absent or non-finite (a NaN/inf
+/// caret must never produce invalid JSON).
+fn push_num_or_null(out: &mut String, v: Option<f32>) {
+    match v {
+        Some(f) if f.is_finite() => {
+            let _ = write!(out, "{f}");
+        }
+        _ => out.push_str("null"),
+    }
+}
+
+/// Append `s` to `out` with JSON string escaping (RFC 8259): the two mandatory
+/// escapes (`"`, `\`), the short escapes for the common control characters, and
+/// `\u00XX` for any other C0 control. Non-ASCII scalars pass through as UTF-8
+/// (valid inside a JSON string), so CJK / emoji text is emitted verbatim.
+pub(crate) fn json_escape_into(s: &str, out: &mut String) {
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +307,90 @@ mod tests {
             false,
             u8::MAX
         ));
+    }
+
+    fn escape(s: &str) -> String {
+        let mut out = String::new();
+        json_escape_into(s, &mut out);
+        out
+    }
+
+    #[test]
+    fn json_escaper_handles_quotes_and_backslashes() {
+        assert_eq!(escape(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn json_escaper_handles_control_characters() {
+        assert_eq!(escape("a\nb\tc\rd"), "a\\nb\\tc\\rd");
+        // A bare NUL / other C0 control becomes a \u00XX escape.
+        assert_eq!(escape("\u{00}\u{1f}"), "\\u0000\\u001f");
+        assert_eq!(escape("\u{08}\u{0c}"), "\\b\\f");
+    }
+
+    #[test]
+    fn json_escaper_passes_unicode_through_as_utf8() {
+        // CJK + emoji (astral) are valid inside a JSON string verbatim.
+        assert_eq!(escape("日本語😀"), "日本語😀");
+    }
+
+    #[test]
+    fn ime_json_with_caret_is_well_formed() {
+        let json = ime_state_json(
+            true,
+            "hi",
+            0,
+            2,
+            -1,
+            -1,
+            Some(CaretRect {
+                x: 4.0,
+                y: 8.0,
+                w: 2.0,
+                h: 16.0,
+            }),
+        );
+        assert_eq!(
+            json,
+            r#"{"active":true,"text":"hi","selBase":0,"selExt":2,"compBase":-1,"compExt":-1,"caretX":4,"caretY":8,"caretW":2,"caretH":16}"#
+        );
+    }
+
+    #[test]
+    fn ime_json_without_caret_emits_nulls() {
+        let json = ime_state_json(false, "", -1, -1, -1, -1, None);
+        assert_eq!(
+            json,
+            r#"{"active":false,"text":"","selBase":-1,"selExt":-1,"compBase":-1,"compExt":-1,"caretX":null,"caretY":null,"caretW":null,"caretH":null}"#
+        );
+    }
+
+    #[test]
+    fn ime_json_escapes_text_and_keeps_utf16_indices() {
+        // Text with a quote is escaped; composing indices survive verbatim.
+        let json = ime_state_json(true, "a\"b", 1, 1, 0, 3, None);
+        assert!(json.contains(r#""text":"a\"b""#));
+        assert!(json.contains(r#""compBase":0,"compExt":3"#));
+    }
+
+    #[test]
+    fn ime_json_nonfinite_caret_is_null() {
+        let json = ime_state_json(
+            true,
+            "x",
+            0,
+            0,
+            -1,
+            -1,
+            Some(CaretRect {
+                x: f32::NAN,
+                y: f32::INFINITY,
+                w: 2.0,
+                h: 10.0,
+            }),
+        );
+        // Non-finite components degrade to null rather than emitting `NaN`/`inf`
+        // (which are not valid JSON); finite ones still serialize.
+        assert!(json.contains(r#""caretX":null,"caretY":null,"caretW":2,"caretH":10"#));
     }
 }

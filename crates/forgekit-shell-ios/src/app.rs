@@ -31,7 +31,9 @@
 use std::any::Any;
 use std::ffi::c_void;
 
-use forgekit_core::event::{InputEvent, PointerButton, PointerEvent, PointerPhase};
+use forgekit_core::event::{
+    EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerPhase,
+};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
@@ -225,6 +227,24 @@ impl IosAppHandle {
             button: PointerButton::Primary,
         });
         let _ = self.app.event(&event);
+    }
+
+    /// Push a whole editing state from the platform IME mirror into the focused
+    /// widget (the mobile state-sync path — spec §9). Delegates to
+    /// [`AppTree::ime_apply`]; the `EditingState`'s selection/composing indices are
+    /// UTF-16 code units (converted to byte offsets by the widget/`forgekit-text`).
+    /// The `needs_redraw` in the returned outcome is implicit here — the
+    /// `CADisplayLink` loop already ticks the next frame every vsync — so it is
+    /// dropped (mirror of [`Self::dispatch_touch`]).
+    pub(crate) fn ime_apply(&mut self, state: EditingState) {
+        let _ = self.app.ime_apply(state);
+    }
+
+    /// The IME surface the focused widget published (editing state + caret), for
+    /// the FFI layer to serialize back to the Swift `UITextInput` bridge.
+    /// Delegates to [`AppTree::ime_state`]; `None` when nothing is focused.
+    pub(crate) fn ime_state(&self) -> Option<ImeState> {
+        self.app.ime_state()
     }
 
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop

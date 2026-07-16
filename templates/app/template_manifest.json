@@ -23,5 +23,6 @@
   "ios.tmpl/Runner/AppDelegate.swift",
   "ios.tmpl/Runner/SceneDelegate.swift",
   "ios.tmpl/Runner/ForgeKitView.swift",
-  "ios.tmpl/Runner/ForgeKitViewController.swift"
+  "ios.tmpl/Runner/ForgeKitViewController.swift",
+  "ios.tmpl/Runner/ForgeKitTextInput.swift"
 ]

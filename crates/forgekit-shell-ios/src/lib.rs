@@ -57,7 +57,9 @@ pub use forgekit_shell_common::{AppTree, new_boxed_app};
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (spec §10.2, Makepad `app_main!` precedent).
 ///
-/// Stamps out the seven `forgekit_*` symbols the generated Swift app declares,
+/// Stamps out the ten `forgekit_*` symbols the generated Swift app declares (the
+/// seven lifecycle/input exports plus the three text-input exports —
+/// `forgekit_ime_apply`, `forgekit_ime_state_json`, `forgekit_string_free`),
 /// each delegating to the non-generic runtime in [`ffi_glue`]. `forgekit_init`
 /// constructs the app's erased view tree from `$state_ty::default()` and
 /// `$app_logic` and returns an opaque handle; the rest operate on that handle.
@@ -126,6 +128,43 @@ macro_rules! ios_app {
             y: f32,
         ) {
             $crate::ffi_glue::dispatch_touch(handle, phase, x, y)
+        }
+
+        /// `forgekit_ime_apply`: push a whole editing state from the Swift
+        /// `UITextInput` mirror into the focused widget (spec §9 state-sync path).
+        ///
+        /// `text` is UTF-8; `sel_*`/`comp_*` are UTF-16 code-unit indices (`-1` =
+        /// none) — the ABI shared with the Swift `ForgeKitTextInput` mirror.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn forgekit_ime_apply(
+            handle: *mut ::core::ffi::c_void,
+            text: *const ::core::ffi::c_char,
+            sel_base: i32,
+            sel_ext: i32,
+            comp_base: i32,
+            comp_ext: i32,
+        ) {
+            $crate::ffi_glue::ime_apply(handle, text, sel_base, sel_ext, comp_base, comp_ext)
+        }
+
+        /// `forgekit_ime_state_json`: the focused field's IME surface as a
+        /// heap-allocated JSON C string the caller must release with
+        /// `forgekit_string_free`.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn forgekit_ime_state_json(
+            handle: *mut ::core::ffi::c_void,
+        ) -> *mut ::core::ffi::c_char {
+            $crate::ffi_glue::ime_state_json(handle)
+        }
+
+        /// `forgekit_string_free`: release a C string returned by
+        /// `forgekit_ime_state_json`.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn forgekit_string_free(s: *mut ::core::ffi::c_char) {
+            $crate::ffi_glue::string_free(s)
         }
 
         /// `forgekit_pause`: app backgrounded — stop submitting frames.
