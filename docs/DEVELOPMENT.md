@@ -58,18 +58,41 @@ cargo run -p notes
 # workspace, so it is run and gated from its own directory rather than by
 # `-p` from the repo root.
 (cd examples/inbox && cargo run)
+
+# Full-app demo: a team roster screen wiring a clean-signals ControllerCore
+# (load/retry/rename UseCases) to ForgeKit Components via the
+# clean-signals-forgekit glue crate — exercises the same reactive substrate
+# as `inbox` but as a complete app (search/filter, per-row rename, error
+# banner), with an Android build target below. Also a standalone package
+# (own [workspace]/Cargo.lock, excluded from the root workspace — see
+# Version-Pin Policy), so it's run and gated from its own directory. The
+# first live load intentionally fails once and retries (~200ms backoff)
+# before showing rows — expect "Loading team…" for about a second, not a
+# hang.
+(cd examples/team-demo && cargo run)
 ```
 
 `cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes`/
-`(cd examples/inbox && cargo run)` are the manual visual gates for
-rendering, interaction, text-input, and async/signals changes respectively —
-there is no automated pixel-diff test yet, so a person must look at the
-window. `notes` is also the demo `forgekit create` scaffolds
-(`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
-against it. `examples/inbox`'s own verify gate (`cd examples/inbox && cargo test` plus
-its clippy line) is its regression proof; it's chained onto the end of the
-Standard verify gate below as a separate step since it needs network access
-— see Version-Pin Policy and *Test* below.
+`(cd examples/inbox && cargo run)`/`(cd examples/team-demo && cargo run)` are
+the manual visual gates for rendering, interaction, text-input, and
+async/signals changes respectively — there is no automated pixel-diff test
+yet, so a person must look at the window. `notes` is also the demo
+`forgekit create` scaffolds (`templates/app/src/lib.rs.tmpl`), so scaffold
+changes should be checked against it. `examples/inbox`'s and
+`examples/team-demo`'s own verify gates (`cargo test` plus their clippy
+lines, run from each example's own directory) are their regression proof;
+both are chained onto the end of the Standard verify gate below as separate
+steps — see Version-Pin Policy (which also covers `team-demo`'s
+clean-signals-rs sibling-checkout requirement) and *Test* below.
+
+`examples/team-demo` additionally builds and runs on Android, from its own
+directory (its own `forgekit.toml`, package `it.f0x.team_demo`):
+
+```bash
+cd examples/team-demo
+/path/to/forgekit build apk --debug   # debug APK via Gradle + cargo-ndk
+forgekit run -d <device-id>           # build, install, launch, stream logcat
+```
 
 In a generated project, `forgekit run [-d <device>] [--release|--profile]
 [--flavor <name>]` builds and launches on a connected Android
@@ -122,13 +145,18 @@ cargo build --workspace --locked \
   && cargo clippy --workspace --all-targets -- -D warnings \
   && cargo fmt --check \
   && (cd examples/inbox && cargo test) \
-  && (cd examples/inbox && cargo clippy --all-targets -- -D warnings)   # standalone pkg: clean-signals compat gate (needs network)
+  && (cd examples/inbox && cargo clippy --all-targets -- -D warnings) \
+  && (cd examples/team-demo && cargo test) \
+  && (cd examples/team-demo && cargo clippy --all-targets -- -D warnings)
 ```
 
-The last two steps gate `examples/inbox` from its own directory rather than
-`-p` from the repo root because it's a standalone workspace excluded from
-the root one (see *Version-Pin Policy*) — it's the only part of this chain
-that needs GitHub reachability.
+The `examples/inbox` and `examples/team-demo` steps gate each example from
+its own directory rather than `-p` from the repo root because both are
+standalone workspaces excluded from the root one (see *Version-Pin
+Policy*). `inbox` needs GitHub reachability; `team-demo` needs the
+clean-signals-rs sibling checkout present. Neither is part of `forgekit
+build apk`/`run`'s Android pipeline gate, which is verified separately (see
+*Run*) rather than in this chain.
 
 **Manual/gated tests** (not part of the default `cargo test --workspace`
 run — each requires local hardware or is slow, and is marked `#[ignore]`
@@ -205,6 +233,21 @@ deliberately, not floating:
   `[workspace.dependencies]`. Gate it from its own directory:
   `cd examples/inbox && cargo test` (2 async tests) and
   `cd examples/inbox && cargo clippy --all-targets -- -D warnings`.
+- `examples/team-demo` is the same standalone-package pattern as `inbox`,
+  but with a stricter dependency shape: `clean-signals` AND
+  `clean-signals-forgekit` are both path dependencies to a **sibling
+  checkout** at `../../../clean-signals-rs` (relative to the example, i.e.
+  next to the `forgekit` checkout) on its `develop` branch — neither crate
+  is git+rev-pinned yet. Both must resolve `clean-signals` the same way
+  (both by path); if one used `git`+`rev` while the other used `path`, Cargo
+  would build two distinct `clean-signals` crate identities and the
+  controller/glue types (`AsyncState`, `ControllerCore`, `use_controller`,
+  `async_view`) would fail to unify. Swap both to `git`+`rev` together, never
+  one at a time, once `clean-signals` gains a remote. Gate it from its own
+  directory the same way as `inbox`:
+  `cd examples/team-demo && cargo test` (headless UI tests + ported unit
+  tests) and `cd examples/team-demo && cargo clippy --all-targets -- -D
+  warnings`.
 - **Never run a blind `cargo update`.** If a manifest changes any pinned
   dependency, run `cargo generate-lockfile` and then confirm
   `cargo build --workspace --locked` still succeeds before committing.
