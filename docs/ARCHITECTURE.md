@@ -21,7 +21,7 @@ consumed by app code via the `forgekit` facade crate, and example apps under
 | `forgekit-reactive` | Leaf reactive substrate: the process-wide `ReactiveRuntime` (a background tokio runtime, a custom `any_spawner` executor routing `spawn`/`spawn_local`, a UI-thread local task pump, and the root reactive `Owner`) plus `TrackedScope`, the rebuild-dependency-tracking bridge that wakes a shell when a tracked signal changes (see Key Types, Data Flow's Signal-driven wake). Depends only on `reactive_graph`/`any_spawner`/`tokio` — no `forgekit-core`, no `winit`/`vello`/`wgpu`; consumed by the three shells and the `forgekit` facade (see Layer Dependencies). |
 | `forgekit-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root, GPU surface, and text context for `cargo run`-based development. Compiled only for non-Android targets. |
 | `forgekit-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. |
-| `forgekit-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size` FFI-boundary helpers. Depends on `forgekit-core`/`forgekit-scene`/`forgekit-text` only — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. |
+| `forgekit-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size` FFI-boundary helpers. Depends on `forgekit-core`/`forgekit-scene`/`forgekit-text` only (a test-only `reactive_graph` dev-dependency backs a root-owner regression test but never reaches consumers) — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. |
 | `forgekit-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `forgekit_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `forgekit-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. |
 | `forgekit` | Facade crate: the public app-author API — the canonical `Component`/`app!`/`run` entry surface (spec §5.5), plus `App`/`View`/the widget vocabulary as the lower-level layer `app!` desugars to — composing the crates above into the spec's declarative call shape. Depends on `forgekit-shell-android`, `forgekit-shell-ios`, and `forgekit-reactive` unconditionally, and on `forgekit-shell-desktop` only for non-Android targets; `run`/`App::run` (the desktop preview loop) are likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
 | `forgekit-cli` | Standalone `forgekit` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `forgekit run`/`build`/`clean` drive pipelines for both platforms (Android via Gradle/cargo-ndk, iOS via xcodebuild/devicectl). Depends on none of the framework crates above. |
@@ -35,7 +35,7 @@ forgekit-scene  (no vello/wgpu — kurbo + peniko only)
     └── forgekit-text          (parley — consumes/produces GlyphRun, no vello/wgpu)
 forgekit-reactive       (leaf: reactive_graph + any_spawner + tokio only — no core/scene/render/text/winit)
 forgekit-widgets       = core + scene + text
-forgekit-shell-common  = core + scene + text                     (platform-agnostic; no jni/ndk/winit, no unsafe, reactive-free)
+forgekit-shell-common  = core + scene + text                     (platform-agnostic; no jni/ndk/winit, no unsafe, reactive-free in shipped deps)
 forgekit-shell-desktop = core + scene + render + text + winit + reactive    (non-Android integration point)
 forgekit-shell-android = core + scene + render + text + reactive + shell-common + jni/ndk  (Android integration point; JNI FFI)
 forgekit-shell-ios     = core + scene + render + text + reactive + shell-common           (iOS integration point; C-ABI FFI)
@@ -50,8 +50,10 @@ the `forgekit` facade — never by `forgekit-core`/`forgekit-scene`/
 (not on `forgekit-reactive`) for exactly one purpose — `Component`'s
 per-instance `Owner` — a deliberate, narrow layering exception rather than a
 general reactive dependency: `forgekit-core` has no runtime, executor, or
-tokio dependency. **`forgekit-shell-common` stays reactive-free** (core +
-scene + text only, unchanged); the mobile shells own their own reactive
+tokio dependency. **`forgekit-shell-common` stays reactive-free in its
+shipped dependency graph** (core + scene + text only; a test-only
+`reactive_graph` dev-dependency backs the root-owner regression test and
+never reaches consumers); the mobile shells own their own reactive
 wiring directly (`ReactiveRuntime::init`/`pump_local` called from
 `forgekit-shell-android`/`-ios`), keeping shell-common's zero-`unsafe`,
 compiles-everywhere charter intact.

@@ -66,9 +66,10 @@ rendering, interaction, text-input, and async/signals changes respectively —
 there is no automated pixel-diff test yet, so a person must look at the
 window. `notes` is also the demo `forgekit create` scaffolds
 (`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
-against it. `examples/inbox`'s own verify gate (`cd examples/inbox && cargo
-test`) is its regression proof and is not part of the root
-`cargo test --workspace` run — see Version-Pin Policy.
+against it. `examples/inbox`'s own verify gate (`cd examples/inbox && cargo test` plus
+its clippy line) is its regression proof; it's chained onto the end of the
+Standard verify gate below as a separate step since it needs network access
+— see Version-Pin Policy and *Test* below.
 
 In a generated project, `forgekit run [-d <device>] [--release|--profile]
 [--flavor <name>]` builds and launches on a connected Android
@@ -119,8 +120,15 @@ scheme+configuration already declared in the generated project.
 cargo build --workspace --locked \
   && cargo test --workspace \
   && cargo clippy --workspace --all-targets -- -D warnings \
-  && cargo fmt --check
+  && cargo fmt --check \
+  && (cd examples/inbox && cargo test) \
+  && (cd examples/inbox && cargo clippy --all-targets -- -D warnings)   # standalone pkg: clean-signals compat gate (needs network)
 ```
+
+The last two steps gate `examples/inbox` from its own directory rather than
+`-p` from the repo root because it's a standalone workspace excluded from
+the root one (see *Version-Pin Policy*) — it's the only part of this chain
+that needs GitHub reachability.
 
 **Manual/gated tests** (not part of the default `cargo test --workspace`
 run — each requires local hardware or is slow, and is marked `#[ignore]`
