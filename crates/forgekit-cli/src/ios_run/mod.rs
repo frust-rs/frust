@@ -14,14 +14,24 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
+use crate::build_info::BuildInfo;
 use crate::devices::Device;
 use crate::process::{ProcessRunner, RealProcessRunner, tail_lines};
 
 /// Drives the full iOS simulator pipeline (preflight → xcodebuild →
 /// `simctl install` → `simctl launch`) on `device`, an already-discovered
 /// (and therefore already-booted) `Platform::Ios`/`Kind::Simulator` device,
-/// against the ForgeKit project rooted at `root`.
-pub fn run(runner: &dyn ProcessRunner, root: &Path, device: &Device) -> Result<u8> {
+/// against the ForgeKit project rooted at `root`. `info.mode` (task 66)
+/// selects the `-configuration` xcodebuild builds and the matching
+/// `<config>-iphonesimulator` products directory the app bundle is installed
+/// from; flavor/defines/version aren't threaded here (unlike the Android
+/// pipeline) — the iOS simulator run path stays scheme-fixed (`Runner`).
+pub fn run(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+) -> Result<u8> {
     let project = project::detect(root)?;
     project::require_ios_dir(&project.root)?;
 
@@ -31,10 +41,18 @@ pub fn run(runner: &dyn ProcessRunner, root: &Path, device: &Device) -> Result<u
     };
     preflight::run(&preflight_ctx).map_err(|err| anyhow::anyhow!(err))?;
 
+    let configuration = info.mode.xcode_configuration();
+
     println!("Building `{}`…", project.bundle_id);
     let build_start = Instant::now();
     let mut on_xcodebuild_line = |line: &str| println!("{line}");
-    let build_out = xcodebuild::build(runner, &project.root, &device.id, &mut on_xcodebuild_line)?;
+    let build_out = xcodebuild::build(
+        runner,
+        &project.root,
+        &device.id,
+        configuration,
+        &mut on_xcodebuild_line,
+    )?;
     if !build_out.success {
         bail!("{}", xcodebuild_failure_message(&build_out));
     }
@@ -43,7 +61,7 @@ pub fn run(runner: &dyn ProcessRunner, root: &Path, device: &Device) -> Result<u
         build_start.elapsed().as_secs_f32()
     );
 
-    let app_path = xcodebuild::app_bundle_path(&project.root);
+    let app_path = xcodebuild::app_bundle_path(&project.root, configuration);
     if !app_path.exists() {
         bail!(
             "app bundle not found at `{}` after `xcodebuild build`",
@@ -113,6 +131,7 @@ fn xcodebuild_failure_message(build_out: &crate::process::Output) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build_info::{BuildArgs, BuildMode};
     use crate::devices::{Kind, Platform};
     use crate::process::{FakeProcessRunner, Output};
     use std::fs;
@@ -152,6 +171,21 @@ mod tests {
         }
     }
 
+    fn debug_info() -> BuildInfo {
+        BuildInfo::from_args(BuildArgs::default(), BuildMode::Debug).unwrap()
+    }
+
+    fn profile_info() -> BuildInfo {
+        BuildInfo::from_args(
+            BuildArgs {
+                profile: true,
+                ..BuildArgs::default()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap()
+    }
+
     const BOOTED_JSON: &str = r#"{
         "devices": {
             "com.apple.CoreSimulator.SimRuntime.iOS-17-5": [
@@ -187,7 +221,7 @@ mod tests {
                 },
             );
 
-        let err = run(&runner, &dir, &device()).unwrap_err();
+        let err = run(&runner, &dir, &device(), &debug_info()).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("xcodebuild"), "{message}");
         assert!(message.contains("--- stdout (tail) ---"), "{message}");
@@ -212,8 +246,50 @@ mod tests {
         // pipeline early, the next unmatched invocation would itself error
         // via `FakeProcessRunner`'s "missing" path, which would also fail
         // this test — either way this proves xcodebuild was never reached.
-        let err = run(&runner, &dir, &device()).unwrap_err();
+        let err = run(&runner, &dir, &device(), &debug_info()).unwrap_err();
         assert!(err.to_string().contains("Xcode not found"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Failure exits right after `simctl install` (a deliberately-failing
+    /// fixture matched only on the *exact* Profile-configuration app path),
+    /// before `ctrlc::set_handler` (which can only be installed once per
+    /// test process) — proving `--profile` selects `-configuration Profile`
+    /// and the matching `Profile-iphonesimulator` products directory (task
+    /// 66), rather than the hardcoded `Debug` this pipeline used before.
+    #[test]
+    fn profile_mode_uses_profile_configuration_and_products_dir() {
+        let dir = unique_project_dir("profile-mode");
+        let app_dir = dir.join("build/ios/Build/Products/Profile-iphonesimulator/Runner.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let app_path = app_dir.to_string_lossy().into_owned();
+
+        let runner = FakeProcessRunner::new()
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios-sim\n"),
+            )
+            .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
+            .with(
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios build",
+                ok("Build succeeded"),
+            )
+            .with(
+                format!("xcrun simctl install AAAA {app_path}"),
+                Output {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "INSTALL_FAILED_TEST_STOP".to_string(),
+                },
+            );
+
+        let err = run(&runner, &dir, &device(), &profile_info()).unwrap_err();
+        assert!(err.to_string().contains("simctl install"), "{err}");
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -233,7 +309,7 @@ mod tests {
         // No fixtures registered at all: proves `require_ios_dir` rejects
         // before any `ProcessRunner` call is made.
         let runner = FakeProcessRunner::new();
-        let err = run(&runner, &dir, &device()).unwrap_err();
+        let err = run(&runner, &dir, &device(), &debug_info()).unwrap_err();
         assert!(err.to_string().contains("ios/Runner.xcodeproj"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }

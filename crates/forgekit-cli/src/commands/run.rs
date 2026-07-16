@@ -2,23 +2,18 @@
 //! desktop-preview fallback when no Android device is available.
 
 use std::io::{BufRead, Write};
-use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
 use crate::android_run::{self, DeviceSelection};
 use crate::build_info::{BuildArgs, BuildInfo, BuildMode};
 use crate::devices::{self, Device, Kind, Platform};
-use crate::doctor::RealEnv;
 use crate::ios_run;
-use crate::process::{ProcessRunner, RealProcessRunner, tail_lines};
+use crate::process::{ProcessRunner, RealProcessRunner};
 
 pub fn run(build_args: BuildArgs, device_id: Option<String>, verbose: bool) -> Result<u8> {
     let info =
         BuildInfo::from_args(build_args, BuildMode::Debug).map_err(|err| anyhow::anyhow!(err))?;
-    if info.mode != BuildMode::Debug {
-        bail!("release/profile runs land in Phase 5; `forgekit run` currently only builds debug");
-    }
 
     let runner = RealProcessRunner;
     let discoverers = devices::default_discoverers();
@@ -31,22 +26,22 @@ pub fn run(build_args: BuildArgs, device_id: Option<String>, verbose: bool) -> R
 
     match android_run::select_device(&found, device_id.as_deref()) {
         DeviceSelection::Desktop => run_desktop_fallback(&runner),
-        DeviceSelection::Auto(device) => run_on_device(&runner, &device),
-        DeviceSelection::Ambiguous(candidates) => select_from_prompt(&runner, &candidates),
+        DeviceSelection::Auto(device) => run_on_device(&runner, &device, &info),
+        DeviceSelection::Ambiguous(candidates) => select_from_prompt(&runner, &candidates, &info),
         DeviceSelection::Error(message) => bail!(message),
     }
 }
 
-/// Dispatches a resolved [`Device`] to its platform's drive pipeline (spec
-/// §12.4's Android path, or task 35's iOS simulator path); a physical iOS
-/// device has no signing pipeline yet, so it errors with a Phase 5 note
-/// instead.
-fn run_on_device(runner: &dyn ProcessRunner, device: &Device) -> Result<u8> {
+/// Dispatches a resolved [`Device`] to its platform's mode/flavor-aware
+/// drive pipeline (spec §12.4's Android path, task 66's mode-aware Android
+/// and iOS-simulator paths); a physical iOS device has no signing pipeline
+/// yet, so it errors with a Phase 5 note instead (task 67).
+fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) -> Result<u8> {
     match (device.platform, device.kind) {
-        (Platform::Android, _) => run_android(runner, device),
+        (Platform::Android, _) => run_android(runner, device, info),
         (Platform::Ios, Kind::Simulator) => {
             let cwd = std::env::current_dir().context("reading current directory")?;
-            ios_run::run(runner, &cwd, device)
+            ios_run::run(runner, &cwd, device, info)
         }
         (Platform::Ios, Kind::PhysicalDevice) => {
             bail!("iOS physical-device run lands in Phase 5 (requires the signing pipeline)")
@@ -67,7 +62,11 @@ fn run_desktop_fallback(runner: &dyn ProcessRunner) -> Result<u8> {
     Ok(if out.success { 0 } else { 1 })
 }
 
-fn select_from_prompt(runner: &dyn ProcessRunner, candidates: &[Device]) -> Result<u8> {
+fn select_from_prompt(
+    runner: &dyn ProcessRunner,
+    candidates: &[Device],
+    info: &BuildInfo,
+) -> Result<u8> {
     if !android_run::stdout_is_tty() {
         println!("Multiple Android devices connected; pass -d <id> to select one:");
         for device in candidates {
@@ -90,94 +89,15 @@ fn select_from_prompt(runner: &dyn ProcessRunner, candidates: &[Device]) -> Resu
     let index = android_run::parse_prompt_selection(&input, candidates.len())
         .map_err(|err| anyhow::anyhow!(err))?;
 
-    run_on_device(runner, &candidates[index])
+    run_on_device(runner, &candidates[index], info)
 }
 
-/// Drives the full Android pipeline (spec §12.4 steps 3-7) on `device`.
-fn run_android(runner: &dyn ProcessRunner, device: &Device) -> Result<u8> {
+/// Drives the full, mode/flavor-aware Android pipeline (spec §12.4 steps
+/// 3-7; task 66) on `device` — delegates to `android_run::run`, which owns
+/// the pipeline body (mirroring `ios_run::run`'s shape).
+fn run_android(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) -> Result<u8> {
     let cwd = std::env::current_dir().context("reading current directory")?;
-    let project = android_run::project::detect(&cwd)?;
-    let android_dir = android_run::project::require_android_dir(&project.root)?;
-
-    let env = RealEnv;
-    let preflight_ctx = android_run::preflight::PreflightCtx {
-        runner,
-        env: &env,
-        is_macos: cfg!(target_os = "macos"),
-    };
-    let outcome =
-        android_run::preflight::run(&preflight_ctx).map_err(|err| anyhow::anyhow!(err))?;
-
-    if let Some(gradle_user_home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-        let gradle_user_home = gradle_user_home.join(".gradle");
-        if !android_run::gradle::wrapper_dist_cached(&gradle_user_home) {
-            println!("Note: first Gradle run downloads the wrapper distribution (~1-2 min).");
-        }
-    }
-
-    println!("Building `{}`…", project.app_id);
-    let build_start = Instant::now();
-    let mut on_gradle_line = |line: &str| println!("{line}");
-    let build_out = android_run::gradle::assemble_debug(
-        runner,
-        &android_dir,
-        &outcome.java_home,
-        &mut on_gradle_line,
-    )?;
-    if !build_out.success {
-        let tail = tail_lines(&build_out.stderr, 50);
-        if tail.is_empty() {
-            bail!("`./gradlew assembleDebug` failed");
-        }
-        bail!("`./gradlew assembleDebug` failed:\n{tail}");
-    }
-    println!(
-        "Build finished in {:.1}s.",
-        build_start.elapsed().as_secs_f32()
-    );
-
-    let apk_path = android_dir.join(android_run::gradle::DEBUG_APK_PATH);
-    let apk_path = apk_path.to_string_lossy().into_owned();
-
-    println!("Installing on {}…", device.name);
-    let install_start = Instant::now();
-    let install_out = android_run::adb::install(runner, &device.id, &apk_path)?;
-    if !install_out.success {
-        bail!("`adb install` failed: {}", install_out.stderr.trim());
-    }
-    println!(
-        "Installed in {:.1}s.",
-        install_start.elapsed().as_secs_f32()
-    );
-
-    println!("Launching {}…", project.app_id);
-    let launch_out = android_run::adb::launch(runner, &device.id, &project.app_id)?;
-    if !launch_out.success {
-        bail!("`adb shell am start` failed: {}", launch_out.stderr.trim());
-    }
-
-    let mut sleep = || std::thread::sleep(android_run::adb::PID_RETRY_DELAY);
-    let pid = android_run::adb::resolve_pid(
-        runner,
-        &device.id,
-        &project.app_id,
-        android_run::adb::PID_RETRY_ATTEMPTS,
-        &mut sleep,
-    )?;
-
-    println!("Streaming logs (pid {pid}); press Ctrl-C to stop.");
-    // Default SIGINT disposition would exit 130; spec §12.4 wants Ctrl-C to
-    // stop the (already-SIGINT'd, same-process-group) `adb logcat` child
-    // and exit 0.
-    ctrlc::set_handler(|| {
-        std::process::exit(0);
-    })
-    .context("failed to install Ctrl-C handler")?;
-
-    let mut on_log_line = |line: &str| println!("{line}");
-    android_run::adb::stream_logcat(runner, &device.id, &pid, &mut on_log_line)?;
-
-    Ok(0)
+    android_run::run(runner, &cwd, device, info)
 }
 
 #[cfg(test)]
@@ -194,26 +114,34 @@ mod tests {
         }
     }
 
+    fn debug_info() -> BuildInfo {
+        BuildInfo::from_args(BuildArgs::default(), BuildMode::Debug).unwrap()
+    }
+
     #[test]
     fn run_on_device_bails_with_phase5_note_for_physical_ios_device() {
         let runner = FakeProcessRunner::new();
-        let err = run_on_device(&runner, &ios_physical_device()).unwrap_err();
+        let err = run_on_device(&runner, &ios_physical_device(), &debug_info()).unwrap_err();
         assert!(err.to_string().contains("lands in Phase 5"), "{err}");
         assert!(err.to_string().contains("signing pipeline"), "{err}");
     }
 
     #[test]
-    fn run_rejects_release_mode_with_phase5_note_before_any_device_selection() {
-        // The mode guard fires before device discovery/selection, so this
-        // holds for an iOS-selected context exactly as much as any other —
-        // `run` never gets far enough to shell out for device discovery
-        // (this test would hang/error on a missing `adb`/`xcrun` fixture
-        // otherwise, proving the guard runs first).
-        let build_args = BuildArgs {
-            release: true,
-            ..Default::default()
-        };
-        let err = run(build_args, None, false).unwrap_err();
-        assert!(err.to_string().contains("Phase 5"), "{err}");
+    fn physical_ios_sentinel_fires_regardless_of_build_mode() {
+        // The physical-iOS sentinel (task 67 removes it) is independent of
+        // `--release`/`--profile`/`--debug` — task 66 only unblocks the
+        // Android and iOS-*simulator* run paths.
+        let runner = FakeProcessRunner::new();
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                release: true,
+                ..Default::default()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap();
+        let err = run_on_device(&runner, &ios_physical_device(), &info).unwrap_err();
+        assert!(err.to_string().contains("lands in Phase 5"), "{err}");
+        assert!(err.to_string().contains("signing pipeline"), "{err}");
     }
 }

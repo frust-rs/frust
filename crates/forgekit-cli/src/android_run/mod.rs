@@ -9,8 +9,16 @@ pub mod preflight;
 pub mod project;
 
 use std::io::IsTerminal;
+use std::path::Path;
+use std::time::Instant;
 
+use anyhow::{Context, Result, bail};
+
+use crate::android_build::AndroidArtifact;
+use crate::build_info::BuildInfo;
 use crate::devices::{Device, Platform};
+use crate::doctor::{EnvLookup, RealEnv};
+use crate::process::{ProcessRunner, tail_lines};
 
 /// Outcome of matching discovered devices against `-d`/no-flag selection
 /// (spec §12.4 step 2).
@@ -90,6 +98,133 @@ pub fn parse_prompt_selection(input: &str, count: usize) -> Result<usize, String
 /// list-and-exit for [`DeviceSelection::Ambiguous`].
 pub fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
+}
+
+/// Drives the full, mode/flavor-aware Android pipeline (spec §12.4 steps
+/// 3-7, task 66): preflight → local.properties version write → (release
+/// only) signing gate → variant-aware `./gradlew assemble<Flavor><Mode>` →
+/// variant-aware APK install → launch → pid-scoped logcat streaming.
+/// Mirrors `ios_run::run`'s `(runner, root, device)` shape, plus `info` for
+/// the mode/flavor/defines/version funnel.
+pub fn run(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+) -> Result<u8> {
+    run_with_env(runner, root, device, info, &RealEnv)
+}
+
+/// The testable core of [`run`], taking an injected [`EnvLookup`] so
+/// `JAVA_HOME` resolution can be exercised with a `crate::doctor::FakeEnv`
+/// in tests instead of the real process environment.
+fn run_with_env(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    env: &dyn EnvLookup,
+) -> Result<u8> {
+    let project = project::detect(root)?;
+    let android_dir = project::require_android_dir(&project.root)?;
+
+    let preflight_ctx = preflight::PreflightCtx {
+        runner,
+        env,
+        is_macos: cfg!(target_os = "macos"),
+    };
+    let outcome = preflight::run(&preflight_ctx).map_err(|err| anyhow::anyhow!(err))?;
+
+    if let Some(gradle_user_home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        let gradle_user_home = gradle_user_home.join(".gradle");
+        if !gradle::wrapper_dist_cached(&gradle_user_home) {
+            println!("Note: first Gradle run downloads the wrapper distribution (~1-2 min).");
+        }
+    }
+
+    let version_name = info.build_name.clone().unwrap_or_else(|| "1.0".to_string());
+    let version_code = info
+        .build_number
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "1".to_string());
+    crate::android_build::local_properties::write(&android_dir, &version_name, &version_code)
+        .context("writing android/local.properties")?;
+
+    crate::android_build::signing::check_release_signing(&android_dir, info.mode)?;
+
+    let abi = adb::device_abi(runner, &device.id);
+    let target = AndroidArtifact::Apk {
+        split_per_abi: false,
+        abis: vec![abi],
+    };
+    let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
+    let props = crate::android_build::tasks::gradle_properties(&target, &info.defines);
+
+    println!("Building `{}`…", project.app_id);
+    let build_start = Instant::now();
+    let mut on_gradle_line = |line: &str| println!("{line}");
+    let build_out = gradle::assemble(
+        runner,
+        &android_dir,
+        &outcome.java_home,
+        &task,
+        &props,
+        &mut on_gradle_line,
+    )?;
+    if !build_out.success {
+        let tail = tail_lines(&build_out.stderr, 50);
+        if tail.is_empty() {
+            bail!("`./gradlew {task}` failed");
+        }
+        bail!("`./gradlew {task}` failed:\n{tail}");
+    }
+    println!(
+        "Build finished in {:.1}s.",
+        build_start.elapsed().as_secs_f32()
+    );
+
+    let apk_path = gradle::apk_output_path(&android_dir, info.mode, info.flavor.as_deref())?;
+    let apk_path = apk_path.to_string_lossy().into_owned();
+
+    println!("Installing on {}…", device.name);
+    let install_start = Instant::now();
+    let install_out = adb::install(runner, &device.id, &apk_path)?;
+    if !install_out.success {
+        bail!("`adb install` failed: {}", install_out.stderr.trim());
+    }
+    println!(
+        "Installed in {:.1}s.",
+        install_start.elapsed().as_secs_f32()
+    );
+
+    println!("Launching {}…", project.app_id);
+    let launch_out = adb::launch(runner, &device.id, &project.app_id)?;
+    if !launch_out.success {
+        bail!("`adb shell am start` failed: {}", launch_out.stderr.trim());
+    }
+
+    let mut sleep = || std::thread::sleep(adb::PID_RETRY_DELAY);
+    let pid = adb::resolve_pid(
+        runner,
+        &device.id,
+        &project.app_id,
+        adb::PID_RETRY_ATTEMPTS,
+        &mut sleep,
+    )?;
+
+    println!("Streaming logs (pid {pid}); press Ctrl-C to stop.");
+    // Default SIGINT disposition would exit 130; spec §12.4 wants Ctrl-C to
+    // stop the (already-SIGINT'd, same-process-group) `adb logcat` child
+    // and exit 0.
+    ctrlc::set_handler(|| {
+        std::process::exit(0);
+    })
+    .context("failed to install Ctrl-C handler")?;
+
+    let mut on_log_line = |line: &str| println!("{line}");
+    adb::stream_logcat(runner, &device.id, &pid, &mut on_log_line)?;
+
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -213,5 +348,260 @@ mod tests {
     #[test]
     fn parse_prompt_selection_rejects_non_numeric() {
         assert!(parse_prompt_selection("abc", 3).is_err());
+    }
+
+    mod run_pipeline {
+        use super::*;
+        use crate::build_info::{BuildArgs, BuildMode};
+        use crate::doctor::FakeEnv;
+        use crate::process::{FakeProcessRunner, Output};
+        use std::fs;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        const JAVA_HOME: &str = "/opt/jdk17";
+
+        fn unique_project_dir(tag: &str) -> std::path::PathBuf {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "forgekit-cli-android-run-pipeline-test-{tag}-{}-{n}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(dir.join("android")).unwrap();
+            fs::write(dir.join("android/gradlew"), "#!/bin/sh\n").unwrap();
+            fs::write(
+                dir.join("forgekit.toml"),
+                "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n",
+            )
+            .unwrap();
+            dir
+        }
+
+        fn fake_env() -> FakeEnv {
+            FakeEnv::new().set("JAVA_HOME", JAVA_HOME)
+        }
+
+        fn ok(stdout: &str) -> Output {
+            Output {
+                success: true,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+            }
+        }
+
+        /// Every preflight check `preflight::run` performs (including the
+        /// device-only `adb version` one this module's pipeline needs, unlike
+        /// `android_build`'s device-less preflight).
+        fn preflight_ok_runner() -> FakeProcessRunner {
+            FakeProcessRunner::new()
+                .with(
+                    "rustup target list --installed",
+                    ok("aarch64-linux-android\n"),
+                )
+                .with("cargo ndk --version", ok("cargo-ndk 3.5.4\n"))
+                .with(
+                    format!("{JAVA_HOME}/bin/java -version"),
+                    Output {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: "openjdk version \"17.0.9\" 2023-10-17\n".to_string(),
+                    },
+                )
+                .with("adb version", ok("Android Debug Bridge version 1.0.41\n"))
+        }
+
+        fn device() -> Device {
+            Device {
+                id: "emulator-5554".to_string(),
+                name: "Pixel 7".to_string(),
+                platform: Platform::Android,
+                kind: Kind::Emulator,
+            }
+        }
+
+        fn info(mode: BuildMode, flavor: Option<&str>) -> BuildInfo {
+            BuildInfo::from_args(
+                BuildArgs {
+                    flavor: flavor.map(str::to_string),
+                    ..BuildArgs::default()
+                },
+                mode,
+            )
+            .unwrap()
+        }
+
+        /// Registering the exact `adb install` invocation to *fail* (rather
+        /// than succeed) stops the pipeline right after it, before
+        /// `resolve_pid`'s real-clock retry loop / `ctrlc::set_handler`
+        /// (which can only be installed once per test process) — a
+        /// deliberately-failing fixture that only matches on the *exact*
+        /// apk path proves the gradle task/props/apk-path computation was
+        /// correct up to that point (any mismatch earlier would instead
+        /// error on an unregistered `./gradlew`/`adb` invocation).
+        fn stop_after_install(runner: FakeProcessRunner, apk_path: &str) -> FakeProcessRunner {
+            runner.with(
+                format!("adb -s emulator-5554 install -r {apk_path}"),
+                Output {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "INSTALL_FAILED_TEST_STOP".to_string(),
+                },
+            )
+        }
+
+        #[test]
+        fn debug_default_assembles_debug_and_installs_debug_apk_unchanged() {
+            let dir = unique_project_dir("debug-default");
+            let android_dir = dir.join("android");
+            let out_dir = android_dir.join("app/build/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    "./gradlew assembleDebug -Pforgekit.targetPlatforms=arm64-v8a -Pforgekit.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Debug, None);
+            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            assert!(err.to_string().contains("adb install"), "{err}");
+
+            let local_props = fs::read_to_string(android_dir.join("local.properties")).unwrap();
+            assert!(local_props.contains("forgekit.versionName=1.0"));
+            assert!(local_props.contains("forgekit.versionCode=1"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn release_assembles_release_and_installs_release_apk() {
+            let dir = unique_project_dir("release-default");
+            let android_dir = dir.join("android");
+            fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+            let apk_path = out_dir
+                .join("app-release.apk")
+                .to_string_lossy()
+                .into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    "./gradlew assembleRelease -Pforgekit.targetPlatforms=arm64-v8a -Pforgekit.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Release, None);
+            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            assert!(err.to_string().contains("adb install"), "{err}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn profile_assembles_profile_and_installs_profile_apk() {
+            let dir = unique_project_dir("profile-default");
+            let android_dir = dir.join("android");
+            let out_dir = android_dir.join("app/build/outputs/apk/profile");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-profile.apk"), b"fake").unwrap();
+            let apk_path = out_dir
+                .join("app-profile.apk")
+                .to_string_lossy()
+                .into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    "./gradlew assembleProfile -Pforgekit.targetPlatforms=arm64-v8a -Pforgekit.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Profile, None);
+            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            assert!(err.to_string().contains("adb install"), "{err}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn flavor_and_release_assembles_flavored_task_and_installs_flavored_apk() {
+            let dir = unique_project_dir("flavor-release");
+            let android_dir = dir.join("android");
+            fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+            let out_dir = android_dir.join("app/build/outputs/apk/paid/release");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-paid-release.apk"), b"fake").unwrap();
+            let apk_path = out_dir
+                .join("app-paid-release.apk")
+                .to_string_lossy()
+                .into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    "./gradlew assemblePaidRelease -Pforgekit.targetPlatforms=arm64-v8a -Pforgekit.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Release, Some("paid"));
+            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            assert!(err.to_string().contains("adb install"), "{err}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn release_without_key_properties_errs_before_invoking_gradle() {
+            let dir = unique_project_dir("release-no-keystore");
+            // No `./gradlew`/`adb` fixtures registered at all: an unexpected
+            // call would itself error, proving Gradle is never invoked.
+            let runner = preflight_ok_runner();
+
+            let build_info = info(BuildMode::Release, None);
+            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            assert!(err.to_string().contains("keytool"), "{err}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn device_abi_flows_into_target_platforms_property() {
+            let dir = unique_project_dir("device-abi-x86-64");
+            let android_dir = dir.join("android");
+            let out_dir = android_dir.join("app/build/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner()
+                    .with(
+                        "adb -s emulator-5554 shell getprop ro.product.cpu.abi",
+                        ok("x86_64\n"),
+                    )
+                    .with(
+                        "./gradlew assembleDebug -Pforgekit.targetPlatforms=x86_64 -Pforgekit.splitPerAbi=false",
+                        ok("BUILD SUCCESSFUL"),
+                    ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Debug, None);
+            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            assert!(err.to_string().contains("adb install"), "{err}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 }

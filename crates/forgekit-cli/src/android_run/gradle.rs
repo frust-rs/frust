@@ -1,41 +1,74 @@
-//! Drives `./gradlew assembleDebug` in `<app>/android/` (spec §12.4 step 4).
-//! The generated Gradle project's cargo-ndk task does the actual Rust
-//! `.so` build; this module only shells out to Gradle and streams its
-//! output.
+//! Drives `./gradlew assemble<Flavor><Mode>` in `<app>/android/` (spec
+//! §12.4 step 4, mode-aware since task 66). The generated Gradle project's
+//! cargo-ndk task does the actual Rust `.so` build; this module only shells
+//! out to Gradle and streams its output.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
+use crate::android_build::AndroidArtifact;
+use crate::build_info::BuildMode;
 use crate::process::{Output, ProcessRunner};
 
-/// Where `assembleDebug` writes the debug APK, relative to `android/`.
-pub const DEBUG_APK_PATH: &str = "app/build/outputs/apk/debug/app-debug.apk";
-
-/// Runs `./gradlew assembleDebug` in `android_dir`, streaming each line of
-/// output through `on_line` (prefixed `[gradle] `) and exporting
-/// `JAVA_HOME=java_home` for the child process only.
-pub fn assemble_debug(
+/// Runs `./gradlew <task> [-P...]` in `android_dir` — `task` and `props` are
+/// `android_build::tasks::task_name`/`gradle_properties`' output (task 64),
+/// reused rather than duplicated here so the run and build pipelines compute
+/// a variant's task name and `-P` properties from exactly one place.
+/// Streams each line of output through `on_line` (prefixed `[gradle] `) and
+/// exports `JAVA_HOME=java_home` for the child process only.
+pub fn assemble(
     runner: &dyn ProcessRunner,
     android_dir: &Path,
     java_home: &str,
+    task: &str,
+    props: &[String],
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Output> {
+    let mut args: Vec<&str> = Vec::with_capacity(1 + props.len());
+    args.push(task);
+    for prop in props {
+        args.push(prop.as_str());
+    }
+
     let mut prefixed = |line: &str| on_line(&format!("[gradle] {line}"));
     runner
         .run_streaming(
             "./gradlew",
-            &["assembleDebug"],
+            &args,
             Some(android_dir),
             &[("JAVA_HOME", java_home)],
             &mut prefixed,
         )
-        .with_context(|| {
-            format!(
-                "running `./gradlew assembleDebug` in `{}`",
-                android_dir.display()
-            )
-        })
+        .with_context(|| format!("running `./gradlew {task}` in `{}`", android_dir.display()))
+}
+
+/// Resolves the single APK a non-split `assemble<Flavor><Mode>` build should
+/// have produced, reusing `android_build::artifacts`' directory + glob
+/// discovery (task 64) rather than guessing AGP's exact output filename here
+/// — the output-naming/path logic lives in exactly one place. `forgekit
+/// run` always builds a single-ABI, non-split APK (it installs on one
+/// connected device), so exactly one file is expected; more than one (e.g. a
+/// stale split-build artifact left over in the output directory) is an
+/// error rather than an ambiguous pick.
+pub fn apk_output_path(
+    android_dir: &Path,
+    mode: BuildMode,
+    flavor: Option<&str>,
+) -> Result<PathBuf> {
+    let target = AndroidArtifact::Apk {
+        split_per_abi: false,
+        abis: Vec::new(),
+    };
+    let mut found = crate::android_build::artifacts::discover(android_dir, &target, mode, flavor)?;
+    if found.len() > 1 {
+        bail!(
+            "expected exactly one APK in the non-split build output, found {}: {:?}",
+            found.len(),
+            found
+        );
+    }
+    Ok(found.pop().expect("discover errors on an empty result"))
 }
 
 /// Best-effort check for whether Gradle's wrapper distribution is already
@@ -59,9 +92,9 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn assemble_debug_runs_gradlew_with_java_home_env_and_prefixes_lines() {
+    fn assemble_runs_gradlew_with_task_props_java_home_env_and_prefixes_lines() {
         let runner = FakeProcessRunner::new().with(
-            "./gradlew assembleDebug",
+            "./gradlew assembleDebug -Pforgekit.targetPlatforms=arm64-v8a -Pforgekit.splitPerAbi=false",
             Output {
                 success: true,
                 stdout: "> Task :app:assembleDebug\nBUILD SUCCESSFUL".to_string(),
@@ -69,10 +102,16 @@ mod tests {
             },
         );
         let mut lines = Vec::new();
-        let out = assemble_debug(
+        let props = vec![
+            "-Pforgekit.targetPlatforms=arm64-v8a".to_string(),
+            "-Pforgekit.splitPerAbi=false".to_string(),
+        ];
+        let out = assemble(
             &runner,
             Path::new("/tmp/myapp/android"),
             "/opt/jdk17",
+            "assembleDebug",
+            &props,
             &mut |line| lines.push(line.to_string()),
         )
         .unwrap();
@@ -87,17 +126,65 @@ mod tests {
     }
 
     #[test]
-    fn assemble_debug_surfaces_failure() {
+    fn assemble_surfaces_failure() {
         let runner = FakeProcessRunner::new().with(
-            "./gradlew assembleDebug",
+            "./gradlew assembleRelease",
             Output {
                 success: false,
-                stdout: "> Task :app:compileDebugKotlin FAILED".to_string(),
+                stdout: "> Task :app:compileReleaseKotlin FAILED".to_string(),
                 stderr: "e: compile error".to_string(),
             },
         );
-        let out = assemble_debug(&runner, Path::new("android"), "/opt/jdk17", &mut |_| {}).unwrap();
+        let out = assemble(
+            &runner,
+            Path::new("android"),
+            "/opt/jdk17",
+            "assembleRelease",
+            &[],
+            &mut |_| {},
+        )
+        .unwrap();
         assert!(!out.success);
+    }
+
+    #[test]
+    fn apk_output_path_finds_the_single_debug_apk_no_flavor() {
+        let dir = unique_temp_dir("apk-output-debug");
+        let out_dir = dir.join("app/build/outputs/apk/debug");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+
+        let path = apk_output_path(&dir, BuildMode::Debug, None).unwrap();
+        assert_eq!(path, out_dir.join("app-debug.apk"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apk_output_path_finds_flavored_release_apk() {
+        let dir = unique_temp_dir("apk-output-flavored-release");
+        let out_dir = dir.join("app/build/outputs/apk/paid/release");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-paid-release.apk"), b"fake").unwrap();
+
+        let path = apk_output_path(&dir, BuildMode::Release, Some("paid")).unwrap();
+        assert_eq!(path, out_dir.join("app-paid-release.apk"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apk_output_path_errs_when_more_than_one_apk_present() {
+        let dir = unique_temp_dir("apk-output-ambiguous");
+        let out_dir = dir.join("app/build/outputs/apk/release");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-arm64-v8a-release.apk"), b"fake").unwrap();
+        fs::write(out_dir.join("app-x86_64-release.apk"), b"fake").unwrap();
+
+        let err = apk_output_path(&dir, BuildMode::Release, None).unwrap_err();
+        assert!(
+            err.to_string().contains("expected exactly one APK"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn unique_temp_dir(tag: &str) -> std::path::PathBuf {

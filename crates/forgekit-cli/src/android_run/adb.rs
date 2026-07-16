@@ -12,6 +12,35 @@ pub fn install(runner: &dyn ProcessRunner, device_id: &str, apk_path: &str) -> R
     runner.run("adb", &["-s", device_id, "install", "-r", apk_path])
 }
 
+/// Fallback ABI when the device doesn't report a usable one — the same
+/// `arm64-v8a` the Gradle template previously built implicitly by default
+/// (task 66), made explicit.
+pub const DEFAULT_ABI: &str = "arm64-v8a";
+
+/// Queries the connected device/emulator's primary ABI via `adb -s <id>
+/// shell getprop ro.product.cpu.abi` (task 66's mode-aware run pipeline
+/// needs the real device ABI, not an assumed `arm64-v8a`, to pass
+/// `-Pforgekit.targetPlatforms`) — a physical device reports `arm64-v8a` (or
+/// occasionally `armeabi-v7a`), an x86_64 emulator reports `x86_64`. Falls
+/// back to [`DEFAULT_ABI`] on a spawn failure, a non-zero exit, or empty
+/// output rather than failing the whole run over a single `getprop` hiccup.
+pub fn device_abi(runner: &dyn ProcessRunner, device_id: &str) -> String {
+    match runner.run(
+        "adb",
+        &["-s", device_id, "shell", "getprop", "ro.product.cpu.abi"],
+    ) {
+        Ok(out) if out.success => {
+            let abi = out.stdout.trim();
+            if abi.is_empty() {
+                DEFAULT_ABI.to_string()
+            } else {
+                abi.to_string()
+            }
+        }
+        _ => DEFAULT_ABI.to_string(),
+    }
+}
+
 /// `adb -s <id> shell am start -n <appId>/.MainActivity` (spec §12.4 step 6;
 /// `MainActivity` lives in the app's own package, per task 22's template).
 ///
@@ -109,6 +138,44 @@ mod tests {
         )
         .unwrap();
         assert!(out.success);
+    }
+
+    #[test]
+    fn device_abi_reports_getprop_output() {
+        let runner = FakeProcessRunner::new().with(
+            "adb -s emulator-5554 shell getprop ro.product.cpu.abi",
+            ok("x86_64\n"),
+        );
+        assert_eq!(device_abi(&runner, "emulator-5554"), "x86_64");
+    }
+
+    #[test]
+    fn device_abi_falls_back_to_default_on_spawn_failure() {
+        let runner = FakeProcessRunner::new()
+            .missing("adb -s emulator-5554 shell getprop ro.product.cpu.abi");
+        assert_eq!(device_abi(&runner, "emulator-5554"), DEFAULT_ABI);
+    }
+
+    #[test]
+    fn device_abi_falls_back_to_default_on_empty_output() {
+        let runner = FakeProcessRunner::new().with(
+            "adb -s emulator-5554 shell getprop ro.product.cpu.abi",
+            ok(""),
+        );
+        assert_eq!(device_abi(&runner, "emulator-5554"), DEFAULT_ABI);
+    }
+
+    #[test]
+    fn device_abi_falls_back_to_default_on_nonzero_exit() {
+        let runner = FakeProcessRunner::new().with(
+            "adb -s emulator-5554 shell getprop ro.product.cpu.abi",
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: closed".to_string(),
+            },
+        );
+        assert_eq!(device_abi(&runner, "emulator-5554"), DEFAULT_ABI);
     }
 
     #[test]

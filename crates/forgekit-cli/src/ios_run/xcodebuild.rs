@@ -9,24 +9,25 @@ use anyhow::{Context, Result};
 
 use crate::process::{Output, ProcessRunner};
 
-/// Where a Debug/`iphonesimulator` build writes the app bundle, relative to
-/// the project root (given `-derivedDataPath build/ios`).
-pub const APP_BUNDLE_PATH: &str = "build/ios/Build/Products/Debug-iphonesimulator/Runner.app";
-
 /// The absolute path a successful [`build`] should have produced the app
-/// bundle at, given the project `root`.
-pub fn app_bundle_path(root: &Path) -> PathBuf {
-    root.join(APP_BUNDLE_PATH)
+/// bundle at, given the project `root` and the `-configuration` it was built
+/// with (task 66: derived from `BuildMode::xcode_configuration()`, not
+/// hardcoded `Debug`) — e.g. `build/ios/Build/Products/Profile-iphonesimulator/Runner.app`.
+pub fn app_bundle_path(root: &Path, configuration: &str) -> PathBuf {
+    root.join(format!(
+        "build/ios/Build/Products/{configuration}-iphonesimulator/Runner.app"
+    ))
 }
 
 /// Runs `xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner
-/// -configuration Debug -sdk iphonesimulator -destination id=<udid>
-/// -derivedDataPath build/ios build` in `root`, streaming each line of
-/// output through `on_line` (prefixed `[xcodebuild] `).
+/// -configuration <configuration> -sdk iphonesimulator -destination
+/// id=<udid> -derivedDataPath build/ios build` in `root`, streaming each
+/// line of output through `on_line` (prefixed `[xcodebuild] `).
 pub fn build(
     runner: &dyn ProcessRunner,
     root: &Path,
     udid: &str,
+    configuration: &str,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Output> {
     let mut prefixed = |line: &str| on_line(&format!("[xcodebuild] {line}"));
@@ -41,7 +42,7 @@ pub fn build(
                 "-scheme",
                 "Runner",
                 "-configuration",
-                "Debug",
+                configuration,
                 "-sdk",
                 "iphonesimulator",
                 "-destination",
@@ -73,12 +74,37 @@ mod tests {
             },
         );
         let mut lines = Vec::new();
-        let out = build(&runner, Path::new("/tmp/myapp"), "AAAA", &mut |line| {
-            lines.push(line.to_string())
-        })
+        let out = build(
+            &runner,
+            Path::new("/tmp/myapp"),
+            "AAAA",
+            "Debug",
+            &mut |line| lines.push(line.to_string()),
+        )
         .unwrap();
         assert!(out.success);
         assert_eq!(lines, vec!["[xcodebuild] Build succeeded"]);
+    }
+
+    #[test]
+    fn build_passes_through_a_non_debug_configuration() {
+        let runner = FakeProcessRunner::new().with(
+            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios build",
+            Output {
+                success: true,
+                stdout: "Build succeeded".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let out = build(
+            &runner,
+            Path::new("/tmp/myapp"),
+            "AAAA",
+            "Profile",
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(out.success);
     }
 
     #[test]
@@ -91,15 +117,30 @@ mod tests {
                 stderr: "error: build input file cannot be found".to_string(),
             },
         );
-        let out = build(&runner, Path::new("/tmp/myapp"), "AAAA", &mut |_| {}).unwrap();
+        let out = build(
+            &runner,
+            Path::new("/tmp/myapp"),
+            "AAAA",
+            "Debug",
+            &mut |_| {},
+        )
+        .unwrap();
         assert!(!out.success);
     }
 
     #[test]
-    fn app_bundle_path_joins_root_and_relative_path() {
+    fn app_bundle_path_joins_root_configuration_and_relative_path() {
         assert_eq!(
-            app_bundle_path(Path::new("/tmp/myapp")),
+            app_bundle_path(Path::new("/tmp/myapp"), "Debug"),
             Path::new("/tmp/myapp/build/ios/Build/Products/Debug-iphonesimulator/Runner.app")
+        );
+        assert_eq!(
+            app_bundle_path(Path::new("/tmp/myapp"), "Profile"),
+            Path::new("/tmp/myapp/build/ios/Build/Products/Profile-iphonesimulator/Runner.app")
+        );
+        assert_eq!(
+            app_bundle_path(Path::new("/tmp/myapp"), "Release"),
+            Path::new("/tmp/myapp/build/ios/Build/Products/Release-iphonesimulator/Runner.app")
         );
     }
 }

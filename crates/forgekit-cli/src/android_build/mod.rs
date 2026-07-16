@@ -5,10 +5,15 @@
 //! Gradle task and its `-P` properties → run `./gradlew` → glob-verify and
 //! report the produced artifact(s).
 
-mod artifacts;
-mod local_properties;
-mod signing;
-mod tasks;
+// `pub(crate)`, not private: task 66's `android_run::run` reuses these
+// helpers directly (task-name/`-P`-property computation, the
+// local.properties merge-write, the release-signing gate, artifact
+// discovery) rather than duplicating the naming/path logic for `forgekit
+// run`'s Android pipeline.
+pub(crate) mod artifacts;
+pub(crate) mod local_properties;
+pub(crate) mod signing;
+pub(crate) mod tasks;
 
 use std::path::{Path, PathBuf};
 
