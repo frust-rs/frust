@@ -76,7 +76,14 @@ of the framework.
    rounded rects, stroked lines, push/pop clip, and glyph runs all become real
    `Command`s in the `Scene`; the legacy unshaped `draw_text` stays a no-op on
    this implementation because real text must already be shaped into
-   `GlyphRun`s by `forgekit-text` before it can reach the scene.
+   `GlyphRun`s by `forgekit-text` before it can reach the scene. Paint is also
+   the animation driver: a widget may advance animation state (e.g. a fling
+   in progress) and call `PaintCtx::request_frame` to ask for another frame
+   without waiting on external input; this bubbles up as
+   `PaintOutcome::needs_frame` from `RenderRoot::paint`/`AppTree::paint`. The
+   desktop shell honors it with an extra `window.request_redraw()`; the
+   Android/iOS continuous loops below ignore it since they already produce
+   every frame regardless.
 5. The finished `Scene` is encoded (`forgekit_render::encode_scene`) into a
    `vello::Scene` and presented to the window surface by `SurfaceRenderer`,
    which is the spec §8.1 surface lifecycle state machine
@@ -180,6 +187,7 @@ preview).
 | `AnyView<State>` | Type-erased `View` (element `Box<dyn Widget>`) used wherever children are heterogeneous (a container's child list); mirrors the xilem `AnyView` pattern. |
 | `Text` / `Button` / `Checkbox` / `Slider` / `Flex` (`Row`/`Column`) / `Stack` / `Padding` / `Align` / `SizedBox` / `ScrollView` / `GestureDetector` | `forgekit-widgets`' baseline vocabulary — each a `View`/`Widget` pair over the `AnyView`/`ChildPod` substrate; the interactive ones are controlled components (see `docs/CODE_STANDARDS.md`). |
 | `PaintScene` | Renderer-agnostic paint target widgets draw into; bridged onto `SceneBuilder`. |
+| `PaintCtx` / `PaintOutcome` | Paint-pass context and result: `PaintCtx::request_frame`/`needs_frame` let a widget advance animation state during paint and ask to be re-invoked without external input; `PaintOutcome::needs_frame` surfaces that through `RenderRoot::paint`/`AppTree::paint` — see Data Flow's Frame pipeline. |
 | `Scene` / `SceneBuilder` / `Command` | Layer 3 vector display list — the widget/GPU seam. |
 | `GlyphRun` | Shaped-glyph carrier from `forgekit-text` into the scene. |
 | `TextContext` / `TextStyle` / `TextLayout` | Parley-backed text shaping surface. |
