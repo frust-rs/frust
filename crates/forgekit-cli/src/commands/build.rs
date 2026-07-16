@@ -1,8 +1,7 @@
 //! `forgekit build apk|appbundle|ios|ipa` (spec §12.5/12.6): validates the
 //! full `BuildTarget` flag surface into a [`BuildInfo`] + platform artifact
 //! enum, resolves the project root (mirrors `run`'s `forgekit.toml`
-//! detection), and dispatches to `android_build`/`ios_build` — both stubs
-//! until tasks 64/65 land.
+//! detection), and dispatches to the `android_build`/`ios_build` pipelines.
 
 use std::path::Path;
 
@@ -409,7 +408,7 @@ mod tests {
     #[cfg_attr(
         target_os = "macos",
         ignore = "asserts the macOS-only gate rejects a non-macOS host; on macOS see \
-                  `build_ios_reaches_the_ios_stub_error_on_macos`"
+                  `build_ios_reaches_the_ios_pipeline_on_macos`"
     )]
     fn build_ios_rejected_on_non_macos_host() {
         let dir = ios_project_dir("ios-non-macos");
