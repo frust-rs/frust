@@ -5,7 +5,11 @@ members = ["crates/*", "examples/*"]
 # Cargo.lock) so its git+rev clean-signals dependency never enters the root
 # workspace graph — `exclude` beats the `examples/*` members glob (see
 # docs/DEVELOPMENT.md's Version-Pin Policy).
-exclude = ["examples/inbox"]
+# examples/team-demo is likewise standalone (its own [workspace] root, own
+# Cargo.lock) — a `forgekit create`-generated project embedded verbatim to
+# gate the Android build pipeline end-to-end (see
+# workflow/plans/features/team-demo-android).
+exclude = ["examples/inbox", "examples/team-demo"]
 
 [workspace.package]
 version = "0.1.0"
