@@ -33,6 +33,8 @@ mod text;
 mod textinput;
 
 use std::any::Any;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use forgekit_core::{
@@ -46,7 +48,7 @@ pub use button::{Button, ButtonView, ButtonWidget, button};
 pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox};
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
-    flexible, inflexible,
+    flexible, inflexible, keyed,
 };
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
@@ -68,6 +70,48 @@ pub(crate) type ErasedArgCallback<A> = Box<dyn FnMut(&mut EventCtx, A)>;
 /// A view-held, typed callback carrying one value argument (Checkbox's `bool`,
 /// Slider's `f64`), erased to [`ErasedArgCallback`] on build.
 pub(crate) type TypedArgCallback<State, A> = std::rc::Rc<dyn Fn(&mut State, A)>;
+
+/// A stable identity for a list child, so a container's reconciliation can match
+/// a child to its live widget *by key* across reorders/inserts instead of by
+/// position — the difference between "the third row's widget" and "row #42's
+/// widget" when the list is shuffled (spec §6.3).
+///
+/// Built from any [`Hash`] value (an item id, a string name, an index) via the
+/// `From` impls below and [`keyed`](crate::keyed); the hashed `u64` is what the
+/// reconciler compares. Two children in the same list must not collide — a
+/// duplicate key is a `debug_assert` tripwire that falls back to positional
+/// reconciliation (see [`rebuild_children`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ChildKey(u64);
+
+impl ChildKey {
+    /// Hash any [`Hash`] value into a `ChildKey`. Backs the `From` impls and
+    /// [`keyed`](crate::keyed)'s `impl Into<ChildKey>` argument.
+    pub fn new(value: impl Hash) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        ChildKey(hasher.finish())
+    }
+}
+
+macro_rules! child_key_from {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl From<$t> for ChildKey {
+                fn from(value: $t) -> Self {
+                    ChildKey::new(value)
+                }
+            }
+        )*
+    };
+}
+
+// Common key types: integer ids/indices, chars, and string names. A blanket
+// `impl<T: Hash> From<T>` would collide with the reflexive `From<ChildKey>`, so
+// the ergonomic conversions are spelled out for the types keys are drawn from.
+child_key_from!(
+    u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, char, &str, String
+);
 
 /// Erase a view-held `Rc<dyn Fn(&mut State)>` app-state callback into the
 /// widget-held [`ErasedCallback`] adapter the interactive widgets invoke during
@@ -212,38 +256,110 @@ fn cancel_pod(pod: &mut ChildPod) {
     pod.event_child(&mut ctx, &cancel);
 }
 
-/// Cancel and clear every child still holding a recorded active (captured) path.
+/// Cancel-and-clear every surviving child's recorded interaction paths after a
+/// structural change — both the capture (`active`) path and the focus
+/// (`focused`) path.
 ///
-/// Called by [`rebuild_children`] once a structural change is detected: the
-/// recorded path can no longer be trusted, so any surviving armed widget is
-/// unwound via [`cancel_pod`] and its `active` flag dropped.
+/// Called by [`rebuild_children`]'s positional and keyed reconcilers once a
+/// structural change is detected: the recorded paths can no longer be trusted
+/// (a length shift, type swap, or keyed reorder moves widgets under the paths),
+/// so any surviving armed widget is unwound via [`cancel_pod`] and its `active`
+/// flag dropped, and any focused child has its `focused` flag dropped.
+///
+/// # Focus vs. capture: why one synthesizes a `Cancel` and the other does not
+///
+/// Capture state lives *inside* the widget (an `armed`/`pressed` flag its own
+/// event arms), so dropping the recorded path requires a synthetic [`Cancel`]
+/// ([`cancel_pod`]) to unwind that internal machine — otherwise it would fire on
+/// a later hit-tested `Up`. Focus state, by contrast, is *reflected* from the pod
+/// flag into the widget each event (`EventCtx::has_focus`, threaded through
+/// [`ChildPod::event_child`]) rather than latched internally, so clearing the pod
+/// flag is enough — there is no widget-internal blur to drive, and (per the g5
+/// contract) a `Cancel` handler must not touch app state anyway.
+///
+/// **RenderRoot desync note.** Clearing `focused` here does *not* notify
+/// [`RenderRoot`](forgekit_core::RenderRoot): the rebuild pass runs over a
+/// [`BuildCtx`], with no `RenderRoot` in scope, exactly as the g5 capture-cancel
+/// cannot reset `RenderRoot::pointer_captured`. So the root's
+/// `focus_active`/`ime_state` stay momentarily stale after a structural blur and
+/// self-correct on the next event pass (a `Down` re-evaluates focus/blur; a
+/// focus-routed event finds no focused pod and is ignored). This is the
+/// conservative, correct-by-convergence behavior — the same transient g5 already
+/// accepts for capture — not a new desync class.
 fn cancel_active_children(pods: &mut [ChildPod]) {
     for pod in pods.iter_mut() {
         if pod.is_active() {
             cancel_pod(pod);
             pod.set_active(false);
         }
+        if pod.is_focused() {
+            pod.set_focused(false);
+        }
     }
 }
 
-/// Positionally diff a child list against its live `ChildPod`s, extracting each
-/// child's [`AnyView`] through `view_of` (identity for a plain `Vec<AnyView>`,
-/// `|c| &c.view` for Flex's `FlexChild` wrapper — the one shared reconciler).
+/// Diff a child list against its live `ChildPod`s, extracting each child's
+/// [`AnyView`] through `view_of` (identity for a plain `Vec<AnyView>`, `|c|
+/// &c.view` for Flex's `FlexChild` wrapper) and its optional [`ChildKey`]
+/// through `key_of` (`|_| None` for keyless containers, `|c| c.key` for Flex) —
+/// the one shared reconciler for every multi-child container.
 ///
-/// Common indices rebuild in place; a grown tail is built; a shrunk tail is torn
-/// down and dropped. Length changes signal `LAYOUT | PAINT`.
+/// **Positional vs. keyed.** With *no* child carrying a key this is a positional
+/// diff (see [`rebuild_children_positional`]); with keys present it matches
+/// old↔new by key so reorders/inserts preserve widget identity and state (see
+/// [`rebuild_children_keyed`]). Keys are all-or-nothing per list: a list that
+/// mixes keyed and unkeyed children, or repeats a key, trips a `debug_assert`
+/// and falls back to the positional path (correct, just identity-blind).
+///
+/// **Structural change cancels in-flight interaction.** Either path treats a
+/// child-count change, an in-place type swap, or (keyed only) a reorder as a
+/// structural edit that invalidates the recorded capture/focus paths, unwinding
+/// them via [`cancel_active_children`]; a structural-change-free rebuild leaves
+/// the recorded paths untouched, so an ordinary every-frame rebuild never breaks
+/// a captured drag or dismisses the keyboard.
+pub(crate) fn rebuild_children<State: 'static, C>(
+    prev: &[C],
+    next: &[C],
+    pods: &mut Vec<ChildPod>,
+    ctx: &mut BuildCtx<'_>,
+    view_of: impl Fn(&C) -> &AnyView<State>,
+    key_of: impl Fn(&C) -> Option<ChildKey>,
+) -> ChangeFlags {
+    let any_keyed = prev.iter().chain(next.iter()).any(|c| key_of(c).is_some());
+    if !any_keyed {
+        return rebuild_children_positional(prev, next, pods, ctx, view_of);
+    }
+    // v1 keys are all-or-nothing per list: a mixed list has no well-defined
+    // match for its unkeyed members, so fall back to positional (identity-blind
+    // but correct) rather than guess. A debug build flags the misuse loudly.
+    let all_keyed = prev.iter().chain(next.iter()).all(|c| key_of(c).is_some());
+    if !all_keyed {
+        debug_assert!(
+            false,
+            "keyed child list mixes keyed and unkeyed children; \
+             falling back to positional reconciliation"
+        );
+        return rebuild_children_positional(prev, next, pods, ctx, view_of);
+    }
+    rebuild_children_keyed(prev, next, pods, ctx, view_of, key_of)
+}
+
+/// The positional reconciler: common indices rebuild in place, a grown tail is
+/// built, a shrunk tail is torn down and dropped. Length changes signal
+/// `LAYOUT | PAINT`.
 ///
 /// **Structural change cancels in-flight gestures.** Positional reconciliation
 /// misroutes a captured gesture across a structural edit: a length shift moves
 /// the armed widget to a different logical index, and a type swap replaces the
 /// widget under a still-recorded path. On any child-count change *or* in-place
-/// type swap, every surviving captured child is [cancelled](cancel_active_children)
-/// so it unwinds rather than firing on a hit-tested `Up`; a swapped-in fresh
-/// widget (which never saw `Down`) just has its stale path dropped; and a
-/// truncated active pod is cancelled in [`teardown_child`]. A structural-change-free
-/// rebuild leaves the recorded path untouched, so an ordinary every-frame rebuild
-/// never breaks a captured drag.
-pub(crate) fn rebuild_children<State: 'static, C>(
+/// type swap, every surviving captured/focused child is
+/// [cleared](cancel_active_children) so it unwinds rather than firing on a
+/// hit-tested `Up`; a swapped-in fresh widget (which never saw `Down`) just has
+/// its stale path dropped; and a truncated active pod is cancelled in
+/// [`teardown_child`]. A structural-change-free rebuild leaves the recorded
+/// paths untouched, so an ordinary every-frame rebuild never breaks a captured
+/// drag.
+fn rebuild_children_positional<State: 'static, C>(
     prev: &[C],
     next: &[C],
     pods: &mut Vec<ChildPod>,
@@ -279,6 +395,115 @@ pub(crate) fn rebuild_children<State: 'static, C>(
     // invalidates any surviving in-flight capture (truncated active pods were
     // already cancelled in teardown; swapped slots were cleared above).
     if prev.len() != next.len() || swapped {
+        cancel_active_children(pods);
+    }
+    flags
+}
+
+/// The keyed reconciler: match old↔new children by [`ChildKey`] so reorders and
+/// inserts preserve each surviving child's live widget (and thus its internal
+/// state) instead of rebuilding whatever happens to sit at the same index.
+///
+/// Matched children are *relocated* into the new order — their `ChildPod` (boxed
+/// widget + geometry) is moved, then rebuilt in place against its own previous
+/// view. Unmatched new keys are built fresh; unmatched old keys are torn down
+/// (with [`teardown_child`]'s cancel-if-active). A duplicate key (old or new)
+/// trips a `debug_assert` and falls back to the positional path.
+///
+/// **Any move is a structural change.** A reorder, insert, or removal
+/// invalidates the recorded capture/focus paths (v1 is conservative: it does not
+/// try to carry an in-flight gesture or the keyboard across a moved row), so on
+/// any such edit every surviving child's paths are cleared via
+/// [`cancel_active_children`]. A same-keys, same-order rebuild is *not*
+/// structural: the recorded paths survive, exactly mirroring the positional
+/// path's content-only rebuild. A future surgical-preserve option could relocate
+/// the `active`/`focused` flag with its pod instead of clearing it.
+fn rebuild_children_keyed<State: 'static, C>(
+    prev: &[C],
+    next: &[C],
+    pods: &mut Vec<ChildPod>,
+    ctx: &mut BuildCtx<'_>,
+    view_of: impl Fn(&C) -> &AnyView<State>,
+    key_of: impl Fn(&C) -> Option<ChildKey>,
+) -> ChangeFlags {
+    // Old key -> old index, flagging any duplicate.
+    let mut old_by_key: HashMap<ChildKey, usize> = HashMap::with_capacity(prev.len());
+    let mut duplicate = false;
+    for (i, child) in prev.iter().enumerate() {
+        let key = key_of(child).expect("all-keyed list checked by caller");
+        if old_by_key.insert(key, i).is_some() {
+            duplicate = true;
+        }
+    }
+    // Duplicate new keys are equally ambiguous (two children claim one identity).
+    let mut seen_new: HashSet<ChildKey> = HashSet::with_capacity(next.len());
+    for child in next {
+        let key = key_of(child).expect("all-keyed list checked by caller");
+        if !seen_new.insert(key) {
+            duplicate = true;
+        }
+    }
+    if duplicate {
+        debug_assert!(
+            false,
+            "keyed child list has duplicate keys; falling back to positional reconciliation"
+        );
+        return rebuild_children_positional(prev, next, pods, ctx, view_of);
+    }
+
+    // Take ownership of the old pods so matched ones can be relocated by `take`.
+    let mut old_pods: Vec<Option<ChildPod>> = pods.drain(..).map(Some).collect();
+    let mut new_pods: Vec<ChildPod> = Vec::with_capacity(next.len());
+    let mut flags = ChangeFlags::NONE;
+    let mut structural = false;
+    // The old index of the previously-matched child: if a later match resolves to
+    // an *earlier* old index, the relative order changed → a reorder.
+    let mut last_matched_old: Option<usize> = None;
+
+    for child in next {
+        let key = key_of(child).expect("all-keyed list checked by caller");
+        if let Some(&old_index) = old_by_key.get(&key) {
+            if let Some(prev_old) = last_matched_old
+                && old_index < prev_old
+            {
+                structural = true;
+            }
+            last_matched_old = Some(old_index);
+            let mut pod = old_pods[old_index]
+                .take()
+                .expect("each old key matches at most one new child (no duplicates)");
+            let (child_flags, child_swapped) =
+                rebuild_child_tracked(view_of(&prev[old_index]), view_of(child), &mut pod, ctx);
+            flags |= child_flags;
+            if child_swapped {
+                // A key reused for a different concrete type: the old widget was
+                // torn down inside AnyView::rebuild; drop the stale paths.
+                pod.set_active(false);
+                pod.set_focused(false);
+                structural = true;
+            }
+            new_pods.push(pod);
+        } else {
+            // A brand-new key: build a fresh child.
+            new_pods.push(build_child(view_of(child), ctx));
+            structural = true;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+    }
+
+    // Any old pod never taken is a removed key: tear it down (cancelling first if
+    // it held an in-flight capture).
+    for (old_index, slot) in old_pods.iter_mut().enumerate() {
+        if let Some(mut pod) = slot.take() {
+            teardown_child(view_of(&prev[old_index]), &mut pod, ctx);
+            structural = true;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+    }
+
+    *pods = new_pods;
+
+    if structural {
         cancel_active_children(pods);
     }
     flags

@@ -16,6 +16,8 @@ use forgekit_core::{
 };
 use kurbo::{Point, Size};
 
+use crate::ChildKey;
+
 /// The axis a [`FlexView`] lays its children along.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis {
@@ -80,11 +82,18 @@ pub enum MainAxisAlignment {
     Start,
 }
 
-/// One child of a [`FlexView`]: an erased child view plus its `flex` factor
-/// (`0` = inflexible; `> 0` = takes a proportional share of the free main space).
+/// One child of a [`FlexView`]: an erased child view, its `flex` factor
+/// (`0` = inflexible; `> 0` = takes a proportional share of the free main space),
+/// and an optional [`ChildKey`] for keyed reconciliation.
+///
+/// `key` is `None` for the plain [`Row`]/[`Column`]/[`flexible`]/[`inflexible`]
+/// sugar (positional reconciliation, unchanged) and `Some` only for children
+/// built with [`keyed`], which opts the whole list into key-matched
+/// reconciliation (spec §6.3) so reorders/inserts preserve widget state.
 pub struct FlexChild<State: 'static> {
     view: AnyView<State>,
     flex: u32,
+    key: Option<ChildKey>,
 }
 
 /// A flexible child taking `flex` proportional shares of the free main-axis space.
@@ -92,6 +101,7 @@ pub fn flexible<State: 'static, V: View<State>>(flex: u32, view: V) -> FlexChild
     FlexChild {
         view: any(view),
         flex,
+        key: None,
     }
 }
 
@@ -100,6 +110,44 @@ pub fn inflexible<State: 'static, V: View<State>>(view: V) -> FlexChild<State> {
     FlexChild {
         view: any(view),
         flex: 0,
+        key: None,
+    }
+}
+
+/// An inflexible child tagged with a stable [`ChildKey`], for a list whose items
+/// reorder, insert, or delete between frames (spec §6.3).
+///
+/// Attaching a key to *any* child opts the whole [`FlexView`] into keyed
+/// reconciliation: on the next rebuild, children are matched to their live
+/// widgets by key rather than by position, so a shuffled or grown list preserves
+/// each surviving row's widget and its internal state (a scroll offset, a text
+/// buffer, a toggle) instead of rebuilding whatever now sits at that index. Keys
+/// are all-or-nothing per list and must be unique within it (see
+/// [`ChildKey`]).
+///
+/// Use it inside [`FlexView::new`] alongside (or instead of) [`inflexible`]:
+///
+/// ```
+/// use forgekit_widgets::{Axis, FlexView, keyed, text};
+/// # struct Item { id: u64, label: String }
+/// # fn demo(items: &[Item]) -> FlexView<()> {
+/// FlexView::new(
+///     Axis::Vertical,
+///     items.iter().map(|item| keyed(item.id, text(item.label.clone()))).collect(),
+/// )
+/// # }
+/// ```
+///
+/// v1 keyed children are inflexible; combining a key with a `flex` factor is a
+/// future extension.
+pub fn keyed<State: 'static, V: View<State>>(
+    key: impl Into<ChildKey>,
+    view: V,
+) -> FlexChild<State> {
+    FlexChild {
+        view: any(view),
+        flex: 0,
+        key: Some(key.into()),
     }
 }
 
@@ -144,7 +192,11 @@ pub fn Row<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
         Axis::Horizontal,
         children
             .into_iter()
-            .map(|view| FlexChild { view, flex: 0 })
+            .map(|view| FlexChild {
+                view,
+                flex: 0,
+                key: None,
+            })
             .collect(),
     )
 }
@@ -157,7 +209,11 @@ pub fn Column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> 
         Axis::Vertical,
         children
             .into_iter()
-            .map(|view| FlexChild { view, flex: 0 })
+            .map(|view| FlexChild {
+                view,
+                flex: 0,
+                key: None,
+            })
             .collect(),
     )
 }
@@ -226,37 +282,28 @@ impl<State: 'static> View<State> for FlexView<State> {
             flags |= ChangeFlags::LAYOUT;
         }
 
-        // Update flex factors on the surviving (common) children; a factor change
-        // is a layout change even when the child rebuilds in place. Done here
-        // because the parallel `flex` vec is Flex-specific sidecar state; the
-        // shared `rebuild_children` reconciles only the child pods below.
-        let common = prev.children.len().min(self.children.len());
-        for i in 0..common {
-            if prev.children[i].flex != self.children[i].flex {
-                element.flex[i] = self.children[i].flex;
-                flags |= ChangeFlags::LAYOUT;
-            }
-        }
-
         // Reconcile the child pods through the shared helper (build/rebuild/
-        // teardown + the structural-change capture cancellation).
+        // teardown + the structural-change capture/focus cancellation). Keyed
+        // children (`|child| child.key`) opt the list into key-matched
+        // reconciliation; an all-unkeyed list stays positional.
         flags |= crate::rebuild_children(
             &prev.children,
             &self.children,
             &mut element.children,
             ctx,
             |child| &child.view,
+            |child| child.key,
         );
 
-        // Keep the parallel `flex` vec length-synced with the reconciled children.
-        if self.children.len() > prev.children.len() {
-            element.flex.extend(
-                self.children[prev.children.len()..]
-                    .iter()
-                    .map(|child| child.flex),
-            );
-        } else if self.children.len() < prev.children.len() {
-            element.flex.truncate(self.children.len());
+        // Rebuild the parallel `flex` sidecar to match the reconciled children's
+        // new order and length in one shot — the keyed path may have reordered
+        // them, so an index-wise diff no longer tracks a given child. Comparing
+        // against the previous sidecar keeps the layout-dirty signal a factor
+        // change (or length/order change) still deserves.
+        let new_flex: Vec<u32> = self.children.iter().map(|child| child.flex).collect();
+        if new_flex != element.flex {
+            element.flex = new_flex;
+            flags |= ChangeFlags::LAYOUT;
         }
 
         flags
@@ -819,5 +866,344 @@ mod tests {
         // The captured drag completes and fires on the still-armed row.
         dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(1)));
         assert_eq!(log, vec![1], "captured row fires on Up as normal");
+    }
+
+    // --- Keyed reconciliation fixtures (task 58) --------------------------
+    //
+    // A stateful probe row: `CounterWidget` holds an internal `count` that starts
+    // at 0 on build and increments on every `Down`, pushing the post-increment
+    // value into the `Vec<u32>` app state. Its rebuild deliberately does NOT reset
+    // `count`, so the pushed sequence reveals whether a reconciliation *relocated*
+    // the live widget (count continues) or *rebuilt* it from scratch (count resets
+    // to 1). This is the probe the reorder-preserves-state test turns on.
+
+    /// A stateful counter row view tagged with `id`.
+    struct Counter {
+        id: u32,
+    }
+    /// Retained widget for [`Counter`]: `count` survives an in-place rebuild.
+    struct CounterWidget {
+        id: u32,
+        count: u32,
+    }
+
+    impl View<Vec<u32>> for Counter {
+        type Element = CounterWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> CounterWidget {
+            CounterWidget {
+                id: self.id,
+                count: 0,
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut CounterWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            // Adopt the new id but preserve the accumulated count — a relocated
+            // widget must keep its internal state.
+            element.id = self.id;
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for CounterWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(ROW_W, ROW_H))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            if p.phase == PointerPhase::Down {
+                self.count += 1;
+                ctx.state_mut::<Vec<u32>>().push(self.count);
+                EventResult::Handled
+            } else {
+                EventResult::Ignored
+            }
+        }
+    }
+
+    /// A keyed inflexible counter child.
+    fn kcounter(key: u64, id: u32) -> FlexChild<Vec<u32>> {
+        keyed(key, Counter { id })
+    }
+
+    /// Build a vertical keyed column of counter rows.
+    fn keyed_column(children: Vec<FlexChild<Vec<u32>>>) -> FlexView<Vec<u32>> {
+        FlexView::new(Axis::Vertical, children)
+    }
+
+    #[test]
+    fn keyed_reorder_preserves_widget_state() {
+        // THE CRITICAL TEST. Two keyed counter rows; drive row A's internal count
+        // up, reorder the list, then drive A again — its count must continue from
+        // where it left off, proving the reorder relocated A's live widget rather
+        // than rebuilding whatever now sits at A's old index.
+        let mut counter = 0u64;
+        let prev = keyed_column(vec![kcounter(1, 1), kcounter(2, 2)]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        // Row A (key 1) at index 0: three Downs → its internal count reaches 3.
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        assert_eq!(log, vec![1, 2, 3], "count accumulates on the original row");
+        log.clear();
+
+        // Reorder: [B, A]. Row A moves to index 1.
+        let reordered = keyed_column(vec![kcounter(2, 2), kcounter(1, 1)]);
+        reordered.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert_eq!(w.children.len(), 2);
+        layout_column(&mut w);
+
+        // Drive row A at its NEW index (1). If its widget was relocated, the count
+        // continues to 4; a from-scratch rebuild would reset it to 1.
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert_eq!(
+            log,
+            vec![4],
+            "reordered row kept its internal state (4, not a reset 1)"
+        );
+    }
+
+    #[test]
+    fn keyed_insert_above_preserves_existing_widget_state() {
+        // Inserting a new keyed row above the existing ones must not rebuild them:
+        // the surviving rows relocate (state preserved), only the new key builds.
+        let mut counter = 0u64;
+        let prev = keyed_column(vec![kcounter(1, 1), kcounter(2, 2)]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        // Row with key 2 (index 1): two Downs → count 2.
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert_eq!(log, vec![1, 2]);
+        log.clear();
+
+        // Insert a fresh key 9 at the top: [9, 1, 2]. Key 2 shifts to index 2.
+        let inserted = keyed_column(vec![kcounter(9, 9), kcounter(1, 1), kcounter(2, 2)]);
+        inserted.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert_eq!(w.children.len(), 3);
+        layout_column(&mut w);
+
+        // Key 2 at its new index (2) continues its count to 3, not a reset 1.
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(2)));
+        assert_eq!(log, vec![3], "shifted row preserved its state");
+        log.clear();
+
+        // The freshly-built key 9 (index 0) starts its own count at 1.
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        assert_eq!(log, vec![1], "newly-inserted key builds a fresh widget");
+    }
+
+    #[test]
+    fn keyed_swap_preserves_both_widgets() {
+        // A straight two-row swap must preserve *both* rows' state.
+        let mut counter = 0u64;
+        let prev = keyed_column(vec![kcounter(1, 1), kcounter(2, 2)]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        // A (key 1, idx 0) → count 1; B (key 2, idx 1) → count 1 then 2.
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert_eq!(log, vec![1, 1, 2]);
+        log.clear();
+
+        // Swap → [B, A].
+        let swapped = keyed_column(vec![kcounter(2, 2), kcounter(1, 1)]);
+        swapped.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        // B now at idx 0 continues to 3; A now at idx 1 continues to 2.
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert_eq!(log, vec![3, 2], "both swapped rows kept their state");
+    }
+
+    #[test]
+    fn keyed_same_order_rebuild_is_not_structural() {
+        // A same-keys, same-order keyed rebuild is the content-only case: it must
+        // NOT clear an in-flight capture (mirrors the positional negative test).
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = FlexView::new(
+            Axis::Vertical,
+            vec![keyed(1u64, Captor { id: 0 }), keyed(2u64, Captor { id: 1 })],
+        );
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert!(w.children[1].is_active());
+
+        // Same keys, same order → not structural.
+        let same: FlexView<Vec<u32>> = FlexView::new(
+            Axis::Vertical,
+            vec![keyed(1u64, Captor { id: 0 }), keyed(2u64, Captor { id: 1 })],
+        );
+        same.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            w.children[1].is_active(),
+            "same-order keyed rebuild must not clear an in-flight capture"
+        );
+
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(1)));
+        assert_eq!(log, vec![1], "captured row fires on Up as normal");
+    }
+
+    #[test]
+    fn keyed_reorder_cancels_inflight_gesture_no_fire() {
+        // An in-flight capture across a keyed reorder is cancelled (g5 pattern):
+        // no callback fires on the later Up.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = FlexView::new(
+            Axis::Vertical,
+            vec![keyed(1u64, Captor { id: 0 }), keyed(2u64, Captor { id: 1 })],
+        );
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        // Arm the capture in the key-1 row (index 0).
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        assert!(w.children[0].is_active());
+
+        // Reorder → [key2, key1]. The reorder is structural → cancel.
+        let reordered: FlexView<Vec<u32>> = FlexView::new(
+            Axis::Vertical,
+            vec![keyed(2u64, Captor { id: 1 }), keyed(1u64, Captor { id: 0 })],
+        );
+        reordered.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            w.children.iter().all(|p| !p.is_active()),
+            "keyed reorder cleared every active path"
+        );
+
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(1)));
+        assert!(log.is_empty(), "no row fires on Up after a reorder cancel");
+    }
+
+    #[test]
+    fn keyed_removed_active_key_unwinds_without_fire() {
+        // Removing a key whose row holds an in-flight capture tears it down via
+        // the cancel-if-active path: no fire, no panic.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = FlexView::new(
+            Axis::Vertical,
+            vec![
+                keyed(1u64, Captor { id: 0 }),
+                keyed(2u64, Captor { id: 1 }),
+                keyed(3u64, Captor { id: 2 }),
+            ],
+        );
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        // Arm the key-2 row (index 1).
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert!(w.children[1].is_active());
+
+        // Drop key 2 → [key1, key3].
+        let removed: FlexView<Vec<u32>> = FlexView::new(
+            Axis::Vertical,
+            vec![keyed(1u64, Captor { id: 0 }), keyed(3u64, Captor { id: 2 })],
+        );
+        removed.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert_eq!(w.children.len(), 2);
+        assert_eq!(w.flex.len(), 2);
+        assert!(w.children.iter().all(|p| !p.is_active()));
+
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(1)));
+        assert!(log.is_empty(), "removed active row does not fire on Up");
+    }
+
+    #[test]
+    fn keyed_reorder_clears_focus() {
+        // Focus is the second recorded path: any keyed reorder clears it, exactly
+        // like the capture path (conservative v1 — see cancel_active_children).
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = FlexView::new(
+            Axis::Vertical,
+            vec![
+                keyed(1u64, FocusRow { id: 1 }),
+                keyed(2u64, FocusRow { id: 2 }),
+            ],
+        );
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        // Focus the key-1 row (index 0).
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        assert!(w.children[0].is_focused());
+
+        // Reorder → [key2, key1]. Structural → focus chain cleared.
+        let reordered: FlexView<Vec<u32>> = FlexView::new(
+            Axis::Vertical,
+            vec![
+                keyed(2u64, FocusRow { id: 2 }),
+                keyed(1u64, FocusRow { id: 1 }),
+            ],
+        );
+        reordered.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            w.children.iter().all(|p| !p.is_focused()),
+            "keyed reorder cleared the focus path"
+        );
+    }
+
+    /// A focus-taking row: requests focus on `Down`, records `id` on a Key event.
+    struct FocusRow {
+        id: u32,
+    }
+    /// Retained widget for [`FocusRow`].
+    struct FocusRowWidget {
+        id: u32,
+    }
+
+    impl View<Vec<u32>> for FocusRow {
+        type Element = FocusRowWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FocusRowWidget {
+            FocusRowWidget { id: self.id }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut FocusRowWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.id = self.id;
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for FocusRowWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(ROW_W, ROW_H))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
+            {
+                ctx.request_focus();
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
     }
 }

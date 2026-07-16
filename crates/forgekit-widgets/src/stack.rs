@@ -47,12 +47,16 @@ impl<State: 'static> View<State> for StackView<State> {
         element: &mut StackWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
+        // Stack children are plain `AnyView`s with no key storage, so every child
+        // reports `None` and reconciliation stays positional. Keyed stacks are a
+        // future extension (they would need a keyed child descriptor like Flex's).
         crate::rebuild_children(
             &prev.children,
             &self.children,
             &mut element.children,
             ctx,
             |view| view,
+            |_| None,
         )
     }
 
