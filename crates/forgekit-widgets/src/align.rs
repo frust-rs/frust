@@ -318,4 +318,55 @@ mod tests {
             EventResult::Ignored
         );
     }
+
+    // -- Type-swap capture clearing (re-review round 1: `rebuild_child` must
+    // clear a stale capture on an AnyView type swap, matching
+    // `rebuild_children`'s semantics for `Flex`/`Stack`) --
+
+    #[test]
+    fn type_swap_at_captured_child_clears_active_and_stops_routing() {
+        let mut counter = 0u64;
+        let prev: AlignView<Counter> = Align(
+            Alignment::CENTER,
+            crate::button::<Counter, _>("go", |s: &mut Counter| s.presses += 1),
+        );
+        let mut w = prev.build(&mut BuildCtx::new(&mut counter));
+        let mut text_ctx = forgekit_text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx);
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(500.0, 500.0)));
+
+        let mut state = Counter::default();
+        let origin = w.child.origin();
+        let inside = Point::new(origin.x + 2.0, origin.y + 2.0);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Down, inside.x, inside.y),
+        );
+        assert!(w.child.is_active(), "down captures the pointer");
+
+        // Rebuild, swapping the child's concrete type (Button -> Checkbox).
+        let swapped: AlignView<Counter> = Align(
+            Alignment::CENTER,
+            crate::checkbox::<Counter, _>(false, "swapped", |_s: &mut Counter, _v: bool| {}),
+        );
+        swapped.rebuild(&prev, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(
+            !w.child.is_active(),
+            "the type swap must clear the stale capture"
+        );
+
+        // A Down outside the child's bounds must now be Ignored — not routed
+        // to the fresh widget via a stale `active` flag.
+        let outside = Point::new(1.0, 1.0);
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Down, outside.x, outside.y)
+            ),
+            EventResult::Ignored,
+            "a swap must clear active so an out-of-bounds Down is not delivered"
+        );
+    }
 }

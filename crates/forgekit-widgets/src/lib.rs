@@ -109,13 +109,26 @@ pub(crate) fn build_child<State: 'static>(
 }
 
 /// Reconcile one [`AnyView`] child in place through its `ChildPod`.
+///
+/// A type-swapped child (see [`rebuild_child_tracked`]) that still holds a
+/// recorded capture has that capture dropped: `pod.set_active(false)`, no
+/// synthetic `Cancel`. The old armed widget was torn down inside
+/// `AnyView::rebuild` — its state died with it — and the fresh widget in its
+/// place never saw the original `Down`, so there is nothing to unwind; this
+/// mirrors [`rebuild_children`]'s documented type-swap semantics for the
+/// single-child wrappers (`Padding`/`Align`/`SizedBox`, and the interactive
+/// widgets' own label/track children) that call this instead of
+/// `rebuild_children`.
 pub(crate) fn rebuild_child<State: 'static>(
     prev: &AnyView<State>,
     next: &AnyView<State>,
     pod: &mut ChildPod,
     ctx: &mut BuildCtx<'_>,
 ) -> ChangeFlags {
-    let (flags, _swapped) = rebuild_child_tracked(prev, next, pod, ctx);
+    let (flags, swapped) = rebuild_child_tracked(prev, next, pod, ctx);
+    if swapped && pod.is_active() {
+        pod.set_active(false);
+    }
     flags
 }
 
@@ -123,10 +136,12 @@ pub(crate) fn rebuild_child<State: 'static>(
 /// underlying widget (an [`AnyView`] concrete-type swap) rather than mutating it
 /// in place.
 ///
-/// The swap flag drives [`rebuild_children`]'s capture bookkeeping: a fresh
-/// widget swapped in at a still-captured index never saw the original `Down`, so
-/// its stale `active` path is dropped without a synthetic `Cancel` (there is
-/// nothing armed to unwind). Detection compares the boxed element's concrete
+/// The swap flag drives both callers' capture bookkeeping: [`rebuild_children`]'s
+/// (multi-child `Vec` containers — `Flex`/`Stack`) and [`rebuild_child`]'s
+/// (single-child wrappers). A fresh widget swapped in at a still-captured
+/// index/pod never saw the original `Down`, so its stale `active` path is
+/// dropped without a synthetic `Cancel` (there is nothing armed to unwind).
+/// Detection compares the boxed element's concrete
 /// [`TypeId`](std::any::TypeId) across the rebuild.
 fn rebuild_child_tracked<State: 'static>(
     prev: &AnyView<State>,
@@ -502,5 +517,61 @@ pub(crate) mod test_support {
             self.rects.push((origin, size));
         }
         fn draw_text(&mut self, _origin: Point, _text: &str) {}
+    }
+}
+
+/// Mechanism-level tests for [`rebuild_child`]'s type-swap capture handling
+/// (re-review round 1): every single-child container (`Padding`/`Align`/
+/// `SizedBox`, interactive widgets' labels) reconciles its child through this
+/// helper, so the clear-on-swap behavior is proven once here at the shared
+/// substrate, and each container's own test module (see `padding`/`align`/
+/// `sized`) proves it end to end through real event routing/geometry.
+#[cfg(test)]
+mod tests {
+    use super::test_support::{leaf_any, swap_leaf};
+    use super::*;
+    use forgekit_core::BuildCtx;
+
+    fn ctx(counter: &mut u64) -> BuildCtx<'_> {
+        BuildCtx::new(counter)
+    }
+
+    #[test]
+    fn rebuild_child_clears_active_on_type_swap() {
+        // A type swap (Leaf -> SwapLeaf, different concrete types) tears down
+        // the old widget inside AnyView::rebuild and builds a fresh one in its
+        // place; a still-active pod must have its stale capture dropped so a
+        // later event isn't misrouted into the fresh widget.
+        let mut counter = 0u64;
+        let prev: AnyView<()> = leaf_any(10.0, 10.0);
+        let mut pod = build_child(&prev, &mut ctx(&mut counter));
+        pod.set_active(true);
+
+        let next: AnyView<()> = swap_leaf().into_any();
+        rebuild_child::<()>(&prev, &next, &mut pod, &mut ctx(&mut counter));
+
+        assert!(
+            !pod.is_active(),
+            "a type-swapped child's stale capture must be dropped"
+        );
+    }
+
+    #[test]
+    fn rebuild_child_preserves_active_on_same_type_rebuild() {
+        // Negative guard against over-clearing: a same-type, content-only
+        // rebuild (no AnyView type swap) must NOT touch an in-flight capture —
+        // mirrors rebuild_children's content_only_rebuild_preserves_captured_drag.
+        let mut counter = 0u64;
+        let prev: AnyView<()> = leaf_any(10.0, 10.0);
+        let mut pod = build_child(&prev, &mut ctx(&mut counter));
+        pod.set_active(true);
+
+        let next: AnyView<()> = leaf_any(20.0, 20.0);
+        rebuild_child::<()>(&prev, &next, &mut pod, &mut ctx(&mut counter));
+
+        assert!(
+            pod.is_active(),
+            "a content-only rebuild must not clear an in-flight capture"
+        );
     }
 }
