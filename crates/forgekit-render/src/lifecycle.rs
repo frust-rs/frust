@@ -130,8 +130,26 @@ pub(crate) enum AcquireAction {
     Skip,
 }
 
+/// Cap on consecutive `Invalid`-acquire reconfigure retries before the machine
+/// gives up and transitions to [`SurfacePhase::SurfaceLost`].
+///
+/// Mirrors `forgekit-shell-ios::ffi_support::MAX_RECREATE_ATTEMPTS`'s style and
+/// rationale (same spec §8.1 phase, applied one step earlier): without a cap, a
+/// persistently-`Invalid` swapchain would retry a reconfigure every frame,
+/// forever. At the cap the existing per-shell `SurfaceLost` recovery paths take
+/// over instead — desktop recreates on the next resize/redraw, iOS's own
+/// `recover_surface` (capped separately), Android on the next `surfaceChanged`
+/// — so no shell code needs to change for this to be honoured.
+pub(crate) const MAX_INVALID_RECONFIGURES: u8 = 3;
+
 /// Pure acquire-error policy (spec §8.1).
-pub(crate) fn decide_acquire(status: AcquireStatus) -> AcquireAction {
+///
+/// `consecutive_invalid` is the number of `Invalid` acquires already retried
+/// (via `Reconfigure`) since the last successful acquire; only the `Invalid`
+/// arm consults it. Host-testable: no `wgpu` state is touched here, only the
+/// counter [`crate::SurfaceRenderer::render`] tracks and resets on a
+/// successful acquire.
+pub(crate) fn decide_acquire(status: AcquireStatus, consecutive_invalid: u8) -> AcquireAction {
     match status {
         AcquireStatus::Usable => AcquireAction::Present,
         AcquireStatus::Outdated => AcquireAction::Reconfigure,
@@ -140,7 +158,40 @@ pub(crate) fn decide_acquire(status: AcquireStatus) -> AcquireAction {
         // A validation error on acquire is treated like `Outdated`: rebuild the
         // swapchain and ask for a redraw. Recovering (rather than `Fail`ing)
         // keeps a transient driver hiccup from permanently freezing the surface.
-        AcquireStatus::Invalid => AcquireAction::Reconfigure,
+        // But only up to `MAX_INVALID_RECONFIGURES` consecutive attempts — past
+        // that this is no longer a one-off hiccup, and retrying forever would
+        // spin the render loop on a permanently-broken swapchain. At the cap,
+        // give up and drop to `SurfaceLost` like a genuine `Lost` acquire, so
+        // the shell's existing recovery paths take over.
+        AcquireStatus::Invalid => {
+            if consecutive_invalid < MAX_INVALID_RECONFIGURES {
+                AcquireAction::Reconfigure
+            } else {
+                AcquireAction::Lose
+            }
+        }
+    }
+}
+
+/// Given the just-observed acquire `status` and the [`AcquireAction`]
+/// [`decide_acquire`] chose for it, returns the next consecutive-`Invalid`
+/// streak count [`crate::SurfaceRenderer`] should store.
+///
+/// Pure and host-testable, split out of [`crate::SurfaceRenderer::render`] so
+/// the counter's reset-on-success / increment-on-retry / reset-on-give-up
+/// discipline is unit-tested without a GPU:
+/// - a successful acquire (`Usable`) always resets the streak to zero — the
+///   next `Invalid`, if any, starts a fresh episode with a full retry budget;
+/// - a retried `Invalid` (`Reconfigure`) increments the streak;
+/// - a given-up `Invalid` (`Lose`, i.e. the cap was hit) resets to zero — the
+///   giving-up transition itself ends the episode;
+/// - every other status/action pairing leaves the streak untouched.
+pub(crate) fn next_invalid_streak(status: AcquireStatus, action: AcquireAction, current: u8) -> u8 {
+    match (status, action) {
+        (AcquireStatus::Usable, _) => 0,
+        (AcquireStatus::Invalid, AcquireAction::Reconfigure) => current.saturating_add(1),
+        (AcquireStatus::Invalid, AcquireAction::Lose) => 0,
+        _ => current,
     }
 }
 
@@ -296,23 +347,135 @@ mod tests {
     #[test]
     fn acquire_policy_matches_spec_8_1() {
         assert_eq!(
-            decide_acquire(AcquireStatus::Usable),
+            decide_acquire(AcquireStatus::Usable, 0),
             AcquireAction::Present
         );
         assert_eq!(
-            decide_acquire(AcquireStatus::Outdated),
+            decide_acquire(AcquireStatus::Outdated, 0),
             AcquireAction::Reconfigure
         );
-        assert_eq!(decide_acquire(AcquireStatus::Lost), AcquireAction::Lose);
+        assert_eq!(decide_acquire(AcquireStatus::Lost, 0), AcquireAction::Lose);
         assert_eq!(
-            decide_acquire(AcquireStatus::Transient),
+            decide_acquire(AcquireStatus::Transient, 0),
             AcquireAction::Skip
         );
         // A validation error on acquire recovers by reconfiguring the surface,
         // not by failing — a transient SwiftShader hiccup must not wedge the app.
         assert_eq!(
-            decide_acquire(AcquireStatus::Invalid),
+            decide_acquire(AcquireStatus::Invalid, 0),
             AcquireAction::Reconfigure
         );
+    }
+
+    #[test]
+    fn invalid_reconfigures_under_the_cap() {
+        // Every count below the cap still reconfigures — mirrors the iOS
+        // `MAX_RECREATE_ATTEMPTS` "under cap" behavior at the analogous phase.
+        for consecutive_invalid in 0..MAX_INVALID_RECONFIGURES {
+            assert_eq!(
+                decide_acquire(AcquireStatus::Invalid, consecutive_invalid),
+                AcquireAction::Reconfigure,
+                "expected Reconfigure at consecutive_invalid={consecutive_invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_gives_up_at_the_cap() {
+        assert_eq!(
+            decide_acquire(AcquireStatus::Invalid, MAX_INVALID_RECONFIGURES),
+            AcquireAction::Lose,
+            "at the cap the machine must give up and drop to SurfaceLost"
+        );
+        // Saturating past the cap stays given-up (never re-enters Reconfigure).
+        assert_eq!(
+            decide_acquire(AcquireStatus::Invalid, u8::MAX),
+            AcquireAction::Lose
+        );
+    }
+
+    #[test]
+    fn invalid_streak_resets_on_successful_acquire() {
+        assert_eq!(
+            next_invalid_streak(AcquireStatus::Usable, AcquireAction::Present, 2),
+            0
+        );
+        // Even a streak already at (or past) the cap resets on success.
+        assert_eq!(
+            next_invalid_streak(AcquireStatus::Usable, AcquireAction::Present, u8::MAX),
+            0
+        );
+    }
+
+    #[test]
+    fn invalid_streak_increments_while_reconfiguring() {
+        assert_eq!(
+            next_invalid_streak(AcquireStatus::Invalid, AcquireAction::Reconfigure, 0),
+            1
+        );
+        assert_eq!(
+            next_invalid_streak(
+                AcquireStatus::Invalid,
+                AcquireAction::Reconfigure,
+                MAX_INVALID_RECONFIGURES - 1
+            ),
+            MAX_INVALID_RECONFIGURES
+        );
+        // Saturates rather than overflowing.
+        assert_eq!(
+            next_invalid_streak(AcquireStatus::Invalid, AcquireAction::Reconfigure, u8::MAX),
+            u8::MAX
+        );
+    }
+
+    #[test]
+    fn invalid_streak_resets_on_giving_up() {
+        assert_eq!(
+            next_invalid_streak(
+                AcquireStatus::Invalid,
+                AcquireAction::Lose,
+                MAX_INVALID_RECONFIGURES
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn invalid_streak_untouched_by_unrelated_status_action_pairs() {
+        assert_eq!(
+            next_invalid_streak(AcquireStatus::Outdated, AcquireAction::Reconfigure, 2),
+            2
+        );
+        assert_eq!(
+            next_invalid_streak(AcquireStatus::Lost, AcquireAction::Lose, 2),
+            2
+        );
+        assert_eq!(
+            next_invalid_streak(AcquireStatus::Transient, AcquireAction::Skip, 2),
+            2
+        );
+    }
+
+    #[test]
+    fn non_invalid_statuses_are_unaffected_by_the_counter() {
+        // The counter only matters for `Invalid`; every other status ignores it.
+        for consecutive_invalid in [0, 1, MAX_INVALID_RECONFIGURES, u8::MAX] {
+            assert_eq!(
+                decide_acquire(AcquireStatus::Usable, consecutive_invalid),
+                AcquireAction::Present
+            );
+            assert_eq!(
+                decide_acquire(AcquireStatus::Outdated, consecutive_invalid),
+                AcquireAction::Reconfigure
+            );
+            assert_eq!(
+                decide_acquire(AcquireStatus::Lost, consecutive_invalid),
+                AcquireAction::Lose
+            );
+            assert_eq!(
+                decide_acquire(AcquireStatus::Transient, consecutive_invalid),
+                AcquireAction::Skip
+            );
+        }
     }
 }

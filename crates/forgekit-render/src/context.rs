@@ -139,6 +139,54 @@ fn supports_required_downlevel_flags(flags: wgpu::DownlevelFlags) -> bool {
     flags.contains(REQUIRED_DOWNLEVEL_FLAGS)
 }
 
+/// Number of uncaptured `wgpu` errors logged at error level per device before
+/// the handler latches into suppression. A single flaky frame under a driver
+/// hiccup (e.g. the Android emulator's SwiftShader path — see the
+/// `on_uncaptured_error` doc below) is expected to surface a handful of
+/// errors; past this the process is either wedged in a genuine per-frame error
+/// storm or the driver is fundamentally broken, and re-logging every single
+/// one would flood the log without adding information.
+const MAX_LOGGED_UNCAPTURED_ERRORS: u32 = 5;
+
+/// How often (in error count) a latched handler bumps a debug-level "still
+/// happening" line once past [`MAX_LOGGED_UNCAPTURED_ERRORS`] and the one
+/// suppression notice. Debug level (not error) because this is diagnostic
+/// noise for someone actively investigating, not an actionable signal.
+const UNCAPTURED_ERROR_DEBUG_BUMP_PERIOD: u32 = 100;
+
+/// What the `on_uncaptured_error` handler should do for the `count`-th
+/// uncaptured error (1-indexed) it has observed on a given device.
+///
+/// Pure decision logic, split out of the handler closure in [`RenderContext::ensure_device`]
+/// so the latch discipline — log the first few, announce the latch once, then
+/// go quiet except an occasional debug bump — is unit-testable without a GPU
+/// or a real `wgpu::Error`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LogAction {
+    /// One of the first [`MAX_LOGGED_UNCAPTURED_ERRORS`]: log the error itself
+    /// at error level.
+    Log,
+    /// The first error past the cap: log one suppression notice (naming the
+    /// running total) instead of the error itself.
+    SuppressionNotice,
+    /// Past the cap and past the suppression notice: stay silent, except a
+    /// periodic debug-level count bump when `debug_bump` is set.
+    Silent { debug_bump: bool },
+}
+
+/// Pure latch policy for the uncaptured-error handler (see [`LogAction`]).
+pub(crate) fn decide_log_action(count: u32) -> LogAction {
+    if count <= MAX_LOGGED_UNCAPTURED_ERRORS {
+        LogAction::Log
+    } else if count == MAX_LOGGED_UNCAPTURED_ERRORS + 1 {
+        LogAction::SuppressionNotice
+    } else {
+        LogAction::Silent {
+            debug_bump: count.is_multiple_of(UNCAPTURED_ERROR_DEBUG_BUMP_PERIOD),
+        }
+    }
+}
+
 /// Detects whether the current process is running on an Android emulator
 /// (goldfish/ranchu), as opposed to a physical device, via the standard
 /// `ro.kernel.qemu` system property (`"1"` on emulators, unset/absent on
@@ -285,8 +333,36 @@ impl RenderContext {
         // lets the swapchain rebuild and rendering resume. Genuine API misuse is
         // still surfaced — loudly, at error level — just without killing the
         // process across the FFI boundary.
-        device.on_uncaptured_error(std::sync::Arc::new(|error| {
-            log::error!("forgekit-render: uncaptured wgpu error: {error}");
+        //
+        // The handler latches rather than logging unbounded: a device stuck in a
+        // genuine per-frame error storm (as opposed to a one-off driver hiccup)
+        // would otherwise flood the log forever. `error_count` is per-device
+        // (captured fresh each time this closure is installed, i.e. once per
+        // logical device), `Arc<AtomicU32>` because `on_uncaptured_error`'s
+        // handler must be `Fn`, not `FnMut` — see [`decide_log_action`] for the
+        // pure latch policy this defers to.
+        let error_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        device.on_uncaptured_error(std::sync::Arc::new(move |error| {
+            let count = error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            match decide_log_action(count) {
+                LogAction::Log => {
+                    log::error!("forgekit-render: uncaptured wgpu error: {error}");
+                }
+                LogAction::SuppressionNotice => {
+                    log::error!(
+                        "forgekit-render: further uncaptured wgpu errors suppressed \
+                         (total so far: {count})"
+                    );
+                }
+                LogAction::Silent { debug_bump } => {
+                    if debug_bump {
+                        log::debug!(
+                            "forgekit-render: uncaptured wgpu error count now {count} \
+                             (still suppressed)"
+                        );
+                    }
+                }
+            }
         }));
 
         self.device = Some(DeviceHandle {
@@ -477,5 +553,49 @@ mod tests {
         let limits = effective_limits(adapter.clone(), true);
         assert_eq!(limits.min_uniform_buffer_offset_alignment, 256);
         assert_eq!(limits.max_texture_dimension_2d, 4096);
+    }
+
+    #[test]
+    fn first_n_uncaptured_errors_log() {
+        for count in 1..=MAX_LOGGED_UNCAPTURED_ERRORS {
+            assert_eq!(
+                decide_log_action(count),
+                LogAction::Log,
+                "expected Log at count={count}"
+            );
+        }
+    }
+
+    #[test]
+    fn nplus1_uncaptured_error_suppresses() {
+        assert_eq!(
+            decide_log_action(MAX_LOGGED_UNCAPTURED_ERRORS + 1),
+            LogAction::SuppressionNotice
+        );
+    }
+
+    #[test]
+    fn further_uncaptured_errors_stay_silent_between_debug_bumps() {
+        let past_notice = MAX_LOGGED_UNCAPTURED_ERRORS + 2;
+        assert_eq!(
+            decide_log_action(past_notice),
+            LogAction::Silent { debug_bump: false }
+        );
+    }
+
+    #[test]
+    fn uncaptured_error_debug_bump_is_periodic() {
+        assert_eq!(
+            decide_log_action(UNCAPTURED_ERROR_DEBUG_BUMP_PERIOD),
+            LogAction::Silent { debug_bump: true }
+        );
+        assert_eq!(
+            decide_log_action(UNCAPTURED_ERROR_DEBUG_BUMP_PERIOD * 2),
+            LogAction::Silent { debug_bump: true }
+        );
+        assert_eq!(
+            decide_log_action(UNCAPTURED_ERROR_DEBUG_BUMP_PERIOD + 1),
+            LogAction::Silent { debug_bump: false }
+        );
     }
 }

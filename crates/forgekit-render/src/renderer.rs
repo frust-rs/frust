@@ -19,7 +19,7 @@ use crate::context::RenderContext;
 use crate::convert;
 use crate::lifecycle::{
     AcquireAction, AcquireStatus, FrameOutcome, SurfaceEvent, SurfacePhase, decide_acquire,
-    next_phase,
+    next_invalid_streak, next_phase,
 };
 
 /// The live GPU resources of a [`SurfacePhase::SurfaceReady`] surface.
@@ -55,6 +55,12 @@ pub struct SurfaceRenderer {
     /// (spec §7). Device-independent, so it outlives surface transitions.
     scene: vello::Scene,
     state: SurfaceState,
+    /// Consecutive `AcquireStatus::Invalid` acquires retried via `Reconfigure`
+    /// since the last successful acquire or surface (re)install — see
+    /// [`crate::lifecycle::decide_acquire`]/[`crate::lifecycle::MAX_INVALID_RECONFIGURES`].
+    /// Reset on a successful acquire, on giving up (transitioning to
+    /// `SurfaceLost`), and on installing a fresh surface.
+    consecutive_invalid: u8,
 }
 
 impl Default for SurfaceRenderer {
@@ -73,6 +79,7 @@ impl SurfaceRenderer {
         Self {
             scene: vello::Scene::new(),
             state: SurfaceState::NoSurface,
+            consecutive_invalid: 0,
         }
     }
 
@@ -209,6 +216,9 @@ impl SurfaceRenderer {
         // before the new one goes live (spec §8.1: no surface outlives a
         // transition).
         self.state = SurfaceState::Ready(Box::new(ReadySurface { surface, renderer }));
+        // A freshly (re)installed surface starts a new `Invalid`-reconfigure
+        // episode — any prior streak belonged to the surface just replaced.
+        self.consecutive_invalid = 0;
         Ok(())
     }
 
@@ -263,10 +273,12 @@ impl SurfaceRenderer {
         if !self.phase().can_render() {
             return Ok(FrameOutcome::Skipped);
         }
-        // Disjoint field borrows: the reusable scene and the live surface.
+        // Disjoint field borrows: the reusable scene, the live surface, and the
+        // consecutive-Invalid counter.
         let Self {
             scene: vello_scene,
             state,
+            consecutive_invalid,
         } = self;
         let SurfaceState::Ready(ready) = state else {
             // Unreachable: `can_render()` above guaranteed SurfaceReady.
@@ -304,11 +316,25 @@ impl SurfaceRenderer {
             Cst::Validation => AcquireStatus::Invalid,
         };
 
-        match decide_acquire(status) {
+        let action = decide_acquire(status, *consecutive_invalid);
+        // Reset-on-success / increment-on-retry / reset-on-give-up (spec §8.1
+        // discipline mirrored from iOS's `recreate_failures`) — pure and
+        // unit-tested in `next_invalid_streak` itself.
+        if status == AcquireStatus::Invalid && action == AcquireAction::Lose {
+            // The cap was hit rather than a genuine `Lost` acquire: log once so
+            // the giving-up transition is visible before the streak resets.
+            log::warn!(
+                "forgekit-render: giving up on Invalid-acquire reconfigure after \
+                 {consecutive_invalid} consecutive attempts; surface lost"
+            );
+        }
+        *consecutive_invalid = next_invalid_streak(status, action, *consecutive_invalid);
+
+        match action {
             AcquireAction::Present => {
                 let surface_texture = match acquired {
                     Cst::Success(t) | Cst::Suboptimal(t) => t,
-                    // `decide_acquire(Usable) == Present`, and only Success/
+                    // `decide_acquire(Usable, _) == Present`, and only Success/
                     // Suboptimal classify as Usable — so this is unreachable.
                     // Report rather than panic to honour the no-panic invariant.
                     _ => {
@@ -345,7 +371,10 @@ impl SurfaceRenderer {
                     "Lost must reach SurfaceLost from SurfaceReady (spec §8.1)"
                 );
                 // Drop the surface and its outstanding resources before returning
-                // (spec §8.1) so the shell can recreate cleanly.
+                // (spec §8.1) so the shell can recreate cleanly. `consecutive_invalid`
+                // was already reset above (`next_invalid_streak`); the shell's own
+                // recovery path (recreate on resize/redraw/surfaceChanged) starts a
+                // fresh episode.
                 *state = SurfaceState::Lost;
                 Ok(FrameOutcome::SurfaceLost)
             }
