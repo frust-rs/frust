@@ -226,34 +226,37 @@ impl<State: 'static> View<State> for FlexView<State> {
             flags |= ChangeFlags::LAYOUT;
         }
 
+        // Update flex factors on the surviving (common) children; a factor change
+        // is a layout change even when the child rebuilds in place. Done here
+        // because the parallel `flex` vec is Flex-specific sidecar state; the
+        // shared `rebuild_children` reconciles only the child pods below.
         let common = prev.children.len().min(self.children.len());
         for i in 0..common {
-            flags |= crate::rebuild_child(
-                &prev.children[i].view,
-                &self.children[i].view,
-                &mut element.children[i],
-                ctx,
-            );
             if prev.children[i].flex != self.children[i].flex {
                 element.flex[i] = self.children[i].flex;
                 flags |= ChangeFlags::LAYOUT;
             }
         }
 
+        // Reconcile the child pods through the shared helper (build/rebuild/
+        // teardown + the structural-change capture cancellation).
+        flags |= crate::rebuild_children(
+            &prev.children,
+            &self.children,
+            &mut element.children,
+            ctx,
+            |child| &child.view,
+        );
+
+        // Keep the parallel `flex` vec length-synced with the reconciled children.
         if self.children.len() > prev.children.len() {
-            for child in &self.children[prev.children.len()..] {
-                element.children.push(crate::build_child(&child.view, ctx));
-                element.flex.push(child.flex);
-            }
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            element.flex.extend(
+                self.children[prev.children.len()..]
+                    .iter()
+                    .map(|child| child.flex),
+            );
         } else if self.children.len() < prev.children.len() {
-            for (offset, child) in prev.children[self.children.len()..].iter().enumerate() {
-                let idx = self.children.len() + offset;
-                crate::teardown_child(&child.view, &mut element.children[idx], ctx);
-            }
-            element.children.truncate(self.children.len());
             element.flex.truncate(self.children.len());
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
 
         flags
@@ -547,5 +550,274 @@ mod tests {
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
         assert_eq!(w.children[0].size(), Size::new(7.0, 7.0));
+    }
+
+    // --- Capture-vs-rebuild fixtures (review R5) ---------------------------
+    //
+    // A vertical list of fixed 50x20 rows, each of which captures on `Down` and
+    // "fires" (records its id into the `Vec<u32>` app state) only on an `Up`
+    // while still armed. `Cancel` disarms WITHOUT touching app state — which is
+    // what makes the rebuild-path synthetic cancel (driven over a `()` dummy
+    // state) sound; a Cancel arm that read state would panic on the `()`
+    // downcast, so these tests also guard that contract.
+
+    use std::any::Any;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use forgekit_core::{EventCtx, PointerButton, PointerEvent, PointerPhase, any};
+
+    const ROW_W: f64 = 50.0;
+    const ROW_H: f64 = 20.0;
+
+    /// A row that captures on `Down` and fires its id on up-inside.
+    struct Captor {
+        id: u32,
+    }
+    /// Retained widget for [`Captor`].
+    struct CaptorWidget {
+        id: u32,
+        armed: bool,
+    }
+
+    /// Erase a [`Captor`] tagged `id` into an `AnyView<Vec<u32>>`.
+    fn captor(id: u32) -> AnyView<Vec<u32>> {
+        any(Captor { id })
+    }
+
+    impl View<Vec<u32>> for Captor {
+        type Element = CaptorWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> CaptorWidget {
+            CaptorWidget {
+                id: self.id,
+                armed: false,
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut CaptorWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.id = self.id;
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for CaptorWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(ROW_W, ROW_H))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            match p.phase {
+                PointerPhase::Down => {
+                    self.armed = true;
+                    ctx.capture_pointer();
+                    EventResult::Handled
+                }
+                PointerPhase::Move => EventResult::Handled,
+                PointerPhase::Up => {
+                    if self.armed {
+                        ctx.state_mut::<Vec<u32>>().push(self.id);
+                    }
+                    self.armed = false;
+                    EventResult::Handled
+                }
+                PointerPhase::Cancel => {
+                    // Clears armed WITHOUT reading app state (g2 contract).
+                    self.armed = false;
+                    EventResult::Handled
+                }
+            }
+        }
+    }
+
+    /// A row that records into a shared cell that it saw *any* event — used to
+    /// prove a freshly type-swapped widget receives nothing until a new `Down`.
+    struct Recorder {
+        seen: Rc<Cell<u32>>,
+    }
+    /// Retained widget for [`Recorder`].
+    struct RecorderWidget {
+        seen: Rc<Cell<u32>>,
+    }
+
+    impl View<Vec<u32>> for Recorder {
+        type Element = RecorderWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> RecorderWidget {
+            RecorderWidget {
+                seen: self.seen.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut RecorderWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for RecorderWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(ROW_W, ROW_H))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, _ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
+            self.seen.set(self.seen.get() + 1);
+            EventResult::Handled
+        }
+    }
+
+    fn ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// Dispatch one event to the flex over a `Vec<u32>` fire-log state.
+    ///
+    /// The log stays a `Vec<u32>` (not a slice) because it is erased as
+    /// `&mut dyn Any` and recovered by the widgets via `state_mut::<Vec<u32>>()`.
+    #[allow(clippy::ptr_arg)]
+    fn dispatch(w: &mut FlexWidget, log: &mut Vec<u32>, event: &InputEvent) {
+        let state: &mut dyn Any = log;
+        let mut ectx = EventCtx::new(state, Point::ZERO, Size::new(ROW_W, ROW_H * 8.0));
+        w.event(&mut ectx, event);
+    }
+
+    /// Lay a Captor/Recorder column out so rows sit at y = i * ROW_H.
+    fn layout_column(w: &mut FlexWidget) {
+        let mut lctx = LayoutCtx::new();
+        w.layout(
+            &mut lctx,
+            &BoxConstraints::loose(Size::new(ROW_W, ROW_H * 8.0)),
+        );
+    }
+
+    /// Y within row `i` (its vertical midpoint).
+    fn row_y(i: usize) -> f64 {
+        i as f64 * ROW_H + ROW_H / 2.0
+    }
+
+    #[test]
+    fn structural_insert_cancels_inflight_drag_no_fire() {
+        // (Scenario 1) Drag armed in row 1; a rebuild inserts a row above
+        // (length grows). On Up: NO callback fires, and the original row's
+        // gesture state is cleared.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1), captor(2)]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert!(w.children[1].is_active(), "row 1 captured the pointer");
+
+        // Rebuild: insert a new row at the top → positions shift, length grows.
+        let inserted: FlexView<Vec<u32>> = Column(vec![captor(9), captor(0), captor(1), captor(2)]);
+        inserted.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            w.children.iter().all(|p| !p.is_active()),
+            "structural change cleared every active path"
+        );
+
+        // Re-layout for the new row count, then release. Nothing is armed.
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(1)));
+        assert!(
+            log.is_empty(),
+            "no row fires on Up after an in-flight cancel"
+        );
+    }
+
+    #[test]
+    fn structural_truncation_of_active_row_unwinds_without_panic() {
+        // (Scenario 2) Drag armed in row 2; a rebuild truncates the list to two
+        // rows, dropping the active row. teardown_child cancels it: no panic, no
+        // fire.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1), captor(2), captor(3)]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(2)));
+        assert!(w.children[2].is_active());
+
+        // Truncate to two rows — the active row 2 is dropped.
+        let truncated: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1)]);
+        truncated.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert_eq!(w.children.len(), 2);
+        assert_eq!(w.flex.len(), 2);
+        assert!(w.children.iter().all(|p| !p.is_active()));
+
+        // A release lands nowhere armed → no fire, no panic.
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(2)));
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn type_swap_at_active_index_clears_without_notifying_fresh_widget() {
+        // (Scenario 3) A type swap at the active index clears the stale capture
+        // but does NOT deliver anything to the fresh widget — it must see nothing
+        // until a new Down.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1)]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert!(w.children[1].is_active());
+
+        // Swap row 1 from Captor to a Recorder (a different concrete type).
+        let seen = Rc::new(Cell::new(0u32));
+        let swapped: FlexView<Vec<u32>> =
+            Column(vec![captor(0), any(Recorder { seen: seen.clone() })]);
+        swapped.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+
+        assert!(!w.children[1].is_active(), "stale capture path dropped");
+        assert_eq!(seen.get(), 0, "fresh widget received no synthetic event");
+
+        // A brand-new Down now reaches the fresh widget.
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert_eq!(seen.get(), 1, "fresh widget responds to a new gesture");
+    }
+
+    #[test]
+    fn content_only_rebuild_preserves_captured_drag() {
+        // (Scenario 4, the critical negative test) A structural-change-free
+        // rebuild (same length, same types) must NOT break a captured drag: the
+        // active path survives and the release still fires on the captured row.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1)]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert!(w.children[1].is_active());
+
+        // An ordinary every-frame rebuild: same structure, content only.
+        let same: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1)]);
+        same.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            w.children[1].is_active(),
+            "content-only rebuild must NOT clear an in-flight capture"
+        );
+
+        // The captured drag completes and fires on the still-armed row.
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(1)));
+        assert_eq!(log, vec![1], "captured row fires on Up as normal");
     }
 }

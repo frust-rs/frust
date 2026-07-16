@@ -47,7 +47,13 @@ impl<State: 'static> View<State> for StackView<State> {
         element: &mut StackWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        crate::rebuild_children(&prev.children, &self.children, &mut element.children, ctx)
+        crate::rebuild_children(
+            &prev.children,
+            &self.children,
+            &mut element.children,
+            ctx,
+            |view| view,
+        )
     }
 
     fn teardown(&self, element: &mut StackWidget, ctx: &mut BuildCtx<'_>) {
