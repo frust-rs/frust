@@ -53,15 +53,22 @@ cargo run -p notes
 # ControllerCore (a real async UseCase, with retry) to an RwSignal it renders
 # — exercises the reactive substrate end-to-end (signal write -> wake ->
 # tracked rebuild, see docs/ARCHITECTURE.md#data-flow's Signal-driven wake).
-cargo run -p inbox
+# `examples/inbox` is a standalone package (its own [workspace] root, own
+# Cargo.lock — see Version-Pin Policy below), excluded from the root
+# workspace, so it is run and gated from its own directory rather than by
+# `-p` from the repo root.
+(cd examples/inbox && cargo run)
 ```
 
 `cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes`/
-`cargo run -p inbox` are the manual visual gates for rendering, interaction,
-text-input, and async/signals changes respectively — there is no automated
-pixel-diff test yet, so a person must look at the window. `notes` is also the
-demo `forgekit create` scaffolds (`templates/app/src/lib.rs.tmpl`), so
-scaffold changes should be checked against it.
+`(cd examples/inbox && cargo run)` are the manual visual gates for
+rendering, interaction, text-input, and async/signals changes respectively —
+there is no automated pixel-diff test yet, so a person must look at the
+window. `notes` is also the demo `forgekit create` scaffolds
+(`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
+against it. `examples/inbox`'s own verify gate (`cd examples/inbox && cargo
+test`) is its regression proof and is not part of the root
+`cargo test --workspace` run — see Version-Pin Policy.
 
 In a generated project, `forgekit run [-d <device>] [--release|--profile]
 [--flavor <name>]` builds and launches on a connected Android
@@ -175,9 +182,21 @@ deliberately, not floating:
   bump. Never enable `reactive_graph`'s `effects` feature (the frame path is
   a custom subscriber, not `RenderEffect` — see `docs/ARCHITECTURE.md`'s Key
   Types).
-- `examples/inbox`'s `clean-signals` dependency is a `git`+`rev`-pinned
-  dependency of that one example crate — never a framework-crate dependency,
-  and never floated to a branch/tag.
+- `examples/inbox` is a **standalone package** (its own `[workspace]` root
+  and `Cargo.lock`, `exclude`d from the root `[workspace]` in the root
+  `Cargo.toml`) specifically so its `git`+`rev`-pinned `clean-signals`
+  dependency never enters the root workspace graph/lockfile — the root
+  workspace stays registry-only, and the standard verify gate
+  (`cargo build --workspace --locked && ...`) never needs GitHub
+  reachability. `clean-signals` is never a framework-crate dependency, and
+  its rev pin is never floated to a branch/tag. Because it's outside the
+  root workspace, `examples/inbox/Cargo.toml` cannot use
+  `{ workspace = true }` — every dependency (including the pins shared with
+  the root workspace, like `reactive_graph`/`kurbo`/`peniko`) is a literal
+  spec kept in sync by hand with the root manifest's
+  `[workspace.dependencies]`. Gate it from its own directory:
+  `cd examples/inbox && cargo test` (2 async tests) and
+  `cd examples/inbox && cargo clippy --all-targets -- -D warnings`.
 - **Never run a blind `cargo update`.** If a manifest changes any pinned
   dependency, run `cargo generate-lockfile` and then confirm
   `cargo build --workspace --locked` still succeeds before committing.

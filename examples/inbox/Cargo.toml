@@ -1,13 +1,22 @@
+# Standalone package: excluded from the root workspace (see root Cargo.toml's
+# `[workspace] exclude` and docs/DEVELOPMENT.md's Version-Pin Policy) so its
+# git+rev clean-signals dependency never enters the root workspace graph or
+# lockfile. This `[workspace]` table makes this directory its own workspace
+# root with its own Cargo.lock; every dependency below is therefore a
+# literal spec rather than `{ workspace = true }` (workspace inheritance
+# isn't available outside the root workspace).
+[workspace]
+
 [package]
 name = "inbox"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-forgekit = { workspace = true }
+forgekit = { path = "../../crates/forgekit" }
 # The clean-signals framework core (use cases / controllers / retry / AsyncState),
 # pulled in by git+rev — the whole point of this example is proving a
 # clean_signals::ControllerCore drives a ForgeKit Component. The framework crates
@@ -16,17 +25,17 @@ forgekit = { workspace = true }
 # docs/DEVELOPMENT.md's Version-Pin Policy — do not float it.
 clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626f28adceeb88a3c8de96cfa844dc4f911a" }
 # `.get()`/`RwSignal` come straight from reactive_graph (the same version the
-# whole workspace and clean-signals resolve to, so the signal types unify).
-reactive_graph = { workspace = true }
+# root workspace and clean-signals resolve to, so the signal types unify).
+reactive_graph = "0.2"
 
 # Dev-only: the headless async test drives the framework's `RenderRoot` directly
 # (the desktop shell's own event/frame seam), pumps the reactive runtime's local
 # task queue frame by frame, and records paint output — no GPU, no window. A
 # permanent regression gate for the phase-5.5 Component + clean-signals wiring.
 [dev-dependencies]
-forgekit-core = { workspace = true }
-forgekit-reactive = { workspace = true }
-forgekit-scene = { workspace = true }
-forgekit-text = { workspace = true }
-kurbo = { workspace = true }
-peniko = { workspace = true }
+forgekit-core = { path = "../../crates/forgekit-core" }
+forgekit-reactive = { path = "../../crates/forgekit-reactive" }
+forgekit-scene = { path = "../../crates/forgekit-scene" }
+forgekit-text = { path = "../../crates/forgekit-text" }
+kurbo = "0.13.1"
+peniko = "0.6.1"

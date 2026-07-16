@@ -2,3 +2,7 @@
 /tmp
 **/*.rs.bk
 /.claude/
+# examples/inbox is a standalone package (its own [workspace] root outside
+# the root workspace — see root Cargo.toml's exclude), so its build output
+# lands in its own target/ dir rather than the root /target.
+/examples/inbox/target

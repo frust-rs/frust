@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "examples/*"]
+# examples/inbox is a standalone package (its own [workspace] root, own
+# Cargo.lock) so its git+rev clean-signals dependency never enters the root
+# workspace graph — `exclude` beats the `examples/*` members glob (see
+# docs/DEVELOPMENT.md's Version-Pin Policy).
+exclude = ["examples/inbox"]
 
 [workspace.package]
 version = "0.1.0"
