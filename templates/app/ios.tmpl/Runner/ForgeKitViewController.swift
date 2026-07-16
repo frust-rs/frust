@@ -157,14 +157,16 @@ final class ForgeKitViewController: UIViewController {
 
     private func startDisplayLink() {
         guard displayLink == nil else { return }
-        let link = CADisplayLink(target: self, selector: #selector(renderFrame))
+        let link = CADisplayLink(target: self, selector: #selector(renderFrame(_:)))
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
 
-    @objc private func renderFrame() {
+    @objc private func renderFrame(_ link: CADisplayLink) {
         guard let handle else { return }
-        forgekit_render_frame(handle)
+        // `link.timestamp` is a `CFTimeInterval` (seconds); the Rust side wants
+        // the shell-owned monotonic frame clock in nanoseconds (spec §8).
+        forgekit_render_frame(handle, UInt64(link.timestamp * 1_000_000_000))
     }
 
     @objc private func appWillResignActive() {

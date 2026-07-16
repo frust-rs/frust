@@ -280,7 +280,12 @@ pub fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
 /// recreate it from the retained layer at the last-known size/scale (self-recovery
 /// — see [`recover_surface`]) so a `SurfaceLost` is no longer a permanent black
 /// screen.
-pub fn render_frame(handle: *mut c_void) {
+///
+/// `timestamp_ns` is the `CADisplayLink` tick's `timestamp` (`CFTimeInterval`
+/// seconds), converted to nanoseconds by the Swift caller
+/// (`UInt64(link.timestamp * 1_000_000_000)`) — the shell-owned monotonic
+/// frame clock threaded into [`forgekit_core::FrameTime`] (spec §8).
+pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) {
     guard("forgekit_render_frame", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -292,7 +297,7 @@ pub fn render_frame(handle: *mut c_void) {
                 let (physical, scale) = (app.physical(), app.scale());
                 recover_surface(app, physical, scale);
             }
-            app.frame();
+            app.frame(timestamp_ns);
         }
     });
 }

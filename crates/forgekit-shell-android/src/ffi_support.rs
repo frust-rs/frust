@@ -56,6 +56,19 @@ pub(crate) fn touch_phase_from_action(action: i32) -> TouchPhase {
     }
 }
 
+/// Convert Kotlin's `Choreographer.FrameCallback` `frameTimeNanos` (a JNI
+/// `jlong`, signed 64-bit) into the unsigned nanosecond count
+/// [`forgekit_core::FrameTime::from_nanos`] takes.
+///
+/// `frameTimeNanos` is documented as monotonic and non-negative in practice,
+/// but the JNI boundary is untrusted input: a negative value clamps to `0`
+/// rather than silently wrapping into a huge `u64` via `as` (which would
+/// corrupt every later `FrameTime::saturating_sub` in the same episode).
+#[inline]
+pub(crate) fn frame_time_nanos_from_jlong(frame_time_nanos: i64) -> u64 {
+    frame_time_nanos.max(0) as u64
+}
+
 /// Normalise a raw JNI selection/composing index quintuple into the canonical
 /// [`forgekit_core::event::EditingState`] field form (the mobile IME seam).
 ///
@@ -227,6 +240,21 @@ mod tests {
         assert_eq!(touch_phase_from_action(4), TouchPhase::Cancel);
         assert_eq!(touch_phase_from_action(-1), TouchPhase::Cancel);
         assert_eq!(touch_phase_from_action(i32::MAX), TouchPhase::Cancel);
+    }
+
+    #[test]
+    fn frame_time_nanos_passes_positive_values_through() {
+        assert_eq!(frame_time_nanos_from_jlong(0), 0);
+        assert_eq!(frame_time_nanos_from_jlong(1), 1);
+        assert_eq!(frame_time_nanos_from_jlong(i64::MAX), i64::MAX as u64);
+    }
+
+    #[test]
+    fn frame_time_nanos_clamps_negative_to_zero() {
+        // A corrupt/negative `jlong` must clamp to `0`, never wrap to a huge
+        // `u64` via `as`.
+        assert_eq!(frame_time_nanos_from_jlong(-1), 0);
+        assert_eq!(frame_time_nanos_from_jlong(i64::MIN), 0);
     }
 
     #[test]

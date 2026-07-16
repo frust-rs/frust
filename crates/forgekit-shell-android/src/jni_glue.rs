@@ -259,12 +259,16 @@ pub fn native_on_surface_destroyed(handle: jlong) {
 }
 
 /// `nativeOnFrame`: run one Choreographer-driven frame (no-op unless the surface
-/// is ready). `frame_time_nanos` is unused in v0 (no animation clock yet).
-pub fn native_on_frame(handle: jlong, _frame_time_nanos: jlong) {
+/// is ready). `frame_time_nanos` is Kotlin's `Choreographer.FrameCallback`
+/// timestamp (`System.nanoTime()`-based, monotonic); a negative value (should
+/// never happen, but the JNI boundary is untrusted input) clamps to `0` rather
+/// than wrapping through the `as u64` cast.
+pub fn native_on_frame(handle: jlong, frame_time_nanos: jlong) {
     guard("nativeOnFrame", (), || {
+        let frame_time_nanos = crate::ffi_support::frame_time_nanos_from_jlong(frame_time_nanos);
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
-            app.frame();
+            app.frame(frame_time_nanos);
         }
     });
 }

@@ -11,7 +11,6 @@
 //! in `forgekit-shell-common`.
 
 use std::any::Any;
-use std::time::Instant;
 
 use forgekit_core::FrameTime;
 use forgekit_core::event::{
@@ -51,12 +50,6 @@ pub struct AndroidAppHandle {
     /// The acquired window backing the current surface. Dropped after `renderer`
     /// (see the struct doc): its `Drop` calls `ANativeWindow_release`.
     window: Option<NativeWindow>,
-    /// The shell-owned monotonic epoch the per-frame [`FrameTime`] is measured
-    /// from. `forgekit-core` never reads a clock itself (spec §8: time enters from
-    /// the shell); this task threads an `Instant`-based placeholder — task 06
-    /// swaps in the real Choreographer frame-nanos value at the one `frame()` call
-    /// site below.
-    epoch: Instant,
 }
 
 impl AndroidAppHandle {
@@ -84,7 +77,6 @@ impl AndroidAppHandle {
             physical,
             scale,
             window: Some(window),
-            epoch: Instant::now(),
         }
     }
 
@@ -198,11 +190,17 @@ impl AndroidAppHandle {
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop
     /// shell's `RedrawRequested` path (spec §8) but driven by Choreographer.
     ///
+    /// `frame_time_nanos` is Kotlin's Choreographer `frameTimeNanos` for this
+    /// tick (already clamped non-negative at the JNI boundary — see
+    /// [`crate::jni_glue::native_on_frame`]), the shell-owned monotonic clock
+    /// threaded into [`FrameTime`] (spec §8: `forgekit-core` never reads a clock
+    /// itself).
+    ///
     /// A no-op when the surface isn't `SurfaceReady` (Kotlin keeps posting frames
     /// across surface loss; this makes those cheap). On `FrameOutcome::SurfaceLost`
     /// the machine has already dropped the surface; recovery waits for the next
     /// `surfaceChanged`/`surfaceCreated` rather than recreating mid-frame.
-    pub(crate) fn frame(&mut self) {
+    pub(crate) fn frame(&mut self, frame_time_nanos: u64) {
         // Pump the reactive runtime's local task queue BEFORE the surface-ready
         // gate below: a controller-driven `spawn_local` task must keep draining
         // every Choreographer tick even while the surface is torn down (e.g.
@@ -243,10 +241,9 @@ impl AndroidAppHandle {
             // whole scene by the device pixel ratio for sharp glyphs.
             builder.push_transform(Affine::scale(scale));
             // Shell-owned frame clock (spec §8: time enters from the shell, never
-            // `Instant::now()` inside `forgekit-core`). Placeholder derived from an
-            // `Instant` epoch this task — task 06 replaces this single expression
-            // with the Choreographer frame-nanos value forwarded from Kotlin.
-            let frame_time = FrameTime::from_nanos(self.epoch.elapsed().as_nanos() as u64);
+            // `Instant::now()` inside `forgekit-core`) — Choreographer's
+            // `frameTimeNanos`, forwarded from Kotlin via `nativeOnFrame`.
+            let frame_time = FrameTime::from_nanos(frame_time_nanos);
             // The paint pass returns a `needs_frame` continuation signal (spec's
             // v1 animation seam). This shell runs a continuous Choreographer loop
             // that already posts the next frame every tick, so the flag is

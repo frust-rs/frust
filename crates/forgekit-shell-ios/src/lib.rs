@@ -123,10 +123,17 @@ macro_rules! ios_app {
         }
 
         /// `forgekit_render_frame`: run one CADisplayLink-driven frame.
+        ///
+        /// `timestamp_ns` is the `CADisplayLink` tick's `timestamp`
+        /// (`CFTimeInterval` seconds) converted to nanoseconds by the Swift
+        /// caller — the shell-owned monotonic frame clock (spec §8).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
-        pub extern "C" fn forgekit_render_frame(handle: *mut ::core::ffi::c_void) {
-            $crate::ffi_glue::render_frame(handle)
+        pub extern "C" fn forgekit_render_frame(
+            handle: *mut ::core::ffi::c_void,
+            timestamp_ns: u64,
+        ) {
+            $crate::ffi_glue::render_frame(handle, timestamp_ns)
         }
 
         /// `forgekit_dispatch_touch`: deliver one touch contact (spec §9).

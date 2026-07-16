@@ -13,7 +13,9 @@
 // forgekit_destroy before releasing the view.
 void *forgekit_init(void *metal_layer, uint32_t width, uint32_t height, float scale);
 void  forgekit_resize(void *handle, uint32_t width, uint32_t height, float scale);
-void  forgekit_render_frame(void *handle);
+// `timestamp_ns` is the CADisplayLink tick's `timestamp` (CFTimeInterval
+// seconds), converted to nanoseconds by the caller: UInt64(link.timestamp * 1_000_000_000).
+void  forgekit_render_frame(void *handle, uint64_t timestamp_ns);
 // Touch delivery (spec §9). `phase` is a fixed numeric ABI shared with the Rust
 // `forgekit_dispatch_touch` glue — DO NOT renumber without changing both sides:
 //   0 = began, 1 = moved, 2 = ended, 3 = cancelled.

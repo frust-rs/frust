@@ -30,7 +30,6 @@
 
 use std::any::Any;
 use std::ffi::c_void;
-use std::time::Instant;
 
 use forgekit_core::FrameTime;
 use forgekit_core::event::{
@@ -83,12 +82,6 @@ pub struct IosAppHandle {
     /// per-CADisplayLink-frame retry storm; reset by a successful recreate
     /// ([`Self::set_surface`]).
     recreate_failures: u8,
-    /// The shell-owned monotonic epoch the per-frame [`FrameTime`] is measured
-    /// from. `forgekit-core` never reads a clock itself (spec §8: time enters from
-    /// the shell); this task threads an `Instant`-based placeholder — task 06
-    /// swaps in the real `CADisplayLink` timestamp at the one `frame()` call site
-    /// below.
-    epoch: Instant,
 }
 
 impl IosAppHandle {
@@ -117,7 +110,6 @@ impl IosAppHandle {
             scale,
             paused: false,
             recreate_failures: 0,
-            epoch: Instant::now(),
         }
     }
 
@@ -261,13 +253,18 @@ impl IosAppHandle {
     /// shell's `RedrawRequested` path (spec §8) but driven by the Swift
     /// `CADisplayLink`.
     ///
+    /// `timestamp_ns` is the `CADisplayLink` tick's `timestamp`
+    /// (`CFTimeInterval` seconds) converted to nanoseconds by the Swift caller
+    /// — the shell-owned monotonic clock threaded into [`FrameTime`] (spec §8:
+    /// `forgekit-core` never reads a clock itself).
+    ///
     /// A no-op unless the surface is `SurfaceReady` *and* the app is not paused
     /// (see [`crate::ffi_support::should_render_frame`]). On
     /// `FrameOutcome::SurfaceLost` the machine has already dropped the surface;
     /// this frame becomes a no-op, and the *next* `forgekit_render_frame`/
     /// `forgekit_resize` FFI entry recreates the surface from the retained
     /// `metal_layer` (see [`crate::ffi_glue`]) before rendering resumes.
-    pub(crate) fn frame(&mut self) {
+    pub(crate) fn frame(&mut self, timestamp_ns: u64) {
         // Pump the UI-thread reactive local-task queue BEFORE the ready/paused
         // gate below: placed after it, queued `spawn_local` completions (e.g. a
         // signal write scheduled from a background task) would stall for as
@@ -312,10 +309,9 @@ impl IosAppHandle {
             // whole scene by the device pixel ratio for sharp glyphs.
             builder.push_transform(Affine::scale(scale));
             // Shell-owned frame clock (spec §8: time enters from the shell, never
-            // `Instant::now()` inside `forgekit-core`). Placeholder derived from an
-            // `Instant` epoch this task — task 06 replaces this single expression
-            // with the `CADisplayLink` timestamp forwarded from Swift.
-            let frame_time = FrameTime::from_nanos(self.epoch.elapsed().as_nanos() as u64);
+            // `Instant::now()` inside `forgekit-core`) — the `CADisplayLink`
+            // timestamp forwarded from Swift.
+            let frame_time = FrameTime::from_nanos(timestamp_ns);
             // The paint pass returns a `needs_frame` continuation signal (spec's
             // v1 animation seam). This shell runs a continuous CADisplayLink loop
             // that already ticks the next frame every vsync, so the flag is
