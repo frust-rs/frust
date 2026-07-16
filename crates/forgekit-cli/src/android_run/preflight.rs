@@ -33,6 +33,17 @@ pub fn run(ctx: &PreflightCtx) -> Result<PreflightOutcome, String> {
     Ok(PreflightOutcome { java_home })
 }
 
+/// Like [`run`], but skips [`check_adb`] — used by `forgekit build`'s
+/// Android pipeline (`android_build`, task 64), which drives Gradle directly
+/// and never talks to a connected device/emulator, so requiring `adb` would
+/// be an unrelated hard blocker for a CI/headless release build.
+pub fn run_without_device_checks(ctx: &PreflightCtx) -> Result<PreflightOutcome, String> {
+    check_rust_target(ctx)?;
+    check_cargo_ndk(ctx)?;
+    let java_home = check_java(ctx)?;
+    Ok(PreflightOutcome { java_home })
+}
+
 fn check_rust_target(ctx: &PreflightCtx) -> Result<(), String> {
     match ctx.runner.run("rustup", &["target", "list", "--installed"]) {
         Ok(out) if out.success && has_target(&out.stdout, "aarch64-linux-android") => Ok(()),
@@ -158,6 +169,28 @@ mod tests {
             is_macos: true,
         };
         let outcome = run(&ctx).unwrap();
+        assert_eq!(outcome.java_home, "/opt/jdk17");
+    }
+
+    #[test]
+    fn run_without_device_checks_passes_without_adb_registered() {
+        // No `adb version` fixture registered at all — an unexpected call
+        // would itself error via FakeProcessRunner's "missing" path, proving
+        // the adb check is truly skipped.
+        let runner = FakeProcessRunner::new()
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-linux-android\n"),
+            )
+            .with("cargo ndk --version", ok("cargo-ndk 3.5.4\n"))
+            .with("/opt/jdk17/bin/java -version", java_ok_stderr("17.0.9"));
+        let env = FakeEnv::new().set("JAVA_HOME", "/opt/jdk17");
+        let ctx = PreflightCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
+        let outcome = run_without_device_checks(&ctx).unwrap();
         assert_eq!(outcome.java_home, "/opt/jdk17");
     }
 

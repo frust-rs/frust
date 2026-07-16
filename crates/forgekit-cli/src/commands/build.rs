@@ -278,7 +278,11 @@ mod tests {
     }
 
     #[test]
-    fn build_apk_reaches_the_android_stub_error() {
+    fn build_apk_reaches_the_android_build_pipeline() {
+        // `android_build::build` (task 64) is real now, not a stub — with no
+        // `ProcessRunner` fixtures registered at all, the pipeline reaches
+        // (and fails at) its own preflight, proving `run_in` dispatches into
+        // it rather than stopping at project detection.
         let dir = android_project_dir("apk-stub");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Apk {
@@ -287,7 +291,11 @@ mod tests {
             target_platform: None,
         };
         let err = run_in(&runner, &dir, target).unwrap_err();
-        assert!(err.to_string().contains("task 64"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("rustup target add aarch64-linux-android"),
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -341,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn build_appbundle_reaches_the_android_stub_error() {
+    fn build_appbundle_reaches_the_android_build_pipeline() {
         let dir = android_project_dir("aab-stub");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Appbundle {
@@ -349,7 +357,11 @@ mod tests {
             target_platform: None,
         };
         let err = run_in(&runner, &dir, target).unwrap_err();
-        assert!(err.to_string().contains("task 64"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("rustup target add aarch64-linux-android"),
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
