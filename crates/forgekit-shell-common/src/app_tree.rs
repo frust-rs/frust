@@ -104,6 +104,29 @@ where
     }
 }
 
+/// Erase an app's `State`/`app_logic` into a `Box<dyn AppTree>`, building the
+/// initial `State` from a caller-supplied factory rather than a ready-made
+/// value.
+///
+/// This is the one construction path: [`new_boxed_app`] is a thin wrapper over
+/// this function that hands in a closure returning an already-built `state`.
+/// The factory form lets an entry macro (e.g. a future `Component::init`
+/// binding) construct `State` itself from inside the closure instead of
+/// requiring the caller to build a value up front.
+pub fn new_boxed_app_with<State, Logic, V, F>(state_init: F, app_logic: Logic) -> Box<dyn AppTree>
+where
+    F: FnOnce() -> State,
+    State: 'static,
+    V: View<State>,
+    Logic: FnMut(&mut State) -> V + 'static,
+{
+    Box::new(ErasedApp {
+        state: state_init(),
+        logic: app_logic,
+        root: RenderRoot::new(),
+    })
+}
+
 /// Erase an app's `State`/`app_logic` into a `Box<dyn AppTree>`.
 ///
 /// Called by a shell's app-binding macro (e.g. `forgekit::android_app!`) from its
@@ -115,9 +138,63 @@ where
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
 {
-    Box::new(ErasedApp {
-        state,
-        logic,
-        root: RenderRoot::new(),
-    })
+    new_boxed_app_with(move || state, logic)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forgekit_core::layout::BoxConstraints;
+    use forgekit_core::view::{BuildCtx, ChangeFlags};
+    use forgekit_core::widget::{LayoutCtx, PaintCtx, Widget};
+    use kurbo::Size;
+
+    /// A state type with no `Default` impl — the only way it can be
+    /// constructed is through the factory closure passed to
+    /// [`new_boxed_app_with`], proving the seam actually threads the
+    /// factory's output through rather than falling back to some default.
+    struct NonDefaultState {
+        label: &'static str,
+    }
+
+    struct StubWidget;
+    impl Widget for StubWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, _bc: &BoxConstraints) -> Size {
+            Size::ZERO
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    struct StubView;
+    impl View<NonDefaultState> for StubView {
+        type Element = StubWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> StubWidget {
+            StubWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut StubWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn new_boxed_app_with_uses_factory_produced_state() {
+        let mut app = new_boxed_app_with(
+            || NonDefaultState {
+                label: "from-factory",
+            },
+            |state: &mut NonDefaultState| {
+                assert_eq!(state.label, "from-factory");
+                StubView
+            },
+        );
+        // Drive one rebuild so `app_logic` actually observes the factory-built
+        // state (it's a closure param above, but this also exercises the
+        // AppTree seam end-to-end rather than just constructing the box).
+        app.rebuild();
+    }
 }

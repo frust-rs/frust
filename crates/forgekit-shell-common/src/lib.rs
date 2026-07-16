@@ -17,5 +17,5 @@
 mod app_tree;
 mod ffi_support;
 
-pub use app_tree::{AppTree, new_boxed_app};
+pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
 pub use ffi_support::{guard, logical_size, sanitize_scale};
