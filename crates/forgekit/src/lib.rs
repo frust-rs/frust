@@ -97,6 +97,10 @@ pub mod input {
 pub use forgekit_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 pub use reactive_graph::computed::Memo;
 pub use reactive_graph::signal::{ReadSignal, WriteSignal, signal};
+// The access traits the signal types' methods are defined through — without
+// these in scope, `sig.get()`/`sig.set(..)`/`sig.update(..)` do not compile,
+// so a facade-only consumer could name the types but never use them.
+pub use reactive_graph::traits::{Get, GetUntracked, Set, Track, Update, With, WithUntracked};
 
 /// Spawns a `Send` future on the background reactive runtime (Tokio-backed —
 /// see `forgekit_reactive::ReactiveRuntime`). A thin wrapper over
