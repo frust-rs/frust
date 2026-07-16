@@ -288,6 +288,15 @@ mod tests {
         assert!(dest.join("assets/logo.png").exists());
         assert!(dest.join("src/main.rs").exists());
         assert!(dest.join(".gitignore").exists());
+        let gitignore = fs::read_to_string(dest.join(".gitignore")).unwrap();
+        // Verify build-output patterns are present (kept in sync with clean.rs REMOVED_DIRS).
+        assert!(gitignore.contains("android/app/build/"), "{gitignore}");
+        assert!(gitignore.contains("android/.gradle/"), "{gitignore}");
+        assert!(gitignore.contains("build/"), "{gitignore}");
+        assert!(
+            gitignore.contains("android/local.properties"),
+            "{gitignore}"
+        );
         assert!(dest.join("assets/.gitkeep").exists());
         assert!(!dest.join("template_manifest.json").exists());
         assert!(!dest.join("Cargo.toml.tmpl").exists());

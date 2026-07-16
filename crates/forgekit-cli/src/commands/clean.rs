@@ -14,6 +14,7 @@ use crate::process::{ProcessRunner, RealProcessRunner};
 /// `cargo clean`'s own `target/`: the Gradle app-module build dir, the
 /// project-local Gradle cache, and `build/` (covers `build/ios`, spec
 /// §12.6's `-derivedDataPath`/archive output).
+/// Keep in sync with `templates/app/.gitignore`'s build-output patterns.
 const REMOVED_DIRS: &[&str] = &["android/app/build", "android/.gradle", "build"];
 
 /// Entry point `commands::dispatch` calls: resolves the real process runner
