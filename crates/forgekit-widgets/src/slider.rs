@@ -65,6 +65,10 @@ pub fn Slider<State: 'static, F: Fn(&mut State, f64) + 'static>(
 /// The retained widget for a [`SliderView`].
 pub struct SliderWidget {
     value: f64,
+    /// Armed by a `Down` (alongside `capture_pointer`), cleared on `Up`/`Cancel`.
+    /// Gates `Move` so a hover `Move` (no prior press) never fires `on_change`;
+    /// a `Down` still jumps to and reports the tapped value regardless.
+    captured: bool,
     on_change: crate::ErasedArgCallback<f64>,
 }
 
@@ -83,6 +87,7 @@ impl<State: 'static> View<State> for SliderView<State> {
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> SliderWidget {
         SliderWidget {
             value: self.value,
+            captured: false,
             on_change: crate::erase_callback_arg(&self.on_change),
         }
     }
@@ -147,6 +152,7 @@ impl Widget for SliderWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                self.captured = true;
                 ctx.capture_pointer();
                 let v = value_from_x(p.position.x, ctx.size().width);
                 (self.on_change)(ctx, v);
@@ -154,12 +160,20 @@ impl Widget for SliderWidget {
                 EventResult::Handled
             }
             PointerPhase::Move => {
+                // A hover `Move` (no prior press) never reports a value.
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
                 let v = value_from_x(p.position.x, ctx.size().width);
                 (self.on_change)(ctx, v);
                 ctx.request_redraw();
                 EventResult::Handled
             }
             PointerPhase::Up | PointerPhase::Cancel => {
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
+                self.captured = false;
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -235,6 +249,32 @@ mod tests {
         // Up does not report a value.
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 0.0));
         assert_eq!(state.changes, 3);
+    }
+
+    #[test]
+    fn hover_move_without_down_is_ignored_noop() {
+        let mut w = widget(0.3);
+        let mut state = Val::default();
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(200.0, HEIGHT));
+        let result = w.event(&mut ctx, &ev(PointerPhase::Move, 100.0));
+        assert!(matches!(result, EventResult::Ignored));
+        assert!(!ctx.needs_redraw(), "hover must not request a redraw");
+        assert_eq!(state.changes, 0, "hover must not report a value");
+    }
+
+    #[test]
+    fn cancel_clears_captured_state() {
+        let mut w = widget(0.0);
+        let mut state = Val::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 100.0));
+        assert!(w.captured);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Cancel, 100.0));
+        assert!(!w.captured, "Cancel disarms the drag");
+        // A follow-up hover Move must not report.
+        let before = state.changes;
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 40.0));
+        assert_eq!(state.changes, before, "hover after Cancel does not report");
     }
 
     #[test]

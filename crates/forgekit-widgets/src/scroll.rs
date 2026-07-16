@@ -65,6 +65,12 @@ pub struct ScrollWidget {
     content: Size,
     /// Whether we have taken the gesture over as a scroll drag.
     scrolling: bool,
+    /// Whether a `Down` has armed an active gesture (distinct from `scrolling`,
+    /// which only becomes true after the drag passes the slop). Set on `Down`
+    /// and cleared on `Up`/`Cancel`; the slop/takeover math runs only while it
+    /// is true, so a hover `Move` (dispatched on every cursor motion) is never
+    /// mistaken for a drag and can never take the gesture from a child.
+    down_active: bool,
     down_start: Point,
     last_drag: Point,
     tracker: VelocityTracker,
@@ -84,6 +90,7 @@ impl ScrollWidget {
             viewport: Size::ZERO,
             content: Size::ZERO,
             scrolling: false,
+            down_active: false,
             down_start: Point::ZERO,
             last_drag: Point::ZERO,
             tracker: VelocityTracker::new(),
@@ -193,6 +200,7 @@ impl ScrollWidget {
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
                     self.scrolling = false;
+                    self.down_active = true;
                     self.fling = None;
                     self.last_anim = None;
                     self.down_start = p.position;
@@ -204,6 +212,13 @@ impl ScrollWidget {
                     EventResult::Handled
                 }
                 PointerPhase::Move => {
+                    // Without an armed `Down`, this is a hover move (the desktop
+                    // shell dispatches `Move` on every cursor motion): never run
+                    // the slop/takeover math against a stale `down_start`, just
+                    // forward it to the child.
+                    if !self.down_active {
+                        return self.child.event_child(ctx, event);
+                    }
                     self.tracker.record(t_ms, p.position.y);
                     if self.scrolling {
                         let dy = p.position.y - self.last_drag.y;
@@ -236,6 +251,7 @@ impl ScrollWidget {
                     }
                     self.child.set_active(false);
                     self.scrolling = false;
+                    self.down_active = false;
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -243,6 +259,7 @@ impl ScrollWidget {
                     self.child.event_child(ctx, event);
                     self.child.set_active(false);
                     self.scrolling = false;
+                    self.down_active = false;
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -441,6 +458,89 @@ mod tests {
         // Subsequent scrolling moves are not forwarded to the child.
         run(&mut w, &mut state, &ev(PointerPhase::Move, 50.0), 32.0);
         assert_eq!(state.cancels, 1);
+    }
+
+    /// A recording child probe, shared by the takeover/hover tests.
+    #[derive(Default)]
+    struct Rec {
+        downs: u32,
+        cancels: u32,
+        moves: u32,
+    }
+    struct Probe;
+    struct ProbeW;
+    impl View<Rec> for Probe {
+        type Element = ProbeW;
+        fn build(&self, _c: &mut BuildCtx<'_>) -> ProbeW {
+            ProbeW
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut ProbeW, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for ProbeW {
+        fn layout(&mut self, _c: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(200.0, 1000.0))
+        }
+        fn paint(&mut self, _c: &mut PaintCtx, _s: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, e: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = e {
+                let rec = ctx.state_mut::<Rec>();
+                match p.phase {
+                    PointerPhase::Down => rec.downs += 1,
+                    PointerPhase::Cancel => rec.cancels += 1,
+                    PointerPhase::Move => rec.moves += 1,
+                    _ => {}
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    fn probe_scroll() -> ScrollWidget {
+        let view: ScrollView<Rec> = scroll_view(Probe);
+        let mut counter = 0u64;
+        let mut w = View::<Rec>::build(&view, &mut BuildCtx::new(&mut counter));
+        w.viewport = Size::new(200.0, 100.0);
+        w
+    }
+
+    fn run_rec(w: &mut ScrollWidget, state: &mut Rec, e: &InputEvent, t: f64) -> bool {
+        let sa: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(200.0, 100.0));
+        w.event_at(&mut ctx, e, t);
+        ctx.needs_redraw()
+    }
+
+    #[test]
+    fn hover_move_without_down_never_scrolls_or_cancels_child() {
+        let mut w = probe_scroll();
+        let mut state = Rec::default();
+        // A cursor drifting over the list with no prior Down: no takeover, no
+        // Cancel to the child, no offset change, no self redraw request.
+        let redraw = run_rec(&mut w, &mut state, &ev(PointerPhase::Move, 40.0), 16.0);
+        assert!(!w.scrolling, "hover must not enter scrolling");
+        assert!(!w.down_active);
+        assert_eq!(w.offset(), 0.0, "hover must not move the offset");
+        assert_eq!(state.cancels, 0, "hover must not cancel the child");
+        assert!(!redraw, "hover must not request a redraw");
+        // The hover move is forwarded to the child (which ignores it).
+        assert_eq!(state.moves, 1);
+    }
+
+    #[test]
+    fn cancel_clears_down_active() {
+        let mut w = probe_scroll();
+        let mut state = Rec::default();
+        run_rec(&mut w, &mut state, &ev(PointerPhase::Down, 100.0), 0.0);
+        assert!(w.down_active);
+        run_rec(&mut w, &mut state, &ev(PointerPhase::Cancel, 100.0), 16.0);
+        assert!(!w.down_active, "Cancel disarms the gesture");
+        assert!(!w.scrolling);
+        // A subsequent hover Move must not run the takeover math.
+        run_rec(&mut w, &mut state, &ev(PointerPhase::Move, 20.0), 32.0);
+        assert!(!w.scrolling, "hover after Cancel must not take over");
+        assert_eq!(w.offset(), 0.0);
     }
 
     #[test]

@@ -65,7 +65,14 @@ pub fn Button<State: 'static, F: Fn(&mut State) + 'static>(
 /// [`crate::TextWidget`] owned as a [`ChildPod`].
 pub struct ButtonWidget {
     label: ChildPod,
+    /// The pressed *visual* state (background darkens). Follows the cursor
+    /// in/out while captured, and is purely cosmetic.
     pressed: bool,
+    /// Armed by a `Down` (alongside `capture_pointer`), cleared on `Up`/`Cancel`.
+    /// Gates all `Move`/`Up` handling so a hover `Move` (dispatched by the
+    /// desktop shell on every cursor motion) never latches `pressed` or fires
+    /// the callback without a preceding press.
+    captured: bool,
     on_press: crate::ErasedCallback,
 }
 
@@ -83,6 +90,7 @@ impl<State: 'static> View<State> for ButtonView<State> {
         ButtonWidget {
             label: crate::build_child(&label_view, ctx),
             pressed: false,
+            captured: false,
             on_press: crate::erase_callback(&self.on_press),
         }
     }
@@ -141,27 +149,41 @@ impl Widget for ButtonWidget {
         match p.phase {
             PointerPhase::Down => {
                 self.pressed = true;
+                self.captured = true;
                 ctx.capture_pointer();
                 ctx.request_redraw();
                 EventResult::Handled
             }
             PointerPhase::Move => {
+                // Only a press we armed on `Down` tracks the cursor; a hover
+                // `Move` (no prior press) is not ours.
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
                 // Visual only: track whether the cursor is still over the button.
                 self.pressed = inside(p.position, ctx.size());
                 ctx.request_redraw();
                 EventResult::Handled
             }
             PointerPhase::Up => {
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
                 // Fire on up-inside only (masonry semantics).
                 if inside(p.position, ctx.size()) {
                     (self.on_press)(ctx);
                 }
                 self.pressed = false;
+                self.captured = false;
                 ctx.request_redraw();
                 EventResult::Handled
             }
             PointerPhase::Cancel => {
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
                 self.pressed = false;
+                self.captured = false;
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -231,6 +253,48 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Cancel, 10.0, 10.0));
         assert!(!w.pressed);
         assert_eq!(state.presses, 0);
+    }
+
+    #[test]
+    fn hover_move_without_down_is_ignored_noop() {
+        let mut w = widget();
+        let mut state = Counter::default();
+        // A cursor drifting over the button with no prior press must not latch
+        // pressed, fire, or request a redraw.
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 40.0));
+        let result = w.event(&mut ctx, &ev(PointerPhase::Move, 20.0, 20.0));
+        assert!(matches!(result, EventResult::Ignored));
+        assert!(!w.pressed, "hover must not press");
+        assert!(!ctx.needs_redraw(), "hover must not request a redraw");
+        assert_eq!(state.presses, 0);
+    }
+
+    #[test]
+    fn up_without_down_does_not_fire() {
+        let mut w = widget();
+        let mut state = Counter::default();
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 40.0));
+        let result = w.event(&mut ctx, &ev(PointerPhase::Up, 20.0, 20.0));
+        assert!(matches!(result, EventResult::Ignored));
+        assert_eq!(state.presses, 0, "an unarmed Up must never fire");
+    }
+
+    #[test]
+    fn cancel_clears_armed_state() {
+        let mut w = widget();
+        let mut state = Counter::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert!(w.captured);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Cancel, 10.0, 10.0));
+        assert!(!w.captured, "Cancel disarms the press");
+        // A subsequent hover Move must not re-press or fire.
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 40.0));
+        let result = w.event(&mut ctx, &ev(PointerPhase::Move, 12.0, 12.0));
+        assert!(matches!(result, EventResult::Ignored));
+        assert!(!w.pressed);
     }
 
     #[test]

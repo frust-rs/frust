@@ -72,7 +72,12 @@ pub fn Checkbox<State: 'static, F: Fn(&mut State, bool) + 'static>(
 pub struct CheckboxWidget {
     checked: bool,
     label: ChildPod,
+    /// The pressed *visual* state; follows the cursor in/out while captured.
     pressed: bool,
+    /// Armed by a `Down` (alongside `capture_pointer`), cleared on `Up`/`Cancel`.
+    /// Gates all `Move`/`Up` handling so a hover `Move` never latches `pressed`
+    /// or fires `on_toggle` without a preceding press.
+    captured: bool,
     on_toggle: crate::ErasedArgCallback<bool>,
 }
 
@@ -89,6 +94,7 @@ impl<State: 'static> View<State> for CheckboxView<State> {
             checked: self.checked,
             label: crate::build_child(&label_view, ctx),
             pressed: false,
+            captured: false,
             on_toggle: crate::erase_callback_arg(&self.on_toggle),
         }
     }
@@ -156,27 +162,41 @@ impl Widget for CheckboxWidget {
         match p.phase {
             PointerPhase::Down => {
                 self.pressed = true;
+                self.captured = true;
                 ctx.capture_pointer();
                 ctx.request_redraw();
                 EventResult::Handled
             }
             PointerPhase::Move => {
+                // Only a press we armed on `Down` tracks the cursor; a hover
+                // `Move` (no prior press) is not ours.
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
                 self.pressed = inside(p.position, ctx.size());
                 ctx.request_redraw();
                 EventResult::Handled
             }
             PointerPhase::Up => {
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
                 if inside(p.position, ctx.size()) {
                     // Report the *requested* value; never self-toggle.
                     let requested = !self.checked;
                     (self.on_toggle)(ctx, requested);
                 }
                 self.pressed = false;
+                self.captured = false;
                 ctx.request_redraw();
                 EventResult::Handled
             }
             PointerPhase::Cancel => {
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
                 self.pressed = false;
+                self.captured = false;
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -246,6 +266,43 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 12.0));
         dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 500.0, 12.0));
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 500.0, 12.0));
+        assert_eq!(state.toggles, 0);
+    }
+
+    #[test]
+    fn hover_move_without_down_is_ignored_noop() {
+        let mut w = widget(false);
+        let mut state = ToggleState::default();
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(120.0, 24.0));
+        let result = w.event(&mut ctx, &ev(PointerPhase::Move, 5.0, 12.0));
+        assert!(matches!(result, EventResult::Ignored));
+        assert!(!w.pressed, "hover must not press");
+        assert!(!ctx.needs_redraw(), "hover must not request a redraw");
+        assert_eq!(state.toggles, 0);
+    }
+
+    #[test]
+    fn up_without_down_does_not_fire() {
+        let mut w = widget(false);
+        let mut state = ToggleState::default();
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(120.0, 24.0));
+        let result = w.event(&mut ctx, &ev(PointerPhase::Up, 5.0, 12.0));
+        assert!(matches!(result, EventResult::Ignored));
+        assert_eq!(state.toggles, 0);
+    }
+
+    #[test]
+    fn cancel_clears_armed_state() {
+        let mut w = widget(false);
+        let mut state = ToggleState::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 12.0));
+        assert!(w.captured);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Cancel, 5.0, 12.0));
+        assert!(!w.captured, "Cancel disarms the press");
+        // A follow-up hover Up must not fire.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 12.0));
         assert_eq!(state.toggles, 0);
     }
 
