@@ -186,6 +186,15 @@ impl ScrollWidget {
     /// is deterministic in tests; [`Widget::event`] supplies the real clock.
     fn event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
         match event {
+            // Focus-routed events (Key/Ime) bypass the scroll gesture machinery
+            // and go straight to the child if it holds the recorded focus path.
+            InputEvent::Key(_) | InputEvent::Ime(_) => {
+                if self.child.is_focused() {
+                    self.child.event_child(ctx, event)
+                } else {
+                    EventResult::Ignored
+                }
+            }
             InputEvent::Scroll { delta, .. } => {
                 let dy = match delta {
                     ScrollDelta::Lines(_, y) => y * WHEEL_LINE_PX,

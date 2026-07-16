@@ -18,7 +18,7 @@
 
 use std::any::Any;
 
-use kurbo::{Point, Size, Vec2};
+use kurbo::{Point, Rect, Size, Vec2};
 
 /// Which physical (or synthetic) button a pointer event carries.
 ///
@@ -79,11 +79,141 @@ pub enum ScrollDelta {
     Pixels(f64, f64),
 }
 
+/// A named (non-character) key: the control keys an editable widget reacts to.
+///
+/// Character-producing keys arrive as [`Key::Character`] (already resolved to the
+/// typed text, so dead keys / smart quotes / IME are handled upstream); only the
+/// keys with editing *semantics* are enumerated here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamedKey {
+    /// Return / Enter — submit or newline.
+    Enter,
+    /// Backspace — delete the grapheme before the caret.
+    Backspace,
+    /// Forward delete — delete the grapheme after the caret.
+    Delete,
+    /// Move / extend the caret left.
+    ArrowLeft,
+    /// Move / extend the caret right.
+    ArrowRight,
+    /// Move / extend the caret up.
+    ArrowUp,
+    /// Move / extend the caret down.
+    ArrowDown,
+    /// Move to line / document start.
+    Home,
+    /// Move to line / document end.
+    End,
+    /// Cancel / dismiss (blur, drop composition).
+    Escape,
+    /// Tab — focus traversal or literal tab (widget's choice).
+    Tab,
+}
+
+/// A logical key press: either a semantic [`NamedKey`] or a run of typed text.
+///
+/// [`Key::Character`] carries the *resolved* text a key produced (winit's
+/// `KeyEvent.text` / a platform character), so widgets insert it verbatim without
+/// re-deriving it from a keycode + modifiers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Key {
+    /// A control / navigation key with editing semantics.
+    Named(NamedKey),
+    /// Typed text to insert as-is (usually a single grapheme).
+    Character(String),
+}
+
+/// The chord of modifier keys held when a [`KeyEvent`] fired.
+///
+/// `meta` is Command on macOS and the Windows/Super key elsewhere; widgets use
+/// it (with `ctrl`) for shortcuts like select-all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    /// Shift held (extends selection on arrow keys).
+    pub shift: bool,
+    /// Control held.
+    pub ctrl: bool,
+    /// Alt / Option held.
+    pub alt: bool,
+    /// Meta held (Command on macOS, Super/Windows elsewhere).
+    pub meta: bool,
+}
+
+/// A keyboard key event delivered down the focus path (never hit-tested).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyEvent {
+    /// The logical key (a [`NamedKey`] or typed [`Key::Character`] text).
+    pub key: Key,
+    /// The modifier chord held when the key fired.
+    pub modifiers: Modifiers,
+    /// Whether this is an auto-repeat (key held down), not a fresh press.
+    pub repeat: bool,
+}
+
+/// The full editing state of a text field, the one struct every IME bridge syncs.
+///
+/// This mirrors Flutter's canonical editing-state shape (`−1` = "none" for the
+/// selection/composing anchors). It is the value pushed across the framework↔
+/// platform seam in both directions.
+///
+/// # Index boundary rule
+///
+/// **An `EditingState` crossing the `AppTree`/shell seam is UTF-16 code-unit
+/// indexed** (`selection_*`/`composing_*` count UTF-16 units, the platform-native
+/// unit for both Android `Editable` and iOS `NSMutableString`). Widgets and
+/// `forgekit-text` convert to/from Rust byte offsets at their own boundary
+/// (task 52 owns the conversion helpers). Core carries the value opaquely and
+/// makes no index interpretation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditingState {
+    /// The full text content.
+    pub text: String,
+    /// Selection anchor (UTF-16 unit index at the shell seam; `−1` = none).
+    pub selection_base: i32,
+    /// Selection focus (UTF-16 unit index at the shell seam; `−1` = none).
+    pub selection_extent: i32,
+    /// Composing-region start (UTF-16 unit index; `−1` = not composing).
+    pub composing_base: i32,
+    /// Composing-region end (UTF-16 unit index; `−1` = not composing).
+    pub composing_extent: i32,
+}
+
+/// An input-method (IME) event delivered down the focus path (never hit-tested).
+///
+/// Desktop drives [`ImeEvent::Compose`]/[`ImeEvent::Commit`] from winit's
+/// `Ime::Preedit`/`Ime::Commit`; the mobile bridges push whole values via
+/// [`ImeEvent::ApplyEditingState`] (state-sync, not op-forwarding — see
+/// `research/RESEARCH.md`). [`ImeEvent::Enabled`]/[`ImeEvent::Disabled`] bracket a
+/// composition session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImeEvent {
+    /// Preedit / marked text: `text` is the composing string, `cursor` its
+    /// optional `(start, end)` selection within that string (byte indices, as
+    /// winit reports).
+    Compose {
+        /// The composing (marked) text.
+        text: String,
+        /// Optional caret/selection `(start, end)` inside `text`.
+        cursor: Option<(usize, usize)>,
+    },
+    /// Commit finished composition: insert `text` and clear the composing region.
+    Commit(String),
+    /// Replace the whole editing state (mobile state-sync path).
+    ApplyEditingState(EditingState),
+    /// The platform enabled IME on the focused field (composition may begin).
+    Enabled,
+    /// The platform disabled IME (composition ended / focus left).
+    Disabled,
+}
+
 /// An input event delivered to the widget tree.
 ///
-/// The two families widgets handle in Phase 4A: pointer gestures and scroll.
-/// Keyboard/IME arrive with TextInput (Phase 4B) and are intentionally absent.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Pointer gestures and scroll are **hit-tested** (routed by position); keyboard
+/// and IME events are **focus-routed** — delivered straight down the recorded
+/// focus chain with no hit test and no meaningful position (see
+/// [`crate::widget::ChildPod`]'s focus bookkeeping and `forgekit-widgets`'
+/// `route_event`).
+#[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     /// A pointer (mouse/touch/pen) gesture event.
     Pointer(PointerEvent),
@@ -94,14 +224,24 @@ pub enum InputEvent {
         /// How much to scroll.
         delta: ScrollDelta,
     },
+    /// A keyboard key event, routed down the focus path (no hit test).
+    Key(KeyEvent),
+    /// An IME event, routed down the focus path (no hit test).
+    Ime(ImeEvent),
 }
 
 impl InputEvent {
     /// The event's location, in the receiving widget's local coordinate space.
+    ///
+    /// Focus-routed events ([`InputEvent::Key`]/[`InputEvent::Ime`]) have no
+    /// spatial position — they are delivered down the focus chain, not hit-tested
+    /// — so this reports [`Point::ZERO`] for them; callers must never hit-test on
+    /// it (routing helpers early-return the focus-routed variants).
     pub fn position(&self) -> Point {
         match self {
             InputEvent::Pointer(p) => p.position,
             InputEvent::Scroll { position, .. } => *position,
+            InputEvent::Key(_) | InputEvent::Ime(_) => Point::ZERO,
         }
     }
 
@@ -109,7 +249,9 @@ impl InputEvent {
     ///
     /// Containers use this (with `offset = -child_origin`) to translate an event
     /// from their own coordinate space into a child's local space before
-    /// forwarding it — see [`crate::widget::ChildPod::event_child`].
+    /// forwarding it — see [`crate::widget::ChildPod::event_child`]. Focus-routed
+    /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]) carry no position, so they
+    /// are returned unchanged (cloned).
     pub fn translated(&self, offset: Vec2) -> InputEvent {
         match self {
             InputEvent::Pointer(p) => InputEvent::Pointer(PointerEvent {
@@ -120,8 +262,32 @@ impl InputEvent {
                 position: *position + offset,
                 delta: *delta,
             },
+            InputEvent::Key(_) | InputEvent::Ime(_) => self.clone(),
         }
     }
+
+    /// Whether this event is focus-routed (delivered down the focus chain with no
+    /// hit test) rather than hit-tested by position.
+    pub fn is_focus_routed(&self) -> bool {
+        matches!(self, InputEvent::Key(_) | InputEvent::Ime(_))
+    }
+}
+
+/// The IME-relevant surface a focused editable widget publishes for the shell.
+///
+/// Written by the focused widget through [`EventCtx::publish_ime_state`], it
+/// bubbles up the focus chain and is stored on [`crate::app::RenderRoot`], where
+/// the shell reads it via [`crate::app::RenderRoot::ime_state`] to drive the
+/// platform IME (winit `set_ime_cursor_area`, Android `updateSelection`, iOS
+/// `inputDelegate`). See the module docs for the index boundary rule.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImeState {
+    /// Whether the focused widget currently wants IME active.
+    pub active: bool,
+    /// The current editing state (UTF-16 indexed at this shell-facing surface).
+    pub editing: EditingState,
+    /// The caret rectangle in logical coordinates, for IME candidate placement.
+    pub caret: Option<Rect>,
 }
 
 /// What a widget did with an event.
@@ -167,6 +333,17 @@ pub struct EventCtx<'a> {
     state: &'a mut dyn Any,
     needs_redraw: bool,
     capture_requested: bool,
+    /// Set by [`EventCtx::request_focus`]; read by the enclosing container to
+    /// record which child holds the focus path (mirrors `capture_requested`).
+    focus_requested: bool,
+    /// Set by [`EventCtx::release_focus`]; drops the recorded focus path.
+    focus_released: bool,
+    /// Whether the receiving widget currently holds focus (threaded down from its
+    /// pod's recorded focus flag; seeded from the root focus state at the root).
+    has_focus: bool,
+    /// The IME surface the focused widget published this dispatch, if any; bubbles
+    /// up the focus chain to [`crate::app::RenderRoot`].
+    ime_state: Option<ImeState>,
     origin: Point,
     size: Size,
 }
@@ -179,6 +356,10 @@ impl<'a> EventCtx<'a> {
             state,
             needs_redraw: false,
             capture_requested: false,
+            focus_requested: false,
+            focus_released: false,
+            has_focus: false,
+            ime_state: None,
             origin,
             size,
         }
@@ -217,6 +398,61 @@ impl<'a> EventCtx<'a> {
         self.capture_requested
     }
 
+    /// Request focus: subsequent keyboard/IME events should route to this widget.
+    ///
+    /// The enclosing container reads the flag after the dispatch returns and
+    /// records this child as the focused path (the focus mirror of
+    /// [`EventCtx::capture_pointer`]). Focus is delivered down the recorded chain
+    /// with no hit test.
+    pub fn request_focus(&mut self) {
+        self.focus_requested = true;
+    }
+
+    /// Release focus: drop the recorded focus path (e.g. Escape / blur).
+    pub fn release_focus(&mut self) {
+        self.focus_released = true;
+    }
+
+    /// Whether the receiving widget currently holds the focus path.
+    ///
+    /// Threaded down from the widget's pod ([`crate::widget::ChildPod::is_focused`]);
+    /// a keyboard/IME event only reaches a widget along this chain, so a widget
+    /// handling such an event is by construction focused.
+    pub fn has_focus(&self) -> bool {
+        self.has_focus
+    }
+
+    /// Publish this widget's IME surface (editing state + caret) for the shell.
+    ///
+    /// The value bubbles up the focus chain to [`crate::app::RenderRoot`], where
+    /// the shell reads it via [`crate::app::RenderRoot::ime_state`]. Called by the
+    /// focused editable widget after any state change so the platform IME stays in
+    /// sync.
+    pub fn publish_ime_state(&mut self, state: ImeState) {
+        self.ime_state = Some(state);
+    }
+
+    /// Whether this widget requested focus during this (sub)dispatch (container-side).
+    pub(crate) fn is_focus_requested(&self) -> bool {
+        self.focus_requested
+    }
+
+    /// Whether this widget released focus during this (sub)dispatch (container-side).
+    pub(crate) fn is_focus_released(&self) -> bool {
+        self.focus_released
+    }
+
+    /// Take the IME surface published during this (sub)dispatch, leaving `None`.
+    pub(crate) fn take_ime_state(&mut self) -> Option<ImeState> {
+        self.ime_state.take()
+    }
+
+    /// Seed whether the receiving (root) widget holds focus — used by
+    /// [`crate::app::RenderRoot::event`] when it dispatches straight to the root.
+    pub(crate) fn set_has_focus(&mut self, has_focus: bool) {
+        self.has_focus = has_focus;
+    }
+
     /// The receiving widget's origin in its parent's coordinate space.
     pub fn origin(&self) -> Point {
         self.origin
@@ -228,22 +464,40 @@ impl<'a> EventCtx<'a> {
     }
 
     /// Create a fresh sub-context for a child at `origin`/`size`, reborrowing the
-    /// same erased state. The child's `needs_redraw`/`capture_requested` start
-    /// clear; the parent folds them back in with [`EventCtx::absorb_child`].
-    pub(crate) fn child_ctx(&mut self, origin: Point, size: Size) -> EventCtx<'_> {
+    /// same erased state. The child's `needs_redraw`/`capture_requested`/focus
+    /// flags start clear; `has_focus` reflects the child pod's recorded focus
+    /// flag. The parent folds the results back in with [`EventCtx::absorb_child`].
+    pub(crate) fn child_ctx(&mut self, origin: Point, size: Size, focused: bool) -> EventCtx<'_> {
         EventCtx {
             state: &mut *self.state,
             needs_redraw: false,
             capture_requested: false,
+            focus_requested: false,
+            focus_released: false,
+            has_focus: focused,
+            ime_state: None,
             origin,
             size,
         }
     }
 
-    /// Fold a child dispatch's redraw/capture flags back into this context.
-    pub(crate) fn absorb_child(&mut self, child_needs_redraw: bool, child_captured: bool) {
+    /// Fold a child dispatch's redraw/capture/focus flags (and any published IME
+    /// surface) back into this context.
+    pub(crate) fn absorb_child(
+        &mut self,
+        child_needs_redraw: bool,
+        child_captured: bool,
+        child_focus_requested: bool,
+        child_focus_released: bool,
+        child_ime_state: Option<ImeState>,
+    ) {
         self.needs_redraw |= child_needs_redraw;
         self.capture_requested |= child_captured;
+        self.focus_requested |= child_focus_requested;
+        self.focus_released |= child_focus_released;
+        if child_ime_state.is_some() {
+            self.ime_state = child_ime_state;
+        }
     }
 }
 
@@ -293,13 +547,84 @@ mod tests {
         let mut count = 0u32;
         let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
         {
-            let mut child = ctx.child_ctx(Point::new(1.0, 2.0), Size::new(3.0, 4.0));
+            let mut child = ctx.child_ctx(Point::new(1.0, 2.0), Size::new(3.0, 4.0), false);
             child.request_redraw();
             child.capture_pointer();
             let (redraw, cap) = (child.needs_redraw(), child.is_pointer_captured());
-            ctx.absorb_child(redraw, cap);
+            ctx.absorb_child(redraw, cap, false, false, None);
         }
         assert!(ctx.needs_redraw());
         assert!(ctx.is_pointer_captured());
+    }
+
+    #[test]
+    fn request_and_release_focus_set_flags() {
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        assert!(!ctx.is_focus_requested());
+        assert!(!ctx.is_focus_released());
+        assert!(!ctx.has_focus());
+        ctx.request_focus();
+        ctx.release_focus();
+        assert!(ctx.is_focus_requested());
+        assert!(ctx.is_focus_released());
+    }
+
+    #[test]
+    fn child_ctx_seeds_has_focus_from_pod_flag() {
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        let focused_child = ctx.child_ctx(Point::ZERO, Size::ZERO, true);
+        assert!(focused_child.has_focus());
+        let unfocused_child = ctx.child_ctx(Point::ZERO, Size::ZERO, false);
+        assert!(!unfocused_child.has_focus());
+    }
+
+    #[test]
+    fn absorb_child_folds_focus_and_ime_upward() {
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        let published = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "hi".to_string(),
+                selection_base: 2,
+                selection_extent: 2,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: Some(Rect::new(0.0, 0.0, 1.0, 10.0)),
+        };
+        {
+            let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, false);
+            child.request_focus();
+            child.publish_ime_state(published.clone());
+            let (fr, frl, ime) = (
+                child.is_focus_requested(),
+                child.is_focus_released(),
+                child.take_ime_state(),
+            );
+            ctx.absorb_child(false, false, fr, frl, ime);
+        }
+        assert!(ctx.is_focus_requested());
+        assert!(!ctx.is_focus_released());
+        assert_eq!(ctx.take_ime_state(), Some(published));
+    }
+
+    #[test]
+    fn key_and_ime_events_are_focus_routed_with_zero_position() {
+        let key = InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Enter),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        });
+        assert!(key.is_focus_routed());
+        assert_eq!(key.position(), Point::ZERO);
+        // translated is identity for focus-routed events.
+        assert_eq!(key.translated(Vec2::new(5.0, 5.0)), key);
+
+        let ime = InputEvent::Ime(ImeEvent::Commit("x".to_string()));
+        assert!(ime.is_focus_routed());
+        assert!(!down(1.0, 1.0).is_focus_routed());
     }
 }

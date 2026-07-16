@@ -9,7 +9,7 @@
 
 use std::any::Any;
 
-use forgekit_core::event::{EventOutcome, InputEvent};
+use forgekit_core::event::{EditingState, EventOutcome, ImeEvent, ImeState, InputEvent};
 use forgekit_core::view::View;
 use forgekit_core::{PaintOutcome, PaintScene, RenderRoot};
 use kurbo::Size;
@@ -45,6 +45,20 @@ pub trait AppTree {
     /// Choreographer/`CADisplayLink` loops already produce the next frame. The
     /// event pass itself never rebuilds or repaints (see [`RenderRoot::event`]).
     fn event(&mut self, event: &InputEvent) -> EventOutcome;
+
+    /// Apply a whole editing state pushed by the platform IME (the mobile
+    /// state-sync path), routed to the focused widget as an
+    /// [`InputEvent::Ime`]`(`[`ImeEvent::ApplyEditingState`]`)`.
+    ///
+    /// `state`'s selection/composing indices are UTF-16 code-unit based (the
+    /// platform-native unit); the focused widget / `forgekit-text` converts them
+    /// to Rust byte offsets. Returns the same [`EventOutcome`] as [`AppTree::event`].
+    fn ime_apply(&mut self, state: EditingState) -> EventOutcome;
+
+    /// The IME surface the focused widget published, for the shell to drive the
+    /// platform input method. Delegates to [`RenderRoot::ime_state`]; `None` when
+    /// nothing is focused or no IME surface was published.
+    fn ime_state(&self) -> Option<ImeState>;
 }
 
 /// Concrete [`AppTree`] holding one app's state, logic and retained root.
@@ -76,6 +90,17 @@ where
 
     fn event(&mut self, event: &InputEvent) -> EventOutcome {
         self.root.event(&mut self.state, event)
+    }
+
+    fn ime_apply(&mut self, state: EditingState) -> EventOutcome {
+        self.root.event(
+            &mut self.state,
+            &InputEvent::Ime(ImeEvent::ApplyEditingState(state)),
+        )
+    }
+
+    fn ime_state(&self) -> Option<ImeState> {
+        self.root.ime_state()
     }
 }
 

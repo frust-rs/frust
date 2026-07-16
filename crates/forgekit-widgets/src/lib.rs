@@ -292,28 +292,74 @@ fn releases_capture(event: &InputEvent) -> bool {
     )
 }
 
-/// Route a pointer/scroll event to a container's children.
+/// Whether `event` is a pointer `Down` — the phase that both opens a capture and
+/// triggers blur-on-outside-tap evaluation in the routing helpers.
+fn is_pointer_down(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Down)
+    )
+}
+
+/// Route a pointer/scroll/keyboard/IME event to a container's children.
 ///
-/// A captured gesture goes straight to the recorded active child (capture
-/// auto-releases on `Up`/`Cancel`). Otherwise the children are hit-tested in
-/// reverse paint order — topmost (last-painted) first — and the first child that
-/// both contains the point and reports [`EventResult::Handled`] consumes it. This
-/// is the z-order convention Flex establishes and Stack shares.
+/// **Focus-routed events** ([`InputEvent::Key`]/[`InputEvent::Ime`]) bypass hit
+/// testing entirely: they go straight to the child holding the recorded focus
+/// path ([`ChildPod::is_focused`]), or are ignored if none does. This is the
+/// focus mirror of the capture fast-path.
+///
+/// For **pointer/scroll**: a captured gesture goes straight to the recorded
+/// active child (capture auto-releases on `Up`/`Cancel`). Otherwise the children
+/// are hit-tested in reverse paint order — topmost (last-painted) first — and the
+/// first child that both contains the point and reports [`EventResult::Handled`]
+/// consumes it. This is the z-order convention Flex establishes and Stack shares.
+///
+/// **Blur-on-outside-tap:** a pointer `Down` that does not (re)establish focus on
+/// the child it hits clears every focused child in this container. At the nearest
+/// common ancestor of a stale focus branch and the tapped branch, this breaks the
+/// recorded focus chain (a `Down` inside the still-focused child keeps it — that
+/// child stays focused and is not cleared). Deeper stale flags below a cleared
+/// link are unreachable and are corrected the next time focus enters that subtree
+/// (a focus request re-records the whole chain).
 pub(crate) fn route_event(
     children: &mut [ChildPod],
     ctx: &mut EventCtx<'_>,
     event: &InputEvent,
 ) -> EventResult {
+    if event.is_focus_routed() {
+        if let Some(pod) = children.iter_mut().find(|p| p.is_focused()) {
+            return pod.event_child(ctx, event);
+        }
+        return EventResult::Ignored;
+    }
     if let Some(pod) = children.iter_mut().find(|p| p.is_active()) {
         return route_event_single(pod, ctx, event);
     }
     let position = event.position();
-    for pod in children.iter_mut().rev() {
-        if pod.contains(position) && pod.event_child(ctx, event) == EventResult::Handled {
-            return EventResult::Handled;
+    let mut handled = EventResult::Ignored;
+    // The index of the hit child *if* it holds focus after dispatch — the one
+    // focused child blur-on-Down must preserve.
+    let mut kept_focus: Option<usize> = None;
+    let n = children.len();
+    for i in (0..n).rev() {
+        if children[i].contains(position)
+            && children[i].event_child(ctx, event) == EventResult::Handled
+        {
+            if children[i].is_focused() {
+                kept_focus = Some(i);
+            }
+            handled = EventResult::Handled;
+            break;
         }
     }
-    EventResult::Ignored
+    if is_pointer_down(event) {
+        for (i, pod) in children.iter_mut().enumerate() {
+            if Some(i) != kept_focus && pod.is_focused() {
+                pod.set_focused(false);
+            }
+        }
+    }
+    handled
 }
 
 /// Route a pointer/scroll event to a container's single child.
@@ -330,6 +376,13 @@ pub(crate) fn route_event_single(
     ctx: &mut EventCtx<'_>,
     event: &InputEvent,
 ) -> EventResult {
+    if event.is_focus_routed() {
+        // Focus-routed events go to the child only if it holds the focus path.
+        if pod.is_focused() {
+            return pod.event_child(ctx, event);
+        }
+        return EventResult::Ignored;
+    }
     if pod.is_active() {
         let result = pod.event_child(ctx, event);
         if releases_capture(event) {
@@ -337,11 +390,19 @@ pub(crate) fn route_event_single(
         }
         return result;
     }
-    if pod.contains(event.position()) {
+    let inside = pod.contains(event.position());
+    let result = if inside {
         pod.event_child(ctx, event)
     } else {
         EventResult::Ignored
+    };
+    // Blur-on-outside-tap: a `Down` that lands *outside* the (single) focused
+    // child drops its recorded focus path. A `Down` inside the child keeps focus
+    // (the child re-requests it, or simply stays the focused widget).
+    if is_pointer_down(event) && !inside && pod.is_focused() {
+        pod.set_focused(false);
     }
+    result
 }
 
 /// Shared, GPU-free fixtures for the container layout/paint/event tests: a
@@ -573,5 +634,301 @@ mod tests {
             pod.is_active(),
             "a content-only rebuild must not clear an in-flight capture"
         );
+    }
+}
+
+/// Focus-path routing tests for [`route_event`]/[`route_event_single`]: Key/IME
+/// events reach only the focused child (including through a nested container),
+/// blur-on-outside-tap breaks the chain, a second focus request moves focus,
+/// `ApplyEditingState` routes to the focused child, a published IME surface
+/// bubbles up, and the capture and focus paths stay independent.
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+    use forgekit_core::{
+        BoxConstraints, EditingState, EventCtx, ImeEvent, ImeState, Key, KeyEvent, LayoutCtx,
+        Modifiers, PaintCtx, PaintScene,
+    };
+    use kurbo::{Point, Rect, Size};
+
+    /// A leaf that: on a pointer `Down` optionally requests focus and records
+    /// `id + 100`; on a `Move` (capture path) records `id + 200`; on a Key/IME
+    /// event records `id` and optionally publishes an IME surface. All state is a
+    /// shared `Vec<u32>` so tests can assert *which* leaf saw *what*.
+    struct KeyLeaf {
+        id: u32,
+        takes_focus: bool,
+        publish_ime: bool,
+    }
+
+    impl Widget for KeyLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) => match p.phase {
+                    PointerPhase::Down => {
+                        if self.takes_focus {
+                            ctx.request_focus();
+                        }
+                        ctx.state_mut::<Vec<u32>>().push(self.id + 100);
+                        EventResult::Handled
+                    }
+                    PointerPhase::Move => {
+                        ctx.state_mut::<Vec<u32>>().push(self.id + 200);
+                        EventResult::Handled
+                    }
+                    _ => EventResult::Handled,
+                },
+                InputEvent::Key(_) | InputEvent::Ime(_) => {
+                    ctx.state_mut::<Vec<u32>>().push(self.id);
+                    if self.publish_ime {
+                        ctx.publish_ime_state(ImeState {
+                            active: true,
+                            editing: EditingState {
+                                text: format!("leaf{}", self.id),
+                                selection_base: 1,
+                                selection_extent: 1,
+                                composing_base: -1,
+                                composing_extent: -1,
+                            },
+                            caret: Some(Rect::new(0.0, 0.0, 1.0, 10.0)),
+                        });
+                    }
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// A minimal multi-child container: stacks its children vertically (each 10
+    /// tall at the given width) and routes events through [`route_event`] — the
+    /// same helper the real `Flex`/`Stack` use — so focus routing is exercised
+    /// through a nested container.
+    struct Nest {
+        children: Vec<ChildPod>,
+    }
+
+    impl Widget for Nest {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            let w = bc.max().width;
+            for (i, pod) in self.children.iter_mut().enumerate() {
+                pod.set_origin(Point::new(0.0, i as f64 * 10.0));
+                pod.layout_child(ctx, &BoxConstraints::tight(Size::new(w, 10.0)));
+            }
+            Size::new(w, self.children.len() as f64 * 10.0)
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            route_event(&mut self.children, ctx, event)
+        }
+    }
+
+    fn leaf_pod(id: u32, takes_focus: bool, publish_ime: bool) -> ChildPod {
+        ChildPod::new(Box::new(KeyLeaf {
+            id,
+            takes_focus,
+            publish_ime,
+        }))
+    }
+
+    /// Lay out a slice of pods vertically (10 tall each at width 100) so hit
+    /// testing distinguishes them: child `i` occupies `y ∈ [i*10, i*10+10)`.
+    fn lay_out_vertically(pods: &mut [ChildPod]) {
+        let mut lctx = LayoutCtx::new();
+        for (i, pod) in pods.iter_mut().enumerate() {
+            pod.set_origin(Point::new(0.0, i as f64 * 10.0));
+            pod.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 10.0)));
+        }
+    }
+
+    fn down(y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(5.0, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    fn mv(y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position: Point::new(5.0, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    fn key() -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Character("a".to_string()),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    fn ime_apply() -> InputEvent {
+        InputEvent::Ime(ImeEvent::ApplyEditingState(EditingState {
+            text: "sync".to_string(),
+            selection_base: 4,
+            selection_extent: 4,
+            composing_base: -1,
+            composing_extent: -1,
+        }))
+    }
+
+    // `state` must be a concrete `&mut Vec<u32>`: it is erased to `&mut dyn Any`
+    // and the leaves recover it with `state_mut::<Vec<u32>>()`, so a slice would
+    // fail the downcast.
+    #[allow(clippy::ptr_arg)]
+    fn route(children: &mut [ChildPod], state: &mut Vec<u32>, event: &InputEvent) -> EventResult {
+        let mut ctx = EventCtx::new(state, Point::ZERO, Size::new(100.0, 100.0));
+        route_event(children, &mut ctx, event)
+    }
+
+    #[test]
+    fn key_routes_only_to_focused_child() {
+        let mut children = vec![leaf_pod(1, true, false), leaf_pod(2, true, false)];
+        lay_out_vertically(&mut children);
+        let mut state = Vec::new();
+
+        // Tap child 2 (y in [10,20)) → it requests focus.
+        route(&mut children, &mut state, &down(15.0));
+        assert!(children[1].is_focused());
+        assert!(!children[0].is_focused());
+        state.clear();
+
+        // A Key event reaches ONLY the focused child (id 2), never child 1.
+        route(&mut children, &mut state, &key());
+        assert_eq!(state, vec![2]);
+    }
+
+    #[test]
+    fn key_reaches_focused_leaf_through_nested_container() {
+        // Outer container holds one Nest; the Nest holds two leaves.
+        let inner = vec![leaf_pod(1, true, false), leaf_pod(2, true, false)];
+        let mut nest = Nest { children: inner };
+        // Lay out the nest so its inner children get real geometry.
+        {
+            let mut lctx = LayoutCtx::new();
+            nest.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 20.0)));
+        }
+        let mut outer = vec![ChildPod::new(Box::new(nest))];
+        outer[0].set_origin(Point::ZERO);
+        {
+            let mut lctx = LayoutCtx::new();
+            outer[0].layout_child(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 20.0)));
+        }
+        let mut state = Vec::new();
+
+        // Tap the second inner leaf (y in [10,20)) → focus chain nest→leaf2.
+        route(&mut outer, &mut state, &down(15.0));
+        assert!(outer[0].is_focused(), "the nest records the focus path");
+        state.clear();
+
+        // Key routes outer→nest→leaf2 only.
+        route(&mut outer, &mut state, &key());
+        assert_eq!(state, vec![2]);
+    }
+
+    #[test]
+    fn blur_on_outside_tap_clears_focus_chain() {
+        // Child 1 takes focus; child 2 does NOT (a non-editable widget).
+        let mut children = vec![leaf_pod(1, true, false), leaf_pod(2, false, false)];
+        lay_out_vertically(&mut children);
+        let mut state = Vec::new();
+
+        route(&mut children, &mut state, &down(5.0)); // focus child 1
+        assert!(children[0].is_focused());
+
+        // Tap child 2 (does not take focus) → blur clears the focus chain.
+        route(&mut children, &mut state, &down(15.0));
+        assert!(
+            !children[0].is_focused(),
+            "outside tap blurs the focused child"
+        );
+        assert!(!children[1].is_focused());
+        state.clear();
+
+        // A Key event now reaches nobody.
+        let result = route(&mut children, &mut state, &key());
+        assert_eq!(result, EventResult::Ignored);
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn tap_inside_focused_widget_keeps_focus() {
+        // A focused widget re-tapped keeps focus (Down inside focused widget).
+        let mut children = vec![leaf_pod(1, true, false), leaf_pod(2, false, false)];
+        lay_out_vertically(&mut children);
+        let mut state = Vec::new();
+
+        route(&mut children, &mut state, &down(5.0)); // focus child 1
+        route(&mut children, &mut state, &down(5.0)); // tap child 1 again
+        assert!(
+            children[0].is_focused(),
+            "a tap inside the focused widget keeps focus"
+        );
+        state.clear();
+        route(&mut children, &mut state, &key());
+        assert_eq!(state, vec![1]);
+    }
+
+    #[test]
+    fn second_focus_request_moves_focus() {
+        let mut children = vec![leaf_pod(1, true, false), leaf_pod(2, true, false)];
+        lay_out_vertically(&mut children);
+        let mut state = Vec::new();
+
+        route(&mut children, &mut state, &down(5.0)); // focus child 1
+        assert!(children[0].is_focused());
+        route(&mut children, &mut state, &down(15.0)); // focus child 2
+        assert!(children[1].is_focused());
+        assert!(!children[0].is_focused(), "focus moved off child 1");
+        state.clear();
+
+        route(&mut children, &mut state, &key());
+        assert_eq!(
+            state,
+            vec![2],
+            "key now reaches only the newly focused child"
+        );
+    }
+
+    #[test]
+    fn ime_apply_routes_to_focused_child() {
+        let mut children = vec![leaf_pod(1, true, false), leaf_pod(2, true, false)];
+        lay_out_vertically(&mut children);
+        let mut state = Vec::new();
+
+        route(&mut children, &mut state, &down(15.0)); // focus child 2
+        state.clear();
+        route(&mut children, &mut state, &ime_apply());
+        assert_eq!(state, vec![2]);
+    }
+
+    #[test]
+    fn capture_and_focus_paths_are_independent() {
+        // Child 1 holds the capture (active) path; child 2 holds the focus path.
+        let mut children = vec![leaf_pod(1, false, false), leaf_pod(2, false, false)];
+        lay_out_vertically(&mut children);
+        children[0].set_active(true);
+        children[1].set_focused(true);
+        let mut state = Vec::new();
+
+        // A Move routes down the capture path → child 1 only (id+200).
+        route(&mut children, &mut state, &mv(999.0));
+        assert_eq!(state, vec![201]);
+        state.clear();
+
+        // A Key routes down the focus path → child 2 only (id).
+        route(&mut children, &mut state, &key());
+        assert_eq!(state, vec![2]);
+
+        // Both paths survive intact.
+        assert!(children[0].is_active());
+        assert!(children[1].is_focused());
     }
 }

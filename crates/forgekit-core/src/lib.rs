@@ -36,8 +36,8 @@ pub mod widget;
 
 pub use app::RenderRoot;
 pub use event::{
-    EventCtx, EventOutcome, EventResult, InputEvent, PointerButton, PointerEvent, PointerPhase,
-    ScrollDelta,
+    EditingState, EventCtx, EventOutcome, EventResult, ImeEvent, ImeState, InputEvent, Key,
+    KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
 };
 pub use input::{
     FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,

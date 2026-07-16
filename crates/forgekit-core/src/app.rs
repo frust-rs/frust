@@ -17,7 +17,7 @@ use std::any::Any;
 
 use kurbo::{Point, Size};
 
-use crate::event::{EventCtx, EventOutcome, EventResult, InputEvent, PointerPhase};
+use crate::event::{EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerPhase};
 use crate::layout::BoxConstraints;
 use crate::tree::{WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
@@ -40,6 +40,16 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// Set on a `Down` whose dispatch requested capture, cleared on `Up`/`Cancel`.
     /// Root-level mirror of the per-container `active` path bookkeeping.
     pointer_captured: bool,
+    /// Whether some widget in the tree currently holds focus. Root-level mirror of
+    /// the per-container `focused` path bookkeeping (the focus analog of
+    /// `pointer_captured`): set when a dispatch requested focus, cleared on a
+    /// release or a blur-on-outside-tap `Down`.
+    focus_active: bool,
+    /// The IME surface the focused widget last published (via
+    /// [`EventCtx::publish_ime_state`]), surfaced to the shell by
+    /// [`RenderRoot::ime_state`]. Persists across rebuilds/events until refreshed
+    /// by a new publish or cleared on blur.
+    ime_state: Option<ImeState>,
     /// Dirtiness accumulated since the last [`RenderRoot::take_change_flags`] —
     /// merged from each rebuild so a shell can decide, in one place, whether a
     /// frame needs layout/paint at all.
@@ -57,6 +67,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             next_id: 0,
             window_size: Size::ZERO,
             pointer_captured: false,
+            focus_active: false,
+            ime_state: None,
             pending: ChangeFlags::NONE,
             _state: core::marker::PhantomData,
         }
@@ -65,6 +77,23 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Whether a captured pointer gesture is currently in flight.
     pub fn is_pointer_captured(&self) -> bool {
         self.pointer_captured
+    }
+
+    /// Whether some widget in the tree currently holds keyboard/IME focus.
+    pub fn is_focus_active(&self) -> bool {
+        self.focus_active
+    }
+
+    /// The IME surface the focused widget published, for the shell to drive the
+    /// platform input method (winit `set_ime_cursor_area`, Android
+    /// `updateSelection`, iOS `inputDelegate`). `None` when nothing is focused or
+    /// the focused widget publishes no IME surface.
+    ///
+    /// Written by the focused widget through [`EventCtx::publish_ime_state`] during
+    /// the event pass and refreshed on every event; it survives a rebuild (so the
+    /// shell can query it between frames) and is cleared when focus is lost.
+    pub fn ime_state(&self) -> Option<ImeState> {
+        self.ime_state.clone()
     }
 
     /// Take (and clear) the dirtiness accumulated since the last call.
@@ -235,29 +264,63 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             return EventOutcome::default();
         };
 
-        let (handled, needs_redraw, captured) = {
+        let (handled, needs_redraw, captured, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
             let mut ctx = EventCtx::new(state_any, pod.origin(), pod.size());
+            // Seed the root widget's focus flag so a leaf-root editable that holds
+            // focus can observe `has_focus()`; deeper focus is threaded per-pod.
+            ctx.set_has_focus(self.focus_active);
             let result = pod.widget_mut().event(&mut ctx, event);
             let handled = matches!(result, EventResult::Handled);
             (
                 handled,
                 ctx.needs_redraw() || handled,
                 ctx.is_pointer_captured(),
+                ctx.is_focus_requested(),
+                ctx.is_focus_released(),
+                ctx.take_ime_state(),
             )
         };
 
+        // A published IME surface refreshes the stored one (persists past this
+        // event, survives rebuild) until a blur clears it below.
+        if ime.is_some() {
+            self.ime_state = ime;
+        }
+
         // Root-level capture path: a captured `Down` opens a gesture; `Up`/`Cancel`
         // close it. `Move` leaves the flag untouched so it survives the drag.
-        if let InputEvent::Pointer(pointer) = event {
-            match pointer.phase {
+        //
+        // Root-level focus path (the capture mirror): a `Down` that requested
+        // focus opens the focus session; a `Down` that did not is a
+        // blur-on-outside-tap and closes it (the per-container `focused` flags are
+        // cleared by the routing helpers). Key/Ime/Scroll only adjust focus if the
+        // dispatch explicitly requested or released it.
+        match event {
+            InputEvent::Pointer(pointer) => match pointer.phase {
                 PointerPhase::Down => {
                     if captured {
                         self.pointer_captured = true;
                     }
+                    if focus_req {
+                        self.focus_active = true;
+                    } else {
+                        // Blur: no widget on the tapped path took focus.
+                        self.focus_active = false;
+                        self.ime_state = None;
+                    }
                 }
                 PointerPhase::Up | PointerPhase::Cancel => self.pointer_captured = false,
                 PointerPhase::Move => {}
+            },
+            InputEvent::Scroll { .. } | InputEvent::Key(_) | InputEvent::Ime(_) => {
+                if focus_req {
+                    self.focus_active = true;
+                }
+                if focus_rel {
+                    self.focus_active = false;
+                    self.ime_state = None;
+                }
             }
         }
 
@@ -602,5 +665,94 @@ mod tests {
         fn downcast_ref_is<W: crate::widget::Widget>(&self) -> bool {
             (self as &dyn std::any::Any).is::<W>()
         }
+    }
+
+    // --- Focus / IME surface fixtures: a root editable that focuses + publishes
+    //     an IME surface on a `Down` in its left half, and blurs (no focus) on a
+    //     `Down` in its right half. ---
+
+    use crate::event::{EditingState, ImeState};
+
+    struct ImeWidget;
+    impl crate::widget::Widget for ImeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 100.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut crate::event::EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event {
+                if p.phase == PointerPhase::Down && p.position.x < 50.0 {
+                    ctx.request_focus();
+                    ctx.publish_ime_state(ImeState {
+                        active: true,
+                        editing: EditingState {
+                            text: "abc".to_string(),
+                            selection_base: 3,
+                            selection_extent: 3,
+                            composing_base: -1,
+                            composing_extent: -1,
+                        },
+                        caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
+                    });
+                    return EventResult::Handled;
+                }
+                if p.phase == PointerPhase::Down {
+                    // Right-half tap: a blur (no focus request).
+                    return EventResult::Handled;
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    struct ImeView;
+    impl View<ClickState> for ImeView {
+        type Element = ImeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ImeWidget {
+            ImeWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ImeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn ime_logic(_state: &mut ClickState) -> ImeView {
+        ImeView
+    }
+
+    #[test]
+    fn focus_and_ime_state_surface_and_clear_on_blur() {
+        let mut root: RenderRoot<ClickState, ImeView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut ime_logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // No focus / no IME surface initially.
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
+
+        // A left-half Down focuses the widget and publishes an IME surface.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active());
+        let ime = root
+            .ime_state()
+            .expect("focused widget published an IME surface");
+        assert!(ime.active);
+        assert_eq!(ime.editing.text, "abc");
+
+        // The published surface survives a rebuild (shell can query it between
+        // frames).
+        root.rebuild(&mut ime_logic, &mut state);
+        assert!(root.ime_state().is_some());
+
+        // A right-half Down is a blur: focus and the IME surface both clear.
+        root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 10.0));
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
     }
 }

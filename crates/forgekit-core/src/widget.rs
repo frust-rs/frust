@@ -328,6 +328,11 @@ pub struct ChildPod {
     /// subsequent moves/releases straight to it (capture-by-recorded-path).
     /// Cleared by the container on `Up`/`Cancel` via [`ChildPod::set_active`].
     active: bool,
+    /// Set when the child holds the focus path, so the container can route
+    /// keyboard/IME events straight to it with no hit test (focus is the
+    /// second recorded path, a mirror of `active`). Maintained by
+    /// [`ChildPod::event_child`] on a `focus_requested`/`focus_released` bubble.
+    focused: bool,
 }
 
 impl ChildPod {
@@ -339,6 +344,7 @@ impl ChildPod {
             origin: Point::ZERO,
             size: Size::ZERO,
             active: false,
+            focused: false,
         }
     }
 
@@ -385,6 +391,20 @@ impl ChildPod {
         self.active = active;
     }
 
+    /// Whether this child currently holds the recorded focus path — keyboard/IME
+    /// events route straight to it (the focus mirror of [`ChildPod::is_active`]).
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    /// Set (or clear) the recorded focus path. Containers clear it on
+    /// blur-on-outside-tap and set it when a child requests focus; the flag is
+    /// maintained automatically by [`ChildPod::event_child`] on a
+    /// `focus_requested`/`focus_released` bubble.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
     /// Lay the child out under `bc`, recording and returning its chosen size.
     pub fn layout_child(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let size = self.widget.layout(ctx, bc);
@@ -422,19 +442,32 @@ impl ChildPod {
     /// child.
     pub fn event_child(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         let local = event.translated(-self.origin.to_vec2());
-        let (captured, redraw, result) = {
-            let mut child_ctx = ctx.child_ctx(self.origin, self.size);
+        let (captured, focus_req, focus_rel, redraw, ime, result) = {
+            let mut child_ctx = ctx.child_ctx(self.origin, self.size, self.focused);
             let result = self.widget.event(&mut child_ctx, &local);
             (
                 child_ctx.is_pointer_captured(),
+                child_ctx.is_focus_requested(),
+                child_ctx.is_focus_released(),
                 child_ctx.needs_redraw(),
+                child_ctx.take_ime_state(),
                 result,
             )
         };
         if captured {
             self.active = true;
         }
-        ctx.absorb_child(redraw, captured);
+        // Focus is the second recorded path, maintained exactly like `active`: a
+        // `focus_requested` bubble records this child as the focused one; a
+        // `focus_released` bubble drops it. A request wins over a release in the
+        // rare case both fire in one dispatch (a re-focus supersedes a blur).
+        if focus_rel {
+            self.focused = false;
+        }
+        if focus_req {
+            self.focused = true;
+        }
+        ctx.absorb_child(redraw, captured, focus_req, focus_rel, ime);
         result
     }
 
@@ -541,6 +574,79 @@ mod tests {
             position: Point::new(x, y),
             button: PointerButton::Primary,
         })
+    }
+
+    /// A leaf that requests focus on `Down`, releases it on Escape, records
+    /// whether it saw a `Key`/`Ime` event, and reports whether it had focus when
+    /// the last event arrived.
+    #[derive(Default)]
+    struct FocusProbe {
+        saw_key: bool,
+        had_focus_on_key: bool,
+    }
+
+    impl Widget for FocusProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &crate::event::InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(PointerEvent {
+                    phase: PointerPhase::Down,
+                    ..
+                }) => {
+                    ctx.request_focus();
+                    EventResult::Handled
+                }
+                InputEvent::Key(_) | InputEvent::Ime(_) => {
+                    self.saw_key = true;
+                    self.had_focus_on_key = ctx.has_focus();
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    fn key_enter() -> InputEvent {
+        InputEvent::Key(crate::event::KeyEvent {
+            key: crate::event::Key::Named(crate::event::NamedKey::Enter),
+            modifiers: crate::event::Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn event_child_records_focus_on_request() {
+        let mut pod = ChildPod::new(Box::new(FocusProbe::default()));
+        pod.set_origin(Point::new(5.0, 5.0));
+        assert!(!pod.is_focused());
+
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::new(50.0, 50.0));
+        pod.event_child(&mut ctx, &down(6.0, 6.0));
+
+        // The child requested focus → the pod records the focus path and it
+        // bubbles up into the parent context.
+        assert!(pod.is_focused());
+        assert!(ctx.is_focus_requested());
+    }
+
+    #[test]
+    fn event_child_threads_has_focus_into_child() {
+        // A focused pod seeds `has_focus` on the child dispatch; a Key event
+        // reaching a focused child sees `has_focus() == true`.
+        let mut pod = ChildPod::new(Box::new(FocusProbe::default()));
+        pod.set_focused(true);
+
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::new(10.0, 10.0));
+        pod.event_child(&mut ctx, &key_enter());
+
+        let probe = pod.widget_mut().downcast_mut::<FocusProbe>().unwrap();
+        assert!(probe.saw_key);
+        assert!(probe.had_focus_on_key);
     }
 
     #[test]
