@@ -25,8 +25,13 @@
 //!   [`WidgetPod`](tree::WidgetPod).
 //! * [`app`] — the [`RenderRoot`](app::RenderRoot) that drives rebuild → layout
 //!   → paint. This is what the desktop shell (task 08) owns.
+//! * [`component`] — [`Component`](component::Component), Flutter's
+//!   `StatefulWidget` analog: a subtree with retained local state, a
+//!   per-component reactive `Owner`, and a state boundary the outer view tree
+//!   never sees.
 
 pub mod app;
+pub mod component;
 pub mod event;
 pub mod input;
 pub mod layout;
@@ -35,6 +40,7 @@ pub mod view;
 pub mod widget;
 
 pub use app::RenderRoot;
+pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{
     EditingState, EventCtx, EventOutcome, EventResult, ImeEvent, ImeState, InputEvent, Key,
     KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
