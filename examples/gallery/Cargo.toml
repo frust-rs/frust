@@ -1,0 +1,22 @@
+[package]
+name = "gallery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+forgekit = { workspace = true }
+# Escape-hatch dependencies, unlike every other in-workspace example
+# (hello/counter/notes depend on `forgekit` alone): no facade widget yet
+# paints an arbitrary color fill or a real blurred elevation shadow, so this
+# crate builds two small `View`/`Widget` pairs directly against
+# `forgekit-core` (spec §6) for the swatch grid / elevation cards / animated
+# motion boxes — the same seam `forgekit-widgets` itself builds every
+# prebuilt widget on, one layer below the facade (see `src/lib.rs`'s module
+# docs, and `forgekit::App::new`'s own documented "low-level escape hatch"
+# precedent). `kurbo`/`peniko` are the geometry/color types that seam speaks.
+forgekit-core = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
