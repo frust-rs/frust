@@ -132,8 +132,11 @@ pub struct TextInputWidget {
     text_ctx: TextContext,
     style: TextStyle,
     placeholder: String,
-    /// Visual focus state (drives the accent border and caret blink). Set on a
-    /// `Down` inside, cleared on Escape / a blur `Down` this widget observes.
+    /// The widget's event-pass view of its focus: set on a `Down` inside,
+    /// cleared on Escape / a blur `Down` this widget observes. NOT authoritative
+    /// for painting — `paint` reads `PaintCtx::has_focus()` (the pod-recorded
+    /// focus path, ancestor-composed) and self-corrects this flag when a
+    /// container-routed blur never reached `event()` (one-paint convergence).
     focused: bool,
     /// Armed by a `Down` inside (alongside `capture_pointer`) to drive
     /// drag-selection; cleared on `Up`/`Cancel`.
@@ -1128,6 +1131,62 @@ mod tests {
         assert!(
             !outcome.needs_frame,
             "a blurred field paints at rest — the desktop wait-loop idles"
+        );
+    }
+
+    /// Two-level nesting: the field sits inside an INNER Column, whose pod is a
+    /// child of the outer Column beside the button. A blur tap on the button
+    /// clears the focus link at the outer level only (the inner Column's pod) —
+    /// the field's own pod flag deep in the blurred subtree legitimately stays
+    /// stale, which is exactly the case `paint_child`'s ancestor-composed
+    /// `has_focus` seeding must cover (re-review N1).
+    fn deep_nested_logic(state: &mut NestedState) -> crate::FlexView<NestedState> {
+        use forgekit_core::any;
+        crate::Column(vec![
+            any(crate::Column(vec![any(text_input(
+                state.value.clone(),
+                |s: &mut NestedState, v: String| {
+                    s.value = v;
+                },
+            ))])),
+            any(crate::button("ok", |_s: &mut NestedState| {})),
+        ])
+    }
+
+    #[test]
+    fn deep_nested_blur_idles_paint_despite_stale_inner_focus_flag() {
+        let mut state = NestedState::default();
+        let mut root: RenderRoot<NestedState, crate::FlexView<NestedState>> = RenderRoot::new();
+        root.rebuild(&mut deep_nested_logic, &mut state);
+        let mut tcx = forgekit_text::TextContext::new();
+        root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+
+        // Focus the field (full Down+Up tap — the Up releases capture so the
+        // blur Down hit-tests afresh; see nested_blur_clears_ime_and_idles_paint).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert!(root.is_focus_active());
+        assert!(root.ime_state().is_some());
+
+        // Blur via the OUTER-level sibling: route_event clears the focused link
+        // at the outer Column (the inner Column's pod); the field's own pod flag
+        // two levels down stays stale.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 45.0));
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
+
+        // Paint: the cleared outer link must force has_focus == false for the
+        // whole subtree (ancestor-composed seeding), so the stale deep flag
+        // cannot re-arm the caret blink or republish the IME surface.
+        let mut sink = NullScene;
+        let outcome = root.paint(&mut sink);
+        assert!(
+            root.ime_state().is_none(),
+            "deep-nested stale focus flag must not resurrect the IME surface"
+        );
+        assert!(
+            !outcome.needs_frame,
+            "deep-nested stale focus flag must not busy-loop the desktop shell"
         );
     }
 

@@ -495,7 +495,14 @@ impl ChildPod {
         // Thread the pod's recorded focus path into paint (the mirror of how
         // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
         // observes a container-routed blur that never reached its `event()`.
-        child_ctx.set_has_focus(self.focused);
+        // COMPOSED with the ancestor's paint focus: paint descends into every
+        // child unconditionally (no focus-routing gate like the event pass), and
+        // a container-routed blur only clears the focused pod at the
+        // nearest-common-ancestor link — flags deeper in the blurred subtree
+        // legitimately go stale. ANDing with `ctx.has_focus()` makes any cleared
+        // link force `has_focus == false` for the whole subtree below it,
+        // matching the effective gating focus-path routing gives events.
+        child_ctx.set_has_focus(self.focused && ctx.has_focus());
         self.widget.paint(&mut child_ctx, scene);
         if child_ctx.needs_frame() {
             ctx.request_frame();
@@ -863,6 +870,50 @@ mod tests {
         assert!(!pctx2.needs_frame());
         anim.paint_child(&mut pctx2, &mut scene);
         assert!(pctx2.needs_frame());
+    }
+
+    #[test]
+    fn child_pod_paint_seeds_has_focus_composed_with_ancestor() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        // A probe recording what `ctx.has_focus()` it observed during paint.
+        struct FocusProbe(Rc<Cell<Option<bool>>>);
+        impl Widget for FocusProbe {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(10.0, 10.0))
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+                self.0.set(Some(ctx.has_focus()));
+            }
+        }
+
+        let seen = Rc::new(Cell::new(None));
+        let mut pod = ChildPod::new(Box::new(FocusProbe(seen.clone())));
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+
+        // Focused pod under a focused ancestor: the child observes focus.
+        pod.set_focused(true);
+        let mut focused_parent = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        focused_parent.set_has_focus(true);
+        pod.paint_child(&mut focused_parent, &mut scene);
+        assert_eq!(seen.get(), Some(true));
+
+        // Focused pod under a BLURRED ancestor (the stale-deep-flag case): the
+        // cleared ancestor link must force `has_focus == false` below it.
+        let mut blurred_parent = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        blurred_parent.set_has_focus(false);
+        pod.paint_child(&mut blurred_parent, &mut scene);
+        assert_eq!(seen.get(), Some(false));
+
+        // Unfocused pod under a focused ancestor stays unfocused.
+        pod.set_focused(false);
+        let mut focused_parent2 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        focused_parent2.set_has_focus(true);
+        pod.paint_child(&mut focused_parent2, &mut scene);
+        assert_eq!(seen.get(), Some(false));
     }
 
     #[test]
