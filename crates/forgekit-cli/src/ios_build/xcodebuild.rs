@@ -33,6 +33,22 @@ pub struct Invocation<'a> {
     pub defines_b64: Option<&'a str>,
 }
 
+/// The Xcode `ARCHS` value for a simulator build on this host. A simulator
+/// `.app` only ever runs on the current machine, and the pbxproj's "Build
+/// Rust staticlib" run-script produces a *single*-arch static lib, so the
+/// Xcode build must be pinned to the host's native arch: the Release/Profile
+/// configs build every arch by default (no `ONLY_ACTIVE_ARCH`, and a generic
+/// simulator destination ignores it), which links a slice the staticlib
+/// lacks (`ld: symbol(s) not found for architecture x86_64` on Apple
+/// Silicon). `x86_64` host → `x86_64`; otherwise (`aarch64`) → `arm64`.
+pub(super) fn host_sim_arch() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        "arm64"
+    }
+}
+
 impl Invocation<'_> {
     fn sdk(&self) -> &'static str {
         if self.simulator {
@@ -69,6 +85,11 @@ impl Invocation<'_> {
             "-derivedDataPath".to_string(),
             "build/ios".to_string(),
         ];
+        // Simulator builds must be pinned to the host arch (see
+        // [`host_sim_arch`]); device/archive builds are arm64-only already.
+        if self.simulator {
+            args.push(format!("ARCHS={}", host_sim_arch()));
+        }
         if let Some(version) = self.marketing_version {
             args.push(format!("MARKETING_VERSION={version}"));
         }
@@ -84,9 +105,16 @@ impl Invocation<'_> {
 
     fn signing_args(&self) -> Vec<String> {
         match &self.signing {
+            // The scaffold's target configs ship `CODE_SIGNING_ALLOWED = NO`
+            // so unsigned/simulator builds work without an Apple account; a
+            // signed build must re-enable signing on the command line, else
+            // xcodebuild silently produces an *unsigned* `.app` even with a
+            // team + automatic style set.
             Signing::Automatic { team } => vec![
                 format!("DEVELOPMENT_TEAM={team}"),
                 "CODE_SIGN_STYLE=Automatic".to_string(),
+                "CODE_SIGNING_ALLOWED=YES".to_string(),
+                "CODE_SIGNING_REQUIRED=YES".to_string(),
                 "-allowProvisioningUpdates".to_string(),
                 "-allowProvisioningDeviceRegistration".to_string(),
             ],
@@ -154,6 +182,8 @@ mod tests {
                 "build/ios",
                 "DEVELOPMENT_TEAM=ABCDE12345",
                 "CODE_SIGN_STYLE=Automatic",
+                "CODE_SIGNING_ALLOWED=YES",
+                "CODE_SIGNING_REQUIRED=YES",
                 "-allowProvisioningUpdates",
                 "-allowProvisioningDeviceRegistration",
                 "build",
@@ -192,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn simulator_build_argv_has_no_signing_args() {
+    fn simulator_build_argv_has_no_signing_args_and_pins_host_arch() {
         let inv = Invocation {
             simulator: true,
             signing: Signing::Simulator,
@@ -200,22 +230,36 @@ mod tests {
         };
         assert_eq!(
             inv.build_argv(),
-            [
-                "xcodebuild",
-                "-project",
-                "ios/Runner.xcodeproj",
-                "-scheme",
-                "Runner",
-                "-configuration",
-                "Release",
-                "-sdk",
-                "iphonesimulator",
-                "-destination",
-                "generic/platform=iOS Simulator",
-                "-derivedDataPath",
-                "build/ios",
-                "build",
+            vec![
+                "xcodebuild".to_string(),
+                "-project".to_string(),
+                "ios/Runner.xcodeproj".to_string(),
+                "-scheme".to_string(),
+                "Runner".to_string(),
+                "-configuration".to_string(),
+                "Release".to_string(),
+                "-sdk".to_string(),
+                "iphonesimulator".to_string(),
+                "-destination".to_string(),
+                "generic/platform=iOS Simulator".to_string(),
+                "-derivedDataPath".to_string(),
+                "build/ios".to_string(),
+                // Pinned to the host arch so the single-arch Rust staticlib
+                // links (Release builds every arch otherwise).
+                format!("ARCHS={}", host_sim_arch()),
+                "build".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn device_build_argv_omits_archs_override() {
+        // Device/archive builds are arm64-only already; no ARCHS pin needed.
+        assert!(
+            !signed()
+                .build_argv()
+                .iter()
+                .any(|a| a.starts_with("ARCHS="))
         );
     }
 

@@ -370,7 +370,7 @@ mod tests {
                 ok(r#"  1) H "Apple Development: Ada (TEAMID1234)""#),
             )
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
                 ok("Build succeeded"),
             );
         let env = FakeEnv::new();
@@ -423,7 +423,7 @@ mod tests {
         let dir = temp_project("simulator");
         plant_products(&dir, "Release", true, "Runner.app");
         let runner = base_runner().with(
-            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination generic/platform=iOS Simulator -derivedDataPath build/ios build",
+            format!("xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination generic/platform=iOS Simulator -derivedDataPath build/ios ARCHS={} build", xcodebuild::host_sim_arch()),
             ok("Build succeeded"),
         );
         let env = FakeEnv::new();
@@ -455,7 +455,7 @@ mod tests {
                 ok(r#"  1) H "Apple Development: Ada (TEAMID1234)""#),
             )
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios MARKETING_VERSION=2.0.1 CURRENT_PROJECT_VERSION=7 DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios MARKETING_VERSION=2.0.1 CURRENT_PROJECT_VERSION=7 DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
                 ok("Build succeeded"),
             );
         let env = FakeEnv::new();
@@ -490,7 +490,7 @@ mod tests {
                 ok(r#"  1) H "Apple Development: Ada (TEAMID1234)""#),
             )
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath build/ios/archive/Runner.xcarchive archive",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath build/ios/archive/Runner.xcarchive archive",
                 ok("Archive succeeded"),
             )
             .with(
@@ -539,7 +539,7 @@ mod tests {
                     ok(r#"  1) H "Apple Development: Ada (TEAMID1234)""#),
                 )
                 .with(
-                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath build/ios/archive/Runner.xcarchive archive",
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath build/ios/archive/Runner.xcarchive archive",
                     ok("Archive succeeded"),
                 )
                 .with(
@@ -593,7 +593,7 @@ mod tests {
     fn build_ios_surfaces_xcodebuild_failure_with_doctor_hint() {
         let dir = temp_project("build-fail");
         let runner = base_runner().with(
-            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination generic/platform=iOS Simulator -derivedDataPath build/ios build",
+            format!("xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination generic/platform=iOS Simulator -derivedDataPath build/ios ARCHS={} build", xcodebuild::host_sim_arch()),
             Output {
                 success: false,
                 stdout: "error: No signing certificate found".to_string(),
