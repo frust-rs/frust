@@ -24,6 +24,7 @@ mod button;
 mod checkbox;
 mod flex;
 mod gesture;
+mod image;
 mod padding;
 mod scroll;
 mod sized;
@@ -51,6 +52,7 @@ pub use flex::{
     flexible, inflexible, keyed,
 };
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
+pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
 pub use scroll::{ScrollView, ScrollWidget, scroll_view};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};

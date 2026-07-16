@@ -1,7 +1,7 @@
 //! The [`Scene`] display list and the [`Command`]s it holds.
 
 use kurbo::{Affine, Point, Rect};
-use peniko::Brush;
+use peniko::{Brush, ImageData};
 
 use crate::glyph::GlyphRun;
 
@@ -42,6 +42,17 @@ pub enum Command {
     PushClip { rect: Rect, transform: Affine },
     /// Pop the most recently pushed clip.
     PopClip,
+    /// Draw a decoded image (natural pixel size `data.width`x`data.height`),
+    /// scaled to fill `dest`, under a transform.
+    ///
+    /// `data` is cloned from the widget's cached `ImageSource` each frame;
+    /// `peniko::ImageData`'s `Blob<u8>` is reference-counted internally, so
+    /// this is a cheap handle clone, never a pixel copy or re-decode.
+    Image {
+        data: ImageData,
+        dest: Rect,
+        transform: Affine,
+    },
 }
 
 /// Renderer-agnostic, immediate-mode display list.

@@ -18,6 +18,12 @@ peniko = "0.6.1"
 kurbo = "0.13.1"
 tree_arena = "0.2.0"
 pollster = "0.4"
+# image decoding (forgekit-widgets' Image widget) — pinned exactly: 0.25.10 is
+# the only 0.25.x release whose MSRV is exactly the workspace's (1.88), not
+# lower (see workflow/plans/.../research/RESEARCH.md §Image); like the
+# rendering-stack pins in docs/DEVELOPMENT.md's Version-Pin Policy, do not
+# bump this independently without re-verifying the MSRV.
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 # cli
 clap = { version = "4.6", features = ["derive"] }
 minijinja = "2.21"

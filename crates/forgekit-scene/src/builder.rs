@@ -1,7 +1,7 @@
 //! [`SceneBuilder`]: the widget-facing API for recording paint commands into a [`Scene`].
 
 use kurbo::{Affine, Point, Rect};
-use peniko::Brush;
+use peniko::{Brush, ImageData};
 
 use crate::glyph::GlyphRun;
 use crate::scene::{Command, Scene};
@@ -104,6 +104,20 @@ impl<'a> SceneBuilder<'a> {
     /// Pops the most recently pushed clip.
     pub fn pop_clip(&mut self) {
         self.scene.push(Command::PopClip);
+    }
+
+    /// Records a decoded image, scaled to fill `dest`, under the current
+    /// transform.
+    ///
+    /// `data` is cloned into the command — cheap, since `ImageData`'s
+    /// `Blob<u8>` is reference-counted internally (see [`Command::Image`]).
+    pub fn draw_image(&mut self, data: &ImageData, dest: Rect) {
+        let transform = self.current_transform();
+        self.scene.push(Command::Image {
+            data: data.clone(),
+            dest,
+            transform,
+        });
     }
 }
 
@@ -313,6 +327,53 @@ mod tests {
         match &scene.commands()[0] {
             Command::PushClip { transform, .. } => assert_eq!(*transform, scale),
             other => panic!("expected PushClip, got {other:?}"),
+        }
+    }
+
+    fn two_by_two_image() -> ImageData {
+        ImageData {
+            data: peniko::Blob::from(vec![0u8; 2 * 2 * 4]),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: 2,
+            height: 2,
+        }
+    }
+
+    #[test]
+    fn draw_image_round_trips_data_and_dest_under_identity_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let data = two_by_two_image();
+        let dest = Rect::new(0.0, 0.0, 20.0, 20.0);
+        builder.draw_image(&data, dest);
+
+        match &scene.commands()[0] {
+            Command::Image {
+                data: got_data,
+                dest: got_dest,
+                transform,
+            } => {
+                assert_eq!(*got_data, data);
+                assert_eq!(*got_dest, dest);
+                assert_eq!(*transform, Affine::IDENTITY);
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_image_composes_with_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((5.0, 6.0));
+        builder.push_transform(translate);
+        let data = two_by_two_image();
+        builder.draw_image(&data, Rect::new(0.0, 0.0, 4.0, 4.0));
+
+        match &scene.commands()[0] {
+            Command::Image { transform, .. } => assert_eq!(*transform, translate),
+            other => panic!("expected Image, got {other:?}"),
         }
     }
 }

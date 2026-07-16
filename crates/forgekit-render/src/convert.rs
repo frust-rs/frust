@@ -11,7 +11,7 @@
 
 use forgekit_scene::{Command, GlyphRun, Scene};
 use kurbo::{Affine, Line, Point, Rect, RoundedRect, Stroke};
-use peniko::{Brush, Fill};
+use peniko::{Brush, Fill, ImageData};
 
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
 ///
@@ -37,6 +37,9 @@ pub(crate) trait SceneSink {
     fn push_clip(&mut self, transform: Affine, rect: &Rect);
     /// Pop the most recently pushed clip.
     fn pop_clip(&mut self);
+    /// Draw a decoded image (natural pixel size `data.width`x`data.height`),
+    /// scaled to fill `dest`, under `transform`.
+    fn draw_image(&mut self, transform: Affine, data: &ImageData, dest: &Rect);
 }
 
 /// Encodes every command in `scene` into `target` (a reused `vello::Scene`).
@@ -74,6 +77,11 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
             Command::GlyphRun(run) => sink.draw_glyph_run(run),
             Command::PushClip { rect, transform } => sink.push_clip(*transform, rect),
             Command::PopClip => sink.pop_clip(),
+            Command::Image {
+                data,
+                dest,
+                transform,
+            } => sink.draw_image(*transform, data, dest),
         }
     }
 }
@@ -136,6 +144,37 @@ impl SceneSink for vello::Scene {
     fn pop_clip(&mut self) {
         self.pop_layer();
     }
+
+    fn draw_image(&mut self, transform: Affine, data: &ImageData, dest: &Rect) {
+        // vello's `Scene::draw_image` draws at the image's *natural* pixel
+        // size under the given transform (task 57 / RESEARCH.md §Image); map
+        // natural -> dest by scaling then translating to `dest`'s origin,
+        // composed under the incoming (widget-position) transform.
+        let Some(image_transform) = natural_to_dest_transform(transform, data, dest) else {
+            return;
+        };
+        vello::Scene::draw_image(self, data, image_transform);
+    }
+}
+
+/// Compose `transform` (the widget's own position/scale) with the affine that
+/// maps an image's natural pixel rect `(0, 0, width, height)` onto `dest` —
+/// what vello's "draws at natural size under the given transform" contract
+/// (`vello::Scene::draw_image`'s doc comment) needs to land pixel-for-pixel
+/// inside `dest`. `None` for a degenerate (zero-area) natural size.
+fn natural_to_dest_transform(transform: Affine, data: &ImageData, dest: &Rect) -> Option<Affine> {
+    let natural_w = data.width as f64;
+    let natural_h = data.height as f64;
+    if natural_w <= 0.0 || natural_h <= 0.0 {
+        return None;
+    }
+    let scale_x = dest.width() / natural_w;
+    let scale_y = dest.height() / natural_h;
+    Some(
+        transform
+            * Affine::translate((dest.x0, dest.y0))
+            * Affine::scale_non_uniform(scale_x, scale_y),
+    )
 }
 
 #[cfg(test)]
@@ -173,6 +212,12 @@ mod tests {
             transform: Affine,
         },
         PopClip,
+        Image {
+            width: u32,
+            height: u32,
+            dest: Rect,
+            transform: Affine,
+        },
     }
 
     #[derive(Default)]
@@ -239,10 +284,29 @@ mod tests {
         fn pop_clip(&mut self) {
             self.events.push(Event::PopClip);
         }
+
+        fn draw_image(&mut self, transform: Affine, data: &ImageData, dest: &Rect) {
+            self.events.push(Event::Image {
+                width: data.width,
+                height: data.height,
+                dest: *dest,
+                transform,
+            });
+        }
     }
 
     fn empty_font() -> FontHandle {
         FontHandle::new(FontData::new(Blob::from(Vec::<u8>::new()), 0))
+    }
+
+    fn two_by_two_image() -> ImageData {
+        ImageData {
+            data: Blob::from(vec![0u8; 2 * 2 * 4]),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: 2,
+            height: 2,
+        }
     }
 
     #[test]
@@ -388,5 +452,71 @@ mod tests {
         let mut sink = RecordingSink::default();
         encode_into(&scene, &mut sink);
         assert_eq!(sink.events.len(), 2);
+    }
+
+    #[test]
+    fn image_maps_to_draw_image_with_dest_and_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((3.0, 4.0));
+        builder.push_transform(translate);
+        let data = two_by_two_image();
+        let dest = Rect::new(0.0, 0.0, 40.0, 40.0);
+        builder.draw_image(&data, dest);
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::Image {
+                width: 2,
+                height: 2,
+                dest,
+                transform: translate,
+            }]
+        );
+    }
+
+    #[test]
+    fn natural_to_dest_transform_scales_and_translates_under_identity() {
+        // A 2x2 natural image into a 40x40 dest offset by (5, 6) under an
+        // identity widget transform: uniform 20x scale (40 / 2), then
+        // translated to dest's origin.
+        let data = two_by_two_image();
+        let dest = Rect::new(5.0, 6.0, 45.0, 46.0);
+        let transform =
+            natural_to_dest_transform(Affine::IDENTITY, &data, &dest).expect("non-degenerate");
+
+        // The natural-space corners (0,0) and (2,2) must map exactly onto
+        // dest's corners.
+        assert_eq!(transform * Point::new(0.0, 0.0), Point::new(5.0, 6.0));
+        assert_eq!(transform * Point::new(2.0, 2.0), Point::new(45.0, 46.0));
+    }
+
+    #[test]
+    fn natural_to_dest_transform_composes_with_widget_transform() {
+        let data = two_by_two_image();
+        let dest = Rect::new(0.0, 0.0, 4.0, 4.0);
+        let widget_transform = Affine::translate((10.0, 20.0));
+        let transform =
+            natural_to_dest_transform(widget_transform, &data, &dest).expect("non-degenerate");
+
+        // Natural (0,0) maps to dest's origin (0,0), then the widget's own
+        // translate is applied on top.
+        assert_eq!(transform * Point::new(0.0, 0.0), Point::new(10.0, 20.0));
+    }
+
+    #[test]
+    fn natural_to_dest_transform_is_none_for_zero_area_natural_size() {
+        let data = ImageData {
+            data: Blob::from(Vec::<u8>::new()),
+            format: peniko::ImageFormat::Rgba8,
+            alpha_type: peniko::ImageAlphaType::Alpha,
+            width: 0,
+            height: 0,
+        };
+        let dest = Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert!(natural_to_dest_transform(Affine::IDENTITY, &data, &dest).is_none());
     }
 }

@@ -73,6 +73,17 @@ pub trait PaintScene {
     /// text pipeline) stay valid without modification; the `SceneBuilder`
     /// implementation overrides it to record a real glyph-run command.
     fn draw_glyph_run(&mut self, _run: GlyphRun) {}
+
+    /// Draw an already-decoded image, scaled from its natural
+    /// (`data.width`x`data.height`) size to fill the absolute `dest` rect.
+    ///
+    /// A single additive method (task 57, `forgekit-widgets::Image`) on this
+    /// otherwise layer-2 trait — authorized because `Command::Image`'s
+    /// `peniko::ImageData` payload has to reach the scene through the same
+    /// `&mut dyn PaintScene` seam every other paint call uses. Defaulted to a
+    /// no-op so pre-existing recorder scenes stay valid; the `SceneBuilder`
+    /// implementation records a real image command.
+    fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
 }
 
 /// Bridges the provisional [`PaintScene`] boundary onto the real
@@ -110,6 +121,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn draw_glyph_run(&mut self, run: GlyphRun) {
         SceneBuilder::draw_glyph_run(self, run);
+    }
+
+    fn draw_image(&mut self, data: &peniko::ImageData, dest: Rect) {
+        SceneBuilder::draw_image(self, data, dest);
     }
 }
 

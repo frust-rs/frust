@@ -46,9 +46,10 @@ pub use forgekit_core::view::{AnyView, View, any};
 pub use forgekit_widgets::{
     Align, AlignView, Alignment, Axis, Button, ButtonView, Checkbox, CheckboxView, ChildKey,
     Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
-    GestureDetectorView, MainAxisAlignment, Padding, PaddingView, Row, ScrollView, SizedBox,
-    SizedBoxView, Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, button,
-    checkbox, flexible, inflexible, keyed, scroll_view, slider, text, text_input,
+    GestureDetectorView, Image, ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment,
+    Padding, PaddingView, Row, ScrollView, SizedBox, SizedBoxView, Slider, SliderView, Stack,
+    StackView, TextInput, TextInputView, TextView, button, checkbox, flexible, inflexible, keyed,
+    scroll_view, slider, text, text_input,
 };
 
 /// Pure input/gesture helpers (slop constants, [`input::VelocityTracker`], the
