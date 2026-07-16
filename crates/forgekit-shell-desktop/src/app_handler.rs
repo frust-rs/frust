@@ -17,6 +17,7 @@ use forgekit_core::event::{
     PointerPhase, ScrollDelta,
 };
 use forgekit_core::view::View;
+use forgekit_reactive::{FrameWaker, ReactiveRuntime, TrackedScope};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_text::TextContext;
@@ -32,6 +33,22 @@ use winit::window::{Window, WindowAttributes, WindowId};
 const INITIAL_SIZE: LogicalSize<u32> = LogicalSize::new(800, 600);
 const WINDOW_TITLE: &str = "ForgeKit";
 
+/// User events posted to the desktop event loop from off the UI thread.
+///
+/// Winit's [`ControlFlow::Wait`] idles the loop until an event arrives, so a
+/// signal write on a background thread would otherwise never surface. The
+/// [`FrameWaker`] installed in [`run_desktop`] fires on the clean→dirty edge of
+/// a tracked signal and sends one of these through the loop's `EventLoopProxy`,
+/// waking the loop to pump local tasks and schedule a redraw. Kept an enum (not
+/// a unit type) so future user-driven events can be added without changing the
+/// loop's user-event type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellUserEvent {
+    /// One or more tracked signals became dirty since the last frame — pump the
+    /// UI-thread local task queue and request a redraw.
+    SignalsDirty,
+}
+
 /// Run `app_logic` over `state` in a desktop preview window until it is closed.
 ///
 /// Blocks the calling thread on the winit event loop. The event loop is
@@ -44,12 +61,27 @@ where
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
 {
-    let event_loop = EventLoop::new()?;
+    // winit 0.30 has no `EventLoop::<T>::new()` — the typed-user-event loop is
+    // built through the builder only.
+    let event_loop = EventLoop::<ShellUserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
+
+    // A tracked signal write on any thread fires this waker, which sends a user
+    // event through the proxy to wake the `Wait` loop. `send_event` fails only
+    // once the loop has closed (a shutdown race) — benign, so its result is
+    // ignored. `ReactiveRuntime::init` must run on this (the UI) thread: it
+    // claims the thread as owner of the local task queue `pump_local` drains.
+    let proxy = event_loop.create_proxy();
+    let waker: FrameWaker = Arc::new(move || {
+        let _ = proxy.send_event(ShellUserEvent::SignalsDirty);
+    });
+    let runtime = ReactiveRuntime::init(waker);
 
     let mut handler = ShellHandler {
         state,
         app_logic,
+        runtime,
+        scope: TrackedScope::new(),
         root: RenderRoot::new(),
         text_ctx: TextContext::new(),
         render_cx: RenderContext::new(),
@@ -231,6 +263,15 @@ struct ImeSync {
 struct ShellHandler<State: 'static, Logic, V: View<State>> {
     state: State,
     app_logic: Logic,
+    /// The process-wide reactive runtime, initialized on this (UI) thread in
+    /// [`run_desktop`]. Per-frame rebuilds run under its root [`Owner`], and
+    /// [`ReactiveRuntime::pump_local`] drains the UI-thread local task queue on
+    /// each wake and frame.
+    runtime: &'static ReactiveRuntime,
+    /// Records which signals the last rebuild read, so a later write to any of
+    /// them dirties the scope and (via the frame waker) wakes the loop for one
+    /// more frame. Re-tracked from scratch every rebuild.
+    scope: TrackedScope,
     root: RenderRoot<State, V>,
     text_ctx: TextContext,
     render_cx: RenderContext,
@@ -314,12 +355,30 @@ where
     }
 }
 
-impl<State, Logic, V> ApplicationHandler for ShellHandler<State, Logic, V>
+impl<State, Logic, V> ApplicationHandler<ShellUserEvent> for ShellHandler<State, Logic, V>
 where
     State: 'static,
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
 {
+    /// A tracked-signal write from any thread routes here via the frame waker →
+    /// [`winit::event_loop::EventLoopProxy::send_event`]. Pump the UI-thread
+    /// local task queue first (a completing local task may have driven the
+    /// write), then request a redraw so the next frame re-runs `app_logic` and
+    /// re-tracks. The waker can fire before the window exists (an early
+    /// background spawn), so a redraw is only requested when a window is present
+    /// — the first rebuild after `resumed` re-tracks regardless.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ShellUserEvent) {
+        self.runtime.pump_local();
+        match event {
+            ShellUserEvent::SignalsDirty => {
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // The window is created once and reused; the surface, by contrast, is
         // (re)created here every time we resume — `suspended()` tears it down,
@@ -371,6 +430,14 @@ where
         // Drop the surface on suspend (spec §8.1): rare on macOS, but keeps the
         // NoSurface path exercised on desktop and matches Android's lifecycle.
         self.renderer.on_surface_destroyed();
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // Drain any UI-thread local tasks that became runnable while dispatching
+        // this batch of events, before the loop parks on `Wait`. Cheap no-op
+        // when the queue is empty; a task that writes a signal here re-dirties a
+        // scope and fires the waker, which re-arms the loop rather than parking.
+        self.runtime.pump_local();
     }
 
     fn window_event(
@@ -485,11 +552,28 @@ where
             }
 
             WindowEvent::RedrawRequested => {
+                // Drain any UI-thread local tasks queued since the last turn
+                // before rebuilding, so their signal writes are visible to this
+                // frame. Cheap no-op when the queue is empty.
+                self.runtime.pump_local();
+
                 // Rebuild the view tree every frame (app_logic is cheap by
                 // construction, spec §5). A real dirty-tracking loop would skip
                 // this when state is unchanged; the on-demand `Wait` control
                 // flow already keeps us from free-running.
-                let _flags = self.root.rebuild(&mut self.app_logic, &mut self.state);
+                //
+                // The rebuild runs under the reactive runtime's root `Owner`
+                // (so signals created during it are root-owned) and inside the
+                // `TrackedScope` (so every signal read subscribes this frame —
+                // a later write dirties the scope and wakes the loop). Fields
+                // are borrowed disjointly so the tracking closure captures only
+                // what the rebuild needs, not all of `self`.
+                let runtime = self.runtime;
+                let scope = &self.scope;
+                let root = &mut self.root;
+                let app_logic = &mut self.app_logic;
+                let state = &mut self.state;
+                let _flags = runtime.with_owner(|| scope.track(|| root.rebuild(app_logic, state)));
                 // A rebuild can change which widget is focused / what it
                 // publishes without an intervening event (e.g. state-driven
                 // focus), so re-sync the platform IME here too (task 54).
@@ -522,6 +606,16 @@ where
                 // so we keep frames coming with an explicit redraw request until
                 // the animation reaches rest and stops signalling.
                 if paint_outcome.needs_frame {
+                    window.request_redraw();
+                }
+
+                // A tracked signal written *during* this frame (e.g. a local
+                // task pumped above, or a write racing in from a background
+                // thread) already re-dirtied the scope after `track` cleared it.
+                // The waker's clean→dirty edge fired inside `track`, so no user
+                // event will arrive for it — request the follow-up frame here,
+                // mirroring the `needs_frame` animation path above.
+                if self.scope.is_dirty() {
                     window.request_redraw();
                 }
 
