@@ -197,4 +197,131 @@ mod tests {
         // AppTree seam end-to-end rather than just constructing the box).
         app.rebuild();
     }
+
+    // --- Root-owner regression test (review F1) -----------------------------
+    //
+    // A root component's `init`/`build` run under the shell's ROOT `Owner`
+    // (`Owner::with`, the way `create_handle`/`forgekit::run` now wrap
+    // `new_boxed_app_with` + the initial rebuild). Without an ambient owner,
+    // `provide_context` in the root's `init` silently no-ops and a nested
+    // component's `use_context` returns `None`. This drives that exact path and
+    // asserts the context resolves through the owner chain.
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use forgekit_core::component::{Component, component};
+    use forgekit_core::view::{AnyView, any};
+    use reactive_graph::owner::{Owner, provide_context, use_context};
+
+    /// A `use_context` sink shared with the nested component's `build`.
+    type Sink = Rc<RefCell<Option<u32>>>;
+
+    /// The context value the root provides in `init` and the nested component
+    /// reads back in `build`.
+    #[derive(Clone, Copy)]
+    struct ProvidedCtx(u32);
+
+    /// A view leaf usable under any state — the nested component's `build`
+    /// result once it has recorded the resolved context.
+    struct StubLeaf;
+    impl<S: 'static> View<S> for StubLeaf {
+        type Element = StubWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> StubWidget {
+            StubWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut StubWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// Root component: `provide_context`s a value in `init`, mounts a nested
+    /// component in `build`.
+    #[derive(Clone)]
+    struct RootComp {
+        sink: Sink,
+    }
+    impl Component for RootComp {
+        type State = ();
+        fn init(&self) {
+            provide_context(ProvidedCtx(42));
+        }
+        fn build(&self, _state: &mut ()) -> AnyView<()> {
+            any(component(ChildComp {
+                sink: self.sink.clone(),
+            }))
+        }
+    }
+
+    /// Nested component: reads the root-provided context in `build` and records
+    /// what it resolved to.
+    #[derive(Clone)]
+    struct ChildComp {
+        sink: Sink,
+    }
+    impl Component for ChildComp {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> AnyView<()> {
+            let resolved = use_context::<ProvidedCtx>().map(|c| c.0);
+            *self.sink.borrow_mut() = resolved;
+            any(StubLeaf)
+        }
+    }
+
+    #[test]
+    fn root_provided_context_resolves_in_nested_component() {
+        let sink: Sink = Rc::new(RefCell::new(None));
+        let root = RootComp { sink: sink.clone() };
+        let root_for_build = root.clone();
+
+        // Mirror the shells: run BOTH the state factory (`Component::init`) and
+        // the initial `rebuild()` under one root `Owner`, so the context the
+        // root provides in `init` is visible to the nested component whose own
+        // owner is created as a child of this one during the rebuild.
+        let owner = Owner::new();
+        owner.with(|| {
+            let mut app = new_boxed_app_with(
+                move || root.init(),
+                move |state: &mut ()| root_for_build.build(state),
+            );
+            app.rebuild();
+        });
+
+        assert_eq!(
+            *sink.borrow(),
+            Some(42),
+            "root-provided context must resolve in the nested component through \
+             the owner-wrapped new_boxed_app_with + rebuild cycle"
+        );
+    }
+
+    #[test]
+    fn root_context_does_not_resolve_without_ambient_owner() {
+        // The negative control: the same tree with NO ambient owner. This is the
+        // pre-fix behavior — `provide_context` no-ops and `use_context` returns
+        // `None` — pinned so a regression that drops the `with_owner` wrap is
+        // caught by the positive test above rather than passing silently.
+        let sink: Sink = Rc::new(RefCell::new(None));
+        let root = RootComp { sink: sink.clone() };
+        let root_for_build = root.clone();
+
+        let mut app = new_boxed_app_with(
+            move || root.init(),
+            move |state: &mut ()| root_for_build.build(state),
+        );
+        app.rebuild();
+
+        assert_eq!(
+            *sink.borrow(),
+            None,
+            "without an ambient owner, provide_context no-ops and use_context \
+             resolves to None (the F1 bug this task closes)"
+        );
+    }
 }

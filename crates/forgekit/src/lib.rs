@@ -193,12 +193,21 @@ impl<State: 'static, Logic> App<State, Logic> {
 /// preview loop's own later `ReactiveRuntime::init` call swaps in the real
 /// proxy waker on top of this seed, the documented swap-on-reinit behavior.
 ///
+/// `root.init()` runs under the runtime's root [`Owner`] (via
+/// [`with_owner`](forgekit_reactive::ReactiveRuntime::with_owner)): `init`
+/// unblocks signal/executor creation, but `provide_context`/`on_cleanup` are
+/// no-ops unless an `Owner` is ambient, and a root component has no enclosing
+/// component to supply one — so the root component registers against the root
+/// owner (process lifetime, never disposed). The desktop loop separately wraps
+/// each per-frame rebuild in the same owner.
+///
 /// Desktop-only, matching [`App::run`]: on Android the app is driven by
 /// [`android_app!`]/JNI instead, not by this preview loop.
 #[cfg(not(target_os = "android"))]
 pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
-    forgekit_reactive::ReactiveRuntime::init(std::sync::Arc::new(|| {}));
-    App::new(root.init(), move |state: &mut C::State| root.build(state)).run()
+    let rt = forgekit_reactive::ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+    let state = rt.with_owner(|| root.init());
+    App::new(state, move |state: &mut C::State| root.build(state)).run()
 }
 
 /// The canonical app entry point (spec §5.5): one line binds a root
@@ -320,4 +329,58 @@ mod macro_expansion {
     }
 
     crate::app!(TestApp);
+}
+
+/// Facade-level regression test for review F1: [`run`] runs a root
+/// [`Component`]'s `init` under the process-wide root [`Owner`], so a
+/// `provide_context` there actually registers (rather than silently no-opping
+/// with no ambient owner). Opening a preview window isn't testable headless, so
+/// this exercises `run`'s init-wrapping *equivalent* directly — the same
+/// `ReactiveRuntime::init` + `with_owner(|| root.init())` shape — and asserts
+/// the context resolves for code running under that same owner (the extent the
+/// desktop loop's per-frame rebuild also runs in).
+#[cfg(test)]
+mod root_owner_wrap {
+    use forgekit_reactive::{ReactiveRuntime, provide_context, use_context};
+
+    use crate::Component;
+
+    // A context type unique to this test so it can't collide with any other
+    // test providing context on the shared process-wide root owner.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct RunCtxMarker(u32);
+
+    struct RootWithContext;
+    impl Component for RootWithContext {
+        type State = u32;
+        fn init(&self) -> u32 {
+            provide_context(RunCtxMarker(7));
+            0
+        }
+        fn build(&self, _state: &mut u32) -> crate::AnyView<u32> {
+            crate::any(crate::text(String::new()))
+        }
+    }
+
+    #[test]
+    fn run_init_wrapping_makes_root_context_resolvable() {
+        // Mirror `run()`'s first two lines: init the runtime with a no-op waker,
+        // then run the root's `init` under the root owner.
+        let rt = ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+        let root = RootWithContext;
+
+        let resolved = rt.with_owner(|| {
+            // `init` provides the context...
+            let _state = root.init();
+            // ...and (still under the same root owner, as a per-frame rebuild
+            // would be) it resolves.
+            use_context::<RunCtxMarker>()
+        });
+
+        assert_eq!(
+            resolved,
+            Some(RunCtxMarker(7)),
+            "run() must wrap root.init() in the root Owner so provide_context sticks"
+        );
+    }
 }

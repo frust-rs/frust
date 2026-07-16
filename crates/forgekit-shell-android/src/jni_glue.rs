@@ -172,13 +172,22 @@ fn create_handle(
     // arrives on the same JVM main thread that invoked `nativeInit` the first
     // time, so re-init here always runs on the thread already claimed — safe by
     // construction, not by accident.
-    ReactiveRuntime::init(std::sync::Arc::new(|| {
+    let rt = ReactiveRuntime::init(std::sync::Arc::new(|| {
         // No-op: Choreographer already posts every frame regardless, so there
         // is nothing for `spawn_local`'s wake-up to nudge on Android.
     }));
 
-    let app = make_app();
-    let handle = AndroidAppHandle::new(render_cx, renderer, window, physical, scale, app);
+    // Construct the app AND its handle under the root `Owner`. `make_app` runs
+    // `Component::init` (via `new_boxed_app_with`'s state factory), and
+    // `AndroidAppHandle::new` runs the initial `rebuild()` — both must see an
+    // ambient `Owner` or `provide_context`/`on_cleanup` silently no-op. A root
+    // component has no enclosing component to supply one, so it registers
+    // against the root owner (process lifetime, never disposed), mirroring the
+    // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
+    let handle = rt.with_owner(|| {
+        let app = make_app();
+        AndroidAppHandle::new(render_cx, renderer, window, physical, scale, app)
+    });
 
     // SAFETY: hand a uniquely-owned boxed handle to the JVM as `jlong`; it is
     // reclaimed exactly once in `native_on_destroy`.

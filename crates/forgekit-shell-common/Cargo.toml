@@ -20,3 +20,12 @@ kurbo = { workspace = true }
 # `guard` logs a caught panic through the `log` facade only (no android_logger),
 # so it stays platform-free and host-testable.
 log = { workspace = true }
+
+# DEV-ONLY: the shipped crate stays reactive-free (see docs/ARCHITECTURE.md's
+# Layer Dependencies). `reactive_graph` is a dev-dependency solely for the
+# root-owner regression test below — it drives a root `Component` under an
+# `Owner::with` (the way the shells now wrap `new_boxed_app_with`) and asserts a
+# root-provided context resolves in a nested component. It never enters the
+# crate's own dependency graph for consumers.
+[dev-dependencies]
+reactive_graph = { workspace = true }

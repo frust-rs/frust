@@ -60,6 +60,14 @@ pub trait Component: 'static {
     /// Create the component's initial local state. Runs exactly once, when the
     /// [`ComponentWidget`] is first built, under the component's [`Owner`] (so
     /// `on_cleanup`/`provide_context` registered here bind to that owner).
+    ///
+    /// A *root* component (the one an entry macro or `forgekit::run` drives) has
+    /// no enclosing [`ComponentWidget`] and so no per-component owner of its
+    /// own: the shell instead runs its `init`/`build` under the shell's **root**
+    /// [`Owner`], which lives for the whole process and is never disposed. Its
+    /// `on_cleanup`/`provide_context` therefore bind to that root owner — the
+    /// context is visible to the entire tree, and cleanups run at process exit
+    /// rather than on teardown (there is no teardown for the root).
     fn init(&self) -> Self::State;
 
     /// Produce the component's subtree from its current local state.

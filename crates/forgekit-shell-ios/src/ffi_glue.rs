@@ -181,12 +181,21 @@ fn create_handle(
     // signals/controllers has a live runtime to create them against. The
     // continuous `CADisplayLink` loop already ticks every frame regardless of a
     // signal write, so the waker is a no-op (mirrors the Android shell).
-    ReactiveRuntime::init(no_op_waker());
+    let rt = ReactiveRuntime::init(no_op_waker());
 
-    let app = make_app();
+    // Construct the app AND its handle under the root `Owner`. `make_app` runs
+    // `Component::init` (via `new_boxed_app_with`'s state factory), and
+    // `IosAppHandle::new` runs the initial `rebuild()` — both must see an
+    // ambient `Owner` or `provide_context`/`on_cleanup` silently no-op. A root
+    // component has no enclosing component to supply one, so it registers
+    // against the root owner (process lifetime, never disposed), mirroring the
+    // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
     // Retain `metal_layer` in the handle so a later `SurfaceLost` can be recovered
     // by recreating the surface from it (iOS never re-delivers the layer).
-    let handle = IosAppHandle::new(render_cx, renderer, metal_layer, physical, scale, app);
+    let handle = rt.with_owner(|| {
+        let app = make_app();
+        IosAppHandle::new(render_cx, renderer, metal_layer, physical, scale, app)
+    });
 
     // SAFETY: hand a uniquely-owned boxed handle to Swift as a raw pointer; it is
     // reclaimed exactly once in `destroy`.

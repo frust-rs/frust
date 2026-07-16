@@ -16,6 +16,7 @@ use forgekit_core::event::{
     EditingState, ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
     PointerEvent, PointerPhase,
 };
+use forgekit_reactive::ReactiveRuntime;
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
@@ -204,7 +205,16 @@ impl AndroidAppHandle {
             return;
         }
 
-        self.app.rebuild();
+        // Rebuild under the root `Owner` so any signal read/`provide_context`
+        // during a per-frame rebuild is tracked/scoped correctly, mirroring the
+        // desktop shell (`runtime.with_owner(|| ...)`) and `create_handle`'s
+        // initial construction. Degrade gracefully to an unwrapped rebuild if
+        // the runtime is somehow absent — the frame path must never panic
+        // across the JNI boundary.
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| self.app.rebuild()),
+            None => self.app.rebuild(),
+        }
 
         // Sanitize once per frame; layout and the paint transform below MUST
         // consume this identical value (an untrusted JNI `jfloat` density

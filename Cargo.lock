@@ -873,6 +873,7 @@ dependencies = [
  "forgekit-text",
  "kurbo",
  "log",
+ "reactive_graph",
 ]
 
 [[package]]
