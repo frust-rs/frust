@@ -12,11 +12,21 @@
 
 mod executor;
 mod runtime;
+mod tracked;
 
 pub use runtime::{FrameWaker, ReactiveRuntime};
+pub use tracked::TrackedScope;
 
 pub use reactive_graph::owner::{Owner, on_cleanup, provide_context, use_context};
 pub use reactive_graph::signal::RwSignal;
+
+/// Serializes every test that installs a recording [`FrameWaker`] and asserts on
+/// wake counts. The frame waker is process-global and swappable, so two such
+/// tests running on the parallel test-runner's separate threads would clobber
+/// each other's waker mid-assertion. Both the runtime end-to-end test and the
+/// tracked-scope test acquire this before touching the waker.
+#[cfg(test)]
+pub(crate) static WAKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -56,6 +66,11 @@ mod tests {
     /// Each block maps to an acceptance criterion.
     #[test]
     fn reactive_runtime_end_to_end() {
+        // Serialize with the tracked-scope test: both swap the global waker.
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
         let (waker1, waker1_count) = recording_waker();
         let rt = ReactiveRuntime::init(waker1);
 
