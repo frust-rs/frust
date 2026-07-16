@@ -89,7 +89,14 @@ of the framework.
    refreshes `RenderRoot::ime_state`/`AppTree::ime_state` on every edit
    during the event pass, but an app-driven change applied only by the next
    rebuild (e.g. a controlled clear-on-submit) never crosses an event, so
-   paint is the other place that surface gets refreshed.
+   paint is the other place that surface gets refreshed. `PaintCtx` also
+   carries `has_focus`, seeded from the pod's recorded focus path
+   (`ChildPod::paint_child`/`RenderRoot::paint`, mirroring how `EventCtx`
+   threads it): a focused editable gates its focus chrome and this republish
+   on it, so a container-routed blur is observed during paint and
+   `RenderRoot::paint` only accepts a bubbled `ime_state` while
+   `focus_active` — a second guard against resurrecting a surface a blur
+   already cleared.
 5. The finished `Scene` is encoded (`forgekit_render::encode_scene`) into a
    `vello::Scene` and presented to the window surface by `SurfaceRenderer`,
    which is the spec §8.1 surface lifecycle state machine
@@ -127,7 +134,8 @@ to its focused child. A pointer `Down` that lands on a child which doesn't
 (re)claim focus clears the chain (blur-on-outside-tap); a structural rebuild
 clears both the capture and focus paths, and `RenderRoot`'s cached
 `focus_active`/`ime_state` are not pushed at rebuild time — they self-correct
-on the next event pass instead. The focused widget's `ImeState` (its current
+on the next event pass instead, and a widget's own focus flag converges the
+same way one paint later via `PaintCtx::has_focus` (see the Frame pipeline). The focused widget's `ImeState` (its current
 `EditingState` plus caret rect) is published through `EventCtx`/`PaintCtx`'s
 `publish_ime_state` (see the Frame pipeline) and surfaced to shells as
 `RenderRoot::ime_state()`/`AppTree::ime_state()`; a platform IME bridge
@@ -225,7 +233,7 @@ preview).
 | `ChildKey` / `keyed` | Explicit child identity for a `Flex` child list (spec §6.3): `keyed(key, view)` attaches a `ChildKey` the reconciler matches old↔new children by, relocating a matched child's widget (preserving its internal state) across a reorder/insert/remove instead of rebuilding it. Keys are all-or-nothing and unique per list; a mixed or duplicate key set falls back to positional matching. A keyed reorder is a structural change like any other (see Data Flow's Event pipeline). |
 | `Text` / `Button` / `Checkbox` / `Slider` / `TextInput` / `Image` / `Flex` (`Row`/`Column`) / `Stack` / `Padding` / `Align` / `SizedBox` / `ScrollView` / `GestureDetector` | `forgekit-widgets`' baseline vocabulary — each a `View`/`Widget` pair over the `AnyView`/`ChildPod` substrate; the interactive ones are controlled components (see `docs/CODE_STANDARDS.md`). `TextInput` owns a `TextEditor` and drives it from focus-routed `Key`/`Ime` events; `Image` wraps a decode-once `ImageSource` (an `Arc`-backed `peniko::ImageData` handle) and a fit mode (`ImageFit::Fill`/`Contain`/`Cover`), painted via the new `Command::Image` scene command. |
 | `PaintScene` | Renderer-agnostic paint target widgets draw into; bridged onto `SceneBuilder`. |
-| `PaintCtx` / `PaintOutcome` | Paint-pass context and result: `PaintCtx::request_frame`/`needs_frame` let a widget advance animation state during paint and ask to be re-invoked without external input; `PaintOutcome::needs_frame` surfaces that through `RenderRoot::paint`/`AppTree::paint` — see Data Flow's Frame pipeline. |
+| `PaintCtx` / `PaintOutcome` | Paint-pass context and result: `PaintCtx::request_frame`/`needs_frame` let a widget advance animation state during paint and ask to be re-invoked without external input; `PaintCtx::has_focus`, seeded from the pod's recorded focus path, lets a focused editable gate its focus chrome and IME republish on it, mirroring `EventCtx::has_focus`; `PaintOutcome::needs_frame` surfaces the former through `RenderRoot::paint`/`AppTree::paint` — see Data Flow's Frame pipeline. |
 | `Scene` / `SceneBuilder` / `Command` | Layer 3 vector display list — the widget/GPU seam. |
 | `GlyphRun` | Shaped-glyph carrier from `forgekit-text` into the scene. |
 | `TextContext` / `TextStyle` / `TextLayout` | Parley-backed text shaping surface. |
