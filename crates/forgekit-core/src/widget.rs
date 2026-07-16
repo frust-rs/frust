@@ -358,6 +358,13 @@ impl ChildPod {
     ///
     /// If the child captured the pointer, this records the active path
     /// ([`ChildPod::is_active`]); the container clears it on `Up`/`Cancel`.
+    ///
+    /// Containers should not call this directly gated on an ad-hoc
+    /// `contains()` check — that drops a captured gesture the instant it moves
+    /// outside the child's bounds. Route through `forgekit-widgets`'
+    /// `route_event`/`route_event_single` helpers instead, which check
+    /// [`ChildPod::is_active`] first and forward unconditionally to a captured
+    /// child.
     pub fn event_child(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         let local = event.translated(-self.origin.to_vec2());
         let (captured, redraw, result) = {
@@ -378,6 +385,12 @@ impl ChildPod {
 
     /// Whether `point` (in the container's coordinate space) lies within this
     /// child's bounds — the container's hit test.
+    ///
+    /// This is only the *initial* hit test (deciding which child a fresh
+    /// `Down`/first contact goes to). Once a child has captured the pointer
+    /// ([`ChildPod::is_active`]), subsequent events must bypass this check and
+    /// go straight to the captured child regardless of where the point now
+    /// falls — see `forgekit-widgets`' `route_event`/`route_event_single`.
     pub fn contains(&self, point: Point) -> bool {
         point.x >= self.origin.x
             && point.x < self.origin.x + self.size.width

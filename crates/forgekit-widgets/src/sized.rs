@@ -142,12 +142,10 @@ impl Widget for SizedBoxWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        if let Some(pod) = &mut self.child
-            && pod.contains(event.position())
-        {
-            return pod.event_child(ctx, event);
+        match &mut self.child {
+            Some(pod) => crate::route_event_single(pod, ctx, event),
+            None => EventResult::Ignored,
         }
-        EventResult::Ignored
     }
 }
 
@@ -155,7 +153,8 @@ impl Widget for SizedBoxWidget {
 mod tests {
     use super::*;
     use crate::test_support::leaf;
-    use forgekit_core::BuildCtx;
+    use forgekit_core::{BuildCtx, PointerButton, PointerEvent, PointerPhase};
+    use std::any::Any;
 
     fn build<S: 'static>(view: &SizedBoxView<S>) -> SizedBoxWidget {
         let mut counter = 0u64;
@@ -190,5 +189,182 @@ mod tests {
         let mut lctx = LayoutCtx::new();
         let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
         assert_eq!(size, Size::new(16.0, 24.0));
+    }
+
+    // -- Capture routing (review R1: a captured child must keep receiving
+    // events regardless of hit geometry, not just while the point is still
+    // over it) --
+
+    #[derive(Default)]
+    struct Counter {
+        presses: u32,
+    }
+
+    fn pointer_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// Build a `SizedBox(Button)` with a forced width wider than the child
+    /// needs, laid out with a real text context.
+    fn button_sized_box() -> SizedBoxWidget {
+        let view: SizedBoxView<Counter> =
+            SizedBox(Some(300.0), None)
+                .child(crate::button::<Counter, _>("go", |s: &mut Counter| {
+                    s.presses += 1
+                }));
+        let mut w = build(&view);
+        let mut text_ctx = forgekit_text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx);
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+        w
+    }
+
+    fn dispatch<S: 'static>(
+        w: &mut SizedBoxWidget,
+        state: &mut S,
+        event: &InputEvent,
+    ) -> EventResult {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(500.0, 500.0));
+        w.event(&mut ctx, event)
+    }
+
+    #[test]
+    fn captured_button_receives_move_and_up_outside_its_bounds() {
+        let mut w = button_sized_box();
+        let mut state = Counter::default();
+        let size = w.child.as_ref().unwrap().size();
+        assert!(size.width > 0.0 && size.height > 0.0);
+
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Down, 2.0, 2.0)
+            ),
+            EventResult::Handled
+        );
+        assert!(
+            w.child.as_ref().unwrap().is_active(),
+            "down captures the pointer"
+        );
+
+        // Move well past the child's bounds — the capture must still route it
+        // there.
+        let outside = Point::new(size.width + 100.0, size.height + 100.0);
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Move, outside.x, outside.y)
+            ),
+            EventResult::Handled,
+            "a captured Move outside the child's bounds must still route to it"
+        );
+
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Up, outside.x, outside.y)
+            ),
+            EventResult::Handled,
+            "the capturing Up must still route to the child even though it's outside"
+        );
+        assert_eq!(
+            state.presses, 0,
+            "up outside the button must not fire on_press"
+        );
+        assert!(
+            !w.child.as_ref().unwrap().is_active(),
+            "capture releases on Up"
+        );
+    }
+
+    #[test]
+    fn captured_button_fires_on_move_back_inside_then_up() {
+        let mut w = button_sized_box();
+        let mut state = Counter::default();
+        let size = w.child.as_ref().unwrap().size();
+
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Down, 2.0, 2.0),
+        );
+
+        let outside = Point::new(size.width + 100.0, 2.0);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Move, outside.x, outside.y),
+        );
+
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Move, 4.0, 4.0),
+        );
+        dispatch(&mut w, &mut state, &pointer_ev(PointerPhase::Up, 4.0, 4.0));
+        assert_eq!(state.presses, 1, "up back inside must fire on_press");
+    }
+
+    #[test]
+    fn active_clears_on_up_so_a_later_down_elsewhere_is_not_routed() {
+        let mut w = button_sized_box();
+        let mut state = Counter::default();
+
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Down, 2.0, 2.0),
+        );
+        dispatch(&mut w, &mut state, &pointer_ev(PointerPhase::Up, 2.0, 2.0));
+        assert!(
+            !w.child.as_ref().unwrap().is_active(),
+            "capture releases on Up"
+        );
+
+        // A Down far away, outside the child's bounds, must now be ignored —
+        // not routed to the (no-longer-active) child.
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Down, 400.0, 400.0)
+            ),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn childless_box_ignores_events_without_panicking() {
+        let view: SizedBoxView<()> = SizedBox(Some(16.0), Some(24.0));
+        let mut w = build(&view);
+        let mut state = ();
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Down, 5.0, 5.0)
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Move, 5.0, 5.0)
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            dispatch(&mut w, &mut state, &pointer_ev(PointerPhase::Up, 5.0, 5.0)),
+            EventResult::Ignored
+        );
     }
 }

@@ -12,7 +12,9 @@
 //!
 //! The container modules build/rebuild/teardown their heterogeneous children
 //! through the crate-private [`build_child`]/[`rebuild_child`]/[`teardown_child`]
-//! helpers and route pointer events through [`route_event`]. Each child is an
+//! helpers and route pointer events through [`route_event`] (multi-child
+//! containers — `Flex`/`Stack`) or [`route_event_single`] (one-child wrappers —
+//! `Padding`/`Align`/`SizedBox`). Each child is an
 //! [`AnyView`](forgekit_core::AnyView) whose element (`Box<dyn Widget>`) is stored
 //! double-boxed inside a `ChildPod`, so a later rebuild can recover
 //! `&mut Box<dyn Widget>` to drive `AnyView`'s type-erased reconciliation.
@@ -159,6 +161,16 @@ pub(crate) fn rebuild_children<State: 'static>(
     flags
 }
 
+/// Whether `event` is the phase that auto-releases a recorded capture
+/// (`Up`/`Cancel`) — shared by [`route_event`]/[`route_event_single`].
+fn releases_capture(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::Pointer(p)
+            if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+    )
+}
+
 /// Route a pointer/scroll event to a container's children.
 ///
 /// A captured gesture goes straight to the recorded active child (capture
@@ -171,17 +183,8 @@ pub(crate) fn route_event(
     ctx: &mut EventCtx<'_>,
     event: &InputEvent,
 ) -> EventResult {
-    let releasing = matches!(
-        event,
-        InputEvent::Pointer(p)
-            if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
-    );
     if let Some(pod) = children.iter_mut().find(|p| p.is_active()) {
-        let result = pod.event_child(ctx, event);
-        if releasing {
-            pod.set_active(false);
-        }
-        return result;
+        return route_event_single(pod, ctx, event);
     }
     let position = event.position();
     for pod in children.iter_mut().rev() {
@@ -190,6 +193,34 @@ pub(crate) fn route_event(
         }
     }
     EventResult::Ignored
+}
+
+/// Route a pointer/scroll event to a container's single child.
+///
+/// Mirrors [`route_event`] for the one-child wrappers (`Padding`/`Align`/
+/// `SizedBox`): a captured gesture is forwarded to `pod` unconditionally —
+/// regardless of whether the event's position still falls within the child's
+/// bounds — with the active path cleared on `Up`/`Cancel`; otherwise the child
+/// only receives the event if it contains the point. Re-hit-testing
+/// `pod.contains()` on every event instead of consulting [`ChildPod::is_active`]
+/// is the bug this helper exists to prevent — see `ChildPod::contains`'s docs.
+pub(crate) fn route_event_single(
+    pod: &mut ChildPod,
+    ctx: &mut EventCtx<'_>,
+    event: &InputEvent,
+) -> EventResult {
+    if pod.is_active() {
+        let result = pod.event_child(ctx, event);
+        if releases_capture(event) {
+            pod.set_active(false);
+        }
+        return result;
+    }
+    if pod.contains(event.position()) {
+        pod.event_child(ctx, event)
+    } else {
+        EventResult::Ignored
+    }
 }
 
 /// Shared, GPU-free fixtures for the container layout/paint/event tests: a

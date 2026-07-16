@@ -134,11 +134,7 @@ impl Widget for PaddingWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        if self.child.contains(event.position()) {
-            self.child.event_child(ctx, event)
-        } else {
-            EventResult::Ignored
-        }
+        crate::route_event_single(&mut self.child, ctx, event)
     }
 }
 
@@ -146,7 +142,8 @@ impl Widget for PaddingWidget {
 mod tests {
     use super::*;
     use crate::test_support::leaf;
-    use forgekit_core::BuildCtx;
+    use forgekit_core::{BuildCtx, PointerButton, PointerEvent, PointerPhase};
+    use std::any::Any;
 
     fn build<S: 'static>(view: &PaddingView<S>) -> PaddingWidget {
         let mut counter = 0u64;
@@ -183,5 +180,216 @@ mod tests {
         let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(50.0, 50.0)));
         assert_eq!(w.child.size(), Size::ZERO);
         assert_eq!(size, Size::new(50.0, 50.0));
+    }
+
+    // -- Capture routing (review R1: a captured child must keep receiving
+    // events regardless of hit geometry, not just while the point is still
+    // over it) --
+
+    #[derive(Default)]
+    struct Counter {
+        presses: u32,
+    }
+
+    fn pointer_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// Build a `Padding(Button)`, laid out under generous constraints so the
+    /// child has real geometry to hit-test/capture against.
+    fn button_padding(insets: EdgeInsets) -> PaddingWidget {
+        let view: PaddingView<Counter> = Padding(
+            insets,
+            crate::button::<Counter, _>("go", |s: &mut Counter| s.presses += 1),
+        );
+        let mut w = build(&view);
+        let mut text_ctx = forgekit_text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx);
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+        w
+    }
+
+    fn dispatch<S: 'static>(
+        w: &mut PaddingWidget,
+        state: &mut S,
+        event: &InputEvent,
+    ) -> EventResult {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(500.0, 500.0));
+        w.event(&mut ctx, event)
+    }
+
+    #[test]
+    fn captured_button_receives_move_and_up_outside_its_bounds() {
+        let mut w = button_padding(EdgeInsets::all(10.0));
+        let mut state = Counter::default();
+        let origin = w.child.origin();
+        let size = w.child.size();
+        assert!(
+            size.width > 0.0 && size.height > 0.0,
+            "button should have real geometry from layout"
+        );
+
+        let inside = Point::new(origin.x + 2.0, origin.y + 2.0);
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Down, inside.x, inside.y)
+            ),
+            EventResult::Handled
+        );
+        assert!(w.child.is_active(), "down captures the pointer");
+
+        // Move far outside the child's bounds — must still reach the child
+        // because it holds the capture, not because the point is over it.
+        let outside = Point::new(
+            origin.x + size.width + 100.0,
+            origin.y + size.height + 100.0,
+        );
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Move, outside.x, outside.y)
+            ),
+            EventResult::Handled,
+            "a captured Move outside the child's bounds must still route to it"
+        );
+
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Up, outside.x, outside.y)
+            ),
+            EventResult::Handled,
+            "the capturing Up must still route to the child even though it's outside"
+        );
+        assert_eq!(
+            state.presses, 0,
+            "up outside the button must not fire on_press"
+        );
+        assert!(!w.child.is_active(), "capture releases on Up");
+    }
+
+    #[test]
+    fn captured_button_fires_on_move_back_inside_then_up() {
+        let mut w = button_padding(EdgeInsets::all(10.0));
+        let mut state = Counter::default();
+        let origin = w.child.origin();
+        let size = w.child.size();
+
+        let inside = Point::new(origin.x + 2.0, origin.y + 2.0);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Down, inside.x, inside.y),
+        );
+
+        let outside = Point::new(origin.x + size.width + 100.0, origin.y);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Move, outside.x, outside.y),
+        );
+
+        let back_inside = Point::new(origin.x + 4.0, origin.y + 4.0);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Move, back_inside.x, back_inside.y),
+        );
+
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Up, back_inside.x, back_inside.y),
+        );
+        assert_eq!(state.presses, 1, "up back inside must fire on_press");
+    }
+
+    #[test]
+    fn captured_slider_move_outside_insets_still_reports_value() {
+        // Padding(Slider) with insets: the inset margin is space the padding
+        // owns but the child does not — a captured drag that strays into it
+        // must still reach the slider.
+        #[derive(Default)]
+        struct Val {
+            changes: u32,
+        }
+
+        let view: PaddingView<Val> = Padding(
+            EdgeInsets::all(20.0),
+            crate::slider::<Val, _>(0.0, |s: &mut Val, _v: f64| s.changes += 1),
+        );
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new(); // Slider's layout needs no text context.
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+        let origin = w.child.origin();
+
+        let mut state = Val::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Down, origin.x + 10.0, origin.y + 5.0),
+        );
+        assert_eq!(state.changes, 1);
+        assert!(w.child.is_active());
+
+        // A captured Move landing inside the inset margin (outside the child's
+        // origin.x) must still fire on_change.
+        let outside = Point::new(5.0, origin.y + 5.0);
+        assert!(
+            !w.child.contains(outside),
+            "sanity: the point is outside the child"
+        );
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Move, outside.x, outside.y)
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            state.changes, 2,
+            "captured Move outside the child must still fire on_change"
+        );
+    }
+
+    #[test]
+    fn active_clears_on_up_so_a_later_down_elsewhere_is_not_routed() {
+        let mut w = button_padding(EdgeInsets::all(10.0));
+        let mut state = Counter::default();
+        let origin = w.child.origin();
+
+        let inside = Point::new(origin.x + 2.0, origin.y + 2.0);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Down, inside.x, inside.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer_ev(PointerPhase::Up, inside.x, inside.y),
+        );
+        assert!(!w.child.is_active(), "capture releases on Up");
+
+        // A Down far away, outside the child's bounds, must now be ignored —
+        // not routed to the (no-longer-active) child.
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer_ev(PointerPhase::Down, 400.0, 400.0)
+            ),
+            EventResult::Ignored
+        );
     }
 }
