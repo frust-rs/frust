@@ -1,1 +1,6 @@
 /target
+
+# Android release signing material — never commit (see forgekit.toml [signing]).
+android/key.properties
+*.jks
+*.keystore
