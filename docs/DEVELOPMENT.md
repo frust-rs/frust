@@ -5,17 +5,23 @@
 - Rust 1.88+ (workspace `rust-version`), edition 2024.
 - macOS with Metal for the GPU smoke gate (`forgekit-render`'s `--ignored`
   test); other platforms can build and run the non-GPU suite.
-- **Android** (only needed for `forgekit run`/`create`'s Android output):
+- **Android** (only needed for `forgekit run`/`build`/`create`'s Android output):
   `rustup target add aarch64-linux-android`; `cargo install cargo-ndk`
   (tested with 4.x); JDK 17+ on `JAVA_HOME` (Android Studio's bundled JBR is
   auto-detected as a fallback on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`
   and `ANDROID_NDK_HOME` set. `forgekit doctor` checks all of these.
-- **iOS** (only needed for `forgekit run`/`create`'s iOS output; macOS host
-  only): Xcode 26+ with `xcode-select -p` resolving to it;
+- **iOS** (only needed for `forgekit run`/`build`/`create`'s iOS output;
+  macOS host only): Xcode 26+ with `xcode-select -p` resolving to it;
   `rustup target add aarch64-apple-ios-sim aarch64-apple-ios`. A booted
-  Simulator is enough for `forgekit run`; code signing is only needed for a
-  physical device, which `forgekit run` does not yet drive (Phase 5).
-  `forgekit doctor` checks the Rust targets on macOS hosts only.
+  Simulator is enough for a debug `forgekit run`. A signed build
+  (`forgekit build ios`/`ipa`, `forgekit run --release`, or any physical-device
+  run) needs a codesigning identity — `forgekit` auto-detects the
+  `DEVELOPMENT_TEAM` from `security find-identity`, or it can be set via
+  `FORGEKIT_IOS_TEAM` or `[ios] team` in `forgekit.toml`. A physical iPhone
+  run additionally needs iOS 17+ (driven via `devicectl`), the device
+  unlocked/paired/trusted, and Developer Mode enabled (Settings → Privacy &
+  Security → Developer Mode). `forgekit doctor` checks the Rust targets on
+  macOS hosts only.
 - No Docker, CI config, or `.env` setup exists in this repo yet.
 
 ## Build
@@ -51,18 +57,47 @@ look at the window. `notes` is also the demo `forgekit create` scaffolds
 (`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
 against it.
 
-In a generated project, `forgekit run [-d <device>]` builds and launches on a
-connected Android device/emulator (preflight → `gradlew assembleDebug`
-(cargo-ndk builds the Rust `.so`) → `adb install`/`launch` → streamed
-`logcat` until Ctrl-C) or a booted iOS Simulator (preflight → `xcodebuild
-build` (its run-script phase invokes `cargo build` for the simulator triple)
-→ `simctl install` → `simctl launch --console-pty`, streamed, until Ctrl-C);
-currently debug-only for both platforms (`--release`/`--profile` error with
-a Phase 5 note), and a physical iOS device also errors with a Phase 5 note
-(no signing pipeline yet). With no device selected, it falls back to a
-streamed `cargo run` (desktop preview). The first Android build downloads
-Gradle 9.5.x, and the first iOS build compiles the whole Rust dependency
-graph for the simulator target — expect either to take a few minutes.
+In a generated project, `forgekit run [-d <device>] [--release|--profile]
+[--flavor <name>]` builds and launches on a connected Android
+device/emulator (preflight → variant-aware `gradlew assemble<Flavor><Mode>`
+(cargo-ndk builds the Rust `.so` for the device's detected ABI) →
+`adb install`/`launch` → streamed `logcat` until Ctrl-C; release mode needs
+the same signing keystore as `build apk` — see Prerequisites), a booted iOS
+Simulator (preflight → `xcodebuild build` at the mode's Xcode configuration
+→ `simctl install` → `simctl launch --console-pty`, streamed, until
+Ctrl-C), or a physical iPhone (iOS 17+ only: a signed device build →
+`xcrun devicectl device install app` → `xcrun devicectl device process
+launch --console --terminate-existing`, streamed, until Ctrl-C — failures
+hint at unlocking/pairing/Developer Mode). `run` defaults to debug mode
+(`forgekit build` defaults to release — see *Release Builds* below). With no
+device selected, it falls back to a streamed `cargo run` (desktop preview).
+The first Android build downloads Gradle 9.5.x, and the first iOS build
+compiles the whole Rust dependency graph for the simulator target — expect
+either to take a few minutes.
+
+## Release Builds
+
+```bash
+# Android: signed release APK (needs android/key.properties — see Prerequisites)
+forgekit build apk --release
+
+# Other Android artifact shapes
+forgekit build apk --debug
+forgekit build apk --profile
+forgekit build apk --release --split-per-abi --target-platform android-arm64,android-x64
+forgekit build appbundle --release --build-name 1.2.3 --build-number 7
+
+# iOS: signed device build, unsigned device build, App Store archive
+forgekit build ios
+forgekit build ios --no-codesign
+forgekit build ipa --export-method app-store-connect
+
+# Remove build output (cargo clean + the Android build/.gradle directories)
+forgekit clean
+```
+
+`--flavor <name>` needs a matching Gradle product flavor / Xcode
+scheme+configuration already declared in the generated project.
 
 ## Test
 
@@ -90,6 +125,11 @@ cargo test -p forgekit-cli --test create_e2e -- --ignored
 # `xcodebuild -list` + `plutil -lint` against the generated Xcode project
 # (parse-only, no build; needs Xcode on macOS).
 cargo test -p forgekit-cli --test create_ios -- --ignored
+
+# Build pipeline end-to-end test (forgekit-cli): scaffolds a project,
+# generates a throwaway keystore, and runs `build apk --release` through a
+# real Gradle build — needs Android SDK/NDK; ~1 minute.
+cargo test -p forgekit-cli --test build_e2e -- --ignored
 
 # Android compile gate (no device needed): the whole facade graph must
 # compile for the Android target.

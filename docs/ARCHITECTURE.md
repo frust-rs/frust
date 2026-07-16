@@ -23,7 +23,7 @@ consumed by app code via the `forgekit` facade crate, and example apps under
 | `forgekit-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size` FFI-boundary helpers. Depends on `forgekit-core`/`forgekit-scene`/`forgekit-text` only — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. |
 | `forgekit-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `forgekit_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `forgekit-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. |
 | `forgekit` | Facade crate: the public app-author API (`App`, `View`, the widget vocabulary, the re-exported `android_app!`/`ios_app!` macros) that composes the crates above into the spec's declarative call shape. Depends on `forgekit-shell-android` and `forgekit-shell-ios` unconditionally, and on `forgekit-shell-desktop` only for non-Android targets; `App::run` (the desktop preview loop) is likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
-| `forgekit-cli` | Standalone `forgekit` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `forgekit run` drive pipeline for both platforms. Depends on none of the framework crates above. |
+| `forgekit-cli` | Standalone `forgekit` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `forgekit run`/`build`/`clean` drive pipelines for both platforms (Android via Gradle/cargo-ndk, iOS via xcodebuild/devicectl). Depends on none of the framework crates above. |
 
 ## Layer Dependencies
 
@@ -205,19 +205,37 @@ and path segments matching context keys are expanded (e.g. an org id into
 nested directories). `doctor` runs a fixed set of `Validator`s and `devices`
 runs a fixed set of `DeviceDiscovery` implementations, both against a shared
 `DoctorCtx`/`ProcessRunner` — no handler ever shells out directly. `run`
-dispatches on the selected device's platform/kind: `android_run` drives a
-`BuildInfo`-gated (mode/flavor/`--define`s, currently debug-only) Android
-build — preflight (Rust target, cargo-ndk, JDK 17+, adb) →
-`./gradlew assembleDebug` (invokes `cargo ndk` to build the Rust `.so`) →
-`adb install`/`launch` → a pid-scoped `logcat` stream until Ctrl-C. `ios_run`
-drives the iOS Simulator equivalent: preflight (Xcode, Rust sim target, a
-booted simulator) → `xcodebuild build` (its run-script build phase invokes
-`cargo build` for the simulator/device triple to produce the Rust staticlib)
-→ `simctl install` → `simctl launch --console-pty` (streamed) until Ctrl-C,
-with a best-effort `simctl terminate` cleanup. A physical iOS device is not
-yet driven by `run` — it bails with a Phase 5 (signing pipeline) sentinel.
-With no device selected, `run` falls back to a streamed `cargo run` (desktop
-preview).
+dispatches on the selected device's platform/kind, threading a
+`BuildInfo`-gated mode/flavor/`--define`s (debug-default) through every
+path: `android_run` drives a variant-aware Android build — preflight (Rust
+target, cargo-ndk, JDK 17+, adb) → `./gradlew assemble<Flavor><Mode>`
+(cargo-ndk builds the Rust `.so` for the connected device's detected ABI) →
+`adb install`/`launch` → a pid-scoped `logcat` stream until Ctrl-C, gated on
+release signing (see Key Types' `BuildInfo` row) when the mode is release.
+`ios_run` drives the iOS Simulator equivalent: preflight (Xcode, Rust sim
+target, a booted simulator) → `xcodebuild build` at the mode's Xcode
+configuration (its run-script build phase invokes `cargo build` for the
+simulator/device triple to produce the Rust staticlib) → `simctl install` →
+`simctl launch --console-pty` (streamed) until Ctrl-C, with a best-effort
+`simctl terminate` cleanup — or drives a physical iPhone via `devicectl`: an
+iOS 17+ gate on the device's reported OS version, then a signed device build
+→ `devicectl device install app` → `devicectl device process launch
+--console --terminate-existing` (streamed) until Ctrl-C, with failure hints
+pointing at device unlock/pairing/Developer Mode. With no device selected,
+`run` falls back to a streamed `cargo run` (desktop preview).
+
+`build` is the release counterpart: `forgekit build apk|appbundle|ios|ipa`
+resolves the same `BuildInfo` funnel (release-default, versus `run`'s
+debug-default) plus an artifact-selection target (`AndroidArtifact`/
+`IosArtifact`), then dispatches to the `android_build`/`ios_build` modules.
+Android writes `local.properties` versions, gates release builds on a
+`key.properties` keystore (a guided `keytool` error otherwise), invokes the
+mapped `gradlew` task with `-Pforgekit.*` properties, and glob-discovers the
+resulting `.apk`/`.aab`. iOS resolves the flavor's scheme/configuration and a
+`DEVELOPMENT_TEAM` for signed builds, then either builds an `.app` directly
+or archives + `exportArchive`s an `.ipa` via a generated
+`exportOptions.plist`. Both hand back a `BuiltArtifacts` path list
+`commands/build.rs` prints. `clean` removes Cargo and Gradle build output.
 
 ## Key Types
 
@@ -240,7 +258,8 @@ preview).
 | `RenderContext` / `SurfaceRenderer` | `RenderContext` owns the wgpu `Instance` and lazily creates/holds the logical `wgpu::Device` itself (adapter-derived limits, not a thin `vello::util` wrapper) so it can request the real adapter limits vello's own device pool cannot; `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation. |
 | `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed, eleven-export Android JNI surface (init/frame/touch/resume/pause/destroy/surface-changed/surface-destroyed, plus the `nativeImeApply`/`nativeImeState`/`nativeImeAction` IME state-sync trio); the sole Android app entry point. |
 | `IosAppHandle` / `ios_app!` | `IosAppHandle` (`forgekit-shell-ios`) is the opaque native handle behind the ten `forgekit_*` C exports (init/resize/render-frame/dispatch-touch/pause/resume/destroy, plus the `forgekit_ime_apply`/`forgekit_ime_state_json`/`forgekit_string_free` IME state-sync trio), mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `forgekit_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports; the sole iOS app entry point. |
-| `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines); drives both the (unimplemented) `build` command and `run`'s Android/iOS pipelines. |
+| `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines, build name/number); drives both the `build` command (release-default) and `run`'s Android/iOS pipelines (debug-default). |
+| `AndroidArtifact` / `IosArtifact` / `BuiltArtifacts` | Artifact-selection targets for the `build` command (Android APK with optional ABI splits, or an appbundle; iOS an `.app`, optionally unsigned, or an archived `.ipa` with an export method) and the resulting built-artifact path list `android_build`/`ios_build` hand back. |
 | `ProcessRunner` | Seam for every external tool invocation in the CLI, including streaming invocations (`run_streaming`) for long-running processes like `gradlew`/`logcat`; fakeable in tests. |
 | `Validator` / `DeviceDiscovery` | Pluggable `doctor`/`devices` checks, each independent and non-fatal on failure. |
 | `TemplateContext` | Render/path substitution variables for `forgekit create`'s scaffold. |
