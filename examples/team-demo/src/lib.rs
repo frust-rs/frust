@@ -19,8 +19,13 @@
 pub mod failure;
 pub mod features;
 
-use forgekit::{AnyView, Component};
+use std::sync::Arc;
+use std::time::Duration;
 
+use forgekit::{AnyView, Component, any, component};
+
+use features::team::data::InMemoryTeamRepo;
+use features::team::domain::repositories::TeamRepository;
 pub use features::team::presentation::{
     TeamController, TeamHandles, TeamScreen, TeamSpy, TeamState,
 };
@@ -28,6 +33,15 @@ pub use features::team::presentation::{
 /// The app root: hosts [`TeamScreen`] with the default in-memory backend so its
 /// `init` runs under a real component [`Owner`]. `Default`-constructed and
 /// stateless (`State = ()`), the shape [`forgekit::app!`] binds.
+///
+/// This is the composition root — the crate-root analog of the Leptos twin's
+/// `main.rs`, which wires `data::InMemoryTeamRepo` into `presentation::TeamPage`
+/// from outside the feature slice. ForgeKit's `Default`-only `app!` entry
+/// constraint means there is no separate platform `main()` to put this in, so
+/// it lives here instead of inside `features::team::presentation` (see this
+/// module's own doc comment above: `domain/ ← data/`, `domain/ ←
+/// presentation/`, nothing crossing the other direction — `presentation` may
+/// only ever see `Arc<dyn TeamRepository>`, never the concrete `data` type).
 #[derive(Default)]
 pub struct TeamApp;
 
@@ -37,7 +51,12 @@ impl Component for TeamApp {
     fn init(&self) {}
 
     fn build(&self, _state: &mut ()) -> AnyView<()> {
-        features::team::presentation::team_screen_with_default_repo()
+        // A latency + one seeded failure so the desktop/mobile run visibly
+        // exercises the retry path (the first load attempt fails, the
+        // RetryPolicy retries).
+        let repo: Arc<dyn TeamRepository + Send + Sync> =
+            Arc::new(InMemoryTeamRepo::new(Duration::from_millis(400), 1));
+        any(component(TeamScreen::new(repo)))
     }
 }
 

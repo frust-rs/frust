@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use clean_signals::Failure;
 use forgekit::{
     AnyView, Axis, Button, Column, Component, FlexChild, FlexView, Get, Row, RwSignal, Set,
-    SizedBox, any, component, keyed, scroll_view, text, text_input,
+    SizedBox, any, keyed, scroll_view, text, text_input,
 };
 
 use crate::failure::TeamFailure;
@@ -261,18 +261,4 @@ fn member_row(member: Member, draft: String) -> FlexView<TeamState> {
             });
         })),
     ])
-}
-
-/// Hosts [`TeamScreen`] under a real component [`Owner`] with a default
-/// in-memory backend — the app root `forgekit::app!` binds. Mirrors the Leptos
-/// twin's composition root (`main.rs`) injecting the repository.
-pub fn team_screen_with_default_repo() -> AnyView<()> {
-    use crate::features::team::data::InMemoryTeamRepo;
-    use std::time::Duration;
-
-    // A latency + one seeded failure so the desktop/mobile run visibly exercises
-    // the retry path (the first load attempt fails, the RetryPolicy retries).
-    let repo: Arc<dyn TeamRepository + Send + Sync> =
-        Arc::new(InMemoryTeamRepo::new(Duration::from_millis(400), 1));
-    any(component(TeamScreen::new(repo)))
 }
