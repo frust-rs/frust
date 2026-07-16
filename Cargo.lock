@@ -208,6 +208,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -391,6 +402,20 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "clean-signals"
+version = "0.1.0"
+source = "git+https://github.com/f0x-it-llc/clean-signals-rs?rev=910f626f28adceeb88a3c8de96cfa844dc4f911a#910f626f28adceeb88a3c8de96cfa844dc4f911a"
+dependencies = [
+ "any_spawner",
+ "async-trait",
+ "futures",
+ "gloo-timers",
+ "reactive_graph",
+ "thiserror 2.0.18",
+ "tokio",
+]
 
 [[package]]
 name = "codespan-reporting"
@@ -1050,6 +1075,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1338,6 +1375,21 @@ dependencies = [
  "png",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "inbox"
+version = "0.1.0"
+dependencies = [
+ "clean-signals",
+ "forgekit",
+ "forgekit-core",
+ "forgekit-reactive",
+ "forgekit-scene",
+ "forgekit-text",
+ "kurbo",
+ "peniko",
+ "reactive_graph",
 ]
 
 [[package]]
@@ -2847,9 +2899,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.52.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "317fafbbe3f02fc663dad00ea6186197de963cd4190e86a26d8d0fae095539af"
 dependencies = [
  "pin-project-lite",
 ]

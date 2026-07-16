@@ -1,0 +1,32 @@
+[package]
+name = "inbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+forgekit = { workspace = true }
+# The clean-signals framework core (use cases / controllers / retry / AsyncState),
+# pulled in by git+rev — the whole point of this example is proving a
+# clean_signals::ControllerCore drives a ForgeKit Component. The framework crates
+# themselves stay clean-signals-free (the approved decision); only this example
+# crate depends on it. Pinned to an exact rev like the rendering-stack pins in
+# docs/DEVELOPMENT.md's Version-Pin Policy — do not float it.
+clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626f28adceeb88a3c8de96cfa844dc4f911a" }
+# `.get()`/`RwSignal` come straight from reactive_graph (the same version the
+# whole workspace and clean-signals resolve to, so the signal types unify).
+reactive_graph = { workspace = true }
+
+# Dev-only: the headless async test drives the framework's `RenderRoot` directly
+# (the desktop shell's own event/frame seam), pumps the reactive runtime's local
+# task queue frame by frame, and records paint output — no GPU, no window. A
+# permanent regression gate for the phase-5.5 Component + clean-signals wiring.
+[dev-dependencies]
+forgekit-core = { workspace = true }
+forgekit-reactive = { workspace = true }
+forgekit-scene = { workspace = true }
+forgekit-text = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
