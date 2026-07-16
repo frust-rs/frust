@@ -65,6 +65,18 @@ impl TextContext {
 
         TextLayout::new(layout)
     }
+
+    /// Borrows the parley font and layout contexts together, for constructing a
+    /// transient [`parley::PlainEditorDriver`] in [`crate::TextEditor::apply`].
+    ///
+    /// Returned as a tuple so a single mutable borrow of `self` yields both
+    /// contexts the driver's borrow-triple needs. `pub(crate)` — parley types
+    /// must not leak past the crate boundary (scene-layer purity).
+    pub(crate) fn driver_contexts(
+        &mut self,
+    ) -> (&mut parley::FontContext, &mut parley::LayoutContext<Brush>) {
+        (&mut self.font_ctx, &mut self.layout_ctx)
+    }
 }
 
 impl Default for TextContext {

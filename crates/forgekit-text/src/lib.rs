@@ -10,10 +10,14 @@
 
 mod context;
 mod convert;
+mod editor;
 mod layout;
 mod style;
 
 pub use context::TextContext;
+pub use editor::{
+    EditOp, EditingState, EditingStateBytes, TextEditor, byte_to_utf16, utf16_to_byte,
+};
 pub use layout::TextLayout;
 pub use style::TextStyle;
 
