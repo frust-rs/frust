@@ -63,21 +63,27 @@ pub use forgekit_shell_common::{AppTree, new_boxed_app};
 #[doc(hidden)]
 pub mod __jni {
     // `EnvUnowned` is the FFI-safe env type for native-method arguments in
-    // `jni` 0.22 (the bare `JNIEnv` alias is deprecated); we only ever read its
-    // raw pointer to hand to the NDK, never call the JNI API through it.
+    // `jni` 0.22 (the bare `JNIEnv` alias is deprecated). For the surface/touch
+    // exports we only read its raw pointer to hand to the NDK; the IME exports
+    // additionally call the JNI string API through it (`EnvUnowned::with_env`) to
+    // read/return a `java.lang.String` — see [`crate::jni_glue`].
     pub use jni::EnvUnowned;
-    pub use jni::objects::{JClass, JObject};
-    pub use jni::sys::{jfloat, jint, jlong};
+    pub use jni::objects::{JClass, JObject, JString};
+    pub use jni::sys::{jfloat, jint, jlong, jstring};
 }
 
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (spec §10.1, Makepad `app_main!` precedent).
 ///
-/// Stamps out the eight `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
+/// Stamps out the eleven `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
 /// the Kotlin `ForgeKitSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from `$state_ty::default()` and `$app_logic`; the rest operate on
-/// the opaque `jlong` handle.
+/// the opaque `jlong` handle. The three IME exports (`nativeImeApply`,
+/// `nativeImeState`, `nativeImeAction`) carry the Phase 4B soft-keyboard
+/// state-sync contract (spec §14 Phase 4): Kotlin pushes a whole editing state in
+/// (`nativeImeApply`), pulls the reconciled state back out (`nativeImeState`), and
+/// forwards an editor action (Enter) via `nativeImeAction`.
 ///
 /// The macro is defined on every target but only *expands* to real code where
 /// its call site is gated, e.g. in the generated `src/lib.rs`:
@@ -191,6 +197,55 @@ macro_rules! android_app {
             handle: $crate::__jni::jlong,
         ) {
             $crate::jni_glue::native_on_destroy(handle)
+        }
+
+        /// JNI `nativeImeApply`: push a whole platform editing state into the
+        /// focused widget (the mobile IME state-sync path, spec §14 Phase 4).
+        ///
+        /// `text` is the Kotlin mirror `Editable`'s content; the four indices are
+        /// **UTF-16 code units** (Java-native) and cross the seam unchanged — the
+        /// focused widget converts them to Rust byte offsets.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeImeApply<'local>(
+            env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            text: $crate::__jni::JString<'local>,
+            sel_base: $crate::__jni::jint,
+            sel_ext: $crate::__jni::jint,
+            comp_base: $crate::__jni::jint,
+            comp_ext: $crate::__jni::jint,
+        ) {
+            $crate::jni_glue::native_ime_apply(
+                env, handle, text, sel_base, sel_ext, comp_base, comp_ext,
+            )
+        }
+
+        /// JNI `nativeImeState`: return the focused widget's published IME surface
+        /// as JSON (`active`/text/selection/composing + logical-px caret) for the
+        /// Kotlin side to reconcile against its mirror and drive the `IMM`.
+        ///
+        /// Returns `null` (a null `jstring`) when there is no live native handle.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeImeState<'local>(
+            env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jstring {
+            $crate::jni_glue::native_ime_state(env, handle)
+        }
+
+        /// JNI `nativeImeAction`: forward a soft-keyboard editor action
+        /// (`performEditorAction`, e.g. `IME_ACTION_DONE`) as an `Enter` key press
+        /// down the focus path.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeImeAction<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            action: $crate::__jni::jint,
+        ) {
+            $crate::jni_glue::native_ime_action(handle, action)
         }
     };
 }

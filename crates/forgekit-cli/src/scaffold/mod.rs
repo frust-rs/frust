@@ -379,6 +379,27 @@ mod tests {
             surface_view_src.contains("override fun onTouchEvent"),
             "{surface_view_src}"
         );
+        // IME transport (spec §14 Phase 4): the three IME exports, the
+        // `BaseInputConnection` mirror, and the editor-view hooks must be
+        // present, and no AndroidX dependency introduced.
+        for needle in [
+            "external fun nativeImeApply",
+            "external fun nativeImeState",
+            "external fun nativeImeAction",
+            "override fun onCheckIsTextEditor",
+            "override fun onCreateInputConnection",
+            "BaseInputConnection(this@ForgeKitSurfaceView",
+            "imm.updateSelection",
+        ] {
+            assert!(
+                surface_view_src.contains(needle),
+                "expected `{needle}` in generated ForgeKitSurfaceView.kt:\n{surface_view_src}"
+            );
+        }
+        assert!(
+            !surface_view_src.contains("androidx"),
+            "IME transport must not introduce an AndroidX dependency:\n{surface_view_src}"
+        );
 
         let _ = fs::remove_dir_all(&dest);
     }

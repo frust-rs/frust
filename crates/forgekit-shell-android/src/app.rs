@@ -12,7 +12,10 @@
 
 use std::any::Any;
 
-use forgekit_core::event::{InputEvent, PointerButton, PointerEvent, PointerPhase};
+use forgekit_core::event::{
+    EditingState, ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
+    PointerEvent, PointerPhase,
+};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
@@ -143,6 +146,41 @@ impl AndroidAppHandle {
             phase: core_phase,
             position,
             button: PointerButton::Primary,
+        });
+        let _ = self.app.event(&event);
+    }
+
+    /// Apply a whole editing state pushed by the platform IME (`nativeImeApply`),
+    /// routing it to the focused widget as an
+    /// [`InputEvent::Ime`]`(`[`ImeEvent::ApplyEditingState`]`)` via
+    /// [`AppTree::ime_apply`]. `state`'s indices are UTF-16 code units (the seam
+    /// unit); the focused widget converts them. No explicit redraw is scheduled —
+    /// the Choreographer loop already posts the next frame (see [`Self::dispatch_touch`]).
+    ///
+    /// [`ImeEvent::ApplyEditingState`]: forgekit_core::event::ImeEvent::ApplyEditingState
+    pub(crate) fn ime_apply(&mut self, state: EditingState) {
+        let _ = self.app.ime_apply(state);
+    }
+
+    /// The IME surface the focused widget published, for the FFI layer to
+    /// serialise into the `nativeImeState` JSON. Delegates to
+    /// [`AppTree::ime_state`]; `None` when nothing is focused.
+    pub(crate) fn ime_state(&self) -> Option<ImeState> {
+        self.app.ime_state()
+    }
+
+    /// Forward a soft-keyboard editor action (`nativeImeAction`, e.g.
+    /// `IME_ACTION_DONE`) as an [`NamedKey::Enter`] key press down the focus path.
+    ///
+    /// `action` is retained for future differentiation; v1 configures only
+    /// `IME_ACTION_DONE`, so every action maps to `Enter`. Reuses the same
+    /// focus-routed key path a hardware Enter would (spec §9), so a widget's
+    /// submit/newline handling stays in one place.
+    pub(crate) fn ime_action(&mut self, _action: i32) {
+        let event = InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Enter),
+            modifiers: Modifiers::default(),
+            repeat: false,
         });
         let _ = self.app.event(&event);
     }

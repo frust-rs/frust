@@ -1,11 +1,22 @@
 package dev.forgekit
 
 import android.content.Context
+import android.text.Editable
+import android.text.InputType
+import android.text.Selection
+import android.text.SpannableStringBuilder
 import android.view.Choreographer
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
+import org.json.JSONException
+import org.json.JSONObject
 
 /**
  * The ForgeKit Android render surface (spec Phase 2 §10.1). Package
@@ -14,6 +25,13 @@ import android.view.SurfaceView
  * stable, so do not rename or move this file. The app's own
  * `MainActivity` (package `{{ android_identifier }}`) owns the activity
  * lifecycle and forwards `onResume`/`onPause`/`onDestroy` here.
+ *
+ * Soft-keyboard text input (spec §14 Phase 4) uses the Flutter-proven
+ * **state-sync** contract, not op-forwarding: [ForgeKitInputConnection] owns
+ * composition mechanics against a mirror [Editable], pushes the whole editing
+ * state into Rust via `nativeImeApply`, then pulls the reconciled state back via
+ * `nativeImeState` to keep the `InputMethodManager` synchronised. No AndroidX
+ * dependency is used.
  */
 class ForgeKitSurfaceView(context: Context) :
     SurfaceView(context),
@@ -27,8 +45,8 @@ class ForgeKitSurfaceView(context: Context) :
     }
 
     // JNI exports implemented by `forgekit-shell-android` (spec Phase 2
-    // task 24) — these names and signatures are load-bearing, matched
-    // exactly by `#[no_mangle] extern "system" fn Java_dev_forgekit_*`.
+    // task 24, Phase 4 IME) — these names and signatures are load-bearing,
+    // matched exactly by `#[no_mangle] extern "system" fn Java_dev_forgekit_*`.
     private external fun nativeInit(surface: Surface, scaleFactor: Float): Long
 
     private external fun nativeOnSurfaceChanged(
@@ -58,17 +76,50 @@ class ForgeKitSurfaceView(context: Context) :
 
     private external fun nativeOnDestroy(handle: Long)
 
+    // IME state-sync exports (spec §14 Phase 4). Indices are UTF-16 code units
+    // (Java-native), passed through the Rust seam unchanged.
+    private external fun nativeImeApply(
+        handle: Long,
+        text: String,
+        selBase: Int,
+        selExt: Int,
+        compBase: Int,
+        compExt: Int,
+    )
+
+    // Returns JSON (`{"active":..,"text":..,"selBase":..,...}`) or null when there
+    // is no live native handle.
+    private external fun nativeImeState(handle: Long): String?
+
+    private external fun nativeImeAction(handle: Long, action: Int)
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
     /** Whether the Choreographer frame loop should keep re-posting itself. */
     private var running = false
 
+    /**
+     * The last IME surface Rust published (from `nativeImeState`). Seeds a freshly
+     * created [ForgeKitInputConnection]'s mirror and `EditorInfo.initialSel*`, and
+     * lets [pollImeAfterDispatch] detect active-state edges.
+     */
+    private var lastKnownState: ImeWireState? = null
+
+    /** Whether the soft keyboard is currently requested (edge-detects show/hide). */
+    private var imeActive = false
+
+    private val imm: InputMethodManager
+        get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+
     private val scaleFactor: Float
         get() = resources.displayMetrics.density
 
     init {
         holder.addCallback(this)
+        // Required for a custom editor view to receive IME focus + text input.
+        isFocusable = true
+        isFocusableInTouchMode = true
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -105,8 +156,73 @@ class ForgeKitSurfaceView(context: Context) :
             else -> return false
         }
         nativeOnTouch(handle, action, event.x, event.y)
+        // The tree may have taken/dropped focus in response to this contact; poll
+        // the IME surface and show/hide the keyboard accordingly. Polling after
+        // the dispatch keeps the JNI ABI one-directional (no native up-calls).
+        pollImeAfterDispatch()
         return true
     }
+
+    /** A custom editor view MUST return true here to be offered an InputConnection. */
+    override fun onCheckIsTextEditor(): Boolean = true
+
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+        outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
+        val state = lastKnownState
+        outAttrs.initialSelStart = state?.selBase ?: -1
+        outAttrs.initialSelEnd = state?.selExt ?: -1
+        return ForgeKitInputConnection().also { it.seed(state) }
+    }
+
+    /**
+     * After every native dispatch, reconcile the soft keyboard with the focused
+     * widget's IME surface: newly-active ⇒ take focus + show the keyboard (and
+     * restart input so a fresh [ForgeKitInputConnection] is seeded from the new
+     * state); newly-inactive ⇒ hide it.
+     */
+    private fun pollImeAfterDispatch() {
+        if (handle == 0L) return
+        val state = parseImeState(nativeImeState(handle)) ?: return
+        lastKnownState = state
+        if (state.active && !imeActive) {
+            imeActive = true
+            requestFocus()
+            // Rebuild the InputConnection so its mirror starts from `state`.
+            imm.restartInput(this)
+            imm.showSoftInput(this, 0)
+        } else if (!state.active && imeActive) {
+            imeActive = false
+            imm.hideSoftInputFromWindow(windowToken, 0)
+        }
+    }
+
+    private fun parseImeState(json: String?): ImeWireState? {
+        if (json == null) return null
+        return try {
+            val obj = JSONObject(json)
+            ImeWireState(
+                active = obj.optBoolean("active", false),
+                text = obj.optString("text", ""),
+                selBase = obj.optInt("selBase", -1),
+                selExt = obj.optInt("selExt", -1),
+                compBase = obj.optInt("compBase", -1),
+                compExt = obj.optInt("compExt", -1),
+            )
+        } catch (e: JSONException) {
+            null
+        }
+    }
+
+    /** A plain snapshot of the editing state exchanged with the Rust seam. */
+    private data class ImeWireState(
+        val active: Boolean,
+        val text: String,
+        val selBase: Int,
+        val selExt: Int,
+        val compBase: Int,
+        val compExt: Int,
+    )
 
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) {
@@ -148,6 +264,177 @@ class ForgeKitSurfaceView(context: Context) :
         if (handle != 0L) {
             nativeOnDestroy(handle)
             handle = 0
+        }
+    }
+
+    /**
+     * A [BaseInputConnection] subclass over a mirror [Editable] (the Flutter
+     * `InputConnectionAdaptor` model). `super` performs the composition mechanics
+     * against [editable]; each override then [sync]s the whole editing state into
+     * Rust and reconciles the state Rust returns back into the mirror + `IMM`.
+     *
+     * `fullEditor = true` so `BaseInputConnection` edits our own [getEditable]
+     * rather than dispatching key events to the (non-existent) view text machinery.
+     */
+    private inner class ForgeKitInputConnection :
+        BaseInputConnection(this@ForgeKitSurfaceView, true) {
+
+        private val editable = SpannableStringBuilder()
+
+        /** Nesting depth of `beginBatchEdit`/`endBatchEdit`; sync once at depth 0. */
+        private var batchDepth = 0
+
+        /**
+         * The last state we pushed to Rust. Breaks the state-sync loop
+         * (IMM update → IME reacts → apply → update …) by short-circuiting a
+         * [sync] whose editable snapshot is unchanged (Flutter's batch-edit
+         * final-state model).
+         */
+        private var lastPushed: ImeWireState? = null
+
+        override fun getEditable(): Editable = editable
+
+        /** Initialise the mirror from a Rust-published state (fresh connection). */
+        fun seed(state: ImeWireState?) {
+            editable.clear()
+            lastPushed = null
+            if (state == null) return
+            editable.append(state.text)
+            val len = editable.length
+            val selStart = state.selBase.coerceIn(0, len)
+            val selEnd = state.selExt.coerceIn(0, len)
+            if (state.selBase >= 0 && state.selExt >= 0) {
+                Selection.setSelection(editable, selStart, selEnd)
+            }
+        }
+
+        override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            val handled = super.commitText(text, newCursorPosition)
+            sync()
+            return handled
+        }
+
+        override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            val handled = super.setComposingText(text, newCursorPosition)
+            sync()
+            return handled
+        }
+
+        override fun setComposingRegion(start: Int, end: Int): Boolean {
+            val handled = super.setComposingRegion(start, end)
+            sync()
+            return handled
+        }
+
+        override fun finishComposingText(): Boolean {
+            val handled = super.finishComposingText()
+            sync()
+            return handled
+        }
+
+        override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+            val handled = super.deleteSurroundingText(beforeLength, afterLength)
+            sync()
+            return handled
+        }
+
+        override fun deleteSurroundingTextInCodePoints(
+            beforeLength: Int,
+            afterLength: Int,
+        ): Boolean {
+            val handled = super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+            sync()
+            return handled
+        }
+
+        override fun setSelection(start: Int, end: Int): Boolean {
+            val handled = super.setSelection(start, end)
+            sync()
+            return handled
+        }
+
+        override fun sendKeyEvent(event: KeyEvent): Boolean {
+            // Soft keyboards emit backspace as `deleteSurroundingText`, but
+            // hardware keys (and some IMEs' DEL/ENTER) arrive here — let `super`
+            // translate them into edits on the mirror, then sync on key-down.
+            val handled = super.sendKeyEvent(event)
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                sync()
+            }
+            return handled
+        }
+
+        override fun beginBatchEdit(): Boolean {
+            batchDepth++
+            return super.beginBatchEdit()
+        }
+
+        override fun endBatchEdit(): Boolean {
+            val handled = super.endBatchEdit()
+            if (batchDepth > 0) {
+                batchDepth--
+            }
+            if (batchDepth == 0) {
+                sync()
+            }
+            return handled
+        }
+
+        override fun performEditorAction(actionCode: Int): Boolean {
+            if (handle != 0L) {
+                nativeImeAction(handle, actionCode)
+            }
+            return true
+        }
+
+        /**
+         * Push the whole mirror editing state to Rust, then reconcile the state
+         * Rust returns back into the mirror and the `IMM`.
+         *
+         * No-op inside a batch edit (synced once at depth 0) or when the state is
+         * unchanged since the last push (loop guard). Otherwise it always calls
+         * `imm.updateSelection` — skipping it breaks composition/prediction — and
+         * `imm.restartInput` when Rust replaced the text wholesale.
+         */
+        private fun sync() {
+            if (batchDepth > 0 || handle == 0L) return
+
+            val text = editable.toString()
+            val selStart = Selection.getSelectionStart(editable)
+            val selEnd = Selection.getSelectionEnd(editable)
+            val compStart = getComposingSpanStart(editable)
+            val compEnd = getComposingSpanEnd(editable)
+            val snapshot = ImeWireState(true, text, selStart, selEnd, compStart, compEnd)
+            if (snapshot == lastPushed) return
+            lastPushed = snapshot
+
+            nativeImeApply(handle, text, selStart, selEnd, compStart, compEnd)
+
+            val state = parseImeState(nativeImeState(handle)) ?: return
+            lastKnownState = state
+
+            val wholesale = state.text != text
+            if (wholesale) {
+                // Rust replaced the text: rebuild the mirror to match.
+                editable.replace(0, editable.length, state.text)
+            }
+            val len = editable.length
+            if (state.selBase in 0..len && state.selExt in 0..len) {
+                Selection.setSelection(editable, state.selBase, state.selExt)
+            }
+            // Sync the IMM on every (state-changing) sync — `updateSelection`'s
+            // last two args are the *candidates* (composing) range, not named
+            // composing params (a common miscoding).
+            imm.updateSelection(
+                this@ForgeKitSurfaceView,
+                state.selBase,
+                state.selExt,
+                state.compBase,
+                state.compExt,
+            )
+            if (wholesale) {
+                imm.restartInput(this@ForgeKitSurfaceView)
+            }
         }
     }
 }

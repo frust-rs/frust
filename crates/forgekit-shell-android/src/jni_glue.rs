@@ -20,13 +20,16 @@ use std::sync::Once;
 
 use anyhow::{Context, Result};
 use jni::EnvUnowned;
-use jni::objects::JObject;
-use jni::sys::{jfloat, jint, jlong};
+use jni::errors::LogErrorAndDefault;
+use jni::objects::{JObject, JString};
+use jni::sys::{jfloat, jint, jlong, jstring};
 use ndk::native_window::NativeWindow;
 
+use forgekit_core::event::{EditingState, ImeState};
 use forgekit_shell_common::{AppTree, guard};
 
 use crate::app::AndroidAppHandle;
+use crate::ffi_support::{ImeJsonState, build_ime_state_json, normalize_ime_indices};
 
 /// Initialise `android_logger` exactly once per process, so `log::*` from any
 /// crate in the graph reaches logcat under the `forgekit` tag.
@@ -275,6 +278,115 @@ pub fn native_on_destroy(handle: jlong) {
         // is never passed back in.
         drop(unsafe { Box::from_raw(handle as *mut AndroidAppHandle) });
     });
+}
+
+/// `nativeImeApply`: push a whole platform editing state into the focused widget
+/// (the mobile IME state-sync path, spec §14 Phase 4).
+///
+/// `text` is the Kotlin mirror `Editable`'s content, read into a Rust `String`
+/// (Java MUTF-8/UTF-16 → UTF-8) through the JNI string API. The four indices are
+/// **UTF-16 code units** (Java-native) and cross the `AppTree`/shell seam
+/// unchanged — [`EditingState`]'s indices are UTF-16 at this seam and the focused
+/// widget converts them to Rust byte offsets. [`normalize_ime_indices`] only
+/// canonicalises the `-1` "none" sentinel. A missing handle is a no-op.
+pub fn native_ime_apply(
+    mut env: EnvUnowned,
+    handle: jlong,
+    text: JString,
+    sel_base: jint,
+    sel_ext: jint,
+    comp_base: jint,
+    comp_ext: jint,
+) {
+    guard("nativeImeApply", (), || {
+        // Read the Java string first (releases the `env` borrow before we touch
+        // the handle); an unreadable/`null` string falls back to empty.
+        let text = env
+            .with_env(|env| text.try_to_string(env))
+            .resolve::<LogErrorAndDefault>();
+
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return;
+        };
+        let (selection_base, selection_extent, composing_base, composing_extent) =
+            normalize_ime_indices(sel_base, sel_ext, comp_base, comp_ext);
+        let state = EditingState {
+            text,
+            selection_base,
+            selection_extent,
+            composing_base,
+            composing_extent,
+        };
+        app.ime_apply(state);
+    });
+}
+
+/// `nativeImeState`: return the focused widget's published IME surface as JSON
+/// for the Kotlin side to reconcile against its mirror and drive the `IMM`.
+///
+/// The JSON (built host-testably by [`build_ime_state_json`]) carries `active`,
+/// the editing state (UTF-16 indices), and the logical-px caret rect. Returns a
+/// null `jstring` only when there is no live native handle; a live handle with no
+/// focused editable yields an inactive-state JSON (so Kotlin can hide the
+/// keyboard) rather than null.
+pub fn native_ime_state(mut env: EnvUnowned, handle: jlong) -> jstring {
+    guard("nativeImeState", std::ptr::null_mut(), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return std::ptr::null_mut();
+        };
+        let json = build_ime_state_json(&ime_state_to_json(app.ime_state()));
+        env.with_env(|env| Ok::<JObject, jni::errors::Error>(JString::new(env, &json)?.into()))
+            .resolve::<LogErrorAndDefault>()
+            .into_raw()
+    })
+}
+
+/// `nativeImeAction`: forward a soft-keyboard editor action
+/// (`performEditorAction`, e.g. `IME_ACTION_DONE`) as an `Enter` key press down
+/// the focus path.
+///
+/// `action` is retained for ABI stability and future differentiation; v1
+/// configures only `IME_ACTION_DONE`, so any action maps to `Enter` (a benign,
+/// single-line "submit"). A missing handle is a no-op.
+pub fn native_ime_action(handle: jlong, action: jint) {
+    guard("nativeImeAction", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.ime_action(action);
+        }
+    });
+}
+
+/// Map the focused widget's published [`ImeState`] (or its absence) onto the
+/// plain, host-testable [`ImeJsonState`] the JSON builder consumes.
+///
+/// `None` (nothing focused / no surface published) becomes the inactive default.
+/// The caret [`kurbo::Rect`] flattens to `(x, y, width, height)` logical pixels,
+/// dropped when any component is non-finite (it would not serialise as JSON).
+fn ime_state_to_json(state: Option<ImeState>) -> ImeJsonState {
+    let Some(state) = state else {
+        return ImeJsonState::default();
+    };
+    let caret = state.caret.and_then(|r| {
+        let (x, y, w, h) = (
+            r.x0 as f32,
+            r.y0 as f32,
+            r.width() as f32,
+            r.height() as f32,
+        );
+        (x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()).then_some((x, y, w, h))
+    });
+    ImeJsonState {
+        active: state.active,
+        text: state.editing.text,
+        sel_base: state.editing.selection_base,
+        sel_ext: state.editing.selection_extent,
+        comp_base: state.editing.composing_base,
+        comp_ext: state.editing.composing_extent,
+        caret,
+    }
 }
 
 /// Compile-only smoke of [`crate::android_app!`]: exercises macro expansion on
