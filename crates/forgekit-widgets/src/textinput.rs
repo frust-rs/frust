@@ -7,7 +7,11 @@
 //! `docs/CODE_STANDARDS.md`): it never owns the durable value. Each edit reports
 //! the *requested* text through `on_change`, and the next `rebuild` reconciles
 //! the app-confirmed `value` back into the underlying [`TextEditor`] (task 52) —
-//! set-if-different, preserving the selection while the text is unchanged.
+//! set-if-different, preserving the selection while the text is unchanged. The
+//! content text's style (defaulting to 16px black) can be set with
+//! [`TextInputView::text_style`], applied to the widget's [`TextEditor`] at
+//! build time; it never touches the chrome color constants or padding/caret
+//! sizing below.
 //!
 //! # Text context ownership
 //!
@@ -76,6 +80,7 @@ type OnText<State> = Rc<dyn Fn(&mut State, String)>;
 pub struct TextInputView<State: 'static> {
     value: String,
     placeholder: String,
+    text_style: TextStyle,
     on_change: OnText<State>,
     on_submit: Option<OnText<State>>,
 }
@@ -95,6 +100,7 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
     TextInputView {
         value: value.into(),
         placeholder: String::new(),
+        text_style: TextStyle::default(),
         on_change: Rc::new(on_change),
         on_submit: None,
     }
@@ -120,6 +126,15 @@ impl<State: 'static> TextInputView<State> {
     /// kept.
     pub fn on_submit<F: Fn(&mut State, String) + 'static>(mut self, on_submit: F) -> Self {
         self.on_submit = Some(Rc::new(on_submit));
+        self
+    }
+
+    /// Set the content text's style (family/weight/style/size/color/
+    /// letter-spacing/line-height), applied to the field's [`TextEditor`].
+    /// Default is unchanged (16px black). Does not affect the chrome colors
+    /// or padding/caret constants.
+    pub fn text_style(mut self, text_style: TextStyle) -> Self {
+        self.text_style = text_style;
         self
     }
 }
@@ -388,7 +403,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
     type Element = TextInputWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> TextInputWidget {
-        let style = TextStyle::default();
+        let style = self.text_style.clone();
         let mut text_ctx = TextContext::new();
         let mut editor = TextEditor::new(&style);
         // Seed the initial controlled value (and refresh the layout metrics).

@@ -9,7 +9,9 @@
 use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
 };
-use forgekit_text::{TextContext, TextLayout, TextStyle};
+use forgekit_text::{
+    FontFamily, FontStyle, FontWeight, LineHeight, TextContext, TextLayout, TextStyle,
+};
 use kurbo::Size;
 use peniko::Color;
 
@@ -17,7 +19,10 @@ use peniko::Color;
 ///
 /// Content does not read application state in v0 — `app_logic` interpolates the
 /// string and hands the finished text in (spec §5). Styling is applied with the
-/// [`TextView::size`]/[`TextView::color`] builder methods.
+/// [`TextView::size`]/[`TextView::color`]/[`TextView::weight`]/
+/// [`TextView::family`]/[`TextView::italic`]/[`TextView::letter_spacing`]/
+/// [`TextView::line_height`] builder methods, or in bulk with
+/// [`TextView::style`].
 pub struct TextView {
     content: String,
     style: TextStyle,
@@ -43,6 +48,42 @@ impl TextView {
         self.style.color = color;
         self
     }
+
+    /// Set the font weight.
+    pub fn weight(mut self, weight: FontWeight) -> Self {
+        self.style.weight = weight;
+        self
+    }
+
+    /// Set the font family (or fallback stack).
+    pub fn family(mut self, family: FontFamily) -> Self {
+        self.style.family = family;
+        self
+    }
+
+    /// Set the font style to italic.
+    pub fn italic(mut self) -> Self {
+        self.style.style = FontStyle::Italic;
+        self
+    }
+
+    /// Set the extra spacing between letters, in logical pixels.
+    pub fn letter_spacing(mut self, letter_spacing: f32) -> Self {
+        self.style.letter_spacing = letter_spacing;
+        self
+    }
+
+    /// Set the line height.
+    pub fn line_height(mut self, line_height: LineHeight) -> Self {
+        self.style.line_height = line_height;
+        self
+    }
+
+    /// Replace the whole style in one call.
+    pub fn style(mut self, style: TextStyle) -> Self {
+        self.style = style;
+        self
+    }
 }
 
 impl<State: 'static> View<State> for TextView {
@@ -51,7 +92,7 @@ impl<State: 'static> View<State> for TextView {
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> TextWidget {
         TextWidget {
             content: self.content.clone(),
-            style: self.style,
+            style: self.style.clone(),
             layout: None,
         }
     }
@@ -69,7 +110,7 @@ impl<State: 'static> View<State> for TextView {
             flags |= ChangeFlags::LAYOUT;
         }
         if prev.style != self.style {
-            element.style = self.style;
+            element.style = self.style.clone();
             element.layout = None;
             flags |= ChangeFlags::LAYOUT;
         }
@@ -109,5 +150,40 @@ impl Widget for TextWidget {
                 scene.draw_glyph_run(run);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_methods_compose() {
+        let view = text("x")
+            .size(20.0)
+            .weight(FontWeight::MEDIUM)
+            .italic()
+            .family(FontFamily::named("Inter"))
+            .letter_spacing(2.0)
+            .line_height(LineHeight::Absolute(30.0))
+            .color(Color::from_rgb8(1, 2, 3));
+
+        assert_eq!(view.style.size, 20.0);
+        assert_eq!(view.style.weight, FontWeight::MEDIUM);
+        assert_eq!(view.style.style, FontStyle::Italic);
+        assert_eq!(view.style.family, FontFamily::named("Inter"));
+        assert_eq!(view.style.letter_spacing, 2.0);
+        assert_eq!(view.style.line_height, LineHeight::Absolute(30.0));
+        assert_eq!(view.style.color, Color::from_rgb8(1, 2, 3));
+    }
+
+    #[test]
+    fn bulk_style_setter_replaces_whole_style() {
+        let custom = TextStyle {
+            size: 40.0,
+            ..TextStyle::default()
+        };
+        let view = text("x").style(custom.clone());
+        assert_eq!(view.style, custom);
     }
 }

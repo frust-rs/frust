@@ -6,11 +6,13 @@
 //! Text on macOS with no registration) and a [`parley::LayoutContext`] scratch
 //! buffer reused across layout passes.
 
-use parley::style::{GenericFamily, StyleProperty};
+use parley::style::StyleProperty;
 use peniko::Brush;
 
 use crate::layout::TextLayout;
-use crate::style::TextStyle;
+use crate::style::{
+    TextStyle, to_parley_family, to_parley_line_height, to_parley_style, to_parley_weight,
+};
 
 /// Owns parley's font matching and layout scratch state.
 ///
@@ -28,7 +30,7 @@ impl TextContext {
     ///
     /// [`parley::FontContext::new`] populates the fontique source collection from
     /// the platform (Core Text on macOS); no manual font registration is
-    /// required for [`GenericFamily::SystemUi`] to resolve.
+    /// required for the default [`crate::FontFamily::SystemUi`] to resolve.
     pub fn new() -> Self {
         Self {
             font_ctx: parley::FontContext::new(),
@@ -52,8 +54,14 @@ impl TextContext {
 
         // SystemUi resolves to the platform UI font (e.g. San Francisco on
         // macOS) with no registration; see the task's verified-parley notes.
-        builder.push_default(GenericFamily::SystemUi);
+        builder.push_default(to_parley_family(&style.family));
         builder.push_default(StyleProperty::FontSize(style.size));
+        builder.push_default(StyleProperty::FontWeight(to_parley_weight(style.weight)));
+        builder.push_default(StyleProperty::FontStyle(to_parley_style(style.style)));
+        builder.push_default(StyleProperty::LetterSpacing(style.letter_spacing));
+        builder.push_default(StyleProperty::LineHeight(to_parley_line_height(
+            style.line_height,
+        )));
         builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
 
         let mut layout = builder.build(text);

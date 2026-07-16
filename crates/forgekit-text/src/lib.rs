@@ -1,12 +1,14 @@
 //! Parley 0.11 text pipeline for ForgeKit (spec §4, §9).
 //!
 //! Wraps parley's font matching and layout into a small, renderer-agnostic
-//! surface: [`TextContext`] owns the heavyweight font/layout state, [`TextStyle`]
-//! carries the v1 styling knobs, and [`TextLayout`] is a finished, measurable
-//! block of text that converts into [`forgekit_scene::GlyphRun`]s. Only
-//! `kurbo`/`peniko`/`forgekit-scene` types appear in the public API — no vello
-//! or wgpu types leak through (spec §7). The parley -> vello glyph coordinate
-//! contract lives in [`convert`].
+//! surface: [`TextContext`] owns the heavyweight font/layout state,
+//! [`TextStyle`] carries the styling knobs (family/weight/style/size/color/
+//! letter-spacing/line-height — the M3 type-scale surface), and [`TextLayout`]
+//! is a finished, measurable block of text that converts into
+//! [`forgekit_scene::GlyphRun`]s. Only `kurbo`/`peniko`/`forgekit-scene` types
+//! appear in the public API — no vello, wgpu, or parley types leak through
+//! (spec §7). The parley -> vello glyph coordinate contract lives in
+//! [`convert`].
 
 mod context;
 mod convert;
@@ -19,7 +21,7 @@ pub use editor::{
     EditOp, EditingState, EditingStateBytes, TextEditor, byte_to_utf16, utf16_to_byte,
 };
 pub use layout::TextLayout;
-pub use style::TextStyle;
+pub use style::{FontFamily, FontStyle, FontWeight, LineHeight, TextStyle};
 
 #[cfg(test)]
 mod tests {
@@ -162,5 +164,99 @@ mod tests {
         let x0 = run.glyphs[0].x;
         let x1 = run.glyphs[1].x;
         assert!(x1 > x0, "second glyph must advance past the first");
+    }
+
+    // --- expanded TextStyle knobs (family/weight/style/letter-spacing/line-height) ---
+
+    #[test]
+    fn absolute_line_height_scales_wrapped_block_height() {
+        let mut cx = TextContext::new();
+        let text = "Hello from ForgeKit, the pure Rust mobile UI toolkit";
+
+        let mut natural = style(24.0);
+        natural.line_height = LineHeight::MetricsRelative(1.0);
+        let natural_layout = cx.layout(text, &natural, Some(80.0));
+
+        let mut tall = style(24.0);
+        tall.line_height = LineHeight::Absolute(80.0);
+        let tall_layout = cx.layout(text, &tall, Some(80.0));
+
+        assert!(
+            tall_layout.size().height > natural_layout.size().height,
+            "an absolute line height much larger than the font's natural line \
+             height should grow the wrapped block: natural {:?} vs tall {:?}",
+            natural_layout.size(),
+            tall_layout.size()
+        );
+    }
+
+    #[test]
+    fn font_size_relative_line_height_differs_from_metrics_relative() {
+        let mut cx = TextContext::new();
+        let text = "Hello\nworld"; // two hard-broken lines
+
+        let mut metrics = style(20.0);
+        metrics.line_height = LineHeight::MetricsRelative(1.0);
+        let metrics_layout = cx.layout(text, &metrics, None);
+
+        let mut font_relative = style(20.0);
+        font_relative.line_height = LineHeight::FontSizeRelative(3.0);
+        let font_relative_layout = cx.layout(text, &font_relative, None);
+
+        assert!(
+            font_relative_layout.size().height > metrics_layout.size().height,
+            "a 3x font-size-relative line height should be taller than the \
+             font's natural (1.0 metrics-relative) line height"
+        );
+    }
+
+    #[test]
+    fn letter_spacing_widens_the_layout() {
+        let mut cx = TextContext::new();
+        let text = "Hello";
+
+        let narrow = style(24.0);
+        let narrow_layout = cx.layout(text, &narrow, None);
+
+        let mut wide = style(24.0);
+        wide.letter_spacing = 20.0;
+        let wide_layout = cx.layout(text, &wide, None);
+
+        assert!(
+            wide_layout.size().width > narrow_layout.size().width,
+            "extra letter-spacing should widen the laid-out line: {:?} vs {:?}",
+            narrow_layout.size(),
+            wide_layout.size()
+        );
+    }
+
+    #[test]
+    fn bold_weight_selects_a_different_width_layout_than_regular() {
+        let mut cx = TextContext::new();
+        let text = "Hello from ForgeKit";
+
+        let mut regular = style(28.0);
+        regular.weight = FontWeight::REGULAR;
+        let regular_layout = cx.layout(text, &regular, None);
+
+        let mut bold = style(28.0);
+        bold.weight = FontWeight::BOLD;
+        let bold_layout = cx.layout(text, &bold, None);
+
+        assert_ne!(
+            regular_layout.size().width,
+            bold_layout.size().width,
+            "a bold weight should select different (typically wider) glyphs \
+             on a system font that supports weight variation"
+        );
+    }
+
+    #[test]
+    fn italic_style_lays_out_without_error() {
+        let mut cx = TextContext::new();
+        let mut italic = style(24.0);
+        italic.style = FontStyle::Italic;
+        let layout = cx.layout("Hello", &italic, None);
+        assert!(layout.size().width > 0.0, "italic text should still shape");
     }
 }

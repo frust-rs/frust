@@ -37,13 +37,15 @@
 use std::ops::Range;
 
 use kurbo::{Point, Rect, Size};
-use parley::{BoundingBox, GenericFamily, PlainEditor, StyleProperty};
+use parley::{BoundingBox, PlainEditor, StyleProperty};
 use peniko::Brush;
 
 use forgekit_scene::GlyphRun;
 
 use crate::context::TextContext;
-use crate::style::TextStyle;
+use crate::style::{
+    TextStyle, to_parley_family, to_parley_line_height, to_parley_style, to_parley_weight,
+};
 
 /// A single editing command applied to a [`TextEditor`].
 ///
@@ -149,16 +151,22 @@ pub struct TextEditor {
 impl TextEditor {
     /// Builds an empty single-line editor styled by `style`.
     ///
-    /// Font size comes from `style.size`; the default brush is
-    /// `style.color`; the family is the platform system UI font (matching
-    /// [`crate::TextContext::layout`]). No wrapping width is set — v1 is
-    /// single-line.
+    /// Every knob on `style` (family, weight, style, size, color,
+    /// letter-spacing, line-height) is applied as an edit-style default,
+    /// mirroring [`crate::TextContext::layout`]. No wrapping width is set —
+    /// v1 is single-line.
     pub fn new(style: &TextStyle) -> Self {
         let mut editor = PlainEditor::<Brush>::new(style.size);
         // Single-line v1: no wrapping. Multi-line is future work.
         editor.set_width(None);
         let styles = editor.edit_styles();
-        styles.insert(GenericFamily::SystemUi.into());
+        styles.insert(StyleProperty::FontFamily(to_parley_family(&style.family)));
+        styles.insert(StyleProperty::FontWeight(to_parley_weight(style.weight)));
+        styles.insert(StyleProperty::FontStyle(to_parley_style(style.style)));
+        styles.insert(StyleProperty::LetterSpacing(style.letter_spacing));
+        styles.insert(StyleProperty::LineHeight(to_parley_line_height(
+            style.line_height,
+        )));
         styles.insert(StyleProperty::Brush(Brush::Solid(style.color)));
         Self {
             editor,
@@ -404,6 +412,7 @@ pub fn utf16_to_byte(text: &str, utf16_idx: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::{FontStyle, FontWeight};
     use peniko::Color;
 
     fn style() -> TextStyle {
@@ -764,5 +773,43 @@ mod tests {
             let units = byte_to_utf16(text, text.len());
             assert_eq!(utf16_to_byte(text, units), text.len());
         }
+    }
+
+    // --- editor/context style parity (task: TextStyle expansion) ---
+
+    #[test]
+    fn editor_letter_spacing_widens_layout_like_context_layout() {
+        // TextEditor::new's edit-style defaults must apply the same
+        // letter-spacing TextContext::layout does (see forgekit_text::tests
+        // in lib.rs for the equivalent context-side assertion).
+        let narrow_style = TextStyle::new(24.0, Color::BLACK);
+        let (mut narrow_ed, mut narrow_cx) = (TextEditor::new(&narrow_style), TextContext::new());
+        narrow_ed.apply(EditOp::Insert("Hello".into()), &mut narrow_cx);
+        let narrow_width = narrow_ed.layout_size().width;
+
+        let mut wide_style = TextStyle::new(24.0, Color::BLACK);
+        wide_style.letter_spacing = 20.0;
+        let (mut wide_ed, mut wide_cx) = (TextEditor::new(&wide_style), TextContext::new());
+        wide_ed.apply(EditOp::Insert("Hello".into()), &mut wide_cx);
+        let wide_width = wide_ed.layout_size().width;
+
+        assert!(
+            wide_width > narrow_width,
+            "the editor's own layout should widen with extra letter-spacing \
+             the same way TextContext::layout's does: {narrow_width} vs {wide_width}"
+        );
+    }
+
+    #[test]
+    fn editor_applies_weight_and_style_edit_defaults_without_panicking() {
+        let mut style = TextStyle::new(24.0, Color::BLACK);
+        style.weight = FontWeight::BOLD;
+        style.style = FontStyle::Italic;
+        let (mut ed, mut cx) = (TextEditor::new(&style), TextContext::new());
+        ed.apply(EditOp::Insert("Hi".into()), &mut cx);
+        assert!(
+            ed.layout_size().width > 0.0,
+            "bold+italic edit-style defaults should still shape text"
+        );
     }
 }
