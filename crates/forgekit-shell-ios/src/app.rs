@@ -30,7 +30,9 @@
 
 use std::any::Any;
 use std::ffi::c_void;
+use std::time::Instant;
 
+use forgekit_core::FrameTime;
 use forgekit_core::event::{
     EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerPhase,
 };
@@ -81,6 +83,12 @@ pub struct IosAppHandle {
     /// per-CADisplayLink-frame retry storm; reset by a successful recreate
     /// ([`Self::set_surface`]).
     recreate_failures: u8,
+    /// The shell-owned monotonic epoch the per-frame [`FrameTime`] is measured
+    /// from. `forgekit-core` never reads a clock itself (spec §8: time enters from
+    /// the shell); this task threads an `Instant`-based placeholder — task 06
+    /// swaps in the real `CADisplayLink` timestamp at the one `frame()` call site
+    /// below.
+    epoch: Instant,
 }
 
 impl IosAppHandle {
@@ -109,6 +117,7 @@ impl IosAppHandle {
             scale,
             paused: false,
             recreate_failures: 0,
+            epoch: Instant::now(),
         }
     }
 
@@ -302,12 +311,17 @@ impl IosAppHandle {
             // HiDPI (spec task 08): lay out in logical pixels, then scale the
             // whole scene by the device pixel ratio for sharp glyphs.
             builder.push_transform(Affine::scale(scale));
+            // Shell-owned frame clock (spec §8: time enters from the shell, never
+            // `Instant::now()` inside `forgekit-core`). Placeholder derived from an
+            // `Instant` epoch this task — task 06 replaces this single expression
+            // with the `CADisplayLink` timestamp forwarded from Swift.
+            let frame_time = FrameTime::from_nanos(self.epoch.elapsed().as_nanos() as u64);
             // The paint pass returns a `needs_frame` continuation signal (spec's
             // v1 animation seam). This shell runs a continuous CADisplayLink loop
             // that already ticks the next frame every vsync, so the flag is
             // irrelevant here and deliberately dropped — unlike the desktop shell,
             // whose `ControlFlow::Wait` loop must honor it to keep animating.
-            let _ = self.app.paint(&mut builder);
+            let _ = self.app.paint(&mut builder, frame_time);
             builder.pop_transform();
         }
 

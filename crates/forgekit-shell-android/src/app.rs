@@ -11,7 +11,9 @@
 //! in `forgekit-shell-common`.
 
 use std::any::Any;
+use std::time::Instant;
 
+use forgekit_core::FrameTime;
 use forgekit_core::event::{
     EditingState, ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
     PointerEvent, PointerPhase,
@@ -49,6 +51,12 @@ pub struct AndroidAppHandle {
     /// The acquired window backing the current surface. Dropped after `renderer`
     /// (see the struct doc): its `Drop` calls `ANativeWindow_release`.
     window: Option<NativeWindow>,
+    /// The shell-owned monotonic epoch the per-frame [`FrameTime`] is measured
+    /// from. `forgekit-core` never reads a clock itself (spec §8: time enters from
+    /// the shell); this task threads an `Instant`-based placeholder — task 06
+    /// swaps in the real Choreographer frame-nanos value at the one `frame()` call
+    /// site below.
+    epoch: Instant,
 }
 
 impl AndroidAppHandle {
@@ -76,6 +84,7 @@ impl AndroidAppHandle {
             physical,
             scale,
             window: Some(window),
+            epoch: Instant::now(),
         }
     }
 
@@ -233,12 +242,17 @@ impl AndroidAppHandle {
             // HiDPI (spec task 08): lay out in logical pixels, then scale the
             // whole scene by the device pixel ratio for sharp glyphs.
             builder.push_transform(Affine::scale(scale));
+            // Shell-owned frame clock (spec §8: time enters from the shell, never
+            // `Instant::now()` inside `forgekit-core`). Placeholder derived from an
+            // `Instant` epoch this task — task 06 replaces this single expression
+            // with the Choreographer frame-nanos value forwarded from Kotlin.
+            let frame_time = FrameTime::from_nanos(self.epoch.elapsed().as_nanos() as u64);
             // The paint pass returns a `needs_frame` continuation signal (spec's
             // v1 animation seam). This shell runs a continuous Choreographer loop
             // that already posts the next frame every tick, so the flag is
             // irrelevant here and deliberately dropped — unlike the desktop shell,
             // whose `ControlFlow::Wait` loop must honor it to keep animating.
-            let _ = self.app.paint(&mut builder);
+            let _ = self.app.paint(&mut builder, frame_time);
             builder.pop_transform();
         }
 

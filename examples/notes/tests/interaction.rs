@@ -20,8 +20,8 @@
 use std::any::Any;
 
 use forgekit_core::{
-    Component, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene, PointerButton,
-    PointerEvent, PointerPhase, RenderRoot, View,
+    Component, FrameTime, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene,
+    PointerButton, PointerEvent, PointerPhase, RenderRoot, View,
 };
 use forgekit_scene::GlyphRun;
 use forgekit_text::TextContext;
@@ -69,7 +69,7 @@ fn frame<V: View<AppState>>(
     let tcx_any: &mut dyn Any = tcx;
     root.layout_with_text(Size::new(W, H), tcx_any);
     let mut scene = RecScene::default();
-    root.paint(&mut scene);
+    root.paint(&mut scene, FrameTime::ZERO);
     scene
 }
 

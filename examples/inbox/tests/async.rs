@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use forgekit::{Axis, ComponentView, FlexView, component, keyed};
-use forgekit_core::{PaintScene, RenderRoot, View};
+use forgekit_core::{FrameTime, PaintScene, RenderRoot, View};
 use forgekit_reactive::{FrameWaker, ReactiveRuntime};
 use forgekit_scene::GlyphRun;
 use forgekit_text::TextContext;
@@ -67,7 +67,7 @@ fn frame<S: 'static, V: View<S>>(
     let tcx_any: &mut dyn Any = tcx;
     root.layout_with_text(Size::new(W, H), tcx_any);
     let mut scene = RecScene::default();
-    root.paint(&mut scene);
+    root.paint(&mut scene, FrameTime::ZERO);
     scene
 }
 

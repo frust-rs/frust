@@ -30,6 +30,7 @@
 //!   per-component reactive `Owner`, and a state boundary the outer view tree
 //!   never sees.
 
+pub mod anim;
 pub mod app;
 pub mod component;
 pub mod event;
@@ -39,6 +40,9 @@ pub mod tree;
 pub mod view;
 pub mod widget;
 
+pub use anim::{
+    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
+};
 pub use app::RenderRoot;
 pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{

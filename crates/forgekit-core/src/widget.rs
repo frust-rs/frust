@@ -14,6 +14,7 @@ use forgekit_scene::{GlyphRun, SceneBuilder};
 use kurbo::{Point, Rect, Size};
 use peniko::{Brush, Color};
 
+use crate::anim::FrameTime;
 use crate::event::{EventCtx, EventResult, ImeState, InputEvent};
 use crate::layout::BoxConstraints;
 
@@ -304,10 +305,21 @@ pub struct PaintCtx {
     /// the widget's `event()` — is finally observed here (see
     /// [`PaintCtx::has_focus`]).
     has_focus: bool,
+    /// The shell-provided time for this frame, threaded from
+    /// [`crate::app::RenderRoot::paint`] and seeded into each child by
+    /// [`ChildPod::paint_child`]. Defaults to [`FrameTime::ZERO`] (the "no time
+    /// available" fallback) for a paint context built without a clock (leaf unit
+    /// tests, recorder scenes). A widget differences it against a stored earlier
+    /// value to advance animation state — see [`PaintCtx::frame_time`].
+    frame_time: FrameTime,
 }
 
 impl PaintCtx {
     /// Create a paint context for a widget at `origin` with `size`.
+    ///
+    /// The frame time defaults to [`FrameTime::ZERO`]; the render root seeds the
+    /// real shell clock via [`PaintCtx::set_frame_time`] before painting the root
+    /// widget, and it flows to children through [`ChildPod::paint_child`].
     pub fn new(origin: Point, size: Size) -> Self {
         Self {
             origin,
@@ -315,6 +327,7 @@ impl PaintCtx {
             needs_frame: false,
             ime_state: None,
             has_focus: false,
+            frame_time: FrameTime::ZERO,
         }
     }
 
@@ -348,6 +361,28 @@ impl PaintCtx {
     /// of [`EventCtx::set_has_focus`].
     pub(crate) fn set_has_focus(&mut self, has_focus: bool) {
         self.has_focus = has_focus;
+    }
+
+    /// The shell-provided time for this frame (monotonic, arbitrary origin).
+    ///
+    /// This is the single shared clock the whole paint pass sees: seeded from the
+    /// shell at the root ([`crate::app::RenderRoot::paint`]) and threaded
+    /// unchanged into every child by [`ChildPod::paint_child`], so sibling and
+    /// nested animations advance against one consistent timestamp. A widget may
+    /// only *difference* it against an earlier `frame_time` it stored (via
+    /// [`FrameTime::saturating_sub`] / [`crate::anim::AnimationController::advance`]),
+    /// never interpret it absolutely — the origin varies per shell. Defaults to
+    /// [`FrameTime::ZERO`] when no clock was threaded in (leaf unit tests).
+    pub fn frame_time(&self) -> FrameTime {
+        self.frame_time
+    }
+
+    /// Seed the shell-provided frame time. Called by
+    /// [`crate::app::RenderRoot::paint`] at the root and by
+    /// [`ChildPod::paint_child`] for each child, mirroring how `has_focus` is
+    /// threaded.
+    pub(crate) fn set_frame_time(&mut self, frame_time: FrameTime) {
+        self.frame_time = frame_time;
     }
 
     /// Signal that this paint advanced animation state and needs to be
@@ -583,6 +618,9 @@ impl ChildPod {
     pub fn paint_child(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let child_origin = ctx.origin() + self.origin.to_vec2();
         let mut child_ctx = PaintCtx::new(child_origin, self.size);
+        // Thread the shared shell clock down unchanged so every widget in the
+        // frame advances animations against one consistent timestamp.
+        child_ctx.set_frame_time(ctx.frame_time());
         // Thread the pod's recorded focus path into paint (the mirror of how
         // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
         // observes a container-routed blur that never reached its `event()`.

@@ -634,7 +634,7 @@ impl Widget for TextInputWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgekit_core::{KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot};
+    use forgekit_core::{FrameTime, KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot};
     use std::any::Any;
 
     #[derive(Default)]
@@ -1015,14 +1015,14 @@ mod tests {
         let mut root = harness(&mut state);
         let mut sink = NullScene;
         assert!(
-            !root.paint(&mut sink).needs_frame,
+            !root.paint(&mut sink, FrameTime::ZERO).needs_frame,
             "an unfocused field is at rest"
         );
 
         // Once focused, paint pumps the blink and asks for the next frame.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         assert!(
-            root.paint(&mut sink).needs_frame,
+            root.paint(&mut sink, FrameTime::ZERO).needs_frame,
             "a focused field blinks its caret"
         );
     }
@@ -1062,7 +1062,7 @@ mod tests {
         state.value.clear();
         root.rebuild(&mut app_logic, &mut state);
         root.layout(Size::new(300.0, 200.0));
-        root.paint(&mut sink);
+        root.paint(&mut sink, FrameTime::ZERO);
 
         let ime = root
             .ime_state()
@@ -1138,7 +1138,7 @@ mod tests {
         // Legs 2 & 3 — a subsequent paint must NOT resurrect the cleared IME
         // surface, and must report the tree at rest (no stale caret-blink frame).
         let mut sink = NullScene;
-        let outcome = root.paint(&mut sink);
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
         assert!(
             root.ime_state().is_none(),
             "paint must not republish the cleared IME surface (F1 resurrection)"
@@ -1194,7 +1194,7 @@ mod tests {
         // whole subtree (ancestor-composed seeding), so the stale deep flag
         // cannot re-arm the caret blink or republish the IME surface.
         let mut sink = NullScene;
-        let outcome = root.paint(&mut sink);
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
         assert!(
             root.ime_state().is_none(),
             "deep-nested stale focus flag must not resurrect the IME surface"

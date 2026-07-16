@@ -21,8 +21,8 @@ use std::any::Any;
 
 use counter::{AppState, BASE_ROWS, CounterApp, EXTRA_ROWS};
 use forgekit_core::{
-    Component, InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase, RenderRoot,
-    ScrollDelta, View,
+    Component, FrameTime, InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase,
+    RenderRoot, ScrollDelta, View,
 };
 use forgekit_scene::GlyphRun;
 use forgekit_text::TextContext;
@@ -70,7 +70,7 @@ fn frame<V: View<AppState>>(
 /// (e.g. a scroll offset change) without a state round-trip.
 fn paint<V: View<AppState>>(root: &mut RenderRoot<AppState, V>) -> RecScene {
     let mut scene = RecScene::default();
-    root.paint(&mut scene);
+    root.paint(&mut scene, FrameTime::ZERO);
     scene
 }
 

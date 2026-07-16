@@ -17,6 +17,7 @@ use std::any::Any;
 
 use kurbo::{Point, Size};
 
+use crate::anim::FrameTime;
 use crate::event::{EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerPhase};
 use crate::layout::BoxConstraints;
 use crate::tree::{WidgetPod, WidgetTree};
@@ -220,12 +221,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// [`PaintOutcome::needs_frame`], which the shell honors by scheduling the next
     /// frame (desktop `window.request_redraw()`; the mobile continuous loops
     /// already do so). Mirrors how [`RenderRoot::event`] surfaces `needs_redraw`.
-    pub fn paint(&mut self, scene: &mut dyn PaintScene) -> PaintOutcome {
+    ///
+    /// `frame_time` is the shell's shared monotonic clock for this frame (spec §8:
+    /// time enters `forgekit-core` from the shell, never `Instant::now()` here). It
+    /// is seeded onto the root [`PaintCtx`] and threaded unchanged to every child
+    /// ([`crate::widget::ChildPod::paint_child`]), so an animating widget advances
+    /// against one consistent timestamp — see [`PaintCtx::frame_time`].
+    pub fn paint(&mut self, scene: &mut dyn PaintScene, frame_time: FrameTime) -> PaintOutcome {
         let Some(root_id) = self.root_id else {
             return PaintOutcome::default();
         };
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
+            // Seed the shared shell clock so the whole paint pass sees one time.
+            ctx.set_frame_time(frame_time);
             // Seed the root widget's paint-time focus from the cached focus path
             // so a leaf-root editable observes its own focus; deeper focus is
             // threaded per-pod by `ChildPod::paint_child`.
@@ -507,14 +516,14 @@ mod tests {
         root.layout(Size::new(200.0, 200.0));
 
         let mut scene = RecordingScene::default();
-        root.paint(&mut scene);
+        root.paint(&mut scene, FrameTime::ZERO);
         assert_eq!(scene.texts, vec![(Point::ZERO, "one".to_string())]);
 
         // Change data, rebuild, repaint -> new text.
         state.label = "two".to_string();
         root.rebuild(&mut app_logic, &mut state);
         let mut scene2 = RecordingScene::default();
-        root.paint(&mut scene2);
+        root.paint(&mut scene2, FrameTime::ZERO);
         assert_eq!(scene2.texts, vec![(Point::ZERO, "two".to_string())]);
     }
 
@@ -556,14 +565,71 @@ mod tests {
         still.rebuild(&mut app_logic, &mut state);
         still.layout(Size::new(100.0, 100.0));
         let mut scene = RecordingScene::default();
-        assert!(!still.paint(&mut scene).needs_frame);
+        assert!(!still.paint(&mut scene, FrameTime::ZERO).needs_frame);
 
         // An animating root bubbles request_frame out as PaintOutcome::needs_frame.
         let mut anim: RenderRoot<AppState, FrameView> = RenderRoot::new();
         anim.rebuild(&mut |_s: &mut AppState| FrameView, &mut state);
         anim.layout(Size::new(100.0, 100.0));
         let mut scene2 = RecordingScene::default();
-        assert!(anim.paint(&mut scene2).needs_frame);
+        assert!(anim.paint(&mut scene2, FrameTime::ZERO).needs_frame);
+    }
+
+    /// A root widget that records the `frame_time` its paint observed, so a test
+    /// can prove the shell-injected clock reaches `PaintCtx::frame_time()`.
+    struct ClockWidget {
+        seen: std::rc::Rc<std::cell::Cell<Option<FrameTime>>>,
+    }
+    impl crate::widget::Widget for ClockWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.seen.set(Some(ctx.frame_time()));
+        }
+    }
+
+    struct ClockView {
+        seen: std::rc::Rc<std::cell::Cell<Option<FrameTime>>>,
+    }
+    impl View<AppState> for ClockView {
+        type Element = ClockWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ClockWidget {
+            ClockWidget {
+                seen: self.seen.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ClockWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn paint_threads_injected_frame_time_to_widget() {
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+        let mut root: RenderRoot<AppState, ClockView> = RenderRoot::new();
+        let mut state = AppState::default();
+        let seen_for_view = seen.clone();
+        root.rebuild(
+            &mut move |_s: &mut AppState| ClockView {
+                seen: seen_for_view.clone(),
+            },
+            &mut state,
+        );
+        root.layout(Size::new(100.0, 100.0));
+
+        // Two paints with distinct injected times: the widget observes each one,
+        // proving the clock is shell-fed (not read from an ambient `Instant`).
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::from_nanos(1_000));
+        assert_eq!(seen.get(), Some(FrameTime::from_nanos(1_000)));
+        root.paint(&mut scene, FrameTime::from_nanos(17_000));
+        assert_eq!(seen.get(), Some(FrameTime::from_nanos(17_000)));
     }
 
     // --- Event-pass fixtures: a widget that mutates state on pointer-down. ---

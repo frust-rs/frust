@@ -9,6 +9,7 @@
 
 use std::any::Any;
 
+use forgekit_core::anim::FrameTime;
 use forgekit_core::event::{EditingState, EventOutcome, ImeEvent, ImeState, InputEvent};
 use forgekit_core::view::View;
 use forgekit_core::{PaintOutcome, PaintScene, RenderRoot};
@@ -28,14 +29,19 @@ pub trait AppTree {
     /// Lay the tree out against a logical (density-independent) size, threading
     /// the shell-owned `TextContext` down type-erased (spec §10.3).
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any);
-    /// Paint the tree into a scene builder.
+    /// Paint the tree into a scene builder at the shell-provided `frame_time`.
+    ///
+    /// `frame_time` is the shell's shared monotonic clock for this frame, threaded
+    /// through to every animating widget as [`forgekit_core::widget::PaintCtx::frame_time`]
+    /// (spec §8: time enters from the shell, never `Instant::now()` inside the
+    /// framework).
     ///
     /// Returns a [`PaintOutcome`] whose `needs_frame` is set when a widget
     /// advanced animation state during paint and wants another frame (spec's v1
     /// animation seam). The desktop shell honors it with `window.request_redraw()`;
     /// the mobile shells' continuous Choreographer/`CADisplayLink` loops already
     /// produce the next frame and may ignore it.
-    fn paint(&mut self, scene: &mut dyn PaintScene) -> PaintOutcome;
+    fn paint(&mut self, scene: &mut dyn PaintScene, frame_time: FrameTime) -> PaintOutcome;
     /// Deliver one platform input event to the retained tree (spec §9).
     ///
     /// Delegates to [`RenderRoot::event`], threading the erased `State` the same
@@ -84,8 +90,8 @@ where
         self.root.layout_with_text(logical, text_ctx);
     }
 
-    fn paint(&mut self, scene: &mut dyn PaintScene) -> PaintOutcome {
-        self.root.paint(scene)
+    fn paint(&mut self, scene: &mut dyn PaintScene, frame_time: FrameTime) -> PaintOutcome {
+        self.root.paint(scene, frame_time)
     }
 
     fn event(&mut self, event: &InputEvent) -> EventOutcome {

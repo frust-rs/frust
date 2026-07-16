@@ -9,8 +9,10 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
+use forgekit_core::FrameTime;
 use forgekit_core::RenderRoot;
 use forgekit_core::event::{
     ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent,
@@ -95,6 +97,7 @@ where
         // window exists, and driven through the §8.1 lifecycle from there.
         renderer: SurfaceRenderer::new(),
         fatal: None,
+        epoch: Instant::now(),
     };
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
@@ -301,6 +304,12 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// only stops the loop (it can't return an `Err`), so the error is stashed
     /// here and re-raised by `run_desktop` once `run_app` returns.
     fatal: Option<anyhow::Error>,
+    /// The shell-owned monotonic epoch the per-frame [`FrameTime`] is measured
+    /// from. `forgekit-core` never reads a clock itself (spec §8: time enters from
+    /// the shell) — the desktop shell samples `epoch.elapsed()` at paint and hands
+    /// the nanosecond delta to [`RenderRoot::paint`]. Task 06 leaves this the
+    /// desktop clock; only the mobile shells swap in a platform vsync timestamp.
+    epoch: Instant,
 }
 
 impl<State, Logic, V> ShellHandler<State, Logic, V>
@@ -592,10 +601,15 @@ where
                 self.root.layout_with_text(logical, text_ctx);
 
                 self.scene.reset();
+                // Sample the shell-owned monotonic clock once per frame and hand
+                // it to paint; every animating widget differences it against its
+                // own stored time (task 06 swaps this single expression for a
+                // platform vsync timestamp on mobile).
+                let frame_time = FrameTime::from_nanos(self.epoch.elapsed().as_nanos() as u64);
                 let paint_outcome = {
                     let mut builder = SceneBuilder::new(&mut self.scene);
                     builder.push_transform(Affine::scale(scale));
-                    let outcome = self.root.paint(&mut builder);
+                    let outcome = self.root.paint(&mut builder, frame_time);
                     builder.pop_transform();
                     outcome
                 };
