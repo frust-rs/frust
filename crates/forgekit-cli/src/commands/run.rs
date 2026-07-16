@@ -34,8 +34,7 @@ pub fn run(build_args: BuildArgs, device_id: Option<String>, verbose: bool) -> R
 
 /// Dispatches a resolved [`Device`] to its platform's mode/flavor-aware
 /// drive pipeline (spec §12.4's Android path, task 66's mode-aware Android
-/// and iOS-simulator paths); a physical iOS device has no signing pipeline
-/// yet, so it errors with a Phase 5 note instead (task 67).
+/// and iOS-simulator paths, task 67's signed physical-iOS-device path).
 fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) -> Result<u8> {
     match (device.platform, device.kind) {
         (Platform::Android, _) => run_android(runner, device, info),
@@ -44,7 +43,8 @@ fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) 
             ios_run::run(runner, &cwd, device, info)
         }
         (Platform::Ios, Kind::PhysicalDevice) => {
-            bail!("iOS physical-device run lands in Phase 5 (requires the signing pipeline)")
+            let cwd = std::env::current_dir().context("reading current directory")?;
+            ios_run::run_physical(runner, &cwd, device, info)
         }
         (Platform::Ios, Kind::Emulator) => {
             unreachable!("iOS devices are never discovered as Kind::Emulator")
@@ -111,6 +111,7 @@ mod tests {
             name: "Ed's iPhone".to_string(),
             platform: Platform::Ios,
             kind: Kind::PhysicalDevice,
+            os_version: Some("17.5.1".to_string()),
         }
     }
 
@@ -118,30 +119,21 @@ mod tests {
         BuildInfo::from_args(BuildArgs::default(), BuildMode::Debug).unwrap()
     }
 
+    /// The Phase-5 sentinel `run_on_device` used to bail a physical iOS
+    /// device with is gone (task 67 wires `ios_run::run_physical` in
+    /// instead). The test process's cwd is the `forgekit-cli` crate root,
+    /// not a generated ForgeKit project, so `run_on_device` now fails at
+    /// `ios_run::run_physical`'s own `project::detect` step instead —
+    /// proving dispatch reaches the real pipeline rather than the removed
+    /// sentinel. The pipeline's own behavior (iOS-17+ gate, build/install/
+    /// launch argv, failure hints) is covered by `ios_run::mod`'s tests
+    /// against a fixture project directory.
     #[test]
-    fn run_on_device_bails_with_phase5_note_for_physical_ios_device() {
+    fn run_on_device_delegates_physical_ios_device_to_ios_run_run_physical() {
         let runner = FakeProcessRunner::new();
         let err = run_on_device(&runner, &ios_physical_device(), &debug_info()).unwrap_err();
-        assert!(err.to_string().contains("lands in Phase 5"), "{err}");
-        assert!(err.to_string().contains("signing pipeline"), "{err}");
-    }
-
-    #[test]
-    fn physical_ios_sentinel_fires_regardless_of_build_mode() {
-        // The physical-iOS sentinel (task 67 removes it) is independent of
-        // `--release`/`--profile`/`--debug` — task 66 only unblocks the
-        // Android and iOS-*simulator* run paths.
-        let runner = FakeProcessRunner::new();
-        let info = BuildInfo::from_args(
-            BuildArgs {
-                release: true,
-                ..Default::default()
-            },
-            BuildMode::Debug,
-        )
-        .unwrap();
-        let err = run_on_device(&runner, &ios_physical_device(), &info).unwrap_err();
-        assert!(err.to_string().contains("lands in Phase 5"), "{err}");
-        assert!(err.to_string().contains("signing pipeline"), "{err}");
+        let message = err.to_string();
+        assert!(!message.contains("lands in Phase 5"), "{message}");
+        assert!(message.contains("forgekit.toml"), "{message}");
     }
 }

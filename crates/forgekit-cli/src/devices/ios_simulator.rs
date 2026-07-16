@@ -56,6 +56,7 @@ fn parse_simctl_list(stdout: &str) -> Result<DiscoveryResult> {
                     name: device.name.clone(),
                     platform: Platform::Ios,
                     kind: Kind::Simulator,
+                    os_version: None,
                 });
             }
         }

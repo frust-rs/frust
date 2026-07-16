@@ -55,7 +55,7 @@ fn tmp_json_path() -> PathBuf {
 }
 
 /// `xcrun devicectl list devices --json-output <file>` JSON structure:
-/// `{"result": {"devices": [{identifier, deviceProperties: {name}, connectionProperties: {tunnelState}}]}}`.
+/// `{"result": {"devices": [{identifier, deviceProperties: {name, osVersionNumber}, connectionProperties: {tunnelState}}]}}`.
 #[derive(Debug, Deserialize)]
 struct DevicectlOutput {
     result: DevicectlResult,
@@ -78,6 +78,11 @@ struct DevicectlDevice {
 #[derive(Debug, Deserialize)]
 struct DevicectlDeviceProperties {
     name: String,
+    /// The device's OS version (e.g. `"17.5.1"`), gating `ios_run::run_physical`'s
+    /// devicectl-requires-iOS-17+ check (task 67). Absent on older `devicectl`
+    /// output shapes, so this stays optional rather than a hard parse failure.
+    #[serde(rename = "osVersionNumber", default)]
+    os_version_number: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +111,7 @@ fn parse_devicectl_output(content: &str) -> Result<DiscoveryResult> {
             name: device.device_properties.name,
             platform: Platform::Ios,
             kind: Kind::PhysicalDevice,
+            os_version: device.device_properties.os_version_number,
         });
     }
 
@@ -133,6 +139,18 @@ mod tests {
         }
     }"#;
 
+    const FIXTURE_WITH_VERSION: &str = r#"{
+        "result": {
+            "devices": [
+                {
+                    "identifier": "00008110-000A2D3A3C68801E",
+                    "deviceProperties": { "name": "Ed's iPhone", "osVersionNumber": "17.5.1" },
+                    "connectionProperties": { "tunnelState": "connected" }
+                }
+            ]
+        }
+    }"#;
+
     #[test]
     fn parses_only_connected_devices() {
         let result = parse_devicectl_output(FIXTURE).unwrap();
@@ -140,7 +158,15 @@ mod tests {
         assert_eq!(result.devices[0].name, "Ed's iPhone");
         assert_eq!(result.devices[0].kind, Kind::PhysicalDevice);
         assert_eq!(result.devices[0].platform, Platform::Ios);
+        assert_eq!(result.devices[0].os_version, None);
         assert!(result.notes.iter().any(|n| n.contains("Old iPad")));
+    }
+
+    #[test]
+    fn parses_os_version_number_when_present() {
+        let result = parse_devicectl_output(FIXTURE_WITH_VERSION).unwrap();
+        assert_eq!(result.devices.len(), 1);
+        assert_eq!(result.devices[0].os_version.as_deref(), Some("17.5.1"));
     }
 
     #[test]

@@ -32,6 +32,11 @@ pub struct Device {
     pub name: String,
     pub platform: Platform,
     pub kind: Kind,
+    /// The device's OS version, if trivially available from its discoverer
+    /// (e.g. `devicectl`'s `osVersionNumber` for a physical iOS device,
+    /// parsed by `ios_run::run_physical`'s iOS-17+ gate — task 67). `None`
+    /// when the discoverer doesn't surface one (Android, iOS Simulator).
+    pub os_version: Option<String>,
 }
 
 /// Result of a single discoverer's run: devices found, plus human-readable

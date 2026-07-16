@@ -238,6 +238,7 @@ mod tests {
             name: name.to_string(),
             platform: Platform::Android,
             kind: Kind::Emulator,
+            os_version: None,
         }
     }
 
@@ -247,6 +248,7 @@ mod tests {
             name: name.to_string(),
             platform: Platform::Ios,
             kind: Kind::Simulator,
+            os_version: None,
         }
     }
 
@@ -417,6 +419,7 @@ mod tests {
                 name: "Pixel 7".to_string(),
                 platform: Platform::Android,
                 kind: Kind::Emulator,
+                os_version: None,
             }
         }
 

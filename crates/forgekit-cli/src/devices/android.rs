@@ -75,6 +75,7 @@ fn parse_adb_devices(stdout: &str) -> DiscoveryResult {
             name,
             platform: Platform::Android,
             kind,
+            os_version: None,
         });
     }
 
