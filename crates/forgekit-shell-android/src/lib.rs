@@ -48,12 +48,13 @@ pub mod jni_glue;
 // app only needs to depend on `forgekit` (which re-exports `android_app!`), never
 // on `jni`/`forgekit-shell-common`/`forgekit-shell-android` directly. The
 // platform-agnostic erasure lives in `forgekit-shell-common`; it is surfaced
-// through `$crate` here so the macro's `$crate::new_boxed_app`/`$crate::AppTree`
-// paths resolve. Android-only: the macro body is never expanded off-Android (its
-// call site is `#[cfg(target_os = "android")]`).
+// through `$crate` here so the macro's `$crate::new_boxed_app`/
+// `$crate::new_boxed_app_with`/`$crate::AppTree` paths resolve. Android-only: the
+// macro body is never expanded off-Android (its call site is
+// `#[cfg(target_os = "android")]`).
 #[cfg(target_os = "android")]
 #[doc(hidden)]
-pub use forgekit_shell_common::{AppTree, new_boxed_app};
+pub use forgekit_shell_common::{AppTree, new_boxed_app_with};
 
 /// Re-exported `jni` types used verbatim by [`android_app!`]'s expansion.
 ///
@@ -78,12 +79,15 @@ pub mod __jni {
 /// Stamps out the eleven `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
 /// the Kotlin `ForgeKitSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
-/// view tree from `$state_ty::default()` and `$app_logic`; the rest operate on
-/// the opaque `jlong` handle. The three IME exports (`nativeImeApply`,
+/// view tree from a state factory and `$app_logic`; the rest operate on the
+/// opaque `jlong` handle. The three IME exports (`nativeImeApply`,
 /// `nativeImeState`, `nativeImeAction`) carry the Phase 4B soft-keyboard
 /// state-sync contract (spec §14 Phase 4): Kotlin pushes a whole editing state in
 /// (`nativeImeApply`), pulls the reconciled state back out (`nativeImeState`), and
-/// forwards an editor action (Enter) via `nativeImeAction`.
+/// forwards an editor action (Enter) via `nativeImeAction`. `nativeInit` also
+/// initializes the process-wide [`forgekit_reactive::ReactiveRuntime`] (see
+/// [`jni_glue::native_init`]) before the state factory runs, so a `State`'s own
+/// construction may already create signals/controllers.
 ///
 /// The macro is defined on every target but only *expands* to real code where
 /// its call site is gated, e.g. in the generated `src/lib.rs`:
@@ -93,11 +97,25 @@ pub mod __jni {
 /// forgekit::android_app!(AppState, app_logic);
 /// ```
 ///
-/// `$state_ty` must implement [`Default`]; `$app_logic` is a
-/// `FnMut(&mut State) -> impl View<State>`.
+/// Two forms:
+/// - `android_app!($state_ty, $app_logic)` — `$state_ty` must implement
+///   [`Default`]; the state is built via `<$state_ty as Default>::default`.
+/// - `android_app!($state_ty, $state_init, $app_logic)` — `$state_init` is a
+///   `FnOnce() -> $state_ty` factory (e.g. a closure or a bare function path
+///   like `MyState::new`), for a `State` that doesn't implement `Default`. The
+///   2-arg form delegates to this one.
+///
+/// `$app_logic` is a `FnMut(&mut State) -> impl View<State>`.
 #[macro_export]
 macro_rules! android_app {
     ($state_ty:ty, $app_logic:expr $(,)?) => {
+        $crate::android_app!(
+            $state_ty,
+            <$state_ty as ::core::default::Default>::default,
+            $app_logic
+        );
+    };
+    ($state_ty:ty, $state_init:expr, $app_logic:expr $(,)?) => {
         /// JNI `nativeInit`: create the native handle for one surface.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeInit<'local>(
@@ -107,10 +125,7 @@ macro_rules! android_app {
             scale: $crate::__jni::jfloat,
         ) -> $crate::__jni::jlong {
             $crate::jni_glue::native_init(env, surface, scale, || {
-                $crate::new_boxed_app::<$state_ty, _, _>(
-                    <$state_ty as ::core::default::Default>::default(),
-                    $app_logic,
-                )
+                $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $app_logic)
             })
         }
 

@@ -193,6 +193,13 @@ impl AndroidAppHandle {
     /// the machine has already dropped the surface; recovery waits for the next
     /// `surfaceChanged`/`surfaceCreated` rather than recreating mid-frame.
     pub(crate) fn frame(&mut self) {
+        // Pump the reactive runtime's local task queue BEFORE the surface-ready
+        // gate below: a controller-driven `spawn_local` task must keep draining
+        // every Choreographer tick even while the surface is torn down (e.g.
+        // mid-rotation) or not yet created, not just once it's ready — otherwise
+        // local tasks stall through surface churn.
+        crate::jni_glue::pump_reactive_runtime();
+
         if self.phase() != SurfacePhase::SurfaceReady {
             return;
         }

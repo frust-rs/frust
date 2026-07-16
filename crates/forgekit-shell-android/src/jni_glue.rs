@@ -26,10 +26,26 @@ use jni::sys::{jfloat, jint, jlong, jstring};
 use ndk::native_window::NativeWindow;
 
 use forgekit_core::event::{EditingState, ImeState};
+use forgekit_reactive::ReactiveRuntime;
 use forgekit_shell_common::{AppTree, guard};
 
 use crate::app::AndroidAppHandle;
 use crate::ffi_support::{ImeJsonState, build_ime_state_json, normalize_ime_indices};
+
+/// Pump the process-wide [`ReactiveRuntime`]'s UI-thread local task queue, if
+/// the runtime has been initialized (it may not be, e.g. a JNI call arriving
+/// before the first `nativeInit`). Cheap when the queue is empty; called at the
+/// top of every entry point that may observe controller-driven state (touch,
+/// the IME trio) so their reads see the latest reconciled state, and — inside
+/// [`crate::app::AndroidAppHandle::frame`] — before that function's
+/// `SurfacePhase::SurfaceReady` early-return, so local tasks keep draining
+/// through surface churn (a torn-down/not-yet-ready surface) instead of
+/// stalling.
+pub(crate) fn pump_reactive_runtime() {
+    if let Some(rt) = ReactiveRuntime::get() {
+        rt.pump_local();
+    }
+}
 
 /// Initialise `android_logger` exactly once per process, so `log::*` from any
 /// crate in the graph reaches logcat under the `forgekit` tag.
@@ -144,6 +160,23 @@ fn create_handle(
     })
     .context("forgekit-shell-android: failed to create Android render surface")?;
 
+    // Process-once (the runtime's own `OnceLock` provides that property; a
+    // repeat call — e.g. an activity recreated in the same process — just
+    // re-marks the calling thread as the UI thread and swaps in a fresh no-op
+    // waker). Must run BEFORE `make_app()`: a `State`'s own construction (a
+    // future `Component::init()`) may create signals/controllers that need the
+    // runtime already installed.
+    //
+    // `init` claims the *calling* thread as the UI thread for `spawn_local`.
+    // Every JNI call (including a `nativeInit` after activity recreation)
+    // arrives on the same JVM main thread that invoked `nativeInit` the first
+    // time, so re-init here always runs on the thread already claimed — safe by
+    // construction, not by accident.
+    ReactiveRuntime::init(std::sync::Arc::new(|| {
+        // No-op: Choreographer already posts every frame regardless, so there
+        // is nothing for `spawn_local`'s wake-up to nudge on Android.
+    }));
+
     let app = make_app();
     let handle = AndroidAppHandle::new(render_cx, renderer, window, physical, scale, app);
 
@@ -237,6 +270,7 @@ pub fn native_on_frame(handle: jlong, _frame_time_nanos: jlong) {
 /// only the primary pointer.
 pub fn native_on_touch(handle: jlong, action: jint, x: jfloat, y: jfloat) {
     guard("nativeOnTouch", (), || {
+        pump_reactive_runtime();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             let phase = crate::ffi_support::touch_phase_from_action(action);
@@ -299,6 +333,7 @@ pub fn native_ime_apply(
     comp_ext: jint,
 ) {
     guard("nativeImeApply", (), || {
+        pump_reactive_runtime();
         // Read the Java string first (releases the `env` borrow before we touch
         // the handle); an unreadable/`null` string falls back to empty.
         let text = env
@@ -332,6 +367,7 @@ pub fn native_ime_apply(
 /// keyboard) rather than null.
 pub fn native_ime_state(mut env: EnvUnowned, handle: jlong) -> jstring {
     guard("nativeImeState", std::ptr::null_mut(), || {
+        pump_reactive_runtime();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         let Some(app) = (unsafe { handle_mut(handle) }) else {
             return std::ptr::null_mut();
@@ -352,6 +388,7 @@ pub fn native_ime_state(mut env: EnvUnowned, handle: jlong) -> jstring {
 /// single-line "submit"). A missing handle is a no-op.
 pub fn native_ime_action(handle: jlong, action: jint) {
     guard("nativeImeAction", (), || {
+        pump_reactive_runtime();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.ime_action(action);
@@ -389,10 +426,12 @@ fn ime_state_to_json(state: Option<ImeState>) -> ImeJsonState {
     }
 }
 
-/// Compile-only smoke of [`crate::android_app!`]: exercises macro expansion on
-/// the Android target (`cargo check --target aarch64-linux-android`), covering
-/// acceptance criterion 2. Never invoked — its symbols would clash with a real
-/// app's, so it lives behind `cfg(test)` where no `cdylib` links it.
+/// Compile-only smoke of [`crate::android_app!`]'s 2-arg (`Default`-state) arm:
+/// exercises macro expansion on the Android target (`cargo check --target
+/// aarch64-linux-android`). Never invoked — its symbols would clash with a real
+/// app's (and with [`macro_expansion_factory`]'s below, both stamping out the
+/// same fixed JNI names), so it lives behind `cfg(test)`, which is never linked
+/// into a `cdylib`.
 #[cfg(test)]
 mod macro_expansion {
     #[derive(Default)]
@@ -406,4 +445,31 @@ mod macro_expansion {
     }
 
     crate::android_app!(TestState, test_logic);
+}
+
+/// Compile-only smoke of [`crate::android_app!`]'s 3-arg (state-factory) arm,
+/// covering acceptance criterion 2: a `State` with **no** `Default` impl —
+/// the only way to construct it is through the factory closure passed as the
+/// macro's second argument. See [`macro_expansion`] for why this lives in its
+/// own `cfg(test)`-only module (both expand to the same fixed JNI symbol names,
+/// which is fine for `cargo check` — the two are never actually linked
+/// together).
+#[cfg(test)]
+mod macro_expansion_factory {
+    struct NonDefaultState {
+        n: u32,
+    }
+
+    fn make_state() -> NonDefaultState {
+        NonDefaultState { n: 1 }
+    }
+
+    fn test_logic(
+        state: &mut NonDefaultState,
+    ) -> impl forgekit_core::view::View<NonDefaultState> + use<> {
+        state.n += 1;
+        forgekit_widgets::text(format!("{}", state.n))
+    }
+
+    crate::android_app!(NonDefaultState, make_state, test_logic);
 }
