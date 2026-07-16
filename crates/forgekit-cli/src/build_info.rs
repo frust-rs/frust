@@ -1,8 +1,8 @@
 //! `BuildInfo` funnel between clap flags and platform builders (spec §12.1/12.2).
 //!
-//! Not consumed by any command yet — `run`/`build` (spec Phase 2+) will
-//! `#[command(flatten)]` [`BuildArgs`] into their clap structs and call
-//! [`BuildInfo::from_args`].
+//! `run` (`Command::Run`, debug-default) and `build` (`Command::Build`,
+//! release-default) both `#[command(flatten)]` [`BuildArgs`] into their clap
+//! structs and call [`BuildInfo::from_args`] with their own `default_mode`.
 
 use std::collections::HashMap;
 
@@ -12,6 +12,41 @@ pub enum BuildMode {
     Debug,
     Profile,
     Release,
+}
+
+impl BuildMode {
+    /// The `cargo build`/`cargo ndk` flag(s) selecting this mode's profile:
+    /// `[]` (default `dev` profile) / `["--profile", "profile"]` /
+    /// `["--release"]`. Shared by `android_build`/`ios_build` (tasks 64/65)
+    /// so the mode → cargo-profile mapping has one source.
+    pub fn cargo_profile_arg(&self) -> &'static [&'static str] {
+        match self {
+            BuildMode::Debug => &[],
+            BuildMode::Profile => &["--profile", "profile"],
+            BuildMode::Release => &["--release"],
+        }
+    }
+
+    /// The Gradle build-type infix used in a task name (spec §12.5's
+    /// `assemble<Flavor><Mode>`/`bundle<Flavor><Mode>`), e.g.
+    /// `assemble{flavor}{Debug,Profile,Release}`.
+    pub fn gradle_infix(&self) -> &'static str {
+        match self {
+            BuildMode::Debug => "Debug",
+            BuildMode::Profile => "Profile",
+            BuildMode::Release => "Release",
+        }
+    }
+
+    /// The Xcode `-configuration` value for this mode (spec §12.6), before
+    /// any flavor/scheme suffix (`<Mode>-<Scheme>`) is appended.
+    pub fn xcode_configuration(&self) -> &'static str {
+        match self {
+            BuildMode::Debug => "Debug",
+            BuildMode::Profile => "Profile",
+            BuildMode::Release => "Release",
+        }
+    }
 }
 
 /// `#[command(flatten)]`-able flags shared by every command that produces a build.
@@ -32,6 +67,13 @@ pub struct BuildArgs {
     /// Compile-time app config, `KEY=VALUE`; repeatable.
     #[arg(long = "define", value_name = "KEY=VALUE")]
     pub defines: Vec<String>,
+    /// Semantic version string embedded in the build (e.g. `1.2.3`).
+    #[arg(long = "build-name", value_name = "VER")]
+    pub build_name: Option<String>,
+    /// Monotonically increasing build number embedded in the build; must be
+    /// `>= 1`.
+    #[arg(long = "build-number", value_name = "N")]
+    pub build_number: Option<u32>,
 }
 
 /// A single validated funnel between flag parsing and platform builders
@@ -41,6 +83,8 @@ pub struct BuildInfo {
     pub mode: BuildMode,
     pub flavor: Option<String>,
     pub defines: HashMap<String, String>,
+    pub build_name: Option<String>,
+    pub build_number: Option<u32>,
 }
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
@@ -49,6 +93,8 @@ pub enum BuildInfoError {
     ConflictingModes,
     #[error("invalid --define '{0}': expected KEY=VALUE with a non-empty key")]
     InvalidDefine(String),
+    #[error("invalid --build-number '{0}': must be >= 1")]
+    InvalidBuildNumber(u32),
 }
 
 impl BuildInfo {
@@ -82,10 +128,18 @@ impl BuildInfo {
             defines.insert(key.to_string(), value.to_string());
         }
 
+        if let Some(n) = args.build_number
+            && n == 0
+        {
+            return Err(BuildInfoError::InvalidBuildNumber(n));
+        }
+
         Ok(BuildInfo {
             mode,
             flavor: args.flavor,
             defines,
+            build_name: args.build_name,
+            build_number: args.build_number,
         })
     }
 }
@@ -185,5 +239,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(info.flavor.as_deref(), Some("paid"));
+    }
+
+    #[test]
+    fn build_name_and_number_pass_through() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                build_name: Some("1.2.3".into()),
+                build_number: Some(42),
+                ..args()
+            },
+            BuildMode::Release,
+        )
+        .unwrap();
+        assert_eq!(info.build_name.as_deref(), Some("1.2.3"));
+        assert_eq!(info.build_number, Some(42));
+    }
+
+    #[test]
+    fn rejects_zero_build_number() {
+        let err = BuildInfo::from_args(
+            BuildArgs {
+                build_number: Some(0),
+                ..args()
+            },
+            BuildMode::Release,
+        )
+        .unwrap_err();
+        assert_eq!(err, BuildInfoError::InvalidBuildNumber(0));
+    }
+
+    #[test]
+    fn cargo_profile_arg_matches_each_mode() {
+        assert_eq!(BuildMode::Debug.cargo_profile_arg(), &[] as &[&str]);
+        assert_eq!(
+            BuildMode::Profile.cargo_profile_arg(),
+            &["--profile", "profile"]
+        );
+        assert_eq!(BuildMode::Release.cargo_profile_arg(), &["--release"]);
+    }
+
+    #[test]
+    fn gradle_infix_matches_each_mode() {
+        assert_eq!(BuildMode::Debug.gradle_infix(), "Debug");
+        assert_eq!(BuildMode::Profile.gradle_infix(), "Profile");
+        assert_eq!(BuildMode::Release.gradle_infix(), "Release");
+    }
+
+    #[test]
+    fn xcode_configuration_matches_each_mode() {
+        assert_eq!(BuildMode::Debug.xcode_configuration(), "Debug");
+        assert_eq!(BuildMode::Profile.xcode_configuration(), "Profile");
+        assert_eq!(BuildMode::Release.xcode_configuration(), "Release");
     }
 }

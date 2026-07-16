@@ -70,6 +70,69 @@ pub enum Command {
         #[command(flatten)]
         build: BuildArgs,
     },
+    /// Produce a distributable artifact (spec §12.5/12.6) — release-signed
+    /// APK/AAB via Gradle, or an iOS app/IPA via `xcodebuild`. Defaults to
+    /// release mode (unlike `run`, which defaults to debug).
+    Build {
+        #[command(subcommand)]
+        target: BuildTarget,
+    },
+}
+
+/// The artifact `forgekit build` produces (spec §12.5/12.6). Kept off
+/// [`crate::build_info::BuildInfo`] — artifact selection is orthogonal to
+/// the mode/flavor/defines/version funnel `run` and `build` share.
+#[derive(Subcommand, Debug)]
+pub enum BuildTarget {
+    /// Release-signed APK via Gradle.
+    Apk {
+        #[command(flatten)]
+        build: BuildArgs,
+
+        /// Produce one APK per target ABI instead of a single fat APK.
+        #[arg(long = "split-per-abi")]
+        split_per_abi: bool,
+
+        /// Comma-separated target ABIs (`android-arm64`, `android-arm`,
+        /// `android-x64`); defaults to all three.
+        #[arg(long = "target-platform", value_name = "CSV")]
+        target_platform: Option<String>,
+    },
+    /// AAB for Play Store via Gradle.
+    #[command(alias = "aab")]
+    Appbundle {
+        #[command(flatten)]
+        build: BuildArgs,
+
+        /// Comma-separated target ABIs (`android-arm64`, `android-arm`,
+        /// `android-x64`); defaults to all three.
+        #[arg(long = "target-platform", value_name = "CSV")]
+        target_platform: Option<String>,
+    },
+    /// iOS device/simulator build via `xcodebuild` (macOS host only).
+    Ios {
+        #[command(flatten)]
+        build: BuildArgs,
+
+        /// Build for the iOS Simulator instead of a physical device.
+        #[arg(long)]
+        simulator: bool,
+
+        /// Skip code signing (`CODE_SIGNING_ALLOWED=NO`).
+        #[arg(long = "no-codesign")]
+        no_codesign: bool,
+    },
+    /// Archive + `-exportArchive` for App Store/ad-hoc/enterprise
+    /// distribution (macOS host only).
+    Ipa {
+        #[command(flatten)]
+        build: BuildArgs,
+
+        /// Export method: `app-store-connect`, `release-testing`,
+        /// `debugging`, or `enterprise`.
+        #[arg(long = "export-method", value_name = "METHOD")]
+        export_method: String,
+    },
 }
 
 #[cfg(test)]
@@ -166,5 +229,123 @@ mod tests {
             Command::Run { build } => assert!(build.release),
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_build_apk_with_full_flag_surface() {
+        let cli = Cli::parse_from([
+            "forgekit",
+            "build",
+            "apk",
+            "--flavor",
+            "paid",
+            "--build-name",
+            "1.2.3",
+            "--build-number",
+            "42",
+            "--define",
+            "A=B",
+        ]);
+        match cli.command {
+            Command::Build {
+                target: BuildTarget::Apk { build, .. },
+            } => {
+                assert_eq!(build.flavor.as_deref(), Some("paid"));
+                assert_eq!(build.build_name.as_deref(), Some("1.2.3"));
+                assert_eq!(build.build_number, Some(42));
+                assert_eq!(build.defines, vec!["A=B".to_string()]);
+            }
+            other => panic!("expected Build/Apk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_apk_split_per_abi_and_target_platform() {
+        let cli = Cli::parse_from([
+            "forgekit",
+            "build",
+            "apk",
+            "--split-per-abi",
+            "--target-platform",
+            "android-arm64,android-x64",
+        ]);
+        match cli.command {
+            Command::Build {
+                target:
+                    BuildTarget::Apk {
+                        split_per_abi,
+                        target_platform,
+                        ..
+                    },
+            } => {
+                assert!(split_per_abi);
+                assert_eq!(
+                    target_platform.as_deref(),
+                    Some("android-arm64,android-x64")
+                );
+            }
+            other => panic!("expected Build/Apk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_appbundle_alias_aab() {
+        let cli = Cli::parse_from(["forgekit", "build", "aab"]);
+        assert!(matches!(
+            cli.command,
+            Command::Build {
+                target: BuildTarget::Appbundle { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_build_ios_flags() {
+        let cli = Cli::parse_from(["forgekit", "build", "ios", "--simulator", "--no-codesign"]);
+        match cli.command {
+            Command::Build {
+                target:
+                    BuildTarget::Ios {
+                        simulator,
+                        no_codesign,
+                        ..
+                    },
+            } => {
+                assert!(simulator);
+                assert!(no_codesign);
+            }
+            other => panic!("expected Build/Ios, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_ipa_export_method() {
+        let cli = Cli::parse_from([
+            "forgekit",
+            "build",
+            "ipa",
+            "--export-method",
+            "app-store-connect",
+        ]);
+        match cli.command {
+            Command::Build {
+                target: BuildTarget::Ipa { export_method, .. },
+            } => {
+                assert_eq!(export_method, "app-store-connect");
+            }
+            other => panic!("expected Build/Ipa, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_ipa_requires_export_method() {
+        let result = Cli::try_parse_from(["forgekit", "build", "ipa"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_clean() {
+        let cli = Cli::parse_from(["forgekit", "clean"]);
+        assert!(matches!(cli.command, Command::Clean));
     }
 }

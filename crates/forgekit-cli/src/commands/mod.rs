@@ -1,5 +1,7 @@
 //! Command dispatch (spec §12.1).
 
+pub mod build;
+pub mod clean;
 pub mod create;
 pub mod devices;
 pub mod doctor;
@@ -31,10 +33,8 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             template_dir,
             forgekit_path,
         }),
-        Command::Clean => {
-            println!("`forgekit clean` is not implemented yet.");
-            Ok(0)
-        }
+        Command::Clean => clean::run(),
         Command::Run { build } => run::run(build, cli.device_id, verbose),
+        Command::Build { target } => build::run(target),
     }
 }
