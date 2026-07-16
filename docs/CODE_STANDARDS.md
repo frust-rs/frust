@@ -249,6 +249,33 @@ interactive widget in `forgekit-widgets`:
   `Cargo.toml`; every symbol an app needs is already flat-re-exported from
   `forgekit` (see `docs/ARCHITECTURE.md`'s Key Types).
 
+## Theming & Animation Conventions
+
+- **Resolve theme tokens at paint/layout time, with an unthemed-fallback
+  constant per resolved value.** A themed widget looks up
+  `Theme::from_paint_ctx(ctx)`/`from_layout_ctx(ctx)`, falling back to a local
+  constant (e.g. `Button`'s `FILL`/`RADIUS`) when no theme is threaded
+  (bare-core tests, pre-theme apps) — a widget never assumes a theme is
+  present. Precedence is **explicit builder value > theme > fallback**: an
+  app-set value (`.color(...)`, `.style(...)`) always wins over both (see
+  `Text`'s `color_explicit` flag).
+- **Event-pass code never reads a theme — `EventCtx` carries none.** Only
+  `LayoutCtx`/`PaintCtx` thread a theme; a metric an event handler also needs
+  (hit-test padding, caret geometry) stays a plain constant read from both
+  passes — the precedent is `TextInput`'s `PAD_X`/`PAD_Y`/`CARET_W`,
+  deliberately never resolved from theme.
+- **No `Instant::now()` in `forgekit-core`/`forgekit-widgets`.** Time enters
+  the framework only from a shell, as the `FrameTime` passed into
+  `RenderRoot::paint` and threaded via `PaintCtx::frame_time` — desktop reads
+  its own `Instant` epoch; Android/iOS pass through the platform's own frame
+  clock (`Choreographer`/`CADisplayLink`). Widget code only *differences* two
+  `FrameTime`s (`saturating_sub`), never reads a wall clock directly.
+- **An animation controller advances during paint, not on a timer.** A widget
+  holds an `anim::AnimationController`, calls `advance(ctx.frame_time())` once
+  per paint, reads `value()`, and — while `advance` returns `true` — calls
+  `PaintCtx::request_frame()` so the shell schedules the next frame; there is
+  no ambient ticker (see `docs/ARCHITECTURE.md`'s Frame pipeline).
+
 ## Testing Patterns
 
 - **Fixture-driven tests for parsers/validators**: register canned

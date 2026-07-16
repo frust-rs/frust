@@ -13,11 +13,12 @@ consumed by app code via the `forgekit` facade crate, and example apps under
 
 | Crate | Responsibility |
 |---|---|
-| `forgekit-core` | Layers 1+2: the declarative `View` trait, the retained `Widget` trait, box-constraint layout, the `tree_arena`-backed widget tree, and `RenderRoot` (rebuild/layout/paint/event pass driver). Its `input` module carries the pointer/scroll event types (`InputEvent`/`PointerEvent`/`EventCtx`/`EventOutcome`) and gesture-math constants (slop, fling decay) the interactive widgets build on. Its `component` module adds `Component` — a `StatefulWidget` analog with retained local state and a per-component reactive `Owner` (see Key Types and Data Flow's Component state boundary); this is the crate's sole, deliberate `reactive_graph` dependency (see Layer Dependencies) — no executor, no tokio. |
+| `forgekit-core` | Layers 1+2: the declarative `View` trait, the retained `Widget` trait, box-constraint layout, the `tree_arena`-backed widget tree, and `RenderRoot` (rebuild/layout/paint/event pass driver). Its `input` module carries the pointer/scroll event types (`InputEvent`/`PointerEvent`/`EventCtx`/`EventOutcome`) and gesture-math constants (slop, fling decay) the interactive widgets build on. Its `component` module adds `Component` — a `StatefulWidget` analog with retained local state and a per-component reactive `Owner` (see Key Types and Data Flow's Component state boundary); this is the crate's sole, deliberate `reactive_graph` dependency (see Layer Dependencies) — no executor, no tokio. Its `anim` module is the animation vocabulary (`FrameTime`, `Curve`, `Tween`, `SpringDesc`, `AnimationController` — see Key Types): plain data/math, no clock, no scheduler. |
 | `forgekit-scene` | Layer 3: the renderer-agnostic vector scene / display list (`Scene`, `SceneBuilder`, `Command`, `GlyphRun`) — the stable seam between widgets and the GPU backend. |
 | `forgekit-render` | Layer 4: the wgpu + Vello GPU backend. Encodes a `Scene` into a `vello::Scene` and presents it to a window surface. |
 | `forgekit-text` | Text shaping: wraps Parley font matching/layout into `TextContext`/`TextStyle`/`TextLayout`, converting shaped text into `forgekit-scene::GlyphRun`s. Also home to `TextEditor`, the Parley-`PlainEditor`-based editing engine `TextInput` and the platform IME bridges drive (see Key Types). |
-| `forgekit-widgets` | The baseline widget set (spec §6.4): `Text`, `Button`, `Checkbox`, `Slider`, `TextInput`, `Image`, `Row`/`Column` (`Flex`), `Stack`, `Padding`, `Align`, `SizedBox`, `ScrollView`, `GestureDetector` — each a `View`/`Widget` pair over `forgekit-core` + `forgekit-text`. Any `Flex` child list can be reconciled by explicit identity via `keyed`/`ChildKey` instead of position (see Key Types). |
+| `forgekit-theme` | Design-token crate (spec §17): the Material 3 baseline value tables — `ColorScheme` (light/dark role pairs), `TypeScale`, `ShapeScale`, `Elevation`, `MotionScheme` (named springs) — bundled into a `Theme` aggregate, plus the `Theme::from_paint_ctx`/`from_layout_ctx` accessors widgets use to recover a threaded theme (see Key Types, Data Flow's theme delivery). Pure data + constructors: no scene/reactive dependency. |
+| `forgekit-widgets` | The baseline widget set (spec §6.4): `Text`, `Button`, `Checkbox`, `Slider`, `TextInput`, `Image`, `Row`/`Column` (`Flex`), `Stack`, `Padding`, `Align`, `SizedBox`, `ScrollView`, `GestureDetector` — each a `View`/`Widget` pair over `forgekit-core` + `forgekit-text` + `forgekit-theme`. Widgets resolve theme tokens at paint/layout time with an unthemed-fallback constant per resolved value (see `docs/CODE_STANDARDS.md`). Any `Flex` child list can be reconciled by explicit identity via `keyed`/`ChildKey` instead of position (see Key Types). |
 | `forgekit-reactive` | Leaf reactive substrate: the process-wide `ReactiveRuntime` (a background tokio runtime, a custom `any_spawner` executor routing `spawn`/`spawn_local`, a UI-thread local task pump, and the root reactive `Owner`) plus `TrackedScope`, the rebuild-dependency-tracking bridge that wakes a shell when a tracked signal changes (see Key Types, Data Flow's Signal-driven wake). Depends only on `reactive_graph`/`any_spawner`/`tokio` — no `forgekit-core`, no `winit`/`vello`/`wgpu`; consumed by the three shells and the `forgekit` facade (see Layer Dependencies). |
 | `forgekit-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root, GPU surface, and text context for `cargo run`-based development. Compiled only for non-Android targets. |
 | `forgekit-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. |
@@ -34,11 +35,12 @@ forgekit-scene  (no vello/wgpu — kurbo + peniko only)
     ├── forgekit-render        (vello/wgpu — consumes Scene)
     └── forgekit-text          (parley — consumes/produces GlyphRun, no vello/wgpu)
 forgekit-reactive       (leaf: reactive_graph + any_spawner + tokio only — no core/scene/render/text/winit)
-forgekit-widgets       = core + scene + text
-forgekit-shell-common  = core + scene + text                     (platform-agnostic; no jni/ndk/winit, no unsafe, reactive-free in shipped deps)
-forgekit-shell-desktop = core + scene + render + text + winit + reactive    (non-Android integration point)
-forgekit-shell-android = core + scene + render + text + reactive + shell-common + jni/ndk  (Android integration point; JNI FFI)
-forgekit-shell-ios     = core + scene + render + text + reactive + shell-common           (iOS integration point; C-ABI FFI)
+forgekit-theme          = peniko + forgekit-text (+ forgekit-core, a reverse edge for its from_paint_ctx/from_layout_ctx accessors only — core never depends on theme, so no cycle)
+forgekit-widgets       = core + scene + text + theme
+forgekit-shell-common  = core + scene + text + theme             (platform-agnostic; no jni/ndk/winit, no unsafe, reactive-free in shipped deps)
+forgekit-shell-desktop = core + scene + render + text + theme + winit + reactive    (non-Android integration point)
+forgekit-shell-android = core + scene + render + text + theme + reactive + shell-common + jni/ndk  (Android integration point; JNI FFI)
+forgekit-shell-ios     = core + scene + render + text + theme + reactive + shell-common           (iOS integration point; C-ABI FFI)
 forgekit  = core + widgets + reactive + shell-android (always) + shell-ios (always) + shell-desktop (non-Android only)
 
 forgekit-cli    (independent binary: clap/anyhow/serde/minijinja/include_dir/thiserror only)
@@ -91,16 +93,21 @@ of the framework.
    `forgekit_text::TextContext` through `LayoutCtx` as `&mut dyn Any` — kept
    type-erased so `forgekit-core` has no dependency on `forgekit-text`; text
    widgets recover it via `LayoutCtx::text_context::<TextContext>()`.
-4. `RenderRoot::paint` calls each widget's `paint`, which emits draw commands
-   into `&mut dyn PaintScene`. `forgekit-scene::SceneBuilder` implements
-   `PaintScene` (an additive bridge, not a signature change): filled rects,
-   rounded rects, stroked lines, push/pop clip, and glyph runs all become real
-   `Command`s in the `Scene`; the legacy unshaped `draw_text` stays a no-op on
-   this implementation because real text must already be shaped into
-   `GlyphRun`s by `forgekit-text` before it can reach the scene. Paint is also
-   the animation driver: a widget may advance animation state (e.g. a fling
-   in progress) and call `PaintCtx::request_frame` to ask for another frame
-   without waiting on external input; this bubbles up as
+4. `RenderRoot::paint(scene, frame_time)` calls each widget's `paint`, which
+   emits draw commands into `&mut dyn PaintScene`. `forgekit-scene::SceneBuilder`
+   implements `PaintScene` (an additive bridge, not a signature change): filled
+   rects, rounded rects, stroked lines, push/pop clip, and glyph runs all
+   become real `Command`s in the `Scene`; the legacy unshaped `draw_text` stays
+   a no-op on this implementation because real text must already be shaped
+   into `GlyphRun`s by `forgekit-text` before it can reach the scene. The
+   `frame_time` (a shell-supplied `FrameTime` — desktop's `Instant`-since-epoch,
+   Android's `Choreographer` tick, iOS's `CADisplayLink` timestamp; never
+   `Instant::now()` inside `forgekit-core`/widgets, see `docs/CODE_STANDARDS.md`)
+   and the render root's stored theme (see Theme delivery below) both thread
+   down through `PaintCtx` unchanged to every descendant, letting a widget
+   advance an `anim::AnimationController` (or fling spring) and call
+   `PaintCtx::request_frame` to ask for another frame without waiting on
+   external input; this bubbles up as
    `PaintOutcome::needs_frame` from `RenderRoot::paint`/`AppTree::paint`. The
    desktop shell honors it with an extra `window.request_redraw()`; the
    Android/iOS continuous loops below ignore it since they already produce
@@ -162,6 +169,17 @@ value — and reconciles the result exactly like `RenderRoot::rebuild_view`;
 teardown tears down the child element, disposes the owner (running its
 `on_cleanup`s), and drops the state.
 
+**Theme delivery:** a shell owns the active `forgekit_theme::Theme` and
+delivers it two ways, mirroring the text-context pattern above. To widgets:
+boxed type-erased (`RenderRoot::set_theme(Box<dyn Any>)`) and lent as
+`Option<&dyn Any>` into every `LayoutCtx`/`PaintCtx`; a themed widget recovers
+it with `theme_as::<Theme>()` (or the `Theme::from_paint_ctx`/`from_layout_ctx`
+wrappers) — `forgekit-core` never depends on `forgekit-theme`. To app code: the
+shell `provide_context`s a cloned `Theme` under the reactive root `Owner`, read
+reactively via `use_context::<Theme>()` in `Component::build`. A shell
+re-pushes both paths together on a brightness change (desktop's
+`WindowEvent::ThemeChanged`, or the mobile appearance exports below).
+
 **Event pipeline:** an `InputEvent` (a `PointerEvent` down/move/up/cancel, or
 a scroll delta — already translated into **logical**, density-independent
 coordinates by the shell before it crosses into `forgekit-core`) enters the
@@ -215,25 +233,29 @@ call, different redraw scheduling.
 inside JNI callbacks (`forgekit-shell-android`) driven by Kotlin's
 `Choreographer`/`SurfaceHolder.Callback` instead of a winit event loop —
 `nativeOnFrame` drives one rebuild→layout→paint→render pass per posted
-frame, `nativeOnTouch` feeds one pointer contact into the same
+frame — passing Choreographer's `frameTimeNanos` through as the pass's
+`FrameTime` — `nativeOnTouch` feeds one pointer contact into the same
 `RenderRoot::event` path between frames, and
 `nativeOnSurfaceChanged`/`nativeOnSurfaceDestroyed` drive the same
 `SurfaceRenderer` state machine as the desktop shell's resize/suspend events
-— eleven JNI exports in total, three of which
+— twelve JNI exports in total, three of which
 (`nativeImeApply`/`nativeImeState`/`nativeImeAction`) carry the soft-keyboard
 state-sync contract (see Key Types' `EditingState`/`ImeState` row): Kotlin's
 `InputConnection` owns text composition against a mirror `Editable`, pushes
 whole `EditingState`s to Rust and polls the reconciled state back to keep
 the IMM (`updateSelection`) and soft-keyboard visibility synchronized;
-hardware/injected Enter also routes through `nativeImeAction`. On
+hardware/injected Enter also routes through `nativeImeAction`. A twelfth,
+`nativeSetAppearance`, pushes the platform's light/dark preference into both
+theme delivery paths (see Theme delivery above). On
 rotation/surface-config changes Android recreates the surface
 (`surfaceChanged` tears down and calls
 `on_surface_created_from_android_window` again).
 
 **iOS frame pipeline:** `forgekit-shell-ios` is driven by the generated
 Swift app instead of an event loop: a UIKit `CADisplayLink` tick calls the
-`forgekit_render_frame` C export once per frame, which runs the same
-rebuild→layout→paint→render pass. Unlike Android, rotation/bounds changes
+`forgekit_render_frame` C export once per frame, passing the tick's
+timestamp (converted to nanoseconds) as the pass's `FrameTime`, which runs
+the same rebuild→layout→paint→render pass. Unlike Android, rotation/bounds changes
 call `forgekit_resize` to resize the existing `SurfaceRenderer` surface in
 place (`on_surface_changed`) rather than recreate it, since the `CAMetalLayer`
 Swift owns survives the whole app lifetime. A `SurfaceLost` surface is
@@ -248,8 +270,10 @@ killed. `forgekit_dispatch_touch` feeds one touch contact into the same
 (`forgekit_ime_apply`/`forgekit_ime_state_json`/`forgekit_string_free`)
 carry the same state-sync contract as Android's, driving a full
 `UITextInput` conformance on the generated `ForgeKitView` (marked-text and
-selection mirror, autocorrect, CJK composition, dictation) — ten
-`forgekit_*` C exports in total.
+selection mirror, autocorrect, CJK composition, dictation). An eleventh,
+`forgekit_set_appearance`, pushes the platform's light/dark preference into
+both theme delivery paths (see Theme delivery above) — eleven `forgekit_*`
+C exports in total.
 
 **CLI flow:** `Cli` (clap) parses into a `Command`, dispatched to a
 `commands::*` handler. `create` renders a manifest-listed template tree
@@ -301,7 +325,9 @@ or archives + `exportArchive`s an `.ipa` via a generated
 | `Widget` | Retained tree element (`Any`-bounded for downcast-on-rebuild); implements `layout`/`paint`. |
 | `Component` / `ComponentView` / `ComponentWidget` | `forgekit-core::component`'s `StatefulWidget` analog: `Component` declares retained `State` (`init`/`build`); `ComponentView<C>` is the `View<Outer>` adapter usable under any outer state; `ComponentWidget` is the retained element owning `State` + a per-component `Owner` and routing events across the state boundary — see Data Flow's Component state boundary. |
 | `ReactiveRuntime` / `TrackedScope` / `FrameWaker` | `forgekit-reactive`'s process-wide substrate: `ReactiveRuntime` owns the background tokio runtime, the custom `any_spawner` executor, and the root `Owner`; `TrackedScope` runs a rebuild with dependency tracking and fires the swappable `FrameWaker` (coalesced) when a tracked signal later changes — see Data Flow's Signal-driven wake. |
-| `RenderRoot<State, V>` | Owns the `WidgetTree` and previous `View`; drives rebuild → layout → paint for a single-root app, and routes an `InputEvent` to it via `event`. |
+| `RenderRoot<State, V>` | Owns the `WidgetTree`, previous `View`, and the boxed active theme (`set_theme`); drives rebuild → layout → paint for a single-root app, and routes an `InputEvent` to it via `event`. |
+| `Theme` / `ColorScheme` / `TypeScale` / `ShapeScale` / `Elevation` / `MotionScheme` | `forgekit-theme`'s design-token bundle (spec §17): `Theme` pairs a light/dark `ColorScheme` (M3 color roles) with a `TypeScale` (`forgekit_text::TextStyle` per M3 type role), `ShapeScale` (corner-radius tokens), `Elevation` (shadow specs per level), and `MotionScheme` (named M3 spring presets) — see Data Flow's Theme delivery. |
+| `FrameTime` / `Curve` / `Tween<T>` / `SpringDesc` / `AnimationController` | `forgekit-core::anim`'s animation vocabulary: `FrameTime` is an opaque shell-supplied clock reading (difference-only, never absolute); `Curve` is a named/cubic-Bézier easing function; `Tween<T>` interpolates a `Lerp` value type; `SpringDesc` parameterizes a damped spring; `AnimationController` drives a `0.0..=1.0` value by duration+curve or by a spring fling, advanced during paint via `PaintCtx::frame_time` — see Data Flow's Frame pipeline. |
 | `InputEvent` / `PointerEvent` / `KeyEvent` / `ImeEvent` / `EventCtx` / `EventOutcome` | Layer 2 input (spec §9): `InputEvent` is a `PointerEvent`, a scroll delta, `Key(KeyEvent)`, or `Ime(ImeEvent)` — `Clone` but not `Copy` (`Key`/`Ime` carry owned `String` payloads) — entering at `RenderRoot::event`; `EventCtx` is the erased-state context a handler mutates (capture pointer, request/release focus, publish IME state, request redraw); `EventOutcome` is the pass's `handled`/`needs_redraw` summary — see Data Flow's Event pipeline. |
 | `EditingState` / `ImeState` | The IME state-sync contract at the shell seam (see Data Flow's Event pipeline). `EditingState` is text plus selection/composing indices, UTF-16 code-unit indexed at this boundary (`forgekit-text`'s `TextEditor` owns byte conversion); a platform bridge pushes one in via `AppTree::ime_apply`/`Ime(ApplyEditingState)` and reads a reconciled one back via `RenderRoot::ime_state`/`AppTree::ime_state`, which returns the focused widget's published `ImeState` (`EditingState` + caret rect). |
 | `ChildPod` | A container's owned child: boxed widget + layout geometry + capture-active/focused bookkeeping — how `forgekit-widgets`' containers and interactive widgets own children without the arena (single-root-arena divergence; see Data Flow). |
@@ -309,13 +335,13 @@ or archives + `exportArchive`s an `.ipa` via a generated
 | `ChildKey` / `keyed` | Explicit child identity for a `Flex` child list (spec §6.3): `keyed(key, view)` attaches a `ChildKey` the reconciler matches old↔new children by, relocating a matched child's widget (preserving its internal state) across a reorder/insert/remove instead of rebuilding it. Keys are all-or-nothing and unique per list; a mixed or duplicate key set falls back to positional matching. A keyed reorder is a structural change like any other (see Data Flow's Event pipeline). |
 | `Text` / `Button` / `Checkbox` / `Slider` / `TextInput` / `Image` / `Flex` (`Row`/`Column`) / `Stack` / `Padding` / `Align` / `SizedBox` / `ScrollView` / `GestureDetector` | `forgekit-widgets`' baseline vocabulary — each a `View`/`Widget` pair over the `AnyView`/`ChildPod` substrate; the interactive ones are controlled components (see `docs/CODE_STANDARDS.md`). `TextInput` owns a `TextEditor` and drives it from focus-routed `Key`/`Ime` events; `Image` wraps a decode-once `ImageSource` (an `Arc`-backed `peniko::ImageData` handle) and a fit mode (`ImageFit::Fill`/`Contain`/`Cover`), painted via the new `Command::Image` scene command. |
 | `PaintScene` | Renderer-agnostic paint target widgets draw into; bridged onto `SceneBuilder`. |
-| `PaintCtx` / `PaintOutcome` | Paint-pass context and result: `PaintCtx::request_frame`/`needs_frame` let a widget advance animation state during paint and ask to be re-invoked without external input; `PaintCtx::has_focus`, seeded from the pod's recorded focus path, lets a focused editable gate its focus chrome and IME republish on it, mirroring `EventCtx::has_focus`; `PaintOutcome::needs_frame` surfaces the former through `RenderRoot::paint`/`AppTree::paint` — see Data Flow's Frame pipeline. |
+| `PaintCtx` / `PaintOutcome` | Paint-pass context and result: `PaintCtx::frame_time` is the shell-fed clock reading a widget advances animation state with; `PaintCtx::theme_as::<T>()` recovers the type-erased threaded theme (`None` if none was set — see Data Flow's Theme delivery); `PaintCtx::request_frame`/`needs_frame` let a widget ask to be re-invoked without external input; `PaintCtx::has_focus`, seeded from the pod's recorded focus path, lets a focused editable gate its focus chrome and IME republish on it, mirroring `EventCtx::has_focus`; `PaintOutcome::needs_frame` surfaces the former through `RenderRoot::paint`/`AppTree::paint` — see Data Flow's Frame pipeline. |
 | `Scene` / `SceneBuilder` / `Command` | Layer 3 vector display list — the widget/GPU seam. |
 | `GlyphRun` | Shaped-glyph carrier from `forgekit-text` into the scene. |
 | `TextContext` / `TextStyle` / `TextLayout` | Parley-backed text shaping surface. |
 | `RenderContext` / `SurfaceRenderer` | `RenderContext` owns the wgpu `Instance` and lazily creates/holds the logical `wgpu::Device` itself (adapter-derived limits, not a thin `vello::util` wrapper) so it can request the real adapter limits vello's own device pool cannot; `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation. |
-| `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed, eleven-export Android JNI surface (init/frame/touch/resume/pause/destroy/surface-changed/surface-destroyed, plus the `nativeImeApply`/`nativeImeState`/`nativeImeAction` IME state-sync trio); the sole Android app entry point. A 2-arg (`State: Default`) and a 3-arg state-factory arm both funnel through `new_boxed_app_with`. |
-| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`forgekit-shell-ios`) is the opaque native handle behind the ten `forgekit_*` C exports (init/resize/render-frame/dispatch-touch/pause/resume/destroy, plus the `forgekit_ime_apply`/`forgekit_ime_state_json`/`forgekit_string_free` IME state-sync trio), mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `forgekit_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports, mirroring `android_app!`'s 2-/3-arg arms; the sole iOS app entry point. |
+| `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed, twelve-export Android JNI surface (init/frame/touch/resume/pause/destroy/surface-changed/surface-destroyed, the `nativeImeApply`/`nativeImeState`/`nativeImeAction` IME state-sync trio, plus `nativeSetAppearance`); the sole Android app entry point. A 2-arg (`State: Default`) and a 3-arg state-factory arm both funnel through `new_boxed_app_with`. |
+| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`forgekit-shell-ios`) is the opaque native handle behind the eleven `forgekit_*` C exports (init/resize/render-frame/dispatch-touch/pause/resume/destroy, the `forgekit_ime_apply`/`forgekit_ime_state_json`/`forgekit_string_free` IME state-sync trio, plus `forgekit_set_appearance`), mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `forgekit_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports, mirroring `android_app!`'s 2-/3-arg arms; the sole iOS app entry point. |
 | `app!` | The canonical facade entry macro (spec §5.5): binds a `Component + Default` root to all three platforms in one call — `android_app!`/`ios_app!` under the hood, plus a hidden desktop `__forgekit_main` calling `forgekit::run`. A generated `lib.rs` calls it once; `main.rs` calls the generated `__forgekit_main`; `forgekit::run(root)` is the same desktop path called directly, for apps with no mobile target. |
 | `new_boxed_app_with` | `forgekit-shell-common`'s app-construction seam: builds an `AppTree` from a state *factory* closure (`FnOnce() -> State`) rather than a pre-built value, letting the entry macros bind `Component::init`; `new_boxed_app` (`State: Default`) is the convenience wrapper over it. |
 | `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines, build name/number); drives both the `build` command (release-default) and `run`'s Android/iOS pipelines (debug-default). |

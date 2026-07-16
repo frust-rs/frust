@@ -54,6 +54,11 @@ cargo run -p counter
 # reconciliation (see docs/ARCHITECTURE.md#data-flow).
 cargo run -p notes
 
+# Theme/animation demo: a gallery of themed widgets and motion — the manual
+# visual gate for theme-token and anim-controller changes (see
+# docs/ARCHITECTURE.md#data-flow's Theme delivery and Frame pipeline).
+cargo run -p gallery
+
 # Async/signals demo: an inbox screen whose Component wires a clean-signals
 # ControllerCore (a real async UseCase, with retry) to an RwSignal it renders
 # — exercises the reactive substrate end-to-end (signal write -> wake ->
@@ -78,10 +83,11 @@ cargo run -p notes
 ```
 
 `cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes`/
-`(cd examples/inbox && cargo run)`/`(cd examples/team-demo && cargo run)` are
-the manual visual gates for rendering, interaction, text-input, and
-async/signals changes respectively — there is no automated pixel-diff test
-yet, so a person must look at the window. `notes` is also the demo
+`cargo run -p gallery`/`(cd examples/inbox && cargo run)`/
+`(cd examples/team-demo && cargo run)` are the manual visual gates for
+rendering, interaction, text-input, theme/animation, and async/signals
+changes respectively — there is no automated pixel-diff test yet, so a
+person must look at the window. `notes` is also the demo
 `forgekit create` scaffolds (`templates/app/src/lib.rs.tmpl`), so scaffold
 changes should be checked against it. `examples/inbox`'s and
 `examples/team-demo`'s own verify gates (`cargo test` plus their clippy
