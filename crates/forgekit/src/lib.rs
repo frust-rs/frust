@@ -1,8 +1,37 @@
 //! Facade crate: the public `forgekit` framework API (spec §5).
 //!
-//! App authors depend on this single crate. It exposes the [`App`] entry point
-//! and curates the view/widget vocabulary from the underlying framework crates
-//! so the declarative call shape reads exactly as the spec promises:
+//! App authors depend on this single crate. It exposes [`run`], the canonical
+//! app entry point (phase 5.5), and curates the view/widget/reactive
+//! vocabulary from the underlying framework crates so the declarative call
+//! shape reads exactly as the spec promises:
+//!
+//! ```no_run
+//! use forgekit::{Component, View, AnyView, any, text};
+//!
+//! struct Counter;
+//!
+//! impl Component for Counter {
+//!     type State = i32;
+//!
+//!     fn init(&self) -> i32 {
+//!         0
+//!     }
+//!
+//!     fn build(&self, state: &mut i32) -> AnyView<i32> {
+//!         any(text(format!("count: {state}")).size(32.0))
+//!     }
+//! }
+//!
+//! forgekit::run(Counter).unwrap();
+//! ```
+//!
+//! ## Low-level escape hatch: `App::new`
+//!
+//! [`App`] is the older, lower-level entry point [`run`] is built on: a
+//! single ambient `State` and a plain `app_logic(&mut State) -> impl View<State>`
+//! function, with no [`Component`] state-boundary or retained local state.
+//! It stays fully supported (backward compat is a feature) for apps that
+//! don't need per-subtree state:
 //!
 //! ```no_run
 //! struct AppState {
@@ -42,6 +71,7 @@
 //! # let _ = app_logic;
 //! ```
 
+pub use forgekit_core::component::{Component, ComponentView, component};
 pub use forgekit_core::view::{AnyView, View, any};
 pub use forgekit_widgets::{
     Align, AlignView, Alignment, Axis, Button, ButtonView, Checkbox, CheckboxView, ChildKey,
@@ -59,6 +89,29 @@ pub mod input {
         FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,
         WHEEL_LINE_PX, fling_decay, fling_displacement,
     };
+}
+
+/// The reactive-programming vocabulary (spec §5.5) [`Component`] state is built
+/// on: signals, memos, and context, flat-re-exported from `forgekit-reactive`/
+/// `reactive_graph` so app authors never name either crate directly.
+pub use forgekit_reactive::{RwSignal, on_cleanup, provide_context, use_context};
+pub use reactive_graph::computed::Memo;
+pub use reactive_graph::signal::{ReadSignal, WriteSignal, signal};
+
+/// Spawns a `Send` future on the background reactive runtime (Tokio-backed —
+/// see `forgekit_reactive::ReactiveRuntime`). A thin wrapper over
+/// `any_spawner::Executor::spawn`; app authors never name `any_spawner`.
+pub fn spawn(fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    any_spawner::Executor::spawn(fut);
+}
+
+/// Spawns a `!Send` future on the UI-thread local task queue, drained each
+/// frame by the shell (`ReactiveRuntime::pump_local`). A thin wrapper over
+/// `any_spawner::Executor::spawn_local`; must be called on the UI thread —
+/// see `forgekit_reactive::ReactiveRuntime::pump_local`'s doc for the panic
+/// this triggers off-thread.
+pub fn spawn_local(fut: impl std::future::Future<Output = ()> + 'static) {
+    any_spawner::Executor::spawn_local(fut);
 }
 
 // Re-export the Android JNI-bridge macro so generated apps write
@@ -121,4 +174,25 @@ impl<State: 'static, Logic> App<State, Logic> {
     {
         forgekit_shell_desktop::run_desktop(self.state, self.logic)
     }
+}
+
+/// Run a root [`Component`] in the desktop preview shell until the window
+/// closes — the canonical `runApp` equivalent (spec §5.5's Component model).
+///
+/// `root.init()` seeds the component's retained `State` once; the resulting
+/// `AnyView<C::State>` is then driven through the same desktop preview loop
+/// [`App::run`] uses, rebuilding from `root.build(state)` every frame.
+///
+/// Initializes the process-wide [`forgekit_reactive::ReactiveRuntime`] with a
+/// no-op waker *before* `root.init()` runs, since a signal or context created
+/// there must already have a runtime to be created under — the desktop
+/// preview loop's own later `ReactiveRuntime::init` call swaps in the real
+/// proxy waker on top of this seed, the documented swap-on-reinit behavior.
+///
+/// Desktop-only, matching [`App::run`]: on Android the app is driven by
+/// [`android_app!`]/JNI instead, not by this preview loop.
+#[cfg(not(target_os = "android"))]
+pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
+    forgekit_reactive::ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+    App::new(root.init(), move |state: &mut C::State| root.build(state)).run()
 }

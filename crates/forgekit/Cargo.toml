@@ -9,6 +9,11 @@ license.workspace = true
 forgekit-core = { workspace = true }
 forgekit-widgets = { workspace = true }
 forgekit-reactive = { workspace = true }
+# Named directly (not just through forgekit-reactive) for the facade's flat
+# re-export surface (`Memo`, `signal`, `spawn`/`spawn_local`) — see
+# `forgekit::run`/the reactive re-exports in `lib.rs`.
+reactive_graph = { workspace = true }
+any_spawner = { workspace = true }
 # Depended on unconditionally so the re-exported `android_app!` macro is always
 # available; the crate compiles to (almost) nothing off-Android.
 forgekit-shell-android = { workspace = true }
