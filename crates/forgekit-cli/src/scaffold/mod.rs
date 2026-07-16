@@ -249,21 +249,15 @@ mod tests {
         assert!(forgekit_toml.contains("dev.f0x"), "{forgekit_toml}");
 
         assert!(dest.join("src/lib.rs").exists());
-        // The Android JNI entry point is stamped out by the re-exported macro,
-        // gated to the Android target (task 24).
+        // The generated app's sole entry point is the canonical `Component` +
+        // `app!` shape (spec §5.5): no hand-written `android_app!`/`ios_app!`
+        // invocation or `App::new` survives in a fresh scaffold.
         let lib_rs = fs::read_to_string(dest.join("src/lib.rs")).unwrap();
-        assert!(
-            lib_rs.contains("#[cfg(target_os = \"android\")]")
-                && lib_rs.contains("forgekit::android_app!(AppState, app_logic)"),
-            "{lib_rs}"
-        );
-        // The iOS C-ABI entry point is stamped out by the re-exported `ios_app!`
-        // macro, invoked unconditionally (the macro self-gates its exports to the
-        // iOS target, task 33).
-        assert!(
-            lib_rs.contains("forgekit::ios_app!(AppState, app_logic)"),
-            "{lib_rs}"
-        );
+        assert!(!lib_rs.contains("android_app!"), "{lib_rs}");
+        assert!(!lib_rs.contains("ios_app!"), "{lib_rs}");
+        assert!(!lib_rs.contains("App::new"), "{lib_rs}");
+        assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
+        assert!(lib_rs.contains("forgekit::app!(MyAppApp)"), "{lib_rs}");
         // The generated demo is the Phase 4B notes app: an embedded logo Image, a
         // controlled TextInput whose submit appends a keyed note row (each with a
         // Delete button), inside a scroll view. The `app_logic` keeps the

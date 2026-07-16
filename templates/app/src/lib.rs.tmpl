@@ -5,11 +5,12 @@
 //! one removes the *right* row), with an embedded logo [`Image`] decoded once —
 //! the Phase 4B TextInput/IME, Image, and keyed-children stack plus the 4A
 //! layout/scroll/button vocabulary in one screen. Edit `app_logic` to make it
-//! yours.
+//! yours; never edit [`forgekit::app!`]'s invocation below or `main.rs` (spec
+//! §5.5's canonical app shape).
 
 use forgekit::{
-    AnyView, Axis, Button, Column, FlexView, Image, ImageFit, ImageSource, Row, SizedBox, View,
-    any, keyed, scroll_view, text, text_input,
+    AnyView, Axis, Button, Column, Component, FlexView, Image, ImageFit, ImageSource, Row,
+    SizedBox, View, any, keyed, scroll_view, text, text_input,
 };
 
 /// The embedded logo bytes, decoded once at startup (see [`AppState::new`]).
@@ -114,16 +115,29 @@ pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<> {
     Column(children)
 }
 
-// Android entry point: stamps out the `Java_dev_forgekit_ForgeKitSurfaceView_native*`
-// JNI exports bound to this app's `AppState`/`app_logic` (spec §10.1). The
-// `#[cfg(target_os = "android")]` gate means the macro expands to nothing on
-// desktop, where `main.rs` drives the app instead.
-#[cfg(target_os = "android")]
-forgekit::android_app!(AppState, app_logic);
+/// The generated app's root [`Component`] (spec §5.5): stateless config
+/// (`Default`-constructed) that wires [`AppState`] as its local state.
+/// `init` decodes the embedded logo exactly once; `build` re-runs the pure
+/// [`app_logic`] view function above on every rebuild.
+#[derive(Default)]
+pub struct {{ title_case_name | replace(" ", "") }}App;
 
-// iOS entry point: stamps out the fixed `forgekit_*` C-ABI exports the generated
-// Swift app calls (spec §10.2), bound to this app's `AppState`/`app_logic`. The
-// invocation is unconditional — the macro gates its own generated exports on
-// `target_os = "ios"`, so this expands to nothing on desktop/Android where
-// `main.rs`/`android_app!` drive the app instead.
-forgekit::ios_app!(AppState, app_logic);
+impl Component for {{ title_case_name | replace(" ", "") }}App {
+    type State = AppState;
+
+    fn init(&self) -> AppState {
+        AppState::new()
+    }
+
+    fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+        any(app_logic(state))
+    }
+}
+
+// The generated app's sole entry point (spec §5.5/§10): one line binds
+// `{{ title_case_name | replace(" ", "") }}App` to all three platforms — the
+// Android JNI exports (`target_os = "android"` only), the iOS C-ABI exports
+// (unconditional; self-gated to `target_os = "ios"`), and (on desktop) the
+// hidden `__forgekit_main` that `main.rs` calls. Never edit this line or
+// `main.rs` — add screens/state to `app_logic`/`AppState` above instead.
+forgekit::app!({{ title_case_name | replace(" ", "") }}App);
