@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use jni::EnvUnowned;
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JObject, JString};
-use jni::sys::{jfloat, jint, jlong, jstring};
+use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
 use ndk::native_window::NativeWindow;
 
 use forgekit_core::event::{EditingState, ImeState};
@@ -405,6 +405,21 @@ pub fn native_ime_action(handle: jlong, action: jint) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.ime_action(action);
+        }
+    });
+}
+
+/// `nativeSetAppearance`: flip the app's theme brightness (config/uiMode
+/// change), re-publishing it through both delivery paths (mirrors task 05's
+/// desktop `apply_theme`). `dark` is a JNI `jboolean` (this `jni` crate's
+/// `jni-sys` 0.4 backing type is a real `bool`, not the `u8` older bindings
+/// use); the continuous Choreographer loop repaints the next tick with no
+/// extra wake needed. A missing handle is a no-op.
+pub fn native_set_appearance(handle: jlong, dark: jboolean) {
+    guard("nativeSetAppearance", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_appearance(dark);
         }
     });
 }

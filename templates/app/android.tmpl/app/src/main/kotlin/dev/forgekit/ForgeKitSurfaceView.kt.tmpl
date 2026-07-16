@@ -1,6 +1,7 @@
 package dev.forgekit
 
 import android.content.Context
+import android.content.res.Configuration
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
@@ -101,6 +102,14 @@ class ForgeKitSurfaceView(context: Context) :
 
     private external fun nativeImeAction(handle: Long, action: Int)
 
+    // Appearance (spec §17, task 08): flip the app's theme brightness between
+    // light and dark. `dark` mirrors Configuration.UI_MODE_NIGHT_YES — see
+    // [isDarkMode]. Called once right after `nativeInit` returns a handle and
+    // again on every `onConfigurationChanged` (the manifest declares `uiMode`
+    // in `android:configChanges` so a system dark-mode toggle reaches here
+    // instead of recreating the activity).
+    private external fun nativeSetAppearance(handle: Long, dark: Boolean)
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
@@ -142,6 +151,11 @@ class ForgeKitSurfaceView(context: Context) :
     private val scaleFactor: Float
         get() = resources.displayMetrics.density
 
+    /** Whether the platform currently reports a dark appearance preference. */
+    private val isDarkMode: Boolean
+        get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+
     init {
         holder.addCallback(this)
         // Required for a custom editor view to receive IME focus + text input.
@@ -152,6 +166,9 @@ class ForgeKitSurfaceView(context: Context) :
     override fun surfaceCreated(holder: SurfaceHolder) {
         if (handle == 0L) {
             handle = nativeInit(holder.surface, scaleFactor)
+            if (handle != 0L) {
+                nativeSetAppearance(handle, isDarkMode)
+            }
         } else {
             nativeOnSurfaceChanged(handle, holder.surface, width, height)
         }
@@ -160,6 +177,18 @@ class ForgeKitSurfaceView(context: Context) :
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         if (handle != 0L) {
             nativeOnSurfaceChanged(handle, holder.surface, width, height)
+        }
+    }
+
+    /**
+     * The `android:configChanges` manifest entry includes `uiMode`, so a
+     * system light/dark toggle reaches here instead of recreating the
+     * activity — re-seed the theme's brightness from the fresh configuration.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (handle != 0L) {
+            nativeSetAppearance(handle, isDarkMode)
         }
     }
 

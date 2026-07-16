@@ -64,6 +64,30 @@ pub(crate) fn touch_phase_from_code(phase: u32) -> TouchPhase {
     }
 }
 
+/// A light/dark appearance flag, decoupled from `forgekit_theme::Brightness` so
+/// this module stays host-testable (that crate is iOS-gated — see the crate's
+/// `Cargo.toml`). [`crate::app`] maps this onto `Brightness` at the one
+/// iOS-only call site ([`crate::app::IosAppHandle::set_appearance`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Appearance {
+    /// The platform reports a light appearance preference.
+    Light,
+    /// The platform reports a dark appearance preference.
+    Dark,
+}
+
+/// Map the `forgekit_set_appearance` C-ABI flag (Swift's `traitCollection.
+/// userInterfaceStyle == .dark`) into an [`Appearance`] — the pure core of the
+/// appearance state-machine transition task 08 wires up.
+#[inline]
+pub(crate) fn appearance_from_dark(dark: bool) -> Appearance {
+    if dark {
+        Appearance::Dark
+    } else {
+        Appearance::Light
+    }
+}
+
 /// Whether a frame should run its rebuild → layout → paint → render pass.
 ///
 /// A frame does work only when the surface is `SurfaceReady` *and* the app is not
@@ -247,6 +271,13 @@ mod tests {
         // A future/corrupt code must release capture, not strand a "began".
         assert_eq!(touch_phase_from_code(4), TouchPhase::Cancelled);
         assert_eq!(touch_phase_from_code(u32::MAX), TouchPhase::Cancelled);
+    }
+
+    #[test]
+    fn appearance_from_dark_maps_true_to_dark() {
+        // init light -> set dark -> the transition Rust's brightness flip applies.
+        assert_eq!(appearance_from_dark(false), Appearance::Light);
+        assert_eq!(appearance_from_dark(true), Appearance::Dark);
     }
 
     #[test]

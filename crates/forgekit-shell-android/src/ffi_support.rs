@@ -69,6 +69,31 @@ pub(crate) fn frame_time_nanos_from_jlong(frame_time_nanos: i64) -> u64 {
     frame_time_nanos.max(0) as u64
 }
 
+/// A light/dark appearance flag, decoupled from `forgekit_theme::Brightness` so
+/// this module stays host-testable (that crate is Android-gated — see the
+/// crate's `Cargo.toml`). [`crate::app`] maps this onto `Brightness` at the one
+/// Android-only call site ([`crate::app::AndroidAppHandle::set_appearance`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Appearance {
+    /// The platform reports a light appearance preference.
+    Light,
+    /// The platform reports a dark appearance preference.
+    Dark,
+}
+
+/// Map the `nativeSetAppearance` JNI boolean (Kotlin's
+/// `(resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+/// Configuration.UI_MODE_NIGHT_YES`) into an [`Appearance`] — the pure core of
+/// the appearance state-machine transition task 08 wires up.
+#[inline]
+pub(crate) fn appearance_from_dark(dark: bool) -> Appearance {
+    if dark {
+        Appearance::Dark
+    } else {
+        Appearance::Light
+    }
+}
+
 /// Normalise a raw JNI selection/composing index quintuple into the canonical
 /// [`forgekit_core::event::EditingState`] field form (the mobile IME seam).
 ///
@@ -255,6 +280,13 @@ mod tests {
         // `u64` via `as`.
         assert_eq!(frame_time_nanos_from_jlong(-1), 0);
         assert_eq!(frame_time_nanos_from_jlong(i64::MIN), 0);
+    }
+
+    #[test]
+    fn appearance_from_dark_maps_true_to_dark() {
+        // init light -> set dark -> the transition Rust's brightness flip applies.
+        assert_eq!(appearance_from_dark(false), Appearance::Light);
+        assert_eq!(appearance_from_dark(true), Appearance::Dark);
     }
 
     #[test]

@@ -480,6 +480,22 @@ pub fn resume(handle: *mut c_void) {
     });
 }
 
+/// `forgekit_set_appearance`: flip the app's theme brightness (a dark-mode
+/// change reported via `traitCollectionDidChange`), re-publishing it through
+/// both delivery paths (mirrors task 05's desktop `apply_theme`). `dark` is
+/// `0`/`1` — no existing bool-ish C-ABI precedent in this crate to match, so a
+/// plain `u8` (see `Runner-Bridging-Header.h`). The continuous `CADisplayLink`
+/// loop repaints the next tick with no extra wake needed. A missing handle is
+/// a no-op.
+pub fn set_appearance(handle: *mut c_void, dark: u8) {
+    guard("forgekit_set_appearance", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_appearance(dark != 0);
+        }
+    });
+}
+
 /// `forgekit_destroy`: reclaim and drop the boxed handle (which drops the surface;
 /// the Swift-owned layer is released separately, afterwards). Idempotent from
 /// Swift's side because it nulls its handle right after calling this.

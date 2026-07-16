@@ -122,6 +122,10 @@ final class ForgeKitViewController: UIViewController {
                 NSLog("ForgeKit: GPU init failed — rendering disabled for this session")
                 return
             }
+            // Seed the theme's brightness from the platform's current
+            // appearance before the first frame (task 08); live changes
+            // arrive later via `traitCollectionDidChange`.
+            forgekit_set_appearance(handle, traitCollection.userInterfaceStyle == .dark ? 1 : 0)
             startDisplayLink()
         } else if pixelSize != lastDrawableSize {
             forgekit_resize(handle, width, height, Float(scale))
@@ -177,6 +181,14 @@ final class ForgeKitViewController: UIViewController {
     @objc private func appDidBecomeActive() {
         if let handle { forgekit_resume(handle) }
         displayLink?.isPaused = false
+    }
+
+    /// The platform's light/dark appearance preference changed (task 08) —
+    /// re-seed the theme's brightness.
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard let handle else { return }
+        forgekit_set_appearance(handle, traitCollection.userInterfaceStyle == .dark ? 1 : 0)
     }
 
     deinit {

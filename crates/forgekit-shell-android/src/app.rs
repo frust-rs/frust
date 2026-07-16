@@ -17,11 +17,12 @@ use forgekit_core::event::{
     EditingState, ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
     PointerEvent, PointerPhase,
 };
-use forgekit_reactive::ReactiveRuntime;
+use forgekit_reactive::{ReactiveRuntime, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
 use forgekit_text::TextContext;
+use forgekit_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 use ndk::native_window::NativeWindow;
 
@@ -50,6 +51,13 @@ pub struct AndroidAppHandle {
     /// The acquired window backing the current surface. Dropped after `renderer`
     /// (see the struct doc): its `Drop` calls `ANativeWindow_release`.
     window: Option<NativeWindow>,
+    /// The app's active theme (M3 baseline). Mirrors the desktop shell's
+    /// appearance ownership (task 05): starts [`Brightness::Light`] here and is
+    /// flipped by [`Self::set_appearance`] once Kotlin reports the platform's
+    /// real dark-mode preference (`nativeSetAppearance`, called right after
+    /// `nativeInit` returns a handle — see `templates/app/android.tmpl`'s
+    /// `ForgeKitSurfaceView.surfaceCreated`).
+    theme: Theme,
 }
 
 impl AndroidAppHandle {
@@ -59,6 +67,14 @@ impl AndroidAppHandle {
     /// `NativeWindow`; runs the first rebuild so the tree exists before the first
     /// frame. No `unsafe` here — the window acquisition and surface creation
     /// happen at the FFI boundary.
+    ///
+    /// Seeds the M3 baseline theme (Light, until Kotlin's follow-up
+    /// `nativeSetAppearance` reports the real preference) into both delivery
+    /// paths (`AppTree::set_theme` for widgets, `provide_context` for app code)
+    /// before the first rebuild, mirroring the desktop shell's `apply_theme`.
+    /// Must be called under the root reactive `Owner` (see
+    /// `crate::jni_glue::create_handle`) so `provide_context` isn't a silent
+    /// no-op.
     pub(crate) fn new(
         render_cx: RenderContext,
         renderer: SurfaceRenderer,
@@ -67,6 +83,9 @@ impl AndroidAppHandle {
         scale: f32,
         mut app: Box<dyn AppTree>,
     ) -> Self {
+        let theme = Theme::m3_baseline();
+        app.set_theme(Box::new(theme.clone()));
+        provide_context(theme.clone());
         app.rebuild();
         Self {
             render_cx,
@@ -77,6 +96,28 @@ impl AndroidAppHandle {
             physical,
             scale,
             window: Some(window),
+            theme,
+        }
+    }
+
+    /// `nativeSetAppearance`: flip the theme's brightness and re-push it to both
+    /// delivery paths (mirrors the desktop shell's `apply_theme`, task 05).
+    ///
+    /// Runs the `provide_context` re-provide under the process-wide root
+    /// [`ReactiveRuntime`]'s owner (fetched fresh here, since — unlike
+    /// [`Self::new`] — this call arrives on its own JNI entry, not nested inside
+    /// `create_handle`'s `with_owner` wrap). No explicit redraw is scheduled —
+    /// the continuous Choreographer loop already repaints every tick.
+    pub(crate) fn set_appearance(&mut self, dark: bool) {
+        self.theme.brightness = match crate::ffi_support::appearance_from_dark(dark) {
+            crate::ffi_support::Appearance::Dark => Brightness::Dark,
+            crate::ffi_support::Appearance::Light => Brightness::Light,
+        };
+        self.app.set_theme(Box::new(self.theme.clone()));
+        let theme = self.theme.clone();
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(theme)),
+            None => provide_context(theme),
         }
     }
 

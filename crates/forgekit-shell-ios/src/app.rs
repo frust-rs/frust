@@ -35,11 +35,12 @@ use forgekit_core::FrameTime;
 use forgekit_core::event::{
     EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerPhase,
 };
-use forgekit_reactive::ReactiveRuntime;
+use forgekit_reactive::{ReactiveRuntime, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
 use forgekit_text::TextContext;
+use forgekit_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 
 use crate::ffi_support::TouchPhase;
@@ -82,6 +83,13 @@ pub struct IosAppHandle {
     /// per-CADisplayLink-frame retry storm; reset by a successful recreate
     /// ([`Self::set_surface`]).
     recreate_failures: u8,
+    /// The app's active theme (M3 baseline). Mirrors the desktop shell's
+    /// appearance ownership (task 05): starts [`Brightness::Light`] here and is
+    /// flipped by [`Self::set_appearance`] once Swift reports the platform's
+    /// real dark-mode preference (`forgekit_set_appearance`, called right after
+    /// `forgekit_init` returns a handle and again from `traitCollectionDidChange`
+    /// — see `templates/app/ios.tmpl`'s `ForgeKitViewController`).
+    theme: Theme,
 }
 
 impl IosAppHandle {
@@ -90,6 +98,14 @@ impl IosAppHandle {
     /// Called from [`crate::ffi_glue`] after the surface has been built from the
     /// `CAMetalLayer`; runs the first rebuild so the tree exists before the first
     /// frame. No `unsafe` here — the surface creation happens at the FFI boundary.
+    ///
+    /// Seeds the M3 baseline theme (Light, until Swift's follow-up
+    /// `forgekit_set_appearance` reports the real preference) into both delivery
+    /// paths (`AppTree::set_theme` for widgets, `provide_context` for app code)
+    /// before the first rebuild, mirroring the desktop shell's `apply_theme`.
+    /// Must be called under the root reactive `Owner` (see
+    /// `crate::ffi_glue::create_handle`) so `provide_context` isn't a silent
+    /// no-op.
     pub(crate) fn new(
         render_cx: RenderContext,
         renderer: SurfaceRenderer,
@@ -98,6 +114,9 @@ impl IosAppHandle {
         scale: f32,
         mut app: Box<dyn AppTree>,
     ) -> Self {
+        let theme = Theme::m3_baseline();
+        app.set_theme(Box::new(theme.clone()));
+        provide_context(theme.clone());
         app.rebuild();
         Self {
             render_cx,
@@ -110,6 +129,29 @@ impl IosAppHandle {
             scale,
             paused: false,
             recreate_failures: 0,
+            theme,
+        }
+    }
+
+    /// `forgekit_set_appearance`: flip the theme's brightness and re-push it to
+    /// both delivery paths (mirrors the desktop shell's `apply_theme`, task 05).
+    ///
+    /// Runs the `provide_context` re-provide under the process-wide root
+    /// [`ReactiveRuntime`]'s owner (fetched fresh here, since — unlike
+    /// [`Self::new`] — this call arrives on its own C-ABI entry, not nested
+    /// inside `create_handle`'s `with_owner` wrap). No explicit redraw is
+    /// scheduled — the continuous `CADisplayLink` loop already repaints every
+    /// tick.
+    pub(crate) fn set_appearance(&mut self, dark: bool) {
+        self.theme.brightness = match crate::ffi_support::appearance_from_dark(dark) {
+            crate::ffi_support::Appearance::Dark => Brightness::Dark,
+            crate::ffi_support::Appearance::Light => Brightness::Light,
+        };
+        self.app.set_theme(Box::new(self.theme.clone()));
+        let theme = self.theme.clone();
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(theme)),
+            None => provide_context(theme),
         }
     }
 

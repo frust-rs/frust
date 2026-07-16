@@ -41,4 +41,11 @@ void  forgekit_ime_apply(void *handle, const char *text, int32_t sel_base, int32
 char *forgekit_ime_state_json(void *handle);
 void  forgekit_string_free(char *s);
 
+// Appearance (spec §17, task 08): flip the app's theme brightness between
+// light and dark. `dark` is 0/1 (no existing bool-ish precedent to match in
+// this header, so plain uint8_t) — see ForgeKitViewController's
+// traitCollectionDidChange, which also seeds the initial value right after
+// forgekit_init returns a handle.
+void  forgekit_set_appearance(void *handle, uint8_t dark);
+
 #endif /* Runner_Bridging_Header_h */

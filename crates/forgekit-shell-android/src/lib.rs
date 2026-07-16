@@ -70,13 +70,13 @@ pub mod __jni {
     // read/return a `java.lang.String` — see [`crate::jni_glue`].
     pub use jni::EnvUnowned;
     pub use jni::objects::{JClass, JObject, JString};
-    pub use jni::sys::{jfloat, jint, jlong, jstring};
+    pub use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
 }
 
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (spec §10.1, Makepad `app_main!` precedent).
 ///
-/// Stamps out the eleven `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
+/// Stamps out the twelve `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
 /// the Kotlin `ForgeKitSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
@@ -84,10 +84,12 @@ pub mod __jni {
 /// `nativeImeState`, `nativeImeAction`) carry the Phase 4B soft-keyboard
 /// state-sync contract (spec §14 Phase 4): Kotlin pushes a whole editing state in
 /// (`nativeImeApply`), pulls the reconciled state back out (`nativeImeState`), and
-/// forwards an editor action (Enter) via `nativeImeAction`. `nativeInit` also
-/// initializes the process-wide [`forgekit_reactive::ReactiveRuntime`] (see
-/// [`jni_glue::native_init`]) before the state factory runs, so a `State`'s own
-/// construction may already create signals/controllers.
+/// forwards an editor action (Enter) via `nativeImeAction`. `nativeSetAppearance`
+/// (task 08) flips the app's theme brightness from the platform's dark-mode
+/// preference. `nativeInit` also initializes the process-wide
+/// [`forgekit_reactive::ReactiveRuntime`] (see [`jni_glue::native_init`]) before
+/// the state factory runs, so a `State`'s own construction may already create
+/// signals/controllers.
 ///
 /// The macro is defined on every target but only *expands* to real code where
 /// its call site is gated, e.g. in the generated `src/lib.rs`:
@@ -261,6 +263,18 @@ macro_rules! android_app {
             action: $crate::__jni::jint,
         ) {
             $crate::jni_glue::native_ime_action(handle, action)
+        }
+
+        /// JNI `nativeSetAppearance`: flip the app's theme brightness (config/
+        /// uiMode change) between light and dark (task 08).
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeSetAppearance<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            dark: $crate::__jni::jboolean,
+        ) {
+            $crate::jni_glue::native_set_appearance(handle, dark)
         }
     };
 }
