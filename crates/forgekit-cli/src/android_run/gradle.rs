@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::android_build::AndroidArtifact;
 use crate::build_info::BuildMode;
@@ -44,13 +44,14 @@ pub fn assemble(
 }
 
 /// Resolves the single APK a non-split `assemble<Flavor><Mode>` build should
-/// have produced, reusing `android_build::artifacts`' directory + glob
-/// discovery (task 64) rather than guessing AGP's exact output filename here
-/// — the output-naming/path logic lives in exactly one place. `forgekit
+/// have produced, reusing `android_build::artifacts`' directory + glob +
+/// expected-count discovery (tasks 64, followup F2) rather than guessing
+/// AGP's exact output filename or re-checking the count here — the
+/// output-naming/count-guard logic lives in exactly one place. `forgekit
 /// run` always builds a single-ABI, non-split APK (it installs on one
-/// connected device), so exactly one file is expected; more than one (e.g. a
-/// stale split-build artifact left over in the output directory) is an
-/// error rather than an ambiguous pick.
+/// connected device), so `discover` itself now errors on anything but
+/// exactly one file (e.g. a stale split-build artifact left over in the
+/// output directory) rather than this function re-deriving the same check.
 pub fn apk_output_path(
     android_dir: &Path,
     mode: BuildMode,
@@ -61,14 +62,14 @@ pub fn apk_output_path(
         abis: Vec::new(),
     };
     let mut found = crate::android_build::artifacts::discover(android_dir, &target, mode, flavor)?;
-    if found.len() > 1 {
-        bail!(
-            "expected exactly one APK in the non-split build output, found {}: {:?}",
-            found.len(),
-            found
-        );
-    }
-    Ok(found.pop().expect("discover errors on an empty result"))
+    debug_assert_eq!(
+        found.len(),
+        1,
+        "discover already guards a non-split APK build to exactly one file"
+    );
+    Ok(found
+        .pop()
+        .expect("discover errors on anything but exactly one file"))
 }
 
 /// Best-effort check for whether Gradle's wrapper distribution is already
@@ -180,10 +181,10 @@ mod tests {
         fs::write(out_dir.join("app-x86_64-release.apk"), b"fake").unwrap();
 
         let err = apk_output_path(&dir, BuildMode::Release, None).unwrap_err();
-        assert!(
-            err.to_string().contains("expected exactly one APK"),
-            "{err}"
-        );
+        let message = err.to_string();
+        assert!(message.contains("expected 1"), "{message}");
+        assert!(message.contains("found 2"), "{message}");
+        assert!(message.contains("forgekit clean"), "{message}");
         let _ = fs::remove_dir_all(&dir);
     }
 

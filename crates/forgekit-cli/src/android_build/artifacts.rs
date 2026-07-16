@@ -54,10 +54,42 @@ fn variant_dir_name(mode: BuildMode, flavor: Option<&str>) -> String {
     }
 }
 
+/// The number of `.apk`/`.aab` files `target`'s build variant should have
+/// produced: `abis.len()` for a `--split-per-abi` APK build (one APK per
+/// requested ABI), `1` for a fat APK or an App Bundle. `discover` checks the
+/// glob result against this count so a leftover artifact from a *different*
+/// build shape sitting in the (shared, non-split-aware) AGP output directory
+/// — e.g. a stale split APK next to a freshly built fat one — is caught as
+/// an error instead of silently reported as "Built" (followup F2).
+fn expected_count(target: &AndroidArtifact) -> Result<usize> {
+    match target {
+        AndroidArtifact::Apk {
+            split_per_abi: true,
+            abis,
+        } => {
+            if abis.is_empty() {
+                bail!(
+                    "internal error: a split-per-ABI APK build was requested with no ABIs \
+                     resolved — this should have been caught earlier"
+                );
+            }
+            Ok(abis.len())
+        }
+        AndroidArtifact::Apk {
+            split_per_abi: false,
+            ..
+        } => Ok(1),
+        AndroidArtifact::Appbundle => Ok(1),
+    }
+}
+
 /// Lists every file with `extension` (no leading dot, e.g. `"apk"`/`"aab"`)
 /// directly inside `target`/`mode`/`flavor`'s expected output directory,
-/// erroring if the directory is missing or contains none — the build is
-/// trusted to have run only once this returns a non-empty result.
+/// erroring if the directory is missing, contains none, or contains a
+/// different count than `target` should have produced — the build is
+/// trusted to have run only once this returns a result, since AGP writes
+/// every APK shape into the same directory and a leftover from a prior,
+/// differently-shaped build would otherwise be reported as freshly built.
 pub fn discover(
     android_dir: &Path,
     target: &AndroidArtifact,
@@ -69,10 +101,11 @@ pub fn discover(
         AndroidArtifact::Appbundle => "aab",
     };
     let dir = expected_output_dir(android_dir, target, mode, flavor);
-    discover_in_dir(&dir, extension)
+    let expected = expected_count(target)?;
+    discover_in_dir(&dir, extension, expected)
 }
 
-fn discover_in_dir(dir: &Path, extension: &str) -> Result<Vec<PathBuf>> {
+fn discover_in_dir(dir: &Path, extension: &str, expected: usize) -> Result<Vec<PathBuf>> {
     let entries = std::fs::read_dir(dir).map_err(|err| {
         anyhow::anyhow!(
             "reading `{}` for built `.{extension}` artifacts: {err}",
@@ -99,6 +132,19 @@ fn discover_in_dir(dir: &Path, extension: &str) -> Result<Vec<PathBuf>> {
     }
 
     found.sort();
+
+    if found.len() != expected {
+        bail!(
+            "expected {expected} `.{extension}` artifact{} in `{}`, found {}: {:?} — AGP writes \
+             every APK shape into the same output directory, so this is likely a stale artifact \
+             left over from a previous build; run `forgekit clean` and rebuild",
+            if expected == 1 { "" } else { "s" },
+            dir.display(),
+            found.len(),
+            found,
+        );
+    }
+
     Ok(found)
 }
 
@@ -123,6 +169,13 @@ mod tests {
     fn apk(abis: &[&str]) -> AndroidArtifact {
         AndroidArtifact::Apk {
             split_per_abi: false,
+            abis: abis.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn split_apk(abis: &[&str]) -> AndroidArtifact {
+        AndroidArtifact::Apk {
+            split_per_abi: true,
             abis: abis.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -205,7 +258,7 @@ mod tests {
 
         let found = discover(
             &dir,
-            &apk(&["arm64-v8a", "x86_64"]),
+            &split_apk(&["arm64-v8a", "x86_64"]),
             BuildMode::Release,
             None,
         )
@@ -217,6 +270,65 @@ mod tests {
                 out_dir.join("app-x86_64-release.apk"),
             ]
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_errs_when_split_build_has_extra_stale_apk() {
+        let dir = unique_temp_dir("apk-split-stale");
+        let out_dir = dir.join("app/build/outputs/apk/release");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-arm64-v8a-release.apk"), b"fake").unwrap();
+        fs::write(out_dir.join("app-x86_64-release.apk"), b"fake").unwrap();
+        fs::write(out_dir.join("app-armeabi-v7a-release.apk"), b"stale").unwrap();
+
+        let err = discover(
+            &dir,
+            &split_apk(&["arm64-v8a", "x86_64"]),
+            BuildMode::Release,
+            None,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("expected 2"), "{message}");
+        assert!(message.contains("found 3"), "{message}");
+        assert!(message.contains("app-arm64-v8a-release.apk"), "{message}");
+        assert!(message.contains("app-x86_64-release.apk"), "{message}");
+        assert!(message.contains("app-armeabi-v7a-release.apk"), "{message}");
+        assert!(message.contains("forgekit clean"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_errs_when_fat_build_has_stale_extra_apk() {
+        let dir = unique_temp_dir("apk-fat-stale");
+        let out_dir = dir.join("app/build/outputs/apk/release");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+        fs::write(out_dir.join("app-arm64-v8a-release.apk"), b"stale").unwrap();
+
+        let err = discover(&dir, &apk(&["arm64-v8a"]), BuildMode::Release, None).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("expected 1"), "{message}");
+        assert!(message.contains("found 2"), "{message}");
+        assert!(message.contains("forgekit clean"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_errs_when_appbundle_has_stale_extra_aab() {
+        let dir = unique_temp_dir("aab-stale");
+        let out_dir = dir.join("app/build/outputs/bundle/release");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-release.aab"), b"fake").unwrap();
+        fs::write(out_dir.join("app-old-release.aab"), b"stale").unwrap();
+
+        let err =
+            discover(&dir, &AndroidArtifact::Appbundle, BuildMode::Release, None).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("expected 1"), "{message}");
+        assert!(message.contains("found 2"), "{message}");
+        assert!(message.contains("forgekit clean"), "{message}");
         let _ = fs::remove_dir_all(&dir);
     }
 

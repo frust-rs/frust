@@ -245,6 +245,51 @@ mod tests {
     }
 
     #[test]
+    fn stale_leftover_artifact_errors_instead_of_being_reported_as_built() {
+        // Followup F2: AGP writes every APK shape into the same output
+        // directory, so a leftover from a previous, differently-shaped
+        // build (e.g. a stale split APK) sitting next to the fresh fat APK
+        // this build produced must be caught as an error, never silently
+        // printed as "Built" alongside/instead of the real artifact.
+        let dir = unique_project_dir("stale-leftover");
+        let android_dir = dir.join("android");
+        let out_dir = android_dir.join("app/build/outputs/apk/debug");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-debug.apk"), b"fresh-apk-bytes").unwrap();
+        fs::write(
+            out_dir.join("app-arm64-v8a-debug.apk"),
+            b"stale-leftover-from-a-prior-split-build",
+        )
+        .unwrap();
+
+        let runner = preflight_ok_runner().with(
+            "./gradlew assembleDebug -Pforgekit.targetPlatforms=arm64-v8a -Pforgekit.splitPerAbi=false",
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let target = AndroidArtifact::Apk {
+            split_per_abi: false,
+            abis: vec!["arm64-v8a".to_string()],
+        };
+        let build_info = info(BuildMode::Debug, None);
+        let err = build_with_env(&runner, &dir, &build_info, &target, &fake_env()).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("expected 1"), "{message}");
+        assert!(message.contains("found 2"), "{message}");
+        assert!(message.contains("forgekit clean"), "{message}");
+        assert!(
+            !message.contains("Built"),
+            "error must not itself echo a stale-path 'Built' report: {message}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn release_apk_with_flavor_and_defines_asserts_exact_argv() {
         let dir = unique_project_dir("full-release-flavor-defines");
         let android_dir = dir.join("android");
