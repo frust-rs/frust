@@ -69,6 +69,16 @@ fn create_ios_project_is_parseable() {
         listing.contains("Runner"),
         "`xcodebuild -list` did not report the Runner target/scheme:\n{listing}"
     );
+    // Debug/Release/Profile must all be present in the project's configuration
+    // matrix (task 63): the run-script phase and version build settings both
+    // depend on `Profile` being a real XCBuildConfiguration, not just scheme
+    // boilerplate.
+    for configuration in ["Debug", "Release", "Profile"] {
+        assert!(
+            listing.contains(configuration),
+            "`xcodebuild -list` did not report the `{configuration}` build configuration:\n{listing}"
+        );
+    }
 
     // The shared scheme must be present for headless `-scheme` builds (task 36).
     assert!(
@@ -89,6 +99,18 @@ fn create_ios_project_is_parseable() {
         "`plutil -lint` failed on {}:\n{}",
         plist.display(),
         String::from_utf8_lossy(&lint.stderr)
+    );
+
+    // Versions are sourced from build settings (task 63), not hardcoded into
+    // the plist.
+    let plist_src = std::fs::read_to_string(&plist).expect("reading rendered Info.plist");
+    assert!(
+        plist_src.contains("$(MARKETING_VERSION)"),
+        "expected CFBundleShortVersionString to reference $(MARKETING_VERSION):\n{plist_src}"
+    );
+    assert!(
+        plist_src.contains("$(CURRENT_PROJECT_VERSION)"),
+        "expected CFBundleVersion to reference $(CURRENT_PROJECT_VERSION):\n{plist_src}"
     );
 
     let _ = std::fs::remove_dir_all(&dest);
