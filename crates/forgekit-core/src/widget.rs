@@ -203,6 +203,16 @@ pub struct PaintCtx {
     size: Size,
     needs_frame: bool,
     ime_state: Option<ImeState>,
+    /// Whether the widget being painted currently holds the focus path — seeded
+    /// from its pod's recorded focus flag ([`ChildPod::is_focused`]) by
+    /// [`ChildPod::paint_child`], and from [`crate::app::RenderRoot`]'s
+    /// `focus_active` at the root. The paint-pass mirror of
+    /// [`EventCtx::has_focus`]: an editable gates its focus chrome (accent
+    /// border, caret, blink `request_frame`, IME republish) on it, so a
+    /// container-routed blur — which clears the pod's focus path without calling
+    /// the widget's `event()` — is finally observed here (see
+    /// [`PaintCtx::has_focus`]).
+    has_focus: bool,
 }
 
 impl PaintCtx {
@@ -213,6 +223,7 @@ impl PaintCtx {
             size,
             needs_frame: false,
             ime_state: None,
+            has_focus: false,
         }
     }
 
@@ -224,6 +235,28 @@ impl PaintCtx {
     /// The widget's resolved size.
     pub fn size(&self) -> Size {
         self.size
+    }
+
+    /// Whether the widget being painted holds the focus path.
+    ///
+    /// Threaded down from the widget's pod ([`ChildPod::is_focused`], seeded at
+    /// the root from `RenderRoot::focus_active`), this is the *authoritative*
+    /// focus signal during paint — a widget must prefer it over any focus flag
+    /// it tracks internally. A container-routed blur clears the pod's focus path
+    /// but never dispatches to the widget's `event()`, so a widget-internal flag
+    /// can lag; reading `has_focus()` here (and self-correcting the internal
+    /// flag against it) lets the widget converge one frame after the blur.
+    /// Mirrors [`EventCtx::has_focus`].
+    pub fn has_focus(&self) -> bool {
+        self.has_focus
+    }
+
+    /// Seed whether the widget being painted holds focus. Called by
+    /// [`ChildPod::paint_child`] (from the pod's recorded focus flag) and by
+    /// [`crate::app::RenderRoot::paint`] (from `focus_active`) — the paint mirror
+    /// of [`EventCtx::set_has_focus`].
+    pub(crate) fn set_has_focus(&mut self, has_focus: bool) {
+        self.has_focus = has_focus;
     }
 
     /// Signal that this paint advanced animation state and needs to be
@@ -459,6 +492,10 @@ impl ChildPod {
     pub fn paint_child(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let child_origin = ctx.origin() + self.origin.to_vec2();
         let mut child_ctx = PaintCtx::new(child_origin, self.size);
+        // Thread the pod's recorded focus path into paint (the mirror of how
+        // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
+        // observes a container-routed blur that never reached its `event()`.
+        child_ctx.set_has_focus(self.focused);
         self.widget.paint(&mut child_ctx, scene);
         if child_ctx.needs_frame() {
             ctx.request_frame();

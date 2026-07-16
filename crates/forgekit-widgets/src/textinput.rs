@@ -459,9 +459,22 @@ impl Widget for TextInputWidget {
         let origin = ctx.origin();
         let size = ctx.size();
 
+        // The pod's recorded focus path (threaded in via `PaintCtx::has_focus`)
+        // is authoritative — not our own `self.focused`, which lags after a
+        // *container-routed* blur (a sibling tap clears the pod's focus without
+        // ever calling our `event()`). Observe that here and self-correct so the
+        // widget converges one frame after the blur: the accent border, caret,
+        // caret-blink continuation frame, and IME republish below all key off
+        // `focused`, so they stop together and the field stops resurrecting the
+        // IME surface the blur cleared (review F1).
+        let focused = ctx.has_focus();
+        if self.focused && !focused {
+            self.focused = false;
+        }
+
         // Chrome: a border-colored rounded rect with an inset background fills in
         // as the frame (there is no stroke-rect primitive on `PaintScene`).
-        let border_color = if self.focused { ACCENT } else { BORDER };
+        let border_color = if focused { ACCENT } else { BORDER };
         scene.fill_rounded_rect(origin, size, RADIUS, border_color);
         scene.fill_rounded_rect(
             Point::new(origin.x + BORDER_W, origin.y + BORDER_W),
@@ -475,7 +488,7 @@ impl Widget for TextInputWidget {
 
         let text_origin = Point::new(origin.x + PAD_X, origin.y + self.text_top(size.height));
 
-        if self.editor.text().is_empty() && !self.focused {
+        if self.editor.text().is_empty() && !focused {
             // Placeholder: shaped on demand through the widget-owned context.
             if !self.placeholder.is_empty() {
                 let ph_style = TextStyle::new(self.style.size, PLACEHOLDER);
@@ -502,7 +515,7 @@ impl Widget for TextInputWidget {
         // Caret: blink while focused. Requesting a frame keeps the desktop shell's
         // wait-loop scheduling paints so the blink animates (the mobile shells'
         // continuous loops already do). At rest (unfocused) we stop signalling.
-        if self.focused {
+        if focused {
             ctx.request_frame();
             // Republish the IME surface every painted frame while focused, so a
             // controlled change applied by a rebuild (a submit clearing the
@@ -1040,6 +1053,81 @@ mod tests {
             ime.editing.text, "",
             "paint refreshes the shell-facing IME state to the controlled-cleared value \
              (without this, the mobile IME mirror re-pushes the stale text)"
+        );
+    }
+
+    // --- Nested-blur regression (review F1) ---
+    //
+    // A `TextInput` nested in a `Column` beside a `Button`. Focusing the field
+    // then tapping the sibling is a *container-routed* blur: `route_event`
+    // clears the field pod's recorded focus path, but the widget's `event()` is
+    // never called on that dispatch. Pre-fix, the widget-internal `focused` flag
+    // stayed set, so the next `paint` republished the (already-cleared) IME
+    // surface and pumped a caret-blink continuation frame — resurrecting the
+    // dismissed keyboard and keeping the desktop wait-loop spinning forever.
+    // The fix threads the pod's focus into paint (`PaintCtx::has_focus`) so the
+    // widget observes the blur and converges.
+
+    #[derive(Default)]
+    struct NestedState {
+        value: String,
+    }
+
+    fn nested_logic(state: &mut NestedState) -> crate::FlexView<NestedState> {
+        use forgekit_core::any;
+        crate::Column(vec![
+            any(text_input(
+                state.value.clone(),
+                |s: &mut NestedState, v: String| {
+                    s.value = v;
+                },
+            )),
+            any(crate::button("ok", |_s: &mut NestedState| {})),
+        ])
+    }
+
+    #[test]
+    fn nested_blur_clears_ime_and_idles_paint() {
+        let mut state = NestedState::default();
+        let mut root: RenderRoot<NestedState, crate::FlexView<NestedState>> = RenderRoot::new();
+        root.rebuild(&mut nested_logic, &mut state);
+        let mut tcx = forgekit_text::TextContext::new();
+        root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+
+        // Focus the field with a full tap (Down+Up) inside its bounds, at the
+        // top of the column. The Up releases the field's pointer capture, so the
+        // next Down is hit-tested afresh instead of routing back to the field.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert!(root.is_focus_active(), "tap inside the field focuses it");
+        assert!(
+            root.ime_state().is_some(),
+            "focusing the nested field publishes an IME surface"
+        );
+
+        // Tap the sibling button, below the field (a container-routed blur): the
+        // field's pod focus is cleared by `route_event`, but its own `event()` is
+        // never called on this dispatch.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 45.0));
+
+        // Leg 1 — the blur event clears the shell-facing focus + IME surface.
+        assert!(!root.is_focus_active(), "the sibling tap blurs the field");
+        assert!(
+            root.ime_state().is_none(),
+            "container-routed blur clears the IME surface"
+        );
+
+        // Legs 2 & 3 — a subsequent paint must NOT resurrect the cleared IME
+        // surface, and must report the tree at rest (no stale caret-blink frame).
+        let mut sink = NullScene;
+        let outcome = root.paint(&mut sink);
+        assert!(
+            root.ime_state().is_none(),
+            "paint must not republish the cleared IME surface (F1 resurrection)"
+        );
+        assert!(
+            !outcome.needs_frame,
+            "a blurred field paints at rest — the desktop wait-loop idles"
         );
     }
 

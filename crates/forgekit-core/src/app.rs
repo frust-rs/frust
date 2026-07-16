@@ -226,15 +226,24 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         };
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
+            // Seed the root widget's paint-time focus from the cached focus path
+            // so a leaf-root editable observes its own focus; deeper focus is
+            // threaded per-pod by `ChildPod::paint_child`.
+            ctx.set_has_focus(self.focus_active);
             pod.widget_mut().paint(&mut ctx, scene);
             pod.clear_flags();
             // A focused editable republishes its IME surface during paint (which
             // runs after every rebuild), so a controlled change applied by the
             // rebuild — e.g. a submit clearing the field — refreshes the
             // shell-facing `ime_state` that the event pass alone would leave
-            // stale. Only overwrite on a fresh publish: focus loss is cleared by
-            // the event pass, and an unfocused frame publishes nothing.
-            if let Some(ime) = ctx.take_ime_state() {
+            // stale. Defense-in-depth against F1: only accept a bubbled publish
+            // while focus is actually active. A widget whose pod focus was just
+            // cleared by a container-routed blur (but whose internal flag lags
+            // one frame) can then never resurrect the `ime_state` the blur
+            // cleared — even before it observes the blur via `PaintCtx::has_focus`.
+            if self.focus_active
+                && let Some(ime) = ctx.take_ime_state()
+            {
                 self.ime_state = Some(ime);
             }
             PaintOutcome {
