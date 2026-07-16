@@ -2,11 +2,20 @@
 //! (mirrors `android_run::gradle`). The generated Xcode project's Rust build
 //! phase does the actual `.a`/`.dylib` build; this module only shells out to
 //! `xcodebuild` and streams its output.
+//!
+//! This is always a simulator build (see [`build`]'s `-sdk iphonesimulator`),
+//! so it unconditionally pins `ARCHS` to [`host_sim_arch`] like
+//! `ios_build::xcodebuild`'s `Invocation::core` does for its own simulator
+//! path: Release/Profile configs build every simulator arch by default (no
+//! `ONLY_ACTIVE_ARCH`, unlike Debug), which links a slice the run-script's
+//! single-arch Rust staticlib lacks (`ld: symbol(s) not found for
+//! architecture x86_64` on Apple Silicon) — see commit `1a65272`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::ios_build::xcodebuild::host_sim_arch;
 use crate::process::{Output, ProcessRunner};
 
 /// The absolute path a successful [`build`] should have produced the app
@@ -21,8 +30,10 @@ pub fn app_bundle_path(root: &Path, configuration: &str) -> PathBuf {
 
 /// Runs `xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner
 /// -configuration <configuration> -sdk iphonesimulator -destination
-/// id=<udid> -derivedDataPath build/ios build` in `root`, streaming each
-/// line of output through `on_line` (prefixed `[xcodebuild] `).
+/// id=<udid> -derivedDataPath build/ios ARCHS=<host arch> build` in `root`,
+/// streaming each line of output through `on_line` (prefixed
+/// `[xcodebuild] `). The `ARCHS` pin (module doc comment) is unconditional —
+/// every call here targets the Simulator.
 pub fn build(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -32,6 +43,7 @@ pub fn build(
 ) -> Result<Output> {
     let mut prefixed = |line: &str| on_line(&format!("[xcodebuild] {line}"));
     let destination = format!("id={udid}");
+    let archs = format!("ARCHS={}", host_sim_arch());
     runner
         .run_streaming(
             "xcrun",
@@ -49,6 +61,7 @@ pub fn build(
                 &destination,
                 "-derivedDataPath",
                 "build/ios",
+                &archs,
                 "build",
             ],
             Some(root),
@@ -66,7 +79,10 @@ mod tests {
     #[test]
     fn build_runs_xcodebuild_with_expected_args_and_prefixes_lines() {
         let runner = FakeProcessRunner::new().with(
-            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios build",
+            format!(
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                host_sim_arch()
+            ),
             Output {
                 success: true,
                 stdout: "Build succeeded".to_string(),
@@ -89,7 +105,10 @@ mod tests {
     #[test]
     fn build_passes_through_a_non_debug_configuration() {
         let runner = FakeProcessRunner::new().with(
-            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios build",
+            format!(
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                host_sim_arch()
+            ),
             Output {
                 success: true,
                 stdout: "Build succeeded".to_string(),
@@ -110,7 +129,10 @@ mod tests {
     #[test]
     fn build_surfaces_failure() {
         let runner = FakeProcessRunner::new().with(
-            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios build",
+            format!(
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                host_sim_arch()
+            ),
             Output {
                 success: false,
                 stdout: "note: Compiling failed".to_string(),
@@ -126,6 +148,35 @@ mod tests {
         )
         .unwrap();
         assert!(!out.success);
+    }
+
+    #[test]
+    fn build_argv_pins_host_arch() {
+        // Mirrors ios_build::xcodebuild's
+        // `simulator_build_argv_has_no_signing_args_and_pins_host_arch`: a
+        // Simulator run build must pin `ARCHS` to the host's native arch
+        // (Release/Profile configs build every sim arch otherwise, which
+        // links a slice the run-script's single-arch Rust staticlib lacks).
+        let runner = FakeProcessRunner::new().with(
+            format!(
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                host_sim_arch()
+            ),
+            Output {
+                success: true,
+                stdout: "Build succeeded".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let out = build(
+            &runner,
+            Path::new("/tmp/myapp"),
+            "AAAA",
+            "Debug",
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(out.success);
     }
 
     #[test]

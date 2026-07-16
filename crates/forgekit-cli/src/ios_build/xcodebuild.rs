@@ -41,7 +41,7 @@ pub struct Invocation<'a> {
 /// simulator destination ignores it), which links a slice the staticlib
 /// lacks (`ld: symbol(s) not found for architecture x86_64` on Apple
 /// Silicon). `x86_64` host → `x86_64`; otherwise (`aarch64`) → `arm64`.
-pub(super) fn host_sim_arch() -> &'static str {
+pub(crate) fn host_sim_arch() -> &'static str {
     if cfg!(target_arch = "x86_64") {
         "x86_64"
     } else {

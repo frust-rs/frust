@@ -239,6 +239,7 @@ mod tests {
     use super::*;
     use crate::build_info::{BuildArgs, BuildMode};
     use crate::devices::{Kind, Platform};
+    use crate::ios_build::xcodebuild::host_sim_arch;
     use crate::process::{FakeProcessRunner, Output};
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -318,7 +319,10 @@ mod tests {
             )
             .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios build",
+                format!(
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                    host_sim_arch()
+                ),
                 Output {
                     success: false,
                     stdout: "note: Compiling Runner\nerror: build input file cannot be found"
@@ -382,7 +386,10 @@ mod tests {
             )
             .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios build",
+                format!(
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                    host_sim_arch()
+                ),
                 ok("Build succeeded"),
             )
             .with(

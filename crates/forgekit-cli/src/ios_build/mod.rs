@@ -10,7 +10,7 @@
 mod export;
 mod schemes;
 mod team;
-mod xcodebuild;
+pub(crate) mod xcodebuild;
 
 use std::collections::HashMap;
 use std::fs;
