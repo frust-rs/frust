@@ -389,8 +389,11 @@ mod tests {
         ignore = "asserts the macOS-only gate is bypassed on macOS; on other hosts see \
                   `build_ios_rejected_on_non_macos_host`"
     )]
-    fn build_ios_reaches_the_ios_stub_error_on_macos() {
-        let dir = ios_project_dir("ios-stub");
+    fn build_ios_reaches_the_ios_pipeline_on_macos() {
+        // With the macOS gate bypassed and an empty runner, dispatch reaches
+        // `ios_build`'s pipeline, which fails at its first preflight check
+        // (Xcode presence) rather than at the removed task-65 stub.
+        let dir = ios_project_dir("ios-pipeline");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Ios {
             build: BuildArgs::default(),
@@ -398,7 +401,7 @@ mod tests {
             no_codesign: true,
         };
         let err = run_in(&runner, &dir, target).unwrap_err();
-        assert!(err.to_string().contains("task 65"), "{err}");
+        assert!(err.to_string().contains("Xcode not found"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
 
