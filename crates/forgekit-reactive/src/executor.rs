@@ -16,17 +16,29 @@ use futures::executor::{LocalPool, LocalSpawner};
 use futures::task::LocalSpawnExt;
 use tokio::runtime::Handle;
 
-thread_local! {
-    /// The UI thread's local task queue for `!Send` futures. Empty on every
-    /// other thread (each thread has its own, so pumping off the UI thread is a
-    /// harmless no-op rather than a panic).
-    static LOCAL_POOL: RefCell<LocalPool> = RefCell::new(LocalPool::new());
-    /// Spawner into `LOCAL_POOL`, cached to avoid re-deriving it per spawn.
-    static LOCAL_SPAWNER: LocalSpawner =
-        LOCAL_POOL.with(|pool| pool.borrow().spawner());
-    /// Set on the thread that called [`init_ui_thread`]; gates `spawn_local`.
-    static IS_UI_THREAD: Cell<bool> = const { Cell::new(false) };
+// The thread-locals live in an allow-scoped module: on the mobile targets
+// (no `#[thread_local]` fast path) std's macro expands through the `os_local`
+// path, where clippy's `missing_const_for_thread_local` misfires — it flags
+// even the already-const `IS_UI_THREAD`, and a per-static `#[allow]` does not
+// survive that expansion. `LOCAL_POOL`/`LOCAL_SPAWNER` genuinely cannot be
+// `const` (`LocalPool::new()`/`spawner()` are not const fns).
+#[allow(clippy::missing_const_for_thread_local)]
+mod tls {
+    use super::*;
+
+    thread_local! {
+        /// The UI thread's local task queue for `!Send` futures. Empty on every
+        /// other thread (each thread has its own, so pumping off the UI thread
+        /// is a harmless no-op rather than a panic).
+        pub(super) static LOCAL_POOL: RefCell<LocalPool> = RefCell::new(LocalPool::new());
+        /// Spawner into `LOCAL_POOL`, cached to avoid re-deriving it per spawn.
+        pub(super) static LOCAL_SPAWNER: LocalSpawner =
+            LOCAL_POOL.with(|pool| pool.borrow().spawner());
+        /// Set on the thread that called [`init_ui_thread`]; gates `spawn_local`.
+        pub(super) static IS_UI_THREAD: Cell<bool> = const { Cell::new(false) };
+    }
 }
+use tls::{IS_UI_THREAD, LOCAL_POOL, LOCAL_SPAWNER};
 
 /// Marks the calling thread as the UI thread — the one that owns the local task
 /// queue and drains it via `pump_local`. Called from `ReactiveRuntime::init`,
