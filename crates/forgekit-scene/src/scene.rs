@@ -1,7 +1,7 @@
 //! The [`Scene`] display list and the [`Command`]s it holds.
 
 use kurbo::{Affine, Point, Rect};
-use peniko::{Brush, ImageData};
+use peniko::{Brush, Color, ImageData};
 
 use crate::glyph::GlyphRun;
 
@@ -53,6 +53,36 @@ pub enum Command {
         dest: Rect,
         transform: Affine,
     },
+    /// Draw a rounded rectangle with a gaussian-blurred elevation shadow (an
+    /// approximation of a CSS `box-shadow`), under a transform.
+    ///
+    /// `radius` is the rectangle's corner radius, `std_dev` the blur's
+    /// standard deviation, both in the pre-transform coordinate space. Maps
+    /// directly onto vello 0.9's `Scene::draw_blurred_rounded_rect`, whose
+    /// `brush` parameter is a concrete `peniko::Color` (not a `Brush`) — a
+    /// blurred shadow has no gradient support in this vello version.
+    BlurredRoundedRect {
+        rect: Rect,
+        radius: f64,
+        std_dev: f64,
+        color: Color,
+        transform: Affine,
+    },
+    /// Push a translucent layer onto the render backend's layer stack, under
+    /// a transform. Subsequent draws are composited at `alpha` until the
+    /// matching [`Command::PopLayer`].
+    ///
+    /// Semantically a generalization of [`Command::PushClip`] (which is
+    /// `PushLayer` with `alpha: 1.0`) — kept as a distinct variant rather than
+    /// folded into it so existing `PushClip`/`PopClip` consumers are
+    /// unaffected (see `forgekit-render::convert`).
+    PushLayer {
+        rect: Rect,
+        alpha: f32,
+        transform: Affine,
+    },
+    /// Pop the most recently pushed layer.
+    PopLayer,
 }
 
 /// Renderer-agnostic, immediate-mode display list.

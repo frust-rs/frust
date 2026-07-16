@@ -1,7 +1,7 @@
 //! [`SceneBuilder`]: the widget-facing API for recording paint commands into a [`Scene`].
 
 use kurbo::{Affine, Point, Rect};
-use peniko::{Brush, ImageData};
+use peniko::{Brush, Color, ImageData};
 
 use crate::glyph::GlyphRun;
 use crate::scene::{Command, Scene};
@@ -118,6 +118,41 @@ impl<'a> SceneBuilder<'a> {
             dest,
             transform,
         });
+    }
+
+    /// Records a gaussian-blurred rounded-rectangle shadow under the current
+    /// transform (see [`Command::BlurredRoundedRect`]).
+    pub fn draw_blurred_rounded_rect(
+        &mut self,
+        rect: Rect,
+        radius: f64,
+        std_dev: f64,
+        color: Color,
+    ) {
+        let transform = self.current_transform();
+        self.scene.push(Command::BlurredRoundedRect {
+            rect,
+            radius,
+            std_dev,
+            color,
+            transform,
+        });
+    }
+
+    /// Pushes a translucent layer onto the render backend's layer stack,
+    /// recording the current transform (see [`Command::PushLayer`]).
+    pub fn push_layer(&mut self, rect: Rect, alpha: f32) {
+        let transform = self.current_transform();
+        self.scene.push(Command::PushLayer {
+            rect,
+            alpha,
+            transform,
+        });
+    }
+
+    /// Pops the most recently pushed layer.
+    pub fn pop_layer(&mut self) {
+        self.scene.push(Command::PopLayer);
     }
 }
 
@@ -375,5 +410,95 @@ mod tests {
             Command::Image { transform, .. } => assert_eq!(*transform, translate),
             other => panic!("expected Image, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn draw_blurred_rounded_rect_round_trips_fields_under_identity_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let rect = Rect::new(0.0, 0.0, 10.0, 8.0);
+        builder.draw_blurred_rounded_rect(rect, 4.0, 2.5, RED);
+
+        match &scene.commands()[0] {
+            Command::BlurredRoundedRect {
+                rect: got_rect,
+                radius,
+                std_dev,
+                color,
+                transform,
+            } => {
+                assert_eq!(*got_rect, rect);
+                assert_eq!(*radius, 4.0);
+                assert_eq!(*std_dev, 2.5);
+                assert_eq!(*color, RED);
+                assert_eq!(*transform, Affine::IDENTITY);
+            }
+            other => panic!("expected BlurredRoundedRect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_blurred_rounded_rect_composes_with_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((1.0, 2.0));
+        builder.push_transform(translate);
+        builder.draw_blurred_rounded_rect(Rect::new(0.0, 0.0, 5.0, 5.0), 2.0, 1.0, RED);
+
+        match &scene.commands()[0] {
+            Command::BlurredRoundedRect { transform, .. } => assert_eq!(*transform, translate),
+            other => panic!("expected BlurredRoundedRect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_pop_layer_emit_commands_with_alpha_and_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let scale = Affine::scale(2.0);
+        builder.push_transform(scale);
+        let rect = Rect::new(0.0, 0.0, 5.0, 5.0);
+        builder.push_layer(rect, 0.5);
+        builder.pop_layer();
+
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 2);
+        match &commands[0] {
+            Command::PushLayer {
+                rect: got_rect,
+                alpha,
+                transform,
+            } => {
+                assert_eq!(*got_rect, rect);
+                assert_eq!(*alpha, 0.5);
+                assert_eq!(*transform, scale);
+            }
+            other => panic!("expected PushLayer, got {other:?}"),
+        }
+        assert!(matches!(commands[1], Command::PopLayer));
+    }
+
+    #[test]
+    fn nested_clip_and_layer_preserve_push_pop_ordering() {
+        // push_clip -> push_layer -> pop_layer -> pop_clip: alpha layers must
+        // nest correctly with clips, preserving command-stream order.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let clip_rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let layer_rect = Rect::new(10.0, 10.0, 50.0, 50.0);
+
+        builder.push_clip(clip_rect);
+        builder.push_layer(layer_rect, 0.75);
+        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), red_brush());
+        builder.pop_layer();
+        builder.pop_clip();
+
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 5);
+        assert!(matches!(commands[0], Command::PushClip { .. }));
+        assert!(matches!(commands[1], Command::PushLayer { .. }));
+        assert!(matches!(commands[2], Command::FillRect { .. }));
+        assert!(matches!(commands[3], Command::PopLayer));
+        assert!(matches!(commands[4], Command::PopClip));
     }
 }

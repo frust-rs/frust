@@ -84,6 +84,71 @@ pub trait PaintScene {
     /// no-op so pre-existing recorder scenes stay valid; the `SceneBuilder`
     /// implementation records a real image command.
     fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
+
+    /// Draw a gaussian-blurred rounded-rectangle elevation shadow (an
+    /// approximation of a CSS `box-shadow`) at `origin`/`size`.
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation records a real
+    /// [`forgekit_scene::Command::BlurredRoundedRect`].
+    fn draw_shadow(
+        &mut self,
+        _origin: Point,
+        _size: Size,
+        _radius: f64,
+        _std_dev: f64,
+        _color: Color,
+    ) {
+    }
+
+    /// Emit a filled axis-aligned rectangle at `origin` with `size`, filled
+    /// with an arbitrary `brush` (solid color or gradient).
+    ///
+    /// Default implementation delegates to [`PaintScene::fill_rect`] using
+    /// the brush's solid color where possible (a `Brush::Solid` unwraps
+    /// directly; a gradient brush falls back to transparent black, since a
+    /// pre-existing recorder scene has no gradient concept to approximate
+    /// it with) — so callers that only override `fill_rect` still see
+    /// *something* painted rather than nothing. The `SceneBuilder`
+    /// implementation records the brush faithfully via
+    /// [`forgekit_scene::Command::RoundedRect`]'s zero-radius sibling
+    /// (`FillRect`).
+    fn fill_rect_brush(&mut self, origin: Point, size: Size, brush: &Brush) {
+        let color = match brush {
+            Brush::Solid(color) => *color,
+            _ => Color::TRANSPARENT,
+        };
+        self.fill_rect(origin, size, color);
+    }
+
+    /// Emit a filled axis-aligned rectangle with uniformly rounded corners,
+    /// filled with an arbitrary `brush` (solid color or gradient).
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation records a real
+    /// [`forgekit_scene::Command::RoundedRect`] carrying the brush.
+    fn fill_rounded_rect_brush(
+        &mut self,
+        _origin: Point,
+        _size: Size,
+        _radius: f64,
+        _brush: &Brush,
+    ) {
+    }
+
+    /// Push a translucent layer (at `origin`/`size`) onto the backend layer
+    /// stack; subsequent draws are composited at `alpha` until the matching
+    /// [`PaintScene::pop_layer`].
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation records a real
+    /// [`forgekit_scene::Command::PushLayer`]/[`forgekit_scene::Command::PopLayer`]
+    /// pair, nesting correctly with [`PaintScene::push_clip`]/[`PaintScene::pop_clip`].
+    fn push_layer(&mut self, _origin: Point, _size: Size, _alpha: f32) {}
+
+    /// Pop the most recently pushed layer. Defaulted to a no-op; see
+    /// [`PaintScene::push_layer`].
+    fn pop_layer(&mut self) {}
 }
 
 /// Bridges the provisional [`PaintScene`] boundary onto the real
@@ -125,6 +190,32 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn draw_image(&mut self, data: &peniko::ImageData, dest: Rect) {
         SceneBuilder::draw_image(self, data, dest);
+    }
+
+    fn draw_shadow(&mut self, origin: Point, size: Size, radius: f64, std_dev: f64, color: Color) {
+        SceneBuilder::draw_blurred_rounded_rect(
+            self,
+            rect_at(origin, size),
+            radius,
+            std_dev,
+            color,
+        );
+    }
+
+    fn fill_rect_brush(&mut self, origin: Point, size: Size, brush: &Brush) {
+        SceneBuilder::fill_rect(self, rect_at(origin, size), brush.clone());
+    }
+
+    fn fill_rounded_rect_brush(&mut self, origin: Point, size: Size, radius: f64, brush: &Brush) {
+        SceneBuilder::fill_rounded_rect(self, rect_at(origin, size), radius, brush.clone());
+    }
+
+    fn push_layer(&mut self, origin: Point, size: Size, alpha: f32) {
+        SceneBuilder::push_layer(self, rect_at(origin, size), alpha);
+    }
+
+    fn pop_layer(&mut self) {
+        SceneBuilder::pop_layer(self);
     }
 }
 
@@ -929,5 +1020,65 @@ mod tests {
         assert!(pod.contains(Point::new(29.9, 29.9)));
         assert!(!pod.contains(Point::new(30.0, 30.0))); // bottom-right exclusive
         assert!(!pod.contains(Point::new(9.9, 15.0)));
+    }
+
+    /// A scene recorder that overrides the task-08 shadow/layer additions, to
+    /// prove they reach an implementor that opts in.
+    #[derive(Default)]
+    struct ShadowLayerRecordingScene {
+        shadows: Vec<(Point, Size, f64, f64, Color)>,
+        layers: Vec<(Point, Size, f32)>,
+        pops: u32,
+    }
+
+    impl PaintScene for ShadowLayerRecordingScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+
+        fn draw_shadow(
+            &mut self,
+            origin: Point,
+            size: Size,
+            radius: f64,
+            std_dev: f64,
+            color: Color,
+        ) {
+            self.shadows.push((origin, size, radius, std_dev, color));
+        }
+
+        fn push_layer(&mut self, origin: Point, size: Size, alpha: f32) {
+            self.layers.push((origin, size, alpha));
+        }
+
+        fn pop_layer(&mut self) {
+            self.pops += 1;
+        }
+    }
+
+    #[test]
+    fn draw_shadow_and_push_layer_are_no_ops_when_not_overridden() {
+        // `RecordingScene` (defined above) does not override the task-08
+        // additions — the trait's default no-op bodies must compile
+        // unchanged and simply do nothing.
+        let mut scene = RecordingScene::default();
+        scene.draw_shadow(Point::ZERO, Size::new(10.0, 10.0), 4.0, 2.0, Color::BLACK);
+        scene.push_layer(Point::ZERO, Size::new(10.0, 10.0), 0.5);
+        scene.pop_layer();
+        assert!(scene.rects.is_empty());
+        assert!(scene.texts.is_empty());
+    }
+
+    #[test]
+    fn draw_shadow_and_push_layer_reach_an_overriding_implementor() {
+        let mut scene = ShadowLayerRecordingScene::default();
+        let origin = Point::new(3.0, 4.0);
+        let size = Size::new(20.0, 12.0);
+        scene.draw_shadow(origin, size, 6.0, 3.0, Color::BLACK);
+        scene.push_layer(origin, size, 0.25);
+        scene.pop_layer();
+
+        assert_eq!(scene.shadows, vec![(origin, size, 6.0, 3.0, Color::BLACK)]);
+        assert_eq!(scene.layers, vec![(origin, size, 0.25)]);
+        assert_eq!(scene.pops, 1);
     }
 }

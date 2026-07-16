@@ -11,7 +11,7 @@
 
 use forgekit_scene::{Command, GlyphRun, Scene};
 use kurbo::{Affine, Line, Point, Rect, RoundedRect, Stroke};
-use peniko::{Brush, Fill, ImageData};
+use peniko::{Brush, Color, Fill, ImageData};
 
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
 ///
@@ -40,6 +40,19 @@ pub(crate) trait SceneSink {
     /// Draw a decoded image (natural pixel size `data.width`x`data.height`),
     /// scaled to fill `dest`, under `transform`.
     fn draw_image(&mut self, transform: Affine, data: &ImageData, dest: &Rect);
+    /// Draw a gaussian-blurred rounded-rectangle elevation shadow.
+    fn draw_blurred_rounded_rect(
+        &mut self,
+        transform: Affine,
+        rect: &Rect,
+        color: Color,
+        radius: f64,
+        std_dev: f64,
+    );
+    /// Push a translucent layer onto the backend's layer stack, under `transform`.
+    fn push_layer(&mut self, transform: Affine, rect: &Rect, alpha: f32);
+    /// Pop the most recently pushed layer.
+    fn pop_layer(&mut self);
 }
 
 /// Encodes every command in `scene` into `target` (a reused `vello::Scene`).
@@ -82,6 +95,19 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
                 dest,
                 transform,
             } => sink.draw_image(*transform, data, dest),
+            Command::BlurredRoundedRect {
+                rect,
+                radius,
+                std_dev,
+                color,
+                transform,
+            } => sink.draw_blurred_rounded_rect(*transform, rect, *color, *radius, *std_dev),
+            Command::PushLayer {
+                rect,
+                alpha,
+                transform,
+            } => sink.push_layer(*transform, rect, *alpha),
+            Command::PopLayer => sink.pop_layer(),
         }
     }
 }
@@ -155,6 +181,31 @@ impl SceneSink for vello::Scene {
         };
         vello::Scene::draw_image(self, data, image_transform);
     }
+
+    fn draw_blurred_rounded_rect(
+        &mut self,
+        transform: Affine,
+        rect: &Rect,
+        color: Color,
+        radius: f64,
+        std_dev: f64,
+    ) {
+        vello::Scene::draw_blurred_rounded_rect(self, transform, *rect, color, radius, std_dev);
+    }
+
+    fn push_layer(&mut self, transform: Affine, rect: &Rect, alpha: f32) {
+        self.push_layer(
+            Fill::NonZero,
+            peniko::BlendMode::default(),
+            alpha,
+            transform,
+            rect,
+        );
+    }
+
+    fn pop_layer(&mut self) {
+        vello::Scene::pop_layer(self);
+    }
 }
 
 /// Compose `transform` (the widget's own position/scale) with the affine that
@@ -218,6 +269,19 @@ mod tests {
             dest: Rect,
             transform: Affine,
         },
+        BlurredRoundedRect {
+            rect: Rect,
+            color: Color,
+            radius: f64,
+            std_dev: f64,
+            transform: Affine,
+        },
+        PushLayer {
+            rect: Rect,
+            alpha: f32,
+            transform: Affine,
+        },
+        PopLayer,
     }
 
     #[derive(Default)]
@@ -292,6 +356,35 @@ mod tests {
                 dest: *dest,
                 transform,
             });
+        }
+
+        fn draw_blurred_rounded_rect(
+            &mut self,
+            transform: Affine,
+            rect: &Rect,
+            color: Color,
+            radius: f64,
+            std_dev: f64,
+        ) {
+            self.events.push(Event::BlurredRoundedRect {
+                rect: *rect,
+                color,
+                radius,
+                std_dev,
+                transform,
+            });
+        }
+
+        fn push_layer(&mut self, transform: Affine, rect: &Rect, alpha: f32) {
+            self.events.push(Event::PushLayer {
+                rect: *rect,
+                alpha,
+                transform,
+            });
+        }
+
+        fn pop_layer(&mut self) {
+            self.events.push(Event::PopLayer);
         }
     }
 
@@ -476,6 +569,112 @@ mod tests {
                 transform: translate,
             }]
         );
+    }
+
+    #[test]
+    fn blurred_rounded_rect_maps_to_shadow_call_with_fields_and_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((2.0, 3.0));
+        builder.push_transform(translate);
+        let rect = Rect::new(0.0, 0.0, 10.0, 8.0);
+        builder.draw_blurred_rounded_rect(rect, 4.0, 2.5, RED);
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::BlurredRoundedRect {
+                rect,
+                color: RED,
+                radius: 4.0,
+                std_dev: 2.5,
+                transform: translate,
+            }]
+        );
+    }
+
+    #[test]
+    fn push_pop_layer_map_to_layer_calls_in_order_with_alpha_and_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let scale = Affine::scale(2.0);
+        builder.push_transform(scale);
+        let rect = Rect::new(0.0, 0.0, 5.0, 5.0);
+        builder.push_layer(rect, 0.4);
+        builder.pop_layer();
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushLayer {
+                    rect,
+                    alpha: 0.4,
+                    transform: scale,
+                },
+                Event::PopLayer,
+            ]
+        );
+    }
+
+    #[test]
+    fn clip_and_layer_nest_preserving_push_pop_order() {
+        // push_clip -> push_layer -> pop_layer -> pop_clip: the encode step
+        // must preserve command-stream order, mirroring the builder-level
+        // nesting test in forgekit-scene.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let clip_rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let layer_rect = Rect::new(10.0, 10.0, 50.0, 50.0);
+
+        builder.push_clip(clip_rect);
+        builder.push_layer(layer_rect, 0.6);
+        builder.pop_layer();
+        builder.pop_clip();
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushClip {
+                    rect: clip_rect,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushLayer {
+                    rect: layer_rect,
+                    alpha: 0.6,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopLayer,
+                Event::PopClip,
+            ]
+        );
+    }
+
+    /// Encodes into a *real* `vello::Scene` (no GPU) to prove the new commands
+    /// don't panic through the actual `SceneSink` impl — the round-trip
+    /// acceptance criterion, not just the `RecordingSink` structural check.
+    #[test]
+    fn new_commands_encode_into_a_real_vello_scene_without_panicking() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((1.0, 1.0));
+        builder.push_transform(translate);
+        builder.draw_blurred_rounded_rect(Rect::new(0.0, 0.0, 20.0, 20.0), 4.0, 3.0, RED);
+        builder.push_clip(Rect::new(0.0, 0.0, 50.0, 50.0));
+        builder.push_layer(Rect::new(5.0, 5.0, 15.0, 15.0), 0.5);
+        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
+        builder.pop_layer();
+        builder.pop_clip();
+
+        let mut vello_scene = vello::Scene::new();
+        encode_scene(&scene, &mut vello_scene);
     }
 
     #[test]
