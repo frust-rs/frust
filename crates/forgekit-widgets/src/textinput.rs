@@ -30,18 +30,21 @@
 //! input method. Keyboard editing (`Key`) and IME composition/state-sync (`Ime`)
 //! route down the focus path; after any edit the widget fires `on_change`, resets
 //! the caret to visible, and republishes the IME surface. The caret blinks while
-//! focused, pumped from a monotonic clock in `paint` via
-//! [`PaintCtx::request_frame`] — the same animation contract the scroll fling
-//! uses.
+//! focused, its phase measured from the shared shell frame clock
+//! ([`PaintCtx::frame_time`], spec §8 — no wall-clock reads in widget code) in
+//! `paint` via [`PaintCtx::request_frame`] — the same animation contract the
+//! scroll fling uses. An edit/focus during the (clockless) event pass flags the
+//! blink for reset; the next paint records the blink epoch from `frame_time`.
 
 use std::rc::Rc;
-use std::time::Instant;
 
 use forgekit_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, EditingState, EventCtx, EventResult, ImeEvent, ImeState,
-    InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, View, Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, EditingState, EventCtx, EventResult, FrameTime,
+    ImeEvent, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase,
+    View, Widget,
 };
 use forgekit_text::{EditOp, EditingStateBytes, TextContext, TextEditor, TextStyle, utf16_to_byte};
+use forgekit_theme::Theme;
 use kurbo::{Point, Rect, Size, Vec2};
 use peniko::Color;
 
@@ -60,18 +63,62 @@ const BLINK_MS: f64 = 500.0;
 /// Default field width when the incoming constraints are horizontally unbounded.
 const DEFAULT_WIDTH: f64 = 200.0;
 
-/// Field background.
+/// Field background (unthemed fallback; a theme resolves this from `surface`).
 const BG: Color = Color::WHITE;
-/// Idle (unfocused) border color.
+/// Idle (unfocused) border color (unthemed fallback; themed from `outline`).
 const BORDER: Color = Color::from_rgb8(0xD1, 0xD5, 0xDB);
-/// Focused border color (accent).
+/// Focused border color (unthemed fallback; themed from `primary`).
 const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
-/// Placeholder text color.
+/// Placeholder text color (unthemed fallback; themed from `on_surface_variant`).
 const PLACEHOLDER: Color = Color::from_rgb8(0x9C, 0xA3, 0xAF);
-/// Selection highlight color.
+/// Selection highlight color (unthemed fallback; themed from `primary` at alpha).
 const SELECTION: Color = Color::from_rgb8(0xBF, 0xDB, 0xFE);
-/// Caret color.
+/// Caret color (unthemed fallback; themed from `primary`).
 const CARET: Color = Color::from_rgb8(0x1D, 0x4E, 0xD8);
+/// Alpha applied to `primary` for the themed selection highlight (a v1
+/// simplification — a translucent primary stands in for a dedicated selection
+/// role; see task 07).
+const SELECTION_ALPHA: f32 = 0.30;
+
+/// The resolved text-field chrome colors. Themed (v1 simplification): background
+/// `surface`, border `outline`, focus accent/caret `primary`, placeholder
+/// `on_surface_variant`, selection `primary` at [`SELECTION_ALPHA`]. Unthemed:
+/// the [`BG`]/[`BORDER`]/[`ACCENT`]/[`PLACEHOLDER`]/[`SELECTION`]/[`CARET`]
+/// constants exactly, so a pre-theme app renders unchanged.
+struct Chrome {
+    bg: Color,
+    border: Color,
+    accent: Color,
+    placeholder: Color,
+    selection: Color,
+    caret: Color,
+}
+
+impl Chrome {
+    fn resolve(theme: Option<&Theme>) -> Self {
+        match theme {
+            Some(theme) => {
+                let s = theme.scheme();
+                Chrome {
+                    bg: s.surface,
+                    border: s.outline,
+                    accent: s.primary,
+                    placeholder: s.on_surface_variant,
+                    selection: s.primary.with_alpha(SELECTION_ALPHA),
+                    caret: s.primary,
+                }
+            }
+            None => Chrome {
+                bg: BG,
+                border: BORDER,
+                accent: ACCENT,
+                placeholder: PLACEHOLDER,
+                selection: SELECTION,
+                caret: CARET,
+            },
+        }
+    }
+}
 
 /// A view-held, typed text callback (erased on build).
 type OnText<State> = Rc<dyn Fn(&mut State, String)>;
@@ -156,10 +203,14 @@ pub struct TextInputWidget {
     /// Armed by a `Down` inside (alongside `capture_pointer`) to drive
     /// drag-selection; cleared on `Up`/`Cancel`.
     captured: bool,
-    /// Monotonic clock for the caret blink.
-    clock: Instant,
-    /// Timestamp (ms since `clock`) the caret was last reset to visible.
-    blink_start_ms: f64,
+    /// The frame time the caret was last reset to visible (the blink phase's
+    /// epoch). Recorded from the paint-pass [`PaintCtx::frame_time`], since the
+    /// event pass carries no clock — see `blink_reset_pending`.
+    blink_epoch: FrameTime,
+    /// Set when an edit/focus during the (clockless) event pass requests a blink
+    /// reset; the next paint records `blink_epoch` from `frame_time` and clears
+    /// this. `true` initially so the first painted frame seeds the epoch.
+    blink_reset_pending: bool,
     on_change: crate::ErasedArgCallback<String>,
     on_submit: Option<crate::ErasedArgCallback<String>>,
 }
@@ -185,18 +236,18 @@ impl TextInputWidget {
         ((height - self.content_height()) / 2.0).max(PAD_Y)
     }
 
-    /// Reset the blink so the caret is visible now (called on any edit / focus).
+    /// Reset the blink so the caret is visible from the next painted frame
+    /// (called on any edit / focus, during the clockless event pass). The actual
+    /// epoch is recorded from `frame_time` on the next paint.
     fn reset_blink(&mut self) {
-        self.blink_start_ms = self.now_ms();
+        self.blink_reset_pending = true;
     }
 
-    fn now_ms(&self) -> f64 {
-        self.clock.elapsed().as_secs_f64() * 1000.0
-    }
-
-    /// Whether the caret is in its visible half-cycle at `now_ms`.
-    fn caret_visible_at(&self, now_ms: f64) -> bool {
-        (((now_ms - self.blink_start_ms) / BLINK_MS) as u64).is_multiple_of(2)
+    /// Whether the caret is in its visible half-cycle at frame time `now`, phase
+    /// measured from `blink_epoch`.
+    fn caret_visible_at(&self, now: FrameTime) -> bool {
+        let elapsed_ms = now.saturating_sub(self.blink_epoch).as_secs_f64() * 1000.0;
+        ((elapsed_ms / BLINK_MS) as u64).is_multiple_of(2)
     }
 
     /// Replace the whole editing value (controlled reconcile / initial seed),
@@ -423,8 +474,8 @@ impl<State: 'static> View<State> for TextInputView<State> {
             placeholder: self.placeholder.clone(),
             focused: false,
             captured: false,
-            clock: Instant::now(),
-            blink_start_ms: 0.0,
+            blink_epoch: FrameTime::ZERO,
+            blink_reset_pending: true,
             on_change: crate::erase_callback_arg(&self.on_change),
             on_submit: self
                 .on_submit
@@ -476,6 +527,15 @@ impl Widget for TextInputWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let origin = ctx.origin();
         let size = ctx.size();
+        let chrome = Chrome::resolve(Theme::from_paint_ctx(ctx));
+
+        // Record the blink epoch from the shared frame clock once per pending
+        // reset (a focus/edit flagged it during the clockless event pass).
+        let now = ctx.frame_time();
+        if self.blink_reset_pending {
+            self.blink_epoch = now;
+            self.blink_reset_pending = false;
+        }
 
         // The pod's recorded focus path (threaded in via `PaintCtx::has_focus`)
         // is authoritative — not our own `self.focused`, which lags after a
@@ -492,7 +552,11 @@ impl Widget for TextInputWidget {
 
         // Chrome: a border-colored rounded rect with an inset background fills in
         // as the frame (there is no stroke-rect primitive on `PaintScene`).
-        let border_color = if focused { ACCENT } else { BORDER };
+        let border_color = if focused {
+            chrome.accent
+        } else {
+            chrome.border
+        };
         scene.fill_rounded_rect(origin, size, RADIUS, border_color);
         scene.fill_rounded_rect(
             Point::new(origin.x + BORDER_W, origin.y + BORDER_W),
@@ -501,7 +565,7 @@ impl Widget for TextInputWidget {
                 (size.height - 2.0 * BORDER_W).max(0.0),
             ),
             (RADIUS - BORDER_W).max(0.0),
-            BG,
+            chrome.bg,
         );
 
         let text_origin = Point::new(origin.x + PAD_X, origin.y + self.text_top(size.height));
@@ -509,7 +573,7 @@ impl Widget for TextInputWidget {
         if self.editor.text().is_empty() && !focused {
             // Placeholder: shaped on demand through the widget-owned context.
             if !self.placeholder.is_empty() {
-                let ph_style = TextStyle::new(self.style.size, PLACEHOLDER);
+                let ph_style = TextStyle::new(self.style.size, chrome.placeholder);
                 let layout = self.text_ctx.layout(&self.placeholder, &ph_style, None);
                 for run in layout.to_scene_runs(text_origin) {
                     scene.draw_glyph_run(run);
@@ -522,7 +586,7 @@ impl Widget for TextInputWidget {
                 scene.fill_rect(
                     Point::new(r.x0 + off.x, r.y0 + off.y),
                     Size::new(r.width(), r.height()),
-                    SELECTION,
+                    chrome.selection,
                 );
             }
             for run in self.editor.to_scene_runs(text_origin) {
@@ -541,14 +605,14 @@ impl Widget for TextInputWidget {
             // otherwise leave stale — the mobile IME mirror relies on this to
             // observe the clear (see `PaintCtx::publish_ime_state`).
             ctx.publish_ime_state(self.current_ime_state(origin, size));
-            if self.caret_visible_at(self.now_ms())
+            if self.caret_visible_at(now)
                 && let Some(c) = self.editor.cursor_rect(CARET_W)
             {
                 let off = text_origin.to_vec2();
                 scene.fill_rect(
                     Point::new(c.x0 + off.x, c.y0 + off.y),
                     Size::new(c.width(), c.height()),
-                    CARET,
+                    chrome.caret,
                 );
             }
         }
@@ -1027,16 +1091,143 @@ mod tests {
         );
     }
 
+    /// A `FrameTime` `ms` milliseconds from the origin.
+    fn ft_ms(ms: f64) -> FrameTime {
+        FrameTime::from_nanos((ms * 1_000_000.0) as u64)
+    }
+
     #[test]
     fn caret_visibility_toggles_across_the_blink_period() {
         let mut state = AppState::default();
         let root = harness(&mut state);
         let w = widget(&root);
-        // Deterministic phase math off the reset epoch (blink_start_ms == 0).
-        assert!(w.caret_visible_at(0.0), "visible at the start of the cycle");
-        assert!(w.caret_visible_at(BLINK_MS - 1.0));
-        assert!(!w.caret_visible_at(BLINK_MS + 1.0), "hidden mid-cycle");
-        assert!(w.caret_visible_at(2.0 * BLINK_MS + 1.0), "visible again");
+        // Deterministic phase math off the reset epoch (blink_epoch == ZERO).
+        assert!(
+            w.caret_visible_at(ft_ms(0.0)),
+            "visible at the start of the cycle"
+        );
+        assert!(w.caret_visible_at(ft_ms(BLINK_MS - 1.0)));
+        assert!(
+            !w.caret_visible_at(ft_ms(BLINK_MS + 1.0)),
+            "hidden mid-cycle"
+        );
+        assert!(
+            w.caret_visible_at(ft_ms(2.0 * BLINK_MS + 1.0)),
+            "visible again"
+        );
+    }
+
+    /// A scene that counts caret fills — the caret is the only bare `fill_rect`
+    /// emitted with the caret color once a non-empty selection isn't present.
+    #[derive(Default)]
+    struct CaretRecorder {
+        caret_color: Option<Color>,
+        caret_fills: usize,
+    }
+
+    impl PaintScene for CaretRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, color: Color) {
+            if Some(color) == self.caret_color {
+                self.caret_fills += 1;
+            }
+        }
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+    }
+
+    #[test]
+    fn caret_blink_phase_advances_from_paint_frame_time() {
+        // Two-frame blink test (task 07): the caret is painted in the visible half
+        // of the cycle and absent in the hidden half, with the phase measured
+        // purely from the injected `RenderRoot::paint` frame time — proving the
+        // blink advances off the shell clock, not a hidden wall clock.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        // Focus so the caret is painted; the focus Down flags a blink reset.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        // Frame 1 at t=0: seeds blink_epoch=0 and paints the caret (visible half).
+        let mut f1 = CaretRecorder {
+            caret_color: Some(CARET),
+            caret_fills: 0,
+        };
+        root.paint(&mut f1, ft_ms(0.0));
+        assert_eq!(f1.caret_fills, 1, "caret visible at the start of the cycle");
+
+        // Frame 2 mid-cycle (t = BLINK_MS + a bit): the caret is hidden.
+        let mut f2 = CaretRecorder {
+            caret_color: Some(CARET),
+            caret_fills: 0,
+        };
+        root.paint(&mut f2, ft_ms(BLINK_MS + 10.0));
+        assert_eq!(
+            f2.caret_fills, 0,
+            "caret hidden mid-cycle (phase from paint time)"
+        );
+
+        // Frame 3 in the next visible half proves the phase keeps advancing.
+        let mut f3 = CaretRecorder {
+            caret_color: Some(CARET),
+            caret_fills: 0,
+        };
+        root.paint(&mut f3, ft_ms(2.0 * BLINK_MS + 10.0));
+        assert_eq!(f3.caret_fills, 1, "caret visible again in the next cycle");
+    }
+
+    // --- Themed chrome (task 07) ---
+
+    /// Records rounded-rect (chrome) and rect (selection/caret) fill colors.
+    #[derive(Default)]
+    struct ChromeRecorder {
+        rrects: Vec<Color>,
+        rects: Vec<Color>,
+    }
+
+    impl PaintScene for ChromeRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, color: Color) {
+            self.rects.push(color);
+        }
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, color: Color) {
+            self.rrects.push(color);
+        }
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, _run: forgekit_scene::GlyphRun) {}
+    }
+
+    /// Paint a focused field (so the accent border + caret show) at frame time 0.
+    fn paint_chrome(root: &mut RenderRoot<AppState, TextInputView<AppState>>) -> ChromeRecorder {
+        let mut rec = ChromeRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+        rec
+    }
+
+    #[test]
+    fn unthemed_chrome_uses_fallback_constants() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let rec = paint_chrome(&mut root);
+        // Border (focused → accent) then background.
+        assert_eq!(rec.rrects, vec![ACCENT, BG]);
+        // The only bare rect on an empty focused field is the caret.
+        assert_eq!(rec.rects, vec![CARET]);
+    }
+
+    #[test]
+    fn themed_chrome_resolves_roles() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.set_theme(Box::new(Theme::m3_baseline()));
+        let theme = Theme::m3_baseline();
+        let scheme = theme.scheme();
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let rec = paint_chrome(&mut root);
+        assert_eq!(
+            rec.rrects,
+            vec![scheme.primary, scheme.surface],
+            "focused border is primary, background is surface"
+        );
+        assert_eq!(rec.rects, vec![scheme.primary], "caret is primary");
     }
 
     #[test]

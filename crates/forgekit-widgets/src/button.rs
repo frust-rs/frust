@@ -15,24 +15,51 @@ use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
     PaintCtx, PaintScene, PointerPhase, View, Widget, any,
 };
+use forgekit_theme::Theme;
 use kurbo::{Point, Size};
 use peniko::Color;
 
 use crate::text;
+use crate::text::ThemeTextColor;
 
-/// Corner radius of the button's rounded-rect background, in logical px.
+/// Corner radius of the button's rounded-rect background, in logical px (the
+/// unthemed fallback; a theme resolves this from `shape.small`).
 const RADIUS: f64 = 6.0;
 /// Horizontal padding around the label, in logical px.
 const PAD_X: f64 = 12.0;
 /// Vertical padding around the label, in logical px.
 const PAD_Y: f64 = 8.0;
-/// Resting background fill.
+/// Resting background fill (unthemed fallback; a theme resolves this from
+/// `colors.primary`).
 const FILL: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
-/// Pressed (darker) background fill.
+/// Pressed (darker) background fill (unthemed fallback; a theme resolves this
+/// from a darkened `colors.primary` — see [`pressed_overlay`]).
 const FILL_PRESSED: Color = Color::from_rgb8(0x1D, 0x4E, 0xD8);
+
+/// The fixed multiplier applied to `colors.primary`'s RGB to synthesize the
+/// pressed fill under a theme (a v1 stand-in reproducing today's press
+/// contrast; M3 tonal state-layers land in phase 6c). `0.82` darkens primary by
+/// roughly the same amount today's `FILL`→`FILL_PRESSED` step does.
+const PRESSED_DARKEN: f32 = 0.82;
+
+/// Darken a color by scaling its RGB components toward black by `factor`,
+/// leaving alpha untouched. Used to synthesize the button's pressed fill from a
+/// themed `primary` (see [`ButtonWidget::resolve_fills`]).
+fn pressed_overlay(color: Color, factor: f32) -> Color {
+    let c = color.components;
+    Color::new([c[0] * factor, c[1] * factor, c[2] * factor, c[3]])
+}
 
 /// A view-held, typed press callback (erased to [`crate::ErasedCallback`] on build).
 type OnPress<State> = Rc<dyn Fn(&mut State)>;
+
+/// Build the type-erased label view, tagged with the `OnPrimary` themed color
+/// role so the label reads correctly against the `primary`-filled button (an
+/// unthemed button keeps its black label). Shared by build/rebuild/teardown so
+/// the role stays consistent across the child's whole lifecycle.
+fn label_view<State: 'static>(label: String) -> forgekit_core::AnyView<State> {
+    any::<State, _>(text(label).themed_role(ThemeTextColor::OnPrimary))
+}
 
 /// A declarative pressable button. See the [module docs](self).
 pub struct ButtonView<State: 'static> {
@@ -82,11 +109,39 @@ fn inside(pos: Point, size: Size) -> bool {
     pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
+impl ButtonWidget {
+    /// The `(resting, pressed)` background fills. Themed: `colors.primary` and a
+    /// darkened primary ([`pressed_overlay`]). Unthemed: the [`FILL`]/
+    /// [`FILL_PRESSED`] constants exactly, so a pre-theme app renders unchanged.
+    fn resolve_fills(theme: Option<&Theme>) -> (Color, Color) {
+        match theme {
+            Some(theme) => {
+                let primary = theme.scheme().primary;
+                (primary, pressed_overlay(primary, PRESSED_DARKEN))
+            }
+            None => (FILL, FILL_PRESSED),
+        }
+    }
+
+    /// The corner radius: themed `shape.small` (8dp — one step up from today's 6px
+    /// fallback, the closest M3 token; a visually negligible change), resolved
+    /// against the box so it never exceeds a pill. Unthemed: the [`RADIUS`]
+    /// constant exactly.
+    fn resolve_radius(theme: Option<&Theme>, size: Size) -> f64 {
+        match theme {
+            Some(theme) => {
+                forgekit_theme::ShapeScale::resolve(theme.shape.small, size.width, size.height)
+            }
+            None => RADIUS,
+        }
+    }
+}
+
 impl<State: 'static> View<State> for ButtonView<State> {
     type Element = ButtonWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ButtonWidget {
-        let label_view = any::<State, _>(text(self.label.clone()));
+        let label_view = label_view::<State>(self.label.clone());
         ButtonWidget {
             label: crate::build_child(&label_view, ctx),
             pressed: false,
@@ -105,15 +160,15 @@ impl<State: 'static> View<State> for ButtonView<State> {
         element.on_press = crate::erase_callback(&self.on_press);
         let mut flags = ChangeFlags::NONE;
         if prev.label != self.label {
-            let prev_view = any::<State, _>(text(prev.label.clone()));
-            let next_view = any::<State, _>(text(self.label.clone()));
+            let prev_view = label_view::<State>(prev.label.clone());
+            let next_view = label_view::<State>(self.label.clone());
             flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
         }
         flags
     }
 
     fn teardown(&self, element: &mut ButtonWidget, ctx: &mut BuildCtx<'_>) {
-        let label_view = any::<State, _>(text(self.label.clone()));
+        let label_view = label_view::<State>(self.label.clone());
         crate::teardown_child(&label_view, &mut element.label, ctx);
     }
 }
@@ -137,8 +192,11 @@ impl Widget for ButtonWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        let fill = if self.pressed { FILL_PRESSED } else { FILL };
-        scene.fill_rounded_rect(ctx.origin(), ctx.size(), RADIUS, fill);
+        let theme = Theme::from_paint_ctx(ctx);
+        let (resting, pressed) = Self::resolve_fills(theme);
+        let radius = Self::resolve_radius(theme, ctx.size());
+        let fill = if self.pressed { pressed } else { resting };
+        scene.fill_rounded_rect(ctx.origin(), ctx.size(), radius, fill);
         self.label.paint_child(ctx, scene);
     }
 
@@ -295,6 +353,56 @@ mod tests {
         let result = w.event(&mut ctx, &ev(PointerPhase::Move, 12.0, 12.0));
         assert!(matches!(result, EventResult::Ignored));
         assert!(!w.pressed);
+    }
+
+    /// A recording scene that captures each rounded rect's `(radius, color)`.
+    #[derive(Default)]
+    struct RRectRecorder {
+        rrects: Vec<(f64, Color)>,
+    }
+
+    impl PaintScene for RRectRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, radius: f64, color: Color) {
+            self.rrects.push((radius, color));
+        }
+    }
+
+    fn paint_bg(w: &mut ButtonWidget, theme: Option<&forgekit_theme::Theme>) -> (f64, Color) {
+        let mut rec = RRectRecorder::default();
+        let mut ctx = match theme {
+            Some(t) => PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(t),
+            None => PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)),
+        };
+        w.paint(&mut ctx, &mut rec);
+        *rec.rrects.first().expect("button paints its background")
+    }
+
+    #[test]
+    fn unthemed_paint_uses_fallback_constants() {
+        // Parity: no theme → exactly today's fill and radius.
+        let mut w = widget();
+        assert_eq!(paint_bg(&mut w, None), (RADIUS, FILL));
+        // Pressed uses the darker constant, unchanged.
+        w.pressed = true;
+        assert_eq!(paint_bg(&mut w, None), (RADIUS, FILL_PRESSED));
+    }
+
+    #[test]
+    fn themed_paint_resolves_primary_and_shape_small() {
+        let theme = forgekit_theme::Theme::m3_baseline();
+        let mut w = widget();
+        let (radius, color) = paint_bg(&mut w, Some(&theme));
+        assert_eq!(color, theme.scheme().primary, "resting fill is primary");
+        assert_eq!(radius, theme.shape.small, "radius is shape.small (8dp)");
+        // Pressed fill is a darkened primary (not the unthemed constant).
+        w.pressed = true;
+        let (_, pressed) = paint_bg(&mut w, Some(&theme));
+        assert_eq!(
+            pressed,
+            pressed_overlay(theme.scheme().primary, PRESSED_DARKEN)
+        );
     }
 
     #[test]

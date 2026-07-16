@@ -20,19 +20,20 @@
 //!
 //! On release with sufficient velocity a fling begins, integrated
 //! frame-by-frame with [`ScrollWidget::tick`] (pure, unit-tested). [`paint`]
-//! pumps the fling from a monotonic clock so it animates for free on the
+//! pumps the fling from the shared shell frame clock ([`PaintCtx::frame_time`],
+//! spec §8 — no wall-clock reads in widget code) so it animates for free on the
 //! continuous-loop mobile shells, and calls [`PaintCtx::request_frame`] while the
 //! fling is still in flight so the desktop shell (event-driven
 //! `ControlFlow::Wait`) keeps scheduling frames via `window.request_redraw()`;
-//! the signal stops once the fling reaches rest.
-
-use std::time::Instant;
+//! the signal stops once the fling reaches rest. The first paint after the
+//! release seeds the fling clock from `frame_time` (a zero-delta frame), and each
+//! subsequent paint advances it by the inter-frame delta.
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FLING_STOP,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase,
-    ScrollDelta, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX, Widget, any, fling_decay,
-    fling_displacement,
+    FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent,
+    PointerPhase, ScrollDelta, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX, Widget, any,
+    fling_decay, fling_displacement,
 };
 use kurbo::{Point, Size};
 
@@ -77,9 +78,14 @@ pub struct ScrollWidget {
     /// Active fling velocity, in px/s of *offset* (opposite the finger), or
     /// `None` when not flinging.
     fling: Option<f64>,
-    clock: Instant,
-    /// Last animation timestamp (ms) for the paint-time fling pump.
-    last_anim: Option<f64>,
+    /// The most recent frame time observed during [`Widget::paint`], reused as the
+    /// event-pass timestamp for velocity tracking (the event pass carries no clock
+    /// of its own — spec §8 provides time only at paint; the fling starts from the
+    /// last paint clock, which is today's behavior too).
+    last_frame_time: FrameTime,
+    /// Last animation frame time for the paint-time fling pump; `None` seeds the
+    /// clock (zero-delta) on the first paint after a release.
+    last_anim: Option<FrameTime>,
 }
 
 impl ScrollWidget {
@@ -95,7 +101,7 @@ impl ScrollWidget {
             last_drag: Point::ZERO,
             tracker: VelocityTracker::new(),
             fling: None,
-            clock: Instant::now(),
+            last_frame_time: FrameTime::ZERO,
             last_anim: None,
         }
     }
@@ -115,8 +121,10 @@ impl ScrollWidget {
         self.fling.is_some()
     }
 
-    fn now_ms(&self) -> f64 {
-        self.clock.elapsed().as_secs_f64() * 1000.0
+    /// The last painted frame time as milliseconds — the event-pass timestamp
+    /// source for velocity tracking (see [`ScrollWidget::last_frame_time`]).
+    fn event_time_ms(&self) -> f64 {
+        self.last_frame_time.as_secs_f64() * 1000.0
     }
 
     fn set_offset(&mut self, value: f64) {
@@ -157,9 +165,9 @@ impl ScrollWidget {
             self.last_anim = None;
             return;
         }
-        let now = self.now_ms();
+        let now = ctx.frame_time();
         let dt = match self.last_anim {
-            Some(t) => now - t,
+            Some(t) => now.saturating_sub(t).as_secs_f64() * 1000.0,
             None => 0.0,
         };
         self.last_anim = Some(now);
@@ -320,6 +328,9 @@ impl Widget for ScrollWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // Record the shared frame clock so the between-frames event pass (which
+        // carries no clock) has a timestamp for velocity tracking.
+        self.last_frame_time = ctx.frame_time();
         self.pump_fling(ctx);
         scene.push_clip(ctx.origin(), ctx.size());
         self.sync_child_origin();
@@ -328,7 +339,7 @@ impl Widget for ScrollWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        let t = self.now_ms();
+        let t = self.event_time_ms();
         self.event_at(ctx, event, t)
     }
 }
@@ -607,6 +618,63 @@ mod tests {
         let mut w = laid_out(200.0, 100.0, 1000.0);
         assert!(!w.tick(16.0));
         assert_eq!(w.offset(), 0.0);
+    }
+
+    /// A no-op paint sink for the RenderRoot clock test.
+    struct NullScene;
+    impl PaintScene for NullScene {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: peniko::Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+    }
+
+    fn scroll_widget(root: &forgekit_core::RenderRoot<(), ScrollView<()>>) -> &ScrollWidget {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<ScrollWidget>()
+            .expect("root is a ScrollWidget")
+    }
+
+    #[test]
+    fn fling_advances_from_injected_paint_frame_time() {
+        // End-to-end through the real paint path (task 07 clock retrofit): the
+        // event pass reads the last painted frame time for velocity tracking, and
+        // the fling pump advances off the injected `RenderRoot::paint` frame time
+        // — no wall clock anywhere. Paints are interleaved with the drag so the
+        // velocity tracker sees distinct (paint-clock) timestamps.
+        use forgekit_core::{FrameTime, RenderRoot};
+
+        fn logic(_: &mut ()) -> ScrollView<()> {
+            scroll_view(leaf(200.0, 1000.0))
+        }
+        let mut root: RenderRoot<(), ScrollView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(200.0, 100.0));
+
+        let ft = |ms: f64| FrameTime::from_nanos((ms * 1_000_000.0) as u64);
+        let mut sink = NullScene;
+        root.paint(&mut sink, ft(0.0));
+        root.event(&mut state, &ev(PointerPhase::Down, 100.0));
+        root.paint(&mut sink, ft(16.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 75.0)); // crosses slop → takeover
+        root.paint(&mut sink, ft(32.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 50.0)); // scroll, builds velocity
+        root.event(&mut state, &ev(PointerPhase::Up, 50.0)); // release → fling
+
+        assert!(
+            scroll_widget(&root).is_flinging(),
+            "release with paint-clock velocity starts a fling"
+        );
+        let before = scroll_widget(&root).offset();
+
+        // Advancing frame times drive the fling: the first paint seeds the fling
+        // clock (zero delta), the next advances the offset.
+        root.paint(&mut sink, ft(48.0));
+        root.paint(&mut sink, ft(64.0));
+        assert!(
+            scroll_widget(&root).offset() > before,
+            "the fling advanced from the injected paint frame time"
+        );
     }
 
     #[test]

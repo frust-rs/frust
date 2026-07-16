@@ -14,6 +14,7 @@ use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
     PaintCtx, PaintScene, PointerPhase, View, Widget, any,
 };
+use forgekit_theme::Theme;
 use kurbo::{Point, Size};
 use peniko::Color;
 
@@ -27,12 +28,28 @@ const GAP: f64 = 8.0;
 const RADIUS: f64 = 4.0;
 /// Stroke width of the check mark.
 const CHECK_WIDTH: f64 = 2.5;
-/// Unchecked box fill (light).
+/// Unchecked box fill (unthemed fallback; a theme resolves this from
+/// `colors.outline`).
 const FILL_OFF: Color = Color::from_rgb8(0xE5, 0xE7, 0xEB);
-/// Checked box fill (accent).
+/// Checked box fill (unthemed fallback; a theme resolves this from
+/// `colors.primary`).
 const FILL_ON: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
-/// Check-mark stroke color.
+/// Check-mark stroke color (unthemed fallback; a theme resolves this from
+/// `colors.on_primary`).
 const CHECK: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
+
+/// The resolved checkbox paint colors: `(off_fill, on_fill, check)`. Themed:
+/// `outline`/`primary`/`on_primary`. Unthemed: the [`FILL_OFF`]/[`FILL_ON`]/
+/// [`CHECK`] constants exactly, so a pre-theme app renders unchanged.
+fn resolve_colors(theme: Option<&Theme>) -> (Color, Color, Color) {
+    match theme {
+        Some(theme) => {
+            let scheme = theme.scheme();
+            (scheme.outline, scheme.primary, scheme.on_primary)
+        }
+        None => (FILL_OFF, FILL_ON, CHECK),
+    }
+}
 
 /// A view-held, typed toggle callback (erased on build).
 type OnToggle<State> = Rc<dyn Fn(&mut State, bool)>;
@@ -140,17 +157,18 @@ impl Widget for CheckboxWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let (off_fill, on_fill, check) = resolve_colors(Theme::from_paint_ctx(ctx));
         let box_y = ctx.origin().y + (ctx.size().height - BOX) / 2.0;
         let box_origin = Point::new(ctx.origin().x, box_y);
-        let fill = if self.checked { FILL_ON } else { FILL_OFF };
+        let fill = if self.checked { on_fill } else { off_fill };
         scene.fill_rounded_rect(box_origin, Size::new(BOX, BOX), RADIUS, fill);
         if self.checked {
             // A two-segment check mark within the box.
             let p0 = Point::new(box_origin.x + BOX * 0.24, box_origin.y + BOX * 0.52);
             let p1 = Point::new(box_origin.x + BOX * 0.42, box_origin.y + BOX * 0.70);
             let p2 = Point::new(box_origin.x + BOX * 0.76, box_origin.y + BOX * 0.30);
-            scene.stroke_line(p0, p1, CHECK_WIDTH, CHECK);
-            scene.stroke_line(p1, p2, CHECK_WIDTH, CHECK);
+            scene.stroke_line(p0, p1, CHECK_WIDTH, check);
+            scene.stroke_line(p1, p2, CHECK_WIDTH, check);
         }
         self.label.paint_child(ctx, scene);
     }
@@ -304,6 +322,64 @@ mod tests {
         // A follow-up hover Up must not fire.
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 12.0));
         assert_eq!(state.toggles, 0);
+    }
+
+    /// Records the box fill (rounded rect) and check-stroke colors.
+    #[derive(Default)]
+    struct BoxRecorder {
+        rrects: Vec<Color>,
+        strokes: Vec<Color>,
+    }
+
+    impl PaintScene for BoxRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, color: Color) {
+            self.rrects.push(color);
+        }
+        fn stroke_line(&mut self, _a: Point, _b: Point, _w: f64, color: Color) {
+            self.strokes.push(color);
+        }
+    }
+
+    fn paint_rec(w: &mut CheckboxWidget, theme: Option<&Theme>) -> BoxRecorder {
+        let mut rec = BoxRecorder::default();
+        let mut ctx = match theme {
+            Some(t) => PaintCtx::new(Point::ZERO, Size::new(120.0, 24.0)).with_theme(t),
+            None => PaintCtx::new(Point::ZERO, Size::new(120.0, 24.0)),
+        };
+        w.paint(&mut ctx, &mut rec);
+        rec
+    }
+
+    #[test]
+    fn unthemed_paint_uses_fallback_constants() {
+        let mut off = widget(false);
+        assert_eq!(paint_rec(&mut off, None).rrects, vec![FILL_OFF]);
+        let mut on = widget(true);
+        let rec = paint_rec(&mut on, None);
+        assert_eq!(rec.rrects, vec![FILL_ON]);
+        assert_eq!(rec.strokes, vec![CHECK, CHECK]);
+    }
+
+    #[test]
+    fn themed_paint_resolves_roles() {
+        let theme = Theme::m3_baseline();
+        let scheme = theme.scheme();
+        let mut off = widget(false);
+        assert_eq!(
+            paint_rec(&mut off, Some(&theme)).rrects,
+            vec![scheme.outline],
+            "unchecked box uses the outline role"
+        );
+        let mut on = widget(true);
+        let rec = paint_rec(&mut on, Some(&theme));
+        assert_eq!(rec.rrects, vec![scheme.primary], "checked box uses primary");
+        assert_eq!(
+            rec.strokes,
+            vec![scheme.on_primary, scheme.on_primary],
+            "check mark uses on_primary"
+        );
     }
 
     #[test]

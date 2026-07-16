@@ -14,6 +14,7 @@ use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
     PaintScene, PointerPhase, View, Widget,
 };
+use forgekit_theme::Theme;
 use kurbo::{Point, Size};
 use peniko::Color;
 
@@ -25,12 +26,33 @@ const DEFAULT_WIDTH: f64 = 200.0;
 const TRACK_H: f64 = 4.0;
 /// Thumb diameter, in logical px.
 const THUMB: f64 = 18.0;
-/// Unfilled track color.
+/// Unfilled (inactive) track color (unthemed fallback; a theme resolves this
+/// from `colors.surface_container_highest`, per the M3 slider spec).
 const TRACK: Color = Color::from_rgb8(0xD1, 0xD5, 0xDB);
-/// Filled track color.
+/// Filled (active) track color (unthemed fallback; a theme resolves this from
+/// `colors.primary`).
 const FILL: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
-/// Thumb color.
+/// Thumb color (unthemed fallback; a theme resolves this from `colors.primary`).
 const THUMB_FILL: Color = Color::from_rgb8(0x1D, 0x4E, 0xD8);
+
+/// The resolved slider paint colors: `(inactive_track, active_track, thumb)`.
+/// Themed per the Material 3 slider spec: the inactive track is
+/// `surface_container_highest`, the active track and thumb are `primary`.
+/// Unthemed: the [`TRACK`]/[`FILL`]/[`THUMB_FILL`] constants exactly, so a
+/// pre-theme app renders unchanged.
+fn resolve_colors(theme: Option<&Theme>) -> (Color, Color, Color) {
+    match theme {
+        Some(theme) => {
+            let scheme = theme.scheme();
+            (
+                scheme.surface_container_highest,
+                scheme.primary,
+                scheme.primary,
+            )
+        }
+        None => (TRACK, FILL, THUMB_FILL),
+    }
+}
 
 /// A view-held, typed change callback (erased on build).
 type OnChange<State> = Rc<dyn Fn(&mut State, f64)>;
@@ -119,6 +141,7 @@ impl Widget for SliderWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let (track, fill, thumb_fill) = resolve_colors(Theme::from_paint_ctx(ctx));
         let o = ctx.origin();
         let w = ctx.size().width;
         let mid_y = o.y + ctx.size().height / 2.0;
@@ -127,7 +150,7 @@ impl Widget for SliderWidget {
             Point::new(o.x, mid_y - TRACK_H / 2.0),
             Size::new(w, TRACK_H),
             TRACK_H / 2.0,
-            TRACK,
+            track,
         );
         // Filled portion up to the thumb.
         let thumb_x = o.x + self.value.clamp(0.0, 1.0) * w;
@@ -135,14 +158,14 @@ impl Widget for SliderWidget {
             Point::new(o.x, mid_y - TRACK_H / 2.0),
             Size::new((thumb_x - o.x).max(0.0), TRACK_H),
             TRACK_H / 2.0,
-            FILL,
+            fill,
         );
         // Thumb (rounded-rect stand-in for a circle in v1).
         scene.fill_rounded_rect(
             Point::new(thumb_x - THUMB / 2.0, mid_y - THUMB / 2.0),
             Size::new(THUMB, THUMB),
             THUMB / 2.0,
-            THUMB_FILL,
+            thumb_fill,
         );
     }
 
@@ -275,6 +298,50 @@ mod tests {
         let before = state.changes;
         dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 40.0));
         assert_eq!(state.changes, before, "hover after Cancel does not report");
+    }
+
+    /// Records rounded-rect fill colors in paint order (track, fill, thumb).
+    #[derive(Default)]
+    struct TrackRecorder {
+        rrects: Vec<Color>,
+    }
+
+    impl PaintScene for TrackRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, color: Color) {
+            self.rrects.push(color);
+        }
+    }
+
+    fn paint_colors(value: f64, theme: Option<&Theme>) -> Vec<Color> {
+        let mut w = widget(value);
+        let mut rec = TrackRecorder::default();
+        let mut ctx = match theme {
+            Some(t) => PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT)).with_theme(t),
+            None => PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT)),
+        };
+        w.paint(&mut ctx, &mut rec);
+        rec.rrects
+    }
+
+    #[test]
+    fn unthemed_paint_uses_fallback_constants() {
+        assert_eq!(paint_colors(0.5, None), vec![TRACK, FILL, THUMB_FILL]);
+    }
+
+    #[test]
+    fn themed_paint_resolves_m3_slider_roles() {
+        let theme = Theme::m3_baseline();
+        let scheme = theme.scheme();
+        assert_eq!(
+            paint_colors(0.5, Some(&theme)),
+            vec![
+                scheme.surface_container_highest,
+                scheme.primary,
+                scheme.primary
+            ],
+        );
     }
 
     #[test]
