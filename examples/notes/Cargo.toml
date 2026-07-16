@@ -1,0 +1,23 @@
+[package]
+name = "notes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+forgekit = { workspace = true }
+
+# Dev-only: the headless interaction test drives the framework's `RenderRoot`
+# directly with synthetic `InputEvent`s (the desktop shell's own event seam) —
+# keyboard/IME keystrokes, submit, and the keyed-delete matrix — shaping text
+# through a real `TextContext` and recording paint output. No GPU, no window,
+# no OS-level UI automation; a permanent regression gate for the Phase 4B
+# TextInput/Image/keyed-children wiring the notes demo exercises.
+[dev-dependencies]
+forgekit-core = { workspace = true }
+forgekit-scene = { workspace = true }
+forgekit-text = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }

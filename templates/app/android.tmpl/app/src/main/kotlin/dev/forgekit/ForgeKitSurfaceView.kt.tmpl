@@ -42,6 +42,14 @@ class ForgeKitSurfaceView(context: Context) :
         init {
             System.loadLibrary("{{ project_name }}")
         }
+
+        /**
+         * How many frames to keep re-polling the IME surface after an editor
+         * action, so [doFrame] catches the submit's next-frame rebuild (which
+         * clears/replaces the field) and reseeds the IME mirror. A small budget
+         * (a couple of frames) covers the one-frame rebuild latency with slack.
+         */
+        private const val IME_RESYNC_FRAMES = 3
     }
 
     // JNI exports implemented by `forgekit-shell-android` (spec Phase 2
@@ -109,6 +117,25 @@ class ForgeKitSurfaceView(context: Context) :
     /** Whether the soft keyboard is currently requested (edge-detects show/hide). */
     private var imeActive = false
 
+    /**
+     * Frames remaining to re-poll the IME surface after an editor action
+     * ([performEditorAction] / a hardware Enter). A submit clears/replaces the
+     * field's text through the framework's *next-frame* rebuild — not
+     * synchronously — so the [InputConnection]'s mirror [Editable] would keep the
+     * pre-submit text and the next keystroke would append to it. Counting a few
+     * frames lets [doFrame] observe the post-rebuild state and reseed the mirror
+     * (see [resyncImeMirror]).
+     */
+    private var imeResyncFrames = 0
+
+    /**
+     * The live [ForgeKitInputConnection] Gboard is bound to (set in
+     * [onCreateInputConnection]). Held so a framework-side edit (a submit
+     * clearing the field) can reseed its mirror [Editable] directly, instead of
+     * only reacting to IME-originated calls.
+     */
+    private var activeConnection: ForgeKitInputConnection? = null
+
     private val imm: InputMethodManager
         get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
 
@@ -163,6 +190,32 @@ class ForgeKitSurfaceView(context: Context) :
         return true
     }
 
+    /**
+     * Forward a hardware / injected **Enter** to the focused editable as the
+     * field's editor action (submit), the same path Gboard's Done key drives
+     * through [ForgeKitInputConnection.performEditorAction].
+     *
+     * Soft-keyboard text (including its own Enter) arrives through the
+     * [InputConnection]; but a *physical* keyboard — and `adb shell input
+     * keyevent 66` — dispatches key events straight to the focused view, which
+     * an `InputConnection`-only editor would otherwise drop. Single-line v1
+     * fields treat Enter as submit (`imeOptions = IME_ACTION_DONE`), so route it
+     * to the existing `nativeImeAction` seam rather than inserting a newline.
+     * Only Enter is intercepted while a field is focused; every other key falls
+     * through to the default handling (soft-keyboard input stays the IME's job).
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (handle != 0L && imeActive &&
+            (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER)
+        ) {
+            nativeImeAction(handle, EditorInfo.IME_ACTION_DONE)
+            pollImeAfterDispatch()
+            imeResyncFrames = IME_RESYNC_FRAMES
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     /** A custom editor view MUST return true here to be offered an InputConnection. */
     override fun onCheckIsTextEditor(): Boolean = true
 
@@ -172,7 +225,10 @@ class ForgeKitSurfaceView(context: Context) :
         val state = lastKnownState
         outAttrs.initialSelStart = state?.selBase ?: -1
         outAttrs.initialSelEnd = state?.selExt ?: -1
-        return ForgeKitInputConnection().also { it.seed(state) }
+        return ForgeKitInputConnection().also {
+            it.seed(state)
+            activeConnection = it
+        }
     }
 
     /**
@@ -237,8 +293,39 @@ class ForgeKitSurfaceView(context: Context) :
         // is a cheap no-op, so re-posting is always correct while `running`.
         if (handle != 0L) {
             nativeOnFrame(handle, frameTimeNanos)
+            // After an editor action, the field's submit-driven text change lands
+            // in this (or the next) frame's rebuild; reseed the IME mirror once it
+            // has (see [imeResyncFrames]).
+            if (imeResyncFrames > 0) {
+                imeResyncFrames--
+                resyncImeMirror()
+            }
         }
         Choreographer.getInstance().postFrameCallback(this)
+    }
+
+    /**
+     * Reconcile the IME with the focused widget's *current* published editing
+     * state after a framework-initiated edit (a submit clearing the field) that
+     * the [InputConnection] did not originate. If the text changed since the IME
+     * last knew it, its mirror [Editable] is stale, so `restartInput` rebuilds
+     * the connection — reseeding the mirror from the fresh state
+     * ([onCreateInputConnection] seeds from [lastKnownState]). A pure
+     * selection/caret move (same text) needs no restart.
+     */
+    private fun resyncImeMirror() {
+        if (handle == 0L) return
+        val state = parseImeState(nativeImeState(handle)) ?: return
+        val prev = lastKnownState
+        lastKnownState = state
+        if (state.active && prev != null && prev.text != state.text) {
+            // Reseed the live connection's mirror to match the widget, then tell
+            // the IMM the text/selection changed under it and restart input so
+            // Gboard re-reads from the fresh (e.g. cleared) editable.
+            activeConnection?.seed(state)
+            imm.updateSelection(this, state.selBase, state.selExt, state.compBase, state.compExt)
+            imm.restartInput(this)
+        }
     }
 
     /** Called by `MainActivity.onResume` — starts the Choreographer loop. */
@@ -383,6 +470,9 @@ class ForgeKitSurfaceView(context: Context) :
         override fun performEditorAction(actionCode: Int): Boolean {
             if (handle != 0L) {
                 nativeImeAction(handle, actionCode)
+                // A submit clears the field on the next-frame rebuild; re-poll for
+                // a few frames so the mirror is reseeded (see [resyncImeMirror]).
+                imeResyncFrames = IME_RESYNC_FRAMES
             }
             return true
         }

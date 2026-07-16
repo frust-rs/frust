@@ -214,9 +214,11 @@ impl TextInputWidget {
         ctx.request_redraw();
     }
 
-    /// Publish the current editing state + caret (window coordinates) so the
-    /// shell can drive the platform IME.
-    fn publish(&self, ctx: &mut EventCtx) {
+    /// Build the current editing state + caret (window coordinates) for the
+    /// widget laid out at `origin`/`size`, so the shell can drive the platform
+    /// IME. Shared by the event-pass [`publish`](Self::publish) and the
+    /// paint-pass republish (see [`Widget::paint`]).
+    fn current_ime_state(&self, origin: Point, size: Size) -> ImeState {
         let es = self.editor.editing_state_utf16();
         let editing = EditingState {
             text: es.text,
@@ -225,7 +227,7 @@ impl TextInputWidget {
             composing_base: es.composing_base,
             composing_extent: es.composing_extent,
         };
-        let offset = ctx.origin().to_vec2() + Vec2::new(PAD_X, self.text_top(ctx.size().height));
+        let offset = origin.to_vec2() + Vec2::new(PAD_X, self.text_top(size.height));
         let caret = self.editor.cursor_rect(CARET_W).map(|c| {
             Rect::new(
                 c.x0 + offset.x,
@@ -234,11 +236,17 @@ impl TextInputWidget {
                 c.y1 + offset.y,
             )
         });
-        ctx.publish_ime_state(ImeState {
+        ImeState {
             active: true,
             editing,
             caret,
-        });
+        }
+    }
+
+    /// Publish the current editing state + caret during the event pass so the
+    /// shell can drive the platform IME.
+    fn publish(&self, ctx: &mut EventCtx) {
+        ctx.publish_ime_state(self.current_ime_state(ctx.origin(), ctx.size()));
     }
 
     /// Translate a widget-local pointer position into the editor's layout-local
@@ -496,6 +504,12 @@ impl Widget for TextInputWidget {
         // continuous loops already do). At rest (unfocused) we stop signalling.
         if self.focused {
             ctx.request_frame();
+            // Republish the IME surface every painted frame while focused, so a
+            // controlled change applied by a rebuild (a submit clearing the
+            // field) refreshes the shell-facing state the event pass would
+            // otherwise leave stale — the mobile IME mirror relies on this to
+            // observe the clear (see `PaintCtx::publish_ime_state`).
+            ctx.publish_ime_state(self.current_ime_state(origin, size));
             if self.caret_visible_at(self.now_ms())
                 && let Some(c) = self.editor.cursor_rect(CARET_W)
             {
@@ -992,6 +1006,41 @@ mod tests {
         assert!(w.caret_visible_at(BLINK_MS - 1.0));
         assert!(!w.caret_visible_at(BLINK_MS + 1.0), "hidden mid-cycle");
         assert!(w.caret_visible_at(2.0 * BLINK_MS + 1.0), "visible again");
+    }
+
+    #[test]
+    fn paint_refreshes_ime_state_after_a_controlled_clear() {
+        // The mobile IME mirror relies on `ime_state()` tracking the field even
+        // when an app-driven controlled change (a submit clearing the draft) is
+        // applied by a *rebuild* rather than an event. The event pass alone
+        // leaves the published state stale (it only refreshes on edits); the
+        // focused widget republishes during paint, which runs after every
+        // rebuild. This is the regression guard for that refresh.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        let mut sink = NullScene;
+
+        // Focus and type "hi" through the event pass — ime_state now reads "hi".
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("h"));
+        root.event(&mut state, &ch("i"));
+        assert_eq!(root.ime_state().expect("focused").editing.text, "hi");
+
+        // Simulate an app-driven controlled clear (what `on_submit` → clear draft
+        // does): set the controlled value to "" and run a frame with NO event.
+        state.value.clear();
+        root.rebuild(&mut app_logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+        root.paint(&mut sink);
+
+        let ime = root
+            .ime_state()
+            .expect("still focused, so still publishing");
+        assert_eq!(
+            ime.editing.text, "",
+            "paint refreshes the shell-facing IME state to the controlled-cleared value \
+             (without this, the mobile IME mirror re-pushes the stale text)"
+        );
     }
 
     /// A no-op paint sink for `needs_frame` assertions (glyph/rect output is not

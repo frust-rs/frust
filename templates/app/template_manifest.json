@@ -3,6 +3,7 @@
   "forgekit.toml.tmpl",
   ".gitignore",
   "assets/.gitkeep",
+  "assets/logo.png",
   "src/lib.rs.tmpl",
   "src/main.rs.tmpl",
   "android.tmpl/settings.gradle.kts.tmpl",

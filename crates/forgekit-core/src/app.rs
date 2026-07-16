@@ -228,6 +228,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             pod.widget_mut().paint(&mut ctx, scene);
             pod.clear_flags();
+            // A focused editable republishes its IME surface during paint (which
+            // runs after every rebuild), so a controlled change applied by the
+            // rebuild — e.g. a submit clearing the field — refreshes the
+            // shell-facing `ime_state` that the event pass alone would leave
+            // stale. Only overwrite on a fresh publish: focus loss is cleared by
+            // the event pass, and an unfocused frame publishes nothing.
+            if let Some(ime) = ctx.take_ime_state() {
+                self.ime_state = Some(ime);
+            }
             PaintOutcome {
                 needs_frame: ctx.needs_frame(),
             }

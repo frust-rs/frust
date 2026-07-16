@@ -14,7 +14,7 @@ use forgekit_scene::{GlyphRun, SceneBuilder};
 use kurbo::{Point, Rect, Size};
 use peniko::{Brush, Color};
 
-use crate::event::{EventCtx, EventResult, InputEvent};
+use crate::event::{EventCtx, EventResult, ImeState, InputEvent};
 use crate::layout::BoxConstraints;
 
 /// The renderer-agnostic paint target a widget draws into.
@@ -202,6 +202,7 @@ pub struct PaintCtx {
     origin: Point,
     size: Size,
     needs_frame: bool,
+    ime_state: Option<ImeState>,
 }
 
 impl PaintCtx {
@@ -211,6 +212,7 @@ impl PaintCtx {
             origin,
             size,
             needs_frame: false,
+            ime_state: None,
         }
     }
 
@@ -238,6 +240,26 @@ impl PaintCtx {
     /// Whether a continuation frame was requested during this (sub)paint.
     pub fn needs_frame(&self) -> bool {
         self.needs_frame
+    }
+
+    /// Publish the focused editable's current IME surface during paint.
+    ///
+    /// The event pass ([`EventCtx::publish_ime_state`]) refreshes the shell's
+    /// IME view on every edit, but an *app-driven* controlled change — a
+    /// submit clearing the field, applied by the next rebuild rather than by
+    /// an event — never crosses the event pass, so the event-published value
+    /// goes stale. A focused editable therefore also republishes here, in the
+    /// paint that runs after every rebuild, so [`crate::app::RenderRoot::ime_state`]
+    /// tracks the field's current text/caret regardless of what drove the
+    /// change. Bubbles up through [`ChildPod::paint_child`], mirroring
+    /// [`Self::request_frame`].
+    pub fn publish_ime_state(&mut self, state: ImeState) {
+        self.ime_state = Some(state);
+    }
+
+    /// Take the IME surface published during this (sub)paint, if any.
+    pub fn take_ime_state(&mut self) -> Option<ImeState> {
+        self.ime_state.take()
     }
 }
 
@@ -440,6 +462,12 @@ impl ChildPod {
         self.widget.paint(&mut child_ctx, scene);
         if child_ctx.needs_frame() {
             ctx.request_frame();
+        }
+        // Bubble a focused editable's republished IME surface up the paint path,
+        // so `RenderRoot::paint` can refresh the shell-facing state after a
+        // rebuild-driven controlled change (see `PaintCtx::publish_ime_state`).
+        if let Some(ime) = child_ctx.take_ime_state() {
+            ctx.publish_ime_state(ime);
         }
     }
 
