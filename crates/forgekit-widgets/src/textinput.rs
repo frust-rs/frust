@@ -315,6 +315,18 @@ impl TextInputWidget {
                 EventResult::Handled
             }
             ImeEvent::Commit(s) => {
+                // iOS Return contract (task 56 / RESEARCH §ios): the Return key on a
+                // UITextInput arrives as `insertText("\n")` → `Commit("\n")`. On this
+                // single-line widget a lone newline commit means SUBMIT, exactly like
+                // `NamedKey::Enter` — it must never insert a literal '\n'.
+                if s == "\n" || s == "\r" || s == "\r\n" {
+                    let text = self.editor.text().to_string();
+                    if let Some(cb) = &mut self.on_submit {
+                        cb(ctx, text);
+                    }
+                    ctx.request_redraw();
+                    return EventResult::Handled;
+                }
                 // Commit the given text via the compose machinery so it replaces
                 // any active preedit and lands at the caret in one edit.
                 let before = self.editor.text().to_string();
@@ -741,6 +753,39 @@ mod tests {
         assert_eq!(state.submits, 1, "Enter fires on_submit exactly once");
         assert_eq!(state.last_submit, "hi");
         assert!(root.is_focus_active(), "submit keeps focus");
+    }
+
+    #[test]
+    fn newline_commit_submits_instead_of_inserting() {
+        // The iOS Return path: UITextInput's Return arrives as insertText("\n")
+        // → ImeEvent::Commit("\n"). Must behave exactly like NamedKey::Enter on
+        // this single-line widget — submit, keep the text newline-free.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("h"));
+        root.event(&mut state, &ch("i"));
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("\n".to_string())),
+        );
+
+        assert_eq!(state.submits, 1, "newline commit fires on_submit once");
+        assert_eq!(state.last_submit, "hi");
+        assert!(
+            !widget(&root).editor.text().contains('\n'),
+            "no literal newline lands in the single-line field"
+        );
+        assert!(root.is_focus_active(), "submit keeps focus");
+
+        // CRLF variant (some platforms/hardware keyboards): same behavior.
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("\r\n".to_string())),
+        );
+        assert_eq!(state.submits, 2);
+        assert!(!widget(&root).editor.text().contains('\r'));
     }
 
     #[test]
