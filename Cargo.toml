@@ -64,6 +64,7 @@ forgekit-core = { path = "crates/forgekit-core" }
 forgekit-scene = { path = "crates/forgekit-scene" }
 forgekit-render = { path = "crates/forgekit-render" }
 forgekit-text = { path = "crates/forgekit-text" }
+forgekit-theme = { path = "crates/forgekit-theme" }
 forgekit-widgets = { path = "crates/forgekit-widgets" }
 forgekit-reactive = { path = "crates/forgekit-reactive" }
 forgekit-shell-desktop = { path = "crates/forgekit-shell-desktop" }

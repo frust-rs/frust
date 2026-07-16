@@ -9,6 +9,10 @@ license.workspace = true
 forgekit-core = { workspace = true }
 forgekit-widgets = { workspace = true }
 forgekit-reactive = { workspace = true }
+# Pre-added ahead of the facade's theme-delivery surface (task 05) — unused
+# today, but pinned so Cargo.lock settles once (see
+# workflow/plans/features/forgekit-phase-6a-foundations/tasks/03-theme-crate-tokens.md).
+forgekit-theme = { workspace = true }
 # Named directly (not just through forgekit-reactive) for the facade's flat
 # re-export surface (`Memo`, `signal`, `spawn`/`spawn_local`) — see
 # `forgekit::run`/the reactive re-exports in `lib.rs`.

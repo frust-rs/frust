@@ -1,0 +1,28 @@
+//! Design-token crate: Material 3 baseline color/type/shape/elevation/motion
+//! values plus the [`Theme`] aggregate that bundles them.
+//!
+//! This crate is deliberately **pure data + constructors** — no
+//! `forgekit-core`, no `forgekit-scene`, no `reactive_graph`. It depends on
+//! `peniko` (for [`peniko::Color`], reused by [`color::ColorScheme`]) and
+//! `forgekit-text` (for [`forgekit_text::TextStyle`], reused by
+//! [`typography::TypeScale`]) only — see `docs/ARCHITECTURE.md`'s Layer
+//! Dependencies. The `resolve`/context-threading helpers that make a `Theme`
+//! reachable from widget code land in a later task (05); this crate only
+//! defines the values.
+//!
+//! Every token table below carries its own source URL and retrieval date in
+//! its module's doc comments.
+
+pub mod color;
+pub mod elevation;
+pub mod motion;
+pub mod shape;
+pub mod theme;
+pub mod typography;
+
+pub use color::{Brightness, ColorScheme};
+pub use elevation::{Elevation, ElevationLevel, ShadowSpec, SurfaceRole};
+pub use motion::{MotionScheme, MotionSpring};
+pub use shape::ShapeScale;
+pub use theme::Theme;
+pub use typography::TypeScale;

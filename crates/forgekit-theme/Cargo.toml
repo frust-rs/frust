@@ -1,0 +1,17 @@
+[package]
+name = "forgekit-theme"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Color role values (ColorScheme). Scene-layer-purity-adjacent: only
+# kurbo/peniko-shaped types appear in this crate's public API, mirroring
+# forgekit-scene/forgekit-text (see docs/ARCHITECTURE.md).
+peniko = { workspace = true }
+# TypeScale fields are forgekit-text::TextStyle values (family/weight/size/
+# letter-spacing/line-height) — the M3 type-scale surface. Deliberately
+# NOTHING else: no forgekit-core, no forgekit-scene, no reactive_graph — this
+# crate is pure data + constructors (see docs/ARCHITECTURE.md, task 03).
+forgekit-text = { workspace = true }

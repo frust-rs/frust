@@ -658,6 +658,7 @@ dependencies = [
  "forgekit-shell-android",
  "forgekit-shell-desktop",
  "forgekit-shell-ios",
+ "forgekit-theme",
  "forgekit-widgets",
  "reactive_graph",
 ]
@@ -717,6 +718,7 @@ dependencies = [
  "forgekit-scene",
  "forgekit-shell-common",
  "forgekit-text",
+ "forgekit-theme",
  "jni",
  "kurbo",
  "log",
@@ -747,6 +749,7 @@ dependencies = [
  "forgekit-render",
  "forgekit-scene",
  "forgekit-text",
+ "forgekit-theme",
  "kurbo",
  "peniko",
  "pollster",
@@ -764,6 +767,7 @@ dependencies = [
  "forgekit-scene",
  "forgekit-shell-common",
  "forgekit-text",
+ "forgekit-theme",
  "kurbo",
  "log",
  "peniko",
@@ -781,12 +785,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "forgekit-theme"
+version = "0.1.0"
+dependencies = [
+ "forgekit-text",
+ "peniko",
+]
+
+[[package]]
 name = "forgekit-widgets"
 version = "0.1.0"
 dependencies = [
  "forgekit-core",
  "forgekit-scene",
  "forgekit-text",
+ "forgekit-theme",
  "image",
  "kurbo",
  "peniko",

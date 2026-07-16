@@ -9,6 +9,10 @@ license.workspace = true
 forgekit-core = { workspace = true }
 forgekit-scene = { workspace = true }
 forgekit-text = { workspace = true }
+# Pre-added ahead of the widget retrofit (task 07) that reads Theme tokens for
+# default styling — unused today, but pinned so Cargo.lock settles once (see
+# workflow/plans/features/forgekit-phase-6a-foundations/tasks/03-theme-crate-tokens.md).
+forgekit-theme = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 image = { workspace = true }
