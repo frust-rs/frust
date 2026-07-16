@@ -234,11 +234,20 @@ fn rect_at(origin: Point, size: Size) -> Rect {
 ///
 /// Beyond the (still-empty) container seam, it optionally carries the shared,
 /// heavyweight text-shaping context the render root threads down for text
-/// layout (spec §10.3). The resource is **type-erased** (`&mut dyn Any`) so
-/// `forgekit-core` stays independent of `forgekit-text` (and thus of parley);
-/// text widgets recover it with [`LayoutCtx::text_context`].
+/// layout (spec §10.3), plus the app's active theme (spec §11 design tokens).
+/// Both resources are **type-erased** (`&mut dyn Any` / `&dyn Any`) so
+/// `forgekit-core` stays independent of `forgekit-text` (and thus of parley)
+/// and of `forgekit-theme`; text widgets recover the shaping context with
+/// [`LayoutCtx::text_context`] and themed widgets recover the theme with
+/// [`LayoutCtx::theme_as`].
 pub struct LayoutCtx<'a> {
     text_ctx: Option<&'a mut dyn Any>,
+    /// The app's active theme, threaded down type-erased by the render root so
+    /// this crate needs no `forgekit-theme` dependency. `None` in bare-core
+    /// tests and pre-theme apps — a *supported* state (unlike the text context,
+    /// whose absence at a text widget is a wiring bug), so [`LayoutCtx::theme_as`]
+    /// returns `Option` rather than panicking.
+    theme: Option<&'a dyn Any>,
 }
 
 impl<'a> LayoutCtx<'a> {
@@ -246,7 +255,10 @@ impl<'a> LayoutCtx<'a> {
     ///
     /// Used by leaf-only unit tests and by containers that never lay out text.
     pub fn new() -> LayoutCtx<'static> {
-        LayoutCtx { text_ctx: None }
+        LayoutCtx {
+            text_ctx: None,
+            theme: None,
+        }
     }
 
     /// Create a layout context carrying the shared text-shaping context.
@@ -257,7 +269,24 @@ impl<'a> LayoutCtx<'a> {
     pub fn with_text_context(text_ctx: &'a mut dyn Any) -> Self {
         LayoutCtx {
             text_ctx: Some(text_ctx),
+            theme: None,
         }
+    }
+
+    /// Create a layout context carrying both an optional text-shaping context
+    /// and an optional type-erased theme.
+    ///
+    /// The render root uses this to thread both resources it owns into the
+    /// layout pass in one shot (see [`crate::app::RenderRoot::layout`]).
+    pub fn with_resources(text_ctx: Option<&'a mut dyn Any>, theme: Option<&'a dyn Any>) -> Self {
+        LayoutCtx { text_ctx, theme }
+    }
+
+    /// Attach the app's active theme, type-erased. Chainable builder used by the
+    /// render root when it lends a stored theme into the layout pass.
+    pub fn with_theme(mut self, theme: &'a dyn Any) -> Self {
+        self.theme = Some(theme);
+        self
     }
 
     /// Recover the shared text-shaping context as `&mut T`.
@@ -271,6 +300,18 @@ impl<'a> LayoutCtx<'a> {
             .expect("no text context threaded into this layout pass")
             .downcast_mut::<T>()
             .expect("threaded layout resource is not the expected text-context type")
+    }
+
+    /// Recover the threaded theme as `&T`, or `None` if no theme was threaded
+    /// into this pass (a supported state — bare-core tests and pre-theme apps)
+    /// or its concrete type differs from `T`.
+    ///
+    /// Mirrors [`LayoutCtx::text_context`] but returns `Option` rather than
+    /// panicking, because a missing theme is a valid runtime state, not a
+    /// wiring bug. Widgets that read `forgekit_theme::Theme` downcast through
+    /// this (or the `Theme::from_layout_ctx` convenience wrapper).
+    pub fn theme_as<T: Any>(&self) -> Option<&T> {
+        self.theme?.downcast_ref::<T>()
     }
 }
 
@@ -290,7 +331,7 @@ impl Default for LayoutCtx<'static> {
 /// [`ChildPod::paint_child`] and out of [`crate::app::RenderRoot::paint`] as a
 /// [`PaintOutcome`], mirroring how [`EventCtx::request_redraw`] surfaces through
 /// [`crate::event::EventOutcome`].
-pub struct PaintCtx {
+pub struct PaintCtx<'a> {
     origin: Point,
     size: Size,
     needs_frame: bool,
@@ -312,14 +353,22 @@ pub struct PaintCtx {
     /// tests, recorder scenes). A widget differences it against a stored earlier
     /// value to advance animation state — see [`PaintCtx::frame_time`].
     frame_time: FrameTime,
+    /// The app's active theme, threaded down type-erased by the render root
+    /// ([`crate::app::RenderRoot::paint`]) and seeded into each child by
+    /// [`ChildPod::paint_child`], mirroring how `frame_time`/`has_focus` flow.
+    /// `None` in bare-core tests and pre-theme apps — a supported state, so
+    /// [`PaintCtx::theme_as`] returns `Option` rather than panicking.
+    theme: Option<&'a dyn Any>,
 }
 
-impl PaintCtx {
+impl<'a> PaintCtx<'a> {
     /// Create a paint context for a widget at `origin` with `size`.
     ///
-    /// The frame time defaults to [`FrameTime::ZERO`]; the render root seeds the
-    /// real shell clock via [`PaintCtx::set_frame_time`] before painting the root
-    /// widget, and it flows to children through [`ChildPod::paint_child`].
+    /// The frame time defaults to [`FrameTime::ZERO`] and no theme is threaded
+    /// in; the render root seeds the real shell clock via
+    /// [`PaintCtx::set_frame_time`] and the active theme via
+    /// [`PaintCtx::set_theme`] before painting the root widget, and both flow to
+    /// children through [`ChildPod::paint_child`].
     pub fn new(origin: Point, size: Size) -> Self {
         Self {
             origin,
@@ -328,7 +377,43 @@ impl PaintCtx {
             ime_state: None,
             has_focus: false,
             frame_time: FrameTime::ZERO,
+            theme: None,
         }
+    }
+
+    /// Attach the app's active theme, type-erased. Chainable builder mirroring
+    /// [`LayoutCtx::with_theme`] — used by widget unit tests that paint against a
+    /// known theme; the render root threads it via [`PaintCtx::set_theme`].
+    pub fn with_theme(mut self, theme: &'a dyn Any) -> Self {
+        self.theme = Some(theme);
+        self
+    }
+
+    /// Recover the threaded theme as `&T`, or `None` if no theme was threaded
+    /// into this pass (a supported state — bare-core tests and pre-theme apps)
+    /// or its concrete type differs from `T`.
+    ///
+    /// The paint-pass mirror of [`LayoutCtx::theme_as`]. Widgets that read
+    /// `forgekit_theme::Theme` downcast through this (or the
+    /// `Theme::from_paint_ctx` convenience wrapper).
+    pub fn theme_as<T: Any>(&self) -> Option<&T> {
+        self.theme?.downcast_ref::<T>()
+    }
+
+    /// Seed the type-erased theme lent by the render root. Called by
+    /// [`crate::app::RenderRoot::paint`] at the root and by
+    /// [`ChildPod::paint_child`] for each child, mirroring how `frame_time` is
+    /// threaded. The `Option<&dyn Any>` is copied down unchanged so a nested
+    /// widget observes the same theme instance without re-borrowing the parent
+    /// context.
+    pub(crate) fn set_theme(&mut self, theme: Option<&'a dyn Any>) {
+        self.theme = theme;
+    }
+
+    /// The type-erased theme reference this context carries, for re-lending to a
+    /// child context (copied, so it does not hold a borrow of `self`).
+    pub(crate) fn theme_ref(&self) -> Option<&'a dyn Any> {
+        self.theme
     }
 
     /// The widget's origin in its parent's coordinate space.
@@ -621,6 +706,9 @@ impl ChildPod {
         // Thread the shared shell clock down unchanged so every widget in the
         // frame advances animations against one consistent timestamp.
         child_ctx.set_frame_time(ctx.frame_time());
+        // Thread the app's active theme down unchanged (copied ref, so the child
+        // context holds no borrow of the parent), mirroring the clock.
+        child_ctx.set_theme(ctx.theme_ref());
         // Thread the pod's recorded focus path into paint (the mirror of how
         // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
         // observes a container-routed blur that never reached its `event()`.
@@ -1104,6 +1192,85 @@ mod tests {
         scene.pop_layer();
         assert!(scene.rects.is_empty());
         assert!(scene.texts.is_empty());
+    }
+
+    /// A dummy theme type, standing in for `forgekit_theme::Theme` — proving the
+    /// type-erased theme slot works for *any* `'static` type, not just the real
+    /// theme (`forgekit-core` never names it).
+    #[derive(Debug, PartialEq)]
+    struct TestTheme {
+        accent: u32,
+    }
+
+    #[test]
+    fn layout_ctx_theme_as_recovers_threaded_theme() {
+        let theme = TestTheme { accent: 7 };
+        let ctx = LayoutCtx::new().with_theme(&theme);
+        assert_eq!(ctx.theme_as::<TestTheme>(), Some(&TestTheme { accent: 7 }));
+    }
+
+    #[test]
+    fn layout_ctx_theme_as_is_none_without_a_theme() {
+        let ctx = LayoutCtx::new();
+        assert!(ctx.theme_as::<TestTheme>().is_none());
+    }
+
+    #[test]
+    fn layout_ctx_theme_as_is_none_on_type_mismatch() {
+        let theme = TestTheme { accent: 1 };
+        let ctx = LayoutCtx::new().with_theme(&theme);
+        // A downcast to the wrong type yields `None`, never a panic.
+        assert!(ctx.theme_as::<u32>().is_none());
+    }
+
+    #[test]
+    fn paint_ctx_theme_as_recovers_threaded_theme() {
+        let theme = TestTheme { accent: 9 };
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(1.0, 1.0));
+        ctx.set_theme(Some(&theme));
+        assert_eq!(ctx.theme_as::<TestTheme>(), Some(&TestTheme { accent: 9 }));
+    }
+
+    #[test]
+    fn paint_ctx_theme_as_is_none_without_a_theme() {
+        let ctx = PaintCtx::new(Point::ZERO, Size::new(1.0, 1.0));
+        assert!(ctx.theme_as::<TestTheme>().is_none());
+    }
+
+    #[test]
+    fn child_pod_paint_threads_theme_into_child() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        // A probe recording the accent it recovered from the paint context's
+        // threaded theme (or `None` if no theme reached it).
+        struct ThemeProbe(Rc<Cell<Option<u32>>>);
+        impl Widget for ThemeProbe {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(10.0, 10.0))
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+                self.0.set(ctx.theme_as::<TestTheme>().map(|t| t.accent));
+            }
+        }
+
+        let seen = Rc::new(Cell::new(None));
+        let mut pod = ChildPod::new(Box::new(ThemeProbe(seen.clone())));
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+
+        // A parent carrying a theme threads it into the child paint.
+        let theme = TestTheme { accent: 42 };
+        let mut parent = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        parent.set_theme(Some(&theme));
+        pod.paint_child(&mut parent, &mut scene);
+        assert_eq!(seen.get(), Some(42));
+
+        // A parent with no theme leaves the child's accessor empty.
+        let mut bare = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        pod.paint_child(&mut bare, &mut scene);
+        assert_eq!(seen.get(), None);
     }
 
     #[test]

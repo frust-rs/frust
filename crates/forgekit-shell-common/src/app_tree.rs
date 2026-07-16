@@ -65,6 +65,17 @@ pub trait AppTree {
     /// platform input method. Delegates to [`RenderRoot::ime_state`]; `None` when
     /// nothing is focused or no IME surface was published.
     fn ime_state(&self) -> Option<ImeState>;
+
+    /// Store the app's active theme, threaded into every subsequent
+    /// layout/paint pass (delegates to [`RenderRoot::set_theme`]).
+    ///
+    /// The theme is **type-erased** (`Box<dyn Any>`) so `forgekit-shell-common`
+    /// stays free of a `forgekit-theme` dependency (it compiles everywhere with
+    /// no unsafe/FFI — see `docs/ARCHITECTURE.md`). The concrete `Theme` is
+    /// boxed by the shell that owns the appearance state; the mobile shells wire
+    /// this up in a later task (08). Re-boxing on a live appearance change
+    /// replaces the stored theme.
+    fn set_theme(&mut self, theme: Box<dyn Any>);
 }
 
 /// Concrete [`AppTree`] holding one app's state, logic and retained root.
@@ -107,6 +118,10 @@ where
 
     fn ime_state(&self) -> Option<ImeState> {
         self.root.ime_state()
+    }
+
+    fn set_theme(&mut self, theme: Box<dyn Any>) {
+        self.root.set_theme(theme);
     }
 }
 

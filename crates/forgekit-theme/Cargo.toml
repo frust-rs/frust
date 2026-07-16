@@ -11,7 +11,12 @@ license.workspace = true
 # forgekit-scene/forgekit-text (see docs/ARCHITECTURE.md).
 peniko = { workspace = true }
 # TypeScale fields are forgekit-text::TextStyle values (family/weight/size/
-# letter-spacing/line-height) — the M3 type-scale surface. Deliberately
-# NOTHING else: no forgekit-core, no forgekit-scene, no reactive_graph — this
-# crate is pure data + constructors (see docs/ARCHITECTURE.md, task 03).
+# letter-spacing/line-height) — the M3 type-scale surface.
 forgekit-text = { workspace = true }
+# The delivery helpers `Theme::from_paint_ctx`/`from_layout_ctx` (task 05, the
+# theme-delivery surface task 03 deferred) name `forgekit_core::PaintCtx`/
+# `LayoutCtx` to wrap their type-erased `theme_as::<Theme>()` accessor into one
+# obvious line for widgets. `forgekit-core` never depends on `forgekit-theme`
+# (core stays theme-agnostic — see docs/ARCHITECTURE.md), so this reverse edge
+# introduces no cycle.
+forgekit-core = { workspace = true }

@@ -82,6 +82,24 @@ pub use forgekit_widgets::{
     scroll_view, slider, text, text_input,
 };
 
+/// The design-token vocabulary (spec §11): the [`Theme`] bundle plus its
+/// component token tables, flat-re-exported from `forgekit-theme` so app code
+/// never names that crate directly. A root component reads the active theme via
+/// [`use_context`]`::<`[`Theme`]`>()`; a widget reads it during paint/layout via
+/// `PaintCtx::theme_as`/`LayoutCtx::theme_as` (or `Theme::from_paint_ctx`).
+pub use forgekit_theme::{
+    Brightness, ColorScheme, Elevation, ElevationLevel, MotionScheme, MotionSpring, ShadowSpec,
+    ShapeScale, SurfaceRole, Theme, TypeScale,
+};
+
+/// The animation vocabulary (spec §8): the shell-fed frame clock ([`FrameTime`])
+/// plus the pure easing/interpolation/spring math a widget or app advances it
+/// through, flat-re-exported from `forgekit-core::anim`. Time enters from the
+/// shell during paint (`PaintCtx::frame_time`); nothing here reads a clock.
+pub use forgekit_core::anim::{
+    AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
+};
+
 /// Pure input/gesture helpers (slop constants, [`input::VelocityTracker`], the
 /// fling-decay math) re-exported for app authors and advanced widgets.
 pub mod input {

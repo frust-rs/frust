@@ -55,6 +55,12 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// merged from each rebuild so a shell can decide, in one place, whether a
     /// frame needs layout/paint at all.
     pending: ChangeFlags,
+    /// The app's active theme, stored type-erased so `forgekit-core` needs no
+    /// `forgekit-theme` dependency (the concrete `Theme` is boxed by the shell —
+    /// see [`RenderRoot::set_theme`]). Lent as `Option<&dyn Any>` into each
+    /// [`LayoutCtx`]/[`PaintCtx`]; `None` until a shell sets one (a supported
+    /// state — bare-core tests and pre-theme apps run without a theme).
+    theme: Option<Box<dyn Any>>,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
 
@@ -71,8 +77,21 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             focus_active: false,
             ime_state: None,
             pending: ChangeFlags::NONE,
+            theme: None,
             _state: core::marker::PhantomData,
         }
+    }
+
+    /// Store the app's active theme, threaded into every subsequent
+    /// layout/paint pass as `Option<&dyn Any>` and recovered by widgets via
+    /// [`crate::widget::PaintCtx::theme_as`]/[`crate::widget::LayoutCtx::theme_as`].
+    ///
+    /// The theme is boxed **type-erased** (`Box<dyn Any>`) so this crate stays
+    /// independent of `forgekit-theme`; the shell boxes the concrete `Theme`
+    /// (and re-boxes it on a live appearance change, e.g. dark-mode toggle).
+    /// Calling again replaces the stored theme.
+    pub fn set_theme(&mut self, theme: Box<dyn Any>) {
+        self.theme = Some(theme);
     }
 
     /// Whether a captured pointer gesture is currently in flight.
@@ -177,12 +196,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Lay out the root widget against `window_size` and record its geometry.
     ///
     /// The root receives loose constraints (zero up to the window size) and is
-    /// placed at the origin. Returns the size the root chose. No shared
-    /// resources are threaded in; use [`RenderRoot::layout_with_text`] when the
-    /// tree contains text widgets.
+    /// placed at the origin. Returns the size the root chose. No text context is
+    /// threaded in (use [`RenderRoot::layout_with_text`] when the tree contains
+    /// text widgets); the stored theme, if any, is still threaded down.
     pub fn layout(&mut self, window_size: Size) -> Size {
-        let mut ctx = LayoutCtx::new();
-        self.layout_with_ctx(window_size, &mut ctx)
+        self.layout_inner(window_size, None)
     }
 
     /// Lay out the root widget, threading a shared text-shaping context down to
@@ -190,24 +208,29 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ///
     /// `text_ctx` is the shell-owned `forgekit_text::TextContext`, passed
     /// type-erased so this crate needs no `forgekit-text` dependency. Text
-    /// widgets recover it via [`crate::widget::LayoutCtx::text_context`].
+    /// widgets recover it via [`crate::widget::LayoutCtx::text_context`]. The
+    /// stored theme, if any, is threaded down alongside it.
     pub fn layout_with_text(&mut self, window_size: Size, text_ctx: &mut dyn Any) -> Size {
-        let mut ctx = LayoutCtx::with_text_context(text_ctx);
-        self.layout_with_ctx(window_size, &mut ctx)
+        self.layout_inner(window_size, Some(text_ctx))
     }
 
-    /// Shared layout body: hands the root loose window constraints and records
-    /// the size it returns.
-    fn layout_with_ctx(&mut self, window_size: Size, ctx: &mut LayoutCtx<'_>) -> Size {
+    /// Shared layout body: hands the root loose window constraints, lends the
+    /// optional text context and the stored theme into a [`LayoutCtx`], and
+    /// records the size the root returns.
+    fn layout_inner(&mut self, window_size: Size, text_ctx: Option<&mut dyn Any>) -> Size {
         self.window_size = window_size;
         let Some(root_id) = self.root_id else {
             return Size::ZERO;
         };
         let bc = BoxConstraints::loose(window_size);
+        // Disjoint field borrows: the theme (immut) and the tree (mut) are
+        // different fields of `self`, so both borrows coexist through the layout.
+        let theme = self.theme.as_deref();
         let Some(pod) = self.tree.pod_mut(root_id) else {
             return Size::ZERO;
         };
-        let size = pod.widget_mut().layout(ctx, &bc);
+        let mut ctx = LayoutCtx::with_resources(text_ctx, theme);
+        let size = pod.widget_mut().layout(&mut ctx, &bc);
         pod.set_layout(Point::ZERO, size);
         size
     }
@@ -231,10 +254,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let Some(root_id) = self.root_id else {
             return PaintOutcome::default();
         };
+        // Disjoint field borrows: the theme (immut) vs the tree (mut).
+        let theme = self.theme.as_deref();
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             // Seed the shared shell clock so the whole paint pass sees one time.
             ctx.set_frame_time(frame_time);
+            // Lend the stored theme (type-erased) into the paint pass; widgets
+            // recover it via `PaintCtx::theme_as`.
+            ctx.set_theme(theme);
             // Seed the root widget's paint-time focus from the cached focus path
             // so a leaf-root editable observes its own focus; deeper focus is
             // threaded per-pod by `ChildPod::paint_child`.
@@ -630,6 +658,123 @@ mod tests {
         assert_eq!(seen.get(), Some(FrameTime::from_nanos(1_000)));
         root.paint(&mut scene, FrameTime::from_nanos(17_000));
         assert_eq!(seen.get(), Some(FrameTime::from_nanos(17_000)));
+    }
+
+    // --- Theme threading: a dummy theme recovered during paint/layout. ---
+
+    /// A dummy theme type standing in for `forgekit_theme::Theme` — `forgekit-core`
+    /// never names the real one, so this proves the type-erased slot works for
+    /// any `'static` type.
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestTheme {
+        accent: u32,
+    }
+
+    /// A root widget recording the theme accent it recovered during paint (and
+    /// during layout), or `None` when no theme was threaded in.
+    struct ThemeWidget {
+        seen_paint: std::rc::Rc<std::cell::Cell<Option<u32>>>,
+        seen_layout: std::rc::Rc<std::cell::Cell<Option<u32>>>,
+    }
+    impl crate::widget::Widget for ThemeWidget {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.seen_layout
+                .set(ctx.theme_as::<TestTheme>().map(|t| t.accent));
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.seen_paint
+                .set(ctx.theme_as::<TestTheme>().map(|t| t.accent));
+        }
+    }
+
+    struct ThemeView {
+        seen_paint: std::rc::Rc<std::cell::Cell<Option<u32>>>,
+        seen_layout: std::rc::Rc<std::cell::Cell<Option<u32>>>,
+    }
+    impl View<AppState> for ThemeView {
+        type Element = ThemeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ThemeWidget {
+            ThemeWidget {
+                seen_paint: self.seen_paint.clone(),
+                seen_layout: self.seen_layout.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ThemeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn drive_theme_root(theme: Option<TestTheme>) -> (Option<u32>, Option<u32>) {
+        let seen_paint = std::rc::Rc::new(std::cell::Cell::new(None));
+        let seen_layout = std::rc::Rc::new(std::cell::Cell::new(None));
+        let mut root: RenderRoot<AppState, ThemeView> = RenderRoot::new();
+        if let Some(theme) = theme {
+            root.set_theme(Box::new(theme));
+        }
+        let mut state = AppState::default();
+        let sp = seen_paint.clone();
+        let sl = seen_layout.clone();
+        root.rebuild(
+            &mut move |_s: &mut AppState| ThemeView {
+                seen_paint: sp.clone(),
+                seen_layout: sl.clone(),
+            },
+            &mut state,
+        );
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        (seen_layout.get(), seen_paint.get())
+    }
+
+    #[test]
+    fn set_theme_threads_into_layout_and_paint() {
+        let (layout, paint) = drive_theme_root(Some(TestTheme { accent: 5 }));
+        assert_eq!(layout, Some(5));
+        assert_eq!(paint, Some(5));
+    }
+
+    #[test]
+    fn no_theme_yields_none_in_layout_and_paint() {
+        let (layout, paint) = drive_theme_root(None);
+        assert_eq!(layout, None);
+        assert_eq!(paint, None);
+    }
+
+    #[test]
+    fn set_theme_replaces_the_previous_theme() {
+        // A second `set_theme` (a live dark-mode flip on desktop) wins on the
+        // next paint.
+        let seen_paint = std::rc::Rc::new(std::cell::Cell::new(None));
+        let seen_layout = std::rc::Rc::new(std::cell::Cell::new(None));
+        let mut root: RenderRoot<AppState, ThemeView> = RenderRoot::new();
+        root.set_theme(Box::new(TestTheme { accent: 1 }));
+        let mut state = AppState::default();
+        let sp = seen_paint.clone();
+        let sl = seen_layout.clone();
+        root.rebuild(
+            &mut move |_s: &mut AppState| ThemeView {
+                seen_paint: sp.clone(),
+                seen_layout: sl.clone(),
+            },
+            &mut state,
+        );
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert_eq!(seen_paint.get(), Some(1));
+
+        // Flip the theme, repaint — the new accent is observed.
+        root.set_theme(Box::new(TestTheme { accent: 2 }));
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert_eq!(seen_paint.get(), Some(2));
     }
 
     // --- Event-pass fixtures: a widget that mutates state on pointer-down. ---

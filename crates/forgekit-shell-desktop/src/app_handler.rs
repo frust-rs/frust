@@ -19,17 +19,18 @@ use forgekit_core::event::{
     PointerPhase, ScrollDelta,
 };
 use forgekit_core::view::View;
-use forgekit_reactive::{FrameWaker, ReactiveRuntime, TrackedScope};
+use forgekit_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_text::TextContext;
+use forgekit_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{Theme as WinitTheme, Window, WindowAttributes, WindowId};
 
 /// Initial preview-window size, in logical pixels.
 const INITIAL_SIZE: LogicalSize<u32> = LogicalSize::new(800, 600);
@@ -98,6 +99,9 @@ where
         renderer: SurfaceRenderer::new(),
         fatal: None,
         epoch: Instant::now(),
+        // M3 baseline, Light until `resumed` seeds the window's real preference.
+        theme: Theme::m3_baseline(),
+        theme_seeded: false,
     };
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
@@ -146,6 +150,18 @@ fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
         WinitNamedKey::Tab => NamedKey::Tab,
         _ => return None,
     })
+}
+
+/// Map winit's window [`WinitTheme`] (`None` when the platform can't report a
+/// preference) to a [`Brightness`], defaulting to [`Brightness::Light`].
+///
+/// Pulled out as a free function so the seed-and-flip mapping is unit-testable
+/// without a live window (winit's `Window::theme()` needs a real window).
+fn brightness_from_winit(theme: Option<WinitTheme>) -> Brightness {
+    match theme {
+        Some(WinitTheme::Dark) => Brightness::Dark,
+        _ => Brightness::Light,
+    }
 }
 
 /// Map winit's [`ModifiersState`] bitflags to our [`Modifiers`] chord.
@@ -310,6 +326,16 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// the nanosecond delta to [`RenderRoot::paint`]. Task 06 leaves this the
     /// desktop clock; only the mobile shells swap in a platform vsync timestamp.
     epoch: Instant,
+    /// The app's active theme (M3 baseline). The shell owns the appearance
+    /// state: its `brightness` is seeded from the window's reported preference
+    /// in `resumed` and flipped live on `WindowEvent::ThemeChanged`. On every
+    /// change the shell re-boxes it into [`RenderRoot::set_theme`] (so widgets
+    /// read it via `PaintCtx::theme_as`) and `provide_context`s a clone under
+    /// the root owner (so app code reads it via `use_context::<Theme>()`).
+    theme: Theme,
+    /// Whether the initial theme has been pushed to the render root / context
+    /// yet — seeded once in the first `resumed`, before the first rebuild.
+    theme_seeded: bool,
 }
 
 impl<State, Logic, V> ShellHandler<State, Logic, V>
@@ -361,6 +387,24 @@ where
                 self.ime_sync.cursor_area = Some(area);
             }
         }
+    }
+
+    /// Push the current [`Theme`] to both delivery paths and schedule a repaint.
+    ///
+    /// 1. `RenderRoot::set_theme` boxes a clone so widgets recover it during
+    ///    layout/paint via `PaintCtx::theme_as` (the type-erased widget path).
+    /// 2. `provide_context` under the reactive root owner re-provides a clone so
+    ///    a `Component::build`'s `use_context::<Theme>()` resolves it on the next
+    ///    rebuild (the app-code path). Re-providing under the same owner replaces
+    ///    the previous value, so a live dark-mode flip is observed next frame.
+    ///
+    /// Called once to seed the theme in `resumed` and again on every
+    /// `WindowEvent::ThemeChanged`.
+    fn apply_theme(&mut self, window: &Window) {
+        self.root.set_theme(Box::new(self.theme.clone()));
+        let theme = self.theme.clone();
+        self.runtime.with_owner(move || provide_context(theme));
+        window.request_redraw();
     }
 }
 
@@ -432,7 +476,18 @@ where
             }
         }
 
-        window.request_redraw();
+        // Seed the theme once, before the first rebuild: read the window's
+        // reported light/dark preference into the M3 baseline, then push it to
+        // the render root and the reactive context (`apply_theme` also requests
+        // the redraw that drives the first frame). Live changes arrive later via
+        // `WindowEvent::ThemeChanged`.
+        if !self.theme_seeded {
+            self.theme.brightness = brightness_from_winit(window.theme());
+            self.theme_seeded = true;
+            self.apply_theme(&window);
+        } else {
+            window.request_redraw();
+        }
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -467,6 +522,15 @@ where
                 self.renderer
                     .on_surface_changed(&self.render_cx, size.width, size.height);
                 window.request_redraw();
+            }
+
+            // Live dark-mode toggle: flip the theme's brightness and re-push it
+            // to both delivery paths (`apply_theme` requests the repaint). The
+            // next paint resolves the dark scheme through `PaintCtx::theme_as`
+            // and the next rebuild sees the new `use_context::<Theme>()` value.
+            WindowEvent::ThemeChanged(winit_theme) => {
+                self.theme.brightness = brightness_from_winit(Some(winit_theme));
+                self.apply_theme(&window);
             }
 
             // Track the cursor in logical space and dispatch a `Move`. We
@@ -677,12 +741,57 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeLatch, ElementState, Ime, WinitKey, WinitNamedKey, finish, map_key_event,
-        map_modifiers, map_named_key, physical_to_logical,
+        ComposeLatch, ElementState, Ime, WinitKey, WinitNamedKey, WinitTheme,
+        brightness_from_winit, finish, map_key_event, map_modifiers, map_named_key,
+        physical_to_logical,
     };
     use forgekit_core::event::{ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use forgekit_theme::{Brightness, Theme};
     use kurbo::Point;
     use winit::keyboard::ModifiersState;
+
+    // --- brightness_from_winit ---
+
+    #[test]
+    fn brightness_from_winit_maps_dark_light_and_defaults() {
+        assert_eq!(
+            brightness_from_winit(Some(WinitTheme::Dark)),
+            Brightness::Dark
+        );
+        assert_eq!(
+            brightness_from_winit(Some(WinitTheme::Light)),
+            Brightness::Light
+        );
+        // No reported preference falls back to Light.
+        assert_eq!(brightness_from_winit(None), Brightness::Light);
+    }
+
+    // --- provide_context replacement (the app-code theme delivery path) ---
+
+    #[test]
+    fn re_providing_theme_context_lets_a_live_flip_win() {
+        // The desktop shell re-`provide_context`s the theme under the root owner
+        // on every `ThemeChanged`. This proves reactive_graph 0.2's replacement
+        // semantics: a second provide of the same type under one owner wins for
+        // subsequent `use_context` reads — so a live dark-mode flip is observed
+        // (no `RwSignal<Theme>` fallback needed; see the task's note).
+        use forgekit_reactive::{Owner, provide_context, use_context};
+
+        let owner = Owner::new();
+        let resolved = owner.with(|| {
+            let mut light = Theme::m3_baseline();
+            light.brightness = Brightness::Light;
+            provide_context(light);
+
+            // A live flip: re-provide a dark theme under the same owner.
+            let mut dark = Theme::m3_baseline();
+            dark.brightness = Brightness::Dark;
+            provide_context(dark);
+
+            use_context::<Theme>()
+        });
+        assert_eq!(resolved.map(|t| t.brightness), Some(Brightness::Dark));
+    }
 
     #[test]
     fn physical_to_logical_divides_by_scale() {
