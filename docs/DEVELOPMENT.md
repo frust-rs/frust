@@ -48,14 +48,20 @@ cargo run -p counter
 # list, plus an Image) — exercises focus/keyboard/IME routing and keyed
 # reconciliation (see docs/ARCHITECTURE.md#data-flow).
 cargo run -p notes
+
+# Async/signals demo: an inbox screen whose Component wires a clean-signals
+# ControllerCore (a real async UseCase, with retry) to an RwSignal it renders
+# — exercises the reactive substrate end-to-end (signal write -> wake ->
+# tracked rebuild, see docs/ARCHITECTURE.md#data-flow's Signal-driven wake).
+cargo run -p inbox
 ```
 
-`cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes` are the
-manual visual gates for rendering, interaction, and text-input changes
-respectively — there is no automated pixel-diff test yet, so a person must
-look at the window. `notes` is also the demo `forgekit create` scaffolds
-(`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
-against it.
+`cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes`/
+`cargo run -p inbox` are the manual visual gates for rendering, interaction,
+text-input, and async/signals changes respectively — there is no automated
+pixel-diff test yet, so a person must look at the window. `notes` is also the
+demo `forgekit create` scaffolds (`templates/app/src/lib.rs.tmpl`), so
+scaffold changes should be checked against it.
 
 In a generated project, `forgekit run [-d <device>] [--release|--profile]
 [--flavor <name>]` builds and launches on a connected Android
@@ -162,6 +168,16 @@ deliberately, not floating:
   not a caret range: it is the only 0.25.x release whose MSRV is exactly the
   workspace's `rust-version` (1.88), not lower — bumping it needs a fresh
   MSRV check, not just `cargo update`.
+- `reactive_graph = "0.2"` / `any_spawner = "0.3"` / `tokio = { version = "1",
+  default-features = false }` (the `forgekit-reactive` substrate, spec §5.5)
+  are pinned to minor, not exact — a pre-1.0 Leptos-ecosystem stack expected
+  to churn; `cargo test -p forgekit-reactive` is the tripwire for a breaking
+  bump. Never enable `reactive_graph`'s `effects` feature (the frame path is
+  a custom subscriber, not `RenderEffect` — see `docs/ARCHITECTURE.md`'s Key
+  Types).
+- `examples/inbox`'s `clean-signals` dependency is a `git`+`rev`-pinned
+  dependency of that one example crate — never a framework-crate dependency,
+  and never floated to a branch/tag.
 - **Never run a blind `cargo update`.** If a manifest changes any pinned
   dependency, run `cargo generate-lockfile` and then confirm
   `cargo build --workspace --locked` still succeeds before committing.

@@ -207,6 +207,48 @@ interactive widget in `forgekit-widgets`:
   handler that reached for real state there panics on the `()` downcast — a
   deliberate tripwire, not silent corruption.
 
+## State & Reactivity Conventions
+
+- **Local state lives in the retained `Component` element, not signals,
+  unless it needs cross-tree reactivity.** A `Component::State` is plain data
+  `ComponentWidget` retains across rebuilds — reach for an `RwSignal` field
+  only when something outside the component's own `build` (a background
+  task, a sibling, a nested component) needs to observe a write. Most
+  `Component::State` should be plain structs/enums, not signal-wrapped, the
+  same way `examples/counter`'s nested local-state component works.
+- **Teardown disposes the component's `Owner`; register cleanup via
+  `on_cleanup`, not `Drop`.** `ComponentWidget::teardown` tears down the child
+  element, then disposes the owner (running every `on_cleanup` registered
+  under it since `init`) before dropping `State`. Register disposal (timers,
+  controller/subscription teardown) with `on_cleanup` inside `init`/`build` —
+  never by hand-rolling a `Drop` impl on `State`; `Drop` order across the
+  state/element/owner triple is not a contract, `on_cleanup` is.
+- **A `Cancel` arm still never touches state, even the component's own.** The
+  Cancel-never-mutates-state rule above binds every widget a component hosts,
+  including handlers reading `ComponentWidget`'s own `State` — a synthesized
+  `Cancel` crossing a component boundary carries real state (unlike the
+  throwaway `()` at the root), but the contract not to reach for it is
+  identical.
+- **`spawn` is for `Send` background work; `spawn_local` only ever runs on
+  the UI thread.** `forgekit::spawn` hands a `Send` future to the background
+  tokio runtime; `forgekit::spawn_local` queues a `!Send` future the shell
+  drains via `ReactiveRuntime::pump_local` once per frame. Calling
+  `spawn_local` off the UI thread is a wiring bug, not a runtime-data
+  condition, and panics with a message saying so (the same convention as the
+  `downcast_mut` panic message above). On iOS, a backgrounded app pauses
+  `CADisplayLink`, so nothing pumps and any timer-driven local task (e.g. an
+  in-flight `tokio::time::sleep`) stalls until `forgekit_resume` fires the
+  next pump on foreground — don't assume a `spawn_local` timer completes
+  promptly while backgrounded.
+- **`Component::State` holds `RwSignal`s directly; app code depends on the
+  `forgekit` facade only, never `reactive_graph`/`any_spawner`/
+  `forgekit-reactive` directly.** A state field that needs reactive
+  read-tracking is typed `RwSignal<T>` and read/written through the
+  `Get`/`Set`/`Update` traits the facade re-exports — an app crate should
+  never add `reactive_graph`/`any_spawner`/`forgekit-reactive` to its own
+  `Cargo.toml`; every symbol an app needs is already flat-re-exported from
+  `forgekit` (see `docs/ARCHITECTURE.md`'s Key Types).
+
 ## Testing Patterns
 
 - **Fixture-driven tests for parsers/validators**: register canned
