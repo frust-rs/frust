@@ -11,7 +11,7 @@ use std::any::Any;
 
 use forgekit_core::event::{EventOutcome, InputEvent};
 use forgekit_core::view::View;
-use forgekit_core::{PaintScene, RenderRoot};
+use forgekit_core::{PaintOutcome, PaintScene, RenderRoot};
 use kurbo::Size;
 
 /// Type-erased app tree: the one seam that lets a shell's native handle stay
@@ -29,7 +29,13 @@ pub trait AppTree {
     /// the shell-owned `TextContext` down type-erased (spec §10.3).
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any);
     /// Paint the tree into a scene builder.
-    fn paint(&mut self, scene: &mut dyn PaintScene);
+    ///
+    /// Returns a [`PaintOutcome`] whose `needs_frame` is set when a widget
+    /// advanced animation state during paint and wants another frame (spec's v1
+    /// animation seam). The desktop shell honors it with `window.request_redraw()`;
+    /// the mobile shells' continuous Choreographer/`CADisplayLink` loops already
+    /// produce the next frame and may ignore it.
+    fn paint(&mut self, scene: &mut dyn PaintScene) -> PaintOutcome;
     /// Deliver one platform input event to the retained tree (spec §9).
     ///
     /// Delegates to [`RenderRoot::event`], threading the erased `State` the same
@@ -64,8 +70,8 @@ where
         self.root.layout_with_text(logical, text_ctx);
     }
 
-    fn paint(&mut self, scene: &mut dyn PaintScene) {
-        self.root.paint(scene);
+    fn paint(&mut self, scene: &mut dyn PaintScene) -> PaintOutcome {
+        self.root.paint(scene)
     }
 
     fn event(&mut self, event: &InputEvent) -> EventOutcome {

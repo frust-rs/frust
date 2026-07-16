@@ -21,7 +21,7 @@ use crate::event::{EventCtx, EventOutcome, EventResult, InputEvent, PointerPhase
 use crate::layout::BoxConstraints;
 use crate::tree::{WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
-use crate::widget::{LayoutCtx, PaintCtx, PaintScene};
+use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene};
 
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
 /// single-root application.
@@ -182,15 +182,28 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         size
     }
 
-    /// Paint the root widget into `scene`.
-    pub fn paint(&mut self, scene: &mut dyn PaintScene) {
+    /// Paint the root widget into `scene`, returning whether the tree wants
+    /// another frame to continue an animation.
+    ///
+    /// A widget whose paint advances animation state (e.g. a scroll fling) signals
+    /// [`PaintCtx::request_frame`]; that flag bubbles up through the container
+    /// [`ChildPod`](crate::widget::ChildPod)s and out here as
+    /// [`PaintOutcome::needs_frame`], which the shell honors by scheduling the next
+    /// frame (desktop `window.request_redraw()`; the mobile continuous loops
+    /// already do so). Mirrors how [`RenderRoot::event`] surfaces `needs_redraw`.
+    pub fn paint(&mut self, scene: &mut dyn PaintScene) -> PaintOutcome {
         let Some(root_id) = self.root_id else {
-            return;
+            return PaintOutcome::default();
         };
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             pod.widget_mut().paint(&mut ctx, scene);
             pod.clear_flags();
+            PaintOutcome {
+                needs_frame: ctx.needs_frame(),
+            }
+        } else {
+            PaintOutcome::default()
         }
     }
 
@@ -422,6 +435,54 @@ mod tests {
         let mut scene2 = RecordingScene::default();
         root.paint(&mut scene2);
         assert_eq!(scene2.texts, vec![(Point::ZERO, "two".to_string())]);
+    }
+
+    /// A root widget that advances no state but requests a continuation frame on
+    /// every paint — stands in for an animating widget (e.g. a scroll fling).
+    struct FrameWidget;
+    impl crate::widget::Widget for FrameWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame();
+        }
+    }
+
+    struct FrameView;
+    impl View<AppState> for FrameView {
+        type Element = FrameWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FrameWidget {
+            FrameWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut FrameWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn paint_reports_needs_frame_from_animating_root() {
+        // A still root reports no continuation frame.
+        let mut still: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+        still.rebuild(&mut app_logic, &mut state);
+        still.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        assert!(!still.paint(&mut scene).needs_frame);
+
+        // An animating root bubbles request_frame out as PaintOutcome::needs_frame.
+        let mut anim: RenderRoot<AppState, FrameView> = RenderRoot::new();
+        anim.rebuild(&mut |_s: &mut AppState| FrameView, &mut state);
+        anim.layout(Size::new(100.0, 100.0));
+        let mut scene2 = RecordingScene::default();
+        assert!(anim.paint(&mut scene2).needs_frame);
     }
 
     // --- Event-pass fixtures: a widget that mutates state on pointer-down. ---

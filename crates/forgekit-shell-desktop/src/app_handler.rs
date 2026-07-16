@@ -285,11 +285,21 @@ where
                 self.root.layout_with_text(logical, text_ctx);
 
                 self.scene.reset();
-                {
+                let paint_outcome = {
                     let mut builder = SceneBuilder::new(&mut self.scene);
                     builder.push_transform(Affine::scale(scale));
-                    self.root.paint(&mut builder);
+                    let outcome = self.root.paint(&mut builder);
                     builder.pop_transform();
+                    outcome
+                };
+
+                // Animation driver (spec v1 seam): if paint advanced animation
+                // state (e.g. a scroll fling) it asks for another frame here.
+                // `ControlFlow::Wait` would otherwise idle with no pending input,
+                // so we keep frames coming with an explicit redraw request until
+                // the animation reaches rest and stops signalling.
+                if paint_outcome.needs_frame {
+                    window.request_redraw();
                 }
 
                 window.pre_present_notify();

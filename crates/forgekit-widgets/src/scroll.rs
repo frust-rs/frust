@@ -21,9 +21,10 @@
 //! On release with sufficient velocity a fling begins, integrated
 //! frame-by-frame with [`ScrollWidget::tick`] (pure, unit-tested). [`paint`]
 //! pumps the fling from a monotonic clock so it animates for free on the
-//! continuous-loop mobile shells; a desktop `request_redraw` pump (event-driven
-//! `ControlFlow::Wait`) is deferred to the shell wiring — this task changes no
-//! shell.
+//! continuous-loop mobile shells, and calls [`PaintCtx::request_frame`] while the
+//! fling is still in flight so the desktop shell (event-driven
+//! `ControlFlow::Wait`) keeps scheduling frames via `window.request_redraw()`;
+//! the signal stops once the fling reaches rest.
 
 use std::time::Instant;
 
@@ -139,7 +140,12 @@ impl ScrollWidget {
         }
     }
 
-    fn pump_fling(&mut self) {
+    /// Advance the fling by the wall-clock delta since the last paint, and signal
+    /// [`PaintCtx::request_frame`] while it is still running so the shell keeps
+    /// scheduling frames (the desktop `ControlFlow::Wait` loop would otherwise
+    /// idle). Stops signalling once [`ScrollWidget::tick`] brings the fling to
+    /// rest (`|velocity|` below [`FLING_STOP`], or a scroll bound reached).
+    fn pump_fling(&mut self, ctx: &mut PaintCtx) {
         if self.fling.is_none() {
             self.last_anim = None;
             return;
@@ -152,6 +158,11 @@ impl ScrollWidget {
         self.last_anim = Some(now);
         if dt > 0.0 {
             self.tick(dt);
+        }
+        // `tick` clears `self.fling` once the fling reaches rest; while it is
+        // still set, ask the shell for another frame to continue animating.
+        if self.fling.is_some() {
+            ctx.request_frame();
         }
     }
 
@@ -283,7 +294,7 @@ impl Widget for ScrollWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.pump_fling();
+        self.pump_fling(ctx);
         scene.push_clip(ctx.origin(), ctx.size());
         self.sync_child_origin();
         self.child.paint_child(ctx, scene);
@@ -448,6 +459,38 @@ mod tests {
         }
         assert!(!w.is_flinging());
         assert!(w.offset() >= 0.0 && w.offset() <= w.max_offset());
+    }
+
+    #[test]
+    fn pump_fling_signals_needs_frame_until_at_rest() {
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        // Drive a release-with-velocity to start a fling (deterministic seam).
+        dispatch(&mut w, &ev(PointerPhase::Down, 100.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 75.0), 16.0); // takeover
+        dispatch(&mut w, &ev(PointerPhase::Move, 50.0), 32.0); // build velocity
+        dispatch(&mut w, &ev(PointerPhase::Up, 50.0), 32.0);
+        assert!(w.is_flinging(), "release with velocity starts a fling");
+
+        // A paint-time pump while flinging asks for another frame.
+        let mut ctx = PaintCtx::new(Point::ZERO, w.viewport);
+        w.pump_fling(&mut ctx);
+        assert!(
+            ctx.needs_frame(),
+            "an in-flight fling requests continuation"
+        );
+        assert!(w.is_flinging());
+
+        // Integrate the fling to rest via the deterministic tick seam.
+        while w.tick(16.0) {}
+        assert!(!w.is_flinging());
+
+        // At rest, the pump no longer signals — the shell can idle again.
+        let mut ctx_rest = PaintCtx::new(Point::ZERO, w.viewport);
+        w.pump_fling(&mut ctx_rest);
+        assert!(
+            !ctx_rest.needs_frame(),
+            "a fling at rest stops requesting frames"
+        );
     }
 
     #[test]

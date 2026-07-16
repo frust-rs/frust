@@ -46,4 +46,4 @@ pub use input::{
 pub use layout::BoxConstraints;
 pub use tree::{WidgetPod, WidgetTree};
 pub use view::{AnyView, BuildCtx, ChangeFlags, View, WidgetId, any};
-pub use widget::{ChildPod, LayoutCtx, PaintCtx, PaintScene, Widget};
+pub use widget::{ChildPod, LayoutCtx, PaintCtx, PaintOutcome, PaintScene, Widget};

@@ -176,16 +176,27 @@ impl Default for LayoutCtx<'static> {
 /// Context passed to [`Widget::paint`].
 ///
 /// Carries the widget's resolved geometry (as stored in its pod after layout) so
-/// paint code can position itself in the parent coordinate space.
+/// paint code can position itself in the parent coordinate space, plus the v1
+/// animation-driver signal ([`PaintCtx::request_frame`]): a widget whose paint
+/// advances animation state (e.g. a scroll fling) must call it so the shell keeps
+/// scheduling frames even absent external input. The flag bubbles up through
+/// [`ChildPod::paint_child`] and out of [`crate::app::RenderRoot::paint`] as a
+/// [`PaintOutcome`], mirroring how [`EventCtx::request_redraw`] surfaces through
+/// [`crate::event::EventOutcome`].
 pub struct PaintCtx {
     origin: Point,
     size: Size,
+    needs_frame: bool,
 }
 
 impl PaintCtx {
     /// Create a paint context for a widget at `origin` with `size`.
     pub fn new(origin: Point, size: Size) -> Self {
-        Self { origin, size }
+        Self {
+            origin,
+            size,
+            needs_frame: false,
+        }
     }
 
     /// The widget's origin in its parent's coordinate space.
@@ -197,6 +208,35 @@ impl PaintCtx {
     pub fn size(&self) -> Size {
         self.size
     }
+
+    /// Signal that this paint advanced animation state and needs to be
+    /// re-invoked to continue, even with no intervening input event.
+    ///
+    /// The desktop shell honors this with a `window.request_redraw()` (its
+    /// `ControlFlow::Wait` loop would otherwise idle); the mobile shells'
+    /// continuous per-frame loops already schedule the next frame and can ignore
+    /// it. Mirrors [`EventCtx::request_redraw`].
+    pub fn request_frame(&mut self) {
+        self.needs_frame = true;
+    }
+
+    /// Whether a continuation frame was requested during this (sub)paint.
+    pub fn needs_frame(&self) -> bool {
+        self.needs_frame
+    }
+}
+
+/// The result of a whole [`crate::app::RenderRoot::paint`] pass.
+///
+/// `needs_frame` is whether any widget advanced animation state during paint and
+/// asked (via [`PaintCtx::request_frame`]) to be re-invoked to continue. The
+/// shell turns it into another scheduled frame — the desktop shell via
+/// `window.request_redraw()`, the mobile shells implicitly through their
+/// continuous loop. Mirrors [`crate::event::EventOutcome`]'s `needs_redraw`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaintOutcome {
+    /// Whether the shell should schedule another frame to continue an animation.
+    pub needs_frame: bool,
 }
 
 /// A retained UI element living in the widget tree.
@@ -211,6 +251,13 @@ pub trait Widget: Any {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size;
 
     /// Emit draw commands for this widget into `scene`.
+    ///
+    /// Paint **may** advance a widget's own animation state (e.g. a scroll
+    /// fling integrated from a monotonic clock) as a v1 seam. A widget that does
+    /// so must call [`PaintCtx::request_frame`] while the animation is still
+    /// running so the shell re-invokes paint absent any external event —
+    /// otherwise the desktop `ControlFlow::Wait` loop idles and the animation
+    /// stalls. It must stop signalling once the animation reaches rest.
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene);
 
     /// Handle an input event, optionally mutating application state through
@@ -347,10 +394,18 @@ impl ChildPod {
 
     /// Paint the child, offsetting its paint origin by the container's origin
     /// (`ctx.origin()`) so the child draws at its absolute position.
+    ///
+    /// Bubbles the child's animation-continuation request ([`PaintCtx::needs_frame`])
+    /// back into the parent `ctx`, mirroring [`ChildPod::event_child`]'s absorb of
+    /// the child's redraw/capture flags — so a nested flinging widget keeps the
+    /// whole tree's frames coming.
     pub fn paint_child(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let child_origin = ctx.origin() + self.origin.to_vec2();
         let mut child_ctx = PaintCtx::new(child_origin, self.size);
         self.widget.paint(&mut child_ctx, scene);
+        if child_ctx.needs_frame() {
+            ctx.request_frame();
+        }
     }
 
     /// Route an event into the child, translating its position into the child's
@@ -416,6 +471,20 @@ mod tests {
 
         fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
             scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+    }
+
+    /// A leaf widget that advances no state but signals it wants another frame
+    /// on every paint — stands in for an animating widget (e.g. a fling).
+    struct Animator;
+
+    impl Widget for Animator {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame();
         }
     }
 
@@ -586,6 +655,28 @@ mod tests {
         assert!(pod.is_active());
         assert!(ctx.is_pointer_captured());
         assert!(ctx.needs_redraw());
+    }
+
+    #[test]
+    fn child_pod_bubbles_needs_frame_from_child_paint() {
+        // A non-animating child leaves the parent's frame flag clear.
+        let mut still = ChildPod::new(Box::new(FixedBox {
+            intrinsic: Size::new(10.0, 10.0),
+        }));
+        let mut lctx = LayoutCtx::new();
+        still.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        still.paint_child(&mut pctx, &mut scene);
+        assert!(!pctx.needs_frame());
+
+        // An animating child bubbles its request into the parent context.
+        let mut anim = ChildPod::new(Box::new(Animator));
+        anim.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut pctx2 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        assert!(!pctx2.needs_frame());
+        anim.paint_child(&mut pctx2, &mut scene);
+        assert!(pctx2.needs_frame());
     }
 
     #[test]

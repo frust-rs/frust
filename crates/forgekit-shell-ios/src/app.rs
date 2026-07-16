@@ -262,7 +262,12 @@ impl IosAppHandle {
             // HiDPI (spec task 08): lay out in logical pixels, then scale the
             // whole scene by the device pixel ratio for sharp glyphs.
             builder.push_transform(Affine::scale(scale));
-            self.app.paint(&mut builder);
+            // The paint pass returns a `needs_frame` continuation signal (spec's
+            // v1 animation seam). This shell runs a continuous CADisplayLink loop
+            // that already ticks the next frame every vsync, so the flag is
+            // irrelevant here and deliberately dropped — unlike the desktop shell,
+            // whose `ControlFlow::Wait` loop must honor it to keep animating.
+            let _ = self.app.paint(&mut builder);
             builder.pop_transform();
         }
 
