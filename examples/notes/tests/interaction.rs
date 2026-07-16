@@ -20,13 +20,13 @@
 use std::any::Any;
 
 use forgekit_core::{
-    ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene, PointerButton,
+    Component, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene, PointerButton,
     PointerEvent, PointerPhase, RenderRoot, View,
 };
 use forgekit_scene::GlyphRun;
 use forgekit_text::TextContext;
 use kurbo::{Point, Rect, Size};
-use notes::{AppState, app_logic, logo_decode_count};
+use notes::{AppState, NotesApp, logo_decode_count};
 use peniko::Color;
 
 const W: f64 = 800.0;
@@ -157,20 +157,20 @@ fn add_notes<V: View<AppState>>(
 #[test]
 fn renders_logo_and_placeholder_and_decodes_once() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::new();
+    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
-    // At least one decode happened (the startup decode in `AppState::new`). The
-    // exact process-wide count is not asserted here because sibling tests run in
-    // parallel and share this global — decode-once is proved below by Arc
-    // identity, which is per-run and race-free.
+    // At least one decode happened (the startup decode in `NotesApp::init`, via
+    // `AppState::new`). The exact process-wide count is not asserted here
+    // because sibling tests run in parallel and share this global — decode-once
+    // is proved below by Arc identity, which is per-run and race-free.
     assert!(logo_decode_count() >= 1, "the logo decoded at startup");
 
     // The decode-once contract, proved by pointer identity: keep a handle to the
     // startup-decoded source, render many frames, and confirm `state.logo` is
-    // still the *same* `Arc` — `app_logic` only ever clones it, never re-decodes
-    // (a re-decode would allocate a fresh, non-`same` Arc).
+    // still the *same* `Arc` — `NotesApp::build` only ever clones it, never
+    // re-decodes (a re-decode would allocate a fresh, non-`same` Arc).
     let handle = state.logo.clone();
     let mut last = RecScene::default();
     for _ in 0..5 {
@@ -195,8 +195,8 @@ fn renders_logo_and_placeholder_and_decodes_once() {
 #[test]
 fn typing_fires_on_change_per_keystroke() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::new();
+    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -222,8 +222,8 @@ fn typing_fires_on_change_per_keystroke() {
 #[test]
 fn enter_submits_keyed_note_and_clears_draft() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::new();
+    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
     add_notes(&mut root, &mut logic, &mut state, &mut tcx, &["hello"]);
@@ -240,8 +240,8 @@ fn enter_submits_keyed_note_and_clears_draft() {
 #[test]
 fn blank_submit_is_dropped() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::new();
+    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -262,8 +262,8 @@ fn blank_submit_is_dropped() {
 #[test]
 fn select_all_then_type_replaces_the_field() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::new();
+    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -298,8 +298,8 @@ fn select_all_then_type_replaces_the_field() {
 #[test]
 fn arrow_and_backspace_editing_matrix() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::new();
+    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -337,8 +337,8 @@ fn arrow_and_backspace_editing_matrix() {
 #[test]
 fn ime_compose_then_commit_inserts_composed_text() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::new();
+    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -371,8 +371,8 @@ fn ime_compose_then_commit_inserts_composed_text() {
 #[test]
 fn keyed_delete_removes_the_correct_middle_row() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::new();
+    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
     // Add three notes: ids 0/1/2 = one/two/three, top-to-bottom.

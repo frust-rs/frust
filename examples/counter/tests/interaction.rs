@@ -13,13 +13,16 @@
 //! rebuild-driven filler list; a horizontal slider drag updates its value; a
 //! wheel notch scrolls the list; and — the headline disambiguation — a drag
 //! that *starts on a button* scrolls the list instead of firing the button.
+//! `local_section_state_survives_parent_rebuilds` proves the phase 5.5
+//! `Component` model's headline feature: the nested `CollapsibleSection`'s own
+//! local state is untouched by a parent-driven rebuild.
 
 use std::any::Any;
 
-use counter::{AppState, BASE_ROWS, EXTRA_ROWS, app_logic};
+use counter::{AppState, BASE_ROWS, CounterApp, EXTRA_ROWS};
 use forgekit_core::{
-    InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase, RenderRoot, ScrollDelta,
-    View,
+    Component, InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase, RenderRoot,
+    ScrollDelta, View,
 };
 use forgekit_scene::GlyphRun;
 use forgekit_text::TextContext;
@@ -136,8 +139,8 @@ fn slider_track(scene: &RecScene) -> (Point, Size) {
 #[test]
 fn plus_and_minus_buttons_change_count() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::default();
+    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -161,8 +164,8 @@ fn plus_and_minus_buttons_change_count() {
 #[test]
 fn checkbox_toggle_grows_the_filler_list() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::default();
+    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
     let before = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -195,8 +198,8 @@ fn checkbox_toggle_grows_the_filler_list() {
 #[test]
 fn slider_drag_updates_value() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::default();
+    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -222,8 +225,8 @@ fn slider_drag_updates_value() {
 #[test]
 fn wheel_scroll_shifts_content() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::default();
+    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
     let before = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -251,8 +254,8 @@ fn wheel_scroll_shifts_content() {
 #[test]
 fn drag_starting_on_a_button_scrolls_instead_of_firing() {
     let mut root = RenderRoot::new();
-    let mut logic = app_logic;
-    let mut state = AppState::default();
+    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
     let before = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -286,5 +289,67 @@ fn drag_starting_on_a_button_scrolls_instead_of_firing() {
     assert!(
         button_y_after < button_y_before - 1.0,
         "the drag should have scrolled the list up (button y {button_y_before} → {button_y_after})"
+    );
+}
+
+/// The collapsible section's own toggle button: the single rounded rect below
+/// the slider track. Filler rows are plain text — they paint no rounded-rect
+/// chrome at all — so nothing else can appear in that region.
+fn collapsible_toggle(scene: &RecScene) -> (Point, Size) {
+    let (slider_origin, _) = slider_track(scene);
+    scene
+        .rounded
+        .iter()
+        .copied()
+        .filter(|(o, s)| o.y > slider_origin.y + 1.0 && s.width < W / 2.0)
+        .min_by(|a, b| a.0.y.partial_cmp(&b.0.y).unwrap())
+        .expect("the collapsible section's toggle button rect")
+}
+
+#[test]
+fn local_section_state_survives_parent_rebuilds() {
+    let mut root = RenderRoot::new();
+    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut state = CounterApp.init();
+    let mut tcx = TextContext::new();
+
+    let collapsed = frame(&mut root, &mut logic, &mut state, &mut tcx);
+    let runs_collapsed = collapsed.glyph_runs;
+
+    // Expand the nested section — mutates ONLY its own local `bool` state,
+    // never `AppState`.
+    let toggle = center(collapsible_toggle(&collapsed));
+    root.event(&mut state, &pointer(PointerPhase::Down, toggle.x, toggle.y));
+    root.event(&mut state, &pointer(PointerPhase::Up, toggle.x, toggle.y));
+
+    let expanded = frame(&mut root, &mut logic, &mut state, &mut tcx);
+    assert!(
+        expanded.glyph_runs > runs_collapsed,
+        "expanding the section must paint its two tip lines \
+         ({runs_collapsed} → {})",
+        expanded.glyph_runs
+    );
+
+    // A PARENT-driven rebuild: tap "+" three times, mutating `AppState.count`
+    // (not the section's own state) and re-running `CounterApp::build` — the
+    // section's `ComponentView` re-runs `CollapsibleSection::build` too, but
+    // its retained `state: bool` field is untouched by that re-run.
+    let (_, plus) = buttons(&expanded);
+    let p = center(plus);
+    for _ in 0..3 {
+        root.event(&mut state, &pointer(PointerPhase::Down, p.x, p.y));
+        root.event(&mut state, &pointer(PointerPhase::Up, p.x, p.y));
+    }
+    assert_eq!(state.count, 3, "the parent-rebuild driver actually fired");
+
+    // The section is STILL expanded after the parent rebuild: its local
+    // `bool` state lives in its own retained widget, not in `AppState`, so
+    // `CounterApp::build` re-running above it never resets it.
+    let after = frame(&mut root, &mut logic, &mut state, &mut tcx);
+    assert_eq!(
+        after.glyph_runs, expanded.glyph_runs,
+        "the section's local expanded state must survive a parent-driven \
+         rebuild — the glyph run count should be unchanged from the expanded \
+         frame, not reset to the collapsed count ({runs_collapsed})"
     );
 }

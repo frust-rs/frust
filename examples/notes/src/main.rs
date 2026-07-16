@@ -1,13 +1,10 @@
 //! Desktop entry point for the notes demo (spec §5, §12.9).
 //!
-//! Opens the notes screen in the preview window; the shared `AppState`/
-//! `app_logic` live in the crate's library root so the interaction test can
-//! drive them headlessly.
-
-use notes::{AppState, app_logic};
+//! `forgekit::app!(NotesApp)` in `lib.rs` generates the hidden
+//! `__forgekit_main` this calls — the one-line `main.rs` split every
+//! `forgekit::app!`-based app uses (never hand-edited; `forgekit create`
+//! scaffolds this exact shape).
 
 fn main() {
-    forgekit::App::new(AppState::new(), app_logic)
-        .run()
-        .unwrap();
+    notes::__forgekit_main();
 }
