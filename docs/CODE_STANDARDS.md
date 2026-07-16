@@ -31,6 +31,28 @@
   logs, returning a benign default instead of unwinding into JVM- or
   Swift-owned stack frames — a panic crossing the FFI boundary is undefined
   behavior, not just a bug.
+- **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS
+  platform text input doesn't send individual keystrokes across the FFI
+  boundary — the platform owns composition (Gboard, CJK marked text) against
+  a local mirror (Kotlin `Editable`/Swift `NSMutableString`), then hands the
+  framework a whole reconciled `EditingState` (`nativeImeApply`/
+  `forgekit_ime_apply`) and reads a reconciled state back
+  (`nativeImeState`/`forgekit_ime_state_json`) to keep its own IME machinery
+  (`InputConnection`/`UITextInput`) synchronized. Do not add a per-keystroke
+  op-forwarding path for mobile text input — it fights the platform's own
+  composition state machine.
+- **UTF-16 at the FFI seam, bytes inside.** `EditingState`'s
+  `selection_*`/`composing_*` indices are UTF-16 code-unit indexed
+  everywhere they cross a shell boundary (JNI, C-ABI, `AppTree`) — the
+  platform's native string type. Convert to/from byte offsets only inside
+  `forgekit-text`'s `TextEditor` (`byte_to_utf16`/`utf16_to_byte`); a
+  shell/glue module passes indices through opaquely and never does this
+  conversion itself.
+- **Hand-roll JSON at the mobile FFI boundary — no `serde` in shell crates.**
+  `forgekit-shell-android`/`forgekit-shell-ios` serialize `ImeState` with a
+  small hand-written escaper/builder, not a `serde_json` dependency, keeping
+  the always-host-testable half of each shell crate free of a codegen
+  dependency for a handful of fixed fields.
 - **Type-erase to avoid a downstream crate dependency**, not to avoid writing
   a type. When a lower layer needs to thread a resource owned by a higher
   layer (e.g. `forgekit-core`'s `LayoutCtx` carrying the shell's
@@ -139,7 +161,31 @@ interactive widget in `forgekit-widgets`:
   *requested* value through `on_toggle`/`on_change` and leave `checked`/
   `value` untouched until the next `rebuild` feeds the app-confirmed value
   back down — the widget is not its own source of truth. Never flip
-  `self.checked` (or similar) inline in an event handler.
+  `self.checked` (or similar) inline in an event handler. `TextInput` is a
+  controlled component too, reconciled rather than mutated: `rebuild`
+  applies the view's `value` to the widget's `TextEditor` with a
+  set-if-different (preserving the live selection when the text is
+  unchanged), so an app that rejects or transforms input in `on_change` sees
+  its own value win on the next frame.
+
+- **Focus routes by recorded path, like capture; `Key`/`Ime` events never
+  hit-test.** `EventCtx::request_focus`/`release_focus` record/clear the
+  focused child exactly like `capture_pointer` records the active one, and a
+  container simply forwards `Key`/`Ime` events to its focused child. A
+  `Down` that doesn't (re)claim focus on the child it hits blurs the chain
+  (blur-on-outside-tap). A structural container rebuild — a child-count
+  change, an `AnyView` type swap, or a keyed reorder — clears both the
+  capture and focus paths; `RenderRoot`'s cached `focus_active`/`ime_state`
+  are not pushed at rebuild time and self-correct on the next event pass,
+  the same convergence contract the capture-cancel case below already uses.
+
+- **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key,
+  view)` marks a `Flex` child list for identity-based reconciliation; once
+  any child in a list is keyed, every child in that list must be (a mixed
+  keyed/unkeyed set, or duplicate keys, `debug_assert!`s and falls back to
+  positional matching in release builds — never panics live). A matched
+  reorder relocates the existing widget, preserving its internal state,
+  rather than rebuilding it.
 
 - **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`,
   `MOUSE_SLOP`), scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`,

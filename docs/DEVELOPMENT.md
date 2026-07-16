@@ -37,13 +37,19 @@ cargo run -p hello
 # scrolling list — exercises the full event pipeline (see
 # docs/ARCHITECTURE.md#data-flow).
 cargo run -p counter
+
+# Text-input/IME/image demo: a notes app (TextInput -> submit into a keyed
+# list, plus an Image) — exercises focus/keyboard/IME routing and keyed
+# reconciliation (see docs/ARCHITECTURE.md#data-flow).
+cargo run -p notes
 ```
 
-`cargo run -p hello`/`cargo run -p counter` are the manual visual gates for
-rendering and interaction changes respectively — there is no automated
-pixel-diff test yet, so a person must look at the window. `counter` is also
-the demo `forgekit create` scaffolds (`templates/app/src/lib.rs.tmpl`), so
-scaffold changes should be checked against both.
+`cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes` are the
+manual visual gates for rendering, interaction, and text-input changes
+respectively — there is no automated pixel-diff test yet, so a person must
+look at the window. `notes` is also the demo `forgekit create` scaffolds
+(`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
+against it.
 
 In a generated project, `forgekit run [-d <device>]` builds and launches on a
 connected Android device/emulator (preflight → `gradlew assembleDebug`
@@ -111,6 +117,11 @@ deliberately, not floating:
   30.x is the ecosystem-latest release — bumping `wgpu` independently of
   `vello` breaks the build. See `docs/spec.md` §8/§15 for the ecosystem
   status this pin is tracking.
+- `image = "=0.25.10"` (the `Image` widget's PNG/JPEG decoder,
+  `default-features = false`, `png`/`jpeg` features only) is pinned exact,
+  not a caret range: it is the only 0.25.x release whose MSRV is exactly the
+  workspace's `rust-version` (1.88), not lower — bumping it needs a fresh
+  MSRV check, not just `cargo update`.
 - **Never run a blind `cargo update`.** If a manifest changes any pinned
   dependency, run `cargo generate-lockfile` and then confirm
   `cargo build --workspace --locked` still succeeds before committing.
