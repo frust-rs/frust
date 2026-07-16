@@ -30,6 +30,7 @@ mod sized;
 mod slider;
 mod stack;
 mod text;
+mod textinput;
 
 use std::any::Any;
 use std::rc::Rc;
@@ -54,6 +55,7 @@ pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
 pub use stack::{Stack, StackView, StackWidget};
 pub use text::{TextView, TextWidget, text};
+pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
 
 /// A widget-held, `State`-erased app-state callback adapter (see
 /// [`erase_callback`]).

@@ -1,0 +1,959 @@
+//! The `TextInput` interactive widget (spec §6.4 / Phase 4B): a single-line
+//! editable text field.
+//!
+//! [`text_input`] produces a [`TextInputView`] carrying the current `value`, a
+//! `placeholder`, an `on_change` callback, and an optional `on_submit`. Like the
+//! other interactive widgets it is a **controlled component** (see
+//! `docs/CODE_STANDARDS.md`): it never owns the durable value. Each edit reports
+//! the *requested* text through `on_change`, and the next `rebuild` reconciles
+//! the app-confirmed `value` back into the underlying [`TextEditor`] (task 52) —
+//! set-if-different, preserving the selection while the text is unchanged.
+//!
+//! # Text context ownership
+//!
+//! Unlike the [`Text`](crate::TextView) leaf (which shapes against the shared
+//! `TextContext` threaded through `LayoutCtx` during the layout pass), a
+//! `TextInput` must apply edits *synchronously during the event pass*, where no
+//! context is threaded. It therefore owns its own [`TextContext`] and drives the
+//! editor through it — so `on_change`/the published [`ImeState`] observe the
+//! fresh editing value immediately, and layout needs no threaded context (it
+//! reads the editor's own refreshed metrics).
+//!
+//! # Focus, IME and blink
+//!
+//! A `Down` inside the field requests focus, places the caret, and publishes an
+//! [`ImeState`] (task 51's focus/IME channel) so the shell can drive the platform
+//! input method. Keyboard editing (`Key`) and IME composition/state-sync (`Ime`)
+//! route down the focus path; after any edit the widget fires `on_change`, resets
+//! the caret to visible, and republishes the IME surface. The caret blinks while
+//! focused, pumped from a monotonic clock in `paint` via
+//! [`PaintCtx::request_frame`] — the same animation contract the scroll fling
+//! uses.
+
+use std::rc::Rc;
+use std::time::Instant;
+
+use forgekit_core::{
+    BoxConstraints, BuildCtx, ChangeFlags, EditingState, EventCtx, EventResult, ImeEvent, ImeState,
+    InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, View, Widget,
+};
+use forgekit_text::{EditOp, EditingStateBytes, TextContext, TextEditor, TextStyle, utf16_to_byte};
+use kurbo::{Point, Rect, Size, Vec2};
+use peniko::Color;
+
+/// Corner radius of the field chrome, in logical px.
+const RADIUS: f64 = 6.0;
+/// Border thickness, in logical px.
+const BORDER_W: f64 = 1.5;
+/// Horizontal inner padding (chrome edge to text), in logical px.
+const PAD_X: f64 = 8.0;
+/// Vertical inner padding (chrome edge to text), in logical px.
+const PAD_Y: f64 = 6.0;
+/// Caret width, in logical px.
+const CARET_W: f32 = 1.5;
+/// Blink half-period: caret visible 500 ms, hidden 500 ms.
+const BLINK_MS: f64 = 500.0;
+/// Default field width when the incoming constraints are horizontally unbounded.
+const DEFAULT_WIDTH: f64 = 200.0;
+
+/// Field background.
+const BG: Color = Color::WHITE;
+/// Idle (unfocused) border color.
+const BORDER: Color = Color::from_rgb8(0xD1, 0xD5, 0xDB);
+/// Focused border color (accent).
+const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
+/// Placeholder text color.
+const PLACEHOLDER: Color = Color::from_rgb8(0x9C, 0xA3, 0xAF);
+/// Selection highlight color.
+const SELECTION: Color = Color::from_rgb8(0xBF, 0xDB, 0xFE);
+/// Caret color.
+const CARET: Color = Color::from_rgb8(0x1D, 0x4E, 0xD8);
+
+/// A view-held, typed text callback (erased on build).
+type OnText<State> = Rc<dyn Fn(&mut State, String)>;
+
+/// A declarative single-line text field. See the [module docs](self).
+pub struct TextInputView<State: 'static> {
+    value: String,
+    placeholder: String,
+    on_change: OnText<State>,
+    on_submit: Option<OnText<State>>,
+}
+
+/// Create a controlled text field showing `value` that fires
+/// `on_change(state, new_text)` on every edit.
+///
+/// The field is a controlled component: it reports the requested text through
+/// `on_change` and adopts the app-confirmed `value` on the next rebuild — it is
+/// never its own source of truth. Add a submit handler with
+/// [`TextInputView::on_submit`] and a placeholder with
+/// [`TextInputView::placeholder`].
+pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
+    value: impl Into<String>,
+    on_change: F,
+) -> TextInputView<State> {
+    TextInputView {
+        value: value.into(),
+        placeholder: String::new(),
+        on_change: Rc::new(on_change),
+        on_submit: None,
+    }
+}
+
+/// PascalCase alias for [`text_input`].
+#[allow(non_snake_case)]
+pub fn TextInput<State: 'static, F: Fn(&mut State, String) + 'static>(
+    value: impl Into<String>,
+    on_change: F,
+) -> TextInputView<State> {
+    text_input(value, on_change)
+}
+
+impl<State: 'static> TextInputView<State> {
+    /// Set the placeholder shown when the field is empty and unfocused.
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Set the submit handler fired on Enter (with the current text); focus is
+    /// kept.
+    pub fn on_submit<F: Fn(&mut State, String) + 'static>(mut self, on_submit: F) -> Self {
+        self.on_submit = Some(Rc::new(on_submit));
+        self
+    }
+}
+
+/// The retained widget for a [`TextInputView`].
+pub struct TextInputWidget {
+    /// The editing engine (task 52). Driven through the widget-owned `text_ctx`.
+    editor: TextEditor,
+    /// The widget's own font/layout context — see the [module docs](self).
+    text_ctx: TextContext,
+    style: TextStyle,
+    placeholder: String,
+    /// Visual focus state (drives the accent border and caret blink). Set on a
+    /// `Down` inside, cleared on Escape / a blur `Down` this widget observes.
+    focused: bool,
+    /// Armed by a `Down` inside (alongside `capture_pointer`) to drive
+    /// drag-selection; cleared on `Up`/`Cancel`.
+    captured: bool,
+    /// Monotonic clock for the caret blink.
+    clock: Instant,
+    /// Timestamp (ms since `clock`) the caret was last reset to visible.
+    blink_start_ms: f64,
+    on_change: crate::ErasedArgCallback<String>,
+    on_submit: Option<crate::ErasedArgCallback<String>>,
+}
+
+/// Whether `pos` (widget-local) lies within a `size`-sized field.
+fn inside(pos: Point, size: Size) -> bool {
+    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
+}
+
+impl TextInputWidget {
+    /// The single-line text height from the editor's refreshed metrics, floored
+    /// to a sensible line height for an empty field.
+    fn content_height(&self) -> f64 {
+        self.editor
+            .layout_size()
+            .height
+            .max(self.style.size as f64 * 1.25)
+    }
+
+    /// The top-left of the text content within a `height`-tall field (vertically
+    /// centered, never above the top padding).
+    fn text_top(&self, height: f64) -> f64 {
+        ((height - self.content_height()) / 2.0).max(PAD_Y)
+    }
+
+    /// Reset the blink so the caret is visible now (called on any edit / focus).
+    fn reset_blink(&mut self) {
+        self.blink_start_ms = self.now_ms();
+    }
+
+    fn now_ms(&self) -> f64 {
+        self.clock.elapsed().as_secs_f64() * 1000.0
+    }
+
+    /// Whether the caret is in its visible half-cycle at `now_ms`.
+    fn caret_visible_at(&self, now_ms: f64) -> bool {
+        (((now_ms - self.blink_start_ms) / BLINK_MS) as u64).is_multiple_of(2)
+    }
+
+    /// Replace the whole editing value (controlled reconcile / initial seed),
+    /// placing the caret at the end. No callback fires.
+    fn set_controlled_value(&mut self, value: &str) {
+        let op = EditOp::ApplyEditingState(EditingStateBytes {
+            text: value.to_string(),
+            base: value.len(),
+            extent: value.len(),
+            composing: None,
+        });
+        self.editor.apply(op, &mut self.text_ctx);
+    }
+
+    /// Apply one editing op, then run the after-edit bookkeeping: reset the
+    /// blink, fire `on_change` if the text actually changed, and republish the
+    /// IME surface. Used for both text edits and selection-only moves.
+    fn apply_edit(&mut self, ctx: &mut EventCtx, op: EditOp) {
+        let before = self.editor.text().to_string();
+        self.editor.apply(op, &mut self.text_ctx);
+        self.finish_edit(ctx, before);
+    }
+
+    /// Shared after-edit bookkeeping (see [`apply_edit`](Self::apply_edit)),
+    /// factored out so a multi-op edit (an IME commit) reports once.
+    fn finish_edit(&mut self, ctx: &mut EventCtx, before: String) {
+        self.reset_blink();
+        let after = self.editor.text().to_string();
+        if after != before {
+            (self.on_change)(ctx, after);
+        }
+        self.publish(ctx);
+        ctx.request_redraw();
+    }
+
+    /// Publish the current editing state + caret (window coordinates) so the
+    /// shell can drive the platform IME.
+    fn publish(&self, ctx: &mut EventCtx) {
+        let es = self.editor.editing_state_utf16();
+        let editing = EditingState {
+            text: es.text,
+            selection_base: es.selection_base,
+            selection_extent: es.selection_extent,
+            composing_base: es.composing_base,
+            composing_extent: es.composing_extent,
+        };
+        let offset = ctx.origin().to_vec2() + Vec2::new(PAD_X, self.text_top(ctx.size().height));
+        let caret = self.editor.cursor_rect(CARET_W).map(|c| {
+            Rect::new(
+                c.x0 + offset.x,
+                c.y0 + offset.y,
+                c.x1 + offset.x,
+                c.y1 + offset.y,
+            )
+        });
+        ctx.publish_ime_state(ImeState {
+            active: true,
+            editing,
+            caret,
+        });
+    }
+
+    /// Translate a widget-local pointer position into the editor's layout-local
+    /// coordinate space (used for caret placement / drag-selection).
+    fn editor_point(&self, pos: Point, height: f64) -> (f32, f32) {
+        (
+            (pos.x - PAD_X) as f32,
+            (pos.y - self.text_top(height)) as f32,
+        )
+    }
+
+    /// Handle a keyboard key event (already focus-gated by the caller).
+    fn handle_key(
+        &mut self,
+        ctx: &mut EventCtx,
+        key: &Key,
+        modifiers: forgekit_core::Modifiers,
+    ) -> EventResult {
+        match key {
+            Key::Character(s) => {
+                if modifiers.ctrl || modifiers.meta {
+                    // The only editing shortcut wired for v1 is select-all; other
+                    // chorded characters (copy/paste, …) are consumed, not typed.
+                    if s.eq_ignore_ascii_case("a") {
+                        self.apply_edit(ctx, EditOp::SelectAll);
+                    }
+                    return EventResult::Handled;
+                }
+                self.apply_edit(ctx, EditOp::Insert(s.clone()));
+                EventResult::Handled
+            }
+            Key::Named(named) => {
+                let select = modifiers.shift;
+                match named {
+                    NamedKey::Backspace => self.apply_edit(ctx, EditOp::Backdelete),
+                    NamedKey::Delete => self.apply_edit(ctx, EditOp::Delete),
+                    NamedKey::ArrowLeft => self.apply_edit(ctx, EditOp::MoveLeft { select }),
+                    NamedKey::ArrowRight => self.apply_edit(ctx, EditOp::MoveRight { select }),
+                    NamedKey::Home => self.apply_edit(ctx, EditOp::Home { select }),
+                    NamedKey::End => self.apply_edit(ctx, EditOp::End { select }),
+                    NamedKey::Enter => {
+                        let text = self.editor.text().to_string();
+                        if let Some(cb) = &mut self.on_submit {
+                            cb(ctx, text);
+                        }
+                        ctx.request_redraw();
+                    }
+                    NamedKey::Escape => {
+                        ctx.release_focus();
+                        self.focused = false;
+                        ctx.request_redraw();
+                    }
+                    // Single-line v1: vertical motion and Tab traversal are no-ops.
+                    NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::Tab => {
+                        return EventResult::Ignored;
+                    }
+                }
+                EventResult::Handled
+            }
+        }
+    }
+
+    /// Handle an IME event (already focus-gated by the caller).
+    fn handle_ime(&mut self, ctx: &mut EventCtx, event: &ImeEvent) -> EventResult {
+        match event {
+            ImeEvent::Compose { text, cursor } => {
+                self.apply_edit(
+                    ctx,
+                    EditOp::Compose {
+                        text: text.clone(),
+                        cursor: *cursor,
+                    },
+                );
+                EventResult::Handled
+            }
+            ImeEvent::Commit(s) => {
+                // Commit the given text via the compose machinery so it replaces
+                // any active preedit and lands at the caret in one edit.
+                let before = self.editor.text().to_string();
+                self.editor.apply(
+                    EditOp::Compose {
+                        text: s.clone(),
+                        cursor: None,
+                    },
+                    &mut self.text_ctx,
+                );
+                self.editor.apply(EditOp::FinishCompose, &mut self.text_ctx);
+                self.finish_edit(ctx, before);
+                EventResult::Handled
+            }
+            ImeEvent::ApplyEditingState(state) => {
+                self.apply_edit(ctx, editing_state_to_op(state));
+                EventResult::Handled
+            }
+            // Bracket a composition session: nothing to mutate here.
+            ImeEvent::Enabled | ImeEvent::Disabled => EventResult::Handled,
+        }
+    }
+}
+
+/// Convert a shell-facing (UTF-16-indexed) [`EditingState`] into the byte-indexed
+/// [`EditOp::ApplyEditingState`] the editor consumes.
+fn editing_state_to_op(state: &EditingState) -> EditOp {
+    let text = &state.text;
+    let base = utf16_to_byte(text, state.selection_base.max(0) as usize);
+    let extent = utf16_to_byte(text, state.selection_extent.max(0) as usize);
+    let composing = if state.composing_base >= 0 && state.composing_extent >= 0 {
+        Some(
+            utf16_to_byte(text, state.composing_base as usize)
+                ..utf16_to_byte(text, state.composing_extent as usize),
+        )
+    } else {
+        None
+    };
+    EditOp::ApplyEditingState(EditingStateBytes {
+        text: text.clone(),
+        base,
+        extent,
+        composing,
+    })
+}
+
+impl<State: 'static> View<State> for TextInputView<State> {
+    type Element = TextInputWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> TextInputWidget {
+        let style = TextStyle::default();
+        let mut text_ctx = TextContext::new();
+        let mut editor = TextEditor::new(&style);
+        // Seed the initial controlled value (and refresh the layout metrics).
+        editor.apply(
+            EditOp::ApplyEditingState(EditingStateBytes {
+                text: self.value.clone(),
+                base: self.value.len(),
+                extent: self.value.len(),
+                composing: None,
+            }),
+            &mut text_ctx,
+        );
+        TextInputWidget {
+            editor,
+            text_ctx,
+            style,
+            placeholder: self.placeholder.clone(),
+            focused: false,
+            captured: false,
+            clock: Instant::now(),
+            blink_start_ms: 0.0,
+            on_change: crate::erase_callback_arg(&self.on_change),
+            on_submit: self
+                .on_submit
+                .as_ref()
+                .map(crate::erase_callback_arg::<State, String>),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut TextInputWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        // Closures aren't comparable; reinstall the erased adapters unconditionally.
+        element.on_change = crate::erase_callback_arg(&self.on_change);
+        element.on_submit = self
+            .on_submit
+            .as_ref()
+            .map(crate::erase_callback_arg::<State, String>);
+
+        let mut flags = ChangeFlags::NONE;
+        if prev.placeholder != self.placeholder {
+            element.placeholder = self.placeholder.clone();
+            flags |= ChangeFlags::PAINT;
+        }
+        // Controlled reconcile: adopt the app-confirmed value only when it differs
+        // from what the editor currently holds, so an accepted edit leaves the
+        // selection untouched and a rejected/normalized one is pulled back in.
+        if self.value != element.editor.text() {
+            element.set_controlled_value(&self.value);
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        flags
+    }
+}
+
+impl Widget for TextInputWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let width = if bc.max().width.is_finite() {
+            bc.max().width
+        } else {
+            DEFAULT_WIDTH
+        };
+        let height = self.content_height() + 2.0 * PAD_Y;
+        bc.constrain(Size::new(width, height))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let origin = ctx.origin();
+        let size = ctx.size();
+
+        // Chrome: a border-colored rounded rect with an inset background fills in
+        // as the frame (there is no stroke-rect primitive on `PaintScene`).
+        let border_color = if self.focused { ACCENT } else { BORDER };
+        scene.fill_rounded_rect(origin, size, RADIUS, border_color);
+        scene.fill_rounded_rect(
+            Point::new(origin.x + BORDER_W, origin.y + BORDER_W),
+            Size::new(
+                (size.width - 2.0 * BORDER_W).max(0.0),
+                (size.height - 2.0 * BORDER_W).max(0.0),
+            ),
+            (RADIUS - BORDER_W).max(0.0),
+            BG,
+        );
+
+        let text_origin = Point::new(origin.x + PAD_X, origin.y + self.text_top(size.height));
+
+        if self.editor.text().is_empty() && !self.focused {
+            // Placeholder: shaped on demand through the widget-owned context.
+            if !self.placeholder.is_empty() {
+                let ph_style = TextStyle::new(self.style.size, PLACEHOLDER);
+                let layout = self.text_ctx.layout(&self.placeholder, &ph_style, None);
+                for run in layout.to_scene_runs(text_origin) {
+                    scene.draw_glyph_run(run);
+                }
+            }
+        } else {
+            let off = text_origin.to_vec2();
+            // Selection highlights sit behind the glyphs.
+            for r in self.editor.selection_rects() {
+                scene.fill_rect(
+                    Point::new(r.x0 + off.x, r.y0 + off.y),
+                    Size::new(r.width(), r.height()),
+                    SELECTION,
+                );
+            }
+            for run in self.editor.to_scene_runs(text_origin) {
+                scene.draw_glyph_run(run);
+            }
+        }
+
+        // Caret: blink while focused. Requesting a frame keeps the desktop shell's
+        // wait-loop scheduling paints so the blink animates (the mobile shells'
+        // continuous loops already do). At rest (unfocused) we stop signalling.
+        if self.focused {
+            ctx.request_frame();
+            if self.caret_visible_at(self.now_ms())
+                && let Some(c) = self.editor.cursor_rect(CARET_W)
+            {
+                let off = text_origin.to_vec2();
+                scene.fill_rect(
+                    Point::new(c.x0 + off.x, c.y0 + off.y),
+                    Size::new(c.width(), c.height()),
+                    CARET,
+                );
+            }
+        }
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        match event {
+            InputEvent::Pointer(p) => match p.phase {
+                PointerPhase::Down => {
+                    if inside(p.position, ctx.size()) {
+                        ctx.request_focus();
+                        ctx.capture_pointer();
+                        self.focused = true;
+                        self.captured = true;
+                        let (x, y) = self.editor_point(p.position, ctx.size().height);
+                        self.apply_edit(
+                            ctx,
+                            EditOp::MoveToPoint {
+                                x,
+                                y,
+                                select: false,
+                            },
+                        );
+                        EventResult::Handled
+                    } else {
+                        // A `Down` outside our bounds that still reaches us (we are
+                        // the root) is a blur: drop focus. Nested, the container's
+                        // routing clears our focus path instead.
+                        if self.focused {
+                            ctx.release_focus();
+                            self.focused = false;
+                            ctx.request_redraw();
+                        }
+                        EventResult::Ignored
+                    }
+                }
+                PointerPhase::Move => {
+                    if !self.captured {
+                        return EventResult::Ignored;
+                    }
+                    let (x, y) = self.editor_point(p.position, ctx.size().height);
+                    self.apply_edit(ctx, EditOp::MoveToPoint { x, y, select: true });
+                    EventResult::Handled
+                }
+                PointerPhase::Up => {
+                    if !self.captured {
+                        return EventResult::Ignored;
+                    }
+                    self.captured = false;
+                    ctx.request_redraw();
+                    EventResult::Handled
+                }
+                PointerPhase::Cancel => {
+                    if !self.captured {
+                        return EventResult::Ignored;
+                    }
+                    // A `Cancel` must never touch application state: only clear the
+                    // drag flag and request a redraw.
+                    self.captured = false;
+                    ctx.request_redraw();
+                    EventResult::Handled
+                }
+            },
+            InputEvent::Key(k) => {
+                if !ctx.has_focus() {
+                    return EventResult::Ignored;
+                }
+                self.focused = true;
+                self.handle_key(ctx, &k.key, k.modifiers)
+            }
+            InputEvent::Ime(e) => {
+                if !ctx.has_focus() {
+                    return EventResult::Ignored;
+                }
+                self.focused = true;
+                self.handle_ime(ctx, e)
+            }
+            InputEvent::Scroll { .. } => EventResult::Ignored,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forgekit_core::{KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot};
+    use std::any::Any;
+
+    #[derive(Default)]
+    struct AppState {
+        value: String,
+        changes: u32,
+        submits: u32,
+        last_submit: String,
+        reject: bool,
+    }
+
+    fn app_logic(state: &mut AppState) -> TextInputView<AppState> {
+        text_input(state.value.clone(), |s: &mut AppState, v: String| {
+            s.changes += 1;
+            if !s.reject {
+                s.value = v;
+            }
+        })
+        .placeholder("type here")
+        .on_submit(|s: &mut AppState, v: String| {
+            s.submits += 1;
+            s.last_submit = v;
+        })
+    }
+
+    /// Build + lay out a render root over `app_logic`, ready for events.
+    fn harness(state: &mut AppState) -> RenderRoot<AppState, TextInputView<AppState>> {
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut app_logic, state);
+        root.layout(Size::new(300.0, 200.0));
+        root
+    }
+
+    fn widget(root: &RenderRoot<AppState, TextInputView<AppState>>) -> &TextInputWidget {
+        let id = root.root_id().expect("root built");
+        let w = root.tree().pod(id).expect("root pod").widget();
+        (w as &dyn Any)
+            .downcast_ref::<TextInputWidget>()
+            .expect("root is a TextInputWidget")
+    }
+
+    fn pointer(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    fn ch(text: &str) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Character(text.to_string()),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    fn named(key: NamedKey, modifiers: Modifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Named(key),
+            modifiers,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn tap_focuses_and_publishes_ime_state() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        assert!(root.is_focus_active(), "tap inside focuses the field");
+        assert!(widget(&root).focused);
+        let ime = root.ime_state().expect("focus publishes an IME surface");
+        assert!(ime.active);
+        assert!(ime.caret.is_some(), "an IME surface carries a caret rect");
+    }
+
+    #[test]
+    fn typing_inserts_and_fires_on_change() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        root.event(&mut state, &ch("h"));
+        root.event(&mut state, &ch("i"));
+
+        assert_eq!(state.value, "hi", "on_change fed each char into app state");
+        assert_eq!(state.changes, 2);
+        assert_eq!(widget(&root).editor.text(), "hi");
+    }
+
+    #[test]
+    fn keys_ignored_while_unfocused() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        // No prior focus: a key is not consumed and does not edit.
+        let outcome = root.event(&mut state, &ch("x"));
+        assert!(!outcome.handled);
+        assert_eq!(state.changes, 0);
+        assert_eq!(widget(&root).editor.text(), "");
+    }
+
+    #[test]
+    fn backspace_over_emoji_removes_grapheme() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        root.event(&mut state, &ch("\u{1F600}")); // grinning face (4 bytes)
+        assert_eq!(widget(&root).editor.text(), "a\u{1F600}");
+
+        root.event(
+            &mut state,
+            &named(NamedKey::Backspace, Modifiers::default()),
+        );
+
+        // The whole emoji code point is removed as a unit (grapheme integrity via
+        // task 52), not a single byte.
+        assert_eq!(widget(&root).editor.text(), "a");
+        assert_eq!(state.value, "a");
+    }
+
+    #[test]
+    fn arrows_with_shift_extend_selection() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        for c in ["a", "b", "c"] {
+            root.event(&mut state, &ch(c));
+        }
+        let changes_before = state.changes;
+
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        root.event(&mut state, &named(NamedKey::ArrowLeft, shift));
+
+        let es = widget(&root).editor.editing_state_bytes();
+        assert_ne!(es.base, es.extent, "shift+arrow extends the selection");
+        assert_eq!(
+            state.changes, changes_before,
+            "a selection-only move does not fire on_change"
+        );
+    }
+
+    #[test]
+    fn enter_fires_on_submit_once_and_keeps_focus() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("h"));
+        root.event(&mut state, &ch("i"));
+
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+
+        assert_eq!(state.submits, 1, "Enter fires on_submit exactly once");
+        assert_eq!(state.last_submit, "hi");
+        assert!(root.is_focus_active(), "submit keeps focus");
+    }
+
+    #[test]
+    fn escape_releases_focus() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active());
+
+        root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
+
+        assert!(!root.is_focus_active(), "Escape blurs the field");
+        assert!(root.ime_state().is_none());
+        assert!(!widget(&root).focused);
+    }
+
+    #[test]
+    fn blur_via_outside_tap_unpublishes_ime_state() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.ime_state().is_some());
+
+        // Tap outside the field's height (still reaches the root widget).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 150.0));
+
+        assert!(!root.is_focus_active(), "outside tap blurs the field");
+        assert!(root.ime_state().is_none());
+        assert!(!widget(&root).focused);
+    }
+
+    #[test]
+    fn meta_a_selects_all_without_typing() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        for c in ["a", "b", "c"] {
+            root.event(&mut state, &ch(c));
+        }
+        let changes_before = state.changes;
+
+        let meta = Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        };
+        root.event(
+            &mut state,
+            &InputEvent::Key(KeyEvent {
+                key: Key::Character("a".to_string()),
+                modifiers: meta,
+                repeat: false,
+            }),
+        );
+
+        let es = widget(&root).editor.editing_state_bytes();
+        assert_eq!(es.base.min(es.extent), 0);
+        assert_eq!(es.base.max(es.extent), 3, "whole buffer selected");
+        assert_eq!(
+            state.changes, changes_before,
+            "select-all does not type an 'a'"
+        );
+        assert_eq!(widget(&root).editor.text(), "abc");
+    }
+
+    #[test]
+    fn controlled_reconcile_rejected_value_shows_app_value() {
+        let mut state = AppState {
+            reject: true,
+            ..AppState::default()
+        };
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        // The app rejects the edit: on_change fires but `value` stays empty while
+        // the editor already holds "x".
+        root.event(&mut state, &ch("x"));
+        assert_eq!(state.changes, 1);
+        assert_eq!(state.value, "");
+        assert_eq!(widget(&root).editor.text(), "x");
+
+        // The next rebuild reconciles the editor back to the app's (empty) value.
+        root.rebuild(&mut app_logic, &mut state);
+        assert_eq!(
+            widget(&root).editor.text(),
+            "",
+            "a rejected edit is pulled back to the app's value on rebuild"
+        );
+    }
+
+    #[test]
+    fn controlled_reconcile_same_value_preserves_selection() {
+        let mut state = AppState {
+            value: "ab".to_string(),
+            ..AppState::default()
+        };
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        let meta = Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        };
+        root.event(
+            &mut state,
+            &InputEvent::Key(KeyEvent {
+                key: Key::Character("a".to_string()),
+                modifiers: meta,
+                repeat: false,
+            }),
+        );
+        let before = widget(&root).editor.editing_state_bytes();
+        assert_ne!(before.base, before.extent);
+
+        // Rebuild with the unchanged value: no reconcile, selection preserved.
+        root.rebuild(&mut app_logic, &mut state);
+        let after = widget(&root).editor.editing_state_bytes();
+        assert_eq!(
+            (before.base, before.extent),
+            (after.base, after.extent),
+            "an unchanged value leaves the selection intact"
+        );
+    }
+
+    #[test]
+    fn ime_apply_editing_state_syncs_value() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        // Mobile state-sync path: push a whole editing value (UTF-16 indexed).
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::ApplyEditingState(EditingState {
+                text: "hello".to_string(),
+                selection_base: 5,
+                selection_extent: 5,
+                composing_base: -1,
+                composing_extent: -1,
+            })),
+        );
+
+        assert_eq!(widget(&root).editor.text(), "hello");
+        assert_eq!(state.value, "hello", "on_change reflects the synced value");
+    }
+
+    #[test]
+    fn ime_commit_inserts_text() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("ni".to_string())),
+        );
+
+        assert_eq!(widget(&root).editor.text(), "ni");
+        assert_eq!(state.value, "ni");
+    }
+
+    #[test]
+    fn cancel_disarms_drag_without_touching_state() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(widget(&root).captured);
+        let changes_before = state.changes;
+
+        root.event(&mut state, &pointer(PointerPhase::Cancel, 10.0, 10.0));
+
+        assert!(!widget(&root).captured, "Cancel disarms the drag");
+        assert_eq!(
+            state.changes, changes_before,
+            "Cancel must not fire on_change"
+        );
+    }
+
+    #[test]
+    fn blink_requests_frame_only_while_focused() {
+        // A fresh, unfocused field does not ask for continuation frames.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        let mut sink = NullScene;
+        assert!(
+            !root.paint(&mut sink).needs_frame,
+            "an unfocused field is at rest"
+        );
+
+        // Once focused, paint pumps the blink and asks for the next frame.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(
+            root.paint(&mut sink).needs_frame,
+            "a focused field blinks its caret"
+        );
+    }
+
+    #[test]
+    fn caret_visibility_toggles_across_the_blink_period() {
+        let mut state = AppState::default();
+        let root = harness(&mut state);
+        let w = widget(&root);
+        // Deterministic phase math off the reset epoch (blink_start_ms == 0).
+        assert!(w.caret_visible_at(0.0), "visible at the start of the cycle");
+        assert!(w.caret_visible_at(BLINK_MS - 1.0));
+        assert!(!w.caret_visible_at(BLINK_MS + 1.0), "hidden mid-cycle");
+        assert!(w.caret_visible_at(2.0 * BLINK_MS + 1.0), "visible again");
+    }
+
+    /// A no-op paint sink for `needs_frame` assertions (glyph/rect output is not
+    /// under test here).
+    struct NullScene;
+    impl PaintScene for NullScene {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+    }
+}

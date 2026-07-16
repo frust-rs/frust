@@ -47,8 +47,8 @@ pub use forgekit_widgets::{
     Align, AlignView, Alignment, Axis, Button, ButtonView, Checkbox, CheckboxView, Column,
     CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector, GestureDetectorView,
     MainAxisAlignment, Padding, PaddingView, Row, ScrollView, SizedBox, SizedBoxView, Slider,
-    SliderView, Stack, StackView, TextView, button, checkbox, flexible, inflexible, scroll_view,
-    slider, text,
+    SliderView, Stack, StackView, TextInput, TextInputView, TextView, button, checkbox, flexible,
+    inflexible, scroll_view, slider, text, text_input,
 };
 
 /// Pure input/gesture helpers (slop constants, [`input::VelocityTracker`], the
