@@ -52,7 +52,7 @@ pub mod ffi_glue;
 // "ios")]`, so nothing references these off-iOS.
 #[cfg(target_os = "ios")]
 #[doc(hidden)]
-pub use forgekit_shell_common::{AppTree, new_boxed_app};
+pub use forgekit_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (spec §10.2, Makepad `app_main!` precedent).
@@ -61,8 +61,11 @@ pub use forgekit_shell_common::{AppTree, new_boxed_app};
 /// seven lifecycle/input exports plus the three text-input exports —
 /// `forgekit_ime_apply`, `forgekit_ime_state_json`, `forgekit_string_free`),
 /// each delegating to the non-generic runtime in [`ffi_glue`]. `forgekit_init`
-/// constructs the app's erased view tree from `$state_ty::default()` and
-/// `$app_logic` and returns an opaque handle; the rest operate on that handle.
+/// constructs the app's erased view tree and returns an opaque handle; the rest
+/// operate on that handle. It also initializes the process-wide
+/// [`forgekit_reactive::ReactiveRuntime`] (idempotent, framework-side inside
+/// [`ffi_glue::init`] rather than emitted here, so both arms below get it with
+/// no macro duplication) before the state/view tree is constructed.
 ///
 /// Unlike [`android_app!`](forgekit_shell_android::android_app), this macro is
 /// **call-site transparent**: it is invoked unconditionally in the generated
@@ -73,11 +76,26 @@ pub use forgekit_shell_common::{AppTree, new_boxed_app};
 /// forgekit::ios_app!(AppState, app_logic);
 /// ```
 ///
-/// `$state_ty` must implement [`Default`]; `$app_logic` is a
-/// `FnMut(&mut State) -> impl View<State>`.
+/// Two forms:
+/// - `ios_app!($state_ty, $app_logic)` — `$state_ty` must implement [`Default`];
+///   the initial state is `$state_ty::default()`.
+/// - `ios_app!($state_ty, $state_init, $app_logic)` — `$state_init` is a
+///   `FnOnce() -> $state_ty` factory, for a state type that doesn't implement
+///   `Default` (e.g. one a future `Component::init` builds). The 2-arg form
+///   delegates to this one with `<$state_ty as Default>::default` as the
+///   factory.
+///
+/// `$app_logic` is a `FnMut(&mut State) -> impl View<State>`.
 #[macro_export]
 macro_rules! ios_app {
     ($state_ty:ty, $app_logic:expr $(,)?) => {
+        $crate::ios_app!(
+            $state_ty,
+            <$state_ty as ::core::default::Default>::default,
+            $app_logic
+        );
+    };
+    ($state_ty:ty, $state_init:expr, $app_logic:expr $(,)?) => {
         /// `forgekit_init`: create the native handle for the app's CAMetalLayer.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
@@ -88,10 +106,7 @@ macro_rules! ios_app {
             scale: f32,
         ) -> *mut ::core::ffi::c_void {
             $crate::ffi_glue::init(metal_layer, width, height, scale, || {
-                $crate::new_boxed_app::<$state_ty, _, _>(
-                    <$state_ty as ::core::default::Default>::default(),
-                    $app_logic,
-                )
+                $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $app_logic)
             })
         }
 

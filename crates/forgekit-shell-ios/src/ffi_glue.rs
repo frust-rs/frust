@@ -21,6 +21,7 @@ use std::sync::Once;
 use anyhow::{Context, Result, bail};
 
 use forgekit_core::event::{EditingState, ImeState};
+use forgekit_reactive::ReactiveRuntime;
 use forgekit_render::{RenderContext, SurfaceRenderer};
 use forgekit_shell_common::{AppTree, guard};
 
@@ -122,6 +123,24 @@ pub fn init(
     )
 }
 
+/// A no-op [`forgekit_reactive::FrameWaker`] for the mobile shell: the
+/// `CADisplayLink` loop already produces every frame regardless of a signal
+/// write, so there is nothing useful for the waker to do (contrast the
+/// desktop shell, which must nudge `ControlFlow::Wait` awake).
+fn no_op_waker() -> forgekit_reactive::FrameWaker {
+    std::sync::Arc::new(|| {})
+}
+
+/// Drains the UI-thread reactive local-task queue if the runtime has been
+/// installed. A no-op before `forgekit_init` has run (nothing to pump yet) —
+/// every call site below is reachable from Swift before init on a
+/// misbehaving caller, so this stays defensive rather than assuming `Some`.
+fn pump_reactive() {
+    if let Some(rt) = ReactiveRuntime::get() {
+        rt.pump_local();
+    }
+}
+
 /// Fallible body of [`init`], separated so the happy path reads top-down.
 fn create_handle(
     metal_layer: *mut c_void,
@@ -150,6 +169,19 @@ fn create_handle(
         )
     })
     .context("forgekit-shell-ios: failed to create Metal render surface")?;
+
+    // Process-wide reactive runtime init (idempotent — `ReactiveRuntime::init`'s
+    // own `OnceLock` provides the process-once property). The Swift-side
+    // `handle`/`initFailed` guards are only per-view-controller: a locale
+    // change, split-screen resize, or an init retry after a prior failure can
+    // re-enter `forgekit_init` in the same process (the project's own
+    // g2-swift-init-latch history shows this happens), and a repeat call here
+    // must be benign rather than rebuilding the background tokio runtime. Runs
+    // BEFORE app construction so a `Component::init` (a future task) creating
+    // signals/controllers has a live runtime to create them against. The
+    // continuous `CADisplayLink` loop already ticks every frame regardless of a
+    // signal write, so the waker is a no-op (mirrors the Android shell).
+    ReactiveRuntime::init(no_op_waker());
 
     let app = make_app();
     // Retain `metal_layer` in the handle so a later `SurfaceLost` can be recovered
@@ -265,6 +297,9 @@ pub fn render_frame(handle: *mut c_void) {
 /// asymmetry note on [`IosAppHandle::dispatch_touch`]). First-touch only in v1.
 pub fn dispatch_touch(handle: *mut c_void, phase: u32, x: f32, y: f32) {
     guard("forgekit_dispatch_touch", (), || {
+        // Cheap; keeps controller-driven updates fresh between CADisplayLink
+        // frames rather than waiting for the next `forgekit_render_frame`.
+        pump_reactive();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             let touch_phase = crate::ffi_support::touch_phase_from_code(phase);
@@ -297,6 +332,8 @@ pub fn ime_apply(
     comp_ext: i32,
 ) {
     guard("forgekit_ime_apply", (), || {
+        // Cheap; keeps controller-driven updates fresh between frames.
+        pump_reactive();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             // SAFETY: `text` is the Swift mirror's UTF-8 C string, valid and
@@ -325,6 +362,8 @@ pub fn ime_apply(
 /// side treats as inactive.
 pub fn ime_state_json(handle: *mut c_void) -> *mut c_char {
     guard("forgekit_ime_state_json", std::ptr::null_mut(), || {
+        // Cheap; keeps controller-driven updates fresh between frames.
+        pump_reactive();
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         let json = match unsafe { handle_mut(handle) } {
             Some(app) => ime_state_to_json(app.ime_state()),
@@ -418,6 +457,12 @@ pub fn resume(handle: *mut c_void) {
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.resume();
         }
+        // While backgrounded, CADisplayLink is paused so nothing pumps and
+        // tokio timers stall (accepted gap — see `ReactiveRuntime::pump_local`
+        // docs and task 08's design notes); drain any queued completions
+        // immediately on foreground instead of waiting for the next
+        // `forgekit_render_frame` tick.
+        pump_reactive();
     });
 }
 
@@ -436,9 +481,10 @@ pub fn destroy(handle: *mut c_void) {
     });
 }
 
-/// Compile-only smoke of [`crate::ios_app!`]: exercises macro expansion on the iOS
-/// target (`cargo check --target aarch64-apple-ios-sim --tests`), covering the
-/// macro half of the acceptance criteria. Never invoked — its symbols would clash
+/// Compile-only smoke of [`crate::ios_app!`]'s 2-arg (`Default`-state) arm:
+/// exercises macro expansion on the iOS target
+/// (`cargo check --target aarch64-apple-ios-sim --tests`), covering the macro
+/// half of the acceptance criteria. Never invoked — its symbols would clash
 /// with a real app's, so it lives behind `cfg(test)` where no `cdylib`/`staticlib`
 /// links it.
 #[cfg(test)]
@@ -454,4 +500,32 @@ mod macro_expansion {
     }
 
     crate::ios_app!(TestState, test_logic);
+}
+
+/// Compile-only smoke of [`crate::ios_app!`]'s 3-arg state-factory arm, with a
+/// state type that deliberately has **no** `Default` impl — the only way it can
+/// build is through the supplied `$state_init` closure (acceptance criterion
+/// 2). Lives in its own module (distinct from [`macro_expansion`]'s 2-arg
+/// invocation) so the two expansions' same-named `extern "C"` items don't
+/// collide as module-scoped Rust items; the underlying `#[no_mangle]` symbol
+/// clash this would cause at *link* time never arises because this module is
+/// exercised only by `cargo check --tests`, which never links.
+#[cfg(test)]
+mod macro_expansion_state_factory {
+    struct NonDefaultState {
+        n: u32,
+    }
+
+    fn init_state() -> NonDefaultState {
+        NonDefaultState { n: 0 }
+    }
+
+    fn test_logic(
+        state: &mut NonDefaultState,
+    ) -> impl forgekit_core::view::View<NonDefaultState> + use<> {
+        state.n += 1;
+        forgekit_widgets::text(format!("{}", state.n))
+    }
+
+    crate::ios_app!(NonDefaultState, init_state, test_logic);
 }

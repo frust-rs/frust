@@ -34,6 +34,7 @@ use std::ffi::c_void;
 use forgekit_core::event::{
     EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerPhase,
 };
+use forgekit_reactive::ReactiveRuntime;
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
@@ -258,6 +259,16 @@ impl IosAppHandle {
     /// `forgekit_resize` FFI entry recreates the surface from the retained
     /// `metal_layer` (see [`crate::ffi_glue`]) before rendering resumes.
     pub(crate) fn frame(&mut self) {
+        // Pump the UI-thread reactive local-task queue BEFORE the ready/paused
+        // gate below: placed after it, queued `spawn_local` completions (e.g. a
+        // signal write scheduled from a background task) would stall for as
+        // long as the surface stays not-ready/paused instead of draining as
+        // soon as the CADisplayLink ticks (phase-5.5 task 08 design). A no-op
+        // until `forgekit_init` has installed the runtime.
+        if let Some(rt) = ReactiveRuntime::get() {
+            rt.pump_local();
+        }
+
         let ready = self.phase() == SurfacePhase::SurfaceReady;
         if !crate::ffi_support::should_render_frame(ready, self.paused) {
             return;
