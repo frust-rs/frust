@@ -153,6 +153,14 @@ interactive widget in `forgekit-widgets`:
   `InputEvent` — widget/container code never divides by scale factor; only
   the shell's FFI-boundary helpers do.
 
+- **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear
+  internal flags (`self.pressed`/`self.captured`/`self.armed`) and request a
+  redraw. A structural container rebuild can synthesize a `Cancel` to a
+  still-captured child with no application state in scope, delivered over a
+  throwaway `()` state (see `docs/ARCHITECTURE.md`'s Event pipeline); a
+  handler that reached for real state there panics on the `()` downcast — a
+  deliberate tripwire, not silent corruption.
+
 ## Testing Patterns
 
 - **Fixture-driven tests for parsers/validators**: register canned

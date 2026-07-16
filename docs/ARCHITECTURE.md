@@ -108,12 +108,17 @@ access, are deferred to a later phase). Capture is **by recorded path, not a
 global registry**: on `Down` a widget calls `EventCtx::capture_pointer`, and
 the enclosing `ChildPod`/`RenderRoot` records it as the active child so
 subsequent moves/releases route straight back, auto-releasing on
-`Up`/`Cancel`. Interactive widgets hold their view-declared callback as an
-**erased closure** — an `Rc<dyn Fn(&mut State)>` boxed at build time into a
-`Box<dyn FnMut(&mut EventCtx)>` the widget invokes directly — mirroring the
-`&mut dyn Any` erasure `LayoutCtx`'s text context uses, so `forgekit-core`
-and `forgekit-widgets` carry no knowledge of the concrete app-state type. The
-pass never rebuilds or repaints: it returns an `EventOutcome { handled,
+`Up`/`Cancel`; outside this normal flow, a structural container rebuild
+(a child-count change, or an `AnyView` type swap at a captured index)
+force-releases the capture by synthesizing a `Cancel` to a still-armed
+surviving widget (see `docs/CODE_STANDARDS.md`'s Interaction Semantics for
+the contract this relies on). Interactive widgets hold their view-declared
+callback as an **erased closure** — an `Rc<dyn Fn(&mut State)>` boxed at
+build time into a `Box<dyn FnMut(&mut EventCtx)>` the widget invokes
+directly — mirroring the `&mut dyn Any` erasure `LayoutCtx`'s text context
+uses, so `forgekit-core` and `forgekit-widgets` carry no knowledge of the
+concrete app-state type. The pass never rebuilds or repaints: it returns an
+`EventOutcome { handled,
 needs_redraw }`, and the shell runs rebuild→layout→paint afterward only if
 warranted. The desktop shell is **dirty-driven** — `needs_redraw` becomes a
 single `window.request_redraw()`, and `winit`'s `ControlFlow::Wait` keeps
