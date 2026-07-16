@@ -196,3 +196,124 @@ pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
     forgekit_reactive::ReactiveRuntime::init(std::sync::Arc::new(|| {}));
     App::new(root.init(), move |state: &mut C::State| root.build(state)).run()
 }
+
+/// The canonical app entry point (spec §5.5): one line binds a root
+/// [`Component`] to all three platforms.
+///
+/// ```no_run
+/// use forgekit::{AnyView, Component, any, text};
+///
+/// #[derive(Default)]
+/// struct App;
+///
+/// impl Component for App {
+///     type State = i32;
+///
+///     fn init(&self) -> i32 {
+///         0
+///     }
+///
+///     fn build(&self, state: &mut i32) -> AnyView<i32> {
+///         any(text(format!("count: {state}")).size(32.0))
+///     }
+/// }
+///
+/// forgekit::app!(App);
+/// # fn main() {}
+/// ```
+///
+/// Expands to:
+/// - **Android**: `#[cfg(target_os = "android")] forgekit::android_app!(...)`
+///   bound to `Root::State`/`Root::build`, mirroring [`android_app!`]'s own
+///   not-self-gating contract (its generated symbols only compile where the
+///   Android FFI glue they call into exists).
+/// - **iOS**: `forgekit::ios_app!(...)`, invoked unconditionally — like a
+///   direct `ios_app!` call, it self-gates: every symbol it emits is itself
+///   `#[cfg(target_os = "ios")]`, so the invocation expands to nothing
+///   off-iOS.
+/// - **Every other target** (the desktop preview): a hidden
+///   `#[doc(hidden)] pub fn __forgekit_main()` that runs `Root` through
+///   [`run`], printing the error and exiting non-zero on failure. `app!`
+///   never emits a `fn main` itself — a generated project splits `lib.rs`
+///   (where `app!` is called) from `main.rs` (a one-line `fn main() {
+///   <crate>::__forgekit_main() }`, scaffolded by `forgekit create` and never
+///   hand-edited), since only the binary crate may define `main`.
+///
+/// `Root` must implement `Component + Default`: the macro constructs a `Root`
+/// twice with no arguments (once to build each platform's state factory,
+/// once to close over `build`) — a root component is stateless configuration
+/// (any real data lives in its `Component::State`), so two independent,
+/// short-lived instances are inexpensive and behaviorally identical.
+#[macro_export]
+macro_rules! app {
+    ($root:ty $(,)?) => {
+        #[cfg(target_os = "android")]
+        $crate::android_app!(
+            <$root as $crate::Component>::State,
+            || $crate::Component::init(&<$root as ::core::default::Default>::default()),
+            {
+                let __forgekit_root = <$root as ::core::default::Default>::default();
+                move |state: &mut <$root as $crate::Component>::State| {
+                    $crate::Component::build(&__forgekit_root, state)
+                }
+            }
+        );
+
+        $crate::ios_app!(
+            <$root as $crate::Component>::State,
+            || $crate::Component::init(&<$root as ::core::default::Default>::default()),
+            {
+                let __forgekit_root = <$root as ::core::default::Default>::default();
+                move |state: &mut <$root as $crate::Component>::State| {
+                    $crate::Component::build(&__forgekit_root, state)
+                }
+            }
+        );
+
+        #[cfg(not(target_os = "android"))]
+        #[doc(hidden)]
+        pub fn __forgekit_main() {
+            if let Err(e) = $crate::run(<$root as ::core::default::Default>::default()) {
+                eprintln!("forgekit: {e:#}");
+                ::std::process::exit(1);
+            }
+        }
+    };
+}
+
+/// Compile-only smoke of [`app!`]: a `Component + Default` fixture bound to
+/// all three platforms in one call, exercising acceptance criteria 1-3 —
+/// `cargo test --workspace` compiles this on host (criterion 1: `__forgekit_main`
+/// present, no Android JNI symbols), and `cargo check --target
+/// aarch64-linux-android -p forgekit --tests` / `--target
+/// aarch64-apple-ios-sim -p forgekit --tests` compile it for the two mobile
+/// targets (criterion 2: the respective platform's exports appear,
+/// `__forgekit_main` absent on Android). Lives behind `cfg(test)` — never
+/// linked into a cdylib/staticlib/binary, so the fixed JNI/C-ABI export names
+/// `app!` stamps out (via `android_app!`/`ios_app!`) never collide with a
+/// real generated app's.
+#[cfg(test)]
+mod macro_expansion {
+    // `#[allow(dead_code)]`: a zero-field unit struct's derived `Default::default()`
+    // call (inside `app!`'s generated `__forgekit_main`/state-factory closures) is
+    // not recognized as a "construction site" by the dead-code lint the way a
+    // struct-literal expression is, even though it is genuinely used.
+    #[derive(Default)]
+    #[allow(dead_code)]
+    struct TestApp;
+
+    impl crate::Component for TestApp {
+        type State = u32;
+
+        fn init(&self) -> u32 {
+            0
+        }
+
+        fn build(&self, state: &mut u32) -> crate::AnyView<u32> {
+            *state += 1;
+            crate::any(crate::text(format!("{state}")))
+        }
+    }
+
+    crate::app!(TestApp);
+}
