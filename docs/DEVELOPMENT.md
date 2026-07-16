@@ -22,6 +22,11 @@
   unlocked/paired/trusted, and Developer Mode enabled (Settings → Privacy &
   Security → Developer Mode). `forgekit doctor` checks the Rust targets on
   macOS hosts only.
+- **clean-signals-rs** cloned as a sibling directory (`../clean-signals-rs`
+  next to this checkout), on branch `develop` — needed only to build/test
+  `examples/team-demo`; the root workspace and every other example never
+  need it. See *Version-Pin Policy* for why. Its own verify gate is a
+  conditional step in *Test* below, not part of the unconditional chain.
 - No Docker, CI config, or `.env` setup exists in this repo yet.
 
 ## Build
@@ -80,10 +85,11 @@ yet, so a person must look at the window. `notes` is also the demo
 `forgekit create` scaffolds (`templates/app/src/lib.rs.tmpl`), so scaffold
 changes should be checked against it. `examples/inbox`'s and
 `examples/team-demo`'s own verify gates (`cargo test` plus their clippy
-lines, run from each example's own directory) are their regression proof;
-both are chained onto the end of the Standard verify gate below as separate
-steps — see Version-Pin Policy (which also covers `team-demo`'s
-clean-signals-rs sibling-checkout requirement) and *Test* below.
+lines, run from each example's own directory) are their regression proof:
+`inbox`'s is unconditional in the Standard verify gate below; `team-demo`'s
+is a separate conditional step gated on the clean-signals-rs sibling
+checkout — see Version-Pin Policy (which covers the sibling-checkout
+requirement) and *Test* below.
 
 `examples/team-demo` additionally builds and runs on Android, from its own
 directory (its own `forgekit.toml`, package `it.f0x.team_demo`):
@@ -145,18 +151,31 @@ cargo build --workspace --locked \
   && cargo clippy --workspace --all-targets -- -D warnings \
   && cargo fmt --check \
   && (cd examples/inbox && cargo test) \
-  && (cd examples/inbox && cargo clippy --all-targets -- -D warnings) \
-  && (cd examples/team-demo && cargo test) \
+  && (cd examples/inbox && cargo clippy --all-targets -- -D warnings)
+```
+
+`examples/inbox` gates from its own directory rather than `-p` from the repo
+root because it's a standalone workspace excluded from the root one (see
+*Version-Pin Policy*); it needs only GitHub reachability, a bar the
+unconditional chain can assume everyone satisfies.
+
+If the clean-signals-rs sibling checkout exists at `../clean-signals-rs`
+(branch `develop` — see Prerequisites and *Version-Pin Policy*),
+additionally run:
+
+```bash
+(cd examples/team-demo && cargo test) \
   && (cd examples/team-demo && cargo clippy --all-targets -- -D warnings)
 ```
 
-The `examples/inbox` and `examples/team-demo` steps gate each example from
-its own directory rather than `-p` from the repo root because both are
-standalone workspaces excluded from the root one (see *Version-Pin
-Policy*). `inbox` needs GitHub reachability; `team-demo` needs the
-clean-signals-rs sibling checkout present. Neither is part of `forgekit
-build apk`/`run`'s Android pipeline gate, which is verified separately (see
-*Run*) rather than in this chain.
+No sibling checkout? Do not run these two commands — record "team-demo gate
+not run — no clean-signals-rs sibling checkout" in your completion summary
+instead, and do not touch `examples/team-demo` without the sibling in place.
+There is no CI for this repo, so this doc is the only enforcement; if CI is
+ever introduced, whether it provisions the sibling must be decided
+explicitly. Neither example's gate is part of `forgekit build apk`/`run`'s
+Android pipeline gate, which is verified separately (see *Run*) rather than
+in this chain.
 
 **Manual/gated tests** (not part of the default `cargo test --workspace`
 run — each requires local hardware or is slow, and is marked `#[ignore]`
