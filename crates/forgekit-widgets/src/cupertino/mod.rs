@@ -6,19 +6,19 @@
 //!
 //! Every catalog module is pre-declared here so the wave-4 task that fills
 //! them adds its code to each file directly and never edits this module list
-//! (task 01, PLAN.md D6 same-file discipline):
+//! (task 01, PLAN.md D6 same-file discipline). All are implemented; the
+//! crate root (`forgekit-widgets/src/lib.rs`) flat re-exports every widget +
+//! spec type below (task 14), so app code never names this module directly:
 //!
-//! * [`navbar`] — `CupertinoNavBar` (44pt) (task 13). A doc-only stub today.
-//! * [`tabbar`] — `CupertinoTabBar` (49pt content height) (task 13). A
-//!   doc-only stub today.
-//! * [`switch`] — `CupertinoSwitch` (51×31pt, community value, flagged)
-//!   (task 13). A doc-only stub today.
-//! * [`alert_dialog`] — `CupertinoAlertDialog` (task 13). A doc-only stub
-//!   today.
-//! * [`action_sheet`] — `CupertinoActionSheet` (task 13). A doc-only stub
-//!   today.
-//! * [`activity_indicator`] — `CupertinoActivityIndicator` (20pt) (task 13).
-//!   A doc-only stub today.
+//! * [`navbar`] — `CupertinoNavBar` (44pt). Implemented in task 13.
+//! * [`tabbar`] — `CupertinoTabBar` (49pt content height). Implemented in
+//!   task 13.
+//! * [`switch`] — `CupertinoSwitch` (51×31pt, community value, flagged).
+//!   Implemented in task 13.
+//! * [`alert_dialog`] — `CupertinoAlertDialog`. Implemented in task 13.
+//! * [`action_sheet`] — `CupertinoActionSheet`. Implemented in task 13.
+//! * [`activity_indicator`] — `CupertinoActivityIndicator` (20pt).
+//!   Implemented in task 13.
 
 pub mod action_sheet;
 pub mod activity_indicator;

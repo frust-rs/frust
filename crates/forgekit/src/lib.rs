@@ -96,6 +96,37 @@ pub use forgekit_widgets::{
     ResolvedPage, Route, RouteBuilder, RouteParams, Router,
 };
 
+/// The Material 3 Expressive widget catalog (Phase 6c, PLAN.md D5): AppBar,
+/// Card, Chips, Dialog, FAB, ListView/ListItem, NavigationBar, BottomSheet,
+/// Switch, and progress indicators — flat-re-exported from
+/// `forgekit-widgets` so app code (e.g. `examples/catalog`) never names that
+/// crate directly, mirroring the baseline-widget re-export block above.
+pub use forgekit_widgets::{
+    AppBar, AppBarView, AppBarWidget, AssistChip, AssistChipView, AssistChipWidget,
+    BottomSheetView, BottomSheetWidget, CardVariant, CardView, CardWidget, CircularProgress,
+    CircularProgressView, CircularProgressWidget, DialogView, DialogWidget, FabSize, FabView,
+    FabWidget, FilterChip, FilterChipView, FilterChipWidget, LinearProgress, LinearProgressView,
+    LinearProgressWidget, ListItem, ListItemLines, ListItemWidget, ListView, ListViewWidget,
+    NavItem, NavigationBar, NavigationBarView, NavigationBarWidget, ONE_LINE_HEIGHT, ProgressValue,
+    Switch, SwitchView, SwitchWidget, THREE_LINE_HEIGHT, TWO_LINE_HEIGHT, app_bar, assist_chip,
+    bottom_sheet, card, circular_progress, dialog, elevated_card, extended_fab, fab, filled_card,
+    filter_chip, linear_progress, list_item, list_view, nav_item, navigation_bar, outlined_card,
+    show_bottom_sheet, show_dialog, switch,
+};
+
+/// The Cupertino (iOS) widget catalog (Phase 6c, PLAN.md D5): the
+/// Flutter-parity counterparts to a subset of the Material catalog above —
+/// flat-re-exported from `forgekit-widgets` for the same reason.
+pub use forgekit_widgets::{
+    CupertinoActionSheetView, CupertinoActionSheetWidget, CupertinoActionStyle,
+    CupertinoActivityIndicator, CupertinoActivityIndicatorView, CupertinoActivityIndicatorWidget,
+    CupertinoAlertDialogView, CupertinoAlertDialogWidget, CupertinoDialogAction, CupertinoNavBar,
+    CupertinoNavBarView, CupertinoNavBarWidget, CupertinoSwitch, CupertinoSwitchView,
+    CupertinoSwitchWidget, CupertinoTabBar, CupertinoTabBarView, CupertinoTabBarWidget, TabItem,
+    action, cupertino_activity_indicator, cupertino_nav_bar, cupertino_switch, cupertino_tab_bar,
+    show_action_sheet, show_cupertino_alert, tab_item,
+};
+
 mod router_glue;
 
 /// Router ⇄ deep-link auto-wiring (Phase 6b, task 08): [`router_with_deep_links`]/
@@ -113,8 +144,8 @@ pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 /// [`use_context`]`::<`[`Theme`]`>()`; a widget reads it during paint/layout via
 /// `PaintCtx::theme_as`/`LayoutCtx::theme_as` (or `Theme::from_paint_ctx`).
 pub use forgekit_theme::{
-    Brightness, ColorScheme, Elevation, ElevationLevel, MotionScheme, MotionSpring, ShadowSpec,
-    ShapeScale, SurfaceRole, Theme, TypeScale,
+    Brightness, ColorScheme, DesignLanguage, Elevation, ElevationLevel, MotionScheme, MotionSpring,
+    ShadowSpec, ShapeScale, SurfaceRole, Theme, TypeScale,
 };
 
 /// App-facing theme override (PLAN.md D2 correction, task 6c-04):

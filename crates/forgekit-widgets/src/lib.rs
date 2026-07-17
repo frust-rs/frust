@@ -74,6 +74,63 @@ pub use stack::{Stack, StackView, StackWidget};
 pub use text::{TextView, TextWidget, text};
 pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
 
+// ---------------------------------------------------------------------
+// Material 3 Expressive widget catalog (Phase 6c, task 14) — flat
+// re-exports so app code (via the `forgekit` facade) never has to name
+// `forgekit_widgets::material::*` directly, mirroring the baseline
+// widgets' flat re-export shape above.
+// ---------------------------------------------------------------------
+pub use material::appbar::{AppBar, AppBarView, AppBarWidget, app_bar};
+pub use material::card::{
+    CardVariant, CardView, CardWidget, card, elevated_card, filled_card, outlined_card,
+};
+pub use material::chips::{
+    AssistChip, AssistChipView, AssistChipWidget, FilterChip, FilterChipView, FilterChipWidget,
+    assist_chip, filter_chip,
+};
+pub use material::dialog::{DialogView, DialogWidget, dialog, show_dialog};
+pub use material::fab::{FabSize, FabView, FabWidget, extended_fab, fab};
+pub use material::list_item::{
+    ListItem, ListItemLines, ListItemWidget, ONE_LINE_HEIGHT, THREE_LINE_HEIGHT, TWO_LINE_HEIGHT,
+    list_item,
+};
+pub use material::list_view::{ListView, ListViewWidget, list_view};
+pub use material::navbar::{
+    NavItem, NavigationBar, NavigationBarView, NavigationBarWidget, nav_item, navigation_bar,
+};
+pub use material::progress::{
+    CircularProgress, CircularProgressView, CircularProgressWidget, LinearProgress,
+    LinearProgressView, LinearProgressWidget, ProgressValue, circular_progress, linear_progress,
+};
+pub use material::sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
+pub use material::switch::{Switch, SwitchView, SwitchWidget, switch};
+
+// ---------------------------------------------------------------------
+// Cupertino (iOS) widget catalog (Phase 6c, task 14) — same flat
+// re-export rationale as the Material block above.
+// ---------------------------------------------------------------------
+pub use cupertino::action_sheet::{
+    CupertinoActionSheetView, CupertinoActionSheetWidget, show_action_sheet,
+};
+pub use cupertino::activity_indicator::{
+    CupertinoActivityIndicator, CupertinoActivityIndicatorView, CupertinoActivityIndicatorWidget,
+    cupertino_activity_indicator,
+};
+pub use cupertino::alert_dialog::{
+    CupertinoActionStyle, CupertinoAlertDialogView, CupertinoAlertDialogWidget,
+    CupertinoDialogAction, action, show_cupertino_alert,
+};
+pub use cupertino::navbar::{
+    CupertinoNavBar, CupertinoNavBarView, CupertinoNavBarWidget, cupertino_nav_bar,
+};
+pub use cupertino::switch::{
+    CupertinoSwitch, CupertinoSwitchView, CupertinoSwitchWidget, cupertino_switch,
+};
+pub use cupertino::tabbar::{
+    CupertinoTabBar, CupertinoTabBarView, CupertinoTabBarWidget, TabItem, cupertino_tab_bar,
+    tab_item,
+};
+
 /// A widget-held, `State`-erased app-state callback adapter (see
 /// [`erase_callback`]).
 pub(crate) type ErasedCallback = Box<dyn FnMut(&mut EventCtx)>;

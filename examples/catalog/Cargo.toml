@@ -1,0 +1,25 @@
+[package]
+name = "catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+forgekit = { workspace = true }
+
+# Dev-only: the headless smoke test drives the framework's `RenderRoot`
+# directly (rebuild only — no layout/paint, so no `TextContext` is needed) to
+# prove a tab switch, a Modals-tab push/pop round trip (with its PopResult
+# landing in app state), and a live Material/Cupertino theme swap all survive
+# a rebuild with no panic. `forgekit-reactive` seeds the process-wide
+# `ReactiveRuntime` the way `forgekit::run` does, since `CatalogApp::init`
+# creates several `RwSignal`s (see `docs/ARCHITECTURE.md`'s Component state
+# boundary — signal creation needs an ambient runtime). This mirrors
+# `examples/navdemo`'s identical dev-dependency shape (`docs/CODE_STANDARDS.md`'s
+# State & Reactivity Conventions carves out this exception).
+[dev-dependencies]
+forgekit-core = { workspace = true }
+forgekit-reactive = { workspace = true }
+kurbo = { workspace = true }
