@@ -28,6 +28,11 @@ use peniko::Color;
 /// an app-supplied `.color()` always wins (precedence: explicit > theme >
 /// fallback). With no theme threaded in, the style's own color (black by default)
 /// is the unthemed fallback.
+// Every variant names an M3 "on_*" color role (`on_surface`/`on_primary`/
+// `on_surface_variant`) — the shared `On` prefix reflects the token
+// vocabulary, not a naming smell; a fourth role (`OnSecondaryContainer`, say)
+// would keep the same shape.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ThemeTextColor {
     /// `colors.on_surface` — the default for standalone/body text.
@@ -35,6 +40,10 @@ pub(crate) enum ThemeTextColor {
     /// `colors.on_primary` — a label painted over a `primary`-filled surface
     /// (used by [`crate::Button`]).
     OnPrimary,
+    /// `colors.on_surface_variant` — a de-emphasized label/caption on the app
+    /// surface (used by [`crate::material::navbar`]'s unselected item labels
+    /// and [`crate::material::appbar`]'s trailing action slots' guidance).
+    OnSurfaceVariant,
 }
 
 /// A declarative description of a run of text.
@@ -202,6 +211,7 @@ impl TextWidget {
                 let color = match self.role {
                     ThemeTextColor::OnSurface => scheme.on_surface,
                     ThemeTextColor::OnPrimary => scheme.on_primary,
+                    ThemeTextColor::OnSurfaceVariant => scheme.on_surface_variant,
                 };
                 let mut style = self.style.clone();
                 style.color = color;
@@ -345,6 +355,16 @@ mod tests {
         let theme = Theme::m3_baseline();
         let view = text("x").themed_role(ThemeTextColor::OnPrimary);
         assert_eq!(painted_color(view, Some(&theme)), theme.scheme().on_primary);
+    }
+
+    #[test]
+    fn on_surface_variant_role_resolves_to_on_surface_variant() {
+        let theme = Theme::m3_baseline();
+        let view = text("x").themed_role(ThemeTextColor::OnSurfaceVariant);
+        assert_eq!(
+            painted_color(view, Some(&theme)),
+            theme.scheme().on_surface_variant
+        );
     }
 
     #[test]

@@ -15,9 +15,9 @@
 //! * [`fab`] — the FloatingActionButton, regular/small/large/extended (task 08).
 //!   A doc-only stub today.
 //! * [`card`] — elevated/filled/outlined Card (task 08). A doc-only stub today.
-//! * [`appbar`] — the small, center-aligned top AppBar (task 09). A doc-only
-//!   stub today.
-//! * [`navbar`] — the bottom NavigationBar (task 09). A doc-only stub today.
+//! * [`appbar`] — the small, center-aligned top AppBar. Implemented in task
+//!   09.
+//! * [`navbar`] — the bottom NavigationBar. Implemented in task 09.
 //! * [`progress`] — linear + circular progress indicators (task 10). A
 //!   doc-only stub today.
 //! * [`dialog`] — the basic modal Dialog (task 11). A doc-only stub today.
