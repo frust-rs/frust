@@ -360,6 +360,30 @@ Semantics pass):
   present. Precedence is **explicit builder value > theme > fallback**: an
   app-set value (`.color(...)`, `.style(...)`) always wins over both (see
   `Text`'s `color_explicit` flag).
+- **Token-not-hardcode: a widget authors against a `Theme` field first; a
+  bare local constant is the documented fallback, not the default.** A
+  hardcoded metric/color in paint or layout code is a defect once a matching
+  `ColorScheme`/`ShapeScale`/`Elevation`/`GlassScale`/`MotionScheme` field
+  exists (see `docs/ARCHITECTURE.md`'s Key Types) — resolve it through
+  `Theme::from_paint_ctx`/`from_layout_ctx` per the fallback bullet above.
+  Only a genuine token-scale gap earns a hand-tuned constant (`forgekit-theme`
+  ships no spacing scale and no fixed-dimension scale for switch-track/button-
+  padding metrics), and that constant stays named, doc-commented, and states
+  *why* no token applies (`button.rs`'s `PAD_X`/`PAD_Y`, `switch.rs`'s
+  `TRACK_W`/`TRACK_H` are the reference cases) rather than being left as a
+  silent magic number.
+- **A contested or unsourced design fact is resolved against a primary
+  source and cited with a retrieval date, not left as a guess.** When a
+  research doc's claim lacks (or conflicts with) a citable primary source,
+  fetch the primary source and record `<source>, retrieved <date>` in the
+  module doc, alongside the existing **Community-approximate** marker
+  (above) for values that stay genuinely unsourced. Reference cases:
+  `typography.rs`'s M3-Expressive emphasized-role count, resolved against
+  `androidx.compose.material3`'s `TypeScaleTokens.kt` (retrieved
+  2026-07-18); `color.rs`'s Cupertino palette refresh and several
+  `cupertino::*` metrics (`switch.rs`'s 64×28 track, `button.rs`'s
+  size-class heights), each citing a specific named record in the mined
+  `kit-colors-type-metrics.json`/`glass-recipes.json` research ledgers.
 - **Event-pass code never reads a theme — `EventCtx` carries none.** Only
   `LayoutCtx`/`PaintCtx` thread a theme; a metric an event handler also needs
   (hit-test padding, caret geometry) stays a plain constant read from both
