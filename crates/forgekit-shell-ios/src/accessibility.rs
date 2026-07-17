@@ -156,7 +156,8 @@ impl IosA11yAdapter {
     pub(crate) fn push_if_active(&self, factory: impl FnOnce() -> SemanticsUpdate) {
         let events = self.adapter.update_if_active(|| {
             let update = factory();
-            crate::ffi_support::build_tree_update(update.nodes, update.root, update.focus_id())
+            let focus = update.focus_id();
+            crate::ffi_support::build_tree_update(update.nodes, update.root, focus)
         });
         if let Some(events) = events {
             events.raise();
