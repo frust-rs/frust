@@ -409,6 +409,33 @@ const SPRING_REST_EPSILON: f64 = 1e-3;
 /// when it moved reverse. [`repeat`](Self::repeat) never completes ([`advance`](Self::advance)
 /// always returns `true`). A [`fling`](Self::fling) settles at `1.0` (positive
 /// velocity) or `0.0` (negative) as `Completed`/`Dismissed`.
+///
+/// # Overshoot (spring-driven only)
+///
+/// Duration+[`Curve`] motion ([`forward`]/[`reverse`]/[`animate_to`]/[`repeat`])
+/// always keeps [`value`](Self::value) in `0.0..=1.0` — unchanged from before
+/// this contract existed. A [`fling`](Self::fling), by contrast, is **not**
+/// clamped while in flight: an under-damped [`SpringDesc`] (M3's spatial
+/// presets use `damping_ratio: 0.9`) genuinely overshoots its target before
+/// settling, and that overshoot is the whole visual point of a "bouncy"
+/// spring — clamping it away would hide it. `value()` may therefore transiently
+/// read outside `[0, 1]` mid-fling; it always lands exactly on the target
+/// (`0.0`/`1.0`) once [`advance`](Self::advance) reports settled (`status()`
+/// becomes `Completed`/`Dismissed`). A consumer that needs the value
+/// pinned to `[0, 1]` at every frame (e.g. to feed a `Lerp`/`Tween` that
+/// assumes bounded input) should use [`value_clamped`](Self::value_clamped)
+/// instead. A critically-/over-damped spring (`damping_ratio >= 1.0`, e.g.
+/// M3's "effects" presets) released with zero velocity (the common
+/// "settle to target" fling usage) never overshoots in the first place, so
+/// `value()`/`value_clamped()` agree for that case; a large enough release
+/// velocity can still carry even a critically-/over-damped spring past its
+/// target before it settles back — damping ratio bounds *oscillation*
+/// (repeated overshoot), not a single one.
+///
+/// [`forward`]: Self::forward
+/// [`reverse`]: Self::reverse
+/// [`animate_to`]: Self::animate_to
+/// [`repeat`]: Self::repeat
 #[derive(Clone, Copy, Debug)]
 pub struct AnimationController {
     value: f64,
@@ -463,9 +490,28 @@ impl AnimationController {
         self
     }
 
-    /// The current value in `0.0..=1.0`.
+    /// The current value.
+    ///
+    /// For duration+[`Curve`] motion this is always in `0.0..=1.0`. For a
+    /// spring [`fling`](Self::fling) it may transiently read outside that
+    /// range — an under-damped spring's overshoot is real motion, not a bug
+    /// (see the type docs' Overshoot section) — but always lands exactly on
+    /// the target once the fling settles. Use
+    /// [`value_clamped`](Self::value_clamped) if a bounded `[0, 1]` read is
+    /// required instead.
     pub fn value(&self) -> f64 {
         self.value
+    }
+
+    /// [`value`](Self::value), clamped to `0.0..=1.0`.
+    ///
+    /// Identical to `value()` for duration+[`Curve`] motion (already
+    /// bounded); for a spring [`fling`](Self::fling) mid-overshoot this
+    /// clips the transient excursion past the target — for consumers (e.g. a
+    /// `Lerp`/`Tween` feed) that need a bounded value and don't want the
+    /// bounce visually represented.
+    pub fn value_clamped(&self) -> f64 {
+        self.value.clamp(0.0, 1.0)
     }
 
     /// The current lifecycle status.
@@ -522,6 +568,11 @@ impl AnimationController {
     /// Start a spring fling from the current value with initial `velocity` (in
     /// value-units per second). It settles toward `1.0` for a non-negative
     /// velocity, `0.0` otherwise.
+    ///
+    /// Unlike duration+[`Curve`] motion, the value driven by a fling is
+    /// **not clamped to `[0, 1]` while in flight** — see the type docs'
+    /// Overshoot section and [`value`](Self::value)/
+    /// [`value_clamped`](Self::value_clamped).
     pub fn fling(&mut self, velocity: f64, spring: SpringDesc) {
         let target = if velocity >= 0.0 { 1.0 } else { 0.0 };
         let x0 = self.value - target;
@@ -621,7 +672,12 @@ impl AnimationController {
                     self.drive = Drive::Idle;
                     false
                 } else {
-                    self.value = (target + spring.position(elapsed)).clamp(0.0, 1.0);
+                    // Deliberately unclamped: an under-damped spring's
+                    // overshoot past the target is real, intended motion
+                    // (see the type docs' Overshoot section), and clamping
+                    // it here would hide it. `value_clamped()` is the
+                    // bounded-read escape hatch for consumers that need one.
+                    self.value = target + spring.position(elapsed);
                     true
                 }
             }
@@ -873,6 +929,116 @@ mod tests {
         assert!(!running, "fling failed to settle");
         assert!((c.value() - 1.0).abs() < 1e-6);
         assert_eq!(c.status(), AnimationStatus::Completed);
+    }
+
+    #[test]
+    fn fling_overshoots_past_target_for_underdamped_spring() {
+        // M3's default-spatial preset: ζ = 0.9, k = 700 — under-damped, so a
+        // fling released with zero velocity still oscillates around the
+        // target before settling.
+        let desc = SpringDesc {
+            mass: 1.0,
+            stiffness: 700.0,
+            damping_ratio: 0.9,
+        };
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.fling(0.0, desc);
+
+        // Track the max value observed while flying; the analytic
+        // cross-check against `Spring` directly lives in the sibling test
+        // `fling_overshoot_values_match_analytic_spring`.
+        let mut max_value = f64::MIN;
+        let mut t = 0.0;
+        let mut running = true;
+        for _ in 0..100_000 {
+            running = c.advance(ft_secs(t));
+            if !running {
+                break;
+            }
+            max_value = max_value.max(c.value());
+            t += 1.0 / 120.0;
+        }
+        assert!(!running, "fling failed to settle");
+        assert!(
+            max_value > 1.0 + 1e-3,
+            "expected a demonstrable overshoot past 1.0, got max {max_value}"
+        );
+        assert_eq!(c.value(), 1.0);
+        assert_eq!(c.status(), AnimationStatus::Completed);
+    }
+
+    #[test]
+    fn fling_overshoot_values_match_analytic_spring() {
+        let desc = SpringDesc {
+            mass: 1.0,
+            stiffness: 700.0,
+            damping_ratio: 0.9,
+        };
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.fling(0.0, desc);
+        let spring = Spring::new(desc, -1.0, 0.0);
+
+        // Seed the clock, then check a handful of in-flight samples against
+        // the analytic spring directly.
+        assert!(c.advance(ft_secs(0.0)));
+        for &t in &[0.01, 0.02, 0.03, 0.05, 0.08] {
+            assert!(c.advance(ft_secs(t)));
+            let expected = 1.0 + spring.position(t);
+            assert!(
+                (c.value() - expected).abs() < 1e-6,
+                "at t={t}: controller {} vs analytic {expected}",
+                c.value()
+            );
+        }
+    }
+
+    #[test]
+    fn effects_spring_never_exceeds_target() {
+        // M3's default-effects preset: ζ = 1.0 — critically damped, released
+        // from rest (velocity 0), so it approaches the target monotonically
+        // with no overshoot.
+        let desc = SpringDesc {
+            mass: 1.0,
+            stiffness: 1600.0,
+            damping_ratio: 1.0,
+        };
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.fling(0.0, desc);
+
+        let mut t = 0.0;
+        let mut running = true;
+        for _ in 0..100_000 {
+            running = c.advance(ft_secs(t));
+            assert!(
+                c.value() <= 1.0 + 1e-9,
+                "critically damped spring released from rest overshot: value {} at t={t}",
+                c.value()
+            );
+            if !running {
+                break;
+            }
+            t += 1.0 / 120.0;
+        }
+        assert!(!running, "fling failed to settle");
+        assert_eq!(c.value(), 1.0);
+        assert_eq!(c.status(), AnimationStatus::Completed);
+    }
+
+    #[test]
+    fn value_clamped_bounds_an_overshooting_fling() {
+        let desc = SpringDesc {
+            mass: 1.0,
+            stiffness: 700.0,
+            damping_ratio: 0.9,
+        };
+        let mut c = AnimationController::new(Duration::from_millis(100));
+        c.fling(0.0, desc);
+        c.advance(ft_secs(0.0));
+        c.advance(ft_secs(0.02));
+        // Overshoot is expected in `value()` but `value_clamped()` must stay
+        // bounded regardless.
+        assert!(c.value_clamped() >= 0.0 && c.value_clamped() <= 1.0);
+        assert_eq!(c.value_clamped(), c.value().clamp(0.0, 1.0));
     }
 
     #[test]
