@@ -142,7 +142,7 @@ pub use forgekit_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// The deep-link read surface (spec §19; `forgekit-reactive`'s `app_links`-
 /// style process-wide source — see its module docs for the semantics): a
 /// mobile shell delivers a platform link via `forgekit-reactive`'s
-/// (crate-internal) `push_deep_link`, and app code reads it here —
+/// [`push_deep_link`], and app code reads it here —
 /// [`deep_links()`] returns a [`DeepLinks`] snapshot ([`DeepLinks::initial`])
 /// plus the live, trackable [`DeepLinks::latest`] signal a
 /// [`Component::build`] reads to react to cold-start and subsequent links
@@ -171,7 +171,12 @@ pub use forgekit_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// }
 /// # let _ = app_logic;
 /// ```
-pub use forgekit_reactive::{DeepLink, DeepLinks, deep_links};
+/// [`push_deep_link`] is normally called by a mobile shell's platform-link
+/// handler; it is also re-exported here as the desktop dev seam Phase 6b's
+/// task 06 documents (no shell writes on desktop yet) — `examples/navdemo`'s
+/// "simulate deep link" button calls it directly to demonstrate warm-link
+/// navigation without a real platform link.
+pub use forgekit_reactive::{DeepLink, DeepLinks, deep_links, push_deep_link};
 pub use reactive_graph::computed::Memo;
 pub use reactive_graph::signal::{ReadSignal, WriteSignal, signal};
 // The access traits the signal types' methods are defined through — without
