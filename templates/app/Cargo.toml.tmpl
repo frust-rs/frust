@@ -32,3 +32,34 @@ panic = "abort"
 inherits = "release"
 debug = true
 strip = "none"
+
+# `[profile.dev]` per-package overrides for the render/shader-compile stack
+# (6e Finding 5 / 6e-fix-1 task 03): vello/wgpu/naga's shader-pipeline
+# translation runs at `opt-level = 0` by default, which is slow enough on a
+# physical iOS device that the OS SIGKILLs a debug `forgekit run` before the
+# synchronous, main-thread launch-time shader compile finishes. This app's
+# own code stays at the default dev opt-level (fast incremental rebuilds) —
+# only these dependencies are bumped. `docs/spec.md` §12.9 documents
+# `opt-level = 1` for deps generally; `opt-level = 2` is used here for the
+# shader-compile-heavy crates specifically (see forgekit's own root
+# `Cargo.toml` for the full rationale — the same override, kept in sync).
+[profile.dev.package.vello]
+opt-level = 2
+
+[profile.dev.package.vello_shaders]
+opt-level = 2
+
+[profile.dev.package.vello_encoding]
+opt-level = 2
+
+[profile.dev.package.wgpu]
+opt-level = 2
+
+[profile.dev.package.wgpu-core]
+opt-level = 2
+
+[profile.dev.package.wgpu-hal]
+opt-level = 2
+
+[profile.dev.package.naga]
+opt-level = 2

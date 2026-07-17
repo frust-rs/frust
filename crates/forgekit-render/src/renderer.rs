@@ -235,10 +235,24 @@ impl SurfaceRenderer {
         let backend = match ctx.selected_tier() {
             crate::RenderTier::Gpu => {
                 let device = &ctx.device_handle().device;
-                let renderer = vello::Renderer::new(device, vello::RendererOptions::default())
-                    .map_err(|e| {
-                        anyhow!("forgekit-render: failed to create vello renderer: {e}")
-                    })?;
+                // Narrow the compiled AA pipeline set to `Area` only (the sole
+                // `AaConfig` `render()` ever requests — see the
+                // `antialiasing_method: vello::AaConfig::Area` `RenderParams`
+                // below): `RendererOptions::default()` compiles shader
+                // permutations for every `AaConfig` (`AaSupport::all()`), ~3x
+                // unnecessary pipeline compiles at init that contribute to the
+                // slow, synchronous, main-thread launch-time shader compile
+                // behind 6e Finding 5's iOS SIGKILL (6e-fix-1 task 03).
+                // Verified against the vello 0.9.0 source
+                // (`RendererOptions::antialiasing_support: AaSupport`,
+                // `AaSupport::area_only()` — both public, non-`non_exhaustive`).
+                let renderer_options = vello::RendererOptions {
+                    antialiasing_support: vello::AaSupport::area_only(),
+                    ..Default::default()
+                };
+                let renderer = vello::Renderer::new(device, renderer_options).map_err(|e| {
+                    anyhow!("forgekit-render: failed to create vello renderer: {e}")
+                })?;
                 TierBackend::Gpu(renderer)
             }
             #[cfg(feature = "cpu-tier")]

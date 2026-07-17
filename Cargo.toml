@@ -99,3 +99,41 @@ forgekit-shell-common = { path = "crates/forgekit-shell-common" }
 forgekit-shell-android = { path = "crates/forgekit-shell-android" }
 forgekit-shell-ios = { path = "crates/forgekit-shell-ios" }
 forgekit = { path = "crates/forgekit" }
+
+# `[profile.dev]` per-package overrides for the render/shader-compile stack
+# (6e Finding 5 / 6e-fix-1 task 03): vello/wgpu/naga's shader-pipeline
+# translation runs at `opt-level = 0` by default, which is slow enough on a
+# physical iOS device that the OS SIGKILLs a debug `forgekit run` before the
+# synchronous, main-thread launch-time shader compile finishes. The app's own
+# code stays at the default dev opt-level (fast incremental rebuilds) — only
+# these dependencies are bumped. `docs/spec.md` §12.9 documents
+# `opt-level = 1` for deps generally; `opt-level = 2` is used here for the
+# shader-compile-heavy crates specifically, since 1 measurably helps but a
+# thin margin isn't enough headroom against the 6e repro's SIGKILL, and 2's
+# extra shader-compile speed only costs incremental-build time on these few
+# packages, not the whole dependency graph (`opt-level = 3`'s further gain
+# over 2 is marginal for straight-line shader-translation code and not worth
+# its added compile-time cost). This is forgekit's own workspace dev
+# workflow (`cargo run -p hello`, etc.); the same override lands in
+# `templates/app/Cargo.toml.tmpl` (every generated app) and
+# `examples/catalog/Cargo.toml` (the 6e repro vehicle).
+[profile.dev.package.vello]
+opt-level = 2
+
+[profile.dev.package.vello_shaders]
+opt-level = 2
+
+[profile.dev.package.vello_encoding]
+opt-level = 2
+
+[profile.dev.package.wgpu]
+opt-level = 2
+
+[profile.dev.package.wgpu-core]
+opt-level = 2
+
+[profile.dev.package.wgpu-hal]
+opt-level = 2
+
+[profile.dev.package.naga]
+opt-level = 2
