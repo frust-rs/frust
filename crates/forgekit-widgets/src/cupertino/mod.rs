@@ -19,10 +19,13 @@
 //! * [`action_sheet`] — `CupertinoActionSheet`. Implemented in task 13.
 //! * [`activity_indicator`] — `CupertinoActivityIndicator` (20pt).
 //!   Implemented in task 13.
+//! * [`button`] — `CupertinoButton` (kit-mined Small/Medium/Large size
+//!   classes; Filled/Gray/Glass styles). Implemented in phase 6f task 12.
 
 pub mod action_sheet;
 pub mod activity_indicator;
 pub mod alert_dialog;
+pub mod button;
 pub mod navbar;
 pub mod switch;
 pub mod tabbar;

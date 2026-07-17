@@ -133,6 +133,10 @@ pub use cupertino::alert_dialog::{
     CupertinoActionStyle, CupertinoAlertDialogView, CupertinoAlertDialogWidget,
     CupertinoDialogAction, action, show_cupertino_alert,
 };
+pub use cupertino::button::{
+    CupertinoButton, CupertinoButtonSize, CupertinoButtonStyle, CupertinoButtonView,
+    CupertinoButtonWidget, cupertino_button,
+};
 pub use cupertino::navbar::{
     CupertinoNavBar, CupertinoNavBarView, CupertinoNavBarWidget, cupertino_nav_bar,
 };
