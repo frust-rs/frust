@@ -697,12 +697,16 @@ mod tests {
 
         // Verify the key event was handled (forwarded to and handled by child).
         assert_eq!(
-            result, EventResult::Handled,
+            result,
+            EventResult::Handled,
             "key event must be forwarded to focused child"
         );
 
         // The row press should not have fired (the row only fires on pointer Up).
-        assert_eq!(state.presses, 0, "row press callback does not fire on key event");
+        assert_eq!(
+            state.presses, 0,
+            "row press callback does not fire on key event"
+        );
     }
 
     // --- Semantics ---

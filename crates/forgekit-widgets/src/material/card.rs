@@ -689,11 +689,7 @@ mod tests {
     }
 
     impl Widget for FocusConsumerWidget {
-        fn layout(
-            &mut self,
-            _ctx: &mut forgekit_core::LayoutCtx,
-            bc: &BoxConstraints,
-        ) -> Size {
+        fn layout(&mut self, _ctx: &mut forgekit_core::LayoutCtx, bc: &BoxConstraints) -> Size {
             bc.max()
         }
         fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
@@ -709,8 +705,8 @@ mod tests {
 
     #[test]
     fn interactive_card_forwards_key_events_to_focused_child() {
-        let view: CardView<Counter> = filled_card(FocusConsumer::new())
-            .on_press(|s: &mut Counter| s.presses += 1);
+        let view: CardView<Counter> =
+            filled_card(FocusConsumer::new()).on_press(|s: &mut Counter| s.presses += 1);
         let mut w = build(&view);
         let mut state = Counter::default();
 
@@ -728,10 +724,17 @@ mod tests {
         let result = dispatch(&mut w, &mut state, &key_event);
 
         // Verify the key event was handled (forwarded to and handled by child).
-        assert_eq!(result, EventResult::Handled, "key event must be forwarded to child");
+        assert_eq!(
+            result,
+            EventResult::Handled,
+            "key event must be forwarded to child"
+        );
 
         // The card press should not have fired (the card only fires on pointer Up).
-        assert_eq!(state.presses, 0, "card press callback does not fire on key event");
+        assert_eq!(
+            state.presses, 0,
+            "card press callback does not fire on key event"
+        );
     }
 
     #[test]
