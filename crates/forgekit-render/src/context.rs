@@ -303,7 +303,11 @@ impl RenderContext {
         // one diagnostic path `select_render_tier` owns (shared with its own
         // unit tests). An explicit override (`FORGEKIT_RENDER_TIER`, or
         // `forgekit run --render-tier` setting it for the spawned process)
-        // wins outright. When the `cpu-tier` feature is compiled in, a failed
+        // wins *among available tiers* — a `Cpu` override always applies, but a
+        // `Gpu` override onto an adapter that lacks the required downlevel flags
+        // is refused (`select_render_tier` returns `Unavailable`), so the
+        // `Unavailable` arm below fails fast rather than handing vello a device
+        // it panics on. When the `cpu-tier` feature is compiled in, a failed
         // GPU probe now selects the experimental `Cpu` tier (vello_cpu, see the
         // `cpu_tier` module + `SurfaceRenderer`) instead of failing — the
         // device is still created (only vello's compute path is unavailable;

@@ -8,11 +8,14 @@
 //! here is wrapped in [`guard`](forgekit_shell_common::guard) so a panic is
 //! caught and turned into a benign default instead of unwinding across the C-ABI
 //! boundary (undefined behaviour). The `unsafe` *code* in this module is confined
-//! to three things, each with a safety comment: the calls into
+//! to four things, each with a safety comment: the calls into
 //! `on_surface_created_from_metal_layer` (raw `CAMetalLayer*` → surface — at init
-//! in [`create_handle`] and on surface recovery in [`recover_surface`]),
-//! `Box::into_raw`/`from_raw` for the opaque handle's lifetime, and reconstituting
-//! the raw handle pointer as a `&mut`.
+//! in [`create_handle`] and on surface recovery in [`recover_surface`]), the
+//! `accessibility::IosA11yAdapter::new` construction in [`init_accessibility`]
+//! (raw `UIView*` → adapter, handed to the now-safe
+//! `IosAppHandle::attach_accessibility`), `Box::into_raw`/`from_raw` for the
+//! opaque handle's lifetime, and reconstituting the raw handle pointer as a
+//! `&mut`.
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::Write;
@@ -25,6 +28,7 @@ use forgekit_reactive::{ReactiveRuntime, push_deep_link};
 use forgekit_render::{RenderContext, SurfaceRenderer};
 use forgekit_shell_common::{AppTree, guard};
 
+use crate::accessibility::IosA11yAdapter;
 use crate::app::IosAppHandle;
 use crate::ffi_support::CaretRect;
 
@@ -150,10 +154,17 @@ pub fn init_accessibility(handle: *mut c_void, view: *mut c_void) {
         }
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
+            // The `unsafe` adapter construction is confined here, in `ffi_glue`
+            // (this crate's sanctioned raw-pointer zone), rather than leaking into
+            // `app.rs` — mirroring how the `on_surface_created_from_metal_layer`
+            // calls stay in this module. The resulting adapter is handed to the
+            // now-safe `IosAppHandle::attach_accessibility`.
+            //
             // SAFETY: `view` is the app's live, unreleased `ForgeKitView` (UIView)
             // pointer, delivered on the main thread on first layout before the view
             // is shown — the contract `IosA11yAdapter::new`/accesskit_ios require.
-            unsafe { app.attach_accessibility(view) };
+            let adapter = unsafe { IosA11yAdapter::new(view) };
+            app.attach_accessibility(adapter);
         }
     });
 }

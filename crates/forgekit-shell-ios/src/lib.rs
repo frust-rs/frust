@@ -25,11 +25,17 @@
 //! This crate is a sanctioned `unsafe` zone (spec §10.2): the framework crates
 //! stay `unsafe`-free, but a platform shell must cross the FFI boundary. The
 //! crate's `unsafe` surface is [`ffi_glue`]'s `unsafe` code — the call into
-//! `on_surface_created_from_metal_layer`, `Box::into_raw`/`from_raw` for the
-//! opaque handle, and reconstituting it as a `&mut` — each with a safety comment,
-//! plus the `#[unsafe(no_mangle)]` attributes the [`ios_app!`] macro emits on its
-//! generated `extern "C"` exports (edition 2024 spells `no_mangle` as an unsafe
-//! attribute).
+//! `on_surface_created_from_metal_layer`, the
+//! `accessibility::IosA11yAdapter::new` construction (a sanctioned raw-`UIView*`
+//! constructor, analogous to `forgekit-render`'s surface constructors — declared
+//! `unsafe fn` in [`accessibility`] but *called* only from `ffi_glue`),
+//! `Box::into_raw`/`from_raw` for the opaque handle, and reconstituting it as a
+//! `&mut` — each with a safety comment, plus the `#[unsafe(no_mangle)]`
+//! attributes the [`ios_app!`] macro emits on its generated `extern "C"` exports
+//! (edition 2024 spells `no_mangle` as an unsafe attribute). The `app` module —
+//! the frame/lifecycle runtime — contains no `unsafe`; the only `unsafe fn`
+//! declaration outside `ffi_glue` is `IosA11yAdapter::new`, and its sole call
+//! site is `ffi_glue::init_accessibility`.
 
 // The iOS-specific pure helpers (the null-handle sentinel and the paused/ready
 // frame gate), consumed by the (iOS-only) FFI layer and by host unit tests. In a

@@ -525,9 +525,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ///
     /// * [`accesskit::Action::Click`] → a `Down` then an `Up` at the center,
     ///   activating any button/switch/checkbox exactly as a real tap would.
-    /// * [`accesskit::Action::Focus`] → a single `Down` at the center, which
-    ///   claims focus for a widget that opts in on `Down` (the recorded-focus
-    ///   contract); a widget that does not claim focus on `Down` is unaffected.
+    /// * [`accesskit::Action::Focus`] → a `Down` then a synthetic `Cancel` at
+    ///   the center: the `Down` claims focus for a widget that opts in on `Down`
+    ///   (the recorded-focus contract), and the `Cancel` releases the capture
+    ///   that same `Down` opened without touching the recorded focus path — so
+    ///   the action claims focus without leaving the widget permanently
+    ///   capturing every later pointer event. A widget that does not claim focus
+    ///   on `Down` is unaffected, and `Cancel` never fires an on-press callback.
     /// * any other action → ignored (a no-op [`EventOutcome`]); richer actions are
     ///   deferred.
     ///
@@ -570,7 +574,21 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     needs_redraw: down.needs_redraw || up.needs_redraw,
                 }
             }
-            accesskit::Action::Focus => self.event(state, &synth(PointerPhase::Down)),
+            accesskit::Action::Focus => {
+                // A `Down` claims focus for a widget that opts in on `Down`; a
+                // synthetic `Cancel` then releases the capture that `Down` also
+                // opened (mirroring a real gesture steal), leaving the recorded
+                // focus path intact — `Cancel` clears both `active` and
+                // `pointer_captured` while never touching `focused`/`focus_active`.
+                // Without the `Cancel`, the `Down` alone would leave the widget
+                // permanently capturing every subsequent pointer event.
+                let down = self.event(state, &synth(PointerPhase::Down));
+                let cancel = self.event(state, &synth(PointerPhase::Cancel));
+                EventOutcome {
+                    handled: down.handled || cancel.handled,
+                    needs_redraw: down.needs_redraw || cancel.needs_redraw,
+                }
+            }
             // Other actions are not modelled in v1: ignore rather than guess.
             _ => EventOutcome::default(),
         }
@@ -1464,6 +1482,213 @@ mod tests {
         let cb = button_node_id(&root.semantics(), Role::CheckBox);
         root.perform_accessibility_action(&mut state, cb, Action::Click);
         assert_eq!(state.clicks, 1, "Click toggled the checkbox once");
+    }
+
+    #[test]
+    fn perform_focus_action_claims_focus_and_clears_capture() {
+        // Two focus-claiming, fire-on-up-inside buttons in a container. A11y
+        // `Focus` on B must claim focus for B *and* release the capture the
+        // synthesized `Down` opened — the CRITICAL leak this regresses: without
+        // the trailing `Cancel`, B stayed captured and swallowed every later
+        // pointer event, so a tap on A never reached A.
+
+        #[derive(Default)]
+        struct FocusState {
+            a_press: u32,
+            b_press: u32,
+            b_move: u32,
+        }
+
+        #[derive(Clone, Copy)]
+        enum Btn {
+            A,
+            B,
+        }
+
+        /// A button that opts into both recorded paths (capture + focus) on
+        /// `Down` and fires its press only on `Up`-inside — never on `Cancel`.
+        struct FocusButton {
+            id: Btn,
+        }
+        impl crate::widget::Widget for FocusButton {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(40.0, 20.0))
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+            fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+                let InputEvent::Pointer(p) = event else {
+                    return EventResult::Ignored;
+                };
+                match p.phase {
+                    PointerPhase::Down => {
+                        ctx.capture_pointer();
+                        ctx.request_focus();
+                        EventResult::Handled
+                    }
+                    PointerPhase::Move => {
+                        if let Btn::B = self.id {
+                            ctx.state_mut::<FocusState>().b_move += 1;
+                        }
+                        EventResult::Handled
+                    }
+                    PointerPhase::Up => {
+                        let size = ctx.size();
+                        let inside = p.position.x >= 0.0
+                            && p.position.y >= 0.0
+                            && p.position.x <= size.width
+                            && p.position.y <= size.height;
+                        if inside {
+                            match self.id {
+                                Btn::A => ctx.state_mut::<FocusState>().a_press += 1,
+                                Btn::B => ctx.state_mut::<FocusState>().b_press += 1,
+                            }
+                        }
+                        EventResult::Handled
+                    }
+                    // A `Cancel` clears without firing on_press and never touches
+                    // state — the contract the Focus action's trailing Cancel rides.
+                    PointerPhase::Cancel => EventResult::Handled,
+                }
+            }
+            fn semantics(&self, ctx: &mut SemanticsCtx) {
+                let label = match self.id {
+                    Btn::A => "A",
+                    Btn::B => "B",
+                };
+                ctx.push_node(Role::Button, |n| n.set_label(label));
+            }
+        }
+
+        /// A minimal two-child container mirroring `forgekit-widgets`'
+        /// `route_event`: a captured gesture goes straight to the active child
+        /// (auto-released on `Up`/`Cancel`), otherwise the event is hit-tested to
+        /// the child under it.
+        struct TwoButtons {
+            a: crate::widget::ChildPod,
+            b: crate::widget::ChildPod,
+        }
+        impl crate::widget::Widget for TwoButtons {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                self.a.layout_child(ctx, bc);
+                self.a.set_origin(Point::new(0.0, 0.0));
+                self.b.layout_child(ctx, bc);
+                self.b.set_origin(Point::new(0.0, 30.0));
+                bc.max()
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                self.a.paint_child(ctx, scene);
+                self.b.paint_child(ctx, scene);
+            }
+            fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+                let releases = matches!(
+                    event,
+                    InputEvent::Pointer(p)
+                        if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+                );
+                // Capture fast-path: a recorded active child receives every event
+                // until it releases on Up/Cancel, bypassing the hit test entirely.
+                if self.a.is_active() {
+                    let r = self.a.event_child(ctx, event);
+                    if releases {
+                        self.a.set_active(false);
+                    }
+                    return r;
+                }
+                if self.b.is_active() {
+                    let r = self.b.event_child(ctx, event);
+                    if releases {
+                        self.b.set_active(false);
+                    }
+                    return r;
+                }
+                // Fresh event: route to the child under the point.
+                let pos = event.position();
+                if self.a.contains(pos) {
+                    return self.a.event_child(ctx, event);
+                }
+                if self.b.contains(pos) {
+                    return self.b.event_child(ctx, event);
+                }
+                EventResult::Ignored
+            }
+            fn semantics(&self, ctx: &mut SemanticsCtx) {
+                self.a.semantics_child(ctx);
+                self.b.semantics_child(ctx);
+            }
+        }
+
+        struct TwoButtonsView;
+        impl View<FocusState> for TwoButtonsView {
+            type Element = TwoButtons;
+            fn build(&self, _ctx: &mut BuildCtx<'_>) -> TwoButtons {
+                TwoButtons {
+                    a: crate::widget::ChildPod::new(Box::new(FocusButton { id: Btn::A })),
+                    b: crate::widget::ChildPod::new(Box::new(FocusButton { id: Btn::B })),
+                }
+            }
+            fn rebuild(
+                &self,
+                _p: &Self,
+                _e: &mut TwoButtons,
+                _c: &mut BuildCtx<'_>,
+            ) -> ChangeFlags {
+                ChangeFlags::NONE
+            }
+        }
+
+        let mut root: RenderRoot<FocusState, TwoButtonsView> = RenderRoot::new();
+        let mut state = FocusState::default();
+        root.rebuild(&mut |_| TwoButtonsView, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        // B's semantics node (label "B") is the a11y Focus target.
+        let b_id = root
+            .semantics()
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label().is_some_and(|l| l == "B"))
+            .map(|(id, _)| *id)
+            .expect("button B contributes a semantics node");
+
+        // A11y `Focus` on B: claims the focus session, fires no on_press, and —
+        // crucially — leaves nothing captured (the Down+Cancel shape).
+        root.perform_accessibility_action(&mut state, b_id, Action::Focus);
+        assert!(root.is_focus_active(), "Focus opened the focus session");
+        assert!(
+            !root.is_pointer_captured(),
+            "the trailing Cancel released the capture the Focus Down opened"
+        );
+        assert_eq!(
+            state.b_press, 0,
+            "Focus (Down+Cancel) must not fire B's on_press"
+        );
+
+        // B is not stuck-captured: a `Move` outside both buttons is ignored. Were
+        // B still captured, the capture fast-path would route this to B regardless
+        // of position (b_move would tick).
+        let outside = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position: Point::new(100.0, 100.0),
+            button: PointerButton::Primary,
+        });
+        root.event(&mut state, &outside);
+        assert_eq!(state.b_move, 0, "no leaked capture: B saw no stray Move");
+
+        // A real Down+Up on A activates A exactly once and never reaches B.
+        let at_a = |phase| {
+            InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(20.0, 10.0),
+                button: PointerButton::Primary,
+            })
+        };
+        root.event(&mut state, &at_a(PointerPhase::Down));
+        root.event(&mut state, &at_a(PointerPhase::Up));
+        assert_eq!(state.a_press, 1, "A fired once from its own tap");
+        assert_eq!(
+            state.b_press, 0,
+            "B never fired — its capture never leaked onto A's tap"
+        );
     }
 
     #[test]

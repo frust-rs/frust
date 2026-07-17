@@ -63,7 +63,10 @@ pub const GPU_REQUIRED_DOWNLEVEL_FLAGS: wgpu::DownlevelFlags =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TierOutcome {
     /// `tier` is usable — either it probed capable, or an explicit override
-    /// asked for it regardless (an override always wins; PLAN.md D4).
+    /// selected it. An override wins **among available tiers**: a `Cpu` override
+    /// always applies, but a `Gpu` override still requires the adapter to support
+    /// [`GPU_REQUIRED_DOWNLEVEL_FLAGS`] — an incapable `Gpu` override is
+    /// [`TierOutcome::Unavailable`], not `Available` (PLAN.md D4).
     Available(RenderTier),
     /// No tier is usable in this build. `would_be` names the tier that
     /// *would* have been selected had it been compiled in (spec Phase 6's
@@ -85,8 +88,13 @@ pub struct TierSelection {
 
 /// Selects the render tier.
 ///
-/// - An explicit `override_tier` always wins, even onto a tier `caps` don't
-///   support — the caller asked for it directly (PLAN.md D4's override
+/// - An explicit `override_tier` wins **among available tiers**: a `Cpu`
+///   override always applies (the CPU tier has no adapter prerequisite), but a
+///   `Gpu` override applies only when `caps` actually support
+///   [`GPU_REQUIRED_DOWNLEVEL_FLAGS`]. A `Gpu` override onto an incapable
+///   adapter is **refused** — [`TierOutcome::Unavailable`] naming `Gpu` — since
+///   an override cannot conjure a missing GPU capability; the caller then keeps
+///   the same fail-fast behavior a failed probe produces (PLAN.md D4's override
 ///   plumbing: `FORGEKIT_RENDER_TIER` / `forgekit run --render-tier`).
 /// - Without an override: `caps` supporting [`GPU_REQUIRED_DOWNLEVEL_FLAGS`]
 ///   selects [`RenderTier::Gpu`]. Otherwise, if the `cpu-tier` feature is
@@ -99,6 +107,28 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
     let gpu_capable = caps.downlevel_flags.contains(GPU_REQUIRED_DOWNLEVEL_FLAGS);
 
     if let Some(tier) = override_tier {
+        // A `Gpu` override cannot conjure a capability the adapter lacks: an
+        // override selects among *available* tiers, so a `Gpu` override onto an
+        // incapable adapter is REFUSED (the same fail-fast the probe path takes),
+        // letting `ensure_device`'s `Unavailable` arm fire rather than handing
+        // vello a device that panics every frame. A `Cpu` override (no adapter
+        // prerequisite) and a `Gpu` override on a capable adapter are unchanged.
+        if tier == RenderTier::Gpu && !gpu_capable {
+            let missing = GPU_REQUIRED_DOWNLEVEL_FLAGS - caps.downlevel_flags;
+            return TierSelection {
+                outcome: TierOutcome::Unavailable {
+                    would_be: RenderTier::Gpu,
+                },
+                diagnosis: format!(
+                    "forgekit-render: GPU render tier explicitly requested via override, but \
+                     REFUSED — adapter `{}` lacks the downlevel flags the vello renderer requires \
+                     ({missing:?}); an override selects among available tiers and cannot supply a \
+                     missing GPU capability. Run on a physical device, or build with the \
+                     experimental `cpu-tier` feature for a CPU fallback.",
+                    caps.adapter_name
+                ),
+            };
+        }
         return TierSelection {
             outcome: TierOutcome::Available(tier),
             diagnosis: format!(
@@ -237,14 +267,40 @@ mod tests {
     }
 
     #[test]
-    fn override_wins_even_over_incapable_caps() {
+    fn gpu_override_refused_on_incapable_caps() {
+        // A `Gpu` override cannot conjure a missing GPU capability: it is refused
+        // (Unavailable naming Gpu), so `ensure_device` fails fast instead of
+        // handing vello a device that panics every frame.
         let selection =
             select_render_tier(&caps(wgpu::DownlevelFlags::empty()), Some(RenderTier::Gpu));
+        assert_eq!(
+            selection.outcome,
+            TierOutcome::Unavailable {
+                would_be: RenderTier::Gpu
+            }
+        );
+        assert!(selection.diagnosis.contains("REFUSED"));
+    }
+
+    #[test]
+    fn gpu_override_wins_on_capable_caps() {
+        // A `Gpu` override on a capable adapter is honored.
+        let selection =
+            select_render_tier(&caps(wgpu::DownlevelFlags::all()), Some(RenderTier::Gpu));
         assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Gpu));
     }
 
     #[test]
-    fn override_wins_over_capable_caps_too() {
+    fn cpu_override_wins_even_on_incapable_caps() {
+        // The CPU tier has no adapter prerequisite, so a `Cpu` override always
+        // applies — even onto an adapter with no downlevel flags at all.
+        let selection =
+            select_render_tier(&caps(wgpu::DownlevelFlags::empty()), Some(RenderTier::Cpu));
+        assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));
+    }
+
+    #[test]
+    fn cpu_override_wins_over_capable_caps_too() {
         let selection =
             select_render_tier(&caps(wgpu::DownlevelFlags::all()), Some(RenderTier::Cpu));
         assert_eq!(selection.outcome, TierOutcome::Available(RenderTier::Cpu));

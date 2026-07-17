@@ -166,23 +166,18 @@ impl IosAppHandle {
         }
     }
 
-    /// Attach the accesskit adapter to the app's `ForgeKitView` (phase-6d task 05).
+    /// Store the accesskit adapter for the app's `ForgeKitView` (phase-6d task 05).
     ///
     /// Called once from [`crate::ffi_glue::init_accessibility`] on the first
-    /// layout, after `forgekit_init` returned this handle. Constructs an
-    /// [`IosA11yAdapter`] (which dynamically subclasses the view to implement the
-    /// UIKit accessibility methods) and stores it; from the next frame on, `frame()`
-    /// pushes semantics to it and routes its queued actions.
-    ///
-    /// # Safety
-    ///
-    /// `view` must be a valid, unreleased `UIView` (`ForgeKitView`) pointer, on the
-    /// UIKit main thread, before the view is first shown/focused — the contract
-    /// [`IosA11yAdapter::new`] forwards to accesskit_ios's `SubclassingAdapter::new`.
-    pub(crate) unsafe fn attach_accessibility(&mut self, view: *mut c_void) {
-        // SAFETY: forwarded from this fn's contract (live UIView*, main thread,
-        // pre-display) straight to the adapter constructor.
-        self.a11y = Some(unsafe { IosA11yAdapter::new(view) });
+    /// layout, after `forgekit_init` returned this handle. The `unsafe`
+    /// construction of the [`IosA11yAdapter`] (dynamically subclassing the view to
+    /// implement the UIKit accessibility methods) happens at the FFI boundary in
+    /// `ffi_glue` — the sanctioned zone for raw-pointer work — so this method is a
+    /// plain, safe store: it just takes the already-constructed adapter. From the
+    /// next frame on, `frame()` pushes semantics to it and routes its queued
+    /// actions.
+    pub(crate) fn attach_accessibility(&mut self, adapter: IosA11yAdapter) {
+        self.a11y = Some(adapter);
     }
 
     /// `forgekit_set_appearance`: flip the theme's brightness and re-push it to
