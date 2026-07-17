@@ -92,6 +92,25 @@ impl Theme {
         }
     }
 
+    /// Force this theme's [`DesignLanguage`]/[`Brightness`] combination while
+    /// preserving a live brightness — a builder over the `brightness` field,
+    /// meant to be chained onto [`Theme::m3_baseline`]/[`Theme::cupertino_baseline`]
+    /// (both of which hardcode `Brightness::Light`) before handing the result to
+    /// `set_app_theme`.
+    ///
+    /// Framework footgun this closes (6e Finding 6, bug 2): `set_app_theme`
+    /// stores its argument as the override-wins theme (spec's override-wins
+    /// rule — an app-set theme always beats further OS appearance reports,
+    /// intentionally). A caller that forces a design language via
+    /// `set_app_theme(Theme::m3_baseline())` therefore also silently pins
+    /// brightness to `Light` forever, discarding whatever OS night-mode state
+    /// was live a moment before. `Theme::m3_baseline().with_brightness(live)`
+    /// forces the design language without discarding brightness.
+    pub fn with_brightness(mut self, brightness: Brightness) -> Self {
+        self.brightness = brightness;
+        self
+    }
+
     /// Recover the active theme from a widget's [`PaintCtx`], or `None` if none
     /// was threaded into the paint pass (a supported state — a pre-theme app or
     /// a bare-core test).
@@ -180,5 +199,25 @@ mod tests {
 
         theme.brightness = Brightness::Dark;
         assert_eq!(theme.scheme(), &theme.dark);
+    }
+
+    #[test]
+    fn with_brightness_forces_design_language_without_discarding_brightness() {
+        // Regression for 6e Finding 6, bug 2: forcing a design language via a
+        // baseline constructor used to silently reset brightness to `Light`
+        // even when the caller's live brightness was `Dark`.
+        let theme = Theme::m3_baseline().with_brightness(Brightness::Dark);
+        assert_eq!(theme.brightness, Brightness::Dark);
+        assert_eq!(theme.design_language, DesignLanguage::Material3);
+        assert_eq!(theme.scheme(), &theme.dark);
+
+        let theme = Theme::cupertino_baseline().with_brightness(Brightness::Dark);
+        assert_eq!(theme.brightness, Brightness::Dark);
+        assert_eq!(theme.design_language, DesignLanguage::Cupertino);
+        assert_eq!(theme.scheme(), &theme.dark);
+
+        // Light stays light — the builder isn't a one-way flip.
+        let theme = Theme::m3_baseline().with_brightness(Brightness::Light);
+        assert_eq!(theme.brightness, Brightness::Light);
     }
 }

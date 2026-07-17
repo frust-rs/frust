@@ -49,11 +49,21 @@
 //! Material/Cupertino counterpart pair on `design_language`. Chips/FAB/Cards
 //! have no Cupertino counterpart (documented, PLAN.md D5) and are shown
 //! unconditionally on both design languages.
+//!
+//! The override is built as `Theme::cupertino_baseline().with_brightness(live)`
+//! (and the M3 mirror), not the bare baseline constructor: both baselines
+//! hardcode `Brightness::Light`, and the override-wins rule (spec) means a
+//! bare `set_app_theme(Theme::m3_baseline())` would silently pin the app to
+//! Light forever, ignoring further OS night-mode reports (6e Finding 6, bug
+//! 2). [`top_bar`] reads the live brightness off the same [`Theme`]
+//! `root_page` already pulled from `use_context` and threads it through
+//! [`Theme::with_brightness`] so forcing a design language never discards it.
 
 use forgekit::{
-    AnyView, Axis, Button, Column, Component, CrossAxisAlignment, CupertinoActionStyle,
-    DesignLanguage, FlexView, Get, NavigatorController, ONE_LINE_HEIGHT, PopResult, ProgressValue,
-    Row, RwSignal, Set, SizedBox, Switch, Theme, Update, action, any, app_bar, assist_chip,
+    AnyView, Axis, Brightness, Button, Column, Component, CrossAxisAlignment,
+    CupertinoActionStyle, DesignLanguage, FlexView, Get, NavigatorController, ONE_LINE_HEIGHT,
+    PopResult, ProgressValue, Row, RwSignal, Set, SizedBox, Switch, Theme, Update, action, any,
+    app_bar, assist_chip,
     bottom_sheet, circular_progress, cupertino_activity_indicator, cupertino_nav_bar,
     cupertino_switch, cupertino_tab_bar, dialog, elevated_card, extended_fab, fab, filled_card,
     filter_chip, flexible, inflexible, linear_progress, list_item, list_view, nav_item,
@@ -181,8 +191,9 @@ fn root_page(
     // `examples/gallery`'s `GalleryApp::build` uses.
     let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
     let design = theme.design_language;
+    let brightness = theme.brightness;
 
-    let top = top_bar(design);
+    let top = top_bar(design, brightness);
     let bottom = bottom_bar(design, signals.tab);
     let content = tab_content(design, signals.tab.get(), controller, signals);
 
@@ -196,17 +207,24 @@ fn root_page(
 /// The persistent top bar: [`app_bar`] (Material) or [`cupertino_nav_bar`]
 /// (Cupertino), each with a trailing button that forces the *other* design
 /// language's baseline via [`set_app_theme`] (task 6c-04's override seam).
-fn top_bar(design: DesignLanguage) -> AnyView<AppState> {
+///
+/// Takes the live `brightness` alongside `design` and threads it through
+/// [`Theme::with_brightness`] when building the override (6e Finding 6, bug
+/// 2 fix): `Theme::cupertino_baseline()`/`Theme::m3_baseline()` alone
+/// hardcode `Brightness::Light`, which would silently pin the app to Light
+/// under the override-wins rule regardless of the OS's live appearance —
+/// `with_brightness` forces the design language without discarding it.
+fn top_bar(design: DesignLanguage, brightness: Brightness) -> AnyView<AppState> {
     match design {
         DesignLanguage::Material3 => {
             any(app_bar::<AppState>("ForgeKit Catalog")
-                .actions(vec![any(Button("Cupertino", |_s: &mut AppState| {
-                    set_app_theme(Theme::cupertino_baseline())
+                .actions(vec![any(Button("Cupertino", move |_s: &mut AppState| {
+                    set_app_theme(Theme::cupertino_baseline().with_brightness(brightness))
                 }))]))
         }
         DesignLanguage::Cupertino => any(cupertino_nav_bar::<AppState>("ForgeKit Catalog")
-            .trailing(any(Button("Material", |_s: &mut AppState| {
-                set_app_theme(Theme::m3_baseline())
+            .trailing(any(Button("Material", move |_s: &mut AppState| {
+                set_app_theme(Theme::m3_baseline().with_brightness(brightness))
             })))),
     }
 }
