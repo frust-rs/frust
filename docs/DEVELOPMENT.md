@@ -145,6 +145,13 @@ The first Android build downloads Gradle 9.5.x, and the first iOS build
 compiles the whole Rust dependency graph for the simulator target — expect
 either to take a few minutes.
 
+`forgekit run --render-tier <gpu|cpu>` forces the render tier
+(`FORGEKIT_RENDER_TIER`, the same variable a manual `cargo run` can set
+directly) for the desktop preview; an explicit choice always wins over the
+probe. It is desktop-preview-only today — passed for an Android/iOS device
+run, `run` prints a not-plumbed note and the device still probes its own
+tier.
+
 ## Release Builds
 
 ```bash
@@ -204,6 +211,15 @@ explicitly. Neither example's gate is part of `forgekit build apk`/`run`'s
 Android pipeline gate, which is verified separately (see *Run*) rather than
 in this chain.
 
+The `cpu-tier` feature (experimental `vello_cpu` render backend, non-default
+— see *Version-Pin Policy*) is headless and needs no GPU, but isn't compiled
+by the standard chain above since the feature is off by default; run it
+directly when touching `forgekit-render`:
+
+```bash
+cargo test -p forgekit-render --features cpu-tier
+```
+
 **Manual/gated tests** (not part of the default `cargo test --workspace`
 run — each requires local hardware or is slow, and is marked `#[ignore]`
 with a reason):
@@ -234,6 +250,14 @@ cargo check --target aarch64-linux-android -p forgekit
 # must compile for the iOS Simulator target.
 cargo check --target aarch64-apple-ios-sim -p forgekit
 ```
+
+The iOS compile gate above is also the only check of the `accesskit_ios`
+adapter today — it has not yet been compiled on any host in this repo's CI
+history (Linux-only so far). Screen-reader verification (TalkBack on
+Android, VoiceOver on iOS) and the `cpu-tier` render tier's visual behavior
+on real hardware are not yet verified — both need a device/Simulator with a
+screen reader enabled or a physical GPU, which this repo's headless host
+cannot provide.
 
 ### Deep-link manual test (Android)
 
@@ -303,9 +327,16 @@ deliberately, not floating:
   a custom subscriber, not `RenderEffect` — see `docs/ARCHITECTURE.md`'s Key
   Types).
 - `accesskit = "0.24"` (`forgekit-core`'s semantics-pass vocabulary, spec §9)
-  is pinned to minor — a core-crate-only dependency, with no
-  `accesskit_*` platform adapter wired yet; `cargo test -p forgekit-core
-  semantics` is the tripwire for a breaking bump.
+  is pinned to minor; `cargo test -p forgekit-core semantics` is the tripwire
+  for a breaking bump. The three per-shell platform adapters unify on this
+  pin: `accesskit_winit = "0.33"` (desktop) and `accesskit_android = "0.7"`
+  are pinned to minor; `accesskit_ios = "=0.1.2"` is pinned exact (its 0.1.x
+  line is younger/less proven — see *Test* below for its compile-gate
+  status).
+- `vello_cpu = "=0.0.9"` (the experimental CPU render tier, `forgekit-render`'s
+  non-default `cpu-tier` feature) is pinned exact — pre-1.0 with an unstable
+  API, isolated behind the `SceneSink` encode seam so a breaking bump never
+  reaches the default GPU path. See *Test* below for its tripwire command.
 - `examples/inbox` is a **standalone package** (its own `[workspace]` root
   and `Cargo.lock`, `exclude`d from the root `[workspace]` in the root
   `Cargo.toml`) specifically so its `git`+`rev`-pinned `clean-signals`

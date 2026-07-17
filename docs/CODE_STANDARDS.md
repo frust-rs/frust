@@ -278,10 +278,18 @@ Semantics pass):
   }
   ```
 
-- **Keep it minimal: role, label, state, and bounds only.** This gives a
-  future platform adapter just enough to build on — no live-region
-  announcements, no custom actions, and no platform adapter wiring belong
-  here (that integration lives in a shell, not `forgekit-core`).
+- **Keep it minimal: role, label, state, and bounds only.** This gives the
+  per-shell platform adapter (`accesskit_winit`/`accesskit_android`/
+  `accesskit_ios` — see `docs/ARCHITECTURE.md`'s Semantics pass) just enough
+  to build on — no live-region announcements, no custom actions, and no
+  adapter wiring belong here; that integration lives in a shell, not
+  `forgekit-core`.
+- **A platform adapter gates its pushes on `semantics_generation`/
+  `semantics_if_changed`, not on pushing every frame unconditionally.**
+  Desktop and Android compare the last-seen generation before rebuilding a
+  `TreeUpdate`; recompute-on-every-active-frame (the iOS adapter's current
+  behavior) is an accepted fallback only where the dirty gate isn't wired
+  yet, not the target steady state for a new adapter.
 
 ## State & Reactivity Conventions
 
@@ -376,8 +384,11 @@ Semantics pass):
   active states', never their sum — M3 shows the strongest state, not a
   stacked blend. Of the four, only `pressed` is currently driven by any
   shipping widget: `hovered` awaits a pointer-hover `PointerPhase` (none
-  exists yet), `focused` awaits widget focus routing, and `dragged` awaits a
-  consumer calling `set_dragged`. See `material/state_layer.rs`'s "Live vs.
+  exists yet); `focused` awaits a widget that both participates in focus
+  routing *and* paints its own `StateLayer` surface — the four modal widgets
+  now claim keyboard focus (see `docs/ARCHITECTURE.md`'s Semantics pass) but
+  paint no `StateLayer` chrome, so this state stays unwired; `dragged` awaits
+  a consumer calling `set_dragged`. See `material/state_layer.rs`'s "Live vs.
   aspirational states" module doc for the authoritative statement.
 
 ## Testing Patterns
