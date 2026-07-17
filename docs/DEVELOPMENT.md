@@ -147,8 +147,9 @@ either to take a few minutes.
 
 `forgekit run --render-tier <gpu|cpu>` forces the render tier
 (`FORGEKIT_RENDER_TIER`, the same variable a manual `cargo run` can set
-directly) for the desktop preview; an explicit choice always wins over the
-probe. It is desktop-preview-only today — passed for an Android/iOS device
+directly) for the desktop preview; an explicit choice wins among tiers the
+adapter supports — forcing `gpu` on an incapable adapter fails fast with the
+probe's diagnosis, while `cpu` can always be forced. It is desktop-preview-only today — passed for an Android/iOS device
 run, `run` prints a not-plumbed note and the device still probes its own
 tier.
 
