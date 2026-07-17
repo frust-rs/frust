@@ -84,10 +84,57 @@
 //!   boundary above (20pt vs 17pt), so every `display_*`/`headline_*` slot
 //!   uses the Display stack and every `title_*`/`body_*`/`label_*` slot uses
 //!   the Text stack.
+//!
+//! # Emphasized type scale (M3 Expressive)
+//!
+//! [`TypeScale`] additionally carries 15 `_emphasized` variants (one per
+//! baseline role, 30 slots total), filled by [`TypeScale::m3`]/
+//! [`TypeScale::cupertino`] alongside the baseline 15.
+//!
+//! **Role-count resolution:** this phase's research sweep flagged "15
+//! baseline + 15 emphasized (30 total), applied to Display/Headline/Title
+//! roles" as a REFUTED/contested claim (see
+//! `workflow/plans/features/forgekit-phase-6f-design-modernization/research/RESEARCH.md`'s
+//! REFUTED-claims section) — the "30 total" count was right but the
+//! "Display/Headline/Title only" scope was wrong. Verified directly against
+//! the primary source: Jetpack Compose Material3's generated token file
+//! (`androidx.compose.material3.tokens.TypographyTokens`/`TypeScaleTokens`,
+//! `VERSION: v0_103`,
+//! <https://github.com/androidx/androidx/blob/androidx-main/compose/material3/material3/src/commonMain/kotlin/androidx/compose/material3/tokens/TypeScaleTokens.kt>
+//! — Compose's `Typography` class doc comments enumerate an
+//! `*Emphasized` property for *all 15* baseline roles: `displayLarge`
+//! through `labelSmall`, not a Display/Headline/Title-only subset;
+//! retrieved/verified 2026-07-18). This module follows that: every one of
+//! the 15 baseline roles gets an emphasized sibling.
+//!
+//! **M3 deltas** (from the same source): size and line height are unchanged
+//! between a role's baseline and emphasized token — only weight (and, for a
+//! handful of roles, letter spacing) shift. Weight always steps up one rung
+//! from the baseline token's own weight: Regular → Medium for every
+//! Regular-weight baseline role (`display_*`, `headline_*`, `title_large`,
+//! `body_*`), and Medium → Bold for every Medium-weight baseline role
+//! (`title_medium`, `title_small`, `label_*`) — so every emphasized style is
+//! guaranteed to differ from its base in weight. Letter spacing mostly
+//! matches the baseline value already in this module's tables; `body_large`
+//! is the one role whose emphasized tracking differs from its own baseline
+//! (0.5px baseline → 0.15px emphasized, matching the source's
+//! `BodyLargeEmphasizedTracking`).
+//!
+//! **Cupertino mapping:** per this task's inputs (SF Pro weights mined into
+//! `research/kit-colors-type-metrics.json`'s `text_styles` — only Regular and
+//! Semibold appear), [`TypeScale::cupertino`]'s emphasized slots reuse the
+//! same size/line-height/family as their baseline counterpart and force
+//! weight to Semibold — including `title_large`/`title_medium` (mapped from
+//! SF Pro Headline, already Semibold by default), whose emphasized variant is
+//! therefore numerically identical to its own baseline; this is a faithful
+//! mapping outcome (SF Pro has no weight above Semibold to step up to here),
+//! not an oversight.
 
 use forgekit_text::{FontFamily, FontWeight, LineHeight, TextStyle};
 
-/// The 15 Material 3 type-scale presets, each a full [`TextStyle`].
+/// The 15 Material 3 type-scale presets, each a full [`TextStyle`], plus 15
+/// M3-Expressive `_emphasized` siblings (see the module docs' "Emphasized
+/// type scale" section).
 ///
 /// Build one from a `base` style (its `family`/`style`/`color` are kept;
 /// `size`/`weight`/`letter_spacing`/`line_height` are overridden per token)
@@ -109,6 +156,21 @@ pub struct TypeScale {
     pub label_large: TextStyle,
     pub label_medium: TextStyle,
     pub label_small: TextStyle,
+    pub display_large_emphasized: TextStyle,
+    pub display_medium_emphasized: TextStyle,
+    pub display_small_emphasized: TextStyle,
+    pub headline_large_emphasized: TextStyle,
+    pub headline_medium_emphasized: TextStyle,
+    pub headline_small_emphasized: TextStyle,
+    pub title_large_emphasized: TextStyle,
+    pub title_medium_emphasized: TextStyle,
+    pub title_small_emphasized: TextStyle,
+    pub body_large_emphasized: TextStyle,
+    pub body_medium_emphasized: TextStyle,
+    pub body_small_emphasized: TextStyle,
+    pub label_large_emphasized: TextStyle,
+    pub label_medium_emphasized: TextStyle,
+    pub label_small_emphasized: TextStyle,
 }
 
 /// One type-scale token's numeric shape: `(size_px, line_height_px,
@@ -130,6 +192,28 @@ const BODY_SMALL: Token = (12.0, 16.0, 0.4, FontWeight::REGULAR);
 const LABEL_LARGE: Token = (14.0, 20.0, 0.1, FontWeight::MEDIUM);
 const LABEL_MEDIUM: Token = (12.0, 16.0, 0.5, FontWeight::MEDIUM);
 const LABEL_SMALL: Token = (11.0, 16.0, 0.5, FontWeight::MEDIUM);
+
+// M3-Expressive emphasized tokens: same size/line-height as the matching
+// baseline `Token` above in every case; weight steps up one rung from the
+// baseline role's own weight (Regular -> Medium, Medium -> Bold) and letter
+// spacing is the source's `*Emphasized*Tracking` value (see the module
+// docs' "Emphasized type scale" section for the primary-source citation and
+// resolution of the contested Display/Headline/Title-only scope claim).
+const DISPLAY_LARGE_EMPHASIZED: Token = (57.0, 64.0, 0.0, FontWeight::MEDIUM);
+const DISPLAY_MEDIUM_EMPHASIZED: Token = (45.0, 52.0, 0.0, FontWeight::MEDIUM);
+const DISPLAY_SMALL_EMPHASIZED: Token = (36.0, 44.0, 0.0, FontWeight::MEDIUM);
+const HEADLINE_LARGE_EMPHASIZED: Token = (32.0, 40.0, 0.0, FontWeight::MEDIUM);
+const HEADLINE_MEDIUM_EMPHASIZED: Token = (28.0, 36.0, 0.0, FontWeight::MEDIUM);
+const HEADLINE_SMALL_EMPHASIZED: Token = (24.0, 32.0, 0.0, FontWeight::MEDIUM);
+const TITLE_LARGE_EMPHASIZED: Token = (22.0, 28.0, 0.0, FontWeight::MEDIUM);
+const TITLE_MEDIUM_EMPHASIZED: Token = (16.0, 24.0, 0.15, FontWeight::BOLD);
+const TITLE_SMALL_EMPHASIZED: Token = (14.0, 20.0, 0.1, FontWeight::BOLD);
+const BODY_LARGE_EMPHASIZED: Token = (16.0, 24.0, 0.15, FontWeight::MEDIUM);
+const BODY_MEDIUM_EMPHASIZED: Token = (14.0, 20.0, 0.25, FontWeight::MEDIUM);
+const BODY_SMALL_EMPHASIZED: Token = (12.0, 16.0, 0.4, FontWeight::MEDIUM);
+const LABEL_LARGE_EMPHASIZED: Token = (14.0, 20.0, 0.1, FontWeight::BOLD);
+const LABEL_MEDIUM_EMPHASIZED: Token = (12.0, 16.0, 0.5, FontWeight::BOLD);
+const LABEL_SMALL_EMPHASIZED: Token = (11.0, 16.0, 0.5, FontWeight::BOLD);
 
 fn apply(base: &TextStyle, token: Token) -> TextStyle {
     let (size, line_height_px, letter_spacing, weight) = token;
@@ -163,6 +247,21 @@ impl TypeScale {
             label_large: apply(base, LABEL_LARGE),
             label_medium: apply(base, LABEL_MEDIUM),
             label_small: apply(base, LABEL_SMALL),
+            display_large_emphasized: apply(base, DISPLAY_LARGE_EMPHASIZED),
+            display_medium_emphasized: apply(base, DISPLAY_MEDIUM_EMPHASIZED),
+            display_small_emphasized: apply(base, DISPLAY_SMALL_EMPHASIZED),
+            headline_large_emphasized: apply(base, HEADLINE_LARGE_EMPHASIZED),
+            headline_medium_emphasized: apply(base, HEADLINE_MEDIUM_EMPHASIZED),
+            headline_small_emphasized: apply(base, HEADLINE_SMALL_EMPHASIZED),
+            title_large_emphasized: apply(base, TITLE_LARGE_EMPHASIZED),
+            title_medium_emphasized: apply(base, TITLE_MEDIUM_EMPHASIZED),
+            title_small_emphasized: apply(base, TITLE_SMALL_EMPHASIZED),
+            body_large_emphasized: apply(base, BODY_LARGE_EMPHASIZED),
+            body_medium_emphasized: apply(base, BODY_MEDIUM_EMPHASIZED),
+            body_small_emphasized: apply(base, BODY_SMALL_EMPHASIZED),
+            label_large_emphasized: apply(base, LABEL_LARGE_EMPHASIZED),
+            label_medium_emphasized: apply(base, LABEL_MEDIUM_EMPHASIZED),
+            label_small_emphasized: apply(base, LABEL_SMALL_EMPHASIZED),
         }
     }
 
@@ -190,6 +289,21 @@ impl TypeScale {
             label_large: apply_cupertino(base, CUPERTINO_LABEL_LARGE),
             label_medium: apply_cupertino(base, CUPERTINO_LABEL_MEDIUM),
             label_small: apply_cupertino(base, CUPERTINO_LABEL_SMALL),
+            display_large_emphasized: apply_cupertino_emphasized(base, CUPERTINO_DISPLAY_LARGE),
+            display_medium_emphasized: apply_cupertino_emphasized(base, CUPERTINO_DISPLAY_MEDIUM),
+            display_small_emphasized: apply_cupertino_emphasized(base, CUPERTINO_DISPLAY_SMALL),
+            headline_large_emphasized: apply_cupertino_emphasized(base, CUPERTINO_HEADLINE_LARGE),
+            headline_medium_emphasized: apply_cupertino_emphasized(base, CUPERTINO_HEADLINE_MEDIUM),
+            headline_small_emphasized: apply_cupertino_emphasized(base, CUPERTINO_HEADLINE_SMALL),
+            title_large_emphasized: apply_cupertino_emphasized(base, CUPERTINO_TITLE_LARGE),
+            title_medium_emphasized: apply_cupertino_emphasized(base, CUPERTINO_TITLE_MEDIUM),
+            title_small_emphasized: apply_cupertino_emphasized(base, CUPERTINO_TITLE_SMALL),
+            body_large_emphasized: apply_cupertino_emphasized(base, CUPERTINO_BODY_LARGE),
+            body_medium_emphasized: apply_cupertino_emphasized(base, CUPERTINO_BODY_MEDIUM),
+            body_small_emphasized: apply_cupertino_emphasized(base, CUPERTINO_BODY_SMALL),
+            label_large_emphasized: apply_cupertino_emphasized(base, CUPERTINO_LABEL_LARGE),
+            label_medium_emphasized: apply_cupertino_emphasized(base, CUPERTINO_LABEL_MEDIUM),
+            label_small_emphasized: apply_cupertino_emphasized(base, CUPERTINO_LABEL_SMALL),
         }
     }
 }
@@ -248,6 +362,15 @@ fn apply_cupertino(base: &TextStyle, token: CupertinoToken) -> TextStyle {
         line_height: LineHeight::Absolute(line_height_pt),
         ..base.clone()
     }
+}
+
+/// Builds a Cupertino emphasized token from its baseline `token`'s
+/// size/line-height (unchanged), forcing weight to Semibold — the only
+/// emphasized weight SF Pro's mined text styles (Regular, Semibold) support
+/// (see the module docs' "Cupertino mapping" paragraph).
+fn apply_cupertino_emphasized(base: &TextStyle, token: CupertinoToken) -> TextStyle {
+    let (size, line_height_pt, _weight) = token;
+    apply_cupertino(base, (size, line_height_pt, FontWeight::SEMI_BOLD))
 }
 
 #[cfg(test)]
@@ -349,5 +472,121 @@ mod tests {
         assert_ne!(scale.body_large.family, base.family);
         assert_eq!(scale.body_large.color, base.color);
         assert_eq!(scale.body_large.style, base.style);
+    }
+
+    /// Every M3 emphasized role differs from its own baseline in weight —
+    /// the "spec'd dimension" per the module docs' M3-deltas paragraph
+    /// (weight always steps up one rung: Regular -> Medium or Medium ->
+    /// Bold), verified across all 15 roles, not just Display/Headline/Title
+    /// (the resolved, previously-contested scope question — see module
+    /// docs).
+    #[test]
+    fn m3_every_emphasized_role_differs_in_weight_from_its_base() {
+        let scale = TypeScale::m3(&TextStyle::new(16.0, Color::BLACK));
+        let pairs: [(&TextStyle, &TextStyle); 15] = [
+            (&scale.display_large, &scale.display_large_emphasized),
+            (&scale.display_medium, &scale.display_medium_emphasized),
+            (&scale.display_small, &scale.display_small_emphasized),
+            (&scale.headline_large, &scale.headline_large_emphasized),
+            (&scale.headline_medium, &scale.headline_medium_emphasized),
+            (&scale.headline_small, &scale.headline_small_emphasized),
+            (&scale.title_large, &scale.title_large_emphasized),
+            (&scale.title_medium, &scale.title_medium_emphasized),
+            (&scale.title_small, &scale.title_small_emphasized),
+            (&scale.body_large, &scale.body_large_emphasized),
+            (&scale.body_medium, &scale.body_medium_emphasized),
+            (&scale.body_small, &scale.body_small_emphasized),
+            (&scale.label_large, &scale.label_large_emphasized),
+            (&scale.label_medium, &scale.label_medium_emphasized),
+            (&scale.label_small, &scale.label_small_emphasized),
+        ];
+        for (base, emphasized) in pairs {
+            assert_ne!(
+                base.weight, emphasized.weight,
+                "expected emphasized weight to differ from base weight"
+            );
+        }
+    }
+
+    #[test]
+    fn m3_emphasized_keeps_base_size_and_line_height() {
+        // Only weight (and, for a few roles, letter spacing) shift between
+        // an M3 role's baseline and emphasized token — size and line height
+        // are unchanged (see module docs' M3-deltas paragraph).
+        let scale = TypeScale::m3(&TextStyle::new(16.0, Color::BLACK));
+        assert_eq!(
+            scale.display_large.size,
+            scale.display_large_emphasized.size
+        );
+        assert_eq!(
+            scale.display_large.line_height,
+            scale.display_large_emphasized.line_height
+        );
+        assert_eq!(scale.label_small.size, scale.label_small_emphasized.size);
+        assert_eq!(
+            scale.label_small.line_height,
+            scale.label_small_emphasized.line_height
+        );
+    }
+
+    #[test]
+    fn m3_display_large_emphasized_is_medium_weight() {
+        let scale = TypeScale::m3(&TextStyle::new(16.0, Color::BLACK));
+        assert_eq!(scale.display_large_emphasized.weight, FontWeight::MEDIUM);
+        assert_eq!(scale.display_large_emphasized.letter_spacing, 0.0);
+    }
+
+    #[test]
+    fn m3_title_medium_emphasized_is_bold_weight() {
+        // title_medium's baseline weight is already Medium (500), so its
+        // emphasized sibling steps up to Bold (700), not Medium again.
+        let scale = TypeScale::m3(&TextStyle::new(16.0, Color::BLACK));
+        assert_eq!(scale.title_medium.weight, FontWeight::MEDIUM);
+        assert_eq!(scale.title_medium_emphasized.weight, FontWeight::BOLD);
+    }
+
+    #[test]
+    fn m3_label_small_emphasized_is_bold_weight() {
+        let scale = TypeScale::m3(&TextStyle::new(16.0, Color::BLACK));
+        assert_eq!(scale.label_small.weight, FontWeight::MEDIUM);
+        assert_eq!(scale.label_small_emphasized.weight, FontWeight::BOLD);
+    }
+
+    #[test]
+    fn m3_body_large_emphasized_tracking_differs_from_base() {
+        // body_large is the one role whose emphasized letter spacing also
+        // differs from its own baseline (0.5px -> 0.15px), per the primary
+        // source's BodyLargeEmphasizedTracking (see module docs).
+        let scale = TypeScale::m3(&TextStyle::new(16.0, Color::BLACK));
+        assert_eq!(scale.body_large.letter_spacing, 0.5);
+        assert_eq!(scale.body_large_emphasized.letter_spacing, 0.15);
+    }
+
+    #[test]
+    fn cupertino_emphasized_slots_are_all_semibold() {
+        // Cupertino emphasized forces Semibold across every slot — SF Pro's
+        // mined text styles have no weight above Semibold to step up to
+        // (see module docs' "Cupertino mapping" paragraph).
+        let scale = TypeScale::cupertino(&TextStyle::new(16.0, Color::BLACK));
+        assert_eq!(scale.display_large_emphasized.weight, FontWeight::SEMI_BOLD);
+        assert_eq!(scale.body_large_emphasized.weight, FontWeight::SEMI_BOLD);
+        assert_eq!(scale.label_small_emphasized.weight, FontWeight::SEMI_BOLD);
+        // title_large/title_medium map from SF Pro Headline, already
+        // Semibold by default — their emphasized sibling is therefore
+        // numerically identical to base (a faithful mapping outcome, not a
+        // bug — see module docs).
+        assert_eq!(scale.title_large.weight, FontWeight::SEMI_BOLD);
+        assert_eq!(scale.title_large_emphasized.weight, FontWeight::SEMI_BOLD);
+    }
+
+    #[test]
+    fn cupertino_emphasized_keeps_base_size_and_family() {
+        let scale = TypeScale::cupertino(&TextStyle::new(16.0, Color::BLACK));
+        assert_eq!(scale.body_large.size, scale.body_large_emphasized.size);
+        assert_eq!(scale.body_large.family, scale.body_large_emphasized.family);
+        assert_eq!(
+            scale.body_large.line_height,
+            scale.body_large_emphasized.line_height
+        );
     }
 }
