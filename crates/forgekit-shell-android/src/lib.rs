@@ -76,7 +76,7 @@ pub mod __jni {
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (spec §10.1, Makepad `app_main!` precedent).
 ///
-/// Stamps out the thirteen `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
+/// Stamps out the fourteen `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
 /// the Kotlin `ForgeKitSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
@@ -87,7 +87,9 @@ pub mod __jni {
 /// forwards an editor action (Enter) via `nativeImeAction`. `nativeSetAppearance`
 /// (task 08) flips the app's theme brightness from the platform's dark-mode
 /// preference. `nativeOnDeepLink` (task 07) delivers a cold-start/running
-/// platform deep link into the process-wide deep-link source. `nativeInit` also
+/// platform deep link into the process-wide deep-link source.
+/// `nativeInitAccessibility` (phase 6d, task 04) attaches the accesskit Android
+/// adapter to the host view. `nativeInit` also
 /// initializes the process-wide [`forgekit_reactive::ReactiveRuntime`] (see
 /// [`jni_glue::native_init`]) before the state factory runs, so a `State`'s own
 /// construction may already create signals/controllers.
@@ -290,6 +292,24 @@ macro_rules! android_app {
             url: $crate::__jni::JString<'local>,
         ) {
             $crate::jni_glue::native_on_deep_link(env, handle, url)
+        }
+
+        /// JNI `nativeInitAccessibility`: attach the accesskit Android adapter to
+        /// the host `ForgeKitSurfaceView` (spec §9, phase 6d — task 04).
+        ///
+        /// `view` is the host `View` (`this`); called once by Kotlin's
+        /// `surfaceCreated` right after `nativeInit`. Best-effort and isolated in
+        /// its own guarded entry so an a11y-init failure never blocks startup.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeInitAccessibility<
+            'local,
+        >(
+            env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            view: $crate::__jni::JObject<'local>,
+        ) {
+            $crate::jni_glue::native_init_accessibility(env, handle, view)
         }
     };
 }

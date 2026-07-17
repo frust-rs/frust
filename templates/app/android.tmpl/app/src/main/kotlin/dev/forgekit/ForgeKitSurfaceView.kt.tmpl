@@ -12,6 +12,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.View
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -114,6 +115,15 @@ class ForgeKitSurfaceView(context: Context) :
     // forwarded to `forgekit_reactive::push_deep_link` on the Rust side.
     private external fun nativeOnDeepLink(handle: Long, url: String)
 
+    // Accessibility (spec §9, phase 6d). Attaches the accesskit Android adapter
+    // to this view. `view` is the accessibility host — always `this`
+    // (`ForgeKitSurfaceView` IS a `View`); the adapter installs a
+    // `View.AccessibilityDelegate` + `OnHoverListener` on it (posted to the UI
+    // thread) and depends on the bundled `dev.accesskit.android.Delegate` class.
+    // Best-effort: the Rust side isolates any init failure so a11y never blocks
+    // startup. Called once, right after `nativeInit` returns a live handle.
+    private external fun nativeInitAccessibility(handle: Long, view: View)
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
@@ -182,6 +192,11 @@ class ForgeKitSurfaceView(context: Context) :
             handle = nativeInit(holder.surface, scaleFactor)
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
+                // Attach the accesskit accessibility adapter to this view (spec
+                // §9, phase 6d). Best-effort: the native side isolates any
+                // failure in its own guard, so a missing delegate class or JNI
+                // hiccup degrades to "no a11y" rather than blocking startup.
+                nativeInitAccessibility(handle, this)
                 // Flush a deep link that arrived before this handle existed
                 // (see `pendingDeepLink`'s doc comment) — a cold-start link
                 // must not be silently dropped just because it raced ahead

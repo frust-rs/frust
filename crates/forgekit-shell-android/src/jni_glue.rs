@@ -18,6 +18,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Once;
 
+use accesskit_android::jni as ak_jni;
 use anyhow::{Context, Result};
 use jni::EnvUnowned;
 use jni::errors::LogErrorAndDefault;
@@ -450,6 +451,57 @@ pub fn native_on_deep_link(mut env: EnvUnowned, handle: jlong, url: JString) {
         if unsafe { handle_mut(handle) }.is_some() {
             push_deep_link(url);
         }
+    });
+}
+
+/// `nativeInitAccessibility`: attach the accesskit Android adapter to the host
+/// `ForgeKitSurfaceView` (phase 6d D3, spec §9). Called by Kotlin's
+/// `surfaceCreated` right after a successful `nativeInit`, passing the view
+/// (`this`) as the accessibility host.
+///
+/// This is a **separate, best-effort** export rather than being folded into
+/// `nativeInit` deliberately: it isolates any JNI hiccup constructing the
+/// adapter — most notably a missing `dev.accesskit.android.Delegate` class —
+/// inside its own [`guard`], so accessibility failing to initialise degrades to
+/// "no a11y" instead of failing app startup (`nativeInit`'s own contract stays
+/// untouched). A missing handle, or a second call (idempotent — see
+/// [`AndroidAppHandle::attach_accessibility`]), is a no-op.
+///
+/// # jni version bridge
+///
+/// accesskit_android 0.7.5 is built against `jni` 0.21 while this shell uses
+/// `jni` 0.22 — two distinct crate versions. Their `JNIEnv`/`jobject` handles
+/// are both `#[repr(C)]` opaque pointers with identical layout, so the raw
+/// pointers cross between them by a plain cast (the same technique
+/// [`native_window_from_surface`] uses to bridge `jni`/`ndk-sys`).
+pub fn native_init_accessibility(env: EnvUnowned, handle: jlong, view: JObject) {
+    guard("nativeInitAccessibility", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return;
+        };
+
+        // Bridge this call's `jni` 0.22 boundary handles into the `jni` 0.21
+        // types `accesskit_android::InjectingAdapter::new` expects.
+        //
+        // SAFETY: `env` is the JVM-owned env pointer for this native call — a
+        // valid attachment of the current (UI) thread; the cast only re-labels
+        // its jni-sys version. `from_raw` does a null check and wraps the
+        // pointer without taking ownership.
+        let mut ak_env = match unsafe { ak_jni::JNIEnv::from_raw(env.as_raw().cast()) } {
+            Ok(ak_env) => ak_env,
+            Err(err) => {
+                log::error!(
+                    "forgekit-shell-android: nativeInitAccessibility: invalid JNIEnv: {err}"
+                );
+                return;
+            }
+        };
+        // SAFETY: `view` is the live, non-null host-`View` jobject Kotlin passed
+        // as `this`; `JObject::from_raw` just wraps the (cast) raw handle as a
+        // borrowed local ref (its `Drop` is a no-op), so no double-free.
+        let ak_view = unsafe { ak_jni::objects::JObject::from_raw(view.as_raw().cast()) };
+        app.attach_accessibility(&mut ak_env, &ak_view);
     });
 }
 

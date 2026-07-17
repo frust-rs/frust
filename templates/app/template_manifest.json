@@ -17,6 +17,7 @@
   "android.tmpl/app/src/main/AndroidManifest.xml.tmpl",
   "android.tmpl/app/src/main/kotlin/androidIdentifier/MainActivity.kt.tmpl",
   "android.tmpl/app/src/main/kotlin/dev/forgekit/ForgeKitSurfaceView.kt.tmpl",
+  "android.tmpl/app/src/main/java/dev/accesskit/android/Delegate.java",
   "ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl",
   "ios.tmpl/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme",
   "ios.tmpl/Runner/Info.plist.tmpl",
