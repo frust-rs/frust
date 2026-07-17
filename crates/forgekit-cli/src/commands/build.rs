@@ -365,6 +365,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "asserts export-method validation order past the macOS host gate; on other \
+                  hosts the gate fires first and the error is the host rejection instead"
+    )]
     fn build_ipa_rejects_bad_export_method_before_touching_the_project() {
         // No `forgekit.toml`/`ios/` fixtures at all: proves export-method
         // validation runs before project detection.
