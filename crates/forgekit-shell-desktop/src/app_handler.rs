@@ -6,14 +6,35 @@
 //! [`TextContext`], the [`RenderRoot`], and the application `State`/`app_logic`.
 //! Each on-demand frame runs the framework passes in Masonry order (the v0
 //! subset): rebuild → layout → paint → render.
+//!
+//! It also owns an `accesskit_winit` [`Adapter`] (phase 6d D3): created in
+//! `resumed` with the same [`EventLoopProxy`](winit::event_loop::EventLoopProxy)
+//! the [`ShellUserEvent`] wake mechanism already uses (extended with an
+//! [`ShellUserEvent::Accessibility`] variant), forwarded every
+//! [`WindowEvent`] via [`Adapter::process_event`] (its documented contract:
+//! *"This must be called whenever a new window event is received"*), and fed a
+//! fresh [`accesskit::TreeUpdate`](forgekit_core::accesskit::TreeUpdate) —
+//! built from [`RenderRoot::semantics`]/[`RenderRoot::semantics_if_changed`] —
+//! post-layout in `RedrawRequested`. Platform `ActionRequest`s arrive back
+//! through the same proxy and route into
+//! [`RenderRoot::perform_accessibility_action`]. Adapter creation cannot panic
+//! without a real platform a11y bus present: `accesskit_winit`'s unix backend
+//! only lazily connects to AT-SPI/D-Bus and stays inert (`update_if_active`
+//! becomes a no-op) until an assistive-technology client actually activates it
+//! — safe to construct in a headless/no-AT-client CI environment.
 
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Instant;
 
+use accesskit_winit::{
+    Adapter, Event as AccessibilityEvent, WindowEvent as AccessibilityWindowEvent,
+};
 use anyhow::{Context, Result};
 use forgekit_core::FrameTime;
 use forgekit_core::RenderRoot;
+use forgekit_core::SemanticsUpdate;
+use forgekit_core::accesskit::{Tree, TreeId, TreeUpdate};
 use forgekit_core::event::{
     ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent,
     PointerPhase, ScrollDelta,
@@ -46,11 +67,29 @@ const WINDOW_TITLE: &str = "ForgeKit";
 /// waking the loop to pump local tasks and schedule a redraw. Kept an enum (not
 /// a unit type) so future user-driven events can be added without changing the
 /// loop's user-event type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// [`ShellUserEvent::Accessibility`] (phase 6d D3) is the second producer of
+/// this same proxy: `accesskit_winit`'s [`Adapter::with_event_loop_proxy`]
+/// requires its `T: From<accesskit_winit::Event>` bound, satisfied below. Its
+/// payload (an [`accesskit::ActionRequest`](forgekit_core::accesskit::ActionRequest)
+/// wrapper) is neither `Copy` nor `PartialEq`, so this enum can no longer
+/// derive those either — every existing use already matched/constructed it by
+/// value, so nothing downstream needed to change.
+#[derive(Debug)]
 enum ShellUserEvent {
     /// One or more tracked signals became dirty since the last frame — pump the
     /// UI-thread local task queue and request a redraw.
     SignalsDirty,
+    /// An `accesskit_winit` adapter event: an initial-tree pull, a platform
+    /// accessibility action request, or a deactivation notice — see
+    /// [`ShellHandler::handle_accessibility_event`].
+    Accessibility(AccessibilityEvent),
+}
+
+impl From<AccessibilityEvent> for ShellUserEvent {
+    fn from(event: AccessibilityEvent) -> Self {
+        ShellUserEvent::Accessibility(event)
+    }
 }
 
 /// Run `app_logic` over `state` in a desktop preview window until it is closed.
@@ -76,6 +115,10 @@ where
     // ignored. `ReactiveRuntime::init` must run on this (the UI) thread: it
     // claims the thread as owner of the local task queue `pump_local` drains.
     let proxy = event_loop.create_proxy();
+    // A second clone is kept on the handler (`accesskit_proxy`) so `resumed` can
+    // hand the accesskit_winit `Adapter` its own event-loop proxy — the waker
+    // closure below consumes its own clone, so neither producer starves.
+    let accesskit_proxy = proxy.clone();
     let waker: FrameWaker = Arc::new(move || {
         let _ = proxy.send_event(ShellUserEvent::SignalsDirty);
     });
@@ -95,6 +138,14 @@ where
         compose: ComposeLatch::default(),
         ime_sync: ImeSync::default(),
         window: None,
+        accesskit_proxy,
+        adapter: None,
+        // The generation `RenderRoot::new()` starts at (0); the first rebuild
+        // always dirties it to a different value (a first `rebuild_view` always
+        // returns non-empty `ChangeFlags` — see `RenderRoot::rebuild`), so the
+        // first post-layout `semantics_if_changed` check below is guaranteed to
+        // see a change and push the initial tree.
+        semantics_seen: 0,
         // Starts in `NoSurface`; the surface is created in `resumed` once the
         // window exists, and driven through the §8.1 lifecycle from there.
         renderer: SurfaceRenderer::new(),
@@ -316,6 +367,21 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     ime_sync: ImeSync,
     /// Created lazily in `resumed()` (macOS requires window creation there).
     window: Option<Arc<Window>>,
+    /// A clone of the wake proxy handed to the `accesskit_winit` [`Adapter`] at
+    /// creation (phase 6d D3) — kept separate from the `FrameWaker`'s own clone
+    /// (`run_desktop`) so `resumed` can construct the adapter without needing
+    /// to unpick it from the (already-moved-into-a-closure) waker.
+    accesskit_proxy: winit::event_loop::EventLoopProxy<ShellUserEvent>,
+    /// The `accesskit_winit` platform adapter (phase 6d D3), created once in
+    /// `resumed` alongside the window (it must be constructed before the
+    /// window is first shown — see [`Adapter::with_event_loop_proxy`]'s
+    /// contract). `None` only before the first `resumed` call.
+    adapter: Option<Adapter>,
+    /// The [`RenderRoot::semantics_generation`] value last pushed to the
+    /// adapter (phase 6d D3's dirty gate) — compared every `RedrawRequested`
+    /// via [`RenderRoot::semantics_if_changed`] so an unchanged tree is never
+    /// re-walked/re-pushed.
+    semantics_seen: u64,
     /// The §8.1 surface lifecycle machine; empty (`NoSurface`) until `resumed()`
     /// creates the surface, and torn down on `suspended()`.
     renderer: SurfaceRenderer,
@@ -419,6 +485,62 @@ where
         self.runtime.with_owner(move || provide_context(theme));
         window.request_redraw();
     }
+
+    /// Handle one `accesskit_winit` adapter event delivered through the
+    /// event-loop proxy (phase 6d D3).
+    ///
+    /// * `InitialTreeRequested` — the adapter activated (an AT client
+    ///   connected) and has no tree yet: pull one fresh
+    ///   [`RenderRoot::semantics`] pass and push it, recording the generation so
+    ///   the next `RedrawRequested` dirty-check doesn't immediately re-push the
+    ///   same tree.
+    /// * `ActionRequested` — forward straight to
+    ///   [`RenderRoot::perform_accessibility_action`] (the same synthesized
+    ///   pointer-event path a real tap/click would take — see
+    ///   `docs/ARCHITECTURE.md`'s Semantics pass); request a redraw if it
+    ///   mutated state.
+    /// * `AccessibilityDeactivated` — the AT client detached; nothing to clean
+    ///   up (`Adapter::update_if_active` already becomes a no-op on its own).
+    fn handle_accessibility_event(&mut self, event: AccessibilityEvent) {
+        let Some(adapter) = self.adapter.as_mut() else {
+            return;
+        };
+        match event.window_event {
+            AccessibilityWindowEvent::InitialTreeRequested => {
+                let update = self.root.semantics();
+                self.semantics_seen = self.root.semantics_generation();
+                adapter.update_if_active(|| build_tree_update(&update));
+            }
+            AccessibilityWindowEvent::ActionRequested(request) => {
+                let outcome = self.root.perform_accessibility_action(
+                    &mut self.state,
+                    request.target_node,
+                    request.action,
+                );
+                if outcome.needs_redraw
+                    && let Some(window) = self.window.as_ref()
+                {
+                    window.request_redraw();
+                }
+            }
+            AccessibilityWindowEvent::AccessibilityDeactivated => {}
+        }
+    }
+}
+
+/// Build an accesskit [`TreeUpdate`] from one [`RenderRoot::semantics`] pull
+/// (phase 6d D3): a full-tree push every time (stable node ids make this valid
+/// — see `forgekit_core::semantics`'s module docs), rooted with
+/// [`TreeId::ROOT`] and the update's already-root-defaulted focus id
+/// ([`SemanticsUpdate::focus_id`]). Pure and unit-testable without a live
+/// window/adapter.
+fn build_tree_update(update: &SemanticsUpdate) -> TreeUpdate {
+    TreeUpdate {
+        nodes: update.nodes.clone(),
+        tree: Some(Tree::new(update.root)),
+        tree_id: TreeId::ROOT,
+        focus: update.focus_id(),
+    }
 }
 
 impl<State, Logic, V> ApplicationHandler<ShellUserEvent> for ShellHandler<State, Logic, V>
@@ -442,6 +564,7 @@ where
                     window.request_redraw();
                 }
             }
+            ShellUserEvent::Accessibility(event) => self.handle_accessibility_event(event),
         }
     }
 
@@ -451,11 +574,24 @@ where
         // mirroring Android's surfaceDestroyed/surfaceCreated so the §8.1
         // machine stays exercised on desktop too.
         if self.window.is_none() {
+            // `with_visible(false)`: the accesskit_winit adapter must be created
+            // before the window is ever shown (its documented contract — see
+            // `Adapter::with_event_loop_proxy`), so the window stays hidden until
+            // the adapter below is constructed, then is made visible.
             let attrs = WindowAttributes::default()
                 .with_title(WINDOW_TITLE)
-                .with_inner_size(INITIAL_SIZE);
+                .with_inner_size(INITIAL_SIZE)
+                .with_visible(false);
             match event_loop.create_window(attrs) {
-                Ok(window) => self.window = Some(Arc::new(window)),
+                Ok(window) => {
+                    self.adapter = Some(Adapter::with_event_loop_proxy(
+                        event_loop,
+                        &window,
+                        self.accesskit_proxy.clone(),
+                    ));
+                    window.set_visible(true);
+                    self.window = Some(Arc::new(window));
+                }
                 Err(err) => {
                     self.fatal =
                         Some(anyhow::Error::from(err).context("forgekit: failed to create window"));
@@ -526,6 +662,14 @@ where
         let Some(window) = self.window.clone() else {
             return;
         };
+
+        // Every `WindowEvent` must reach the accesskit adapter (its documented
+        // `process_event` contract — phase 6d D3): it derives root-window
+        // bounds/focus state from `Moved`/`Resized`/`Focused` regardless of
+        // what the match below does with the same event.
+        if let Some(adapter) = self.adapter.as_mut() {
+            adapter.process_event(&window, &event);
+        }
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -706,6 +850,18 @@ where
                 let text_ctx: &mut dyn Any = &mut self.text_ctx;
                 self.root.layout_with_text(logical, text_ctx);
 
+                // Push a fresh semantics tree to the accesskit adapter if it may
+                // have changed since the last push (phase 6d D3's dirty gate —
+                // `RenderRoot::semantics_if_changed`); post-layout so bounds are
+                // valid. A no-op (`update_if_active` never runs the closure)
+                // while no AT client has activated the adapter.
+                if let Some(adapter) = self.adapter.as_mut()
+                    && let Some(update) = self.root.semantics_if_changed(self.semantics_seen)
+                {
+                    self.semantics_seen = self.root.semantics_generation();
+                    adapter.update_if_active(|| build_tree_update(&update));
+                }
+
                 self.scene.reset();
                 // Sample the shell-owned monotonic clock once per frame and hand
                 // it to paint; every animating widget differences it against its
@@ -783,10 +939,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeLatch, ElementState, Ime, WinitKey, WinitNamedKey, WinitTheme,
-        brightness_from_winit, finish, map_key_event, map_modifiers, map_named_key,
-        physical_to_logical,
+        ComposeLatch, ElementState, Ime, Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme,
+        brightness_from_winit, build_tree_update, finish, map_key_event, map_modifiers,
+        map_named_key, physical_to_logical,
     };
+    use forgekit_core::SemanticsUpdate;
+    use forgekit_core::accesskit::{Node, NodeId, Role};
     use forgekit_core::event::{ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
     use forgekit_theme::{Brightness, Theme};
     use kurbo::Point;
@@ -1118,5 +1276,46 @@ mod tests {
         let mapped = latch.observe(&Ime::Enabled);
         assert!(!latch.is_composing());
         assert_eq!(mapped, ImeEvent::Enabled);
+    }
+
+    // --- build_tree_update (phase 6d D3) ---
+    //
+    // Pure-function coverage of the `SemanticsUpdate` -> `accesskit::TreeUpdate`
+    // assembly; no winit event loop or live adapter needed.
+
+    #[test]
+    fn build_tree_update_assembles_nodes_tree_and_focus() {
+        let root_id = NodeId(1);
+        let child_id = NodeId(2);
+        let mut root_node = Node::new(Role::Window);
+        root_node.set_children(vec![child_id]);
+        let child_node = Node::new(Role::Button);
+
+        let update = SemanticsUpdate {
+            nodes: vec![(root_id, root_node), (child_id, child_node)],
+            root: root_id,
+            focus: Some(child_id),
+        };
+
+        let tree_update = build_tree_update(&update);
+        assert_eq!(tree_update.nodes.len(), 2);
+        assert_eq!(tree_update.tree, Some(Tree::new(root_id)));
+        assert_eq!(tree_update.tree_id, TreeId::ROOT);
+        assert_eq!(tree_update.focus, child_id);
+    }
+
+    #[test]
+    fn build_tree_update_defaults_focus_to_root_when_nothing_focused() {
+        let root_id = NodeId(1);
+        let update = SemanticsUpdate {
+            nodes: vec![(root_id, Node::new(Role::Window))],
+            root: root_id,
+            focus: None,
+        };
+
+        let tree_update = build_tree_update(&update);
+        // SemanticsUpdate::focus_id() defaults to root — accesskit's `focus`
+        // field is non-optional and must always name some target.
+        assert_eq!(tree_update.focus, root_id);
     }
 }
