@@ -26,6 +26,10 @@
 //! * [`sheet`] — the modal BottomSheet. Implemented in task 11.
 //! * [`list_view`] — the virtualized ListView. Implemented in task 12.
 //! * [`list_item`] — 1/2/3-line ListItem rows. Implemented in task 12.
+//! * [`shape_morph`] — rounded-polygon path interpolation primitive. Added in
+//!   Phase 6f (task 05).
+//! * [`loading_indicator`] — the M3 Expressive morphing loading indicator.
+//!   Added in Phase 6f (task 05).
 
 pub mod appbar;
 pub mod card;
@@ -34,8 +38,10 @@ pub mod dialog;
 pub mod fab;
 pub mod list_item;
 pub mod list_view;
+pub mod loading_indicator;
 pub mod navbar;
 pub mod progress;
+pub mod shape_morph;
 pub mod sheet;
 pub mod state_layer;
 pub mod switch;

@@ -95,6 +95,9 @@ pub use material::list_item::{
     list_item,
 };
 pub use material::list_view::{ListView, ListViewWidget, list_view};
+pub use material::loading_indicator::{
+    LoadingIndicator, LoadingIndicatorView, LoadingIndicatorWidget, loading_indicator,
+};
 pub use material::navbar::{
     NavItem, NavigationBar, NavigationBarView, NavigationBarWidget, nav_item, navigation_bar,
 };
@@ -102,6 +105,7 @@ pub use material::progress::{
     CircularProgress, CircularProgressView, CircularProgressWidget, LinearProgress,
     LinearProgressView, LinearProgressWidget, ProgressValue, circular_progress, linear_progress,
 };
+pub use material::shape_morph::{RoundedPolygon, morph_path};
 pub use material::sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
 pub use material::switch::{Switch, SwitchView, SwitchWidget, switch};
 
