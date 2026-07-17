@@ -20,7 +20,10 @@ use forgekit_core::event::{
 use forgekit_reactive::{ReactiveRuntime, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
-use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
+use forgekit_shell_common::{
+    AppTree, ThemeOverrideWatcher, effective_brightness_for_platform_change, logical_size,
+    sanitize_scale,
+};
 use forgekit_text::TextContext;
 use forgekit_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
@@ -58,6 +61,22 @@ pub struct AndroidAppHandle {
     /// `nativeInit` returns a handle — see `templates/app/android.tmpl`'s
     /// `ForgeKitSurfaceView.surfaceCreated`).
     theme: Theme,
+    /// Polls the process-wide app-facing theme override slot
+    /// (`forgekit::set_app_theme`/`clear_app_theme`, task 6c-04) once per
+    /// frame (see [`Self::frame`]) — see
+    /// `forgekit_shell_common::theme_override`'s module docs.
+    theme_override: ThemeOverrideWatcher,
+    /// Whether an app-forced theme override is currently active. While `true`,
+    /// [`Self::set_appearance`] must not flip `self.theme`'s brightness — the
+    /// override wins entirely until `clear_app_theme` runs (see
+    /// `effective_brightness_for_platform_change`).
+    theme_override_active: bool,
+    /// The platform's last-reported light/dark preference, tracked
+    /// independently of `self.theme.brightness` so a `clear_app_theme` can
+    /// restore exactly this value even if the platform reported a change
+    /// *while* an override was active (during which `self.theme.brightness`
+    /// itself does not move — see `effective_brightness_for_platform_change`).
+    platform_brightness: Brightness,
 }
 
 impl AndroidAppHandle {
@@ -97,6 +116,9 @@ impl AndroidAppHandle {
             scale,
             window: Some(window),
             theme,
+            theme_override: ThemeOverrideWatcher::new(),
+            theme_override_active: false,
+            platform_brightness: Brightness::Light,
         }
     }
 
@@ -109,10 +131,31 @@ impl AndroidAppHandle {
     /// `create_handle`'s `with_owner` wrap). No explicit redraw is scheduled —
     /// the continuous Choreographer loop already repaints every tick.
     pub(crate) fn set_appearance(&mut self, dark: bool) {
-        self.theme.brightness = match crate::ffi_support::appearance_from_dark(dark) {
+        let platform = match crate::ffi_support::appearance_from_dark(dark) {
             crate::ffi_support::Appearance::Dark => Brightness::Dark,
             crate::ffi_support::Appearance::Light => Brightness::Light,
         };
+        self.platform_brightness = platform;
+        // Override-wins rule (task 6c-04): while an app-forced theme override
+        // is active, this platform-appearance report must not flip brightness.
+        self.theme.brightness = effective_brightness_for_platform_change(
+            self.theme_override_active,
+            self.theme.brightness,
+            platform,
+        );
+        self.app.set_theme(Box::new(self.theme.clone()));
+        let theme = self.theme.clone();
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(theme)),
+            None => provide_context(theme),
+        }
+    }
+
+    /// Push a theme to both delivery paths (mirrors [`Self::set_appearance`]'s
+    /// second half) — the shared helper [`Self::frame`]'s theme-override poll
+    /// calls, so a forced override and a live appearance change go through one
+    /// code path.
+    fn push_theme(&mut self) {
         self.app.set_theme(Box::new(self.theme.clone()));
         let theme = self.theme.clone();
         match ReactiveRuntime::get() {
@@ -248,6 +291,25 @@ impl AndroidAppHandle {
         // mid-rotation) or not yet created, not just once it's ready — otherwise
         // local tasks stall through surface churn.
         crate::jni_glue::pump_reactive_runtime();
+
+        // Poll the app-facing theme override slot (task 6c-04) once per
+        // frame, before the surface-ready gate — theme delivery needs no
+        // renderer, so this stays in sync even while the surface is torn down
+        // (mirroring the reactive-runtime pump just above).
+        match self.theme_override.poll() {
+            Some(Some(theme)) => {
+                self.theme = theme;
+                self.theme_override_active = true;
+                self.push_theme();
+            }
+            Some(None) => {
+                self.theme = Theme::m3_baseline();
+                self.theme.brightness = self.platform_brightness;
+                self.theme_override_active = false;
+                self.push_theme();
+            }
+            None => {}
+        }
 
         if self.phase() != SurfacePhase::SurfaceReady {
             return;

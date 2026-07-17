@@ -117,6 +117,30 @@ pub use forgekit_theme::{
     ShapeScale, SurfaceRole, Theme, TypeScale,
 };
 
+/// App-facing theme override (PLAN.md D2 correction, task 6c-04):
+/// [`set_app_theme`] forces the app's active [`Theme`] end-to-end — both
+/// delivery paths a shell owned exclusively before this (widget paint/layout
+/// via `RenderRoot::set_theme`, and `use_context::<Theme>()` via
+/// `provide_context`) — reflecting the change the next time the running shell
+/// polls (once per frame; desktop before rebuild, mobile at the top of the
+/// frame callback). [`clear_app_theme`] returns to the platform's own
+/// light/dark-derived default. See `forgekit_shell_common::theme_override`'s
+/// module docs for the full layering rationale, the thread contract (a plain
+/// `Mutex`-guarded process-global — no UI-thread panic, unlike
+/// [`push_deep_link`]), and the override-wins-over-appearance rule (an app
+/// override, once set, is never overridden back by a live platform dark-mode
+/// flip until [`clear_app_theme`] runs).
+///
+/// ```no_run
+/// use forgekit::{Theme, set_app_theme};
+///
+/// // Force the Cupertino baseline regardless of the platform's own
+/// // Material-vs-Cupertino default — e.g. the widget catalog's design-
+/// // language toggle.
+/// set_app_theme(Theme::cupertino_baseline());
+/// ```
+pub use forgekit_shell_common::{clear_app_theme, set_app_theme};
+
 /// The animation vocabulary (spec §8): the shell-fed frame clock ([`FrameTime`])
 /// plus the pure easing/interpolation/spring math a widget or app advances it
 /// through, flat-re-exported from `forgekit-core::anim`. Time enters from the

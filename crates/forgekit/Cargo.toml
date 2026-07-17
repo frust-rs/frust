@@ -18,6 +18,13 @@ forgekit-theme = { workspace = true }
 # `forgekit::run`/the reactive re-exports in `lib.rs`.
 reactive_graph = { workspace = true }
 any_spawner = { workspace = true }
+# Load-bearing (task 6c-04): the app-facing theme override seam
+# (`set_app_theme`/`clear_app_theme`) re-exported flat below — see
+# `forgekit_shell_common::theme_override`'s module docs for the layering
+# rationale. Every shell already depends on this crate; the facade depends on
+# it directly (not just transitively) so the re-export doesn't rely on which
+# platform-shell dependency happens to be active.
+forgekit-shell-common = { workspace = true }
 # Depended on unconditionally so the re-exported `android_app!` macro is always
 # available; the crate compiles to (almost) nothing off-Android.
 forgekit-shell-android = { workspace = true }

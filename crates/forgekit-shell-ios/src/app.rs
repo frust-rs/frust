@@ -38,7 +38,10 @@ use forgekit_core::event::{
 use forgekit_reactive::{ReactiveRuntime, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
-use forgekit_shell_common::{AppTree, logical_size, sanitize_scale};
+use forgekit_shell_common::{
+    AppTree, ThemeOverrideWatcher, effective_brightness_for_platform_change, logical_size,
+    sanitize_scale,
+};
 use forgekit_text::TextContext;
 use forgekit_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
@@ -90,6 +93,22 @@ pub struct IosAppHandle {
     /// `forgekit_init` returns a handle and again from `traitCollectionDidChange`
     /// — see `templates/app/ios.tmpl`'s `ForgeKitViewController`).
     theme: Theme,
+    /// Polls the process-wide app-facing theme override slot
+    /// (`forgekit::set_app_theme`/`clear_app_theme`, task 6c-04) once per
+    /// frame (see [`Self::frame`]) — see
+    /// `forgekit_shell_common::theme_override`'s module docs.
+    theme_override: ThemeOverrideWatcher,
+    /// Whether an app-forced theme override is currently active. While `true`,
+    /// [`Self::set_appearance`] must not flip `self.theme`'s brightness — the
+    /// override wins entirely until `clear_app_theme` runs (see
+    /// `effective_brightness_for_platform_change`).
+    theme_override_active: bool,
+    /// The platform's last-reported light/dark preference, tracked
+    /// independently of `self.theme.brightness` so a `clear_app_theme` can
+    /// restore exactly this value even if the platform reported a change
+    /// *while* an override was active (during which `self.theme.brightness`
+    /// itself does not move — see `effective_brightness_for_platform_change`).
+    platform_brightness: Brightness,
 }
 
 impl IosAppHandle {
@@ -130,6 +149,9 @@ impl IosAppHandle {
             paused: false,
             recreate_failures: 0,
             theme,
+            theme_override: ThemeOverrideWatcher::new(),
+            theme_override_active: false,
+            platform_brightness: Brightness::Light,
         }
     }
 
@@ -142,11 +164,34 @@ impl IosAppHandle {
     /// inside `create_handle`'s `with_owner` wrap). No explicit redraw is
     /// scheduled — the continuous `CADisplayLink` loop already repaints every
     /// tick.
+    ///
+    /// Override-wins rule (task 6c-04): while an app-forced theme override is
+    /// active, this platform-appearance report must not flip brightness (see
+    /// `effective_brightness_for_platform_change`).
     pub(crate) fn set_appearance(&mut self, dark: bool) {
-        self.theme.brightness = match crate::ffi_support::appearance_from_dark(dark) {
+        let platform = match crate::ffi_support::appearance_from_dark(dark) {
             crate::ffi_support::Appearance::Dark => Brightness::Dark,
             crate::ffi_support::Appearance::Light => Brightness::Light,
         };
+        self.platform_brightness = platform;
+        self.theme.brightness = effective_brightness_for_platform_change(
+            self.theme_override_active,
+            self.theme.brightness,
+            platform,
+        );
+        self.app.set_theme(Box::new(self.theme.clone()));
+        let theme = self.theme.clone();
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(theme)),
+            None => provide_context(theme),
+        }
+    }
+
+    /// Push a theme to both delivery paths (mirrors [`Self::set_appearance`]'s
+    /// second half) — the shared helper [`Self::frame`]'s theme-override poll
+    /// calls, so a forced override and a live appearance change go through one
+    /// code path.
+    fn push_theme(&mut self) {
         self.app.set_theme(Box::new(self.theme.clone()));
         let theme = self.theme.clone();
         match ReactiveRuntime::get() {
@@ -315,6 +360,25 @@ impl IosAppHandle {
         // until `forgekit_init` has installed the runtime.
         if let Some(rt) = ReactiveRuntime::get() {
             rt.pump_local();
+        }
+
+        // Poll the app-facing theme override slot (task 6c-04) once per
+        // frame, before the ready/paused gate — theme delivery needs no
+        // renderer, so this stays in sync even while backgrounded/not-ready
+        // (mirroring the reactive-runtime pump just above).
+        match self.theme_override.poll() {
+            Some(Some(theme)) => {
+                self.theme = theme;
+                self.theme_override_active = true;
+                self.push_theme();
+            }
+            Some(None) => {
+                self.theme = Theme::m3_baseline();
+                self.theme.brightness = self.platform_brightness;
+                self.theme_override_active = false;
+                self.push_theme();
+            }
+            None => {}
         }
 
         let ready = self.phase() == SurfacePhase::SurfaceReady;

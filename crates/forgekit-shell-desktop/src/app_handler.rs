@@ -22,6 +22,7 @@ use forgekit_core::view::View;
 use forgekit_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
+use forgekit_shell_common::{ThemeOverrideWatcher, effective_brightness_for_platform_change};
 use forgekit_text::TextContext;
 use forgekit_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
@@ -102,6 +103,8 @@ where
         // M3 baseline, Light until `resumed` seeds the window's real preference.
         theme: Theme::m3_baseline(),
         theme_seeded: false,
+        theme_override: ThemeOverrideWatcher::new(),
+        theme_override_active: false,
     };
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
@@ -336,6 +339,16 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// Whether the initial theme has been pushed to the render root / context
     /// yet — seeded once in the first `resumed`, before the first rebuild.
     theme_seeded: bool,
+    /// Polls the process-wide app-facing theme override slot
+    /// (`forgekit::set_app_theme`/`clear_app_theme`, task 6c-04) once per
+    /// frame, before rebuild in `RedrawRequested` — see
+    /// `forgekit_shell_common::theme_override`'s module docs.
+    theme_override: ThemeOverrideWatcher,
+    /// Whether an app-forced theme override is currently active. While `true`,
+    /// `WindowEvent::ThemeChanged` must not flip `self.theme`'s brightness —
+    /// the override wins entirely until `clear_app_theme` runs (see
+    /// `effective_brightness_for_platform_change`).
+    theme_override_active: bool,
 }
 
 impl<State, Logic, V> ShellHandler<State, Logic, V>
@@ -528,8 +541,17 @@ where
             // to both delivery paths (`apply_theme` requests the repaint). The
             // next paint resolves the dark scheme through `PaintCtx::theme_as`
             // and the next rebuild sees the new `use_context::<Theme>()` value.
+            //
+            // Override-wins rule (task 6c-04): while an app-forced theme
+            // override is active, this platform change must not flip
+            // brightness — `effective_brightness_for_platform_change` passes
+            // the current brightness through unchanged in that case.
             WindowEvent::ThemeChanged(winit_theme) => {
-                self.theme.brightness = brightness_from_winit(Some(winit_theme));
+                self.theme.brightness = effective_brightness_for_platform_change(
+                    self.theme_override_active,
+                    self.theme.brightness,
+                    brightness_from_winit(Some(winit_theme)),
+                );
                 self.apply_theme(&window);
             }
 
@@ -629,6 +651,26 @@ where
                 // before rebuilding, so their signal writes are visible to this
                 // frame. Cheap no-op when the queue is empty.
                 self.runtime.pump_local();
+
+                // Poll the app-facing theme override slot (task 6c-04) once
+                // per frame, before rebuild — mirrors the mobile shells'
+                // frame-callback poll. `Some(Some(theme))` is a new forced
+                // theme; `Some(None)` is a `clear_app_theme` reverting to the
+                // platform-derived default; `None` means nothing changed.
+                match self.theme_override.poll() {
+                    Some(Some(theme)) => {
+                        self.theme = theme;
+                        self.theme_override_active = true;
+                        self.apply_theme(&window);
+                    }
+                    Some(None) => {
+                        self.theme = Theme::m3_baseline();
+                        self.theme.brightness = brightness_from_winit(window.theme());
+                        self.theme_override_active = false;
+                        self.apply_theme(&window);
+                    }
+                    None => {}
+                }
 
                 // Rebuild the view tree every frame (app_logic is cheap by
                 // construction, spec §5). A real dirty-tracking loop would skip

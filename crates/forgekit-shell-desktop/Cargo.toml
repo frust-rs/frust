@@ -15,6 +15,11 @@ forgekit-reactive = { workspace = true }
 # type-erased slot, and re-pushes it on WindowEvent::ThemeChanged — see
 # docs/ARCHITECTURE.md's Theme delivery.
 forgekit-theme = { workspace = true }
+# Load-bearing (task 6c-04): the app-facing theme override watcher
+# (`ThemeOverrideWatcher`/`effective_brightness_for_platform_change`) this
+# shell polls once per frame — see `forgekit_shell_common::theme_override`'s
+# module docs.
+forgekit-shell-common = { workspace = true }
 winit = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
