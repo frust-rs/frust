@@ -38,6 +38,17 @@ cargo build --workspace --locked
 `--locked` must always pass — it is part of the verify gate below and is how
 manifest/lockfile drift is caught (see *Version-Pin Policy*).
 
+**Dev-profile shader-stack overrides.** The root `Cargo.toml`,
+`templates/app/Cargo.toml.tmpl`, and `examples/catalog/Cargo.toml` each carry
+a `[profile.dev.package.*]` override (`opt-level = 2`) for the shader/render
+crates (`vello`, `vello_shaders`, `vello_encoding`, `wgpu`, `wgpu-core`,
+`wgpu-hal`, `naga`). Debug-profile (`opt-level = 0`) shader
+compilation/translation on app launch is slow enough on mobile-class CPUs to
+trip the iOS launch watchdog; optimizing just this stack keeps the rest of a
+debug build fast while making dev-mode launches survive. The three manifests
+must be kept in sync by hand — a project scaffolded by `forgekit create`
+inherits the overrides from the template.
+
 ## Run
 
 ```bash
