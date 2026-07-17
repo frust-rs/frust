@@ -35,6 +35,9 @@
 //!   Phase 6f (task 07).
 //! * [`split_button`] — the M3X split button (leading action + trailing menu,
 //!   with a rotating chevron). Added in Phase 6f (task 07).
+//! * [`fab_menu`] — the M3X FAB menu (a trigger FAB that reveals a vertical
+//!   stack of large menu items), replacing the speed-dial pattern. Added in
+//!   Phase 6f (task 08).
 
 pub mod appbar;
 pub mod button_group;
@@ -42,6 +45,7 @@ pub mod card;
 pub mod chips;
 pub mod dialog;
 pub mod fab;
+pub mod fab_menu;
 pub mod list_item;
 pub mod list_view;
 pub mod loading_indicator;

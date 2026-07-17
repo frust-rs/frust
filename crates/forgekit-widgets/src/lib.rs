@@ -91,6 +91,9 @@ pub use material::chips::{
 };
 pub use material::dialog::{DialogView, DialogWidget, dialog, show_dialog};
 pub use material::fab::{FabSize, FabView, FabWidget, extended_fab, fab};
+pub use material::fab_menu::{
+    FabMenu, FabMenuItem, FabMenuView, FabMenuWidget, fab_menu, fab_menu_item,
+};
 pub use material::list_item::{
     ListItem, ListItemLines, ListItemWidget, ONE_LINE_HEIGHT, THREE_LINE_HEIGHT, TWO_LINE_HEIGHT,
     list_item,
