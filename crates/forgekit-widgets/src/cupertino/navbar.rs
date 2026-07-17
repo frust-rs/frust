@@ -86,7 +86,17 @@ const HAIRLINE_W: f64 = 1.0;
 const CONTAINER: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
 /// Unthemed fallback hairline color (a theme resolves this from
 /// `colors.outline_variant`, iOS `separator`).
-const SEPARATOR: Color = Color::from_rgb8(0xC6, 0xC6, 0xC8);
+///
+/// **Composite-derived** (re-derived for the 2026-07-18 kit refresh — see
+/// `forgekit-theme::color`'s module docs): the themed `outline_variant` token
+/// is now a flat `rgba(0,0,0,0.12)` overlay (light; `rgba(255,255,255,0.12)`
+/// dark), a changed token from the pre-refresh translucent
+/// `rgba(60,60,67,0.29)` this constant used to approximate (as `#C6C6C8`).
+/// This fallback composites the new token's alpha over white the same way,
+/// so an unthemed bar's hairline stays visually consistent with a themed
+/// one: `0.12 × black + 0.88 × white = 0.88 × 255 ≈ 224 = 0xE0` per channel,
+/// i.e. `#E0E0E0`.
+const SEPARATOR: Color = Color::from_rgb8(0xE0, 0xE0, 0xE0);
 
 /// The specular-highlight color of a glass edge. The glass recipe
 /// (`forgekit_theme::glass`) stores only the hairline's *alpha* per tier

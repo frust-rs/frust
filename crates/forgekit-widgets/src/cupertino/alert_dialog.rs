@@ -151,7 +151,13 @@ pub(crate) const SYSTEM_RED: Color = Color::from_rgb8(0xFF, 0x38, 0x3C);
 const PANEL_FILL: Color = Color::from_rgb8(0xF2, 0xF2, 0xF7);
 /// Unthemed fallback hairline color (a theme resolves this from
 /// `colors.outline_variant`, iOS separator).
-const SEPARATOR: Color = Color::from_rgb8(0xC6, 0xC6, 0xC8);
+///
+/// **Composite-derived** (re-derived for the 2026-07-18 kit refresh — see
+/// [`super::navbar`]'s `SEPARATOR` for the full derivation, mirrored here):
+/// `0.12` black over white ≈ `0xE0E0E0`, superseding the pre-refresh
+/// `#C6C6C8` approximation of the old translucent `rgba(60,60,67,0.29)`
+/// token.
+const SEPARATOR: Color = Color::from_rgb8(0xE0, 0xE0, 0xE0);
 /// The scrim alpha the modal dims the page below with.
 ///
 /// **Community-approximate**: iOS composites a blurred dim behind an alert; a
