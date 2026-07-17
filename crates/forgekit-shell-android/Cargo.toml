@@ -25,9 +25,9 @@ forgekit-scene = { workspace = true }
 forgekit-render = { workspace = true }
 forgekit-text = { workspace = true }
 forgekit-reactive = { workspace = true }
-# Pre-added ahead of the mobile theme-appearance wiring (task 08) — unused
-# today, but pinned so Cargo.lock settles once (see
-# workflow/plans/features/forgekit-phase-6a-foundations/tasks/03-theme-crate-tokens.md).
+# Load-bearing: `nativeSetAppearance` boxes the platform light/dark preference
+# into a Theme and pushes it through both delivery paths — see
+# docs/ARCHITECTURE.md's Android frame pipeline / Theme delivery.
 forgekit-theme = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }

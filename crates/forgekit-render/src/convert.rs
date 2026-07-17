@@ -193,6 +193,16 @@ impl SceneSink for vello::Scene {
         vello::Scene::draw_blurred_rounded_rect(self, transform, *rect, color, radius, std_dev);
     }
 
+    // These two impls rely on `vello::Scene`'s *inherent* `push_layer`/
+    // `pop_layer` methods outranking this trait's identically-named methods in
+    // Rust's method-resolution order (inherent methods are always preferred
+    // over trait methods) — `self.push_layer(...)`/`vello::Scene::pop_layer(self)`
+    // therefore call vello's own methods, not recurse into this `SceneSink`
+    // impl. This is implicit, not enforced by the compiler: a `vello` version
+    // bump that renames/removes either inherent method would silently make
+    // these calls recurse (infinite loop) instead of failing to compile.
+    // Re-verify this after any `vello` version bump; fully-qualify
+    // (`<vello::Scene>::push_layer`) if resolution ever becomes ambiguous.
     fn push_layer(&mut self, transform: Affine, rect: &Rect, alpha: f32) {
         self.push_layer(
             Fill::NonZero,

@@ -169,7 +169,12 @@ final class ForgeKitViewController: UIViewController {
     @objc private func renderFrame(_ link: CADisplayLink) {
         guard let handle else { return }
         // `link.timestamp` is a `CFTimeInterval` (seconds); the Rust side wants
-        // the shell-owned monotonic frame clock in nanoseconds (spec §8).
+        // the shell-owned monotonic frame clock in nanoseconds (spec §8). The
+        // f64 * 1e9 multiply/round is tolerated here because Rust only ever
+        // *differences* two FrameTimes (never reads one as an absolute
+        // wall-clock value) — see forgekit-core::anim's FrameTime contract.
+        // Don't "fix" this by reordering the multiply/cast without reading
+        // that contract first.
         forgekit_render_frame(handle, UInt64(link.timestamp * 1_000_000_000))
     }
 

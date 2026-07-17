@@ -90,8 +90,17 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// independent of `forgekit-theme`; the shell boxes the concrete `Theme`
     /// (and re-boxes it on a live appearance change, e.g. dark-mode toggle).
     /// Calling again replaces the stored theme.
+    ///
+    /// Marks `LAYOUT | PAINT` pending (drained by
+    /// [`RenderRoot::take_change_flags`]): a theme swap can change baked-in
+    /// paint state a widget resolves at layout time (e.g. `Text`'s themed
+    /// glyph color, cached into its `TextLayout` — see
+    /// `forgekit-widgets::text`), so a shell that later gates layout/paint on
+    /// this seam must still see a bare `set_theme` as dirty even though no
+    /// view changed.
     pub fn set_theme(&mut self, theme: Box<dyn Any>) {
         self.theme = Some(theme);
+        self.pending |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
     }
 
     /// Whether a captured pointer gesture is currently in flight.
@@ -884,6 +893,25 @@ mod tests {
         assert!(flags.needs_layout());
         // Draining leaves it empty until the next rebuild.
         assert!(root.take_change_flags().is_empty());
+    }
+
+    #[test]
+    fn set_theme_marks_layout_and_paint_pending() {
+        // F1: `set_theme` alone (no rebuild) must dirty layout/paint so a shell
+        // gating on `take_change_flags` doesn't skip re-resolving theme-baked
+        // widget state (e.g. Text's themed glyph color) on a bare theme swap.
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        root.set_theme(Box::new(TestTheme { accent: 1 }));
+        let flags = root.take_change_flags();
+        assert!(flags.needs_layout());
+        assert!(flags.needs_paint());
+
+        // Draining clears it until the next `set_theme`/rebuild.
+        assert!(root.take_change_flags().is_empty());
+        root.set_theme(Box::new(TestTheme { accent: 2 }));
+        let flags = root.take_change_flags();
+        assert!(flags.needs_layout());
+        assert!(flags.needs_paint());
     }
 
     // Small test helper: does the boxed widget downcast to `W`?

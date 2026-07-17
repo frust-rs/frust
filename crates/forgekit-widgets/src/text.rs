@@ -343,4 +343,69 @@ mod tests {
         let custom = Color::from_rgb8(1, 2, 3);
         assert_eq!(painted_color(text("x").color(custom), Some(&theme)), custom);
     }
+
+    // --- Theme-swap regression (review F1) ---
+    //
+    // `effective_style` (above) resolves the themed color at LAYOUT time and
+    // bakes it into the cached `TextLayout`'s glyph brush; `paint` only replays
+    // the cached layout. Every shell calls layout unconditionally every frame
+    // (none gates on `RenderRoot::take_change_flags` today — see
+    // `forgekit_core::app`'s doc comment on that seam), so a bare `set_theme`
+    // with no view change must still repaint with the new theme's color. This
+    // test drives that exact shell contract end-to-end through a real
+    // `RenderRoot` and is deliberately independent of the `set_theme`
+    // change-flags fix in `forgekit-core::app` — temporarily reverting that fix
+    // must not break this test, since it never consults `take_change_flags`.
+    #[test]
+    fn theme_swap_with_no_view_change_repaints_new_glyph_color() {
+        use forgekit_core::{FrameTime, RenderRoot};
+
+        fn logic(_state: &mut ()) -> TextView {
+            text("label").themed_role(ThemeTextColor::OnPrimary)
+        }
+
+        let mut root: RenderRoot<(), TextView> = RenderRoot::new();
+        let mut state = ();
+
+        let mut theme_a = Theme::m3_baseline();
+        theme_a.brightness = forgekit_theme::Brightness::Light;
+        let color_a = theme_a.scheme().on_primary;
+        root.set_theme(Box::new(theme_a));
+        root.rebuild(&mut logic, &mut state);
+
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(200.0, 100.0), &mut tcx as &mut dyn Any);
+        let mut rec = GlyphRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+        assert_eq!(
+            *rec.colors.first().expect("glyph run painted"),
+            color_a,
+            "sanity: first paint reflects theme A's on_primary role"
+        );
+
+        // Swap to a theme whose on_primary genuinely differs (dark scheme), with
+        // NO view change (same `logic`, so `rebuild` diffs identical views) —
+        // mirroring a live appearance flip. Every shell re-lays-out/repaints
+        // unconditionally on the next frame regardless of `rebuild`'s own
+        // ChangeFlags, so drive layout/paint again here without a view change.
+        let mut theme_b = Theme::m3_baseline();
+        theme_b.brightness = forgekit_theme::Brightness::Dark;
+        let color_b = theme_b.scheme().on_primary;
+        assert_ne!(
+            color_a, color_b,
+            "fixture sanity: themes must actually differ"
+        );
+        root.set_theme(Box::new(theme_b));
+
+        root.layout_with_text(Size::new(200.0, 100.0), &mut tcx as &mut dyn Any);
+        let mut rec2 = GlyphRecorder::default();
+        root.paint(&mut rec2, FrameTime::ZERO);
+        assert_eq!(
+            *rec2.colors.first().expect("glyph run painted"),
+            color_b,
+            "a bare theme swap (no view change) must re-resolve the themed glyph \
+             color at the next layout, since the color is baked into the cached \
+             TextLayout at layout time, not read fresh at paint time"
+        );
+    }
 }
