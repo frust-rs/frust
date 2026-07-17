@@ -1,7 +1,9 @@
-//! `CupertinoSwitch` (Phase 6c, PLAN.md D5, task 13): the iOS toggle switch, a
-//! controlled component mirroring [`crate::material::switch`]'s architecture but
-//! with the iOS 51×31pt track, a systemGreen "on" track, and a white
-//! spring-driven thumb.
+//! `CupertinoSwitch` (Phase 6c, PLAN.md D5, task 13; re-skinned to iOS-27 kit
+//! metrics by 6f task 13): the iOS toggle switch, a controlled component
+//! mirroring [`crate::material::switch`]'s architecture, with the kit-cited
+//! 64×28pt track, a systemGreen "on" track, and a white spring-driven thumb
+//! carrying a static specular-highlight/drop-shadow "glassy knob" treatment
+//! (see Reflective knob below).
 //!
 //! [`cupertino_switch`] produces a [`CupertinoSwitchView`] carrying the current
 //! `checked` value and an `on_toggle` closure — a controlled component (see
@@ -9,6 +11,24 @@
 //! `on_toggle(state, !checked)` on release inside its bounds and never flips its
 //! own `checked` field; the app mutates its state and the next `rebuild` feeds
 //! the confirmed value back in.
+//!
+//! # Track metric resolution (6f task 13)
+//!
+//! The module previously shipped a **community-approximate** 51×31pt track
+//! (Flutter's `CupertinoSwitch` value; a competing Apple developer-forums
+//! thread claimed 49×31pt — see PLAN.md's Edge Cases, which flagged both as
+//! refuter-contested). This task resolved the dispute against the Apple iOS 27
+//! UI Kit's own mined data (`workflow/plans/features/forgekit-phase-6f-design-modernization/research/kit-colors-type-metrics.json`,
+//! `component_metrics.Toggles`): the kit's `Toggles/{Light,Dark}/{On,Off}/{1 -
+//! Idle,3 - Pressed,4 - Disabled}` layer records — 8 of 8 — unanimously give a
+//! `64×28` track. That is a real, citable kit record (unlike the flagged
+//! `research/RESEARCH.md` summary claim of the same number, which lacked a
+//! page/layer citation), so per this task's resolution rule ("adopt the kit
+//! numbers ONLY if they come from a real kit record you can cite") the track
+//! ships at **64×28** — see [`TRACK_W`]/[`TRACK_H`]. The thumb inset stays the
+//! pre-existing community-approximate derivation (see [`THUMB_INSET`]'s doc
+//! comment for why the kit's own ambiguous `"Knob"` record wasn't adopted for
+//! it).
 //!
 //! # Thumb travel
 //!
@@ -22,6 +42,23 @@
 //! lazily the next time `paint` observes `checked` disagreeing with the
 //! animation's last-driven target (`anim_target`) — the one place a theme (and
 //! thus a spring) is in scope — exactly as [`crate::material::switch`] does.
+//!
+//! # Reflective knob (6f task 13)
+//!
+//! iOS 26+'s native switch renders a reflective/glassy knob; vello 0.9 has no
+//! backdrop-blur or lensing primitive (PLAN.md's Renderer reality note), so
+//! this ships a **static approximation**: a soft drop shadow beneath the knob
+//! sourced from `theme.glass.control`'s [`forgekit_theme::elevation::ShadowSpec`]
+//! (the same "buttons/toggles" glass tier [`crate::cupertino`]'s other 6f
+//! widgets read — see `forgekit-theme/src/glass.rs`'s module docs; unthemed
+//! falls back to [`GlassScale::ios27`]'s `control` tier, the same values a
+//! Cupertino-themed paint resolves), then a radial specular-gradient highlight
+//! offset toward the upper-left, peaked at the tier's `hairline_alpha`. The
+//! kit's own `Toggles/Toggles/𝛘/{Light,Dark}/Knob` records
+//! (`research/glass-recipes.json`) carry a soft ambient glow (blur 20) plus
+//! tight top/bottom rim shadows (blur 0.5) around the knob — this is the
+//! source the shadow+highlight pairing approximates, not a literal replay of
+//! those blur radii (vello has no blur-layer primitive to replay them with).
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -31,45 +68,74 @@ use forgekit_core::{
     AnimationController, BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, SpringDesc, Tween, View, Widget,
 };
-use forgekit_theme::{Brightness, Theme};
+use forgekit_theme::{Brightness, GlassMaterial, GlassScale, Theme};
 use kurbo::{Point, Size};
-use peniko::Color;
+use peniko::{Brush, Color, Gradient};
 
 /// Track width, in logical px.
 ///
-/// **Community-approximate**: Flutter's `CupertinoSwitch` ships a 51×31pt
-/// track, while an Apple developer-forums thread instead reports 49×31pt.
-/// Both are cited (per this task's C12 flag); ForgeKit ships **51×31** — the
-/// Flutter-compatible value — so a widget authored against a Flutter mockup
-/// lines up.
-const TRACK_W: f64 = 51.0;
-/// Track height, in logical px (see [`TRACK_W`] for the 51×31 / 49×31 source
-/// note — both sources agree on the 31pt height).
-const TRACK_H: f64 = 31.0;
+/// **Kit-cited** (2026-07-18, 6f task 13): the Apple iOS 27 UI Kit's
+/// `Toggles/{Light,Dark}/{On,Off}/{1 - Idle,3 - Pressed,4 - Disabled}` layer
+/// records (`kit-colors-type-metrics.json`, `component_metrics.Toggles`) —
+/// 8 of 8 — unanimously give `64`. This resolves the module's prior
+/// community-approximate 51×31 (Flutter's `CupertinoSwitch` value; a
+/// competing Apple developer-forums thread claimed 49×31) in the kit's favor
+/// — see the module docs' Track metric resolution section.
+const TRACK_W: f64 = 64.0;
+/// Track height, in logical px (see [`TRACK_W`]'s kit citation — the same 8/8
+/// records agree on `28`).
+const TRACK_H: f64 = 28.0;
 /// Inset from the track edge to the thumb, in logical px.
 ///
-/// **Community-approximate**: iOS does not publish the thumb inset; ~2pt is the
-/// value community reimplementations converge on (thumb diameter =
-/// `TRACK_H - 2*THUMB_INSET`).
+/// **Community-approximate**, kept rather than kit-adopted: the kit also
+/// carries a flat `"Knob"` record (`component_metrics.Toggles.Knob`, `38×24`)
+/// but it is not attributable with confidence to the standard `64×28` track
+/// group above — unlike every track record it carries no `Light|Dark`/
+/// `On|Off` prefix, and sits alongside a `Toggles/𝛘/{Light,Dark}/Knob` pair
+/// at `59×37` naming a *different* (icon) toggle variant the kit also ships,
+/// so `"Knob"` may belong to that variant instead. Its 38pt width would also
+/// leave only ~22pt of thumb travel inside a 64pt track — implausibly little
+/// for a resting thumb. Per this task's evidence rule ("adopt the kit numbers
+/// ONLY if they come from a real kit record you can cite"), an ambiguous
+/// record isn't citable, so this module keeps the pre-existing derivation
+/// instead: iOS does not publish the thumb inset, and ~2pt is the value
+/// community reimplementations converge on (thumb diameter = `TRACK_H -
+/// 2*THUMB_INSET`). The 24pt result this derivation lands on for the new 28pt
+/// track does, at least, corroborate the ambiguous record's own height field.
 const THUMB_INSET: f64 = 2.0;
 /// Thumb diameter, in logical px (derived from [`TRACK_H`]/[`THUMB_INSET`]).
 const THUMB_DIAM: f64 = TRACK_H - 2.0 * THUMB_INSET;
 
 /// systemGreen (light), the "on" track fill.
 ///
-/// **Community-measured**: Apple does not publish an exact hex for the system
-/// accent colors (they vary by trait environment); `#34C759` is the
-/// widely-cited community light value.
-const SYSTEM_GREEN_LIGHT: Color = Color::from_rgb8(0x34, 0xC7, 0x59);
-/// systemGreen (dark) — the dark-mode "on" track fill (**community-measured**,
-/// same non-guarantee as [`SYSTEM_GREEN_LIGHT`]).
-const SYSTEM_GREEN_DARK: Color = Color::from_rgb8(0x30, 0xD1, 0x58);
+/// **Kit-measured** (2026-07-18 refresh): the iOS 27 UI Kit's `System
+/// Colors/Light/4 Green` swatch (`kit-colors-type-metrics.json`, `colors`) is
+/// `#34C658` — Apple does not publish an exact hex for the system accent
+/// colors (they vary by trait environment), so this remains a design-tool
+/// snapshot rather than a guarantee, just a newer/more-precise one than the
+/// pre-refresh community value it replaces (`#34C759`), mirroring the same
+/// kind of 1-bit-per-channel refinement `color.rs`'s wave-1 Cupertino
+/// refresh documents for systemBlue/Red/Purple.
+const SYSTEM_GREEN_LIGHT: Color = Color::from_rgb8(0x34, 0xC6, 0x58);
+/// systemGreen (dark) — the kit's `System Colors/Dark/4 Green` swatch,
+/// `#2FD157` (see [`SYSTEM_GREEN_LIGHT`]; refines the pre-refresh `#30D158`).
+const SYSTEM_GREEN_DARK: Color = Color::from_rgb8(0x2F, 0xD1, 0x57);
 /// The "off" track fill (light) — iOS systemGray5.
 ///
-/// **Community-measured**: `#E9E9EA` is the community light value for the
-/// off-state track (systemGray5 / tertiarySystemFill territory).
+/// **Community-measured**, re-checked against the 2026-07-18 kit refresh and
+/// kept unchanged: the kit's `Grays/*` swatch group (six generically-named
+/// steps, `Gray`..`Gray 6`) has no record naming which step (if any) the
+/// toggle's off-track fill actually uses, unlike the on-track's directly-named
+/// `System Colors/*/4 Green` swatch above — adopting one by positional guess
+/// (`Grays/Light/Gray 5` is `#E5E5E9`, close but not identical to the value
+/// below) would violate this task's cite-a-real-record evidence rule, so the
+/// pre-refresh community value stays.
 const TRACK_OFF_LIGHT: Color = Color::from_rgb8(0xE9, 0xE9, 0xEA);
-/// The "off" track fill (dark) — iOS systemGray5 dark (**community-measured**).
+/// The "off" track fill (dark) — iOS systemGray5 dark (see
+/// [`TRACK_OFF_LIGHT`]'s re-check note; kept unchanged for the same reason —
+/// the kit's nearest-named candidate, `Grays/Dark/Gray 5` at `#2B2B2D`, reads
+/// implausibly dark for a switch track against a dark background, so it was
+/// not adopted either).
 const TRACK_OFF_DARK: Color = Color::from_rgb8(0x39, 0x39, 0x3D);
 /// The thumb fill — white in both light and dark (iOS keeps the knob white).
 const THUMB: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
@@ -87,6 +153,35 @@ const FALLBACK_SPRING: SpringDesc = SpringDesc {
 /// ([`AnimationController::fling`]'s `1.0`/`0.0`) the spring drives toward —
 /// only its sign matters (mirrors [`crate::material::switch`]).
 const RELEASE_VELOCITY: f64 = 1e-3;
+
+/// Peak alpha of the knob's specular-highlight gradient at its center,
+/// expressed as a multiplier on the resolved control glass tier's
+/// `hairline_alpha` (**tuned ForgeKit policy**, mirroring `GlassScale`'s own
+/// per-tier tuning — see `forgekit-theme/src/glass.rs`'s module docs). See
+/// the module docs' Reflective knob section for what this approximates and
+/// why (no vello blur/lensing primitive to replay the kit's real glow/rim
+/// shadow stack with).
+const SPECULAR_PEAK_SCALE: f32 = 1.8;
+
+/// The `control` glass tier (buttons/toggles — see `forgekit-theme/src/glass.rs`)
+/// this widget's knob highlight/shadow reads. Themed: `theme.glass.control`
+/// (always [`GlassScale::ios27`]'s tier on a Cupertino-tagged `Theme`,
+/// per [`Theme::cupertino_baseline`]). Unthemed: the same `ios27` control
+/// tier directly, so an unthemed paint matches a Cupertino-themed one exactly
+/// — there is no separate hand-tuned fallback to drift out of sync.
+fn resolve_control_glass(theme: Option<&Theme>) -> GlassMaterial {
+    theme
+        .map(|t| t.glass.control.clone())
+        .unwrap_or_else(|| GlassScale::ios27().control)
+}
+
+/// Return `color` with its alpha channel replaced by `alpha` (mirrors the
+/// per-module helper of the same shape used across `forgekit-widgets`, e.g.
+/// `material::card`'s).
+fn with_alpha(color: Color, alpha: f32) -> Color {
+    let c = color.components;
+    Color::new([c[0], c[1], c[2], alpha])
+}
 
 /// The active `(track_on, track_off, thumb)` colors, selected by the theme's
 /// brightness (or the light fallbacks when unthemed).
@@ -218,6 +313,9 @@ impl Widget for CupertinoSwitchWidget {
         let theme = Theme::from_paint_ctx(ctx);
         let (track_on, track_off, thumb) = resolve_colors(theme);
         let spring = resolve_spring(theme);
+        // Resolved eagerly (before any `&mut ctx` use below) since it, unlike
+        // `theme`, is an owned value carried past `ctx.request_frame()`.
+        let glass_control = resolve_control_glass(theme);
 
         if self.checked != self.anim_target {
             let velocity = if self.checked {
@@ -245,12 +343,39 @@ impl Widget for CupertinoSwitchWidget {
         let max_center_x = o.x + TRACK_W - THUMB_INSET - THUMB_DIAM / 2.0;
         let center_x = min_center_x + (max_center_x - min_center_x) * frac;
         let center_y = o.y + TRACK_H / 2.0;
+        let thumb_origin = Point::new(center_x - THUMB_DIAM / 2.0, center_y - THUMB_DIAM / 2.0);
+        let thumb_size = Size::new(THUMB_DIAM, THUMB_DIAM);
 
-        scene.fill_rounded_rect(
-            Point::new(center_x - THUMB_DIAM / 2.0, center_y - THUMB_DIAM / 2.0),
-            Size::new(THUMB_DIAM, THUMB_DIAM),
+        // Reflective knob (see the module docs): a soft drop shadow from the
+        // control glass tier, under the base fill, then a specular gradient
+        // highlight on top — the static approximation vello's lack of a
+        // backdrop-blur primitive limits this to.
+        scene.draw_shadow(
+            Point::new(
+                thumb_origin.x,
+                thumb_origin.y + glass_control.shadow.y_offset,
+            ),
+            thumb_size,
             THUMB_DIAM / 2.0,
-            thumb,
+            glass_control.shadow.blur_std_dev,
+            with_alpha(Color::BLACK, glass_control.shadow.color_alpha),
+        );
+
+        scene.fill_rounded_rect(thumb_origin, thumb_size, THUMB_DIAM / 2.0, thumb);
+
+        let highlight_center =
+            Point::new(center_x - THUMB_DIAM * 0.18, center_y - THUMB_DIAM * 0.28);
+        let peak_alpha = (glass_control.hairline_alpha * SPECULAR_PEAK_SCALE).min(1.0);
+        let highlight = Gradient::new_radial(highlight_center, (THUMB_DIAM * 0.65) as f32)
+            .with_stops([
+                (0.0f32, with_alpha(thumb, peak_alpha)),
+                (1.0f32, with_alpha(thumb, 0.0)),
+            ]);
+        scene.fill_rounded_rect_brush(
+            thumb_origin,
+            thumb_size,
+            THUMB_DIAM / 2.0,
+            &Brush::Gradient(highlight),
         );
     }
 
@@ -343,11 +468,11 @@ mod tests {
     }
 
     #[test]
-    fn ships_the_flutter_compatible_51x31_track() {
+    fn ships_the_kit_cited_64x28_track() {
         let mut w = widget(false);
         let mut lctx = LayoutCtx::new();
         let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 200.0)));
-        assert_eq!(size, Size::new(51.0, 31.0));
+        assert_eq!(size, Size::new(64.0, 28.0));
     }
 
     #[test]
@@ -393,10 +518,14 @@ mod tests {
     }
 
     /// Records each rounded rect's `(size, radius, color)` in paint order:
-    /// track, then thumb.
+    /// track, then thumb. `shadows`/`brushes` separately record the knob's
+    /// reflective-treatment calls (`draw_shadow`/`fill_rounded_rect_brush`),
+    /// which don't land in `rrects`.
     #[derive(Default)]
     struct RRectRecorder {
         rrects: Vec<(Point, Size, f64, Color)>,
+        shadows: Vec<(Point, Size, f64, f64, Color)>,
+        brushes: Vec<(Point, Size, f64, Brush)>,
     }
 
     impl PaintScene for RRectRecorder {
@@ -404,6 +533,12 @@ mod tests {
         fn draw_text(&mut self, _o: Point, _t: &str) {}
         fn fill_rounded_rect(&mut self, o: Point, s: Size, radius: f64, color: Color) {
             self.rrects.push((o, s, radius, color));
+        }
+        fn draw_shadow(&mut self, o: Point, s: Size, radius: f64, std_dev: f64, color: Color) {
+            self.shadows.push((o, s, radius, std_dev, color));
+        }
+        fn fill_rounded_rect_brush(&mut self, o: Point, s: Size, radius: f64, brush: &Brush) {
+            self.brushes.push((o, s, radius, brush.clone()));
         }
     }
 
@@ -450,6 +585,42 @@ mod tests {
         let mut off = widget(false);
         let rec = paint_rec(&mut off, Some(&theme));
         assert_eq!(rec.rrects[0].3, TRACK_OFF_DARK);
+    }
+
+    #[test]
+    fn paint_draws_one_soft_shadow_beneath_the_knob_from_the_control_glass_tier() {
+        let mut w = widget(false);
+        let rec = paint_rec(&mut w, None);
+        assert_eq!(rec.shadows.len(), 1, "one drop shadow, under the knob");
+        let expected = GlassScale::ios27().control.shadow;
+        assert_eq!(rec.shadows[0].2, THUMB_DIAM / 2.0, "circular, knob radius");
+        assert_eq!(rec.shadows[0].3, expected.blur_std_dev);
+        assert_eq!(rec.shadows[0].4.components[3], expected.color_alpha);
+    }
+
+    #[test]
+    fn paint_draws_one_specular_gradient_highlight_on_the_knob() {
+        let mut w = widget(false);
+        let rec = paint_rec(&mut w, None);
+        assert_eq!(rec.brushes.len(), 1, "one gradient highlight on the knob");
+        assert_eq!(rec.brushes[0].2, THUMB_DIAM / 2.0, "circular, knob radius");
+        match &rec.brushes[0].3 {
+            Brush::Gradient(g) => assert_eq!(g.stops.len(), 2, "peak + fade-to-transparent"),
+            _ => panic!("expected a gradient brush for the specular highlight"),
+        }
+    }
+
+    #[test]
+    fn cupertino_themed_and_unthemed_knob_treatment_match() {
+        // No hand-tuned unthemed fallback to drift: both read the same
+        // ios27 control glass tier (see resolve_control_glass's doc comment).
+        let mut themed = widget(false);
+        let theme = Theme::cupertino_baseline();
+        let rec_themed = paint_rec(&mut themed, Some(&theme));
+        let mut unthemed = widget(false);
+        let rec_unthemed = paint_rec(&mut unthemed, None);
+        assert_eq!(rec_themed.shadows[0].3, rec_unthemed.shadows[0].3);
+        assert_eq!(rec_themed.shadows[0].4, rec_unthemed.shadows[0].4);
     }
 
     #[test]

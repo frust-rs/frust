@@ -13,8 +13,8 @@
 //! * [`navbar`] — `CupertinoNavBar` (44pt). Implemented in task 13.
 //! * [`tabbar`] — `CupertinoTabBar` (49pt content height). Implemented in
 //!   task 13.
-//! * [`switch`] — `CupertinoSwitch` (51×31pt, community value, flagged).
-//!   Implemented in task 13.
+//! * [`switch`] — `CupertinoSwitch` (64×28pt, kit-cited as of 6f task 13 —
+//!   was 51×31pt community value pre-6f). Implemented in task 13.
 //! * [`alert_dialog`] — `CupertinoAlertDialog`. Implemented in task 13.
 //! * [`action_sheet`] — `CupertinoActionSheet`. Implemented in task 13.
 //! * [`activity_indicator`] — `CupertinoActivityIndicator` (20pt).

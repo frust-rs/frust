@@ -7,6 +7,32 @@
 //! (continuous drag); `Up`/`Cancel` release. Like [`crate::Checkbox`] it is not
 //! its own source of truth — it fires `on_change` and the next rebuild feeds the
 //! new value back in. Horizontal only for v1.
+//!
+//! # Design-language branch (6f task 13)
+//!
+//! `paint` reads [`Theme::design_language`] and re-skins the knob only when it
+//! is [`DesignLanguage::Cupertino`] — groove/fill geometry, colors, event
+//! handling, and the entire `Material3`/unthemed path are **untouched**: a
+//! Material-tagged or unthemed paint runs the exact pre-task-13 sequence (same
+//! `fill_rounded_rect` call count/order/values), so Material rendering stays
+//! byte-identical (this task's acceptance criterion 2). The kit's mined data
+//! (`kit-colors-type-metrics.json`) has **no `Sliders` size record at all**
+//! (only shadow recipes for the knob in `glass-recipes.json`, with no
+//! width/height fields) — a strictly more inconclusive case than
+//! [`crate::cupertino::switch`]'s, which at least had an ambiguous record to
+//! reject. Per this task's evidence rule, [`CUPERTINO_THUMB`] is therefore
+//! **community-approximate**, not kit-cited (see its doc comment); the groove
+//! thickness ([`TRACK_H`]) is shared with the Material path unchanged, since
+//! there is no evidence either way to diverge it. The knob's reflective
+//! treatment (drop shadow + specular gradient) mirrors
+//! [`crate::cupertino::switch`]'s exactly, reading the same `theme.glass.control`
+//! tier (buttons/toggles/sliders — the kit's "control" glass tier covers
+//! interactive controls generally, see `forgekit-theme/src/glass.rs`'s module
+//! docs). iOS 26.2's "Liquid Glass slider" claims (a user-facing OS
+//! tint-adjustment control, `research/RESEARCH.md`'s CONTESTED section) are
+//! **not** what this branch re-skins — this is ForgeKit's `Slider` widget, a
+//! different control; per PLAN.md's scope note this task ships a visual
+//! re-skin only, no behavior changes.
 
 use std::rc::Rc;
 
@@ -15,18 +41,39 @@ use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
     PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
-use forgekit_theme::Theme;
+use forgekit_theme::{DesignLanguage, GlassMaterial, GlassScale, Theme};
 use kurbo::{Point, Size};
-use peniko::Color;
+use peniko::{Brush, Color, Gradient};
 
 /// Slider control height, in logical px.
 const HEIGHT: f64 = 24.0;
 /// Default track width when the incoming constraints are unbounded.
 const DEFAULT_WIDTH: f64 = 200.0;
-/// Track (groove) thickness, in logical px.
+/// Track (groove) thickness, in logical px. Shared by both design-language
+/// paths (see the module docs' Design-language branch section — no kit or
+/// community evidence to diverge it for Cupertino).
 const TRACK_H: f64 = 4.0;
-/// Thumb diameter, in logical px.
+/// Thumb diameter, in logical px — the Material path only (see [`THUMB_FILL`]
+/// for its color; [`CUPERTINO_THUMB`] is the Cupertino-branch equivalent).
 const THUMB: f64 = 18.0;
+/// Cupertino knob diameter, in logical px.
+///
+/// **Community-approximate**, not kit-cited: the kit's mined data has no
+/// `Sliders` size record at all (see the module docs) — 28pt is the
+/// widely-cited default `UISlider` thumb diameter community reimplementations
+/// converge on, distinctly larger than the Material path's 18pt (M3's own
+/// slider spec).
+const CUPERTINO_THUMB: f64 = 28.0;
+/// The Cupertino knob's fill — plain white, mirroring
+/// [`crate::cupertino::switch`]'s knob and `UISlider`'s stock white-circle
+/// thumb (its `minimumTrackTintColor`/active-fill carries the tint instead;
+/// see [`resolve_colors`]'s `fill`, reused unchanged for the active track on
+/// both design-language paths).
+const CUPERTINO_THUMB_FILL: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
+/// Peak alpha of the Cupertino knob's specular-highlight gradient at its
+/// center — see [`crate::cupertino::switch`]'s constant of the same name and
+/// role (this module mirrors that treatment exactly).
+const SPECULAR_PEAK_SCALE: f32 = 1.8;
 /// Unfilled (inactive) track color (unthemed fallback; a theme resolves this
 /// from `colors.surface_container_highest`, per the M3 slider spec).
 const TRACK: Color = Color::from_rgb8(0xD1, 0xD5, 0xDB);
@@ -53,6 +100,32 @@ fn resolve_colors(theme: Option<&Theme>) -> (Color, Color, Color) {
         }
         None => (TRACK, FILL, THUMB_FILL),
     }
+}
+
+/// `true` when `theme` is tagged [`DesignLanguage::Cupertino`] — the sole
+/// gate on the Cupertino knob branch (see the module docs). An unthemed paint
+/// (`None`) and a `Material3`-tagged one both return `false`, running the
+/// Material path unchanged.
+fn is_cupertino(theme: Option<&Theme>) -> bool {
+    theme.map(|t| t.design_language) == Some(DesignLanguage::Cupertino)
+}
+
+/// The `control` glass tier (buttons/toggles/sliders) the Cupertino knob's
+/// shadow/highlight reads — mirrors [`crate::cupertino::switch`]'s
+/// `resolve_control_glass` exactly (themed: `theme.glass.control`; unthemed:
+/// [`GlassScale::ios27`]'s `control` tier directly, so there is no separate
+/// hand-tuned fallback to drift out of sync — see that module's doc comment).
+fn resolve_control_glass(theme: Option<&Theme>) -> GlassMaterial {
+    theme
+        .map(|t| t.glass.control.clone())
+        .unwrap_or_else(|| GlassScale::ios27().control)
+}
+
+/// Return `color` with its alpha channel replaced by `alpha` (mirrors the
+/// per-module helper of the same shape used across `forgekit-widgets`).
+fn with_alpha(color: Color, alpha: f32) -> Color {
+    let c = color.components;
+    Color::new([c[0], c[1], c[2], alpha])
 }
 
 /// A view-held, typed change callback (erased on build).
@@ -142,7 +215,8 @@ impl Widget for SliderWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        let (track, fill, thumb_fill) = resolve_colors(Theme::from_paint_ctx(ctx));
+        let theme = Theme::from_paint_ctx(ctx);
+        let (track, fill, thumb_fill) = resolve_colors(theme);
         let o = ctx.origin();
         let w = ctx.size().width;
         let mid_y = o.y + ctx.size().height / 2.0;
@@ -161,13 +235,49 @@ impl Widget for SliderWidget {
             TRACK_H / 2.0,
             fill,
         );
-        // Thumb (rounded-rect stand-in for a circle in v1).
-        scene.fill_rounded_rect(
-            Point::new(thumb_x - THUMB / 2.0, mid_y - THUMB / 2.0),
-            Size::new(THUMB, THUMB),
-            THUMB / 2.0,
-            thumb_fill,
-        );
+
+        if is_cupertino(theme) {
+            // Cupertino re-skin (6f task 13): larger reflective knob — see
+            // the module docs' Design-language branch section. Mirrors
+            // `cupertino::switch`'s shadow+highlight treatment exactly.
+            let diam = CUPERTINO_THUMB;
+            let thumb_origin = Point::new(thumb_x - diam / 2.0, mid_y - diam / 2.0);
+            let thumb_size = Size::new(diam, diam);
+            let glass_control = resolve_control_glass(theme);
+            scene.draw_shadow(
+                Point::new(
+                    thumb_origin.x,
+                    thumb_origin.y + glass_control.shadow.y_offset,
+                ),
+                thumb_size,
+                diam / 2.0,
+                glass_control.shadow.blur_std_dev,
+                with_alpha(Color::BLACK, glass_control.shadow.color_alpha),
+            );
+            scene.fill_rounded_rect(thumb_origin, thumb_size, diam / 2.0, CUPERTINO_THUMB_FILL);
+            let highlight_center = Point::new(thumb_x - diam * 0.18, mid_y - diam * 0.28);
+            let peak_alpha = (glass_control.hairline_alpha * SPECULAR_PEAK_SCALE).min(1.0);
+            let highlight = Gradient::new_radial(highlight_center, (diam * 0.65) as f32)
+                .with_stops([
+                    (0.0f32, with_alpha(CUPERTINO_THUMB_FILL, peak_alpha)),
+                    (1.0f32, with_alpha(CUPERTINO_THUMB_FILL, 0.0)),
+                ]);
+            scene.fill_rounded_rect_brush(
+                thumb_origin,
+                thumb_size,
+                diam / 2.0,
+                &Brush::Gradient(highlight),
+            );
+        } else {
+            // Material path (and unthemed): byte-identical to pre-task-13
+            // behavior — thumb (rounded-rect stand-in for a circle in v1).
+            scene.fill_rounded_rect(
+                Point::new(thumb_x - THUMB / 2.0, mid_y - THUMB / 2.0),
+                Size::new(THUMB, THUMB),
+                THUMB / 2.0,
+                thumb_fill,
+            );
+        }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
@@ -311,9 +421,14 @@ mod tests {
     }
 
     /// Records rounded-rect fill colors in paint order (track, fill, thumb).
+    /// `shadows`/`brushes` separately record the Cupertino knob's reflective-
+    /// treatment calls (`draw_shadow`/`fill_rounded_rect_brush`), which never
+    /// fire on the Material path (see `material_and_unthemed_paint_have_no_reflective_treatment`).
     #[derive(Default)]
     struct TrackRecorder {
         rrects: Vec<Color>,
+        shadows: Vec<(Point, Size, f64, f64, Color)>,
+        brushes: Vec<(Point, Size, f64, Brush)>,
     }
 
     impl PaintScene for TrackRecorder {
@@ -321,6 +436,12 @@ mod tests {
         fn draw_text(&mut self, _o: Point, _t: &str) {}
         fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, color: Color) {
             self.rrects.push(color);
+        }
+        fn draw_shadow(&mut self, o: Point, s: Size, radius: f64, std_dev: f64, color: Color) {
+            self.shadows.push((o, s, radius, std_dev, color));
+        }
+        fn fill_rounded_rect_brush(&mut self, o: Point, s: Size, radius: f64, brush: &Brush) {
+            self.brushes.push((o, s, radius, brush.clone()));
         }
     }
 
@@ -352,6 +473,63 @@ mod tests {
                 scheme.primary
             ],
         );
+    }
+
+    #[test]
+    fn material_and_unthemed_paint_have_no_reflective_treatment() {
+        // Acceptance criterion 2: byte-identical to pre-task-13 behavior — no
+        // draw_shadow/fill_rounded_rect_brush calls leak into the Material
+        // (or unthemed) path.
+        let mut unthemed = widget(0.5);
+        let mut rec = TrackRecorder::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT));
+        unthemed.paint(&mut ctx, &mut rec);
+        assert_eq!(rec.rrects.len(), 3, "track + fill + thumb, nothing else");
+        assert!(rec.shadows.is_empty());
+        assert!(rec.brushes.is_empty());
+
+        let theme = Theme::m3_baseline();
+        let mut themed = widget(0.5);
+        let mut rec = TrackRecorder::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT)).with_theme(&theme);
+        themed.paint(&mut ctx, &mut rec);
+        assert_eq!(rec.rrects.len(), 3);
+        assert!(rec.shadows.is_empty());
+        assert!(rec.brushes.is_empty());
+    }
+
+    #[test]
+    fn cupertino_themed_paint_uses_the_larger_reflective_knob() {
+        let theme = Theme::cupertino_baseline();
+        let mut w = widget(0.5);
+        let mut rec = TrackRecorder::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT)).with_theme(&theme);
+        w.paint(&mut ctx, &mut rec);
+
+        // track + fill + knob base fill (white, unlike the Material path's
+        // tinted `THUMB_FILL`).
+        assert_eq!(rec.rrects.len(), 3);
+        assert_eq!(rec.rrects[2], CUPERTINO_THUMB_FILL);
+
+        assert_eq!(rec.shadows.len(), 1, "one drop shadow under the knob");
+        let expected = GlassScale::ios27().control.shadow;
+        assert_eq!(
+            rec.shadows[0].2,
+            CUPERTINO_THUMB / 2.0,
+            "circular, knob radius"
+        );
+        assert_eq!(rec.shadows[0].3, expected.blur_std_dev);
+
+        assert_eq!(rec.brushes.len(), 1, "one specular gradient highlight");
+        assert_eq!(
+            rec.brushes[0].2,
+            CUPERTINO_THUMB / 2.0,
+            "circular, knob radius"
+        );
+        match &rec.brushes[0].3 {
+            Brush::Gradient(g) => assert_eq!(g.stops.len(), 2, "peak + fade-to-transparent"),
+            _ => panic!("expected a gradient brush for the specular highlight"),
+        }
     }
 
     #[test]
