@@ -113,6 +113,10 @@ pub use material::shape_morph::{RoundedPolygon, morph_path};
 pub use material::sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
 pub use material::split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use material::switch::{Switch, SwitchView, SwitchWidget, switch};
+pub use material::toolbar::{
+    DockedToolbar, FloatingToolbar, ToolbarVariant, ToolbarView, ToolbarWidget, docked_toolbar,
+    floating_toolbar,
+};
 
 // ---------------------------------------------------------------------
 // Cupertino (iOS) widget catalog (Phase 6c, task 14) — same flat

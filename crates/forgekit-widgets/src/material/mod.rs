@@ -38,6 +38,8 @@
 //! * [`fab_menu`] — the M3X FAB menu (a trigger FAB that reveals a vertical
 //!   stack of large menu items), replacing the speed-dial pattern. Added in
 //!   Phase 6f (task 08).
+//! * [`toolbar`] — the M3X floating/docked toolbar (leading/center/trailing
+//!   slots plus an optional fab slot). Added in Phase 6f (task 09).
 
 pub mod appbar;
 pub mod button_group;
@@ -56,3 +58,4 @@ pub mod sheet;
 pub mod split_button;
 pub mod state_layer;
 pub mod switch;
+pub mod toolbar;
