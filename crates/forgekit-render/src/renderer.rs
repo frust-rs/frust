@@ -24,14 +24,38 @@ use crate::lifecycle::{
 
 /// The live GPU resources of a [`SurfacePhase::SurfaceReady`] surface.
 ///
-/// The `vello::Renderer` is created per surface (it is device-bound) and, with
-/// the `RenderSurface`, is dropped on every transition out of `SurfaceReady`,
+/// The tier backend is created per surface (it is device-bound) and, with the
+/// `RenderSurface`, is dropped on every transition out of `SurfaceReady`,
 /// upholding the "no `SurfaceTexture`/surface outlives a transition" invariant.
 struct ReadySurface {
     surface: vello::util::RenderSurface<'static>,
-    /// Reused across frames while the surface lives; its compiled shader
-    /// pipelines survive resizes (which recreate only the swapchain/target).
-    renderer: vello::Renderer,
+    /// The tier-specific renderer that fills `surface.target_view` each frame;
+    /// the shared acquire/blit/present tail is tier-agnostic.
+    backend: TierBackend,
+}
+
+/// The per-surface renderer for the selected [`crate::RenderTier`].
+///
+/// Both variants produce the same thing — pixels in the intermediate
+/// `Rgba8Unorm` target `surface.target_texture`/`target_view` — which the
+/// shared tail then blits to the acquired swapchain texture. Without the
+/// `cpu-tier` feature this is effectively a one-variant enum and the GPU path
+/// is unchanged.
+// The GPU variant holds a `vello::Renderer` inline (~1.2 KiB) while the CPU
+// variant is boxed; the whole `ReadySurface` already lives behind a `Box`
+// (`SurfaceState::Ready`), so the size asymmetry costs nothing on the hot path
+// and boxing the GPU renderer would only add an indirection to every frame.
+#[cfg_attr(feature = "cpu-tier", allow(clippy::large_enum_variant))]
+enum TierBackend {
+    /// vello 0.9 GPU compute path: `render_to_texture` into the target view.
+    /// Reused across frames; its compiled shader pipelines survive resizes
+    /// (which recreate only the swapchain/target).
+    Gpu(vello::Renderer),
+    /// Experimental vello_cpu path (`cpu-tier` feature): rasterize headless
+    /// into a pixmap, then upload it into the target texture. Boxed because it
+    /// carries a reusable `RenderContext`/`Pixmap` that dwarfs the GPU variant.
+    #[cfg(feature = "cpu-tier")]
+    Cpu(Box<crate::cpu_tier::CpuTierRenderer>),
 }
 
 /// The surface half of the lifecycle machine, parallel to [`SurfacePhase`].
@@ -204,9 +228,30 @@ impl SurfaceRenderer {
         ctx: &RenderContext,
         surface: vello::util::RenderSurface<'static>,
     ) -> Result<()> {
-        let device = &ctx.device_handle().device;
-        let renderer = vello::Renderer::new(device, vello::RendererOptions::default())
-            .map_err(|e| anyhow!("forgekit-render: failed to create vello renderer: {e}"))?;
+        // Pick the tier backend the context's probe selected (task 02 / task 06).
+        // Only `Gpu` is reachable without the `cpu-tier` feature (the probe
+        // never returns `Cpu` there, and `ensure_device` guards it), so the
+        // default build creates a `vello::Renderer` exactly as before.
+        let backend = match ctx.selected_tier() {
+            crate::RenderTier::Gpu => {
+                let device = &ctx.device_handle().device;
+                let renderer = vello::Renderer::new(device, vello::RendererOptions::default())
+                    .map_err(|e| {
+                        anyhow!("forgekit-render: failed to create vello renderer: {e}")
+                    })?;
+                TierBackend::Gpu(renderer)
+            }
+            #[cfg(feature = "cpu-tier")]
+            crate::RenderTier::Cpu => TierBackend::Cpu(Box::new(
+                crate::cpu_tier::CpuTierRenderer::new(surface.config.width, surface.config.height),
+            )),
+            #[cfg(not(feature = "cpu-tier"))]
+            crate::RenderTier::Cpu => {
+                return Err(anyhow!(
+                    "forgekit-render: Cpu tier selected without the `cpu-tier` feature compiled in"
+                ));
+            }
+        };
         debug_assert_eq!(
             next_phase(self.phase(), SurfaceEvent::Created),
             SurfacePhase::SurfaceReady,
@@ -215,7 +260,7 @@ impl SurfaceRenderer {
         // Dropping the previous `SurfaceState` here tears down any prior surface
         // before the new one goes live (spec §8.1: no surface outlives a
         // transition).
-        self.state = SurfaceState::Ready(Box::new(ReadySurface { surface, renderer }));
+        self.state = SurfaceState::Ready(Box::new(ReadySurface { surface, backend }));
         // A freshly (re)installed surface starts a new `Invalid`-reconfigure
         // episode — any prior streak belonged to the surface just replaced.
         self.consecutive_invalid = 0;
@@ -234,6 +279,13 @@ impl SurfaceRenderer {
         }
         if let SurfaceState::Ready(ready) = &mut self.state {
             ctx.resize_surface(&mut ready.surface, width, height);
+            #[cfg(feature = "cpu-tier")]
+            if let TierBackend::Cpu(cpu) = &mut ready.backend {
+                // Keep the CPU pixmap's size in step with the swapchain; the
+                // GPU renderer needs no resize (only the target texture, done
+                // above), but the CPU tier's `RenderContext`/`Pixmap` are sized.
+                cpu.resize(width, height);
+            }
         }
     }
 
@@ -284,27 +336,62 @@ impl SurfaceRenderer {
             // Unreachable: `can_render()` above guaranteed SurfaceReady.
             return Ok(FrameOutcome::Skipped);
         };
-
-        vello_scene.reset();
-        convert::encode_scene(scene, vello_scene);
+        // Reborrow through the `Box` once so `ready.backend` and `ready.surface`
+        // are disjoint field borrows of a plain `&mut ReadySurface` — the tier
+        // `match` below mutates `backend` while reading `surface`, which the
+        // borrow checker only allows on a single deref.
+        let ready: &mut ReadySurface = ready;
 
         let device_handle = ctx.device_handle();
-        let params = vello::RenderParams {
-            base_color,
-            width: ready.surface.config.width,
-            height: ready.surface.config.height,
-            antialiasing_method: vello::AaConfig::Area,
-        };
-        ready
-            .renderer
-            .render_to_texture(
-                &device_handle.device,
-                &device_handle.queue,
-                vello_scene,
-                &ready.surface.target_view,
-                &params,
-            )
-            .map_err(|e| anyhow!("forgekit-render: vello render_to_texture failed: {e}"))?;
+
+        // Fill the intermediate `Rgba8Unorm` target for this frame, per tier.
+        // Both paths land pixels in `ready.surface.target_view`/`target_texture`;
+        // the acquire/blit/present tail below is tier-agnostic.
+        match &mut ready.backend {
+            TierBackend::Gpu(renderer) => {
+                vello_scene.reset();
+                convert::encode_scene(scene, vello_scene);
+                let params = vello::RenderParams {
+                    base_color,
+                    width: ready.surface.config.width,
+                    height: ready.surface.config.height,
+                    antialiasing_method: vello::AaConfig::Area,
+                };
+                renderer
+                    .render_to_texture(
+                        &device_handle.device,
+                        &device_handle.queue,
+                        vello_scene,
+                        &ready.surface.target_view,
+                        &params,
+                    )
+                    .map_err(|e| anyhow!("forgekit-render: vello render_to_texture failed: {e}"))?;
+            }
+            #[cfg(feature = "cpu-tier")]
+            TierBackend::Cpu(cpu) => {
+                let width = ready.surface.config.width;
+                let height = ready.surface.config.height;
+                // Rasterize headless into the reusable pixmap (premultiplied
+                // RGBA8), then upload it into the same target the GPU path
+                // renders into. `write_texture` needs no row padding (unlike a
+                // buffer copy), so the tight `4 * width` stride is fine.
+                let pixels = cpu.render(scene, base_color, width, height);
+                device_handle.queue.write_texture(
+                    ready.surface.target_texture.as_image_copy(),
+                    pixels,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * width),
+                        rows_per_image: Some(height),
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
 
         use wgpu::CurrentSurfaceTexture as Cst;
         let acquired = ready.surface.surface.get_current_texture();

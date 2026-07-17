@@ -53,6 +53,14 @@ pub struct RenderContext {
     pub(crate) instance: wgpu::Instance,
     /// Lazily created on the first surface; `None` until then.
     pub(crate) device: Option<DeviceHandle>,
+    /// The tier [`ensure_device`](Self::ensure_device) selected for the live
+    /// device (spec Phase 6 / PLAN.md D4). Defaults to [`RenderTier::Gpu`] and
+    /// is only ever [`RenderTier::Cpu`] in a `cpu-tier`-feature build whose
+    /// probe (or override) chose the CPU fallback — the
+    /// [`SurfaceRenderer`](crate::SurfaceRenderer) reads it to pick the encode
+    /// path. In a default (GPU-only) build a failed GPU probe errors out of
+    /// `ensure_device` before this is ever set to anything but `Gpu`.
+    pub(crate) selected_tier: crate::tier::RenderTier,
 }
 
 impl Default for RenderContext {
@@ -188,6 +196,17 @@ fn create_targets(
     height: u32,
     device: &wgpu::Device,
 ) -> (wgpu::Texture, wgpu::TextureView) {
+    // The GPU tier renders into this via a storage binding, then blits it to
+    // the swapchain. The CPU tier (`cpu-tier` feature) instead uploads its
+    // rasterized pixmap into it with `write_texture`, which needs `COPY_DST` —
+    // added only under the feature so default GPU-only builds keep the exact
+    // usage set they had before.
+    #[allow(unused_mut)]
+    let mut usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+    #[cfg(feature = "cpu-tier")]
+    {
+        usage |= wgpu::TextureUsages::COPY_DST;
+    }
     let target_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("forgekit-render vello target"),
         size: wgpu::Extent3d {
@@ -198,7 +217,7 @@ fn create_targets(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage,
         format: wgpu::TextureFormat::Rgba8Unorm,
         view_formats: &[],
     });
@@ -241,7 +260,15 @@ impl RenderContext {
         Self {
             instance,
             device: None,
+            selected_tier: crate::tier::RenderTier::Gpu,
         }
+    }
+
+    /// The render tier the live device was created for (see
+    /// [`selected_tier`](Self::selected_tier) field). `Gpu` until a surface
+    /// (and thus a device) has been created.
+    pub(crate) fn selected_tier(&self) -> crate::tier::RenderTier {
+        self.selected_tier
     }
 
     /// The single logical device, panicking if no surface has created it yet.
@@ -276,11 +303,14 @@ impl RenderContext {
         // one diagnostic path `select_render_tier` owns (shared with its own
         // unit tests). An explicit override (`FORGEKIT_RENDER_TIER`, or
         // `forgekit run --render-tier` setting it for the spawned process)
-        // wins outright. The experimental `Cpu` tier is not yet wired into
-        // device creation (task 06 adds the vello_cpu encode path), so today
-        // only `Available(Gpu)` actually proceeds — everything else fails
-        // fast here exactly like the prior bespoke check did, just through
-        // the unified diagnosis.
+        // wins outright. When the `cpu-tier` feature is compiled in, a failed
+        // GPU probe now selects the experimental `Cpu` tier (vello_cpu, see the
+        // `cpu_tier` module + `SurfaceRenderer`) instead of failing — the
+        // device is still created (only vello's compute path is unavailable;
+        // the blit the CPU pixmap rides is a basic render pipeline). Without
+        // the feature, `select_render_tier` never returns `Available(Cpu)`, so
+        // a failed probe still fails fast here exactly like the prior bespoke
+        // check did, just through the unified diagnosis.
         let downlevel = adapter.get_downlevel_capabilities();
         let caps = crate::tier::TierCaps {
             downlevel_flags: downlevel.flags,
@@ -288,12 +318,20 @@ impl RenderContext {
         };
         let override_tier = crate::tier::render_tier_override_from_env();
         let selection = crate::tier::select_render_tier(&caps, override_tier);
-        if !matches!(
-            selection.outcome,
-            crate::tier::TierOutcome::Available(crate::tier::RenderTier::Gpu)
-        ) {
+        let tier = match selection.outcome {
+            crate::tier::TierOutcome::Available(tier) => tier,
+            crate::tier::TierOutcome::Unavailable { .. } => {
+                return Err(anyhow!(selection.diagnosis));
+            }
+        };
+        // A `Cpu` selection is only reachable in a `cpu-tier` build; guard
+        // against a stray one in a default build so the SurfaceRenderer never
+        // sees a tier it has no encode path for.
+        #[cfg(not(feature = "cpu-tier"))]
+        if tier != crate::tier::RenderTier::Gpu {
             return Err(anyhow!(selection.diagnosis));
         }
+        self.selected_tier = tier;
 
         let required_features = adapter.features() & vello_optional_features();
         let required_limits = effective_limits(adapter.limits(), is_ios_simulator());

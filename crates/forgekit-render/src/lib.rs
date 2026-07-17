@@ -14,15 +14,19 @@
 //! renderer. Tier selection ([`RenderTier`], [`select_render_tier`], spec
 //! Phase 6 / PLAN.md D4) probes real adapter downlevel flags via [`TierCaps`]
 //! and honours an explicit override (env var / CLI flag, see
-//! [`RENDER_TIER_ENV_VAR`]); the experimental `Cpu` tier is not yet wired
-//! into device creation (only selectable behind the non-default `cpu-tier`
-//! feature).
+//! [`RENDER_TIER_ENV_VAR`]); the experimental `Cpu` tier (vello_cpu, behind the
+//! non-default `cpu-tier` feature) is wired into device creation and
+//! presentation only when that feature is compiled in — its rasterized
+//! `Pixmap` is uploaded into the same intermediate target the GPU path blits
+//! from (see the `cpu_tier` module).
 //!
 //! Surface lifecycle is a first-class state machine (spec §8.1): see
 //! [`SurfaceRenderer`] and [`SurfacePhase`]/[`FrameOutcome`] in [`lifecycle`].
 
 mod context;
 mod convert;
+#[cfg(feature = "cpu-tier")]
+mod cpu_tier;
 mod lifecycle;
 mod renderer;
 mod tier;
