@@ -97,6 +97,45 @@ impl ShapeScale {
             radius.min(pill)
         }
     }
+
+    /// Computes the inner corner radius for a concentrically-nested element.
+    ///
+    /// The **concentric-corner principle** (Liquid Glass, iOS 26+; see WWDC
+    /// 2025 session 219 and Apple HIG) defines inner and outer shapes'
+    /// rounded corners as sharing the same geometric center, with the inner
+    /// radius derived from the outer radius minus the inset depth. This
+    /// applies when a glass container (outer, radius `outer_radius`) nests a
+    /// child container (inner, inset by `inset` on all sides); the child's
+    /// corner radius is `max(outer_radius - inset, 0.0)`.
+    ///
+    /// # Formula
+    ///
+    /// - If `outer_radius` is infinite ([`f64::INFINITY`]), return infinite
+    ///   (a full pill shape has no inner maximum).
+    /// - Otherwise, return `max(outer_radius - inset, 0.0)` (clamped at zero
+    ///   to prevent negative radii).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use forgekit_theme::ShapeScale;
+    ///
+    /// // Normal nesting: glass bar (outer r=20) with inner pill (inset 4)
+    /// assert_eq!(ShapeScale::concentric_inner(20.0, 4.0), 16.0);
+    ///
+    /// // Inset larger than outer: clamp at zero
+    /// assert_eq!(ShapeScale::concentric_inner(8.0, 12.0), 0.0);
+    ///
+    /// // Infinite outer radius stays infinite (no clamping)
+    /// assert!(ShapeScale::concentric_inner(f64::INFINITY, 4.0).is_infinite());
+    /// ```
+    pub fn concentric_inner(outer_radius: f64, inset: f64) -> f64 {
+        if outer_radius.is_infinite() {
+            f64::INFINITY
+        } else {
+            (outer_radius - inset).max(0.0)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +186,42 @@ mod tests {
     #[test]
     fn finite_radius_clamps_when_larger_than_pill() {
         assert_eq!(ShapeScale::resolve(1000.0, 40.0, 20.0), 10.0);
+    }
+
+    #[test]
+    fn concentric_inner_normal_nesting() {
+        // Glass bar (outer r=20) with inner element (inset 4)
+        assert_eq!(ShapeScale::concentric_inner(20.0, 4.0), 16.0);
+    }
+
+    #[test]
+    fn concentric_inner_zero_outer_radius() {
+        // Zero outer radius stays zero regardless of inset
+        assert_eq!(ShapeScale::concentric_inner(0.0, 5.0), 0.0);
+    }
+
+    #[test]
+    fn concentric_inner_zero_inset() {
+        // No inset: inner radius equals outer radius
+        assert_eq!(ShapeScale::concentric_inner(20.0, 0.0), 20.0);
+    }
+
+    #[test]
+    fn concentric_inner_clamps_at_zero() {
+        // Inset larger than outer radius: clamp at zero (no negative radii)
+        assert_eq!(ShapeScale::concentric_inner(8.0, 12.0), 0.0);
+    }
+
+    #[test]
+    fn concentric_inner_inset_equals_outer() {
+        // Exact match: inset equals outer radius, result is zero
+        assert_eq!(ShapeScale::concentric_inner(15.0, 15.0), 0.0);
+    }
+
+    #[test]
+    fn concentric_inner_with_infinity() {
+        // Infinite outer radius stays infinite (a full pill has no inner limit)
+        assert!(ShapeScale::concentric_inner(f64::INFINITY, 4.0).is_infinite());
+        assert!(ShapeScale::concentric_inner(f64::INFINITY, 100.0).is_infinite());
     }
 }
