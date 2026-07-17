@@ -18,8 +18,8 @@ consumed by app code via the `forgekit` facade crate, and example apps under
 | `forgekit-render` | Layer 4: the wgpu + Vello GPU backend. Encodes a `Scene` into a `vello::Scene` and presents it to a window surface. |
 | `forgekit-text` | Text shaping: wraps Parley font matching/layout into `TextContext`/`TextStyle`/`TextLayout`, converting shaped text into `forgekit-scene::GlyphRun`s. Also home to `TextEditor`, the Parley-`PlainEditor`-based editing engine `TextInput` and the platform IME bridges drive (see Key Types). |
 | `forgekit-theme` | Design-token crate (spec §17): the Material 3 baseline value tables — `ColorScheme` (light/dark role pairs), `TypeScale`, `ShapeScale`, `Elevation`, `MotionScheme` (named springs) — bundled into a `Theme` aggregate, plus the `Theme::from_paint_ctx`/`from_layout_ctx` accessors widgets use to recover a threaded theme (see Key Types, Data Flow's theme delivery). Pure data + constructors: no scene/reactive dependency. |
-| `forgekit-widgets` | The baseline widget set (spec §6.4): `Text`, `Button`, `Checkbox`, `Slider`, `TextInput`, `Image`, `Row`/`Column` (`Flex`), `Stack`, `Padding`, `Align`, `SizedBox`, `ScrollView`, `GestureDetector` — each a `View`/`Widget` pair over `forgekit-core` + `forgekit-text` + `forgekit-theme`. Widgets resolve theme tokens at paint/layout time with an unthemed-fallback constant per resolved value (see `docs/CODE_STANDARDS.md`). Any `Flex` child list can be reconciled by explicit identity via `keyed`/`ChildKey` instead of position (see Key Types). |
-| `forgekit-reactive` | Leaf reactive substrate: the process-wide `ReactiveRuntime` (a background tokio runtime, a custom `any_spawner` executor routing `spawn`/`spawn_local`, a UI-thread local task pump, and the root reactive `Owner`) plus `TrackedScope`, the rebuild-dependency-tracking bridge that wakes a shell when a tracked signal changes (see Key Types, Data Flow's Signal-driven wake). Depends only on `reactive_graph`/`any_spawner`/`tokio` — no `forgekit-core`, no `winit`/`vello`/`wgpu`; consumed by the three shells and the `forgekit` facade (see Layer Dependencies). |
+| `forgekit-widgets` | The baseline widget set (spec §6.4): `Text`, `Button`, `Checkbox`, `Slider`, `TextInput`, `Image`, `Row`/`Column` (`Flex`), `Stack`, `Padding`, `Align`, `SizedBox`, `ScrollView`, `GestureDetector` — each a `View`/`Widget` pair over `forgekit-core` + `forgekit-text` + `forgekit-theme`. Widgets resolve theme tokens at paint/layout time with an unthemed-fallback constant per resolved value (see `docs/CODE_STANDARDS.md`). Any `Flex` child list can be reconciled by explicit identity via `keyed`/`ChildKey` instead of position (see Key Types). Its `nav` module (spec §19) adds an imperative page-stack `Navigator` + page transitions and a declarative go_router-subset `Router`, kept in-crate (not a separate crate) because both need the same crate-private container plumbing (`ChildPod`, `build_child`/`teardown_child`, `cancel_pod`) every other container widget uses; `forgekit-widgets` itself stays reactive-free, so the router's deep-link signal glue lives in the `forgekit` facade (see Data Flow's Navigation/Deep-link flow). |
+| `forgekit-reactive` | Leaf reactive substrate: the process-wide `ReactiveRuntime` (a background tokio runtime, a custom `any_spawner` executor routing `spawn`/`spawn_local`, a UI-thread local task pump, and the root reactive `Owner`) plus `TrackedScope`, the rebuild-dependency-tracking bridge that wakes a shell when a tracked signal changes (see Key Types, Data Flow's Signal-driven wake). Its `deep_link` module is a process-wide deep-link source (spec §19): a shell delivers a platform link via `push_deep_link`, app code reads it via `deep_links()`/`DeepLinks` (facade re-exports) — see Data Flow's Deep-link flow. Depends only on `reactive_graph`/`any_spawner`/`tokio` — no `forgekit-core`, no `winit`/`vello`/`wgpu`; consumed by the three shells and the `forgekit` facade (see Layer Dependencies). |
 | `forgekit-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root, GPU surface, and text context for `cargo run`-based development. Compiled only for non-Android targets. |
 | `forgekit-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. |
 | `forgekit-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size` FFI-boundary helpers. Depends on `forgekit-core`/`forgekit-scene`/`forgekit-text` only (a test-only `reactive_graph` dev-dependency backs a root-owner regression test but never reaches consumers) — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. |
@@ -247,17 +247,15 @@ frame — passing Choreographer's `frameTimeNanos` through as the pass's
 `RenderRoot::event` path between frames, and
 `nativeOnSurfaceChanged`/`nativeOnSurfaceDestroyed` drive the same
 `SurfaceRenderer` state machine as the desktop shell's resize/suspend events
-— twelve JNI exports in total, three of which
-(`nativeImeApply`/`nativeImeState`/`nativeImeAction`) carry the soft-keyboard
-state-sync contract (see Key Types' `EditingState`/`ImeState` row): Kotlin's
-`InputConnection` owns text composition against a mirror `Editable`, pushes
-whole `EditingState`s to Rust and polls the reconciled state back to keep
-the IMM (`updateSelection`) and soft-keyboard visibility synchronized;
-hardware/injected Enter also routes through `nativeImeAction`. A twelfth,
+— thirteen JNI exports in total, three of which
+(`nativeImeApply`/`nativeImeState`/`nativeImeAction`) carry the mobile IME
+state-sync contract (see Key Types' `EditingState`/`ImeState` row and
+`docs/CODE_STANDARDS.md`'s state-sync convention); a twelfth,
 `nativeSetAppearance`, pushes the platform's light/dark preference into both
-theme delivery paths (see Theme delivery above). On
-rotation/surface-config changes Android recreates the surface
-(`surfaceChanged` tears down and calls
+theme delivery paths (see Theme delivery above); a thirteenth,
+`nativeOnDeepLink`, delivers a platform deep link into the process-wide
+deep-link source (see Deep-link flow below). On rotation/surface-config
+changes Android recreates the surface (`surfaceChanged` tears down and calls
 `on_surface_created_from_android_window` again).
 
 **iOS frame pipeline:** `forgekit-shell-ios` is driven by the generated
@@ -277,12 +275,50 @@ killed. `forgekit_dispatch_touch` feeds one touch contact into the same
 `RenderRoot::event` path, translating Swift's fixed phase code (`0`=began,
 `1`=moved, `2`=ended, `3`=cancelled) to `PointerPhase`. Three more exports
 (`forgekit_ime_apply`/`forgekit_ime_state_json`/`forgekit_string_free`)
-carry the same state-sync contract as Android's, driving a full
-`UITextInput` conformance on the generated `ForgeKitView` (marked-text and
-selection mirror, autocorrect, CJK composition, dictation). An eleventh,
-`forgekit_set_appearance`, pushes the platform's light/dark preference into
-both theme delivery paths (see Theme delivery above) — eleven `forgekit_*`
-C exports in total.
+carry the same mobile IME state-sync contract as Android's, driving
+`UITextInput` conformance on the generated `ForgeKitView` (see Key Types'
+`EditingState`/`ImeState` row). An eleventh, `forgekit_set_appearance`,
+pushes the platform's light/dark preference into both theme delivery paths
+(see Theme delivery above); a twelfth, `forgekit_on_deep_link`, delivers a
+platform deep link into the process-wide deep-link source (see Deep-link
+flow below) — twelve `forgekit_*` C exports in total.
+
+**Navigation flow:** `nav::navigator()`'s retained page stack is driven by
+`NavigatorController`, a cloneable handle that only *records* requested ops
+(`push`/`pop`/`replace`) — never self-mutates mid-event, the same
+controlled-component convention interactive widgets follow (see
+`docs/CODE_STANDARDS.md`). Queued ops are drained and applied in
+`NavigatorView::rebuild` (a `BuildCtx` pass, not `event`), so a push/pop
+lands whether triggered by a gesture or a background task. A page switch
+cancels any in-flight capture on the outgoing top page (a synthetic
+`Cancel`, see Event pipeline), clears its focus flag, and publishes a
+cleared `ImeState` on the next paint so a platform keyboard hides
+deterministically. Only the topmost settled **opaque** page (plus any
+transparent pages above it) is laid out and painted; covered pages keep
+their retained widgets — state survives — but are culled from layout/paint
+until revealed. A push/pop carrying a `TransitionSpec` runs a
+`TransitionDriver` the navigator advances during paint (mirroring
+`AnimationController`'s paint-driven contract, see the Frame pipeline);
+while a non-interactive transition is in flight the navigator blocks all
+pointer routing to pages — the **capture-cancel-before-block contract**:
+both pages' captures are synthetically cancelled at transition start, so
+the block never leaves a dangling capture behind. An edge-swipe pop is the
+deliberate exception, driving the same transition interactively from its
+own pointer stream instead of being blocked by it.
+
+**Deep-link flow:** a platform delivers a link (cold-start intent data, or
+a running app's warm re-delivery) through the fixed FFI export each mobile
+shell defines (Android's `nativeOnDeepLink`, iOS's `forgekit_on_deep_link`,
+both above), which calls `forgekit_reactive::push_deep_link` — the
+process-wide source `forgekit-reactive::deep_link` owns (an
+`RwSignal<Option<DeepLink>>` plus a set-once `initial` snapshot, uniform
+cold-start/warm delivery through the same signal). App code reads it via
+`deep_links()`, tracking `DeepLinks::latest` from `Component::build` like
+any other signal (see Signal-driven wake above). The facade's
+`RouterDeepLinks` glue (the one seam allowed to see both `Router` and the
+deep-link source together, keeping `forgekit-widgets` itself reactive-free)
+dedupes by the last-consumed link and calls `Router::handle_location` on a
+new one.
 
 **CLI flow:** `Cli` (clap) parses into a `Command`, dispatched to a
 `commands::*` handler. `create` renders a manifest-listed template tree
@@ -296,22 +332,16 @@ runs a fixed set of `DeviceDiscovery` implementations, both against a shared
 `DoctorCtx`/`ProcessRunner` — no handler ever shells out directly. `run`
 dispatches on the selected device's platform/kind, threading a
 `BuildInfo`-gated mode/flavor/`--define`s (debug-default) through every
-path: `android_run` drives a variant-aware Android build — preflight (Rust
-target, cargo-ndk, JDK 17+, adb) → `./gradlew assemble<Flavor><Mode>`
-(cargo-ndk builds the Rust `.so` for the connected device's detected ABI) →
-`adb install`/`launch` → a pid-scoped `logcat` stream until Ctrl-C, gated on
-release signing (see Key Types' `BuildInfo` row) when the mode is release.
-`ios_run` drives the iOS Simulator equivalent: preflight (Xcode, Rust sim
-target, a booted simulator) → `xcodebuild build` at the mode's Xcode
-configuration (its run-script build phase invokes `cargo build` for the
-simulator/device triple to produce the Rust staticlib) → `simctl install` →
-`simctl launch --console-pty` (streamed) until Ctrl-C, with a best-effort
-`simctl terminate` cleanup — or drives a physical iPhone via `devicectl`: an
-iOS 17+ gate on the device's reported OS version, then a signed device build
-→ `devicectl device install app` → `devicectl device process launch
---console --terminate-existing` (streamed) until Ctrl-C, with failure hints
-pointing at device unlock/pairing/Developer Mode. With no device selected,
-`run` falls back to a streamed `cargo run` (desktop preview).
+path: `android_run` preflights (Rust target, cargo-ndk, JDK 17+, adb),
+builds the variant-aware `gradlew assemble<Flavor><Mode>` (cargo-ndk builds
+the Rust `.so` for the device's detected ABI), installs, launches, and
+streams a pid-scoped `logcat` until Ctrl-C — release mode additionally
+gates on signing (see Key Types' `BuildInfo` row). `ios_run` preflights and
+builds via `xcodebuild`, then installs/launches on a booted Simulator
+(`simctl`, streamed console) or a physical iPhone (`devicectl`, iOS 17+
+only, failure hints pointing at unlock/pairing/Developer Mode), streaming
+until Ctrl-C either way. With no device selected, `run` falls back to a
+streamed `cargo run` (desktop preview).
 
 `build` is the release counterpart: `forgekit build apk|appbundle|ios|ipa`
 resolves the same `BuildInfo` funnel (release-default, versus `run`'s
@@ -343,14 +373,18 @@ or archives + `exportArchive`s an `.ipa` via a generated
 | `AnyView<State>` | Type-erased `View` (element `Box<dyn Widget>`) used wherever children are heterogeneous (a container's child list); mirrors the xilem `AnyView` pattern. |
 | `ChildKey` / `keyed` | Explicit child identity for a `Flex` child list (spec §6.3): `keyed(key, view)` attaches a `ChildKey` the reconciler matches old↔new children by, relocating a matched child's widget (preserving its internal state) across a reorder/insert/remove instead of rebuilding it. Keys are all-or-nothing and unique per list; a mixed or duplicate key set falls back to positional matching. A keyed reorder is a structural change like any other (see Data Flow's Event pipeline). |
 | `Text` / `Button` / `Checkbox` / `Slider` / `TextInput` / `Image` / `Flex` (`Row`/`Column`) / `Stack` / `Padding` / `Align` / `SizedBox` / `ScrollView` / `GestureDetector` | `forgekit-widgets`' baseline vocabulary — each a `View`/`Widget` pair over the `AnyView`/`ChildPod` substrate; the interactive ones are controlled components (see `docs/CODE_STANDARDS.md`). `TextInput` owns a `TextEditor` and drives it from focus-routed `Key`/`Ime` events; `Image` wraps a decode-once `ImageSource` (an `Arc`-backed `peniko::ImageData` handle) and a fit mode (`ImageFit::Fill`/`Contain`/`Cover`), painted via the new `Command::Image` scene command. |
+| `NavigatorController<State>` / `NavigatorView` / `PopResult` | `nav::navigator`'s app-facing handle for the retained page stack — an op queue (`push`/`pop`/`replace`) drained at rebuild, never self-mutating (see Data Flow's Navigation flow); `PopResult` is a type-erased pop payload a pusher's `on_result` callback receives. |
+| `Route<State>` / `Router<State>` / `Resolution` | `nav::router`'s go_router-subset declarative layer over the navigator: `Route` pairs a path pattern with a page builder, optional redirect, and nested children; `Router::resolve` is pure location-matching (param capture, redirects under a loop guard) into a `Resolution`; `go`/`push`/`pop` drive the owned `NavigatorController`. |
+| `PageTransition` / `TransitionSpec` / `TransitionDriver` | `nav::transition`'s page-transition vocabulary: named presets (M3 shared-axis/fade-through, iOS push/modal) plus the progress driver the navigator advances during paint (see Data Flow's Navigation flow). |
+| `DeepLink` / `DeepLinks` / `deep_links()` | `forgekit-reactive::deep_link`'s process-wide deep-link source (facade: `forgekit::deep_links()`); `DeepLinks::latest` is a trackable signal, `initial` a set-once cold-start snapshot — see Data Flow's Deep-link flow. |
 | `PaintScene` | Renderer-agnostic paint target widgets draw into; bridged onto `SceneBuilder`. |
 | `PaintCtx` / `PaintOutcome` | Paint-pass context and result: `PaintCtx::frame_time` is the shell-fed clock reading a widget advances animation state with; `PaintCtx::theme_as::<T>()` recovers the type-erased threaded theme (`None` if none was set — see Data Flow's Theme delivery); `PaintCtx::request_frame`/`needs_frame` let a widget ask to be re-invoked without external input; `PaintCtx::has_focus`, seeded from the pod's recorded focus path, lets a focused editable gate its focus chrome and IME republish on it, mirroring `EventCtx::has_focus`; `PaintOutcome::needs_frame` surfaces the former through `RenderRoot::paint`/`AppTree::paint` — see Data Flow's Frame pipeline. |
 | `Scene` / `SceneBuilder` / `Command` | Layer 3 vector display list — the widget/GPU seam. |
 | `GlyphRun` | Shaped-glyph carrier from `forgekit-text` into the scene. |
 | `TextContext` / `TextStyle` / `TextLayout` | Parley-backed text shaping surface. |
 | `RenderContext` / `SurfaceRenderer` | `RenderContext` owns the wgpu `Instance` and lazily creates/holds the logical `wgpu::Device` itself (adapter-derived limits, not a thin `vello::util` wrapper) so it can request the real adapter limits vello's own device pool cannot; `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation. |
-| `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed, twelve-export Android JNI surface (init/frame/touch/resume/pause/destroy/surface-changed/surface-destroyed, the `nativeImeApply`/`nativeImeState`/`nativeImeAction` IME state-sync trio, plus `nativeSetAppearance`); the sole Android app entry point. A 2-arg (`State: Default`) and a 3-arg state-factory arm both funnel through `new_boxed_app_with`. |
-| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`forgekit-shell-ios`) is the opaque native handle behind the eleven `forgekit_*` C exports (init/resize/render-frame/dispatch-touch/pause/resume/destroy, the `forgekit_ime_apply`/`forgekit_ime_state_json`/`forgekit_string_free` IME state-sync trio, plus `forgekit_set_appearance`), mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `forgekit_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports, mirroring `android_app!`'s 2-/3-arg arms; the sole iOS app entry point. |
+| `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed, thirteen-export Android JNI surface (init/frame/touch/resume/pause/destroy/surface-changed/surface-destroyed, the `nativeImeApply`/`nativeImeState`/`nativeImeAction` IME state-sync trio, `nativeSetAppearance`, plus `nativeOnDeepLink`); the sole Android app entry point. A 2-arg (`State: Default`) and a 3-arg state-factory arm both funnel through `new_boxed_app_with`. |
+| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`forgekit-shell-ios`) is the opaque native handle behind the twelve `forgekit_*` C exports (init/resize/render-frame/dispatch-touch/pause/resume/destroy, the `forgekit_ime_apply`/`forgekit_ime_state_json`/`forgekit_string_free` IME state-sync trio, `forgekit_set_appearance`, plus `forgekit_on_deep_link`), mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `forgekit_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports, mirroring `android_app!`'s 2-/3-arg arms; the sole iOS app entry point. |
 | `app!` | The canonical facade entry macro (spec §5.5): binds a `Component + Default` root to all three platforms in one call — `android_app!`/`ios_app!` under the hood, plus a hidden desktop `__forgekit_main` calling `forgekit::run`. A generated `lib.rs` calls it once; `main.rs` calls the generated `__forgekit_main`; `forgekit::run(root)` is the same desktop path called directly, for apps with no mobile target. |
 | `new_boxed_app_with` | `forgekit-shell-common`'s app-construction seam: builds an `AppTree` from a state *factory* closure (`FnOnce() -> State`) rather than a pre-built value, letting the entry macros bind `Component::init`; `new_boxed_app` (`State: Default`) is the convenience wrapper over it. |
 | `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines, build name/number); drives both the `build` command (release-default) and `run`'s Android/iOS pipelines (debug-default). |

@@ -59,6 +59,14 @@ cargo run -p notes
 # docs/ARCHITECTURE.md#data-flow's Theme delivery and Frame pipeline).
 cargo run -p gallery
 
+# Navigation demo: declarative routes, push/pop with results, M3 + iOS page
+# transitions, mouse-drag swipe-back, and a simulate-deep-link button —
+# exercises the nav module end-to-end (see docs/ARCHITECTURE.md#data-flow's
+# Navigation flow and Deep-link flow). The manual visual gate for
+# navigator/transition/router changes: check transition motion, swipe-back,
+# the pop result banner, and the deep-link jump to /item/7.
+cargo run -p navdemo
+
 # Async/signals demo: an inbox screen whose Component wires a clean-signals
 # ControllerCore (a real async UseCase, with retry) to an RwSignal it renders
 # — exercises the reactive substrate end-to-end (signal write -> wake ->
@@ -83,13 +91,14 @@ cargo run -p gallery
 ```
 
 `cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes`/
-`cargo run -p gallery`/`(cd examples/inbox && cargo run)`/
-`(cd examples/team-demo && cargo run)` are the manual visual gates for
-rendering, interaction, text-input, theme/animation, and async/signals
-changes respectively — there is no automated pixel-diff test yet, so a
-person must look at the window. `notes` is also the demo
-`forgekit create` scaffolds (`templates/app/src/lib.rs.tmpl`), so scaffold
-changes should be checked against it. `examples/inbox`'s and
+`cargo run -p gallery`/`cargo run -p navdemo`/
+`(cd examples/inbox && cargo run)`/`(cd examples/team-demo && cargo run)`
+are the manual visual gates for rendering, interaction, text-input,
+theme/animation, navigation, and async/signals changes respectively — there
+is no automated pixel-diff test yet, so a person must look at the window.
+`notes` is also the demo `forgekit create` scaffolds
+(`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
+against it. `examples/inbox`'s and
 `examples/team-demo`'s own verify gates (`cargo test` plus their clippy
 lines, run from each example's own directory) are their regression proof:
 `inbox`'s is unconditional in the Standard verify gate below; `team-demo`'s
@@ -213,6 +222,44 @@ cargo check --target aarch64-linux-android -p forgekit
 # must compile for the iOS Simulator target.
 cargo check --target aarch64-apple-ios-sim -p forgekit
 ```
+
+### Deep-link manual test (Android)
+
+A device/emulator gate for `nativeOnDeepLink` (see
+`docs/ARCHITECTURE.md#data-flow`'s Deep-link flow), against a project
+scaffolded with `forgekit create --deeplink-scheme <scheme>
+[--deeplink-host <host>]` and installed (`forgekit run -d <device>`):
+
+```bash
+# Cold start: app not running — the link launches it and the deep link
+# resolves once the native handle exists (queued until then).
+adb shell am force-stop <package>
+adb shell am start -a android.intent.action.VIEW \
+  -d "<scheme>://<path>" <package>
+
+# Warm: app already foregrounded — android:launchMode="singleTop" routes
+# this through MainActivity.onNewIntent (not a fresh onCreate).
+adb shell am start -a android.intent.action.VIEW \
+  -d "<scheme>://<other-path>" <package>
+```
+
+Confirm the app navigates to the linked route both times. The iOS
+equivalent (`forgekit_on_deep_link`, delivered via `SceneDelegate`'s
+`scene(_:openURLContexts:)`) has a Simulator-only CLI trigger:
+
+```bash
+xcrun simctl openurl booted "<scheme>://<path>"
+```
+
+A physical device has no CLI trigger — test by tapping a link to the
+registered `CFBundleURLSchemes` scheme (e.g. from Notes) instead.
+
+`forgekit.toml`'s `[deeplink]` section (`scheme`/`host`, written by
+`forgekit create`'s `--deeplink-scheme`/`--deeplink-host` flags) is
+informational only — it documents what's already baked into the generated
+Android manifest intent filter / iOS `Info.plist`; editing it does not
+re-render either, so re-scaffold (`--overwrite`) or edit the platform files
+directly to change the scheme after the fact.
 
 ### Template development
 

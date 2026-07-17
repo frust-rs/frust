@@ -72,6 +72,27 @@
   }
   ```
 
+- **A platform value with no published spec is a named constant with a
+  source comment, not a bare literal.** Where a platform's exact behavior is
+  private (an iOS gesture's edge zone, commit threshold, or fling velocity;
+  an animation's duration/curve), name the constant, and its doc comment
+  states whether it's a published value or **community-approximate** (a
+  reverse-engineered/community-converged estimate) plus what it's
+  approximating:
+
+  ```rust
+  /// Left-edge activation zone width for the interactive pop-swipe, in
+  /// logical px.
+  ///
+  /// **Community-approximate**: UIKit's `interactivePopGestureRecognizer`
+  /// edge zone is not a published constant; ~20dp is the value the
+  /// community-reverse-engineered reimplementations converge on.
+  const EDGE_SWIPE_ZONE_DP: f64 = 20.0;
+  ```
+  This keeps the tunable visible and re-tunable in one place instead of
+  buried inline, and tells a future reader whether "fixing" a value means
+  matching a spec or just adjusting a guess.
+
 ## Error Handling
 
 - **`anyhow::Result` in binaries and integration-facing library code**
@@ -207,6 +228,32 @@ interactive widget in `forgekit-widgets`:
   handler that reached for real state there panics on the `()` downcast — a
   deliberate tripwire, not silent corruption.
 
+- **A container that suppresses routing to its children must cancel their
+  capture, clear their focus, and publish a cleared IME surface — in that
+  order — before the block takes effect; there is no bypass.** This binds any
+  container that can stop forwarding events to an already-interactive child
+  (the navigator's mid-transition input block is the reference
+  implementation — see `docs/ARCHITECTURE.md`'s Navigation flow), not just
+  `Navigator`:
+
+  ```rust
+  fn cancel_top(&mut self) {
+      if let Some(top) = self.pages.last_mut() {
+          if top.pod.is_active() {
+              crate::cancel_pod(&mut top.pod); // synthetic Cancel first
+              top.pod.set_active(false);
+          }
+          if top.pod.is_focused() {
+              top.pod.set_focused(false); // then focus
+          }
+      }
+      // then: publish a cleared ImeState on the next paint
+  }
+  ```
+  Skipping this leaves a child armed (a later `Up` it never receives fires
+  against a widget the container has stopped routing to) or a stale
+  focus/IME surface behind after the block lifts.
+
 ## State & Reactivity Conventions
 
 - **Local state lives in the retained `Component` element, not signals,
@@ -247,7 +294,15 @@ interactive widget in `forgekit-widgets`:
   `Get`/`Set`/`Update` traits the facade re-exports — an app crate should
   never add `reactive_graph`/`any_spawner`/`forgekit-reactive` to its own
   `Cargo.toml`; every symbol an app needs is already flat-re-exported from
-  `forgekit` (see `docs/ARCHITECTURE.md`'s Key Types).
+  `forgekit` (see `docs/ARCHITECTURE.md`'s Key Types). **This is the general
+  rule for every `examples/*` crate, not just reactive types**: an example's
+  `Cargo.toml` should depend on `forgekit` alone (`examples/navdemo` is the
+  facade-only baseline this is checked against). `examples/gallery`'s
+  hand-rolled raw-`Spring` widget is the one documented exception — a
+  workaround predating `AnimationController`'s overshoot support, now
+  retirable but not yet removed, not a precedent to extend; a new example
+  missing something from the facade should get that gap filled in the
+  facade, not reach around it.
 
 ## Theming & Animation Conventions
 
