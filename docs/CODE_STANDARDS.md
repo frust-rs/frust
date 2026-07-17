@@ -91,7 +91,10 @@
   ```
   This keeps the tunable visible and re-tunable in one place instead of
   buried inline, and tells a future reader whether "fixing" a value means
-  matching a spec or just adjusting a guess.
+  matching a spec or just adjusting a guess. The `cupertino::*` widget catalog
+  applies this to every iOS-tunable it introduces (alert/action-sheet
+  dimensions, switch geometry, spinner spoke layout, hairline widths) — grep
+  for `Community-approximate` to find them all.
 
 ## Error Handling
 
@@ -254,6 +257,32 @@ interactive widget in `forgekit-widgets`:
   against a widget the container has stopped routing to) or a stale
   focus/IME surface behind after the block lifts.
 
+## Semantics Conventions
+
+Conventions for `Widget::semantics` (spec §9 — see `docs/ARCHITECTURE.md`'s
+Semantics pass):
+
+- **The method defaults to a no-op.** Only override it if the widget has a
+  role/label/state worth reporting; a widget with nothing to say about itself
+  needs no impl at all.
+- **A container MUST forward to every child via `ChildPod::semantics_child`**,
+  never by calling a child's `semantics` directly — this threads the absolute
+  origin the same way `paint_child`/`event_child` do. Skipping a child here
+  silently drops its whole subtree from the accessibility tree with no
+  compile-time or test signal, so every new container widget needs a
+  `semantics` impl even a transparent one that just forwards:
+
+  ```rust
+  fn semantics(&self, ctx: &mut SemanticsCtx) {
+      self.child.semantics_child(ctx);
+  }
+  ```
+
+- **Keep it minimal: role, label, state, and bounds only.** This gives a
+  future platform adapter just enough to build on — no live-region
+  announcements, no custom actions, and no platform adapter wiring belong
+  here (that integration lives in a shell, not `forgekit-core`).
+
 ## State & Reactivity Conventions
 
 - **Local state lives in the retained `Component` element, not signals,
@@ -339,6 +368,13 @@ interactive widget in `forgekit-widgets`:
   per paint, reads `value()`, and — while `advance` returns `true` — calls
   `PaintCtx::request_frame()` so the shell schedules the next frame; there is
   no ambient ticker (see `docs/ARCHITECTURE.md`'s Frame pipeline).
+- **State-layer opacity has one source: `material::state_layer`'s constants.**
+  `HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/`DRAGGED_OPACITY` (M3
+  `StateTokens`) live in that one module; a catalog widget imports them rather
+  than hardcoding its own overlay opacity. When more than one interaction
+  state is active at once, the overlay opacity is the **maximum** of the
+  active states', never their sum — M3 shows the strongest state, not a
+  stacked blend.
 
 ## Testing Patterns
 

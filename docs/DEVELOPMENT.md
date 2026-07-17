@@ -67,6 +67,16 @@ cargo run -p gallery
 # the pop result banner, and the deep-link jump to /item/7.
 cargo run -p navdemo
 
+# Widget catalog demo: the M3/Cupertino widget catalog (AppBar, Card, Chips,
+# Dialog, FAB, ListView/ListItem, NavigationBar, BottomSheet, Switch,
+# progress indicators, plus Cupertino counterparts), with a toolbar toggle
+# swapping design language live via set_app_theme (see
+# docs/ARCHITECTURE.md#data-flow's Theme delivery). Needs a display, like
+# every manual visual gate below — on a headless host, record "catalog
+# visual gate not run — no display" in your completion summary instead and
+# check both design languages on a host with one.
+cargo run -p catalog
+
 # Async/signals demo: an inbox screen whose Component wires a clean-signals
 # ControllerCore (a real async UseCase, with retry) to an RwSignal it renders
 # — exercises the reactive substrate end-to-end (signal write -> wake ->
@@ -91,11 +101,13 @@ cargo run -p navdemo
 ```
 
 `cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes`/
-`cargo run -p gallery`/`cargo run -p navdemo`/
+`cargo run -p gallery`/`cargo run -p navdemo`/`cargo run -p catalog`/
 `(cd examples/inbox && cargo run)`/`(cd examples/team-demo && cargo run)`
 are the manual visual gates for rendering, interaction, text-input,
-theme/animation, navigation, and async/signals changes respectively — there
-is no automated pixel-diff test yet, so a person must look at the window.
+theme/animation, navigation, the M3/Cupertino widget catalog, and
+async/signals changes respectively — there is no automated pixel-diff test
+yet, so a person must look at the window (see *Run* above for `catalog`'s
+no-display fallback).
 `notes` is also the demo `forgekit create` scaffolds
 (`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
 against it. `examples/inbox`'s and
@@ -290,6 +302,10 @@ deliberately, not floating:
   bump. Never enable `reactive_graph`'s `effects` feature (the frame path is
   a custom subscriber, not `RenderEffect` — see `docs/ARCHITECTURE.md`'s Key
   Types).
+- `accesskit = "0.24"` (`forgekit-core`'s semantics-pass vocabulary, spec §9)
+  is pinned to minor — a core-crate-only dependency, with no
+  `accesskit_*` platform adapter wired yet; `cargo test -p forgekit-core
+  semantics` is the tripwire for a breaking bump.
 - `examples/inbox` is a **standalone package** (its own `[workspace]` root
   and `Cargo.lock`, `exclude`d from the root `[workspace]` in the root
   `Cargo.toml`) specifically so its `git`+`rev`-pinned `clean-signals`
