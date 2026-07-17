@@ -200,12 +200,7 @@ impl<State: 'static> NavigatorController<State> {
     /// Push an **opaque** page built by `builder` on top of the stack, using the
     /// navigator's default transition (instant unless the navigator sets one).
     pub fn push(&self, builder: impl Fn() -> AnyView<State> + 'static) {
-        self.enqueue(NavOp::Push {
-            builder: Rc::new(builder),
-            opaque: true,
-            on_result: None,
-            transition: None,
-        });
+        self.push_impl(builder, true, None, None);
     }
 
     /// Push an **opaque** page with an explicit [`TransitionSpec`], overriding the
@@ -216,23 +211,13 @@ impl<State: 'static> NavigatorController<State> {
         builder: impl Fn() -> AnyView<State> + 'static,
         transition: TransitionSpec,
     ) {
-        self.enqueue(NavOp::Push {
-            builder: Rc::new(builder),
-            opaque: true,
-            on_result: None,
-            transition: Some(transition),
-        });
+        self.push_impl(builder, true, None, Some(transition));
     }
 
     /// Push a **transparent** page (e.g. a dialog/overlay) — the page below it
     /// stays visible and painted (see [module docs](self)'s paint culling).
     pub fn push_transparent(&self, builder: impl Fn() -> AnyView<State> + 'static) {
-        self.enqueue(NavOp::Push {
-            builder: Rc::new(builder),
-            opaque: false,
-            on_result: None,
-            transition: None,
-        });
+        self.push_impl(builder, false, None, None);
     }
 
     /// Push an opaque page and register `on_result`, invoked with `&mut State`
@@ -246,11 +231,56 @@ impl<State: 'static> NavigatorController<State> {
         builder: impl Fn() -> AnyView<State> + 'static,
         on_result: impl Fn(&mut State, PopResult) + 'static,
     ) {
+        self.push_impl(builder, true, Some(Rc::new(on_result)), None);
+    }
+
+    /// Push a **transparent** page (e.g. a dialog/bottom sheet) with an explicit
+    /// [`TransitionSpec`] (e.g. [`PageTransition::M3FadeThrough`] for a dialog,
+    /// [`PageTransition::SlideUp`] for a bottom sheet — see
+    /// [`crate::material::dialog`]/[`crate::material::sheet`]'s usage sketch),
+    /// and register `on_result`, invoked with `&mut State` when *this* page is
+    /// later popped (carrying the pop's [`PopResult`]) — the modal-with-a-result
+    /// combination [`push_transparent`](Self::push_transparent) and
+    /// [`push_for_result`](Self::push_for_result) each cover only half of.
+    ///
+    /// ```ignore
+    /// // A confirm dialog that reports whether the user confirmed:
+    /// controller.push_transparent_for_result(
+    ///     || dialog_view(),
+    ///     TransitionSpec::duration(PageTransition::M3FadeThrough),
+    ///     |state: &mut State, result: PopResult| {
+    ///         state.confirmed = result.take::<bool>().unwrap_or(false);
+    ///     },
+    /// );
+    /// ```
+    ///
+    /// The callback is delivered the same way [`push_for_result`](Self::push_for_result)'s
+    /// is: at the start of the [`NavigatorWidget::event`] pass after the pop's
+    /// rebuild.
+    pub fn push_transparent_for_result(
+        &self,
+        builder: impl Fn() -> AnyView<State> + 'static,
+        transition: TransitionSpec,
+        on_result: impl Fn(&mut State, PopResult) + 'static,
+    ) {
+        self.push_impl(builder, false, Some(Rc::new(on_result)), Some(transition));
+    }
+
+    /// Shared push-op construction every `push*` method above funnels through —
+    /// the five public variants differ only in which of `opaque`/`on_result`/
+    /// `transition` they fix vs. expose.
+    fn push_impl(
+        &self,
+        builder: impl Fn() -> AnyView<State> + 'static,
+        opaque: bool,
+        on_result: Option<ResultCallback<State>>,
+        transition: Option<TransitionSpec>,
+    ) {
         self.enqueue(NavOp::Push {
             builder: Rc::new(builder),
-            opaque: true,
-            on_result: Some(Rc::new(on_result)),
-            transition: None,
+            opaque,
+            on_result,
+            transition,
         });
     }
 
@@ -1054,9 +1084,9 @@ impl<State: 'static> NavigatorWidget<State> {
     }
 }
 
-/// Paint one transition page: offset its pod origin by the layer's `dx` (so paint
-/// and hit-testing move together), and composite at the layer's opacity via a
-/// `push_layer`/`pop_layer` pair when it is below full opacity.
+/// Paint one transition page: offset its pod origin by the layer's `dx`/`dy` (so
+/// paint and hit-testing move together), and composite at the layer's opacity
+/// via a `push_layer`/`pop_layer` pair when it is below full opacity.
 fn paint_page_layer(
     pod: &mut ChildPod,
     ctx: &mut PaintCtx,
@@ -1064,7 +1094,7 @@ fn paint_page_layer(
     layer: Layer,
     area: Size,
 ) {
-    pod.set_origin(Point::new(layer.dx, 0.0));
+    pod.set_origin(Point::new(layer.dx, layer.dy));
     let alpha = layer.alpha.clamp(0.0, 1.0);
     if alpha < 1.0 {
         scene.push_layer(ctx.origin(), area, alpha);
@@ -1477,6 +1507,54 @@ mod tests {
         assert_eq!(state.received, Some(42));
     }
 
+    // --- push_transparent_for_result: the modal+result combination carries its
+    //     callback through the pop, same as push_for_result's opaque case, while
+    //     also keeping the page below visible (transparent) the whole time. ---
+
+    #[test]
+    fn push_transparent_for_result_carries_callback_through_pop() {
+        let controller: NavigatorController<ResultState> = NavigatorController::new();
+        let mut root: RenderRoot<ResultState, NavigatorView<ResultState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ResultState| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ResultState::default();
+
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Push a transparent "dialog" page registering a result callback.
+        controller.push_transparent_for_result(
+            || sized_page(20.0, 20.0),
+            TransitionSpec::NONE,
+            |state: &mut ResultState, result: PopResult| {
+                state.received = result.take::<i32>();
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert_eq!(
+            scene.rects,
+            vec![
+                (Point::ZERO, Size::new(100.0, 100.0)),
+                (Point::ZERO, Size::new(20.0, 20.0)),
+            ],
+            "the page below the transparent dialog stays visible"
+        );
+
+        // Pop the dialog with a payload; the callback is queued at rebuild and
+        // flushed at the next event pass, exactly like the opaque
+        // push_for_result path.
+        controller.pop_with_result(PopResult::of(7i32));
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(state.received, None, "not yet flushed (no event pass)");
+        root.event(&mut state, &move_to(5.0, 5.0));
+        assert_eq!(state.received, Some(7));
+    }
+
     // --- Criterion 3: opaque-page paint culling. ---
 
     fn drive_paint(root: &mut RenderRoot<(), NavigatorView<()>>) -> Vec<(Point, Size)> {
@@ -1792,11 +1870,12 @@ mod tests {
     }
 
     /// Run one full frame (rebuild → layout → paint) at `time`, returning the
-    /// recorded fills and whether another frame was requested.
-    fn full_frame(
-        root: &mut RenderRoot<(), NavigatorView<()>>,
-        app: &mut impl FnMut(&mut ()) -> NavigatorView<()>,
-        state: &mut (),
+    /// recorded fills and whether another frame was requested. Generic over
+    /// `State` so a result-carrying transition test (task 06) can share it too.
+    fn full_frame<State: 'static>(
+        root: &mut RenderRoot<State, NavigatorView<State>>,
+        app: &mut impl FnMut(&mut State) -> NavigatorView<State>,
+        state: &mut State,
         time: FrameTime,
     ) -> (Vec<(Point, Size, f32)>, bool) {
         root.rebuild(app, state);
@@ -2092,6 +2171,209 @@ mod tests {
         }
         assert_eq!(last.len(), 1, "only the revealed page remains");
         assert_eq!(last[0].1, Size::new(100.0, 100.0), "the revealed page is A");
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 06: SlideUp preset + push_transparent_for_result.
+    // ---------------------------------------------------------------------
+
+    // --- SlideUp paint sequence: the entering sheet's origin moves bottom→top
+    //     as progress advances, settles exactly at rest, and is disposed (culling
+    //     resumes) once the transition finalizes — mirroring
+    //     `push_animates_moving_origins_and_disposes_after_settle` above, but
+    //     checking the vertical origin a horizontal preset never moves. ---
+
+    #[test]
+    fn slide_up_moves_origin_bottom_to_top_and_disposes_after_settle() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            // Root page A is 100x100; the pushed "sheet" B is 100 wide, 40 tall
+            // (a distinct height so a test can tell it apart in the fills).
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let spec = TransitionSpec::new(
+            PageTransition::SlideUp,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.push_with(|| sized_page(100.0, 40.0), spec);
+
+        // Seed frame: driver at 0. The sheet (B) sits a full 100px (the
+        // navigator's height) below rest; the page below (A) is untouched.
+        let (f0, nf0) = full_frame(&mut root, &mut app, &mut state, ft(0));
+        assert!(nf0, "a running transition requests frames");
+        assert_eq!(fill_h(&f0, 100.0).0, Point::ZERO, "A never moves");
+        let b0 = fill_h(&f0, 40.0).0;
+        assert_eq!(b0.x, 0.0, "SlideUp never offsets horizontally");
+        assert_eq!(b0.y, 100.0, "B starts a full height below rest");
+
+        // Mid frame (50ms → progress 0.5): B has moved halfway up; A is still
+        // static.
+        let (f1, _) = full_frame(&mut root, &mut app, &mut state, ft(50));
+        assert_eq!(
+            fill_h(&f1, 100.0).0,
+            Point::ZERO,
+            "A stays static mid-transition"
+        );
+        let b1 = fill_h(&f1, 40.0).0;
+        assert_eq!(b1.x, 0.0);
+        assert!((b1.y - 50.0).abs() < 1e-6, "B is halfway up (was {})", b1.y);
+        assert!(b1.y < b0.y, "B's origin moves toward the top (up)");
+
+        // End frame (150ms → past the 100ms duration): settles at exact rest.
+        let (f2, nf2) = full_frame(&mut root, &mut app, &mut state, ft(150));
+        assert_eq!(
+            fill_h(&f2, 40.0).0,
+            Point::ZERO,
+            "B rests exactly at origin"
+        );
+        assert!(nf2, "the settling frame still requests one finalize frame");
+
+        // Finalize frame: culling resumes, only the sheet (now opaque top of the
+        // *animated* stack — still the same page) is considered; here it was
+        // pushed with `push_with` (opaque, the default), so only B survives.
+        let (f3, nf3) = full_frame(&mut root, &mut app, &mut state, ft(300));
+        assert!(!nf3, "no frame requested once the transition is disposed");
+        assert_eq!(f3.len(), 1, "culling resumed: only the top page paints");
+        assert_eq!(f3[0].1, Size::new(100.0, 40.0), "the surviving page is B");
+    }
+
+    // --- SlideUp pop: the sheet reverses (slides back down and out) while the
+    //     revealed page below never moves — the modal-sheet paint contract. ---
+
+    #[test]
+    fn slide_up_pop_slides_sheet_down_without_moving_revealed_page() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Push the sheet instantly, then animate the pop.
+        controller.push_with(
+            || sized_page(100.0, 40.0),
+            TransitionSpec::new(
+                PageTransition::SlideUp,
+                Timing::Duration(Duration::from_millis(100), Curve::Linear),
+            ),
+        );
+        for t in [0u64, 50, 150, 300] {
+            full_frame(&mut root, &mut app, &mut state, ft(t));
+        }
+
+        // Pop: the sheet (B) reverses, sliding back down; A (revealed) never
+        // moves throughout. The pop starts a *fresh* driver (a new
+        // `AnimationController` per `start_transition`), so this first frame
+        // after `pop()` is its seed (progress 0, matching the push seed's
+        // convention above) — the sheet still sits at rest here.
+        controller.pop();
+        let (f0, _) = full_frame(&mut root, &mut app, &mut state, ft(1000));
+        assert_eq!(fill_h(&f0, 100.0).0, Point::ZERO, "A never moves on pop");
+        assert_eq!(
+            fill_h(&f0, 40.0).0,
+            Point::ZERO,
+            "the pop's seed frame: sheet still at rest"
+        );
+
+        // 50ms in (half the 100ms duration): the sheet has started sliding down;
+        // A still hasn't moved.
+        let (f1, _) = full_frame(&mut root, &mut app, &mut state, ft(1050));
+        assert_eq!(fill_h(&f1, 100.0).0, Point::ZERO, "A still never moves");
+        let b1 = fill_h(&f1, 40.0).0;
+        assert_eq!(b1.x, 0.0);
+        assert!(b1.y > 0.0, "the sheet has begun sliding down (y={})", b1.y);
+
+        let mut last = Vec::new();
+        for t in [1150u64, 1300] {
+            let (fills, _) = full_frame(&mut root, &mut app, &mut state, ft(t));
+            last = fills;
+        }
+        assert_eq!(last.len(), 1, "only the revealed page remains");
+        assert_eq!(last[0].1, Size::new(100.0, 100.0), "the revealed page is A");
+        assert_eq!(
+            last[0].0,
+            Point::ZERO,
+            "A settles back at its resting origin"
+        );
+    }
+
+    // --- Composed: transparent + result + SlideUp — the dialog/sheet-shaped
+    //     usage `push_transparent_for_result` exists for. The page below stays
+    //     visible throughout (transparent), the sheet animates in/out via
+    //     SlideUp, and the pop result still reaches the pusher's callback. ---
+
+    #[test]
+    fn transparent_result_slide_up_composed_dialog_usage() {
+        let controller: NavigatorController<ResultState> = NavigatorController::new();
+        let mut root: RenderRoot<ResultState, NavigatorView<ResultState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ResultState| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ResultState::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let spec = TransitionSpec::new(
+            PageTransition::SlideUp,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.push_transparent_for_result(
+            || sized_page(100.0, 40.0),
+            spec,
+            |state: &mut ResultState, result: PopResult| {
+                state.received = result.take::<i32>();
+            },
+        );
+
+        // Seed frame (progress 0): the page below (A, 100 tall) already paints —
+        // the sheet is transparent, so culling never hides it — while the sheet
+        // (B, 40 tall) starts a full height below rest.
+        let (f0, _) = full_frame(&mut root, &mut app, &mut state, ft(0));
+        assert_eq!(fill_h(&f0, 100.0).0, Point::ZERO, "A stays visible below");
+        assert_eq!(
+            fill_h(&f0, 40.0).0,
+            Point::new(0.0, 100.0),
+            "B starts a full height below rest"
+        );
+
+        // Mid-animation (50ms of the 100ms duration): B is partway up; A is
+        // still visible and unmoved.
+        let (f1, _) = full_frame(&mut root, &mut app, &mut state, ft(50));
+        assert_eq!(fill_h(&f1, 100.0).0, Point::ZERO, "A stays visible below");
+        let b1 = fill_h(&f1, 40.0).0;
+        assert!(b1.y > 0.0 && b1.y < 100.0, "B is mid-slide (y={})", b1.y);
+
+        // Settle the push.
+        for t in [150u64, 300] {
+            full_frame(&mut root, &mut app, &mut state, ft(t));
+        }
+        // Still transparent: A remains visible under the settled sheet.
+        let (settled, _) = full_frame(&mut root, &mut app, &mut state, ft(316));
+        assert_eq!(settled.len(), 2, "both A and the settled sheet paint");
+
+        // Pop the sheet with a result payload; drive the reverse transition to
+        // settle, then flush the queued callback at the next event pass.
+        controller.pop_with_result(PopResult::of(99i32));
+        for t in [1000u64, 1050, 1150, 1300] {
+            full_frame(&mut root, &mut app, &mut state, ft(t));
+        }
+        assert_eq!(state.received, None, "not yet flushed (no event pass)");
+        root.event(&mut state, &move_to(5.0, 5.0));
+        assert_eq!(
+            state.received,
+            Some(99),
+            "the transparent+SlideUp dialog still delivers its pop result"
+        );
     }
 
     // ---------------------------------------------------------------------

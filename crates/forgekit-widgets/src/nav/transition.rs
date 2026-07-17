@@ -123,6 +123,15 @@ pub enum PageTransition {
     /// iOS-style push/pop: incoming slides full-width from the edge; outgoing
     /// parallaxes by [`IOS_PARALLAX_FRACTION`] with an optional dim.
     IosPush,
+    /// Bottom-sheet-style slide-up: the entering page translates in from the
+    /// bottom (full height → 0); pop reverses (slides back down and out). The
+    /// page **below** never moves (a modal sheet floats over a static page,
+    /// unlike [`PageTransition::IosPush`]'s parallaxing below-page). Opacity is
+    /// always `1.0` for both layers — a sheet's scrim is a **page-owned** paint
+    /// concern (the hosting widget paints/fades its own scrim, e.g. reading the
+    /// transition progress itself or a fixed alpha), not a [`Layer`]-level
+    /// effect this preset drives; see [`resolve_layers`]'s `SlideUp` arm.
+    SlideUp,
 }
 
 /// How a transition's `0.0..=1.0` progress is driven.
@@ -175,6 +184,13 @@ impl TransitionSpec {
     pub fn duration(preset: PageTransition) -> Self {
         let d = match preset {
             PageTransition::IosPush => IOS_DEFAULT_DURATION,
+            // SlideUp is a Material-family surface (a bottom sheet), not an iOS
+            // one, so it follows the same M3 "long2" 300ms default the other
+            // two Material presets use here — a duration-mode default, not a
+            // theme spring, purely to keep this table uniform; an app wanting a
+            // bouncier sheet can still opt into `TransitionSpec::spring` with
+            // any `MotionSpring` preset (e.g. the theme's `default_spatial`),
+            // same as the other presets.
             _ => M3_DEFAULT_DURATION,
         };
         TransitionSpec {
@@ -337,12 +353,16 @@ pub fn settle_driver(
 
 // --- Geometry ---------------------------------------------------------------
 
-/// Per-page paint parameters for one frame of a transition: a horizontal paint
-/// offset (applied to the page's pod origin) and an opacity.
+/// Per-page paint parameters for one frame of a transition: a paint offset
+/// (applied to the page's pod origin) and an opacity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layer {
     /// Horizontal paint offset in logical px (added to the page's pod origin).
     pub dx: f64,
+    /// Vertical paint offset in logical px (added to the page's pod origin).
+    /// Every preset before [`PageTransition::SlideUp`] is horizontal-only and
+    /// leaves this at `0.0`.
+    pub dy: f64,
     /// Opacity in `[0, 1]` (composited via `PaintScene::push_layer`).
     pub alpha: f32,
 }
@@ -351,6 +371,7 @@ impl Layer {
     /// A fully-visible, un-offset layer.
     pub const IDENTITY: Layer = Layer {
         dx: 0.0,
+        dy: 0.0,
         alpha: 1.0,
     };
 }
@@ -382,10 +403,12 @@ pub fn resolve_layers(
             let dir = if is_pop { -1.0 } else { 1.0 };
             let entering = Layer {
                 dx: dir * (1.0 - p) * slide,
+                dy: 0.0,
                 alpha: ramp(pc, M3_FADE_SPLIT, 1.0),
             };
             let leaving = Layer {
                 dx: -dir * p * slide,
+                dy: 0.0,
                 alpha: 1.0 - ramp(pc, 0.0, M3_FADE_SPLIT),
             };
             (entering, leaving)
@@ -395,10 +418,12 @@ pub fn resolve_layers(
             // Pure cross-fade (scale spec'd but not applied — see the constant).
             let entering = Layer {
                 dx: 0.0,
+                dy: 0.0,
                 alpha: ramp(pc, M3_FADE_SPLIT, 1.0),
             };
             let leaving = Layer {
                 dx: 0.0,
+                dy: 0.0,
                 alpha: 1.0 - ramp(pc, 0.0, M3_FADE_SPLIT),
             };
             (entering, leaving)
@@ -410,10 +435,12 @@ pub fn resolve_layers(
                 // slides fully off to the right.
                 let entering = Layer {
                     dx: -(1.0 - p) * w * IOS_PARALLAX_FRACTION,
+                    dy: 0.0,
                     alpha: 1.0,
                 };
                 let leaving = Layer {
                     dx: p * w,
+                    dy: 0.0,
                     alpha: 1.0,
                 };
                 (entering, leaving)
@@ -422,11 +449,48 @@ pub fn resolve_layers(
                 // parallaxes left and dims.
                 let entering = Layer {
                     dx: (1.0 - p) * w,
+                    dy: 0.0,
                     alpha: 1.0,
                 };
                 let leaving = Layer {
                     dx: -p * w * IOS_PARALLAX_FRACTION,
+                    dy: 0.0,
                     alpha: 1.0 - pc as f32 * IOS_DIM_MAX,
+                };
+                (entering, leaving)
+            }
+        }
+
+        PageTransition::SlideUp => {
+            let h = size.height;
+            if is_pop {
+                // The revealed page below never moved while covered (see the
+                // enum docs) — it stays at rest, full opacity, the whole time.
+                // The popped sheet (leaving) slides from rest back down and out.
+                let entering = Layer {
+                    dx: 0.0,
+                    dy: 0.0,
+                    alpha: 1.0,
+                };
+                let leaving = Layer {
+                    dx: 0.0,
+                    dy: p * h,
+                    alpha: 1.0,
+                };
+                (entering, leaving)
+            } else {
+                // The entering sheet slides up from the bottom (full height
+                // offset) to rest; the page below stays static and fully
+                // opaque throughout (no parallax/dim, unlike `IosPush`).
+                let entering = Layer {
+                    dx: 0.0,
+                    dy: (1.0 - p) * h,
+                    alpha: 1.0,
+                };
+                let leaving = Layer {
+                    dx: 0.0,
+                    dy: 0.0,
+                    alpha: 1.0,
                 };
                 (entering, leaving)
             }
@@ -509,6 +573,45 @@ mod tests {
         let (enter, leave) = resolve_layers(PageTransition::M3FadeThrough, 0.5, false, SIZE);
         assert_eq!(enter.dx, 0.0);
         assert_eq!(leave.dx, 0.0);
+    }
+
+    #[test]
+    fn slide_up_enters_from_bottom_and_settles() {
+        // At the start, the entering sheet sits a full height below rest, fully
+        // visible (opacity is a page-owned scrim concern, not this preset's).
+        let (enter, leave) = resolve_layers(PageTransition::SlideUp, 0.0, false, SIZE);
+        assert_eq!(enter.dx, 0.0);
+        assert_eq!(enter.dy, SIZE.height);
+        assert_eq!(enter.alpha, 1.0);
+        // The page below never moves or fades.
+        assert_eq!(leave.dx, 0.0);
+        assert_eq!(leave.dy, 0.0);
+        assert_eq!(leave.alpha, 1.0);
+
+        // At the end, the sheet rests at dy = 0; the below page is unchanged.
+        let (enter, leave) = resolve_layers(PageTransition::SlideUp, 1.0, false, SIZE);
+        assert_eq!(enter.dy, 0.0);
+        assert_eq!(enter.alpha, 1.0);
+        assert_eq!(leave.dy, 0.0);
+        assert_eq!(leave.alpha, 1.0);
+    }
+
+    #[test]
+    fn slide_up_pop_reverses_and_never_moves_below_page() {
+        // Pop: the sheet (leaving) slides back down; the revealed page
+        // (entering) stays static at rest throughout.
+        let (enter, leave) = resolve_layers(PageTransition::SlideUp, 0.0, true, SIZE);
+        assert_eq!(enter.dy, 0.0);
+        assert_eq!(leave.dy, 0.0);
+
+        let (enter, leave) = resolve_layers(PageTransition::SlideUp, 1.0, true, SIZE);
+        assert_eq!(enter.dy, 0.0, "revealed page never moves");
+        assert_eq!(
+            leave.dy, SIZE.height,
+            "the sheet slides fully off the bottom"
+        );
+        assert_eq!(enter.alpha, 1.0);
+        assert_eq!(leave.alpha, 1.0, "SlideUp never fades a page's own layer");
     }
 
     #[test]
