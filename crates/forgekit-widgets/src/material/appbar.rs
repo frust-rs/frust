@@ -16,7 +16,11 @@
 //! hand-shaped text), styled at the M3 `titleLarge` type-scale token and
 //! themed `onSurface` (the `Text` default role), so it participates in a live
 //! theme swap through `Text`'s own layout-time color resolution (see
-//! `docs/ARCHITECTURE.md`'s Theme delivery).
+//! `docs/ARCHITECTURE.md`'s Theme delivery). The title consumes the M3
+//! Expressive **emphasized** `titleLarge` sibling (`titleLargeEmphasized`;
+//! see `forgekit-theme::typography`'s "Emphasized type scale" module docs) —
+//! same size/line-height as the baseline token, weight stepped from Regular
+//! to Medium (task 6f-10).
 //!
 //! Layout is a fixed 64dp-tall row: the leading slot (if any) hugs the left
 //! edge, actions hug the right edge in reading order, and the title fills the
@@ -63,16 +67,19 @@ const PAD_X: f64 = 4.0;
 /// in logical px.
 const GAP: f64 = 4.0;
 
-/// The title's M3 `titleLarge` type-scale token, hardcoded here rather than
-/// read from a live `Theme::type_scale` (unlike a themed *color*, `Text` has
-/// no layout-time-deferred *size/weight* resolution seam — see
-/// `docs/CODE_STANDARDS.md`'s Theming conventions; only a color role can be
-/// resolved after `View::build`). Matches `forgekit-theme::typography`'s
-/// `TITLE_LARGE` token (m3.material.io, weight 400 — not the contested 500
-/// secondary-source claim).
+/// The title's M3 `titleLargeEmphasized` type-scale token, hardcoded here
+/// rather than read from a live `Theme::type_scale` (unlike a themed
+/// *color*, `Text` has no layout-time-deferred *size/weight* resolution
+/// seam — see `docs/CODE_STANDARDS.md`'s Theming conventions; only a color
+/// role can be resolved after `View::build`). Matches
+/// `forgekit-theme::typography`'s `TITLE_LARGE_EMPHASIZED` token: same
+/// size/line-height as the baseline `TITLE_LARGE` (m3.material.io, weight
+/// 400 — not the contested 500 secondary-source claim), weight stepped up to
+/// Medium (task 6f-10's emphasized-type consumption; was `REGULAR` prior to
+/// this task).
 const TITLE_SIZE: f32 = 22.0;
 const TITLE_LINE_HEIGHT: f32 = 28.0;
-const TITLE_WEIGHT: FontWeight = FontWeight::REGULAR;
+const TITLE_WEIGHT: FontWeight = FontWeight::MEDIUM;
 
 /// Unthemed fallback container fill (a theme resolves this from
 /// `colors.surface`).

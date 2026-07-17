@@ -26,8 +26,10 @@
 //!
 //! # Panel anatomy (ledger R15)
 //!
-//! 24dp padding on all four edges; `title` in the M3 `headlineSmall` type role
-//! (`onSurface`), `body` in `bodyMedium` (`onSurfaceVariant`), and a trailing,
+//! 24dp padding on all four edges; `title` in the M3 `headlineSmallEmphasized`
+//! type role (`onSurface`; task 6f-10's emphasized-type consumption — same
+//! size/line-height as `headlineSmall`, weight stepped to Medium), `body` in
+//! `bodyMedium` (`onSurfaceVariant`), and a trailing,
 //! right-aligned row of app-provided action buttons. Internal spacing follows
 //! the M3 basic-dialog spec: 16dp title→body, 24dp body→actions, 8dp between
 //! buttons. The panel width is clamped to `[280, 560]`dp (M3 min/max), the
@@ -82,7 +84,7 @@ use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
 };
-use forgekit_text::LineHeight;
+use forgekit_text::{FontWeight, LineHeight};
 use forgekit_theme::Theme;
 use kurbo::{Point, Rect, Size};
 use peniko::Color;
@@ -109,14 +111,19 @@ const MAX_WIDTH: f64 = 560.0;
 /// `shape.extra_large`, ledger R12's 28dp token).
 const RADIUS: f64 = 28.0;
 
-/// Title type-scale token (M3 `headlineSmall` — matches
-/// `forgekit-theme::typography`'s `HEADLINE_SMALL`, size 24 / line-height 32).
-/// Hardcoded rather than read from a live `Theme::type_scale`: `Text` has no
-/// layout-time-deferred *size* resolution seam (only a *color* role can be
-/// resolved after `View::build` — see `docs/CODE_STANDARDS.md`'s Theming
-/// conventions), the same precedent [`crate::material::appbar`] follows.
+/// Title type-scale token (M3 `headlineSmallEmphasized` — matches
+/// `forgekit-theme::typography`'s `HEADLINE_SMALL_EMPHASIZED`: same size 24 /
+/// line-height 32 as the baseline `HEADLINE_SMALL`, weight stepped up to
+/// Medium). Hardcoded rather than read from a live `Theme::type_scale`:
+/// `Text` has no layout-time-deferred *size/weight* resolution seam (only a
+/// *color* role can be resolved after `View::build` — see
+/// `docs/CODE_STANDARDS.md`'s Theming conventions), the same precedent
+/// [`crate::material::appbar`] follows. The emphasized weight is task
+/// 6f-10's addition — the title previously rendered at the default `Text`
+/// weight (`REGULAR`), matching the baseline `headlineSmall` token.
 const TITLE_SIZE: f32 = 24.0;
 const TITLE_LINE_HEIGHT: f32 = 32.0;
+const TITLE_WEIGHT: FontWeight = FontWeight::MEDIUM;
 /// Body type-scale token (M3 `bodyMedium` — size 14 / line-height 20).
 const BODY_SIZE: f32 = 14.0;
 const BODY_LINE_HEIGHT: f32 = 20.0;
@@ -170,12 +177,13 @@ fn finite_or_zero(v: f64) -> f64 {
     if v.is_finite() { v } else { 0.0 }
 }
 
-/// Build the title's type-erased child view (`headlineSmall`, themed
-/// `onSurface` — the `Text` default role).
+/// Build the title's type-erased child view (`headlineSmallEmphasized`,
+/// themed `onSurface` — the `Text` default role).
 fn title_view<State: 'static>(s: &str) -> AnyView<State> {
     any::<State, _>(
         text(s.to_string())
             .size(TITLE_SIZE)
+            .weight(TITLE_WEIGHT)
             .line_height(LineHeight::Absolute(TITLE_LINE_HEIGHT)),
     )
 }
@@ -216,7 +224,7 @@ pub fn dialog<State: 'static>() -> DialogView<State> {
 }
 
 impl<State: 'static> DialogView<State> {
-    /// Set the dialog title (`headlineSmall`, `onSurface`).
+    /// Set the dialog title (`headlineSmallEmphasized`, `onSurface`).
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self

@@ -39,19 +39,25 @@ use peniko::Color;
 
 use super::state_layer::StateLayer;
 
-/// Track width, in logical px (androidx `SwitchTokens.TrackWidth`, R14).
+/// Track width, in logical px (androidx `SwitchTokens.TrackWidth`, R14). No
+/// `Theme` size token exists for a fixed control dimension like this
+/// (`ShapeScale` publishes corner radii, not track/thumb sizes) — hoisted as
+/// a named constant per task 6f-10's metric-hardcode-migration pass rather
+/// than left as a bare literal.
 const TRACK_W: f64 = 52.0;
 /// Track height, in logical px (androidx `SwitchTokens.TrackHeight`, R14).
+/// See [`TRACK_W`]'s doc comment — no suitable `Theme` token exists.
 const TRACK_H: f64 = 32.0;
 /// Thumb diameter while unselected, in logical px (androidx
-/// `SwitchTokens.UnselectedHandleWidth`, R14).
+/// `SwitchTokens.UnselectedHandleWidth`, R14). See [`TRACK_W`]'s doc comment.
 const THUMB_UNSELECTED: f64 = 16.0;
 /// Thumb diameter while selected, in logical px (androidx
-/// `SwitchTokens.SelectedHandleWidth`, R14).
+/// `SwitchTokens.SelectedHandleWidth`, R14). See [`TRACK_W`]'s doc comment.
 const THUMB_SELECTED: f64 = 24.0;
 /// Thumb diameter while pressed (either state), in logical px (androidx
 /// `SwitchTokens.PressedHandleWidth`, R14) — overrides the
-/// unselected/selected interpolation while a press is in progress.
+/// unselected/selected interpolation while a press is in progress. See
+/// [`TRACK_W`]'s doc comment.
 const THUMB_PRESSED: f64 = 28.0;
 /// Diameter of the state-layer overlay painted behind the thumb, in logical
 /// px (M3's standard 40dp interactive target size for a switch handle).

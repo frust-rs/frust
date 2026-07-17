@@ -75,15 +75,18 @@ const PAD_TOP: f64 = 8.0;
 /// Gap between the indicator/icon area and the label below it.
 const LABEL_GAP: f64 = 4.0;
 
-/// The label's M3 `labelMedium` type-scale token (see [`super::appbar`]'s
-/// `TITLE_SIZE` doc comment for why this is a hardcoded constant rather than
-/// a live `Theme::type_scale` read — `Text` only defers *color* resolution
-/// past `View::build`, never size/weight). Matches
-/// `forgekit-theme::typography`'s `LABEL_MEDIUM` token.
+/// The label's M3 `labelMediumEmphasized` type-scale token (see
+/// [`super::appbar`]'s `TITLE_SIZE` doc comment for why this is a hardcoded
+/// constant rather than a live `Theme::type_scale` read — `Text` only defers
+/// *color* resolution past `View::build`, never size/weight). Matches
+/// `forgekit-theme::typography`'s `LABEL_MEDIUM_EMPHASIZED` token: same
+/// size/line-height/letter-spacing as the baseline `LABEL_MEDIUM`, weight
+/// stepped up from Medium to Bold (task 6f-10's emphasized-type
+/// consumption — was `FontWeight::MEDIUM` prior to this task).
 const LABEL_SIZE: f32 = 12.0;
 const LABEL_LINE_HEIGHT: f32 = 16.0;
 const LABEL_LETTER_SPACING: f32 = 0.5;
-const LABEL_WEIGHT: FontWeight = FontWeight::MEDIUM;
+const LABEL_WEIGHT: FontWeight = FontWeight::BOLD;
 
 /// M3 Expressive `default_effects` spring token (mass 1.0, stiffness 1600.0,
 /// critically damped — opacity/color motion never overshoots). Hardcoded for
@@ -124,8 +127,8 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
     Color::new([c[0], c[1], c[2], alpha])
 }
 
-/// Build a label's type-erased child view at `labelMedium`, tagged with the
-/// themed color `role` selection determines (`OnSurface` selected /
+/// Build a label's type-erased child view at `labelMediumEmphasized`, tagged
+/// with the themed color `role` selection determines (`OnSurface` selected /
 /// `OnSurfaceVariant` unselected).
 fn label_view<State: 'static>(label: String, role: ThemeTextColor) -> AnyView<State> {
     forgekit_core::any::<State, _>(

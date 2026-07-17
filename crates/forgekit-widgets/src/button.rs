@@ -26,9 +26,14 @@ use crate::text::ThemeTextColor;
 /// Corner radius of the button's rounded-rect background, in logical px (the
 /// unthemed fallback; a theme resolves this from `shape.small`).
 const RADIUS: f64 = 6.0;
-/// Horizontal padding around the label, in logical px.
+/// Horizontal padding around the label, in logical px. No `Theme` spacing
+/// token exists to resolve this from (`forgekit-theme` publishes a shape
+/// scale and a type scale, not a padding/spacing scale) — hoisted here as a
+/// named constant per task 6f-10's metric-hardcode-migration pass rather than
+/// left as a bare literal, pending a future spacing-token addition.
 const PAD_X: f64 = 12.0;
-/// Vertical padding around the label, in logical px.
+/// Vertical padding around the label, in logical px. See [`PAD_X`]'s doc
+/// comment — no suitable `Theme` token exists for this metric either.
 const PAD_Y: f64 = 8.0;
 /// Resting background fill (unthemed fallback; a theme resolves this from
 /// `colors.primary`).
