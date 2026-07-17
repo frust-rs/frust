@@ -901,10 +901,14 @@ where
                 // hiccup, and killing the whole app on one bad frame would be
                 // worse than skipping it. Turning *persistent* per-frame
                 // failures into a fatal error is future work — see `fatal`.
-                match self
-                    .renderer
-                    .render(&self.render_cx, &self.scene, peniko::Color::WHITE)
-                {
+                // Clear to the live theme's surface color rather than a
+                // hardcoded white, so a dark-scheme app doesn't render its
+                // dark-themed widgets over a white canvas (6e Finding 6).
+                match self.renderer.render(
+                    &self.render_cx,
+                    &self.scene,
+                    self.theme.scheme().surface,
+                ) {
                     // Stale swapchain (e.g. mid-resize): reconfigured internally,
                     // so ask for another frame against the fresh configuration.
                     Ok(FrameOutcome::Redraw) => window.request_redraw(),

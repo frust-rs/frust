@@ -582,9 +582,12 @@ impl AndroidAppHandle {
             builder.pop_transform();
         }
 
+        // Clear to the live theme's surface color rather than a hardcoded
+        // white, so a dark-scheme app doesn't render its dark-themed widgets
+        // over a white canvas (6e Finding 6).
         match self
             .renderer
-            .render(&self.render_cx, &self.scene, peniko::Color::WHITE)
+            .render(&self.render_cx, &self.scene, self.theme.scheme().surface)
         {
             // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
             // next Choreographer frame draws against the fresh configuration.
