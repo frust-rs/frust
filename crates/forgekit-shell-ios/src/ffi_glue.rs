@@ -21,7 +21,7 @@ use std::sync::Once;
 use anyhow::{Context, Result, bail};
 
 use forgekit_core::event::{EditingState, ImeState};
-use forgekit_reactive::ReactiveRuntime;
+use forgekit_reactive::{ReactiveRuntime, push_deep_link};
 use forgekit_render::{RenderContext, SurfaceRenderer};
 use forgekit_shell_common::{AppTree, guard};
 
@@ -492,6 +492,35 @@ pub fn set_appearance(handle: *mut c_void, dark: u8) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.set_appearance(dark != 0);
+        }
+    });
+}
+
+/// `forgekit_on_deep_link`: deliver a platform deep link (cold-start, from
+/// `SceneDelegate.scene(_:willConnectTo:options:)`'s
+/// `connectionOptions.urlContexts`, or running, from
+/// `SceneDelegate.scene(_:openURLContexts:)` — see
+/// `templates/app/ios.tmpl`'s `SceneDelegate`/`ForgeKitViewController`
+/// queue-until-handle-ready contract, task 07) into the process-wide
+/// deep-link source ([`forgekit_reactive::push_deep_link`]).
+///
+/// `url` is the Swift `URL.absoluteString`'s UTF-8 C string; malformed/null
+/// input decodes lossily (empty on null) via [`cstr_to_string`], the same
+/// policy [`ime_apply`]'s text conversion already uses. A missing handle is
+/// a no-op: Swift's own queue-until-handle-ready contract means this should
+/// not normally be reachable with a null handle, but the native side stays
+/// defensive (mirrors every other export here).
+pub fn on_deep_link(handle: *mut c_void, url: *const c_char) {
+    guard("forgekit_on_deep_link", (), || {
+        // Cheap; keeps controller-driven updates fresh between frames.
+        pump_reactive();
+        // SAFETY: `url` is a valid, NUL-terminated UTF-8 C string for this
+        // call (or null → empty), the same contract `ime_apply`'s `text`
+        // parameter uses.
+        let url = unsafe { cstr_to_string(url) };
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            push_deep_link(url);
         }
     });
 }

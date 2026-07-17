@@ -57,6 +57,19 @@ pub enum Command {
         /// mechanism).
         #[arg(long = "forgekit-path", value_name = "PATH", hide = true)]
         forgekit_path: Option<String>,
+
+        /// URL scheme to register for deep links (e.g. `myapp`, no `://`) —
+        /// generates a Android `<intent-filter>` (VIEW/BROWSABLE/DEFAULT)
+        /// and an iOS `CFBundleURLTypes` entry (task 07). Omit to generate a
+        /// project with no deep-link config (the default).
+        #[arg(long = "deeplink-scheme", value_name = "SCHEME")]
+        deeplink_scheme: Option<String>,
+
+        /// Optional host restricting the Android deep-link intent-filter
+        /// (`android:host`). Only meaningful alongside `--deeplink-scheme`;
+        /// iOS's `CFBundleURLTypes` has no host concept.
+        #[arg(long = "deeplink-host", value_name = "HOST")]
+        deeplink_host: Option<String>,
     },
     /// Validate the ForgeKit toolchain (Rust targets, NDK, Android SDK, Xcode).
     Doctor,
@@ -203,6 +216,46 @@ mod tests {
                 assert_eq!(org, "dev.f0x");
                 assert_eq!(project_name.as_deref(), Some("my_app"));
                 assert!(overwrite);
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_create_with_deeplink_scheme_and_host() {
+        let cli = Cli::parse_from([
+            "forgekit",
+            "create",
+            "myapp",
+            "--deeplink-scheme",
+            "myapp",
+            "--deeplink-host",
+            "open",
+        ]);
+        match cli.command {
+            Command::Create {
+                deeplink_scheme,
+                deeplink_host,
+                ..
+            } => {
+                assert_eq!(deeplink_scheme.as_deref(), Some("myapp"));
+                assert_eq!(deeplink_host.as_deref(), Some("open"));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_create_without_deeplink_flags_defaults_to_none() {
+        let cli = Cli::parse_from(["forgekit", "create", "myapp"]);
+        match cli.command {
+            Command::Create {
+                deeplink_scheme,
+                deeplink_host,
+                ..
+            } => {
+                assert_eq!(deeplink_scheme, None);
+                assert_eq!(deeplink_host, None);
             }
             other => panic!("expected Create, got {other:?}"),
         }

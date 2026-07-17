@@ -27,6 +27,16 @@ final class ForgeKitViewController: UIViewController {
     // ever introduced on the Rust side, this is the place to revisit.
     private var initFailed = false
 
+    /// A deep link delivered (by `SceneDelegate`) before `forgekit_init` has
+    /// returned a handle — cold-start links routinely arrive this early,
+    /// since `connectionOptions.urlContexts` is available in
+    /// `scene(_:willConnectTo:options:)`, well before the first
+    /// `viewDidLayoutSubviews` triggers `updateSurface()`/`forgekit_init`.
+    /// Held here and flushed the moment `handle` becomes non-nil (task 07's
+    /// queue-until-handle-ready contract, mirroring Android's
+    /// `ForgeKitSurfaceView.pendingDeepLink`).
+    private var pendingDeepLink: String?
+
     override func loadView() {
         view = ForgeKitView()
     }
@@ -127,10 +137,40 @@ final class ForgeKitViewController: UIViewController {
             // arrive later via `traitCollectionDidChange`.
             forgekit_set_appearance(handle, traitCollection.userInterfaceStyle == .dark ? 1 : 0)
             startDisplayLink()
+            // Flush a deep link that arrived before this handle existed
+            // (see `pendingDeepLink`'s doc comment) — a cold-start link
+            // must not be silently dropped just because it raced ahead of
+            // `forgekit_init`.
+            if let pending = pendingDeepLink {
+                pendingDeepLink = nil
+                deliverDeepLink(pending)
+            }
         } else if pixelSize != lastDrawableSize {
             forgekit_resize(handle, width, height, Float(scale))
         }
         lastDrawableSize = pixelSize
+    }
+
+    // MARK: - Deep links (task 07)
+
+    /// Deliver a platform deep link — called by `SceneDelegate` for both the
+    /// cold-start link (`connectionOptions.urlContexts`, in
+    /// `scene(_:willConnectTo:options:)`) and a running-app link
+    /// (`scene(_:openURLContexts:)`) uniformly. Queues until `forgekit_init`
+    /// has returned a handle if the link arrives first (see
+    /// `pendingDeepLink`).
+    func handleDeepLink(_ url: URL) {
+        deliverDeepLink(url.absoluteString)
+    }
+
+    private func deliverDeepLink(_ url: String) {
+        guard let handle else {
+            pendingDeepLink = url
+            return
+        }
+        url.withCString { cstr in
+            forgekit_on_deep_link(handle, cstr)
+        }
     }
 
     // MARK: - Text input (spec §9, Phase 4B)

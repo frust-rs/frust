@@ -19,6 +19,10 @@ pub struct CreateArgs {
     pub template_dir: Option<String>,
     /// `--forgekit-path` (undocumented, development only).
     pub forgekit_path: Option<String>,
+    /// `--deeplink-scheme` (task 07).
+    pub deeplink_scheme: Option<String>,
+    /// `--deeplink-host` (task 07).
+    pub deeplink_host: Option<String>,
 }
 
 pub fn run(args: CreateArgs) -> Result<u8> {
@@ -33,6 +37,10 @@ pub fn run(args: CreateArgs) -> Result<u8> {
         })?,
     };
     scaffold::validate_project_name(&project_name)?;
+    if let Some(scheme) = args.deeplink_scheme.as_deref() {
+        scaffold::validate_deeplink_scheme(scheme)
+            .with_context(|| format!("invalid --deeplink-scheme `{scheme}`"))?;
+    }
 
     let ctx = TemplateContext {
         title_case_name: scaffold::title_case(&project_name),
@@ -41,6 +49,8 @@ pub fn run(args: CreateArgs) -> Result<u8> {
         description: args.description,
         forgekit_version: env!("CARGO_PKG_VERSION").to_string(),
         forgekit_path: resolve_forgekit_path(args.forgekit_path.as_deref()),
+        deeplink_scheme: args.deeplink_scheme,
+        deeplink_host: args.deeplink_host,
     };
 
     let template_dir_override = args.template_dir.as_deref().map(Path::new);
@@ -135,5 +145,61 @@ mod tests {
             infer_project_name(Path::new("/tmp/foo/../my_app")).unwrap(),
             "my_app"
         );
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "forgekit-cli-create-cmd-test-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn base_args(dir: &Path) -> CreateArgs {
+        CreateArgs {
+            dir: dir.to_string_lossy().into_owned(),
+            org: "dev.f0x".to_string(),
+            project_name: Some("my_app".to_string()),
+            description: "A new ForgeKit application.".to_string(),
+            overwrite: false,
+            template_dir: None,
+            forgekit_path: None,
+            deeplink_scheme: None,
+            deeplink_host: None,
+        }
+    }
+
+    /// Task 07: an invalid `--deeplink-scheme` (a full URL, not a bare
+    /// scheme) is rejected before any file is written.
+    #[test]
+    fn run_rejects_invalid_deeplink_scheme_before_writing_any_file() {
+        let dest = unique_temp_dir("invalid-deeplink-scheme");
+        let mut args = base_args(&dest);
+        args.deeplink_scheme = Some("myapp://".to_string());
+
+        let err = run(args).unwrap_err();
+        assert!(err.to_string().contains("--deeplink-scheme"), "{err}");
+        assert!(!dest.join("Cargo.toml").exists());
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn run_accepts_valid_deeplink_scheme() {
+        let dest = unique_temp_dir("valid-deeplink-scheme");
+        let mut args = base_args(&dest);
+        args.deeplink_scheme = Some("myapp".to_string());
+
+        assert!(run(args).is_ok());
+        assert!(dest.join("Cargo.toml").exists());
+        let manifest =
+            std::fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(manifest.contains("android:scheme=\"myapp\""), "{manifest}");
+
+        let _ = std::fs::remove_dir_all(&dest);
     }
 }

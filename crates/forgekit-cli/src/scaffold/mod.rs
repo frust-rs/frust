@@ -6,8 +6,11 @@ pub mod context;
 pub mod renderer;
 
 #[allow(unused_imports)]
-// NameError: public API surface for future callers matching on variants
-pub use context::{NameError, TemplateContext, title_case, validate_project_name};
+// NameError/DeepLinkError: public API surface for future callers matching on variants
+pub use context::{
+    DeepLinkError, NameError, TemplateContext, title_case, validate_deeplink_scheme,
+    validate_project_name,
+};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -225,6 +228,8 @@ mod tests {
             description: "A new ForgeKit application.".into(),
             forgekit_version: "0.1.0".into(),
             forgekit_path: "/path/to/forgekit".into(),
+            deeplink_scheme: None,
+            deeplink_host: None,
         }
     }
 
@@ -369,6 +374,18 @@ mod tests {
             main_activity.contains(&format!("package {}", ctx.android_identifier())),
             "{main_activity}"
         );
+        // Deep links (task 07): cold-start (`onCreate`) and running
+        // (`onNewIntent`) delivery must both be present, unconditionally —
+        // only the manifest's intent-filter/launchMode are gated on
+        // `[deeplink]` config.
+        assert!(
+            main_activity.contains("surfaceView.onDeepLink(intent?.data?.toString())"),
+            "{main_activity}"
+        );
+        assert!(
+            main_activity.contains("override fun onNewIntent"),
+            "{main_activity}"
+        );
 
         // `ForgeKitSurfaceView` stays at the fixed `dev/forgekit/` package
         // regardless of `android_identifier`.
@@ -401,6 +418,11 @@ mod tests {
             "override fun onCreateInputConnection",
             "BaseInputConnection(this@ForgeKitSurfaceView",
             "imm.updateSelection",
+            // Deep links (task 07): the export, the queue-until-ready field,
+            // and the public delivery method must all be present.
+            "external fun nativeOnDeepLink",
+            "pendingDeepLink",
+            "fun onDeepLink(url: String?)",
         ] {
             assert!(
                 surface_view_src.contains(needle),
@@ -484,6 +506,218 @@ mod tests {
         let forgekit_view = fs::read_to_string(dest.join("ios/Runner/ForgeKitView.swift")).unwrap();
         assert!(forgekit_view.contains("touchesBegan"), "{forgekit_view}");
         assert!(forgekit_view.contains("var onTouch"), "{forgekit_view}");
+
+        // Deep links (task 07): the C export, the queue-until-ready field,
+        // the delivery method, and both SceneDelegate call sites must all
+        // be present, unconditionally — only Info.plist's CFBundleURLTypes
+        // is gated on `[deeplink]` config.
+        assert!(bridging.contains("forgekit_on_deep_link"), "{bridging}");
+        let controller =
+            fs::read_to_string(dest.join("ios/Runner/ForgeKitViewController.swift")).unwrap();
+        assert!(controller.contains("pendingDeepLink"), "{controller}");
+        assert!(controller.contains("func handleDeepLink"), "{controller}");
+        let scene_delegate =
+            fs::read_to_string(dest.join("ios/Runner/SceneDelegate.swift")).unwrap();
+        assert!(
+            scene_delegate.contains("connectionOptions.urlContexts"),
+            "{scene_delegate}"
+        );
+        assert!(
+            scene_delegate.contains("func scene(_ scene: UIScene, openURLContexts"),
+            "{scene_delegate}"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Task 07 acceptance criterion 2: with no `[deeplink]` config, the
+    /// rendered Android manifest must be byte-identical to the pre-task
+    /// rendering (no `android:launchMode`, no second `<intent-filter>`).
+    #[test]
+    fn generate_android_manifest_without_deeplink_is_byte_identical_to_pre_task_baseline() {
+        let dest = unique_temp_dir("manifest-no-deeplink");
+        let ctx = test_context();
+        assert!(ctx.deeplink_scheme.is_none());
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        let manifest =
+            fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        let expected = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+             <manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n\
+             \n\
+             \x20\x20\x20\x20<application\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:allowBackup=\"true\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:label=\"{title}\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar.Fullscreen\">\n\
+             \n\
+             \x20\x20\x20\x20\x20\x20\x20\x20<activity\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:name=\".MainActivity\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:exported=\"true\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:configChanges=\"orientation|screenSize|keyboardHidden|uiMode\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar.Fullscreen\">\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<intent-filter>\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<action android:name=\"android.intent.action.MAIN\" />\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<category android:name=\"android.intent.category.LAUNCHER\" />\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20</intent-filter>\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20</activity>\n\
+             \x20\x20\x20\x20</application>\n\
+             \n\
+             </manifest>",
+            title = ctx.title_case_name,
+        );
+        assert_eq!(manifest, expected);
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Task 07: a `[deeplink]` scheme (+ optional host) renders the
+    /// `android:launchMode="singleTop"` attribute and a
+    /// VIEW/BROWSABLE/DEFAULT `<intent-filter>`.
+    #[test]
+    fn generate_android_manifest_with_deeplink_renders_intent_filter() {
+        let dest = unique_temp_dir("manifest-with-deeplink");
+        let mut ctx = test_context();
+        ctx.deeplink_scheme = Some("myapp".into());
+        ctx.deeplink_host = Some("open".into());
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        let manifest =
+            fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            manifest.contains("android:launchMode=\"singleTop\""),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("<action android:name=\"android.intent.action.VIEW\" />"),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("<category android:name=\"android.intent.category.BROWSABLE\" />"),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("<category android:name=\"android.intent.category.DEFAULT\" />"),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("android:scheme=\"myapp\" android:host=\"open\""),
+            "{manifest}"
+        );
+        // Well-formed XML: the same open/close tag count.
+        assert_eq!(
+            manifest.matches("<intent-filter>").count(),
+            manifest.matches("</intent-filter>").count()
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Task 07: a scheme with no host omits `android:host` entirely (not an
+    /// empty attribute).
+    #[test]
+    fn generate_android_manifest_with_deeplink_scheme_only_omits_host_attr() {
+        let dest = unique_temp_dir("manifest-deeplink-no-host");
+        let mut ctx = test_context();
+        ctx.deeplink_scheme = Some("myapp".into());
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        let manifest =
+            fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            manifest.contains("android:scheme=\"myapp\" />"),
+            "{manifest}"
+        );
+        assert!(!manifest.contains("android:host"), "{manifest}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Task 07 acceptance criterion 2 (iOS half): with no `[deeplink]`
+    /// config, the rendered Info.plist has no `CFBundleURLTypes` key and
+    /// stays byte-identical to the pre-task rendering.
+    #[test]
+    fn generate_info_plist_without_deeplink_is_byte_identical_to_pre_task_baseline() {
+        let dest = unique_temp_dir("plist-no-deeplink");
+        let ctx = test_context();
+        assert!(ctx.deeplink_scheme.is_none());
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        let plist = fs::read_to_string(dest.join("ios/Runner/Info.plist")).unwrap();
+        assert!(!plist.contains("CFBundleURLTypes"), "{plist}");
+        let expected_tail = "\t<key>UISupportedInterfaceOrientations~ipad</key>\n\
+             \t<array>\n\
+             \t\t<string>UIInterfaceOrientationPortrait</string>\n\
+             \t\t<string>UIInterfaceOrientationPortraitUpsideDown</string>\n\
+             \t\t<string>UIInterfaceOrientationLandscapeLeft</string>\n\
+             \t\t<string>UIInterfaceOrientationLandscapeRight</string>\n\
+             \t</array>\n\
+             </dict>\n\
+             </plist>";
+        assert!(
+            plist.ends_with(expected_tail),
+            "expected plist to end with:\n{expected_tail}\ngot:\n{plist}"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Task 07: a `[deeplink]` scheme renders a valid `CFBundleURLTypes`
+    /// entry with the scheme and the derived iOS bundle id as
+    /// `CFBundleURLName`.
+    #[test]
+    fn generate_info_plist_with_deeplink_renders_cfbundle_url_types() {
+        let dest = unique_temp_dir("plist-with-deeplink");
+        let mut ctx = test_context();
+        ctx.deeplink_scheme = Some("myapp".into());
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        let plist = fs::read_to_string(dest.join("ios/Runner/Info.plist")).unwrap();
+        assert!(plist.contains("<key>CFBundleURLTypes</key>"), "{plist}");
+        assert!(plist.contains("<string>myapp</string>"), "{plist}");
+        assert!(
+            plist.contains(&format!("<string>{}</string>", ctx.ios_identifier())),
+            "{plist}"
+        );
+        // Well-formed plist tail: closes cleanly.
+        assert!(plist.trim_end().ends_with("</plist>"), "{plist}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Task 07: `forgekit.toml` records the `[deeplink]` config when set,
+    /// and omits the section entirely when not.
+    #[test]
+    fn generate_forgekit_toml_records_deeplink_section_when_configured() {
+        let dest = unique_temp_dir("toml-deeplink");
+        let mut ctx = test_context();
+        ctx.deeplink_scheme = Some("myapp".into());
+        ctx.deeplink_host = Some("open".into());
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        let toml = fs::read_to_string(dest.join("forgekit.toml")).unwrap();
+        assert!(toml.contains("[deeplink]"), "{toml}");
+        assert!(toml.contains("scheme = \"myapp\""), "{toml}");
+        assert!(toml.contains("host = \"open\""), "{toml}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_forgekit_toml_omits_deeplink_section_by_default() {
+        let dest = unique_temp_dir("toml-no-deeplink");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false).unwrap();
+
+        let toml = fs::read_to_string(dest.join("forgekit.toml")).unwrap();
+        assert!(!toml.contains("[deeplink]"), "{toml}");
 
         let _ = fs::remove_dir_all(&dest);
     }

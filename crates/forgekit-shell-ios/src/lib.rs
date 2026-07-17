@@ -57,13 +57,14 @@ pub use forgekit_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (spec §10.2, Makepad `app_main!` precedent).
 ///
-/// Stamps out the eleven `forgekit_*` symbols the generated Swift app declares
+/// Stamps out the twelve `forgekit_*` symbols the generated Swift app declares
 /// (the seven lifecycle/input exports, the three text-input exports —
 /// `forgekit_ime_apply`, `forgekit_ime_state_json`, `forgekit_string_free` —
-/// plus `forgekit_set_appearance`, task 08's dark-mode export), each delegating
-/// to the non-generic runtime in [`ffi_glue`]. `forgekit_init` constructs the
-/// app's erased view tree and returns an opaque handle; the rest operate on
-/// that handle. It also initializes the process-wide
+/// `forgekit_set_appearance` (task 08's dark-mode export), plus
+/// `forgekit_on_deep_link` (task 07's cold-start/running deep-link delivery)),
+/// each delegating to the non-generic runtime in [`ffi_glue`]. `forgekit_init`
+/// constructs the app's erased view tree and returns an opaque handle; the rest
+/// operate on that handle. It also initializes the process-wide
 /// [`forgekit_reactive::ReactiveRuntime`] (idempotent, framework-side inside
 /// [`ffi_glue::init`] rather than emitted here, so both arms below get it with
 /// no macro duplication) before the state/view tree is constructed.
@@ -217,6 +218,18 @@ macro_rules! ios_app {
         #[unsafe(no_mangle)]
         pub extern "C" fn forgekit_set_appearance(handle: *mut ::core::ffi::c_void, dark: u8) {
             $crate::ffi_glue::set_appearance(handle, dark)
+        }
+
+        /// `forgekit_on_deep_link`: deliver a platform deep link (cold-start
+        /// or running — task 07) into the process-wide deep-link source.
+        /// `url` is the URL's `absoluteString` as a UTF-8 C string.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn forgekit_on_deep_link(
+            handle: *mut ::core::ffi::c_void,
+            url: *const ::core::ffi::c_char,
+        ) {
+            $crate::ffi_glue::on_deep_link(handle, url)
         }
     };
 }

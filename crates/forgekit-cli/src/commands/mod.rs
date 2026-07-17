@@ -24,6 +24,8 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             overwrite,
             template_dir,
             forgekit_path,
+            deeplink_scheme,
+            deeplink_host,
         } => create::run(create::CreateArgs {
             dir,
             org,
@@ -32,6 +34,8 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             overwrite,
             template_dir,
             forgekit_path,
+            deeplink_scheme,
+            deeplink_host,
         }),
         Command::Clean => clean::run(),
         Command::Run { build } => run::run(build, cli.device_id, verbose),

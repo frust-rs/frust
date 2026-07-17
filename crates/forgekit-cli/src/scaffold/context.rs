@@ -14,6 +14,20 @@ pub struct TemplateContext {
     pub description: String,
     pub forgekit_version: String,
     pub forgekit_path: String,
+    /// `--deeplink-scheme` (task 07): the URL scheme (e.g. `myapp`, no
+    /// `://`) the generated Android manifest/iOS Info.plist register for
+    /// deep links, and the value written into the generated `forgekit.toml`
+    /// `[deeplink]` section. `None` renders byte-identical
+    /// manifest/Info.plist output to a project with no deep-link config (no
+    /// intent-filter, no `CFBundleURLTypes`) — see
+    /// [`validate_deeplink_scheme`] for the accepted grammar.
+    pub deeplink_scheme: Option<String>,
+    /// `--deeplink-host` (task 07): an optional host restricting the
+    /// Android intent-filter's `<data>` element (`android:host`); iOS's
+    /// `CFBundleURLTypes` has no host concept, so this is Android-only and
+    /// silently unused by the iOS template. Meaningless without
+    /// `deeplink_scheme` also being set.
+    pub deeplink_host: Option<String>,
 }
 
 impl TemplateContext {
@@ -29,6 +43,14 @@ impl TemplateContext {
             ("forgekit_path", self.forgekit_path.clone()),
             ("android_identifier", self.android_identifier()),
             ("iosIdentifier", self.ios_identifier()),
+            (
+                "deeplink_scheme",
+                self.deeplink_scheme.clone().unwrap_or_default(),
+            ),
+            (
+                "deeplink_host",
+                self.deeplink_host.clone().unwrap_or_default(),
+            ),
         ])
     }
 
@@ -79,6 +101,39 @@ impl TemplateContext {
     pub(crate) fn validate_ios_identifier(&self) -> Result<(), crate::ios_id::IdError> {
         crate::ios_id::validate(&self.ios_identifier())
     }
+}
+
+/// Why a `--deeplink-scheme` value was rejected (task 07). Follows the
+/// `[ios] team`-style forgekit.toml precedent (`ios_build::team`) for what
+/// gets validated here versus left to the platform build tools: this is a
+/// scaffold-time, actionable check, not a full RFC 3986 scheme grammar
+/// validator.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum DeepLinkError {
+    #[error("--deeplink-scheme cannot be empty")]
+    Empty,
+    #[error(
+        "--deeplink-scheme `{0}` must be a bare scheme (e.g. `myapp`), not a full URL — omit \
+         the `://`"
+    )]
+    ContainsSchemeSeparator(String),
+}
+
+/// Validates a `--deeplink-scheme` value (task 07): non-empty, and not a
+/// full URL (no `://` — a common mistake, e.g. passing `myapp://` instead of
+/// `myapp`). Deliberately narrow: RFC 3986 scheme-grammar policing (alnum +
+/// `+`/`-`/`.`) is left to the platform build tools (Gradle/`xcodebuild`),
+/// which already reject a malformed scheme in the generated manifest/plist —
+/// this only catches the "pasted a whole URL" mistake before it silently
+/// bakes an invalid intent-filter/`CFBundleURLTypes` entry.
+pub fn validate_deeplink_scheme(scheme: &str) -> Result<(), DeepLinkError> {
+    if scheme.is_empty() {
+        return Err(DeepLinkError::Empty);
+    }
+    if scheme.contains("://") {
+        return Err(DeepLinkError::ContainsSchemeSeparator(scheme.to_string()));
+    }
+    Ok(())
 }
 
 /// Rust keywords (2015/2018/2021/2024 strict + reserved), used to reject
@@ -215,6 +270,8 @@ mod tests {
             description: "A new ForgeKit application.".into(),
             forgekit_version: "0.1.0".into(),
             forgekit_path: "/path/to/forgekit".into(),
+            deeplink_scheme: None,
+            deeplink_host: None,
         }
     }
 
@@ -281,5 +338,41 @@ mod tests {
     fn title_case_converts_snake_case() {
         assert_eq!(title_case("my_app"), "My App");
         assert_eq!(title_case("app"), "App");
+    }
+
+    #[test]
+    fn validate_deeplink_scheme_accepts_bare_scheme() {
+        assert!(validate_deeplink_scheme("myapp").is_ok());
+        assert!(validate_deeplink_scheme("my-app+1").is_ok());
+    }
+
+    #[test]
+    fn validate_deeplink_scheme_rejects_empty() {
+        assert_eq!(validate_deeplink_scheme(""), Err(DeepLinkError::Empty));
+    }
+
+    #[test]
+    fn validate_deeplink_scheme_rejects_full_url() {
+        let err = validate_deeplink_scheme("myapp://").unwrap_err();
+        assert!(matches!(err, DeepLinkError::ContainsSchemeSeparator(_)));
+        let err = validate_deeplink_scheme("https://example.com").unwrap_err();
+        assert!(matches!(err, DeepLinkError::ContainsSchemeSeparator(_)));
+    }
+
+    #[test]
+    fn render_vars_default_deeplink_keys_to_empty_string() {
+        let vars = test_context().render_vars();
+        assert_eq!(vars.get("deeplink_scheme").unwrap(), "");
+        assert_eq!(vars.get("deeplink_host").unwrap(), "");
+    }
+
+    #[test]
+    fn render_vars_include_configured_deeplink_scheme_and_host() {
+        let mut ctx = test_context();
+        ctx.deeplink_scheme = Some("myapp".into());
+        ctx.deeplink_host = Some("open".into());
+        let vars = ctx.render_vars();
+        assert_eq!(vars.get("deeplink_scheme").unwrap(), "myapp");
+        assert_eq!(vars.get("deeplink_host").unwrap(), "open");
     }
 }

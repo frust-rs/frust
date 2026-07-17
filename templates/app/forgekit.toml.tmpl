@@ -3,6 +3,19 @@ name = "{{ project_name }}"
 org = "{{ org }}"
 description = "{{ description }}"
 
+{% if deeplink_scheme -%}
+# Deep-link scheme registered in the generated Android manifest / iOS
+# Info.plist (task 07). Informational here — ForgeKit tooling doesn't parse
+# this section; it documents what `forgekit create --deeplink-scheme` baked
+# into the platform templates. Editing it does NOT re-render the manifest/
+# Info.plist — re-run `forgekit create --overwrite` (or edit the platform
+# files directly) to change it after scaffolding.
+[deeplink]
+scheme = "{{ deeplink_scheme }}"
+{% if deeplink_host -%}
+host = "{{ deeplink_host }}"
+{% endif %}
+{% endif -%}
 # [flavors]
 # dev = { app-id-suffix = ".dev" }
 # prod = {}

@@ -26,7 +26,7 @@ use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
 use ndk::native_window::NativeWindow;
 
 use forgekit_core::event::{EditingState, ImeState};
-use forgekit_reactive::ReactiveRuntime;
+use forgekit_reactive::{ReactiveRuntime, push_deep_link};
 use forgekit_shell_common::{AppTree, guard};
 
 use crate::app::AndroidAppHandle;
@@ -420,6 +420,35 @@ pub fn native_set_appearance(handle: jlong, dark: jboolean) {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.set_appearance(dark);
+        }
+    });
+}
+
+/// `nativeOnDeepLink`: deliver a platform deep link (cold-start, forwarded
+/// from `MainActivity.onCreate`'s `intent?.data`, or running, from
+/// `MainActivity.onNewIntent` — see `templates/app/android.tmpl`'s
+/// `MainActivity`/`ForgeKitSurfaceView` queue-until-handle-ready contract,
+/// task 07) into the process-wide deep-link source
+/// ([`forgekit_reactive::push_deep_link`]).
+///
+/// `url` is the Kotlin `Intent.data` `Uri`'s `toString()`, read into a Rust
+/// `String` through the JNI string API (Java MUTF-8/UTF-16 → UTF-8); an
+/// unreadable/malformed/`null` value falls back to empty rather than
+/// failing the call — the same lossy-on-malformed-input policy
+/// [`native_ime_apply`]'s text conversion already uses. A missing handle is
+/// a no-op: Kotlin's own queue-until-handle-ready contract means this
+/// should not normally be reachable with a null handle, but the native side
+/// stays defensive (mirrors every other `native_*` entry point here).
+pub fn native_on_deep_link(mut env: EnvUnowned, handle: jlong, url: JString) {
+    guard("nativeOnDeepLink", (), || {
+        pump_reactive_runtime();
+        let url = env
+            .with_env(|env| url.try_to_string(env))
+            .resolve::<LogErrorAndDefault>();
+
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if unsafe { handle_mut(handle) }.is_some() {
+            push_deep_link(url);
         }
     });
 }

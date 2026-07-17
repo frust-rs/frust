@@ -9,12 +9,23 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+{%- if deeplink_scheme %}
+            android:launchMode="singleTop"
+{%- endif %}
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+{%- if deeplink_scheme %}
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="{{ deeplink_scheme }}"{% if deeplink_host %} android:host="{{ deeplink_host }}"{% endif %} />
+            </intent-filter>
+{%- endif %}
         </activity>
     </application>
 

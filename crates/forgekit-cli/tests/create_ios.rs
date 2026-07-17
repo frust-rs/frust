@@ -115,3 +115,54 @@ fn create_ios_project_is_parseable() {
 
     let _ = std::fs::remove_dir_all(&dest);
 }
+
+/// Task 07: a `--deeplink-scheme` project's rendered Info.plist (with its
+/// `CFBundleURLTypes` entry) still lints as a well-formed plist.
+#[test]
+#[ignore = "shells out to `plutil` (macOS + Xcode command-line tools only); run explicitly with `--ignored`"]
+fn create_ios_project_with_deeplink_scheme_has_valid_plist() {
+    let dest = unique_dest();
+    let _ = std::fs::remove_dir_all(&dest);
+
+    let forgekit_exe = env!("CARGO_BIN_EXE_forgekit");
+    let create_status = Command::new(forgekit_exe)
+        .args([
+            "create",
+            dest.to_str().expect("dest path is valid UTF-8"),
+            "--project-name",
+            "fk_ios_deeplink_app",
+            "--org",
+            "dev.forgekit",
+            "--deeplink-scheme",
+            "fkdeeplink",
+        ])
+        .status()
+        .expect("failed to spawn `forgekit create`");
+    assert!(create_status.success(), "`forgekit create` exited non-zero");
+
+    let plist = dest.join("ios/Runner/Info.plist");
+    let plist_src = std::fs::read_to_string(&plist).expect("reading rendered Info.plist");
+    assert!(
+        plist_src.contains("CFBundleURLTypes"),
+        "expected CFBundleURLTypes in {}:\n{plist_src}",
+        plist.display()
+    );
+    assert!(
+        plist_src.contains("<string>fkdeeplink</string>"),
+        "{plist_src}"
+    );
+
+    let lint = Command::new("plutil")
+        .arg("-lint")
+        .arg(&plist)
+        .output()
+        .expect("failed to spawn `plutil`");
+    assert!(
+        lint.status.success(),
+        "`plutil -lint` failed on {}:\n{}",
+        plist.display(),
+        String::from_utf8_lossy(&lint.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&dest);
+}

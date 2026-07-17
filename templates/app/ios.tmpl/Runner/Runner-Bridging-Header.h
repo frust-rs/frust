@@ -48,4 +48,12 @@ void  forgekit_string_free(char *s);
 // forgekit_init returns a handle.
 void  forgekit_set_appearance(void *handle, uint8_t dark);
 
+// Deep links (task 07): deliver a platform URL — cold-start, from
+// SceneDelegate's connectionOptions.urlContexts, or running, from
+// scene(_:openURLContexts:) — into the process-wide deep-link source. `url`
+// is the URL's absoluteString as a UTF-8 C string; malformed/null input
+// decodes lossily. A missing handle is a no-op (Swift queues the link until
+// forgekit_init has returned a handle — see ForgeKitViewController).
+void  forgekit_on_deep_link(void *handle, const char *url);
+
 #endif /* Runner_Bridging_Header_h */

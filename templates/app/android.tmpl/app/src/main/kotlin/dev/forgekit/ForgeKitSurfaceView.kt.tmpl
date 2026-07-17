@@ -110,11 +110,25 @@ class ForgeKitSurfaceView(context: Context) :
     // instead of recreating the activity).
     private external fun nativeSetAppearance(handle: Long, dark: Boolean)
 
+    // Deep links (task 07). `url` is the raw `Intent.data` Uri's `toString()`,
+    // forwarded to `forgekit_reactive::push_deep_link` on the Rust side.
+    private external fun nativeOnDeepLink(handle: Long, url: String)
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
     /** Whether the Choreographer frame loop should keep re-posting itself. */
     private var running = false
+
+    /**
+     * A deep link delivered (by `MainActivity`) before [nativeInit] has
+     * returned a non-zero handle. Cold-start links routinely arrive this
+     * early — `MainActivity.onCreate` calls [onDeepLink] right after
+     * constructing this view, well before `surfaceCreated` (and therefore
+     * `nativeInit`) ever runs. Held here and flushed the moment `handle`
+     * becomes non-zero (queue-until-handle-ready).
+     */
+    private var pendingDeepLink: String? = null
 
     /**
      * The last IME surface Rust published (from `nativeImeState`). Seeds a freshly
@@ -168,9 +182,33 @@ class ForgeKitSurfaceView(context: Context) :
             handle = nativeInit(holder.surface, scaleFactor)
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
+                // Flush a deep link that arrived before this handle existed
+                // (see `pendingDeepLink`'s doc comment) — a cold-start link
+                // must not be silently dropped just because it raced ahead
+                // of `nativeInit`.
+                pendingDeepLink?.let { url ->
+                    pendingDeepLink = null
+                    nativeOnDeepLink(handle, url)
+                }
             }
         } else {
             nativeOnSurfaceChanged(handle, holder.surface, width, height)
+        }
+    }
+
+    /**
+     * Deliver a platform deep link — called by `MainActivity` for both the
+     * cold-start link (`onCreate`'s `intent?.data`) and a running-app link
+     * (`onNewIntent`) uniformly. Queues until [nativeInit] has returned a
+     * handle if the link arrives first (see [pendingDeepLink]); a `null`
+     * `url` (no data on the intent) is a no-op.
+     */
+    fun onDeepLink(url: String?) {
+        if (url == null) return
+        if (handle == 0L) {
+            pendingDeepLink = url
+        } else {
+            nativeOnDeepLink(handle, url)
         }
     }
 

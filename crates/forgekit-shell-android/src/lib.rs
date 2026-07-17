@@ -76,7 +76,7 @@ pub mod __jni {
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (spec §10.1, Makepad `app_main!` precedent).
 ///
-/// Stamps out the twelve `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
+/// Stamps out the thirteen `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
 /// the Kotlin `ForgeKitSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
@@ -86,10 +86,11 @@ pub mod __jni {
 /// (`nativeImeApply`), pulls the reconciled state back out (`nativeImeState`), and
 /// forwards an editor action (Enter) via `nativeImeAction`. `nativeSetAppearance`
 /// (task 08) flips the app's theme brightness from the platform's dark-mode
-/// preference. `nativeInit` also initializes the process-wide
-/// [`forgekit_reactive::ReactiveRuntime`] (see [`jni_glue::native_init`]) before
-/// the state factory runs, so a `State`'s own construction may already create
-/// signals/controllers.
+/// preference. `nativeOnDeepLink` (task 07) delivers a cold-start/running
+/// platform deep link into the process-wide deep-link source. `nativeInit` also
+/// initializes the process-wide [`forgekit_reactive::ReactiveRuntime`] (see
+/// [`jni_glue::native_init`]) before the state factory runs, so a `State`'s own
+/// construction may already create signals/controllers.
 ///
 /// The macro is defined on every target but only *expands* to real code where
 /// its call site is gated, e.g. in the generated `src/lib.rs`:
@@ -275,6 +276,20 @@ macro_rules! android_app {
             dark: $crate::__jni::jboolean,
         ) {
             $crate::jni_glue::native_set_appearance(handle, dark)
+        }
+
+        /// JNI `nativeOnDeepLink`: deliver a platform deep link (cold-start or
+        /// running — task 07) into the process-wide deep-link source.
+        ///
+        /// `url` is the Kotlin `Intent.data` `Uri`'s `toString()`.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeOnDeepLink<'local>(
+            env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            url: $crate::__jni::JString<'local>,
+        ) {
+            $crate::jni_glue::native_on_deep_link(env, handle, url)
         }
     };
 }
