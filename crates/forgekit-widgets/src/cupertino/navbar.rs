@@ -17,6 +17,27 @@
 //! slots) — the platform convention. A title wide enough to collide with a slot
 //! is clamped to the available centered width.
 //!
+//! # Background: Liquid Glass (task 6f-11)
+//!
+//! The bar background is read from the theme's `bar`-tier glass token
+//! (`Theme.glass.bar`, [`forgekit_theme::glass`]), not a hardcoded fill. On the
+//! Cupertino design language that tier is a translucent Liquid-Glass lens
+//! ([`GlassScale::ios27`](forgekit_theme::GlassScale::ios27)'s `r=45` recipe:
+//! over-light `white a=0.07` + `white a=0.03`); the bar composites that wash
+//! stack over the live content behind it (no real backdrop blur yet — that is a
+//! later spike), then draws a **specular hairline** along its content-facing
+//! bottom edge whose alpha is the tier's `hairline_alpha`, plus the tier's drop
+//! shadow (the `bar` tier's is zero, so effectively none). The wash stack for
+//! the active brightness (over-light vs over-dark) is chosen from the token.
+//!
+//! The navbar keeps its full-width, square, docked geometry — only the
+//! *background* becomes glass (the floating-pill idiom is the tab bar's, task
+//! 11). On the **Material** design language (or a bare-core/unthemed bar) the
+//! same code takes the opaque path instead: `glass.bar` is opaque
+//! ([`GlassScale::opaque_material`](forgekit_theme::GlassScale::opaque_material)),
+//! so the bar paints an opaque `surface` fill + an `outline_variant` separator
+//! hairline — the pre-glass look, unchanged.
+//!
 //! # Semantics
 //!
 //! The whole bar is one [`Role::TitleBar`] container node labelled with the
@@ -29,7 +50,7 @@ use forgekit_core::{
     LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
 };
 use forgekit_text::{FontWeight, LineHeight};
-use forgekit_theme::Theme;
+use forgekit_theme::{Brightness, GlassFill, GlassMaterial, Theme};
 use kurbo::{Point, Size};
 use peniko::Color;
 
@@ -67,7 +88,17 @@ const CONTAINER: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
 /// `colors.outline_variant`, iOS `separator`).
 const SEPARATOR: Color = Color::from_rgb8(0xC6, 0xC6, 0xC8);
 
-/// The resolved `(container, separator)` colors. Themed: `colors.surface` /
+/// The specular-highlight color of a glass edge. The glass recipe
+/// (`forgekit_theme::glass`) stores only the hairline's *alpha* per tier
+/// (`GlassMaterial::hairline_alpha`); white is the specular color the glass
+/// module documents the consuming widget draws over light content. The
+/// load-bearing value (alpha) is read from the token — this is the fixed
+/// specular color, not a recipe rgba (task 11 acceptance: no hardcoded recipe
+/// rgba in the widget).
+const SPECULAR: Color = Color::WHITE;
+
+/// The resolved `(container, separator)` colors for the **opaque** path
+/// (Material design language, or an unthemed bar). Themed: `colors.surface` /
 /// `colors.outline_variant` (iOS systemBackground / separator). Unthemed: the
 /// [`CONTAINER`]/[`SEPARATOR`] constants.
 fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
@@ -75,6 +106,38 @@ fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
         Some(theme) => (theme.scheme().surface, theme.scheme().outline_variant),
         None => (CONTAINER, SEPARATOR),
     }
+}
+
+/// The Liquid-Glass `bar`-tier material to paint from, or `None` when the bar
+/// should take the **opaque** path instead: no theme (bare-core/pre-theme), or
+/// a theme whose `glass.bar` is opaque (the Material design language — see
+/// [`forgekit_theme::glass::GlassScale::opaque_material`]). This is the
+/// single-API branch that keeps Material bars opaque while Cupertino bars read
+/// glass (task 11 acceptance 4).
+fn glass_bar(theme: Option<&Theme>) -> Option<&GlassMaterial> {
+    let material = &theme?.glass.bar;
+    (!material.is_opaque()).then_some(material)
+}
+
+/// The wash stack to composite for the active `brightness` (over-light vs
+/// over-dark content), bottom-to-top — read purely from the tier token.
+fn glass_fills(material: &GlassMaterial, brightness: Brightness) -> &[GlassFill] {
+    match brightness {
+        Brightness::Light => &material.fills_light,
+        Brightness::Dark => &material.fills_dark,
+    }
+}
+
+/// Return `color` with its alpha channel replaced by `alpha` (mirrors
+/// [`crate::material::toolbar`]'s helper of the same shape).
+fn specular_from(color: Color, alpha: f32) -> Color {
+    let c = color.components;
+    Color::new([c[0], c[1], c[2], alpha])
+}
+
+/// `SPECULAR` white with its alpha replaced by the tier's `hairline_alpha`.
+fn specular(alpha: f32) -> Color {
+    specular_from(SPECULAR, alpha)
 }
 
 /// Build the title's type-erased child view: Headline-styled text, defaulting
@@ -272,18 +335,58 @@ impl Widget for CupertinoNavBarWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        let (fill, separator) = resolve_colors(Theme::from_paint_ctx(ctx));
+        let theme = Theme::from_paint_ctx(ctx);
         let origin = ctx.origin();
         let size = ctx.size();
-        scene.fill_rect(origin, size, fill);
-        // Hairline along the bottom edge.
-        let y = origin.y + size.height - HAIRLINE_W / 2.0;
-        scene.stroke_line(
-            Point::new(origin.x, y),
-            Point::new(origin.x + size.width, y),
-            HAIRLINE_W,
-            separator,
-        );
+        // Bottom edge (the content-facing edge of a top bar), where the
+        // hairline/separator sits.
+        let hairline_y = origin.y + size.height - HAIRLINE_W / 2.0;
+        let hairline = |scene: &mut dyn PaintScene, color: Color| {
+            scene.stroke_line(
+                Point::new(origin.x, hairline_y),
+                Point::new(origin.x + size.width, hairline_y),
+                HAIRLINE_W,
+                color,
+            );
+        };
+
+        match glass_bar(theme) {
+            // Cupertino Liquid Glass: layered translucent wash stack +
+            // specular hairline (+ shadow spec), all read from the `bar` tier
+            // token — the navbar keeps its full-width geometry, adopting only
+            // the glass background/hairline (task 11).
+            Some(material) => {
+                let brightness = theme.map(|t| t.brightness).unwrap_or_default();
+                // Drop shadow: the ios27 `bar` tier carries none
+                // (`color_alpha == 0.0`), so this is a no-op there — drawn only
+                // when the token asks for one.
+                let shadow = material.shadow;
+                if shadow.color_alpha > 0.0 {
+                    let shadow_color = theme
+                        .map(|t| specular_from(t.scheme().shadow, shadow.color_alpha))
+                        .unwrap_or_else(|| specular_from(Color::BLACK, shadow.color_alpha));
+                    scene.draw_shadow(
+                        Point::new(origin.x, origin.y + shadow.y_offset),
+                        size,
+                        0.0,
+                        shadow.blur_std_dev,
+                        shadow_color,
+                    );
+                }
+                for fill in glass_fills(material, brightness) {
+                    scene.fill_rect(origin, size, fill.color);
+                }
+                hairline(scene, specular(material.hairline_alpha));
+            }
+            // Opaque path (Material design language, or an unthemed bar): the
+            // pre-glass look — an opaque surface fill + a separator hairline.
+            None => {
+                let (fill, separator) = resolve_colors(theme);
+                scene.fill_rect(origin, size, fill);
+                hairline(scene, separator);
+            }
+        }
+
         for pod in &mut self.interactive {
             pod.paint_child(ctx, scene);
         }
@@ -423,8 +526,18 @@ mod tests {
     }
 
     #[test]
-    fn themed_paint_resolves_surface_and_separator() {
+    fn cupertino_theme_paints_the_glass_bar_wash_stack_and_specular_hairline() {
+        // Default (light) Cupertino baseline: the `bar` tier is a glass lens,
+        // so the bar composites the token's over-light wash stack (read purely
+        // from `Theme.glass.bar.fills_light`) and draws a specular white
+        // hairline whose alpha is the tier's `hairline_alpha`.
         let theme = Theme::cupertino_baseline();
+        let material = &theme.glass.bar;
+        assert!(
+            !material.is_opaque(),
+            "the cupertino bar tier is a glass lens"
+        );
+
         let view: CupertinoNavBarView<()> = cupertino_nav_bar("Home");
         let mut w = build(&view);
         let mut tcx = TextContext::new();
@@ -435,6 +548,35 @@ mod tests {
         let mut scene = Recorder::default();
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(300.0, HEIGHT)).with_theme(&theme);
         w.paint(&mut pctx, &mut scene);
+
+        // One filled rect per wash in the (light) stack, in token order — the
+        // fill stack reaches the paint layer.
+        let washes: Vec<Color> = material.fills_light.iter().map(|f| f.color).collect();
+        assert!(!washes.is_empty());
+        let painted: Vec<Color> = scene.rects.iter().map(|(_, _, c)| *c).collect();
+        assert_eq!(&painted[..washes.len()], &washes[..]);
+        // The specular hairline is white at the tier's hairline_alpha.
+        assert_eq!(scene.lines.len(), 1, "one specular hairline");
+        assert_eq!(scene.lines[0].3, specular(material.hairline_alpha));
+    }
+
+    #[test]
+    fn material_theme_keeps_the_bar_opaque() {
+        // Acceptance 4: an M3 theme's `glass.bar` is opaque, so the same code
+        // paints the opaque surface fill + outline_variant separator — the
+        // pre-glass look, never the glass wash stack.
+        let theme = Theme::m3_baseline();
+        assert!(theme.glass.bar.is_opaque());
+        let view: CupertinoNavBarView<()> = cupertino_nav_bar("Home");
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx =
+            LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), Some(&theme as &dyn Any));
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 100.0)));
+        let mut scene = Recorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(300.0, HEIGHT)).with_theme(&theme);
+        w.paint(&mut pctx, &mut scene);
+        assert_eq!(scene.rects.len(), 1, "one opaque surface fill");
         assert_eq!(scene.rects[0].2, theme.scheme().surface);
         assert_eq!(scene.lines[0].3, theme.scheme().outline_variant);
     }
