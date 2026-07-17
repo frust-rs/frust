@@ -28,8 +28,10 @@
 //! [`InputEvent::is_focus_routed`] dispatch gate — see
 //! `docs/ARCHITECTURE.md`'s Event pipeline), and this widget never calls
 //! `request_focus`, so there is no focused chain for an Escape key to travel
-//! and no way to wire dismiss-on-Escape without the focus-routing work that is
-//! 6d scope. Dismissal is pointer-only: a scrim tap, the cancel row, or an
+//! so Escape cannot reach it. The focus-routing path itself already exists
+//! (`EventCtx::request_focus` + focus-routed Key dispatch); this widget simply
+//! does not opt in yet — the opt-in plus Escape handling is deferred
+//! follow-on work. Dismissal is pointer-only: a scrim tap, the cancel row, or an
 //! action row. Its semantics node is a [`Role::Menu`] container with **no**
 //! accesskit modal flag, so there is no modal-audience concern to reconcile;
 //! keyboard operability + platform `accesskit_*` adapter wiring is 6d scope.

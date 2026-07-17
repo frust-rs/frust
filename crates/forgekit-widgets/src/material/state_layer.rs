@@ -30,8 +30,8 @@
 //! describes the full M3 design, but three of its four inputs have no live
 //! signal source yet:
 //!
-//! - **`hovered` — unwireable today.** `forgekit_core::input`'s `PointerPhase`
-//!   (see core `input/event.rs`) has only Down/Move/Up/Cancel — no
+//! - **`hovered` — unwireable today.** `forgekit_core::event`'s `PointerPhase` (re-exported as `forgekit_core::PointerPhase`)
+//!   has only Down/Move/Up/Cancel — no
 //!   Enter/Leave/hover phase — so no widget can detect hover without future
 //!   input-pipeline work adding one.
 //! - **`focused` — awaiting focus routing.** A focus overlay needs a widget to
