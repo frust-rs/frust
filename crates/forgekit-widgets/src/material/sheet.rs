@@ -49,6 +49,23 @@
 //! "bottom sheet" role, and a modal sheet is, to assistive tech, a modal
 //! dialog-ish surface (the same role the [`crate::material::dialog`] uses). Its
 //! content becomes the node's accesskit children.
+//!
+//! # Keyboard operability (limitation)
+//!
+//! **There is no keyboard focus or Escape-to-dismiss for this sheet today.**
+//! `Key` events route only down the recorded focus path (the
+//! [`InputEvent::is_focus_routed`] dispatch gate — see
+//! `docs/ARCHITECTURE.md`'s Event pipeline), and this widget never calls
+//! `request_focus`, so there is no focused chain for an Escape key to travel
+//! and no way to wire dismiss-on-Escape without the focus-routing work that is
+//! 6d scope. Dismissal is pointer-only: a scrim tap or a drag-down on the
+//! handle.
+//!
+//! The accesskit **modal** flag set above is nonetheless **kept deliberately**,
+//! not dropped. No platform `accesskit_*` adapter is wired yet (see
+//! `docs/ARCHITECTURE.md`'s Semantics pass), so there is no live assistive-tech
+//! audience the flag could currently mislead; it becomes load-bearing exactly
+//! when keyboard operability + adapter wiring land together in 6d.
 
 use std::rc::Rc;
 

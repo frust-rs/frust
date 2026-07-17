@@ -22,6 +22,28 @@
 //! widget), the overlay opacity is the **maximum** of the active states'
 //! opacities — M3 does not stack multiple overlays additively, it shows the
 //! strongest one.
+//!
+//! # Live vs. aspirational states
+//!
+//! Of the four interaction states this helper models, **only `pressed` is
+//! wired by any shipping widget today** — the max-of-active-states rule above
+//! describes the full M3 design, but three of its four inputs have no live
+//! signal source yet:
+//!
+//! - **`hovered` — unwireable today.** `forgekit_core::input`'s `PointerPhase`
+//!   (see core `input/event.rs`) has only Down/Move/Up/Cancel — no
+//!   Enter/Leave/hover phase — so no widget can detect hover without future
+//!   input-pipeline work adding one.
+//! - **`focused` — awaiting focus routing.** A focus overlay needs a widget to
+//!   participate in the recorded focus path (`request_focus`/`Key` routing),
+//!   and none of the catalog widgets do; that wiring is 6d-adjacent.
+//! - **`dragged` — unwired.** No catalog widget reports a drag into
+//!   [`StateLayer::set_dragged`] yet.
+//!
+//! The `set_hovered`/`set_focused`/`set_dragged` setters remain the stable API
+//! for when those upstream signals exist; they are deliberately kept, not
+//! dead-stripped, so a widget can adopt each state the moment its source lands
+//! without re-plumbing this helper.
 
 use forgekit_core::{PaintCtx, PaintScene};
 use kurbo::Rect;

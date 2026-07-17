@@ -23,6 +23,37 @@
 //! `prev.builder(i)` and the current one with `self.builder(i)`, so no separate
 //! per-window view cache is retained.
 //!
+//! # Index-identity contract (NO stable keys — read before mutating the data)
+//!
+//! **Rows are reconciled by their raw item index, not by any stable identity.**
+//! A retained [`ChildPod`] is kept for an index that stays in the window
+//! (preserving that row's *entire* retained state — hosted `Component` state,
+//! `StateLayer` interaction flags, a `ListItem`'s toggle/press state) and
+//! rebuilt in place against `builder(index)`. That is exactly correct when the
+//! backing data changes only in ways that don't shift what lives at an index:
+//!
+//! * **append-only** (add rows at the end — `item_count` grows),
+//! * **truncate-only** (drop rows from the end — `item_count` shrinks),
+//! * **full-replace** (every row's content changes anyway — no state worth
+//!   preserving is misattached).
+//!
+//! It is **wrong** — silently, with no panic or debug assertion — for a
+//! **mid-list insert, remove, or reorder**: because identity is positional, the
+//! row state retained at index *i* reattaches to whatever *different* content
+//! now occupies index *i*, so a `ListItem`'s pressed overlay, a hosted
+//! component's local state, or a row toggle appears to "jump" onto the wrong
+//! item. There is no signal that this happened; the list simply renders stale
+//! per-row state against new content at the same slot.
+//!
+//! A stable-key `builder_keyed` variant (identity-keyed rows that survive a
+//! mid-list mutation, like [`keyed`](crate::keyed) does for `Flex`) is a
+//! **named, deliberately deferred follow-up** — non-trivial here because it
+//! must split window *position/slot* from row *identity*, preserve the
+//! `window_covers` contiguity the uniform-extent fast path relies on, and
+//! reconstruct a surviving row's previous view without a positional
+//! `prev.builder(i)`. Until it lands, treat a mid-list mutation as a
+//! full-replace (or accept the misattachment).
+//!
 //! # Viewport staleness (plan-verify correction a)
 //!
 //! [`forgekit_core::BuildCtx`] carries no viewport size, so the widget caches
@@ -86,6 +117,17 @@ impl<State: 'static> ListView<State> {
     /// type); spell each row with [`forgekit_core::any`]. Panics if
     /// `item_extent` is not positive (the uniform extent is the virtualization
     /// fast path; a zero/negative extent has no well-defined window).
+    ///
+    /// # Contract
+    ///
+    /// Rows are reconciled by **raw item index**, not by a stable key. This is
+    /// safe for append-only, truncate-only, and full-replace data, but a
+    /// mid-list insert/remove/reorder silently reattaches a retained row's state
+    /// to different content at the same index. See the [module docs]'
+    /// *Index-identity contract* section for the full rule and the deferred
+    /// `builder_keyed` follow-up.
+    ///
+    /// [module docs]: self
     pub fn builder(
         item_count: usize,
         item_extent: f64,

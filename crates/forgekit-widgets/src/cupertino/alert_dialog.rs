@@ -19,6 +19,20 @@
 //! by [`CupertinoActionStyle`] from *community-measured* systemBlue/systemRed
 //! (baked explicit — see [`crate::cupertino::tabbar`]'s Label color note for why
 //! these accent colors don't live-swap).
+//!
+//! # Keyboard operability (limitation)
+//!
+//! **There is no keyboard focus or Escape-to-dismiss for this alert today.**
+//! `Key` events route only down the recorded focus path (the
+//! [`InputEvent::is_focus_routed`] dispatch gate — see
+//! `docs/ARCHITECTURE.md`'s Event pipeline), and this widget never calls
+//! `request_focus`, so there is no focused chain for an Escape key to travel
+//! and no way to wire dismiss-on-Escape without the focus-routing work that is
+//! 6d scope. Dismissal is pointer-only: a scrim tap or an action button.
+//! Its semantics node carries [`Role::AlertDialog`] but **no** accesskit modal
+//! flag (unlike [`crate::material::dialog`]/[`crate::material::sheet`]), so
+//! there is nothing to reconcile with a future adapter on that front; keyboard
+//! operability + platform `accesskit_*` adapter wiring is 6d scope.
 
 use forgekit_core::accesskit::Role;
 use forgekit_core::{

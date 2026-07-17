@@ -49,6 +49,22 @@
 //! accesskit **modal** flag set (per the accesskit vocabulary for a modal
 //! dialog box), labelled with the title text; the title, body, and each action
 //! become its accesskit children.
+//!
+//! # Keyboard operability (limitation)
+//!
+//! **There is no keyboard focus or Escape-to-dismiss for this dialog today.**
+//! `Key` events route only down the recorded focus path (the
+//! [`InputEvent::is_focus_routed`] dispatch gate — see
+//! `docs/ARCHITECTURE.md`'s Event pipeline), and this widget never calls
+//! `request_focus`, so there is no focused chain for an Escape key to travel
+//! and no way to wire dismiss-on-Escape without the focus-routing work that is
+//! 6d scope. Dismissal is pointer-only: a scrim tap or an action button.
+//!
+//! The accesskit **modal** flag set above is nonetheless **kept deliberately**,
+//! not dropped. No platform `accesskit_*` adapter is wired yet (see
+//! `docs/ARCHITECTURE.md`'s Semantics pass), so there is no live assistive-tech
+//! audience the flag could currently mislead; it becomes load-bearing exactly
+//! when keyboard operability + adapter wiring land together in 6d.
 
 use std::rc::Rc;
 

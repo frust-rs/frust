@@ -179,18 +179,18 @@ impl IosAppHandle {
             self.theme.brightness,
             platform,
         );
-        self.app.set_theme(Box::new(self.theme.clone()));
-        let theme = self.theme.clone();
-        match ReactiveRuntime::get() {
-            Some(rt) => rt.with_owner(|| provide_context(theme)),
-            None => provide_context(theme),
-        }
+        self.push_theme();
     }
 
-    /// Push a theme to both delivery paths (mirrors [`Self::set_appearance`]'s
-    /// second half) — the shared helper [`Self::frame`]'s theme-override poll
-    /// calls, so a forced override and a live appearance change go through one
-    /// code path.
+    /// Push the current [`Self::theme`] to both delivery paths — boxed
+    /// type-erased into the render root ([`AppTree::set_theme`]) and
+    /// re-`provide_context`ed under the process-wide root
+    /// [`ReactiveRuntime`]'s owner for app-side `use_context` reads.
+    ///
+    /// This IS the shared theme-delivery body: both [`Self::set_appearance`]
+    /// (after it resolves the new brightness) and [`Self::frame`]'s
+    /// theme-override poll call it, so a forced override and a live appearance
+    /// change go through one code path.
     fn push_theme(&mut self) {
         self.app.set_theme(Box::new(self.theme.clone()));
         let theme = self.theme.clone();

@@ -20,6 +20,19 @@
 //! The sheet anchors to a fixed bottom margin. The home-indicator safe-area
 //! inset a real iOS sheet respects is **shell-future work** (documented,
 //! PLAN.md D5).
+//!
+//! # Keyboard operability (limitation)
+//!
+//! **There is no keyboard focus or Escape-to-dismiss for this action sheet
+//! today.** `Key` events route only down the recorded focus path (the
+//! [`InputEvent::is_focus_routed`] dispatch gate — see
+//! `docs/ARCHITECTURE.md`'s Event pipeline), and this widget never calls
+//! `request_focus`, so there is no focused chain for an Escape key to travel
+//! and no way to wire dismiss-on-Escape without the focus-routing work that is
+//! 6d scope. Dismissal is pointer-only: a scrim tap, the cancel row, or an
+//! action row. Its semantics node is a [`Role::Menu`] container with **no**
+//! accesskit modal flag, so there is no modal-audience concern to reconcile;
+//! keyboard operability + platform `accesskit_*` adapter wiring is 6d scope.
 
 use forgekit_core::accesskit::Role;
 use forgekit_core::{
