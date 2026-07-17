@@ -1,9 +1,28 @@
 //! The [`Scene`] display list and the [`Command`]s it holds.
 
-use kurbo::{Affine, Point, Rect};
+use kurbo::{Affine, BezPath, Point, Rect};
 use peniko::{Brush, Color, ImageData};
 
 use crate::glyph::GlyphRun;
+
+/// How a [`Command::Path`] is rendered: filled or stroked.
+///
+/// Kept intentionally minimal (task 05, PLAN.md D2b): the fill/stroke shape
+/// widgets need for arcs (circular progress, activity indicators) — a
+/// nonzero-fill, or a stroke with a fixed width and round caps/joins. No
+/// dash pattern, miter limit, or even-odd fill rule yet; extend here (and in
+/// `forgekit-render::convert`) if a later widget needs one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PathStyle {
+    /// Fill using the nonzero winding rule.
+    Fill,
+    /// Stroke with the given width (pre-transform coordinate space) and
+    /// round caps/joins.
+    Stroke {
+        /// Stroke width, in the pre-transform coordinate space.
+        width: f64,
+    },
+}
 
 /// A single paint operation recorded into a [`Scene`].
 ///
@@ -83,6 +102,19 @@ pub enum Command {
     },
     /// Pop the most recently pushed layer.
     PopLayer,
+    /// Fill or stroke an arbitrary vector path (e.g. an arc), under a
+    /// transform.
+    ///
+    /// `path` is a `kurbo::BezPath` already positioned in the same
+    /// coordinate space as every other command (the caller has translated it
+    /// to the widget's origin before recording); `style` selects fill vs.
+    /// stroke (see [`PathStyle`]).
+    Path {
+        path: BezPath,
+        style: PathStyle,
+        brush: Brush,
+        transform: Affine,
+    },
 }
 
 /// Renderer-agnostic, immediate-mode display list.

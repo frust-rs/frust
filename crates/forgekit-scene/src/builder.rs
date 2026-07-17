@@ -1,10 +1,10 @@
 //! [`SceneBuilder`]: the widget-facing API for recording paint commands into a [`Scene`].
 
-use kurbo::{Affine, Point, Rect};
+use kurbo::{Affine, BezPath, Point, Rect};
 use peniko::{Brush, Color, ImageData};
 
 use crate::glyph::GlyphRun;
-use crate::scene::{Command, Scene};
+use crate::scene::{Command, PathStyle, Scene};
 
 /// Records paint commands into a [`Scene`], maintaining a transform stack.
 ///
@@ -153,6 +153,30 @@ impl<'a> SceneBuilder<'a> {
     /// Pops the most recently pushed layer.
     pub fn pop_layer(&mut self) {
         self.scene.push(Command::PopLayer);
+    }
+
+    /// Records a filled arbitrary vector path (e.g. an arc) under the current
+    /// transform, using the nonzero winding rule.
+    pub fn fill_path(&mut self, path: BezPath, brush: Brush) {
+        let transform = self.current_transform();
+        self.scene.push(Command::Path {
+            path,
+            style: PathStyle::Fill,
+            brush,
+            transform,
+        });
+    }
+
+    /// Records a stroked arbitrary vector path (e.g. an arc), with round
+    /// caps/joins, under the current transform.
+    pub fn stroke_path(&mut self, path: BezPath, width: f64, brush: Brush) {
+        let transform = self.current_transform();
+        self.scene.push(Command::Path {
+            path,
+            style: PathStyle::Stroke { width },
+            brush,
+            transform,
+        });
     }
 }
 
@@ -500,5 +524,70 @@ mod tests {
         assert!(matches!(commands[2], Command::FillRect { .. }));
         assert!(matches!(commands[3], Command::PopLayer));
         assert!(matches!(commands[4], Command::PopClip));
+    }
+
+    fn triangle_path() -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((10.0, 0.0));
+        path.line_to((5.0, 10.0));
+        path.close_path();
+        path
+    }
+
+    #[test]
+    fn fill_path_round_trips_path_and_style_under_identity_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let path = triangle_path();
+        builder.fill_path(path.clone(), red_brush());
+
+        match &scene.commands()[0] {
+            Command::Path {
+                path: got_path,
+                style,
+                transform,
+                ..
+            } => {
+                assert_eq!(*got_path, path);
+                assert_eq!(*style, PathStyle::Fill);
+                assert_eq!(*transform, Affine::IDENTITY);
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stroke_path_round_trips_width_and_style() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let path = triangle_path();
+        builder.stroke_path(path.clone(), 2.5, red_brush());
+
+        match &scene.commands()[0] {
+            Command::Path {
+                path: got_path,
+                style,
+                ..
+            } => {
+                assert_eq!(*got_path, path);
+                assert_eq!(*style, PathStyle::Stroke { width: 2.5 });
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fill_path_composes_with_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((3.0, 4.0));
+        builder.push_transform(translate);
+        builder.fill_path(triangle_path(), red_brush());
+
+        match &scene.commands()[0] {
+            Command::Path { transform, .. } => assert_eq!(*transform, translate),
+            other => panic!("expected Path, got {other:?}"),
+        }
     }
 }

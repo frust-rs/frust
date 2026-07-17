@@ -6,10 +6,12 @@
 //! `vello`/`wgpu` types are forbidden here so the render backend can be swapped
 //! later (spec §7).
 
+mod arc;
 mod builder;
 mod glyph;
 mod scene;
 
+pub use arc::arc_path;
 pub use builder::SceneBuilder;
 pub use glyph::{FontHandle, Glyph, GlyphRun};
-pub use scene::{Command, Scene};
+pub use scene::{Command, PathStyle, Scene};

@@ -11,7 +11,7 @@
 use std::any::Any;
 
 use forgekit_scene::{GlyphRun, SceneBuilder};
-use kurbo::{Point, Rect, Size};
+use kurbo::{Affine, BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
 
 use crate::anim::FrameTime;
@@ -151,6 +151,24 @@ pub trait PaintScene {
     /// Pop the most recently pushed layer. Defaulted to a no-op; see
     /// [`PaintScene::push_layer`].
     fn pop_layer(&mut self) {}
+
+    /// Fill an arbitrary vector path (e.g. an arc — see
+    /// [`forgekit_scene::arc_path`]) at `origin`, using the nonzero winding
+    /// rule and `brush`.
+    ///
+    /// `path` is in the widget's local coordinate space; `origin` translates
+    /// it into the parent's space, mirroring every other `PaintScene`
+    /// method's origin convention (task 05, PLAN.md D2b). Defaulted to a
+    /// no-op so pre-existing recorder scenes stay valid; the `SceneBuilder`
+    /// implementation records a real [`forgekit_scene::Command::Path`].
+    fn fill_path(&mut self, _origin: Point, _path: &BezPath, _brush: &Brush) {}
+
+    /// Stroke an arbitrary vector path (e.g. an arc) at `origin` with `width`
+    /// and round caps/joins, using `brush`.
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; see
+    /// [`PaintScene::fill_path`].
+    fn stroke_path(&mut self, _origin: Point, _path: &BezPath, _width: f64, _brush: &Brush) {}
 }
 
 /// Bridges the provisional [`PaintScene`] boundary onto the real
@@ -219,6 +237,14 @@ impl PaintScene for SceneBuilder<'_> {
     fn pop_layer(&mut self) {
         SceneBuilder::pop_layer(self);
     }
+
+    fn fill_path(&mut self, origin: Point, path: &BezPath, brush: &Brush) {
+        SceneBuilder::fill_path(self, path_at(origin, path), brush.clone());
+    }
+
+    fn stroke_path(&mut self, origin: Point, path: &BezPath, width: f64, brush: &Brush) {
+        SceneBuilder::stroke_path(self, path_at(origin, path), width, brush.clone());
+    }
 }
 
 /// Build an origin/size pair into the `kurbo::Rect` the scene builder speaks.
@@ -229,6 +255,13 @@ fn rect_at(origin: Point, size: Size) -> Rect {
         origin.x + size.width,
         origin.y + size.height,
     )
+}
+
+/// Translates `path` (in the widget's local coordinate space) by `origin`,
+/// mirroring [`rect_at`]'s origin/size convention for [`PaintScene::fill_path`]/
+/// [`PaintScene::stroke_path`].
+fn path_at(origin: Point, path: &BezPath) -> BezPath {
+    Affine::translate((origin.x, origin.y)) * path.clone()
 }
 
 /// Context passed to [`Widget::layout`].
@@ -1224,6 +1257,79 @@ mod tests {
         scene.pop_layer();
         assert!(scene.rects.is_empty());
         assert!(scene.texts.is_empty());
+    }
+
+    #[test]
+    fn fill_path_and_stroke_path_are_no_ops_when_not_overridden() {
+        // `RecordingScene` does not override the task-05 path additions
+        // either — the trait's default no-op bodies must compile unchanged.
+        let mut scene = RecordingScene::default();
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((1.0, 0.0));
+        scene.fill_path(Point::ZERO, &path, &Brush::Solid(Color::BLACK));
+        scene.stroke_path(Point::ZERO, &path, 2.0, &Brush::Solid(Color::BLACK));
+        assert!(scene.rects.is_empty());
+        assert!(scene.texts.is_empty());
+    }
+
+    /// A scene recorder overriding the task-05 path additions, proving they
+    /// reach an implementor that opts in.
+    #[derive(Default)]
+    struct PathRecordingScene {
+        fills: Vec<(Point, BezPath)>,
+        strokes: Vec<(Point, BezPath, f64)>,
+    }
+
+    impl PaintScene for PathRecordingScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+
+        fn fill_path(&mut self, origin: Point, path: &BezPath, _brush: &Brush) {
+            self.fills.push((origin, path.clone()));
+        }
+
+        fn stroke_path(&mut self, origin: Point, path: &BezPath, width: f64, _brush: &Brush) {
+            self.strokes.push((origin, path.clone(), width));
+        }
+    }
+
+    #[test]
+    fn fill_path_and_stroke_path_reach_an_overriding_implementor() {
+        let mut scene = PathRecordingScene::default();
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((5.0, 0.0));
+
+        scene.fill_path(Point::new(1.0, 2.0), &path, &Brush::Solid(Color::BLACK));
+        scene.stroke_path(
+            Point::new(3.0, 4.0),
+            &path,
+            1.5,
+            &Brush::Solid(Color::BLACK),
+        );
+
+        assert_eq!(scene.fills.len(), 1);
+        assert_eq!(scene.fills[0].0, Point::new(1.0, 2.0));
+        assert_eq!(scene.fills[0].1, path);
+
+        assert_eq!(scene.strokes.len(), 1);
+        assert_eq!(scene.strokes[0].0, Point::new(3.0, 4.0));
+        assert_eq!(scene.strokes[0].1, path);
+        assert_eq!(scene.strokes[0].2, 1.5);
+    }
+
+    #[test]
+    fn path_at_translates_path_points_by_origin() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((5.0, 0.0));
+
+        let translated = path_at(Point::new(10.0, 20.0), &path);
+        let mut expected = BezPath::new();
+        expected.move_to((10.0, 20.0));
+        expected.line_to((15.0, 20.0));
+        assert_eq!(translated, expected);
     }
 
     /// A dummy theme type, standing in for `forgekit_theme::Theme` — proving the

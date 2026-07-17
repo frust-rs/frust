@@ -9,8 +9,8 @@
 //! can reuse ForgeKit's scene encoding (mirrors how `forgekit-scene` allows
 //! `peniko` types, spec §7).
 
-use forgekit_scene::{Command, GlyphRun, Scene};
-use kurbo::{Affine, Line, Point, Rect, RoundedRect, Stroke};
+use forgekit_scene::{Command, GlyphRun, PathStyle, Scene};
+use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
 
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
@@ -53,6 +53,12 @@ pub(crate) trait SceneSink {
     fn push_layer(&mut self, transform: Affine, rect: &Rect, alpha: f32);
     /// Pop the most recently pushed layer.
     fn pop_layer(&mut self);
+    /// Fill an arbitrary vector path with `brush` under `transform`, using
+    /// the nonzero winding rule.
+    fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath);
+    /// Stroke an arbitrary vector path with `brush`/`width` (round caps/joins)
+    /// under `transform`.
+    fn stroke_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath, width: f64);
 }
 
 /// Encodes every command in `scene` into `target` (a reused `vello::Scene`).
@@ -108,6 +114,15 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
                 transform,
             } => sink.push_layer(*transform, rect, *alpha),
             Command::PopLayer => sink.pop_layer(),
+            Command::Path {
+                path,
+                style,
+                brush,
+                transform,
+            } => match style {
+                PathStyle::Fill => sink.fill_path(*transform, brush, path),
+                PathStyle::Stroke { width } => sink.stroke_path(*transform, brush, path, *width),
+            },
         }
     }
 }
@@ -216,6 +231,14 @@ impl SceneSink for vello::Scene {
     fn pop_layer(&mut self) {
         vello::Scene::pop_layer(self);
     }
+
+    fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath) {
+        self.fill(Fill::NonZero, transform, brush, None, path);
+    }
+
+    fn stroke_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath, width: f64) {
+        self.stroke(&Stroke::new(width), transform, brush, None, path);
+    }
 }
 
 /// Compose `transform` (the widget's own position/scale) with the affine that
@@ -292,6 +315,15 @@ mod tests {
             transform: Affine,
         },
         PopLayer,
+        FillPath {
+            path: BezPath,
+            transform: Affine,
+        },
+        StrokePath {
+            path: BezPath,
+            width: f64,
+            transform: Affine,
+        },
     }
 
     #[derive(Default)]
@@ -395,6 +427,21 @@ mod tests {
 
         fn pop_layer(&mut self) {
             self.events.push(Event::PopLayer);
+        }
+
+        fn fill_path(&mut self, transform: Affine, _brush: &Brush, path: &BezPath) {
+            self.events.push(Event::FillPath {
+                path: path.clone(),
+                transform,
+            });
+        }
+
+        fn stroke_path(&mut self, transform: Affine, _brush: &Brush, path: &BezPath, width: f64) {
+            self.events.push(Event::StrokePath {
+                path: path.clone(),
+                width,
+                transform,
+            });
         }
     }
 
@@ -682,6 +729,73 @@ mod tests {
         builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
         builder.pop_layer();
         builder.pop_clip();
+
+        let mut vello_scene = vello::Scene::new();
+        encode_scene(&scene, &mut vello_scene);
+    }
+
+    fn triangle_path() -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((10.0, 0.0));
+        path.line_to((5.0, 10.0));
+        path.close_path();
+        path
+    }
+
+    #[test]
+    fn fill_path_maps_to_fill_path_call_with_path_and_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((2.0, 3.0));
+        builder.push_transform(translate);
+        let path = triangle_path();
+        builder.fill_path(path.clone(), Brush::Solid(RED));
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::FillPath {
+                path,
+                transform: translate,
+            }]
+        );
+    }
+
+    #[test]
+    fn stroke_path_maps_to_stroke_path_call_with_width_and_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let path = triangle_path();
+        builder.stroke_path(path.clone(), 2.5, Brush::Solid(RED));
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::StrokePath {
+                path,
+                width: 2.5,
+                transform: Affine::IDENTITY,
+            }]
+        );
+    }
+
+    /// A widget can paint a stroked arc via `PaintScene`/`SceneBuilder` without
+    /// any `forgekit-render` dependency, and it reaches a real `vello::Scene`
+    /// without panicking — the task 05 acceptance criterion.
+    #[test]
+    fn arc_path_fill_and_stroke_encode_into_a_real_vello_scene_without_panicking() {
+        let path =
+            forgekit_scene::arc_path(Point::new(10.0, 10.0), 8.0, 0.0, std::f64::consts::PI / 2.0);
+
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.fill_path(path.clone(), Brush::Solid(RED));
+        builder.stroke_path(path, 2.0, Brush::Solid(RED));
 
         let mut vello_scene = vello::Scene::new();
         encode_scene(&scene, &mut vello_scene);
