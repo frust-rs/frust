@@ -250,6 +250,13 @@ class ForgeKitSurfaceView(context: Context) :
         } else if (!state.active && imeActive) {
             imeActive = false
             imm.hideSoftInputFromWindow(windowToken, 0)
+        } else if (state.active) {
+            // Steady active (no show/hide edge): reconcile the live mirror to the
+            // focused field's published state — a caret moved by a tap (Finding
+            // 10), or a whole-field text change from a field switch (Finding 9) or
+            // submit-clear. Compares against the LIVE editable, not the racing
+            // `lastKnownState`, so a pre-advanced snapshot can't defeat it.
+            activeConnection?.reconcileTo(state)
         }
     }
 
@@ -293,13 +300,12 @@ class ForgeKitSurfaceView(context: Context) :
         // is a cheap no-op, so re-posting is always correct while `running`.
         if (handle != 0L) {
             nativeOnFrame(handle, frameTimeNanos)
-            // After an editor action, the field's submit-driven text change lands
-            // in this (or the next) frame's rebuild; reseed the IME mirror once it
-            // has (see [imeResyncFrames]).
-            if (imeResyncFrames > 0) {
-                imeResyncFrames--
-                resyncImeMirror()
-            }
+            // Per-frame IME reconcile (Findings 9/10): pick up caret moves,
+            // field switches, and submit-clears that no InputConnection callback
+            // originated. `pollImeAfterDispatch` reconciles the live mirror to the
+            // focused field's published state; a no-op when they already match, so
+            // normal typing never triggers a spurious restart.
+            pollImeAfterDispatch()
         }
         Choreographer.getInstance().postFrameCallback(this)
     }
@@ -395,6 +401,32 @@ class ForgeKitSurfaceView(context: Context) :
             }
         }
 
+        /**
+         * Reconcile the mirror to a Rust-published state the IME did not
+         * originate: a tap that moved the caret (selection-only), or a whole-field
+         * text change from a field switch / submit-clear. Compares against the
+         * LIVE editable (not `lastKnownState`) so a pre-advanced snapshot cannot
+         * hide a divergence.
+         */
+        fun reconcileTo(state: ImeWireState) {
+            val curText = editable.toString()
+            val curStart = Selection.getSelectionStart(editable)
+            val curEnd = Selection.getSelectionEnd(editable)
+            if (curText != state.text) {
+                seed(state)
+                imm.updateSelection(this@ForgeKitSurfaceView, state.selBase, state.selExt, state.compBase, state.compExt)
+                imm.restartInput(this@ForgeKitSurfaceView)
+            } else if (curStart != state.selBase || curEnd != state.selExt) {
+                val len = editable.length
+                if (state.selBase in 0..len && state.selExt in 0..len) {
+                    Selection.setSelection(editable, state.selBase, state.selExt)
+                }
+                imm.updateSelection(this@ForgeKitSurfaceView, state.selBase, state.selExt, state.compBase, state.compExt)
+                // A later identical `sync()` must not short-circuit on the stale snapshot.
+                lastPushed = null
+            }
+        }
+
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
             val handled = super.commitText(text, newCursorPosition)
             sync()
@@ -444,6 +476,30 @@ class ForgeKitSurfaceView(context: Context) :
             // Soft keyboards emit backspace as `deleteSurroundingText`, but
             // hardware keys (and some IMEs' DEL/ENTER) arrive here — let `super`
             // translate them into edits on the mirror, then sync on key-down.
+            // `BaseInputConnection.sendKeyEvent` does NOT edit the mirror for
+            // KEYCODE_DEL/FORWARD_DEL — it only dispatches the key to the view.
+            // Many soft keyboards (Gboard on this device) deliver backspace this
+            // way rather than via `deleteSurroundingText`, so we must perform the
+            // edit on the mirror ourselves, then let `sync()` push it to Rust.
+            if (event.action == KeyEvent.ACTION_DOWN &&
+                (event.keyCode == KeyEvent.KEYCODE_DEL ||
+                    event.keyCode == KeyEvent.KEYCODE_FORWARD_DEL)
+            ) {
+                val selStart = Selection.getSelectionStart(editable)
+                val selEnd = Selection.getSelectionEnd(editable)
+                val lo = minOf(selStart, selEnd)
+                val hi = maxOf(selStart, selEnd)
+                if (lo != hi) {
+                    editable.delete(lo, hi)
+                } else if (event.keyCode == KeyEvent.KEYCODE_DEL && lo > 0) {
+                    editable.delete(lo - 1, lo)
+                } else if (event.keyCode == KeyEvent.KEYCODE_FORWARD_DEL && lo < editable.length) {
+                    editable.delete(lo, lo + 1)
+                }
+                sync()
+                return true
+            }
+            // Other keys (hardware ENTER/etc.): let `super` dispatch, then sync.
             val handled = super.sendKeyEvent(event)
             if (event.action == KeyEvent.ACTION_DOWN) {
                 sync()
