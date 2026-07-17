@@ -22,9 +22,11 @@
 mod align;
 mod button;
 mod checkbox;
+pub mod cupertino;
 mod flex;
 mod gesture;
 mod image;
+pub mod material;
 pub mod nav;
 mod padding;
 mod scroll;
