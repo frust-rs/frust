@@ -58,6 +58,11 @@ pub use nav::navigator::{
     NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult, ResultCallback,
     navigator,
 };
+pub use nav::path::{Location, PathPattern, RouteParams};
+pub use nav::router::{
+    DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Redirect, Resolution, ResolvedPage, Route, RouteBuilder,
+    Router,
+};
 pub use nav::transition::{PageTransition, Timing, TransitionSpec};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
 pub use scroll::{ScrollView, ScrollWidget, scroll_view};
