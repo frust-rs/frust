@@ -14,13 +14,18 @@
 //! ViewSequence / multiple children are explicitly out of scope (task 08+).
 
 use std::any::Any;
+use std::cell::Cell;
+use std::num::NonZeroU64;
 
 use kurbo::{Point, Size};
 
 use crate::anim::FrameTime;
-use crate::event::{EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerPhase};
+use crate::event::{
+    EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerButton, PointerEvent,
+    PointerPhase,
+};
 use crate::layout::BoxConstraints;
-use crate::semantics::{SemanticsCtx, SemanticsUpdate};
+use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
 use crate::tree::{WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
 use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene};
@@ -62,6 +67,24 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// [`LayoutCtx`]/[`PaintCtx`]; `None` until a shell sets one (a supported
     /// state — bare-core tests and pre-theme apps run without a theme).
     theme: Option<Box<dyn Any>>,
+    /// The persistent, never-reused per-pod semantics base-id allocator's next
+    /// value (phase-6d D1). Seeded at `2` (ids `0`/`1` reserved: `0` keeps
+    /// `NonZeroU64` valid, `1` is the [`ROOT_NODE_ID`] window node), advanced as
+    /// [`ChildPod`](crate::widget::ChildPod)s are assigned bases on their first
+    /// semantics visit, and carried across passes so a pod that first appears on a
+    /// later frame never collides with an already-assigned one. A `Cell` because
+    /// [`RenderRoot::semantics`] runs behind `&self`.
+    semantics_alloc: Cell<u64>,
+    /// The root widget's stable semantics base id (the root pod is arena-backed,
+    /// not a [`ChildPod`](crate::widget::ChildPod), so it caches its base here
+    /// rather than in a pod). Lazily assigned on the first semantics pass.
+    root_semantics_id: Cell<Option<NonZeroU64>>,
+    /// A monotonically-increasing generation bumped whenever a rebuild or theme
+    /// swap could have changed the semantics tree, so a shell can cheaply skip
+    /// re-pulling + re-pushing an unchanged accessibility tree (phase-6d D1's
+    /// dirty gate — see [`RenderRoot::semantics_if_changed`]). v1 recompute is
+    /// acceptable; this is the seam a shell gates on.
+    semantics_gen: u64,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
 
@@ -79,6 +102,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ime_state: None,
             pending: ChangeFlags::NONE,
             theme: None,
+            // Ids 0 and 1 are reserved (see the field doc); pods start at 2.
+            semantics_alloc: Cell::new(2),
+            root_semantics_id: Cell::new(None),
+            semantics_gen: 0,
             _state: core::marker::PhantomData,
         }
     }
@@ -102,6 +129,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     pub fn set_theme(&mut self, theme: Box<dyn Any>) {
         self.theme = Some(theme);
         self.pending |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        // A theme swap can change semantics-visible state (e.g. a relabelled or
+        // re-bounded node once layout re-runs); treat it as semantics-dirty too.
+        self.semantics_gen = self.semantics_gen.wrapping_add(1);
     }
 
     /// Whether a captured pointer gesture is currently in flight.
@@ -162,6 +192,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
         let flags = self.rebuild_view(view);
         self.pending |= flags;
+        // A rebuild that changed layout/paint could have changed the semantics
+        // tree (added/removed/relabelled nodes); bump the dirty gate a shell polls
+        // via `semantics_if_changed`.
+        if !flags.is_empty() {
+            self.semantics_gen = self.semantics_gen.wrapping_add(1);
+        }
         flags
     }
 
@@ -314,10 +350,22 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// node covering the window, whose children are whatever the root widget
     /// contributed. An unbuilt tree yields a bare window node with no children.
     pub fn semantics(&self) -> SemanticsUpdate {
-        let mut ctx = SemanticsCtx::new(self.window_size);
+        let mut ctx = SemanticsCtx::new(self.window_size, self.semantics_alloc.get());
         let window = self.window_size;
         let root_pod = self.root_id.and_then(|id| self.tree.pod(id));
-        let root_node = ctx.push_container(
+        // The root pod is arena-backed (not a `ChildPod`), so it caches its stable
+        // base id in `root_semantics_id` rather than in a pod — assigned on first
+        // pass and reused thereafter, exactly like `ChildPod::semantics_base`.
+        let root_widget_base = match self.root_semantics_id.get() {
+            Some(id) => id,
+            None => {
+                let id = ctx.alloc_base();
+                self.root_semantics_id.set(Some(id));
+                id
+            }
+        };
+        let root_node = ctx.push_container_with_id(
+            ROOT_NODE_ID,
             accesskit::Role::Window,
             |node| {
                 node.set_bounds(accesskit::Rect {
@@ -330,15 +378,45 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             |ctx| {
                 if let Some(pod) = root_pod {
                     // The root pod sits at its recorded origin (ZERO today) with
-                    // its laid-out size; descend into that geometry, mirroring
-                    // how `ChildPod::semantics_child` threads a child's.
-                    ctx.descend(pod.origin().to_vec2(), pod.size(), |ctx| {
-                        pod.widget().semantics(ctx);
-                    });
+                    // its laid-out size; descend into that geometry and its stable
+                    // id scope, mirroring `ChildPod::semantics_child`.
+                    ctx.descend_into_pod(
+                        root_widget_base,
+                        pod.origin().to_vec2(),
+                        pod.size(),
+                        |ctx| {
+                            pod.widget().semantics(ctx);
+                        },
+                    );
                 }
             },
         );
+        // Persist the allocator's high-water mark so the next pass keeps handing
+        // out fresh, never-reused bases to pods that first appear later.
+        self.semantics_alloc.set(ctx.next_base());
         ctx.finish(root_node)
+    }
+
+    /// The current semantics generation — bumped by every rebuild/theme swap that
+    /// could have changed the accessibility tree (phase-6d D1's dirty gate).
+    ///
+    /// A shell records the value it last pushed and compares; see
+    /// [`RenderRoot::semantics_if_changed`].
+    pub fn semantics_generation(&self) -> u64 {
+        self.semantics_gen
+    }
+
+    /// Pull a fresh [`SemanticsUpdate`] **only if** the semantics tree may have
+    /// changed since generation `last_seen` (phase-6d D1).
+    ///
+    /// Returns `None` when nothing relevant changed, letting a shell skip both the
+    /// tree walk and the platform `accesskit_*` push. Call it post-layout (bounds
+    /// must be valid). A shell threads its stored generation in and, on `Some`,
+    /// updates it from [`RenderRoot::semantics_generation`]. v1 pushes the whole
+    /// tree when it does recompute (stable ids make that valid); finer-grained
+    /// diffing is a later optimization.
+    pub fn semantics_if_changed(&self, last_seen: u64) -> Option<SemanticsUpdate> {
+        (self.semantics_gen != last_seen).then(|| self.semantics())
     }
 
     /// Deliver an input event to the widget tree, returning what happened.
@@ -432,6 +510,69 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         EventOutcome {
             handled,
             needs_redraw,
+        }
+    }
+
+    /// Perform a platform accessibility action (phase-6d D2), returning the same
+    /// [`EventOutcome`] the synthesized input produced.
+    ///
+    /// A platform `accesskit_*` adapter delivers an `ActionRequest(node_id,
+    /// action)`; a shell forwards it here. v1 routes actions through the **normal
+    /// event path** by synthesizing pointer events at the target node's absolute
+    /// bounds center (recovered from a fresh semantics pass — the id → bounds map
+    /// the pass produces), so *every* fire-on-up-inside widget is operable with
+    /// **zero** widget-side changes:
+    ///
+    /// * [`accesskit::Action::Click`] → a `Down` then an `Up` at the center,
+    ///   activating any button/switch/checkbox exactly as a real tap would.
+    /// * [`accesskit::Action::Focus`] → a single `Down` at the center, which
+    ///   claims focus for a widget that opts in on `Down` (the recorded-focus
+    ///   contract); a widget that does not claim focus on `Down` is unaffected.
+    /// * any other action → ignored (a no-op [`EventOutcome`]); richer actions are
+    ///   deferred.
+    ///
+    /// An unknown `node_id` (not in the current tree) is a benign no-op. Requires
+    /// a prior [`RenderRoot::layout`] so the bounds are valid. Synthetic-pointer
+    /// activation cannot drive widgets that require a real drag (e.g. a slider) —
+    /// an accepted v1 limitation.
+    pub fn perform_accessibility_action(
+        &mut self,
+        state: &mut State,
+        node_id: accesskit::NodeId,
+        action: accesskit::Action,
+    ) -> EventOutcome {
+        // Recover the node's absolute bounds from a fresh semantics pass (the
+        // id → absolute-bounds map D2 calls for; recomputing keeps it in step with
+        // the live tree without a stored cache).
+        let update = self.semantics();
+        let Some(bounds) = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == node_id)
+            .and_then(|(_, node)| node.bounds())
+        else {
+            return EventOutcome::default();
+        };
+        let center = Point::new((bounds.x0 + bounds.x1) / 2.0, (bounds.y0 + bounds.y1) / 2.0);
+        let synth = |phase| {
+            InputEvent::Pointer(PointerEvent {
+                phase,
+                position: center,
+                button: PointerButton::Primary,
+            })
+        };
+        match action {
+            accesskit::Action::Click => {
+                let down = self.event(state, &synth(PointerPhase::Down));
+                let up = self.event(state, &synth(PointerPhase::Up));
+                EventOutcome {
+                    handled: down.handled || up.handled,
+                    needs_redraw: down.needs_redraw || up.needs_redraw,
+                }
+            }
+            accesskit::Action::Focus => self.event(state, &synth(PointerPhase::Down)),
+            // Other actions are not modelled in v1: ignore rather than guess.
+            _ => EventOutcome::default(),
         }
     }
 }
@@ -1052,5 +1193,297 @@ mod tests {
         root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 10.0));
         assert!(!root.is_focus_active());
         assert!(root.ime_state().is_none());
+    }
+
+    // --- Semantics: stable ids + accessibility action routing (phase-6d D1/D2) --
+    //
+    // Fixtures: an accessibility-visible button (fire-on-up-inside, contributes a
+    // `Role::Button` node) and a checkbox variant (`Role::CheckBox`), plus a
+    // labelled leaf used to prove id stability survives a pod relocation.
+
+    use accesskit::{Action, NodeId, Role};
+
+    /// A fire-on-up-inside button that also contributes a semantics node — the
+    /// end-to-end target for `perform_accessibility_action(Click)`.
+    struct A11yButtonWidget;
+    impl crate::widget::Widget for A11yButtonWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event {
+                match p.phase {
+                    PointerPhase::Down => {
+                        ctx.capture_pointer();
+                        return EventResult::Handled;
+                    }
+                    PointerPhase::Up => {
+                        let size = ctx.size();
+                        let inside = p.position.x >= 0.0
+                            && p.position.y >= 0.0
+                            && p.position.x <= size.width
+                            && p.position.y <= size.height;
+                        if inside {
+                            ctx.state_mut::<ClickState>().clicks += 1;
+                            ctx.request_redraw();
+                        }
+                        return EventResult::Handled;
+                    }
+                    _ => {}
+                }
+            }
+            EventResult::Ignored
+        }
+        fn semantics(&self, ctx: &mut SemanticsCtx) {
+            ctx.push_node(Role::Button, |n| n.set_label("Go"));
+        }
+    }
+
+    struct A11yButtonView;
+    impl View<ClickState> for A11yButtonView {
+        type Element = A11yButtonWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> A11yButtonWidget {
+            A11yButtonWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _el: &mut A11yButtonWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn a11y_button_logic(_state: &mut ClickState) -> A11yButtonView {
+        A11yButtonView
+    }
+
+    fn button_node_id(update: &SemanticsUpdate, role: Role) -> NodeId {
+        update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == role)
+            .map(|(id, _)| *id)
+            .unwrap_or_else(|| panic!("a {role:?} node is present"))
+    }
+
+    #[test]
+    fn semantics_ids_are_stable_across_frames() {
+        let mut root: RenderRoot<ClickState, A11yButtonView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut a11y_button_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        let first = button_node_id(&root.semantics(), Role::Button);
+        // Re-run rebuild+layout+semantics several times: the button keeps its id.
+        for _ in 0..3 {
+            root.rebuild(&mut a11y_button_logic, &mut state);
+            root.layout(Size::new(200.0, 200.0));
+            assert_eq!(
+                button_node_id(&root.semantics(), Role::Button),
+                first,
+                "the same widget must keep its NodeId across frames"
+            );
+        }
+        // The window root is the reserved constant id.
+        assert_eq!(root.semantics().root, ROOT_NODE_ID);
+    }
+
+    #[test]
+    fn semantics_ids_survive_a_pod_relocation() {
+        // A keyed reorder relocates the whole `ChildPod` (preserving its cached
+        // semantics id); simulate that here by swapping two pods in place and
+        // asserting each labelled node keeps its id despite changing position.
+        struct LabeledLeaf {
+            label: &'static str,
+        }
+        impl crate::widget::Widget for LabeledLeaf {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(10.0, 10.0))
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+            fn semantics(&self, ctx: &mut SemanticsCtx) {
+                let label = self.label;
+                ctx.push_node(Role::Label, |n| n.set_label(label));
+            }
+        }
+
+        let mut pods = vec![
+            crate::widget::ChildPod::new(Box::new(LabeledLeaf { label: "A" })),
+            crate::widget::ChildPod::new(Box::new(LabeledLeaf { label: "B" })),
+        ];
+
+        // Collect (label -> id) for a given pod order. `SemanticsCtx` is
+        // crate-private, so this drives the pods directly — the same allocation
+        // path `RenderRoot::semantics` uses.
+        let collect = |pods: &[crate::widget::ChildPod]| {
+            let mut ctx = SemanticsCtx::new(Size::new(100.0, 100.0), 2);
+            for pod in pods {
+                pod.semantics_child(&mut ctx);
+            }
+            let update = ctx.finish(ROOT_NODE_ID);
+            update
+                .nodes
+                .iter()
+                .filter(|(id, _)| *id != ROOT_NODE_ID)
+                .map(|(id, n)| (n.label().unwrap().to_string(), *id))
+                .collect::<Vec<_>>()
+        };
+
+        let before = collect(&pods);
+        // Relocate: swap the pods (the pods themselves, with their cached ids,
+        // move — mirroring the keyed reconciler's `take`-and-reorder).
+        pods.swap(0, 1);
+        let after = collect(&pods);
+
+        for (label, id) in &before {
+            let relocated = after.iter().find(|(l, _)| l == label).unwrap().1;
+            assert_eq!(
+                *id, relocated,
+                "widget {label:?} must keep its NodeId across the reorder"
+            );
+        }
+        // And the reorder actually changed positions (A now second).
+        assert_eq!(after[0].0, "B");
+        assert_eq!(after[1].0, "A");
+    }
+
+    #[test]
+    fn semantics_full_update_assembles_window_and_child() {
+        let mut root: RenderRoot<ClickState, A11yButtonView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut a11y_button_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        let update = root.semantics();
+        // Window root + the button.
+        assert_eq!(update.nodes.len(), 2);
+        assert_eq!(update.root, ROOT_NODE_ID);
+        let root_node = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == update.root)
+            .unwrap();
+        assert_eq!(root_node.1.role(), Role::Window);
+        let button = button_node_id(&update, Role::Button);
+        assert_eq!(
+            root_node.1.children(),
+            &[button],
+            "the button attaches under the window root"
+        );
+        // Nothing focused → the adapter-facing focus id defaults to the root.
+        assert!(update.focus.is_none());
+        assert_eq!(update.focus_id(), ROOT_NODE_ID);
+    }
+
+    #[test]
+    fn perform_click_action_activates_a_button() {
+        let mut root: RenderRoot<ClickState, A11yButtonView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut a11y_button_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        let button = button_node_id(&root.semantics(), Role::Button);
+        let outcome = root.perform_accessibility_action(&mut state, button, Action::Click);
+        assert!(outcome.handled, "the synthesized Down+Up was handled");
+        assert!(outcome.needs_redraw);
+        assert_eq!(state.clicks, 1, "Click synthesized a real up-inside tap");
+
+        // An unknown node id is a benign no-op.
+        let outcome = root.perform_accessibility_action(&mut state, NodeId(999_999), Action::Click);
+        assert_eq!(outcome, EventOutcome::default());
+        assert_eq!(state.clicks, 1);
+
+        // An unmodelled action is ignored.
+        let outcome = root.perform_accessibility_action(&mut state, button, Action::ScrollDown);
+        assert_eq!(outcome, EventOutcome::default());
+        assert_eq!(state.clicks, 1);
+    }
+
+    #[test]
+    fn perform_click_action_toggles_a_checkbox() {
+        // A checkbox-shaped widget (`Role::CheckBox`) reached through the same
+        // synthetic-pointer path — proving Click drives any fire-on-up-inside
+        // control, not just buttons.
+        struct CheckboxWidget;
+        impl crate::widget::Widget for CheckboxWidget {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(24.0, 24.0))
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+            fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+                if let InputEvent::Pointer(p) = event {
+                    match p.phase {
+                        PointerPhase::Down => {
+                            ctx.capture_pointer();
+                            return EventResult::Handled;
+                        }
+                        PointerPhase::Up => {
+                            let size = ctx.size();
+                            if p.position.x >= 0.0
+                                && p.position.y >= 0.0
+                                && p.position.x <= size.width
+                                && p.position.y <= size.height
+                            {
+                                ctx.state_mut::<ClickState>().clicks += 1;
+                            }
+                            return EventResult::Handled;
+                        }
+                        _ => {}
+                    }
+                }
+                EventResult::Ignored
+            }
+            fn semantics(&self, ctx: &mut SemanticsCtx) {
+                ctx.push_node(Role::CheckBox, |n| n.set_label("Agree"));
+            }
+        }
+        struct CheckboxView;
+        impl View<ClickState> for CheckboxView {
+            type Element = CheckboxWidget;
+            fn build(&self, _ctx: &mut BuildCtx<'_>) -> CheckboxWidget {
+                CheckboxWidget
+            }
+            fn rebuild(
+                &self,
+                _p: &Self,
+                _e: &mut CheckboxWidget,
+                _c: &mut BuildCtx<'_>,
+            ) -> ChangeFlags {
+                ChangeFlags::NONE
+            }
+        }
+
+        let mut root: RenderRoot<ClickState, CheckboxView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut |_| CheckboxView, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        let cb = button_node_id(&root.semantics(), Role::CheckBox);
+        root.perform_accessibility_action(&mut state, cb, Action::Click);
+        assert_eq!(state.clicks, 1, "Click toggled the checkbox once");
+    }
+
+    #[test]
+    fn semantics_if_changed_gates_on_generation() {
+        let mut root: RenderRoot<ClickState, A11yButtonView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        // First build bumps the generation from 0.
+        root.rebuild(&mut a11y_button_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        let generation = root.semantics_generation();
+        assert!(generation > 0);
+        // A shell that already pushed `generation` sees no change.
+        assert!(root.semantics_if_changed(generation).is_none());
+        // A stale generation triggers a fresh pull.
+        assert!(root.semantics_if_changed(generation - 1).is_some());
+
+        // A theme swap marks the tree semantics-dirty.
+        root.set_theme(Box::new(0u32));
+        assert!(root.semantics_generation() > generation);
+        assert!(root.semantics_if_changed(generation).is_some());
     }
 }

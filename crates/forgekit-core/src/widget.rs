@@ -9,6 +9,8 @@
 //! * **paint** — emit draw commands into a scene.
 
 use std::any::Any;
+use std::cell::Cell;
+use std::num::NonZeroU64;
 
 use forgekit_scene::{GlyphRun, SceneBuilder};
 use kurbo::{Affine, BezPath, Point, Rect, Size};
@@ -665,6 +667,16 @@ pub struct ChildPod {
     /// second recorded path, a mirror of `active`). Maintained by
     /// [`ChildPod::event_child`] on a `focus_requested`/`focus_released` bubble.
     focused: bool,
+    /// This pod's persistent semantics base id (phase-6d D1), lazily assigned on
+    /// the pod's first [`ChildPod::semantics_child`] visit from the
+    /// [`RenderRoot`](crate::app::RenderRoot) allocator and reused for the whole
+    /// pod lifetime — so the node id a widget contributes is stable across frames
+    /// (and survives a keyed reorder, which relocates the whole pod). Interior
+    /// mutability because `semantics_child` runs behind `&self` (mirroring
+    /// `Widget::semantics`); `NonZeroU64` niche-packs the `Option` and encodes
+    /// "id 0 is not a valid base". `None` until the first semantics pass reaches
+    /// this pod.
+    semantics_id: Cell<Option<NonZeroU64>>,
 }
 
 impl ChildPod {
@@ -677,6 +689,7 @@ impl ChildPod {
             size: Size::ZERO,
             active: false,
             focused: false,
+            semantics_id: Cell::new(None),
         }
     }
 
@@ -792,9 +805,25 @@ impl ChildPod {
     /// transparent container, under whatever encloses it — see
     /// [`crate::semantics`]).
     pub fn semantics_child(&self, ctx: &mut SemanticsCtx) {
-        ctx.descend(self.origin.to_vec2(), self.size, |ctx| {
+        let base = self.semantics_base(ctx);
+        ctx.descend_into_pod(base, self.origin.to_vec2(), self.size, |ctx| {
             self.widget.semantics(ctx);
         });
+    }
+
+    /// This pod's stable semantics base id, assigning one from the allocator on
+    /// the first visit and reusing the cached value thereafter (phase-6d D1) —
+    /// the mechanism that keeps a widget's node id stable across frames and keyed
+    /// reorders. See [`ChildPod::semantics_id`].
+    fn semantics_base(&self, ctx: &mut SemanticsCtx) -> NonZeroU64 {
+        match self.semantics_id.get() {
+            Some(id) => id,
+            None => {
+                let id = ctx.alloc_base();
+                self.semantics_id.set(Some(id));
+                id
+            }
+        }
     }
 
     /// Route an event into the child, translating its position into the child's

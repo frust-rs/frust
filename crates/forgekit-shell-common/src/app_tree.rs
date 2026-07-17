@@ -9,10 +9,11 @@
 
 use std::any::Any;
 
+use forgekit_core::accesskit;
 use forgekit_core::anim::FrameTime;
 use forgekit_core::event::{EditingState, EventOutcome, ImeEvent, ImeState, InputEvent};
 use forgekit_core::view::View;
-use forgekit_core::{PaintOutcome, PaintScene, RenderRoot};
+use forgekit_core::{PaintOutcome, PaintScene, RenderRoot, SemanticsUpdate};
 use kurbo::Size;
 
 /// Type-erased app tree: the one seam that lets a shell's native handle stay
@@ -76,6 +77,38 @@ pub trait AppTree {
     /// this up in a later task (08). Re-boxing on a live appearance change
     /// replaces the stored theme.
     fn set_theme(&mut self, theme: Box<dyn Any>);
+
+    /// Collect the accessibility tree for the current frame (spec §9, phase-6d),
+    /// for a shell to push into its platform `accesskit_*` adapter. Delegates to
+    /// [`RenderRoot::semantics`]; must run **after** [`AppTree::layout`] so node
+    /// bounds are valid.
+    fn semantics(&mut self) -> SemanticsUpdate;
+
+    /// The current semantics generation, bumped whenever a rebuild/theme swap
+    /// could have changed the tree (delegates to
+    /// [`RenderRoot::semantics_generation`]). A shell compares it to skip
+    /// re-pushing an unchanged tree — see [`AppTree::semantics_if_changed`].
+    fn semantics_generation(&self) -> u64;
+
+    /// Pull a fresh [`SemanticsUpdate`] only if the tree may have changed since
+    /// generation `last_seen` (delegates to [`RenderRoot::semantics_if_changed`]),
+    /// so a shell's adapter push runs only when something changed.
+    fn semantics_if_changed(&mut self, last_seen: u64) -> Option<SemanticsUpdate>;
+
+    /// Perform a platform accessibility action delivered by the shell's
+    /// `accesskit_*` adapter (an `ActionRequest`), threading the erased `State`
+    /// the same way [`AppTree::event`] does (delegates to
+    /// [`RenderRoot::perform_accessibility_action`]).
+    ///
+    /// `node_id` is the raw accesskit id the adapter reported; `action` is the
+    /// requested [`accesskit::Action`]. Returns the same [`EventOutcome`] as
+    /// [`AppTree::event`] — its `needs_redraw` tells the shell whether to schedule
+    /// a frame. An unknown node or unmodelled action is a benign no-op.
+    fn perform_accessibility_action(
+        &mut self,
+        node_id: u64,
+        action: accesskit::Action,
+    ) -> EventOutcome;
 }
 
 /// Concrete [`AppTree`] holding one app's state, logic and retained root.
@@ -122,6 +155,27 @@ where
 
     fn set_theme(&mut self, theme: Box<dyn Any>) {
         self.root.set_theme(theme);
+    }
+
+    fn semantics(&mut self) -> SemanticsUpdate {
+        self.root.semantics()
+    }
+
+    fn semantics_generation(&self) -> u64 {
+        self.root.semantics_generation()
+    }
+
+    fn semantics_if_changed(&mut self, last_seen: u64) -> Option<SemanticsUpdate> {
+        self.root.semantics_if_changed(last_seen)
+    }
+
+    fn perform_accessibility_action(
+        &mut self,
+        node_id: u64,
+        action: accesskit::Action,
+    ) -> EventOutcome {
+        self.root
+            .perform_accessibility_action(&mut self.state, accesskit::NodeId(node_id), action)
     }
 }
 
