@@ -14,6 +14,22 @@ use crate::motion::MotionScheme;
 use crate::shape::ShapeScale;
 use crate::typography::TypeScale;
 
+/// Which design language a [`Theme`] was built from — a `Theme` itself stays
+/// a single, language-agnostic aggregate struct (spec §17.1); this is just a
+/// tag app/shell code can branch on (e.g. to pick per-platform interaction
+/// affordances), not a second `Theme` type. See `crate::color`'s "Cupertino
+/// (iOS) mapping" module docs for how [`ColorScheme::cupertino_light`]/
+/// [`ColorScheme::cupertino_dark`] fill the same 46 roles [`Theme::cupertino_baseline`]
+/// uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DesignLanguage {
+    /// Material 3 (Android/cross-platform baseline). Default.
+    #[default]
+    Material3,
+    /// Cupertino (iOS).
+    Cupertino,
+}
+
 /// A full design-token bundle: paired light/dark color schemes, the type
 /// scale, shape scale, elevation table, and motion scheme, plus which
 /// brightness is currently active.
@@ -26,6 +42,7 @@ pub struct Theme {
     pub elevation: Elevation,
     pub motion: MotionScheme,
     pub brightness: Brightness,
+    pub design_language: DesignLanguage,
 }
 
 impl Theme {
@@ -42,6 +59,27 @@ impl Theme {
             elevation: Elevation::m3(),
             motion: MotionScheme::m3_expressive(),
             brightness: Brightness::Light,
+            design_language: DesignLanguage::Material3,
+        }
+    }
+
+    /// The Cupertino (iOS) baseline theme: baseline light/dark Cupertino
+    /// color schemes, the Cupertino type scale (built from
+    /// `TextStyle::default()`), the Cupertino shape scale, the Cupertino
+    /// elevation table, and the Cupertino motion scheme. Starts in
+    /// [`Brightness::Light`]. Shells still hardcode `Theme::m3_baseline()`
+    /// as of this task — wiring a shell to pick this baseline instead is a
+    /// later task's (04) override seam, not this one's.
+    pub fn cupertino_baseline() -> Self {
+        Self {
+            light: ColorScheme::cupertino_light(),
+            dark: ColorScheme::cupertino_dark(),
+            type_scale: TypeScale::cupertino(&TextStyle::default()),
+            shape: ShapeScale::cupertino(),
+            elevation: Elevation::cupertino(),
+            motion: MotionScheme::cupertino(),
+            brightness: Brightness::Light,
+            design_language: DesignLanguage::Cupertino,
         }
     }
 
@@ -118,5 +156,29 @@ mod tests {
         assert_eq!(theme.light, ColorScheme::m3_baseline_light());
         assert_eq!(theme.dark, ColorScheme::m3_baseline_dark());
         assert_eq!(theme.brightness, Brightness::Light);
+        assert_eq!(theme.design_language, DesignLanguage::Material3);
+    }
+
+    #[test]
+    fn cupertino_baseline_is_internally_consistent() {
+        let theme = Theme::cupertino_baseline();
+        assert_eq!(theme.light, ColorScheme::cupertino_light());
+        assert_eq!(theme.dark, ColorScheme::cupertino_dark());
+        assert_eq!(theme.brightness, Brightness::Light);
+        assert_eq!(theme.design_language, DesignLanguage::Cupertino);
+    }
+
+    #[test]
+    fn design_language_defaults_to_material3() {
+        assert_eq!(DesignLanguage::default(), DesignLanguage::Material3);
+    }
+
+    #[test]
+    fn cupertino_scheme_selects_by_brightness() {
+        let mut theme = Theme::cupertino_baseline();
+        assert_eq!(theme.scheme(), &theme.light);
+
+        theme.brightness = Brightness::Dark;
+        assert_eq!(theme.scheme(), &theme.dark);
     }
 }

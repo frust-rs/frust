@@ -14,6 +14,61 @@
 //! Material 3 deprecated all three in favor of `surface`/`onSurface` and the
 //! `surfaceContainer*` ladder respectively; carrying them forward would just
 //! duplicate an existing role under a legacy name.
+//!
+//! # Cupertino (iOS) mapping
+//!
+//! [`ColorScheme::cupertino_light`]/[`ColorScheme::cupertino_dark`] fill the
+//! same 46 `Color` fields from Apple's iOS semantic color palette instead of
+//! the M3 tokens above — `ColorScheme` itself stays a single, fixed-role,
+//! design-language-agnostic struct (spec §17.1); see
+//! [`crate::theme::DesignLanguage`] for the tag a [`crate::theme::Theme`]
+//! carries to say which baseline it was built from. Sources (retrieved
+//! 2026-07-17, per
+//! `workflow/plans/features/forgekit-phase-6c-widget-catalog/research/RESEARCH.md`'s
+//! `cupertino-tokens-idioms` claims and its R19/R20/R22 refuted-claims
+//! corrections):
+//!
+//! - `label`/`secondaryLabel`: Apple publishes `label` as opaque
+//!   `#000000`/`#FFFFFF` (light/dark). `secondaryLabel` is a **translucent**
+//!   token — `rgba(60,60,67,0.60)` light / `rgba(235,235,245,0.60)` dark (R22
+//!   correction; Noah Gilmore's "Backwards compatibility for iOS 13 system
+//!   colors", cross-verified with Sarunw's "Dark color cheat sheet"). Unlike
+//!   the M3 constructors, the Cupertino constructors below **do** store
+//!   non-opaque `Color`s for the handful of roles (`on_surface_variant`,
+//!   `outline_variant`) whose real iOS token is itself translucent —
+//!   flattening them to opaque would misrepresent the source value.
+//! - System accent colors (`systemBlue`/`systemRed`/`systemPurple`/…) are
+//!   **community-measured, not Apple-published** — Apple deliberately
+//!   documents them as varying by trait environment. Values below are the
+//!   widely-cited community constants (colorsift.com / Apple's own
+//!   "Standard Colors" doc page, which states the same non-guarantee).
+//! - `separator`/`opaqueSeparator`: `separator` is the translucent hairline
+//!   token (`rgba(60,60,67,0.29)` light / `rgba(84,84,88,0.65)` dark, per
+//!   Sarunw's cheat sheet); `opaqueSeparator` is Apple's flattened opaque
+//!   variant for contexts that can't composite translucency.
+//! - `systemBackground`/`secondarySystemBackground`/
+//!   `tertiarySystemBackground` and their `*GroupedBackground` counterparts
+//!   are Apple-documented (UIColor system background docs); this module
+//!   combines both triads into a 5-step `surface_container*` **elevation
+//!   ladder** to fill M3's `lowest/low/container/high/highest` slots — iOS
+//!   itself has no such explicit 5-step ladder concept (unlike M3's
+//!   `surfaceContainer*` scale), so this ordering (progressively more
+//!   saturated gray moving up the ladder) is a documented **ForgeKit
+//!   policy**, not an Apple/community source, mirroring how
+//!   [`crate::elevation`]'s shadow math is documented as tunable ForgeKit
+//!   policy rather than an Apple spec.
+//! - M3-only concepts with **no iOS equivalent at all** — the `*_container`
+//!   tonal roles, the `*_fixed`/`*_fixed_dim`/`on_*_fixed_variant` roles
+//!   (brightness-invariant tones — see M3's own baseline, where e.g.
+//!   `primary_fixed` is the identical literal in both
+//!   [`ColorScheme::m3_baseline_light`] and
+//!   [`ColorScheme::m3_baseline_dark`]), and `inverse_*` — are filled with
+//!   **ForgeKit-authored derivations** documented per-field below (a light
+//!   tint of the base accent for a "container", the base accent itself for
+//!   `on_*_container`, the opposite brightness's base tone for `inverse_*`),
+//!   not sourced from any Apple/community iOS reference, since none exists.
+//!   `surface_tint` mirrors M3's own convention of reusing `primary` verbatim
+//!   (true in both M3 baselines).
 
 use peniko::Color;
 
@@ -211,6 +266,167 @@ impl ColorScheme {
             surface_tint: Color::from_rgb8(0xD0, 0xBC, 0xFF),
         }
     }
+
+    /// The Cupertino (iOS) light `ColorScheme`, filling the same 46 M3
+    /// roles from Apple's iOS semantic color palette. See the module docs'
+    /// "Cupertino (iOS) mapping" section for the full role-by-role source
+    /// table and the documented ForgeKit-authored fill-ins for M3 concepts
+    /// with no iOS equivalent.
+    pub const fn cupertino_light() -> Self {
+        // systemBlue — community-measured (Apple doesn't publish exact hex).
+        const SYSTEM_BLUE_LIGHT: Color = Color::from_rgb8(0x00, 0x7A, 0xFF);
+        const SYSTEM_BLUE_DARK: Color = Color::from_rgb8(0x0A, 0x84, 0xFF);
+        // systemPurple — community-measured, used as the "tertiary" accent.
+        const SYSTEM_PURPLE_LIGHT: Color = Color::from_rgb8(0xAF, 0x52, 0xDE);
+        // systemGray — Apple documents the same base hex for light/dark.
+        const SYSTEM_GRAY: Color = Color::from_rgb8(0x8E, 0x8E, 0x93);
+        // systemRed — community-measured.
+        const SYSTEM_RED_LIGHT: Color = Color::from_rgb8(0xFF, 0x3B, 0x30);
+        const LABEL_LIGHT: Color = Color::from_rgb8(0x00, 0x00, 0x00);
+        // opaqueSeparator (Apple-documented flattened hairline).
+        const OPAQUE_SEPARATOR_LIGHT: Color = Color::from_rgb8(0xC6, 0xC6, 0xC8);
+
+        Self {
+            primary: SYSTEM_BLUE_LIGHT,
+            on_primary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            // ForgeKit-derived tinted "container" (iOS has no container
+            // role) — a pale tint of systemBlue over systemBackground.
+            primary_container: Color::from_rgb8(0xD6, 0xE9, 0xFF),
+            on_primary_container: SYSTEM_BLUE_LIGHT,
+            // "Fixed" roles are brightness-invariant by M3 definition (see
+            // module docs) — the light-mode tone reused verbatim in both
+            // cupertino_light() and cupertino_dark().
+            primary_fixed: SYSTEM_BLUE_LIGHT,
+            primary_fixed_dim: SYSTEM_BLUE_DARK,
+            on_primary_fixed: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            on_primary_fixed_variant: Color::from_rgb8(0x00, 0x4C, 0x99),
+
+            secondary: SYSTEM_GRAY,
+            on_secondary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            secondary_container: Color::from_rgb8(0xF2, 0xF2, 0xF7),
+            on_secondary_container: LABEL_LIGHT,
+            secondary_fixed: Color::from_rgb8(0xF2, 0xF2, 0xF7),
+            secondary_fixed_dim: Color::from_rgb8(0x2C, 0x2C, 0x2E),
+            on_secondary_fixed: LABEL_LIGHT,
+            on_secondary_fixed_variant: SYSTEM_GRAY,
+
+            tertiary: SYSTEM_PURPLE_LIGHT,
+            on_tertiary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            tertiary_container: Color::from_rgb8(0xF3, 0xE1, 0xFB),
+            on_tertiary_container: SYSTEM_PURPLE_LIGHT,
+            tertiary_fixed: SYSTEM_PURPLE_LIGHT,
+            tertiary_fixed_dim: Color::from_rgb8(0xBF, 0x5A, 0xF2),
+            on_tertiary_fixed: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            on_tertiary_fixed_variant: Color::from_rgb8(0x6B, 0x2E, 0x86),
+
+            error: SYSTEM_RED_LIGHT,
+            on_error: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            error_container: Color::from_rgb8(0xFF, 0xD9, 0xD6),
+            on_error_container: SYSTEM_RED_LIGHT,
+
+            // systemBackground.
+            surface: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            on_surface: LABEL_LIGHT,
+            // secondaryLabel — translucent per its real iOS token (R22).
+            on_surface_variant: Color::from_rgba8(0x3C, 0x3C, 0x43, 153),
+            // secondarySystemBackground.
+            surface_dim: Color::from_rgb8(0xF2, 0xF2, 0xF7),
+            surface_bright: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            // ForgeKit-authored 5-step elevation ladder built from the iOS
+            // background/gray tones (see module docs) — iOS has no native
+            // 5-step ladder concept.
+            surface_container_lowest: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            surface_container_low: Color::from_rgb8(0xF7, 0xF7, 0xFA),
+            surface_container: Color::from_rgb8(0xF2, 0xF2, 0xF7),
+            surface_container_high: Color::from_rgb8(0xE5, 0xE5, 0xEA),
+            surface_container_highest: Color::from_rgb8(0xD1, 0xD1, 0xD6),
+
+            outline: OPAQUE_SEPARATOR_LIGHT,
+            // separator — translucent per its real iOS token.
+            outline_variant: Color::from_rgba8(0x3C, 0x3C, 0x43, 74),
+            shadow: Color::from_rgb8(0x00, 0x00, 0x00),
+            scrim: Color::from_rgb8(0x00, 0x00, 0x00),
+            // "Inverse" roles reuse the opposite brightness's base tones.
+            inverse_surface: Color::from_rgb8(0x00, 0x00, 0x00),
+            inverse_on_surface: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            inverse_primary: SYSTEM_BLUE_DARK,
+            // Mirrors M3's own convention: surface_tint == primary.
+            surface_tint: SYSTEM_BLUE_LIGHT,
+        }
+    }
+
+    /// The Cupertino (iOS) dark `ColorScheme` — the dark-mode mirror of
+    /// [`ColorScheme::cupertino_light`]; see that constructor's doc comment
+    /// and the module docs' "Cupertino (iOS) mapping" section for sources.
+    pub const fn cupertino_dark() -> Self {
+        const SYSTEM_BLUE_LIGHT: Color = Color::from_rgb8(0x00, 0x7A, 0xFF);
+        const SYSTEM_BLUE_DARK: Color = Color::from_rgb8(0x0A, 0x84, 0xFF);
+        const SYSTEM_PURPLE_DARK: Color = Color::from_rgb8(0xBF, 0x5A, 0xF2);
+        const SYSTEM_GRAY: Color = Color::from_rgb8(0x8E, 0x8E, 0x93);
+        const SYSTEM_RED_DARK: Color = Color::from_rgb8(0xFF, 0x45, 0x3A);
+        const LABEL_DARK: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
+        // opaqueSeparator (Apple-documented flattened hairline), dark.
+        const OPAQUE_SEPARATOR_DARK: Color = Color::from_rgb8(0x38, 0x38, 0x3A);
+
+        Self {
+            primary: SYSTEM_BLUE_DARK,
+            on_primary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            primary_container: Color::from_rgb8(0x16, 0x3A, 0x5C),
+            on_primary_container: SYSTEM_BLUE_DARK,
+            primary_fixed: SYSTEM_BLUE_LIGHT,
+            primary_fixed_dim: SYSTEM_BLUE_DARK,
+            on_primary_fixed: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            on_primary_fixed_variant: Color::from_rgb8(0x00, 0x4C, 0x99),
+
+            secondary: SYSTEM_GRAY,
+            on_secondary: Color::from_rgb8(0x00, 0x00, 0x00),
+            secondary_container: Color::from_rgb8(0x1C, 0x1C, 0x1E),
+            on_secondary_container: LABEL_DARK,
+            secondary_fixed: Color::from_rgb8(0xF2, 0xF2, 0xF7),
+            secondary_fixed_dim: Color::from_rgb8(0x2C, 0x2C, 0x2E),
+            on_secondary_fixed: Color::from_rgb8(0x00, 0x00, 0x00),
+            on_secondary_fixed_variant: SYSTEM_GRAY,
+
+            tertiary: SYSTEM_PURPLE_DARK,
+            on_tertiary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            tertiary_container: Color::from_rgb8(0x3B, 0x1F, 0x49),
+            on_tertiary_container: SYSTEM_PURPLE_DARK,
+            tertiary_fixed: Color::from_rgb8(0xAF, 0x52, 0xDE),
+            tertiary_fixed_dim: SYSTEM_PURPLE_DARK,
+            on_tertiary_fixed: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            on_tertiary_fixed_variant: Color::from_rgb8(0x6B, 0x2E, 0x86),
+
+            error: SYSTEM_RED_DARK,
+            on_error: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            error_container: Color::from_rgb8(0x4C, 0x16, 0x13),
+            on_error_container: SYSTEM_RED_DARK,
+
+            // systemBackground, dark.
+            surface: Color::from_rgb8(0x00, 0x00, 0x00),
+            on_surface: LABEL_DARK,
+            // secondaryLabel, dark — translucent per its real iOS token (R22).
+            on_surface_variant: Color::from_rgba8(0xEB, 0xEB, 0xF5, 153),
+            // secondarySystemBackground, dark.
+            surface_dim: Color::from_rgb8(0x1C, 0x1C, 0x1E),
+            // tertiarySystemBackground, dark — the "brightest" dark surface.
+            surface_bright: Color::from_rgb8(0x2C, 0x2C, 0x2E),
+            surface_container_lowest: Color::from_rgb8(0x00, 0x00, 0x00),
+            surface_container_low: Color::from_rgb8(0x1C, 0x1C, 0x1E),
+            surface_container: Color::from_rgb8(0x2C, 0x2C, 0x2E),
+            surface_container_high: Color::from_rgb8(0x3A, 0x3A, 0x3C),
+            surface_container_highest: Color::from_rgb8(0x48, 0x48, 0x4A),
+
+            outline: OPAQUE_SEPARATOR_DARK,
+            // separator, dark — translucent per its real iOS token.
+            outline_variant: Color::from_rgba8(0x54, 0x54, 0x58, 166),
+            shadow: Color::from_rgb8(0x00, 0x00, 0x00),
+            scrim: Color::from_rgb8(0x00, 0x00, 0x00),
+            inverse_surface: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            inverse_on_surface: Color::from_rgb8(0x00, 0x00, 0x00),
+            inverse_primary: SYSTEM_BLUE_LIGHT,
+            surface_tint: SYSTEM_BLUE_DARK,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -275,5 +491,62 @@ mod tests {
         // not a runtime check (a missing field is a compile error, not a
         // test failure). See module docs for why they're omitted.
         let _ = ColorScheme::m3_baseline_light();
+    }
+
+    #[test]
+    fn cupertino_light_spot_check() {
+        let s = ColorScheme::cupertino_light();
+        assert_eq!(s.primary, Color::from_rgb8(0x00, 0x7A, 0xFF));
+        assert_eq!(s.surface, Color::from_rgb8(0xFF, 0xFF, 0xFF));
+        assert_eq!(s.on_surface, Color::from_rgb8(0x00, 0x00, 0x00));
+        assert_eq!(s.error, Color::from_rgb8(0xFF, 0x3B, 0x30));
+        assert_eq!(s.outline, Color::from_rgb8(0xC6, 0xC6, 0xC8));
+        assert_eq!(s.surface_tint, s.primary);
+    }
+
+    #[test]
+    fn cupertino_dark_spot_check() {
+        let s = ColorScheme::cupertino_dark();
+        assert_eq!(s.primary, Color::from_rgb8(0x0A, 0x84, 0xFF));
+        assert_eq!(s.surface, Color::from_rgb8(0x00, 0x00, 0x00));
+        assert_eq!(s.on_surface, Color::from_rgb8(0xFF, 0xFF, 0xFF));
+        assert_eq!(s.error, Color::from_rgb8(0xFF, 0x45, 0x3A));
+        assert_eq!(s.outline, Color::from_rgb8(0x38, 0x38, 0x3A));
+        assert_eq!(s.surface_tint, s.primary);
+    }
+
+    #[test]
+    fn cupertino_translucent_roles_carry_real_alpha() {
+        // secondaryLabel/separator are genuinely translucent iOS tokens
+        // (R22 correction) — unlike every M3 role, these two Cupertino
+        // fields intentionally carry a non-1.0 alpha (see module docs).
+        let light = ColorScheme::cupertino_light();
+        let [.., a] = light.on_surface_variant.to_rgba8().to_u8_array();
+        assert_eq!(a, 153);
+        let [.., a] = light.outline_variant.to_rgba8().to_u8_array();
+        assert_eq!(a, 74);
+
+        let dark = ColorScheme::cupertino_dark();
+        let [.., a] = dark.on_surface_variant.to_rgba8().to_u8_array();
+        assert_eq!(a, 153);
+        let [.., a] = dark.outline_variant.to_rgba8().to_u8_array();
+        assert_eq!(a, 166);
+    }
+
+    #[test]
+    fn cupertino_fixed_roles_are_brightness_invariant() {
+        // "Fixed" roles must not change between light/dark, mirroring M3's
+        // own convention (see module docs).
+        let light = ColorScheme::cupertino_light();
+        let dark = ColorScheme::cupertino_dark();
+        assert_eq!(light.primary_fixed, dark.primary_fixed);
+        assert_eq!(light.primary_fixed_dim, dark.primary_fixed_dim);
+        assert_eq!(light.on_primary_fixed, dark.on_primary_fixed);
+        assert_eq!(
+            light.on_primary_fixed_variant,
+            dark.on_primary_fixed_variant
+        );
+        assert_eq!(light.secondary_fixed, dark.secondary_fixed);
+        assert_eq!(light.tertiary_fixed, dark.tertiary_fixed);
     }
 }

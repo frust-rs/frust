@@ -6,6 +6,26 @@
 //! `workflow/plans/features/forgekit-phase-6a-foundations/research/RESEARCH.md`'s
 //! refuted-claims list). Radii are dp, treated 1:1 as logical px, matching
 //! this crate's other length fields.
+//!
+//! # Cupertino (iOS) mapping
+//!
+//! [`ShapeScale::cupertino`] fills the same 10 slots with iOS-idiom corner
+//! radii. Apple does not publish a numeric corner-radius scale the way M3
+//! does — every value below is a **community-approximate** convention (see
+//! `workflow/plans/features/forgekit-phase-6c-widget-catalog/research/RESEARCH.md`'s
+//! `cupertino-tokens-idioms` claims, retrieved 2026-07-17): `small` (8pt) is
+//! the widely-cited standard `UIButton`/control corner radius; `medium`
+//! (10pt) approximates a text field/small card; `large`/`large_increased`
+//! (13pt/14pt) bracket the community-cited alert/action-sheet radius range
+//! (C13-adjacent: Apple's own HIG text does not publish this figure);
+//! `extra_large`/`extra_large_increased` (20pt/24pt) approximate a sheet or
+//! large modal card; `extra_extra_large` (36pt) has no iOS precedent at all
+//! and is a ForgeKit linear extrapolation to fill the scale's largest slot.
+//! **iOS corners are visually "continuous" (superellipse/"squircle") curves,
+//! not circular arcs** — a numeric radius here approximates the visual size
+//! of that curve, not an exact geometric equivalent; ForgeKit's own corner
+//! painting (a circular-arc rounded rect) does not reproduce the continuous
+//! curve shape, only its rough footprint.
 
 /// The 10 Material 3 corner-radius tokens, dp (logical px). `full` is
 /// represented as [`f64::INFINITY`] rather than a separate enum variant —
@@ -44,6 +64,24 @@ impl ShapeScale {
         }
     }
 
+    /// The Cupertino (iOS) shape scale — see the module docs' "Cupertino
+    /// (iOS) mapping" section for the per-field rationale; every radius
+    /// here is community-approximate, not an Apple-published spec.
+    pub const fn cupertino() -> Self {
+        Self {
+            none: 0.0,
+            extra_small: 4.0,
+            small: 8.0,
+            medium: 10.0,
+            large: 13.0,
+            large_increased: 14.0,
+            extra_large: 20.0,
+            extra_large_increased: 24.0,
+            extra_extra_large: 36.0,
+            full: f64::INFINITY,
+        }
+    }
+
     /// Resolves a corner radius against a box's shorter side (`min(width,
     /// height)`), clamping an infinite ([`ShapeScale::full`]) radius to a
     /// pill shape (`shorter_side / 2.0`) and any finite radius to itself
@@ -77,6 +115,20 @@ mod tests {
         assert_eq!(s.extra_large, 28.0);
         assert_eq!(s.extra_large_increased, 32.0);
         assert_eq!(s.extra_extra_large, 48.0);
+        assert!(s.full.is_infinite());
+    }
+
+    #[test]
+    fn cupertino_matches_table() {
+        let s = ShapeScale::cupertino();
+        assert_eq!(s.none, 0.0);
+        assert_eq!(s.small, 8.0);
+        assert_eq!(s.medium, 10.0);
+        assert_eq!(s.large, 13.0);
+        assert_eq!(s.large_increased, 14.0);
+        assert_eq!(s.extra_large, 20.0);
+        assert_eq!(s.extra_large_increased, 24.0);
+        assert_eq!(s.extra_extra_large, 36.0);
         assert!(s.full.is_infinite());
     }
 
