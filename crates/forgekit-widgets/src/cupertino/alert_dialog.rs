@@ -131,11 +131,20 @@ const MESSAGE_LINE_HEIGHT: f32 = 18.0;
 const ACTION_SIZE: f32 = 17.0;
 const ACTION_LINE_HEIGHT: f32 = 22.0;
 
-/// systemBlue — the default/cancel action tint (**community-measured**; see
-/// [`super::tabbar`]'s `SYSTEM_BLUE`).
-pub(crate) const SYSTEM_BLUE: Color = Color::from_rgb8(0x00, 0x7A, 0xFF);
-/// systemRed — the destructive action tint (**community-measured**).
-pub(crate) const SYSTEM_RED: Color = Color::from_rgb8(0xFF, 0x3B, 0x30);
+/// systemBlue — the default/cancel action tint.
+///
+/// **Kit-measured** (2026-07-18 refresh; see [`super::tabbar`]'s
+/// `SYSTEM_BLUE`, which cites the iOS 27 UI Kit `System Colors/Light/8 Blue`
+/// swatch this mirrors exactly): refines the pre-refresh community value
+/// `#007AFF`.
+pub(crate) const SYSTEM_BLUE: Color = Color::from_rgb8(0x00, 0x87, 0xFF);
+/// systemRed — the destructive action tint.
+///
+/// **Kit-measured** (2026-07-18 refresh): the iOS 27 UI Kit's `System
+/// Colors/Light/1 Red` swatch (`kit-colors-type-metrics.json`, `colors`),
+/// matching `ColorScheme::cupertino_light().error` exactly (see `color.rs`'s
+/// module docs) — refines the pre-refresh community value `#FF3B30`.
+pub(crate) const SYSTEM_RED: Color = Color::from_rgb8(0xFF, 0x38, 0x3C);
 
 /// Unthemed fallback panel fill (a theme resolves this from
 /// `colors.surface_container_high`).

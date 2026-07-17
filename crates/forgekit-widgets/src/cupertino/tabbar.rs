@@ -109,12 +109,17 @@ const LABEL_LINE_HEIGHT: f32 = 12.0;
 
 /// systemBlue (the selected item tint).
 ///
-/// **Community-measured**: Apple does not publish exact hex for the system
-/// accent colors (they vary by trait environment); `#007AFF` is the
-/// widely-cited community light value, matching
-/// `ColorScheme::cupertino_light().primary`. Baked as an explicit label color
-/// (see the [module docs](self)'s Label color note).
-const SYSTEM_BLUE: Color = Color::from_rgb8(0x00, 0x7A, 0xFF);
+/// **Kit-measured** (2026-07-18 refresh): the iOS 27 UI Kit's `System
+/// Colors/Light/8 Blue` swatch (`kit-colors-type-metrics.json`, `colors`) is
+/// `#0087FF`, matching `ColorScheme::cupertino_light().primary` exactly —
+/// Apple does not publish an exact hex for the system accent colors (they
+/// vary by trait environment), so this remains a design-tool snapshot rather
+/// than a guarantee, just a newer/more-precise one than the pre-refresh
+/// community value it replaces (`#007AFF`), mirroring `switch.rs`'s
+/// `SYSTEM_GREEN_LIGHT` refresh note (see also `color.rs`'s module docs).
+/// Baked as an explicit label color (see the [module docs](self)'s Label
+/// color note).
+const SYSTEM_BLUE: Color = Color::from_rgb8(0x00, 0x87, 0xFF);
 
 /// Unthemed fallback bar fill (a theme resolves this from `colors.surface`,
 /// iOS systemBackground).
