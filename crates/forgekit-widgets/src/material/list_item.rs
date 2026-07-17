@@ -424,8 +424,11 @@ impl Widget for ListItemWidget {
         if !self.interactive {
             return crate::route_event(&mut self.children, ctx, event);
         }
+        // Non-pointer events (Key, Ime, focus-routed) must be forwarded to
+        // children, even when interactive. Only pointer events drive the
+        // interactive row's own capture/press behavior.
         let InputEvent::Pointer(p) = event else {
-            return EventResult::Ignored;
+            return crate::route_event(&mut self.children, ctx, event);
         };
         let on_press = self
             .on_press
@@ -625,6 +628,81 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 999.0, 999.0));
         assert_eq!(state.presses, 0);
+    }
+
+    // --- Interactive with focus-routed child events ---
+
+    /// A minimal widget that handles Key events for testing focus routing.
+    struct FocusConsumer;
+
+    impl FocusConsumer {
+        fn new() -> Self {
+            FocusConsumer
+        }
+    }
+
+    struct FocusConsumerWidget;
+
+    impl View<Counter> for FocusConsumer {
+        type Element = FocusConsumerWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FocusConsumerWidget {
+            FocusConsumerWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut FocusConsumerWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for FocusConsumerWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            // Handle any key event (focus-routed events reach here only if the
+            // pod is focused, so a Key event here proves the routing worked).
+            if let InputEvent::Key(_) = event {
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[test]
+    fn interactive_row_with_trailing_control_forwards_key_events() {
+        let view: ListItem<Counter> = list_item("Item")
+            .trailing(FocusConsumer::new())
+            .on_press(|s: &mut Counter| s.presses += 1);
+        let mut w = build(&view);
+        let mut state = Counter::default();
+
+        // Manually set the trailing control as focused to simulate a prior focus state.
+        // (In real usage, the control would be focused by a pointer-down event,
+        // but here we're directly testing the event-routing path.)
+        let trailing_idx = w.slots.trailing.expect("trailing is present");
+        w.children[trailing_idx].set_focused(true);
+
+        // Send a Key event — it should be forwarded to the focused child.
+        let key_event = InputEvent::Key(forgekit_core::KeyEvent {
+            key: forgekit_core::Key::Named(forgekit_core::NamedKey::Backspace),
+            modifiers: forgekit_core::Modifiers::default(),
+            repeat: false,
+        });
+        let result = dispatch(&mut w, &mut state, &key_event);
+
+        // Verify the key event was handled (forwarded to and handled by child).
+        assert_eq!(
+            result, EventResult::Handled,
+            "key event must be forwarded to focused child"
+        );
+
+        // The row press should not have fired (the row only fires on pointer Up).
+        assert_eq!(state.presses, 0, "row press callback does not fire on key event");
     }
 
     // --- Semantics ---

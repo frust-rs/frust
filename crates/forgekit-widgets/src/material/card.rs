@@ -367,8 +367,11 @@ impl Widget for CardWidget {
         if !self.interactive {
             return crate::route_event_single(&mut self.child, ctx, event);
         }
+        // Non-pointer events (Key, Ime, focus-routed) must be forwarded to
+        // the child, even when interactive. Only pointer events drive the
+        // interactive card's own capture/press behavior.
         let InputEvent::Pointer(p) = event else {
-            return EventResult::Ignored;
+            return crate::route_event_single(&mut self.child, ctx, event);
         };
         let on_press = self
             .on_press
@@ -655,6 +658,80 @@ mod tests {
         assert!(!w.captured);
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
         assert_eq!(state.presses, 0);
+    }
+
+    // --- Interactive with focus-routed child events ---
+
+    /// A minimal widget that consumes focus and handles Key events for testing.
+    struct FocusConsumer;
+
+    impl FocusConsumer {
+        fn new() -> Self {
+            FocusConsumer
+        }
+    }
+
+    struct FocusConsumerWidget;
+
+    impl View<Counter> for FocusConsumer {
+        type Element = FocusConsumerWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FocusConsumerWidget {
+            FocusConsumerWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut FocusConsumerWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> forgekit_core::ChangeFlags {
+            forgekit_core::ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for FocusConsumerWidget {
+        fn layout(
+            &mut self,
+            _ctx: &mut forgekit_core::LayoutCtx,
+            bc: &BoxConstraints,
+        ) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            // Handle any key event (focus-routed events reach here only if the
+            // pod is focused, so a Key event here proves the routing worked).
+            if let InputEvent::Key(_) = event {
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[test]
+    fn interactive_card_forwards_key_events_to_focused_child() {
+        let view: CardView<Counter> = filled_card(FocusConsumer::new())
+            .on_press(|s: &mut Counter| s.presses += 1);
+        let mut w = build(&view);
+        let mut state = Counter::default();
+
+        // Manually set the child as focused to simulate a prior focus state.
+        // (In real usage, the child would be focused by a pointer-down event,
+        // but here we're directly testing the event-routing path.)
+        w.child.set_focused(true);
+
+        // Send a Key event — it should be forwarded to the focused child.
+        let key_event = InputEvent::Key(forgekit_core::KeyEvent {
+            key: forgekit_core::Key::Named(forgekit_core::NamedKey::Backspace),
+            modifiers: forgekit_core::Modifiers::default(),
+            repeat: false,
+        });
+        let result = dispatch(&mut w, &mut state, &key_event);
+
+        // Verify the key event was handled (forwarded to and handled by child).
+        assert_eq!(result, EventResult::Handled, "key event must be forwarded to child");
+
+        // The card press should not have fired (the card only fires on pointer Up).
+        assert_eq!(state.presses, 0, "card press callback does not fire on key event");
     }
 
     #[test]
