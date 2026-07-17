@@ -41,6 +41,34 @@
 //! This alert has no `StateLayer` surface of its own (the scrim, panel, and
 //! action rows are plain fills/hairlines, not an M3 interactive surface) —
 //! there is nothing here for `StateLayer::set_focused` to wire into.
+//!
+//! # Liquid Glass panel (task 6f-14)
+//!
+//! When a [`Theme`] is threaded and its `glass.chrome` recipe is not the
+//! opaque-material path ([`GlassMaterial::is_opaque`] — true on the Material
+//! baseline, false on [`Theme::cupertino_baseline`]), the panel paints the
+//! chrome fill-wash stack + a specular hairline + the tier's drop shadow
+//! straight from `theme.glass.chrome`, and each action row paints as its own
+//! nested "button" capsule inset from the panel edge, its corner radius
+//! derived from the panel's outer radius via
+//! [`ShapeScale::concentric_inner`] (the concentric-corner principle, iOS
+//! 26+ — see that fn's docs). No theme (bare-core tests) or an opaque-chrome
+//! theme (the Material baseline) falls back to the pre-26 single flat fill +
+//! hairline-separator-row layout this widget always painted. The panel
+//! corner radius itself also grows under a theme (`shape.extra_large`,
+//! iOS-26+'s larger panel radii) versus the flat, pre-26 [`PANEL_RADIUS`]
+//! fallback. Real background blur is out of scope (spike 16) — the fill
+//! washes composite over whatever the scrim already painted, not a blurred
+//! backdrop.
+//!
+//! Kit sizing evidence (RESEARCH.md, action-sheet container/action-row
+//! records, **partially-verified** — cited as guidance, not adopted
+//! verbatim): mined action-sheet containers ran 260×424-524px, action rows
+//! 232×48px. This widget keeps its own established [`PANEL_W`]/[`ACTION_H`]
+//! geometry (task 07's community-approximate ~270pt/~44pt) rather than
+//! matching those mined figures exactly — changing panel/row *sizing* is out
+//! of this task's scope (only the *material* and *corner radii* are
+//! re-skinned).
 
 use forgekit_core::accesskit::Role;
 use forgekit_core::{
@@ -48,9 +76,9 @@ use forgekit_core::{
     Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
 use forgekit_text::{FontWeight, LineHeight};
-use forgekit_theme::Theme;
-use kurbo::{Point, Rect, Size};
-use peniko::Color;
+use forgekit_theme::{Brightness, GlassFill, GlassMaterial, ShapeScale, Theme};
+use kurbo::{Point, Rect, RoundedRect, Shape, Size};
+use peniko::{Brush, Color};
 
 use crate::nav::navigator::{NavigatorController, PopResult};
 use crate::text;
@@ -61,9 +89,24 @@ use crate::text::ThemeTextColor;
 /// **Community-approximate**: iOS does not publish an exact alert width; ~270pt
 /// is the community-converged value (per this task's C13 flag).
 const PANEL_W: f64 = 270.0;
-/// Panel corner radius, in logical px (**community-approximate**, ~13-14pt — no
-/// published Apple alert corner spec, per C13).
+/// Unthemed-fallback panel corner radius, in logical px (**community-approximate**,
+/// ~13-14pt — no published Apple alert corner spec, per C13). A themed panel
+/// uses the larger `shape.extra_large` iOS-26+ Liquid Glass radius instead
+/// (see [`resolve_panel_radius`] and the module docs' Liquid Glass panel
+/// section) — this constant is now only the no-theme (bare-core test) path.
 const PANEL_RADIUS: f64 = 14.0;
+/// Inset, in logical px, between a nested action-row "button" capsule and the
+/// glass panel's own edge/neighboring rows (task 6f-14's iOS-26+ idiom:
+/// distinct rounded glass buttons rather than hairline-divided flush rows).
+///
+/// **Community-approximate**: iOS 26 groups alert/action-sheet actions as
+/// separated glass elements with a visible gap; Apple publishes no exact gap
+/// value, so a small, defensible inset is picked here.
+const BUTTON_INSET: f64 = 4.0;
+/// Flattening tolerance for the panel's specular-hairline outline path (see
+/// [`crate::material::card`]'s identical precedent — a visually-lossless
+/// value for on-screen corner radii).
+const PATH_TOLERANCE: f64 = 0.1;
 /// Horizontal content padding inside the panel, in logical px.
 const H_PAD: f64 = 16.0;
 /// Top padding above the title, in logical px.
@@ -223,6 +266,40 @@ pub struct CupertinoAlertDialogWidget<State: 'static> {
     action_rects: Vec<Rect>,
     /// Armed by a `Down`, cleared on `Up`/`Cancel` (fire-on-up-inside).
     captured: bool,
+}
+
+/// Return `color` with its alpha channel replaced by `alpha` (mirrors
+/// [`crate::material::card`]'s helper of the same shape).
+fn with_alpha(color: Color, alpha: f32) -> Color {
+    let c = color.components;
+    Color::new([c[0], c[1], c[2], alpha])
+}
+
+/// The resolved panel corner radius. Themed: `shape.extra_large` (the
+/// iOS-26+ Liquid Glass idiom's larger panel radius). Unthemed:
+/// [`PANEL_RADIUS`] exactly (see the module docs' Liquid Glass panel
+/// section).
+pub(crate) fn resolve_panel_radius(theme: Option<&Theme>) -> f64 {
+    match theme {
+        Some(theme) => theme.shape.extra_large,
+        None => PANEL_RADIUS,
+    }
+}
+
+/// The chrome-tier glass material for the panel — a one-line accessor kept
+/// so the paint code below reads `theme.glass.chrome` in exactly one place.
+fn resolve_chrome(theme: &Theme) -> &GlassMaterial {
+    &theme.glass.chrome
+}
+
+/// The chrome material's fill-wash stack for `theme`'s *active* brightness
+/// (`fills_dark` under [`Brightness::Dark`], `fills_light` otherwise).
+fn resolve_fills<'a>(theme: &Theme, material: &'a GlassMaterial) -> &'a [GlassFill] {
+    if theme.brightness == Brightness::Dark {
+        &material.fills_dark
+    } else {
+        &material.fills_light
+    }
 }
 
 fn title_view<State: 'static>(title: String) -> AnyView<State> {
@@ -389,37 +466,86 @@ impl<State: 'static> Widget for CupertinoAlertDialogWidget<State> {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
-        let panel_fill = theme
-            .map(|t| t.scheme().surface_container_high)
-            .unwrap_or(PANEL_FILL);
-        let separator = theme
-            .map(|t| t.scheme().outline_variant)
-            .unwrap_or(SEPARATOR);
         let scrim_base = theme.map(|t| t.scheme().scrim).unwrap_or(Color::BLACK);
 
         let origin = ctx.origin();
         let size = ctx.size();
-        // Scrim over the whole page.
-        let scrim = {
-            let c = scrim_base.components;
-            Color::new([c[0], c[1], c[2], SCRIM_ALPHA])
-        };
-        scene.fill_rect(origin, size, scrim);
+        // Scrim over the whole page (mechanism unchanged — restyled values
+        // only, per the module docs' Liquid Glass panel note).
+        scene.fill_rect(origin, size, with_alpha(scrim_base, SCRIM_ALPHA));
 
-        // Panel background (local rects offset by the paint origin).
+        // Panel geometry (local rects offset by the paint origin).
         let panel_origin = Point::new(origin.x + self.panel_rect.x0, origin.y + self.panel_rect.y0);
         let panel_size = Size::new(self.panel_rect.width(), self.panel_rect.height());
-        scene.fill_rounded_rect(panel_origin, panel_size, PANEL_RADIUS, panel_fill);
+        let panel_radius = resolve_panel_radius(theme);
 
-        // Hairlines above each action row.
-        for rect in &self.action_rects {
-            let y = origin.y + rect.y0 + HAIRLINE_W / 2.0;
-            scene.stroke_line(
-                Point::new(origin.x + rect.x0, y),
-                Point::new(origin.x + rect.x1, y),
-                HAIRLINE_W,
-                separator,
-            );
+        let chrome = theme.map(resolve_chrome);
+        match chrome {
+            Some(material) if !material.is_opaque() => {
+                let theme = theme.expect("chrome resolved from a threaded theme");
+                // Drop shadow, straight from the token.
+                if material.shadow.color_alpha > 0.0 {
+                    let shadow_color =
+                        with_alpha(theme.scheme().shadow, material.shadow.color_alpha);
+                    scene.draw_shadow(
+                        Point::new(panel_origin.x, panel_origin.y + material.shadow.y_offset),
+                        panel_size,
+                        panel_radius,
+                        material.shadow.blur_std_dev,
+                        shadow_color,
+                    );
+                }
+                // Fill-wash stack, bottom-to-top.
+                let fills = resolve_fills(theme, material);
+                for wash in fills {
+                    scene.fill_rounded_rect(panel_origin, panel_size, panel_radius, wash.color);
+                }
+                // Specular hairline — white at the token's alpha (see the
+                // `GlassMaterial::hairline_alpha` docs: the color is always
+                // white, only the alpha is thematic).
+                let hairline = Color::new([1.0, 1.0, 1.0, material.hairline_alpha]);
+                if material.hairline_alpha > 0.0 {
+                    let local = Rect::new(0.0, 0.0, panel_size.width, panel_size.height);
+                    let path = RoundedRect::from_rect(local, panel_radius).to_path(PATH_TOLERANCE);
+                    scene.stroke_path(panel_origin, &path, HAIRLINE_W, &Brush::Solid(hairline));
+                }
+                // Each action row paints as its own nested "button" capsule,
+                // concentric with the panel's outer corners.
+                let nested_radius = ShapeScale::concentric_inner(panel_radius, BUTTON_INSET);
+                let nested_fill = fills.last().map(|w| w.color).unwrap_or(hairline);
+                for rect in &self.action_rects {
+                    let btn_origin = Point::new(
+                        origin.x + rect.x0 + BUTTON_INSET,
+                        origin.y + rect.y0 + BUTTON_INSET,
+                    );
+                    let btn_size = Size::new(
+                        (rect.width() - 2.0 * BUTTON_INSET).max(0.0),
+                        (rect.height() - 2.0 * BUTTON_INSET).max(0.0),
+                    );
+                    scene.fill_rounded_rect(btn_origin, btn_size, nested_radius, nested_fill);
+                }
+            }
+            _ => {
+                // No theme, or an opaque-chrome (Material-baseline) theme:
+                // the pre-26 single flat fill + hairline-separated rows.
+                let panel_fill = theme
+                    .map(|t| t.scheme().surface_container_high)
+                    .unwrap_or(PANEL_FILL);
+                scene.fill_rounded_rect(panel_origin, panel_size, panel_radius, panel_fill);
+
+                let separator = theme
+                    .map(|t| t.scheme().outline_variant)
+                    .unwrap_or(SEPARATOR);
+                for rect in &self.action_rects {
+                    let y = origin.y + rect.y0 + HAIRLINE_W / 2.0;
+                    scene.stroke_line(
+                        Point::new(origin.x + rect.x0, y),
+                        Point::new(origin.x + rect.x1, y),
+                        HAIRLINE_W,
+                        separator,
+                    );
+                }
+            }
         }
 
         self.title.paint_child(ctx, scene);
@@ -549,6 +675,142 @@ mod tests {
             position: Point::new(x, y),
             button: PointerButton::Primary,
         })
+    }
+
+    /// Records filled rounded rects, shadows, and stroked paths — enough to
+    /// assert the Liquid Glass panel's fill stack, hairline, and nested
+    /// concentric-radius button capsules reach paint (task 6f-14).
+    #[derive(Default)]
+    struct Recorder {
+        rrects: Vec<(Point, Size, f64, Color)>,
+        shadows: Vec<(Point, Size, f64, f64, Color)>,
+        strokes: Vec<(Point, f64, Color)>,
+    }
+    impl PaintScene for Recorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn fill_rounded_rect(&mut self, o: Point, s: Size, radius: f64, color: Color) {
+            self.rrects.push((o, s, radius, color));
+        }
+        fn draw_shadow(&mut self, o: Point, s: Size, radius: f64, std_dev: f64, color: Color) {
+            self.shadows.push((o, s, radius, std_dev, color));
+        }
+        fn stroke_path(
+            &mut self,
+            origin: Point,
+            _path: &kurbo::BezPath,
+            width: f64,
+            brush: &Brush,
+        ) {
+            if let Brush::Solid(color) = brush {
+                self.strokes.push((origin, width, *color));
+            }
+        }
+    }
+
+    fn paint_with_theme(
+        w: &mut CupertinoAlertDialogWidget<()>,
+        window: Size,
+        theme: Option<&Theme>,
+    ) -> Recorder {
+        let mut rec = Recorder::default();
+        let mut pctx = match theme {
+            Some(t) => PaintCtx::new(Point::ZERO, window).with_theme(t),
+            None => PaintCtx::new(Point::ZERO, window),
+        };
+        w.paint(&mut pctx, &mut rec);
+        rec
+    }
+
+    #[test]
+    fn glass_chrome_theme_paints_the_fill_stack_hairline_and_shadow() {
+        let theme = Theme::cupertino_baseline(); // light brightness by default
+        let mut w = build(&alert_view());
+        let window = Size::new(400.0, 800.0);
+        layout(&mut w, window);
+        let rec = paint_with_theme(&mut w, window, Some(&theme));
+
+        let radius = resolve_panel_radius(Some(&theme));
+        for wash in &theme.glass.chrome.fills_light {
+            assert!(
+                rec.rrects
+                    .iter()
+                    .any(|(_, _, r, c)| *r == radius && *c == wash.color),
+                "each chrome fill wash reaches paint as its own filled rounded rect: {:?}",
+                wash
+            );
+        }
+        assert!(
+            !rec.strokes.is_empty(),
+            "the chrome recipe's specular hairline is stroked"
+        );
+        assert!(
+            !rec.shadows.is_empty(),
+            "the chrome recipe's drop shadow is painted"
+        );
+    }
+
+    #[test]
+    fn nested_action_button_radius_is_concentric_with_the_panel() {
+        let theme = Theme::cupertino_baseline();
+        let mut w = build(&alert_view());
+        let window = Size::new(400.0, 800.0);
+        layout(&mut w, window);
+        let rec = paint_with_theme(&mut w, window, Some(&theme));
+
+        let panel_radius = resolve_panel_radius(Some(&theme));
+        let expected = ShapeScale::concentric_inner(panel_radius, BUTTON_INSET);
+        assert!(
+            expected < panel_radius,
+            "sanity: a nested inset radius is strictly smaller than the panel's"
+        );
+        assert!(
+            rec.rrects
+                .iter()
+                .any(|(_, _, r, _)| (*r - expected).abs() < 1e-9),
+            "a nested action-row capsule paints at the concentric-inner radius"
+        );
+    }
+
+    #[test]
+    fn opaque_material_theme_keeps_the_pre_26_flat_panel() {
+        // Material baseline's chrome tier is opaque — no fill washes, no
+        // hairline, no nested button capsules; the legacy flat-fill +
+        // hairline-row layout paints instead (bullet 3: Material appearance
+        // unchanged).
+        let theme = Theme::m3_baseline();
+        let mut w = build(&alert_view());
+        let window = Size::new(400.0, 800.0);
+        layout(&mut w, window);
+        let rec = paint_with_theme(&mut w, window, Some(&theme));
+
+        assert!(theme.glass.chrome.is_opaque());
+        assert_eq!(
+            rec.rrects.len(),
+            1,
+            "one flat panel fill, no chrome washes or nested button capsules"
+        );
+        assert_eq!(rec.rrects[0].3, theme.scheme().surface_container_high);
+        assert!(
+            rec.shadows.is_empty(),
+            "the opaque path paints no glass shadow"
+        );
+    }
+
+    #[test]
+    fn unthemed_paint_keeps_the_pre_26_flat_panel() {
+        let mut w = build(&alert_view());
+        let window = Size::new(400.0, 800.0);
+        layout(&mut w, window);
+        let rec = paint_with_theme(&mut w, window, None);
+
+        assert_eq!(
+            rec.rrects.len(),
+            1,
+            "one flat panel fill, unthemed fallback"
+        );
+        assert_eq!(rec.rrects[0].2, PANEL_RADIUS);
+        assert_eq!(rec.rrects[0].3, PANEL_FILL);
     }
 
     #[test]
