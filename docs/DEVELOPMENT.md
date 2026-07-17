@@ -75,7 +75,11 @@ cargo run -p navdemo
 # every manual visual gate below — on a headless host, record "catalog
 # visual gate not run — no display" in your completion summary instead and
 # check both design languages on a host with one.
-cargo run -p catalog
+# `examples/catalog` is a standalone package (its own [workspace] root, own
+# Cargo.lock — see Version-Pin Policy below), excluded from the root
+# workspace, so it is run and gated from its own directory rather than by
+# `-p` from the repo root.
+(cd examples/catalog && cargo run)
 
 # Async/signals demo: an inbox screen whose Component wires a clean-signals
 # ControllerCore (a real async UseCase, with retry) to an RwSignal it renders
@@ -101,8 +105,9 @@ cargo run -p catalog
 ```
 
 `cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes`/
-`cargo run -p gallery`/`cargo run -p navdemo`/`cargo run -p catalog`/
-`(cd examples/inbox && cargo run)`/`(cd examples/team-demo && cargo run)`
+`cargo run -p gallery`/`cargo run -p navdemo`/
+`(cd examples/catalog && cargo run)`/`(cd examples/inbox && cargo run)`/
+`(cd examples/team-demo && cargo run)`
 are the manual visual gates for rendering, interaction, text-input,
 theme/animation, navigation, the M3/Cupertino widget catalog, and
 async/signals changes respectively — there is no automated pixel-diff test
@@ -110,13 +115,13 @@ yet, so a person must look at the window (see *Run* above for `catalog`'s
 no-display fallback).
 `notes` is also the demo `forgekit create` scaffolds
 (`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
-against it. `examples/inbox`'s and
+against it. `examples/catalog`'s, `examples/inbox`'s, and
 `examples/team-demo`'s own verify gates (`cargo test` plus their clippy
 lines, run from each example's own directory) are their regression proof:
-`inbox`'s is unconditional in the Standard verify gate below; `team-demo`'s
-is a separate conditional step gated on the clean-signals-rs sibling
-checkout — see Version-Pin Policy (which covers the sibling-checkout
-requirement) and *Test* below.
+`catalog`'s and `inbox`'s are unconditional in the Standard verify gate
+below; `team-demo`'s is a separate conditional step gated on the
+clean-signals-rs sibling checkout — see Version-Pin Policy (which covers the
+sibling-checkout requirement) and *Test* below.
 
 `examples/team-demo` additionally builds and runs on Android, from its own
 directory (its own `forgekit.toml`, package `it.f0x.team_demo`):
@@ -186,13 +191,17 @@ cargo build --workspace --locked \
   && cargo clippy --workspace --all-targets -- -D warnings \
   && cargo fmt --check \
   && (cd examples/inbox && cargo test) \
-  && (cd examples/inbox && cargo clippy --all-targets -- -D warnings)
+  && (cd examples/inbox && cargo clippy --all-targets -- -D warnings) \
+  && (cd examples/catalog && cargo test) \
+  && (cd examples/catalog && cargo clippy --all-targets -- -D warnings)
 ```
 
-`examples/inbox` gates from its own directory rather than `-p` from the repo
-root because it's a standalone workspace excluded from the root one (see
-*Version-Pin Policy*); it needs only GitHub reachability, a bar the
-unconditional chain can assume everyone satisfies.
+`examples/inbox` and `examples/catalog` gate from their own directories
+rather than `-p` from the repo root because they're standalone workspaces
+excluded from the root one (see *Version-Pin Policy*). `inbox` needs GitHub
+reachability, a bar the unconditional chain can assume everyone satisfies;
+`catalog` needs no sibling checkout or network reachability at all — its
+only dependency is the path dep on `../../crates/forgekit`.
 
 If the clean-signals-rs sibling checkout exists at `../clean-signals-rs`
 (branch `develop` — see Prerequisites and *Version-Pin Policy*),
@@ -353,6 +362,12 @@ deliberately, not floating:
   `[workspace.dependencies]`. Gate it from its own directory:
   `cd examples/inbox && cargo test` (2 async tests) and
   `cd examples/inbox && cargo clippy --all-targets -- -D warnings`.
+- `examples/catalog` is also a standalone package (own `[workspace]`/
+  `Cargo.lock`, excluded from the root workspace), not for a git-pinned
+  dependency but because the `forgekit run`/`build` device pipeline needs a
+  project-local `target/` dir. Gate it from its own directory the same way
+  as `inbox`: `cd examples/catalog && cargo test` and
+  `cd examples/catalog && cargo clippy --all-targets -- -D warnings`.
 - `examples/team-demo` is the same standalone-package pattern as `inbox`,
   but with a stricter dependency shape: `clean-signals` AND
   `clean-signals-forgekit` are both path dependencies to a **sibling
