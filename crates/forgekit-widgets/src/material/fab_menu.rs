@@ -69,6 +69,22 @@
 //! Unlike [`super::fab`], this widget paints no hover/press `StateLayer`
 //! overlay on the trigger or the items — a future task can add one mirroring
 //! `fab.rs`'s.
+//!
+//! # Keyboard operability (task 6f-fix-1/02)
+//!
+//! **Escape-to-dismiss now works, once the menu has focus.** A `Down` on the
+//! trigger, or (while `open`) on an item or the scrim, claims focus via
+//! `EventCtx::request_focus` — the same opt-in
+//! [`crate::material::dialog`]/[`crate::material::sheet`]/
+//! [`crate::cupertino::alert_dialog`]/[`crate::cupertino::action_sheet`] (the
+//! four modal widgets `docs/ARCHITECTURE.md`'s Semantics section names) use;
+//! this widget now joins that set. Once focused, a focus-routed
+//! `Key(Escape)` fires the same `on_toggle` callback a scrim/item/trigger tap
+//! would, but only while `open` — a closed menu has nothing to dismiss, so
+//! Escape is ignored outright regardless of focus. As with the other four
+//! modal widgets, there is still no hook to auto-focus the menu on open; a
+//! caller must complete one pointer interaction with the open menu before
+//! Escape does anything.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -76,8 +92,8 @@ use std::time::Duration;
 use forgekit_core::accesskit::{Action, Role};
 use forgekit_core::{
     AnimationController, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx,
-    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx,
-    SpringDesc, View, Widget,
+    EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase,
+    SemanticsCtx, SpringDesc, View, Widget,
 };
 use forgekit_theme::Theme;
 use kurbo::{Point, Rect, Size};
@@ -630,12 +646,28 @@ impl Widget for FabMenuWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // Escape (once focused) requests a close through the same `on_toggle`
+        // path a scrim/item/trigger tap uses — but only while open (see the
+        // module docs' Keyboard operability note); a closed menu has nothing
+        // to dismiss, so Escape is ignored outright regardless of focus.
+        if let InputEvent::Key(key_event) = event {
+            if self.open && key_event.key == Key::Named(NamedKey::Escape) {
+                (self.on_toggle)(ctx);
+                ctx.request_redraw();
+                return EventResult::Handled;
+            }
+            return EventResult::Ignored;
+        }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
         match p.phase {
             PointerPhase::Down => {
                 if self.fab_rect.contains(p.position) {
+                    // A press on the trigger claims focus, so a subsequent
+                    // Escape has a focus chain to travel (see the module
+                    // docs' Keyboard operability note).
+                    ctx.request_focus();
                     self.armed = Some(Target::Fab);
                     self.pressed_inside = true;
                     ctx.capture_pointer();
@@ -645,6 +677,9 @@ impl Widget for FabMenuWidget {
                 if !self.open {
                     return EventResult::Ignored;
                 }
+                // Same opt-in while open: a press on an item or the scrim
+                // also claims focus.
+                ctx.request_focus();
                 if let Some(i) = self.item_rects.iter().position(|r| r.contains(p.position)) {
                     self.armed = Some(Target::Item(i));
                 } else {
@@ -746,7 +781,7 @@ impl Widget for FabMenuWidget {
 mod tests {
     use super::*;
     use crate::test_support::leaf_any;
-    use forgekit_core::{PointerButton, PointerEvent};
+    use forgekit_core::{KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot};
     use forgekit_theme::MotionScheme;
     use std::any::Any;
 
@@ -939,6 +974,74 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 500.0, 500.0));
         assert!(state.selected.is_empty());
         assert_eq!(state.toggles, 0);
+    }
+
+    // --- Focus + Escape opt-in (task 6f-fix-1/02). ---
+
+    fn escape_event() -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Escape),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn escape_while_open_requests_toggle() {
+        let mut w = build_menu(true, 2);
+        laid_out(&mut w);
+        let mut state = Log::default();
+        let result = dispatch(&mut w, &mut state, &escape_event());
+        assert!(matches!(result, EventResult::Handled));
+        assert_eq!(state.toggles, 1, "Escape while open requests a close");
+        assert!(state.selected.is_empty());
+    }
+
+    #[test]
+    fn escape_while_closed_is_ignored() {
+        let mut w = build_menu(false, 2);
+        laid_out(&mut w);
+        let mut state = Log::default();
+        let result = dispatch(&mut w, &mut state, &escape_event());
+        assert!(matches!(result, EventResult::Ignored));
+        assert_eq!(state.toggles, 0, "a closed menu has nothing to dismiss");
+    }
+
+    #[test]
+    fn trigger_press_claims_focus_so_a_later_escape_reaches_the_open_menu() {
+        // Drive a real RenderRoot so the container-level focus-path recording
+        // (mirrors `cupertino::alert_dialog`'s modal-widget precedent) is
+        // actually exercised, not just the widget's own `event` in isolation.
+        let mut root: RenderRoot<Log, FabMenuView<Log>> = RenderRoot::new();
+        let mut app = |_s: &mut Log| {
+            fab_menu::<Log, _>(
+                icon_stub::<Log>(),
+                true,
+                (0..2).map(item).collect(),
+                |s: &mut Log| s.toggles += 1,
+            )
+        };
+        let mut state = Log::default();
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = forgekit_text::TextContext::new();
+        root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);
+
+        // A press on the scrim (top-left corner, outside the trigger/items —
+        // see `scrim_tap_closes_without_selecting_an_item`) claims focus. A
+        // `Cancel` instead of `Up` disarms without firing `on_toggle`, so the
+        // Escape below is the only thing that can have requested the close.
+        root.event(&mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+        root.event(&mut state, &ev(PointerPhase::Cancel, 5.0, 5.0));
+        assert_eq!(
+            state.toggles, 0,
+            "the cancelled scrim press alone never toggles"
+        );
+
+        root.event(&mut state, &escape_event());
+        assert_eq!(
+            state.toggles, 1,
+            "Escape reaches the now-focused, still-open menu and requests a close"
+        );
     }
 
     #[test]
