@@ -9,7 +9,12 @@ members = ["crates/*", "examples/*"]
 # Cargo.lock) — a `forgekit create`-generated project embedded verbatim to
 # gate the Android build pipeline end-to-end (see
 # workflow/plans/features/team-demo-android).
-exclude = ["examples/inbox", "examples/team-demo"]
+# examples/catalog is likewise standalone (own [workspace] root, own
+# Cargo.lock) — converted in phase 6e so `forgekit run`/`build` can install it
+# on real devices: the generated iOS Xcode build phase resolves
+# `target/<triple>/<profile>/libcatalog.a` relative to the project directory,
+# which a root-workspace member's shared `target/` would break.
+exclude = ["examples/inbox", "examples/team-demo", "examples/catalog"]
 
 [workspace.package]
 version = "0.1.0"

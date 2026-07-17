@@ -1,13 +1,26 @@
+# Standalone package: excluded from the root workspace (see root Cargo.toml's
+# `[workspace] exclude` and docs/DEVELOPMENT.md's Version-Pin Policy) so the
+# `forgekit run`/`build` device pipeline works against it — the generated iOS
+# Xcode build phase copies `target/<triple>/<profile>/libcatalog.a` relative to
+# this directory, which requires this package's own `target/` (the
+# `examples/team-demo` pattern) rather than the root workspace's.
+[workspace]
+
 [package]
 name = "catalog"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
 publish = false
 
+# `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
+# bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
+# `forgekit_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
+# library for the desktop `main.rs` preview binary (spec §12.9).
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
 [dependencies]
-forgekit = { workspace = true }
+forgekit = { path = "../../crates/forgekit" }
 
 # Dev-only: the headless smoke test drives the framework's `RenderRoot`
 # directly (rebuild only — no layout/paint, so no `TextContext` is needed) to
@@ -18,8 +31,24 @@ forgekit = { workspace = true }
 # creates several `RwSignal`s (see `docs/ARCHITECTURE.md`'s Component state
 # boundary — signal creation needs an ambient runtime). This mirrors
 # `examples/navdemo`'s identical dev-dependency shape (`docs/CODE_STANDARDS.md`'s
-# State & Reactivity Conventions carves out this exception).
+# State & Reactivity Conventions carves out this exception). Versions pin the
+# same concrete releases `examples/team-demo` does (Version-Pin Policy).
 [dev-dependencies]
-forgekit-core = { workspace = true }
-forgekit-reactive = { workspace = true }
-kurbo = { workspace = true }
+forgekit-core = { path = "../../crates/forgekit-core" }
+forgekit-reactive = { path = "../../crates/forgekit-reactive" }
+kurbo = "0.13.1"
+
+# `--release` mode: fully optimized, stripped, single-panic-path binary for
+# store distribution (spec §12.2).
+[profile.release]
+lto = "thin"
+strip = "symbols"
+panic = "abort"
+
+# `--profile` mode: release performance with symbols + tracing kept for
+# on-device performance measurement (spec §12.2). Artifacts land in
+# `target/<triple>/profile/` (custom-profile name, verified legal).
+[profile.profile]
+inherits = "release"
+debug = true
+strip = "none"
