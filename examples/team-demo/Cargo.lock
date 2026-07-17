@@ -672,6 +672,7 @@ dependencies = [
  "forgekit-core",
  "forgekit-reactive",
  "forgekit-shell-android",
+ "forgekit-shell-common",
  "forgekit-shell-desktop",
  "forgekit-shell-ios",
  "forgekit-theme",
@@ -752,6 +753,7 @@ dependencies = [
  "forgekit-core",
  "forgekit-scene",
  "forgekit-text",
+ "forgekit-theme",
  "kurbo",
  "log",
 ]
@@ -765,6 +767,7 @@ dependencies = [
  "forgekit-reactive",
  "forgekit-render",
  "forgekit-scene",
+ "forgekit-shell-common",
  "forgekit-text",
  "forgekit-theme",
  "kurbo",
