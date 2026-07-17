@@ -12,3 +12,6 @@ build/
 
 # Machine-local Android SDK path + CLI-written version stamps.
 android/local.properties
+
+# Rust-built JNI libraries copied in by the gradle preBuild step — build output, never commit.
+android/app/src/main/jniLibs/
