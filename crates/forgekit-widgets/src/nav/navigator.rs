@@ -52,7 +52,8 @@ use std::rc::Rc;
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EditingState, EventCtx, EventResult,
-    ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, SpringDesc, View, Widget,
+    FrameTime, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SpringDesc,
+    TOUCH_SLOP, VelocityTracker, View, Widget,
 };
 use kurbo::{Point, Size};
 
@@ -60,6 +61,32 @@ use super::transition::{
     Layer, PageTransition, TransitionDriver, TransitionSpec, make_driver, resolve_layers,
     settle_driver,
 };
+
+// --- Edge-swipe tuning constants (see per-constant approximation notes) ------
+
+/// Left-edge activation zone width for the interactive pop-swipe, in logical px.
+///
+/// **Community-approximate** (phase-6b refuted-claims ledger #2): UIKit's
+/// `interactivePopGestureRecognizer` edge zone is not a published constant;
+/// ~20dp is the value the community-reverse-engineered reimplementations
+/// converge on. A `Down` at `x <= EDGE_SWIPE_ZONE_DP` (with a poppable stack)
+/// arms the gesture.
+const EDGE_SWIPE_ZONE_DP: f64 = 20.0;
+
+/// Progress past which a *released* edge-swipe completes the pop; at or below
+/// it, the pop cancels and the page springs back.
+///
+/// The standard halfway commit point — Flutter's `CupertinoPageRoute` uses the
+/// same 0.5 threshold for its interactive back gesture.
+const EDGE_SWIPE_COMMIT_PROGRESS: f64 = 0.5;
+
+/// Release x-velocity (logical px/s) past which an edge-swipe completes the pop
+/// regardless of how far it dragged (a fast flick from near the edge still
+/// pops).
+///
+/// **Community-approximate**: matches Flutter's Cupertino commit velocity
+/// (~1300 pt/s); UIKit's exact interactive-pop fling threshold is private.
+const EDGE_SWIPE_FLING_VELOCITY: f64 = 1300.0;
 
 /// A page builder: a cheap closure that produces the page's view, re-run every
 /// rebuild so a retained page's content still reconciles against live app state
@@ -284,6 +311,10 @@ pub struct NavigatorView<State: 'static> {
     /// Defaults to [`TransitionSpec::NONE`] (instant switches — the task-02
     /// behavior).
     default_transition: TransitionSpec,
+    /// Explicit override for the interactive edge-swipe back gesture (task 05).
+    /// `None` derives it from the default transition preset — on for
+    /// [`PageTransition::IosPush`], off otherwise.
+    pop_swipe: Option<bool>,
 }
 
 impl<State: 'static> NavigatorView<State> {
@@ -293,6 +324,24 @@ impl<State: 'static> NavigatorView<State> {
     pub fn transition(mut self, spec: TransitionSpec) -> Self {
         self.default_transition = spec;
         self
+    }
+
+    /// Explicitly enable or disable the interactive edge-swipe back gesture
+    /// (task 05), overriding the preset-derived default (on for
+    /// [`PageTransition::IosPush`], off otherwise). The gesture pops the top page
+    /// with a left-edge drag: drag progress reverses the popped page's transition,
+    /// and release completes or cancels the pop by progress/velocity.
+    pub fn pop_swipe(mut self, enabled: bool) -> Self {
+        self.pop_swipe = Some(enabled);
+        self
+    }
+
+    /// Resolve whether the edge-swipe gesture is enabled: the explicit override if
+    /// set, else on for the iOS-push preset (the transition the swipe is designed
+    /// around) and off for every other default.
+    fn resolve_pop_swipe(&self) -> bool {
+        self.pop_swipe
+            .unwrap_or(self.default_transition.preset == PageTransition::IosPush)
     }
 }
 
@@ -306,6 +355,7 @@ pub fn navigator<State: 'static>(
         controller: controller.clone(),
         initial: Rc::new(initial),
         default_transition: TransitionSpec::NONE,
+        pop_swipe: None,
     }
 }
 
@@ -345,6 +395,44 @@ struct ActiveTransition<State: 'static> {
     /// Set by paint when the driver reaches rest; the next rebuild finalizes the
     /// transition (tears down `stashed`, resumes culling).
     settled: bool,
+    /// This transition is being driven by an interactive edge-swipe (task 05):
+    /// its progress is `Held` by the drag, then settled on release. An
+    /// interactive pop stashed the top page *without* queuing its result
+    /// callback (a swipe may still cancel), so finalize does the completion
+    /// bookkeeping the [`NavOp::Pop`] path did eagerly.
+    interactive: bool,
+    /// Set when an interactive pop was *cancelled* (settled toward `0.0`): finalize
+    /// pushes the stashed page back onto the stack instead of tearing it down (the
+    /// page was never really popped). See [`NavigatorWidget::finalize_transition`].
+    restore_on_finalize: bool,
+}
+
+/// The interactive edge-swipe gesture state (task 05). Mirrors
+/// [`ScrollWidget`](crate::ScrollWidget)'s arm/steal model: `armed` on a
+/// left-edge `Down`, promoted to `active` (an interactive pop in flight) once a
+/// decisive horizontal drag steals the gesture from the page.
+struct EdgeSwipe {
+    /// A left-edge `Down` on a poppable stack armed the gesture, but the slop has
+    /// not yet been crossed. Disarmed by a vertical/leftward drag or `Up`.
+    armed: bool,
+    /// The gesture stole from the page and is driving a held pop transition; the
+    /// navigator owns the pointer stream until release.
+    active: bool,
+    /// The `Down` position the drag delta is measured from.
+    down_start: Point,
+    /// Trailing-window x-velocity tracker for the release fling decision.
+    tracker: VelocityTracker,
+}
+
+impl EdgeSwipe {
+    fn new() -> Self {
+        Self {
+            armed: false,
+            active: false,
+            down_start: Point::ZERO,
+            tracker: VelocityTracker::new(),
+        }
+    }
 }
 
 /// The retained widget for a [`NavigatorView`]: owns the page stack and applies
@@ -363,6 +451,17 @@ pub struct NavigatorWidget<State: 'static> {
     /// The single in-flight transition, if any (task 03). `None` between
     /// transitions — the common case, where paint/layout cull normally.
     transition: Option<ActiveTransition<State>>,
+    /// Whether the interactive edge-swipe back gesture is enabled (task 05).
+    /// Resolved from the view each rebuild — default-on for the iOS-push preset,
+    /// or explicitly via [`NavigatorView::pop_swipe`].
+    pop_swipe_enabled: bool,
+    /// The in-progress edge-swipe gesture state (task 05).
+    edge: EdgeSwipe,
+    /// The most recent frame time seen during [`paint`](NavigatorWidget::paint),
+    /// reused as the event-pass timestamp for velocity tracking — the event pass
+    /// carries no clock of its own (spec §8 provides time only at paint). The
+    /// same seam [`ScrollWidget`](crate::ScrollWidget) uses.
+    last_frame_time: FrameTime,
 }
 
 impl<State: 'static> NavigatorWidget<State> {
@@ -423,17 +522,47 @@ impl<State: 'static> NavigatorWidget<State> {
             stashed,
             settle_spring,
             settled: false,
+            interactive: false,
+            restore_on_finalize: false,
         });
     }
 
     /// Dispose the active transition: tear down its retained (leaving) page, if
     /// any, and drop it. Called on settle (from rebuild) and when a new op
     /// supersedes a running transition.
+    ///
+    /// # Interactive-pop finalization
+    ///
+    /// A *cancelled* interactive edge-swipe pop
+    /// ([`restore_on_finalize`](ActiveTransition)) never really removed its page —
+    /// the stashed page is pushed back onto the stack (origin reset, so it lands
+    /// at exact resting geometry) instead of torn down. A *completing* interactive
+    /// pop, conversely, is where its result callback is queued (the swipe path
+    /// defers this since the pop may still cancel — unlike the eager
+    /// [`NavOp::Pop`] path). Also clears the edge-swipe drive flags: the
+    /// transition ending means no interactive drive continues.
     fn finalize_transition(&mut self, ctx: &mut BuildCtx<'_>) {
-        if let Some(mut t) = self.transition.take()
-            && let Some(mut stashed) = t.stashed.take()
-        {
-            crate::teardown_child(&stashed.view, &mut stashed.pod, ctx);
+        if let Some(mut t) = self.transition.take() {
+            self.edge.active = false;
+            self.edge.armed = false;
+            if let Some(mut stashed) = t.stashed.take() {
+                if t.restore_on_finalize {
+                    // Cancelled interactive pop: the page was never popped — restore
+                    // it at exact resting geometry.
+                    stashed.pod.set_origin(Point::ZERO);
+                    self.pages.push(stashed);
+                } else {
+                    // A completing interactive pop is the point where its pusher's
+                    // result callback fires (the non-interactive pop queued it up
+                    // front; the swipe defers until it commits).
+                    if t.interactive
+                        && let Some(callback) = stashed.on_result.take()
+                    {
+                        self.pending_results.push((callback, PopResult::empty()));
+                    }
+                    crate::teardown_child(&stashed.view, &mut stashed.pod, ctx);
+                }
+            }
         }
     }
 
@@ -461,6 +590,220 @@ impl<State: 'static> NavigatorWidget<State> {
             let target = if velocity >= 0.0 { 1.0 } else { 0.0 };
             t.driver = settle_driver(t.settle_spring, from, velocity, target);
             t.settled = false;
+        }
+    }
+
+    /// The event-pass timestamp (ms) for velocity tracking — the last frame time
+    /// seen at paint, since the event pass carries no clock (see
+    /// [`last_frame_time`](NavigatorWidget::last_frame_time)).
+    fn event_time_ms(&self) -> f64 {
+        self.last_frame_time.as_secs_f64() * 1000.0
+    }
+
+    /// Steal the gesture from the top page into an interactive pop (task 05).
+    ///
+    /// Mirrors the [`NavOp::Pop`] animated-pop structure but built entirely in the
+    /// event pass (no `BuildCtx`): the top page's in-flight capture is
+    /// synthetically cancelled ([`cancel_top`](Self::cancel_top) — the covered
+    /// widget's press machine must not fire on a later `Up`), then the page is
+    /// popped into a **held** pop transition the drag drives via
+    /// [`set_transition_progress`](Self::set_transition_progress). Building/tearing
+    /// pods is deferred: the stashed page's teardown (or restore) happens at
+    /// finalize, which runs at rebuild with a `BuildCtx` in scope.
+    ///
+    /// The pusher's result callback is intentionally *not* queued here — a swipe
+    /// may still cancel; it fires only if the pop later completes (see
+    /// [`finalize_transition`](Self::finalize_transition)).
+    fn begin_interactive_pop(&mut self, initial_progress: f64) {
+        debug_assert!(self.pages.len() > 1, "steal requires a poppable stack");
+        debug_assert!(
+            self.transition.is_none(),
+            "steal requires no active transition"
+        );
+        self.cancel_top();
+        let popped = self.pages.pop().expect("depth > 1 checked before steal");
+        let spec = popped.transition;
+        // The swipe animates the popped page's own preset; a page pushed without an
+        // animated transition still swipes with the iOS-push geometry (a swipe is
+        // inherently an iOS-style interaction). The timing only supplies the
+        // fallback settle spring — the drag itself holds progress.
+        let preset = if spec.is_animated() {
+            spec.preset
+        } else {
+            PageTransition::IosPush
+        };
+        let (_driver, settle_spring) = make_driver(spec.timing);
+        self.transition = Some(ActiveTransition {
+            driver: TransitionDriver::Held {
+                value: initial_progress.clamp(0.0, 1.0),
+            },
+            preset,
+            is_pop: true,
+            stashed: Some(popped),
+            settle_spring,
+            settled: false,
+            interactive: true,
+            restore_on_finalize: false,
+        });
+        self.needs_ime_clear = true;
+    }
+
+    /// Settle a released interactive pop toward completion (`1.0`) or cancellation
+    /// (`0.0`), springing from the held progress with initial `progress_velocity`
+    /// (progress units/s). A cancel flags the transition for
+    /// [restore](Self::finalize_transition) rather than teardown.
+    fn settle_interactive(&mut self, complete: bool, progress_velocity: f64) {
+        if let Some(t) = self.transition.as_mut() {
+            let from = t.driver.value();
+            let target = if complete { 1.0 } else { 0.0 };
+            t.driver = settle_driver(t.settle_spring, from, progress_velocity, target);
+            t.settled = false;
+            t.restore_on_finalize = !complete;
+        }
+    }
+
+    /// Drive an in-progress interactive edge-swipe from a pointer event (task 05):
+    /// `Move` maps drag-x to held progress; `Up` settles by progress/velocity;
+    /// `Cancel` (system gesture steal) cancels the pop with no state mutation.
+    ///
+    /// This runs *before* the mid-transition input block in
+    /// [`event_at`](Self::event_at) — the swipe owns the pointer stream and must
+    /// keep receiving moves/releases even though a (held) transition is present.
+    fn drive_edge_swipe(
+        &mut self,
+        ctx: &mut EventCtx<'_>,
+        event: &InputEvent,
+        t_ms: f64,
+    ) -> EventResult {
+        let InputEvent::Pointer(p) = event else {
+            // Only pointer events drive a swipe; ignore anything else while active.
+            return EventResult::Ignored;
+        };
+        let width = ctx.size().width.max(1.0);
+        match p.phase {
+            PointerPhase::Move => {
+                self.edge.tracker.record(t_ms, p.position.x);
+                let dx = p.position.x - self.edge.down_start.x;
+                let progress = (dx / width).clamp(0.0, 1.0);
+                self.set_transition_progress(progress);
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            PointerPhase::Up => {
+                let finger_v = self.edge.tracker.velocity();
+                let progress = self
+                    .transition
+                    .as_ref()
+                    .map(|t| t.driver.value())
+                    .unwrap_or(0.0);
+                // Complete if dragged past the commit point, or flicked rightward
+                // fast enough — the low-progress high-velocity case (criterion 1e).
+                let complete =
+                    progress > EDGE_SWIPE_COMMIT_PROGRESS || finger_v > EDGE_SWIPE_FLING_VELOCITY;
+                // The spring drives *progress*, so convert the px/s finger velocity
+                // into progress/s by the drag axis length.
+                self.settle_interactive(complete, finger_v / width);
+                self.edge.active = false;
+                self.edge.armed = false;
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            PointerPhase::Cancel => {
+                // System cancel mid-drag = cancel path: spring back and restore the
+                // page. No state mutation here (the `()` Cancel tripwire contract).
+                self.settle_interactive(false, 0.0);
+                self.edge.active = false;
+                self.edge.armed = false;
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            // A stray extra Down during a drive: swallow it (the navigator owns the
+            // stream), don't re-enter arming.
+            PointerPhase::Down => EventResult::Handled,
+        }
+    }
+
+    /// Route an event to the top page via the shared single-child router.
+    fn route_top(&mut self, ctx: &mut EventCtx<'_>, event: &InputEvent) -> EventResult {
+        if let Some(top) = self.pages.last_mut() {
+            crate::route_event_single(&mut top.pod, ctx, event)
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// The event body with an explicit timestamp so velocity math is deterministic
+    /// in tests ([`Widget::event`] supplies the real paint-derived clock).
+    ///
+    /// Ordering: an active interactive swipe is driven first (it bypasses the
+    /// mid-transition input block); otherwise a running transition suppresses all
+    /// page routing; otherwise pointer events run the edge-swipe arm/steal
+    /// machinery before falling through to normal top-page routing.
+    fn event_at(&mut self, ctx: &mut EventCtx<'_>, event: &InputEvent, t_ms: f64) -> EventResult {
+        // An in-progress interactive swipe owns the pointer stream.
+        if self.edge.active {
+            return self.drive_edge_swipe(ctx, event, t_ms);
+        }
+        // Input-blocking contract (task 03): while a non-interactive transition is
+        // in flight, suppress ALL routing to pages.
+        if self.transition.is_some() {
+            return EventResult::Ignored;
+        }
+        let InputEvent::Pointer(p) = event else {
+            // Focus-routed / scroll events route straight to the top page.
+            return self.route_top(ctx, event);
+        };
+        match p.phase {
+            PointerPhase::Down => {
+                // Arm an edge-swipe on a left-edge Down over a poppable stack. The
+                // navigator does NOT capture here (ScrollView precedent): the page
+                // still sees the Down and may capture; a later steal sends the page
+                // a synthetic Cancel. No buffering/re-dispatch — children see Down
+                // first.
+                self.edge.armed = self.pop_swipe_enabled
+                    && self.pages.len() > 1
+                    && p.position.x <= EDGE_SWIPE_ZONE_DP;
+                if self.edge.armed {
+                    self.edge.down_start = p.position;
+                    self.edge.tracker.clear();
+                    self.edge.tracker.record(t_ms, p.position.x);
+                }
+                self.route_top(ctx, event)
+            }
+            PointerPhase::Move => {
+                if !self.edge.armed {
+                    return self.route_top(ctx, event);
+                }
+                self.edge.tracker.record(t_ms, p.position.x);
+                let dx = p.position.x - self.edge.down_start.x;
+                let dy = p.position.y - self.edge.down_start.y;
+                if dx > TOUCH_SLOP && dx.abs() > dy.abs() {
+                    // Decisive rightward horizontal drag → STEAL from the page.
+                    let width = ctx.size().width.max(1.0);
+                    let progress = (dx / width).clamp(0.0, 1.0);
+                    self.begin_interactive_pop(progress);
+                    self.edge.armed = false;
+                    self.edge.active = true;
+                    ctx.capture_pointer();
+                    ctx.request_redraw();
+                    EventResult::Handled
+                } else if dy.abs() > TOUCH_SLOP || dx < -TOUCH_SLOP {
+                    // Vertical dominance or a leftward drag: not an edge pop. Disarm
+                    // and let the page own the gesture (e.g. a ScrollView child that
+                    // starts in the edge zone but drags vertically still scrolls).
+                    self.edge.armed = false;
+                    self.route_top(ctx, event)
+                } else {
+                    // Still within slop: keep observing, forward to the page.
+                    self.route_top(ctx, event)
+                }
+            }
+            PointerPhase::Up | PointerPhase::Cancel => {
+                // An armed-but-never-stolen gesture just releases its arm; the page
+                // owned the Down/Move/Up stream throughout.
+                self.edge.armed = false;
+                self.route_top(ctx, event)
+            }
         }
     }
 
@@ -717,6 +1060,9 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             needs_ime_clear: false,
             default_transition: self.default_transition,
             transition: None,
+            pop_swipe_enabled: self.resolve_pop_swipe(),
+            edge: EdgeSwipe::new(),
+            last_frame_time: FrameTime::ZERO,
         };
         // Apply any ops the app queued before the first frame.
         let ops = self.controller.drain();
@@ -736,6 +1082,8 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         // Keep the widget's default transition in sync with the view so an app can
         // change it live (per-op overrides always win over it).
         element.default_transition = self.default_transition;
+        // Refresh the edge-swipe enable flag from the view too (live-configurable).
+        element.pop_swipe_enabled = self.resolve_pop_swipe();
         // 1. Structural ops (view-driven): push/pop/replace the retained stack.
         let ops = self.controller.drain();
         if !ops.is_empty() {
@@ -795,6 +1143,9 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // Record the shared frame clock so the between-frames event pass (which
+        // carries no clock) has a timestamp for edge-swipe velocity tracking.
+        self.last_frame_time = ctx.frame_time();
         if self.transition.is_some() {
             // Animated page switch: paint both involved pages with per-frame
             // offsets/opacity and drive the transition off the frame clock.
@@ -827,23 +1178,19 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
                 callback(state, result);
             }
         }
-        // Input-blocking contract (refuter-verified, STRICT): while a transition
-        // is in flight, suppress ALL routing to pages. Capture routing lives
-        // entirely inside this `event` (no RenderRoot bypass), so returning
-        // without routing guarantees a mid-transition `Down` reaches no page and
-        // records no `active`/focus path — the involved pages' captures were
-        // already synthetically cancelled at transition start (`cancel_top`).
-        // Routing resumes only once the transition is finalized (settled).
-        if self.transition.is_some() {
-            return EventResult::Ignored;
-        }
-        // Route to the top page only (capture/focus/blur handled by the shared
-        // single-child router).
-        if let Some(top) = self.pages.last_mut() {
-            crate::route_event_single(&mut top.pod, ctx, event)
-        } else {
-            EventResult::Ignored
-        }
+        // The rest of the event body (edge-swipe arm/steal/drive + the
+        // mid-transition input block + top-page routing) runs against the
+        // paint-derived event-pass clock. See [`event_at`](Self::event_at).
+        //
+        // Input-blocking contract (refuter-verified, STRICT): while a
+        // non-interactive transition is in flight, `event_at` suppresses ALL
+        // routing to pages — a mid-transition `Down` reaches no page and records
+        // no `active`/focus path (the involved pages' captures were already
+        // synthetically cancelled at transition start via `cancel_top`). An
+        // interactive edge-swipe is the deliberate exception: it drives a held
+        // transition and keeps receiving its own pointer stream.
+        let t_ms = self.event_time_ms();
+        self.event_at(ctx, event, t_ms)
     }
 }
 
@@ -882,6 +1229,22 @@ mod tests {
     fn move_to(x: f64, y: f64) -> InputEvent {
         InputEvent::Pointer(PointerEvent {
             phase: PointerPhase::Move,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    fn up(x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Up,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    fn cancel_ev(x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Cancel,
             position: Point::new(x, y),
             button: PointerButton::Primary,
         })
@@ -1695,5 +2058,596 @@ mod tests {
         }
         assert_eq!(last.len(), 1, "only the revealed page remains");
         assert_eq!(last[0].1, Size::new(100.0, 100.0), "the revealed page is A");
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 05: interactive edge-swipe back gesture.
+    // ---------------------------------------------------------------------
+
+    /// Downcast the root widget to a `&NavigatorWidget` so a gesture test can
+    /// inspect the private edge/transition state.
+    fn nav_widget(root: &RenderRoot<(), NavigatorView<()>>) -> &NavigatorWidget<()> {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<NavigatorWidget<()>>()
+            .expect("root is a NavigatorWidget")
+    }
+
+    /// A page leaf that captures the pointer on `Down`, counts the `Move`s it
+    /// receives, and records whether it got a synthetic `Cancel` — so a test can
+    /// tell a steal (child gets Cancel, no more moves) from a yield (child keeps
+    /// receiving moves). Its `Cancel` arm touches no application state (the `()`
+    /// tripwire contract).
+    struct DragProbe {
+        moves: Rc<Cell<u32>>,
+        cancelled: Rc<Cell<bool>>,
+    }
+    struct DragProbeWidget {
+        moves: Rc<Cell<u32>>,
+        cancelled: Rc<Cell<bool>>,
+    }
+    impl View<()> for DragProbe {
+        type Element = DragProbeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> DragProbeWidget {
+            DragProbeWidget {
+                moves: self.moves.clone(),
+                cancelled: self.cancelled.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut DragProbeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.moves = self.moves.clone();
+            element.cancelled = self.cancelled.clone();
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for DragProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event {
+                match p.phase {
+                    PointerPhase::Down => {
+                        ctx.capture_pointer();
+                        return EventResult::Handled;
+                    }
+                    PointerPhase::Move => {
+                        self.moves.set(self.moves.get() + 1);
+                        return EventResult::Handled;
+                    }
+                    PointerPhase::Cancel => {
+                        self.cancelled.set(true);
+                        return EventResult::Handled;
+                    }
+                    PointerPhase::Up => return EventResult::Handled,
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    fn drag_probe_page(moves: &Rc<Cell<u32>>, cancelled: &Rc<Cell<bool>>) -> AnyView<()> {
+        any(DragProbe {
+            moves: moves.clone(),
+            cancelled: cancelled.clone(),
+        })
+    }
+
+    /// Drive one shell-style frame (rebuild → layout → paint) at `time`, returning
+    /// the alpha-tagged fills and whether another frame was requested. Sharing the
+    /// task-03 `TransitionScene`/`full_frame`/`fill_h`/`ft` helpers above.
+    /// Run frames until the tree stops requesting them (a settle finishes and the
+    /// transition finalizes), returning the last frame's fills.
+    fn run_until_settled(
+        root: &mut RenderRoot<(), NavigatorView<()>>,
+        app: &mut impl FnMut(&mut ()) -> NavigatorView<()>,
+        state: &mut (),
+        mut time_ms: u64,
+    ) -> Vec<(Point, Size, f32)> {
+        for _ in 0..10_000 {
+            let (fills, needs_frame) = full_frame(root, app, state, ft(time_ms));
+            if !needs_frame {
+                return fills;
+            }
+            time_ms += 16;
+        }
+        panic!("transition failed to settle");
+    }
+
+    // --- Criterion 1a: an edge drag past slop steals from a capturing child. ---
+
+    #[test]
+    fn edge_drag_steals_from_capturing_child() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let moves = Rc::new(Cell::new(0u32));
+        let cancelled = Rc::new(Cell::new(false));
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+
+        // Push a capturing page B on top (instant — default transition is NONE).
+        {
+            let m = moves.clone();
+            let c = cancelled.clone();
+            controller.push(move || drag_probe_page(&m, &c));
+        }
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // Down at the left edge: B captures (mid-press); nothing cancelled yet.
+        root.event(&mut state, &down(5.0, 50.0));
+        assert!(!cancelled.get(), "no cancel before the steal");
+
+        // A rightward drag past the slop steals: B receives a synthetic Cancel and
+        // no further moves; the navigator now drives an interactive pop.
+        root.paint(&mut scene, ft(16));
+        root.event(&mut state, &move_to(40.0, 50.0));
+        assert!(
+            cancelled.get(),
+            "the mid-press child got a synthetic Cancel"
+        );
+        let moves_at_steal = moves.get();
+        assert!(
+            nav_widget(&root).transition.is_some(),
+            "an interactive pop began"
+        );
+        assert!(
+            nav_widget(&root).edge.active,
+            "the navigator drives the swipe"
+        );
+
+        // Subsequent drag moves drive the pop and never reach B.
+        root.paint(&mut scene, ft(32));
+        root.event(&mut state, &move_to(60.0, 50.0));
+        assert_eq!(
+            moves.get(),
+            moves_at_steal,
+            "B receives no moves after the steal"
+        );
+    }
+
+    // --- Criterion 1b: drag moves pages, origins tracking progress. ---
+
+    #[test]
+    fn edge_drag_moves_pages_tracking_progress() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        controller.push(|| sized_page(100.0, 60.0)); // B, instant
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // Down at the edge, then drag to x=40 (progress 0.35): B (leaving, iOS-pop)
+        // sits at dx = progress * width.
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(16));
+        root.event(&mut state, &move_to(40.0, 50.0)); // steal, progress (40-5)/100
+        let (f1, _) = full_frame(&mut root, &mut app, &mut state, ft(24));
+        let b1 = fill_h(&f1, 60.0).0.x;
+        assert!(
+            (b1 - 35.0).abs() < 1e-6,
+            "B tracks drag progress (x was {b1})"
+        );
+
+        // Drag further right → B's origin advances with progress.
+        root.event(&mut state, &move_to(70.0, 50.0)); // progress (70-5)/100 = 0.65
+        let (f2, _) = full_frame(&mut root, &mut app, &mut state, ft(40));
+        let b2 = fill_h(&f2, 60.0).0.x;
+        assert!(
+            (b2 - 65.0).abs() < 1e-6,
+            "B follows the finger (x was {b2})"
+        );
+        assert!(
+            b2 > b1,
+            "the popped page moves right as the drag progresses"
+        );
+    }
+
+    // --- Criterion 1c: release past the halfway point completes the pop. ---
+
+    #[test]
+    fn release_past_half_completes_pop() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        controller.push(|| sized_page(100.0, 60.0)); // B, instant
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // Slow drag (100 ms apart → low velocity) past the halfway commit point.
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(100));
+        root.event(&mut state, &move_to(70.0, 50.0)); // progress 0.65, velocity ~650 px/s
+        root.paint(&mut scene, ft(200));
+        root.event(&mut state, &up(70.0, 50.0)); // >0.5 → complete
+
+        // After settle the pop completed: only page A (height 100) remains.
+        let fills = run_until_settled(&mut root, &mut app, &mut state, 300);
+        assert_eq!(
+            fills.len(),
+            1,
+            "the pop completed — stack shrank to one page"
+        );
+        assert!(
+            (fills[0].1.height - 100.0).abs() < 1e-9,
+            "the surviving page is A"
+        );
+        assert_eq!(
+            nav_widget(&root).pages.len(),
+            1,
+            "the retained stack shrank"
+        );
+        assert!(
+            nav_widget(&root).transition.is_none(),
+            "the transition finalized"
+        );
+    }
+
+    // --- Criterion 1c (result path): a completed swipe delivers the pop result. ---
+
+    #[derive(Default)]
+    struct SwipeResultState {
+        popped: bool,
+    }
+
+    #[test]
+    fn swipe_complete_delivers_result_to_callback() {
+        let controller: NavigatorController<SwipeResultState> = NavigatorController::new();
+        let mut root: RenderRoot<SwipeResultState, NavigatorView<SwipeResultState>> =
+            RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut SwipeResultState| {
+                navigator(&ctrl, || {
+                    any(SizedLeaf {
+                        size: Size::new(100.0, 100.0),
+                    })
+                })
+                .pop_swipe(true)
+            }
+        };
+        let mut state = SwipeResultState::default();
+
+        // Push B (instant) registering a result callback fired on its pop.
+        controller.push_for_result(
+            || {
+                any(SizedLeaf {
+                    size: Size::new(100.0, 60.0),
+                })
+            },
+            |state: &mut SwipeResultState, _result: PopResult| {
+                state.popped = true;
+            },
+        );
+        let mut sink = RecordingScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut sink, FrameTime::ZERO);
+
+        // Swipe across and release past the commit point → complete.
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut sink, ft(100));
+        root.event(&mut state, &move_to(80.0, 50.0));
+        root.paint(&mut sink, ft(200));
+        root.event(&mut state, &up(80.0, 50.0));
+
+        // Drive to settle/finalize (the callback is queued at finalize).
+        for t in [300u64, 316, 332, 348, 400, 500, 800, 1200, 2000] {
+            root.rebuild(&mut app, &mut state);
+            root.layout(Size::new(100.0, 100.0));
+            root.paint(&mut sink, ft(t));
+        }
+        assert!(
+            !state.popped,
+            "callback not fired until the next event pass"
+        );
+
+        // The next event pass flushes the queued result callback.
+        root.event(&mut state, &move_to(5.0, 5.0));
+        assert!(state.popped, "the completed swipe delivered its pop result");
+    }
+
+    // --- Criterion 1d: release below threshold cancels; page restored exactly. ---
+
+    #[test]
+    fn release_below_threshold_cancels_and_restores() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        controller.push(|| sized_page(100.0, 60.0)); // B, instant
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // Small, slow drag (well under half, low velocity) then release → cancel.
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(200));
+        root.event(&mut state, &move_to(30.0, 50.0)); // progress 0.25 (< 0.5)
+        root.paint(&mut scene, ft(400));
+        root.event(&mut state, &up(30.0, 50.0)); // cancel
+
+        // After settle the pop was cancelled: page B (height 60) is restored on top
+        // at exact resting geometry (origin ZERO), the stack is unchanged (depth 2).
+        let fills = run_until_settled(&mut root, &mut app, &mut state, 500);
+        assert_eq!(
+            fills.len(),
+            1,
+            "cancelled pop: only the opaque top page paints"
+        );
+        assert!(
+            (fills[0].1.height - 60.0).abs() < 1e-9,
+            "page B was restored on top"
+        );
+        assert_eq!(
+            fills[0].0,
+            Point::ZERO,
+            "restored page sits at exact resting origin"
+        );
+        assert_eq!(nav_widget(&root).pages.len(), 2, "the stack is unchanged");
+        assert!(
+            nav_widget(&root).transition.is_none(),
+            "the transition finalized"
+        );
+    }
+
+    // --- Criterion 1e: a low-progress high-velocity release completes the pop. ---
+
+    #[test]
+    fn low_progress_high_velocity_release_completes() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        controller.push(|| sized_page(100.0, 60.0)); // B, instant
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // Fast flick: x 5→25 in 10 ms ≈ 2000 px/s, but progress only 0.20 (< 0.5).
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(10));
+        root.event(&mut state, &move_to(25.0, 50.0)); // steal, progress 0.20
+        assert!(
+            nav_widget(&root)
+                .transition
+                .as_ref()
+                .map(|t| t.driver.value() < EDGE_SWIPE_COMMIT_PROGRESS)
+                .unwrap_or(false),
+            "progress is below the commit threshold at release"
+        );
+        root.paint(&mut scene, ft(20));
+        root.event(&mut state, &up(25.0, 50.0)); // low progress, high velocity → complete
+
+        let fills = run_until_settled(&mut root, &mut app, &mut state, 100);
+        assert_eq!(fills.len(), 1, "the fast flick completed the pop");
+        assert!(
+            (fills[0].1.height - 100.0).abs() < 1e-9,
+            "the surviving page is A"
+        );
+        assert_eq!(
+            nav_widget(&root).pages.len(),
+            1,
+            "the stack shrank to one page"
+        );
+    }
+
+    // --- A system Cancel mid-drag takes the cancel path (page restored). ---
+
+    #[test]
+    fn system_cancel_mid_drag_cancels_pop() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        controller.push(|| sized_page(100.0, 60.0)); // B, instant
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // Steal an interactive pop, then a system Cancel arrives mid-drag: the pop
+        // cancels and the page is restored (no application-state access — a Cancel
+        // arm must never touch state).
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(100));
+        root.event(&mut state, &move_to(70.0, 50.0)); // steal, progress 0.65
+        assert!(nav_widget(&root).edge.active, "the swipe is driving");
+        root.paint(&mut scene, ft(200));
+        root.event(&mut state, &cancel_ev(70.0, 50.0)); // system gesture steal
+        assert!(
+            !nav_widget(&root).edge.active,
+            "the cancel released the drive"
+        );
+
+        // After settle the pop was cancelled: page B is restored on top (depth 2).
+        let fills = run_until_settled(&mut root, &mut app, &mut state, 300);
+        assert_eq!(
+            fills.len(),
+            1,
+            "cancelled pop leaves the opaque top painting"
+        );
+        assert!(
+            (fills[0].1.height - 60.0).abs() < 1e-9,
+            "page B was restored"
+        );
+        assert_eq!(nav_widget(&root).pages.len(), 2, "the stack is unchanged");
+    }
+
+    // --- Criterion 2 (a): a non-edge drag never arms the gesture. ---
+
+    #[test]
+    fn non_edge_down_never_arms() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        controller.push(|| sized_page(100.0, 60.0));
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // A Down well inside the page (x=50, past the ~20px edge zone) never arms.
+        root.event(&mut state, &down(50.0, 50.0));
+        assert!(
+            !nav_widget(&root).edge.armed,
+            "a non-edge Down does not arm"
+        );
+        root.paint(&mut scene, ft(16));
+        root.event(&mut state, &move_to(90.0, 50.0)); // large rightward drag
+        assert!(
+            !nav_widget(&root).edge.active,
+            "no steal from a non-edge drag"
+        );
+        assert!(
+            nav_widget(&root).transition.is_none(),
+            "no interactive pop began"
+        );
+    }
+
+    // --- Criterion 2 (b): a vertical drag starting in the edge zone stays with the
+    //     page (a ScrollView child scrolls normally). ---
+
+    #[test]
+    fn vertical_drag_in_edge_zone_stays_with_page() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let moves = Rc::new(Cell::new(0u32));
+        let cancelled = Rc::new(Cell::new(false));
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        {
+            let m = moves.clone();
+            let c = cancelled.clone();
+            controller.push(move || drag_probe_page(&m, &c));
+        }
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // Down in the edge zone (arms), then a vertical drag: the arm releases and
+        // the page keeps the gesture — the child keeps receiving moves, no Cancel.
+        root.event(&mut state, &down(5.0, 30.0));
+        assert!(nav_widget(&root).edge.armed, "edge-zone Down arms");
+        root.paint(&mut scene, ft(16));
+        root.event(&mut state, &move_to(5.0, 70.0)); // vertical → disarm, yield
+        root.paint(&mut scene, ft(32));
+        root.event(&mut state, &move_to(5.0, 100.0)); // stays with the page
+
+        assert!(
+            !cancelled.get(),
+            "a vertical drag never steals from the page"
+        );
+        assert!(moves.get() >= 1, "the page keeps receiving the drag moves");
+        assert!(
+            !nav_widget(&root).edge.active,
+            "no interactive pop for a vertical drag"
+        );
+        assert!(nav_widget(&root).transition.is_none());
+    }
+
+    // --- Criterion 3: a depth-1 stack disables the gesture. ---
+
+    #[test]
+    fn depth_one_stack_disables_gesture() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // A single-page stack: an edge Down never arms (nothing to pop back to).
+        root.event(&mut state, &down(5.0, 50.0));
+        assert!(!nav_widget(&root).edge.armed, "depth-1 stack: no arm");
+        root.paint(&mut scene, ft(16));
+        root.event(&mut state, &move_to(60.0, 50.0));
+        assert!(
+            nav_widget(&root).transition.is_none(),
+            "no interactive pop at depth 1"
+        );
+    }
+
+    // --- Criterion 4 / config: pop-swipe defaults on for the iOS-push preset. ---
+
+    #[test]
+    fn pop_swipe_defaults_on_for_ios_preset() {
+        // Default transition IosPush → gesture enabled without an explicit flag.
+        let ios = NavigatorController::<()>::new();
+        let mut root_ios: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app_ios = {
+            let ctrl = ios.clone();
+            move |_: &mut ()| {
+                navigator(&ctrl, || sized_page(10.0, 10.0))
+                    .transition(TransitionSpec::duration(PageTransition::IosPush))
+            }
+        };
+        let mut s = ();
+        root_ios.rebuild(&mut app_ios, &mut s);
+        assert!(
+            nav_widget(&root_ios).pop_swipe_enabled,
+            "iOS-push default enables the pop-swipe"
+        );
+
+        // Default transition NONE → gesture off unless explicitly enabled.
+        let plain = NavigatorController::<()>::new();
+        let mut root_plain: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app_plain = {
+            let ctrl = plain.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(10.0, 10.0))
+        };
+        let mut s2 = ();
+        root_plain.rebuild(&mut app_plain, &mut s2);
+        assert!(
+            !nav_widget(&root_plain).pop_swipe_enabled,
+            "the default (instant) preset leaves the pop-swipe off"
+        );
     }
 }
