@@ -31,6 +31,64 @@ use forgekit_reactive::{DeepLink, deep_links};
 use forgekit_widgets::Router;
 use reactive_graph::traits::Get;
 
+/// Normalize a raw deep-link source string into a router-ready path (Finding
+/// 8, 6e-fix-1 task 04). Platform shells push the RAW URL as delivered by the
+/// OS (`fktest://item/7`, or `https://host/item/7`) into the deep-link
+/// source, but the router only understands bare paths —
+/// `forgekit_widgets::nav::path::Location::parse` splits on `/` with no
+/// scheme awareness, so an unnormalized `fktest://item/7` becomes the bogus
+/// path `/fktest:/item/7`. Per this module's own docs (top of file), this
+/// crate is the one place that sees both the router and the deep-link
+/// source, so the URL→path translation lives here — hand-rolled and
+/// dependency-free (no `url` crate in the workspace), mirroring
+/// `path.rs`'s own precedent.
+///
+/// Rules:
+/// 1. No `://` in the string → already a bare path; pass through unchanged
+///    (bare-path sources like navdemo's simulate-deep-link button, plus
+///    defense-in-depth).
+/// 2. Has `://` → split `scheme://rest`:
+///    - `http`/`https` (universal/App Links): drop the host — keep from the
+///      first `/` of `rest` onward (`https://host/item/7` → `/item/7`; no
+///      `/` at all, e.g. `https://host`, → `/`).
+///    - Any other (custom) scheme: map host+path
+///      (`fktest://item/7` → `/item/7`, host `item` + `/7`; a hostless
+///      `fktest:///settings` → `/settings`).
+/// 3. The result always starts with `/`.
+///
+/// Graceful on unmappable input by construction — worst case it produces `/`
+/// or an unmatched path, which `Router::handle_location` already routes to
+/// the error page like any other unmatched location (see this module's
+/// tests' Criterion 3); it never panics.
+fn normalize_deep_link(raw: &str) -> String {
+    let Some((scheme, rest)) = raw.split_once("://") else {
+        // Rule 1.
+        return raw.to_string();
+    };
+
+    if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+        // Rule 2, universal/App Links: drop the host.
+        return match rest.find('/') {
+            Some(idx) => rest[idx..].to_string(),
+            None => "/".to_string(),
+        };
+    }
+
+    // Rule 2, custom scheme: map host+path. `rest` is `host/path...` — or,
+    // for a hostless `scheme:///path`, `/path...` (an empty host before the
+    // first `/`).
+    let (host, tail) = match rest.split_once('/') {
+        Some((h, t)) => (h, Some(t)),
+        None => (rest, None),
+    };
+    match (host.is_empty(), tail) {
+        (true, Some(t)) if !t.is_empty() => format!("/{t}"),
+        (true, _) => "/".to_string(),
+        (false, Some(t)) if !t.is_empty() => format!("/{host}/{t}"),
+        (false, _) => format!("/{host}"),
+    }
+}
+
 /// A [`Router`] wired to the process-wide deep-link source (see the module
 /// docs). Construct once with [`router_with_deep_links`] (or
 /// [`RouterDeepLinks::new`] directly) — typically from `Component::init`,
@@ -58,7 +116,7 @@ impl<State: 'static> RouterDeepLinks<State> {
             .initial
             .clone()
             .unwrap_or_else(|| initial_location.to_string());
-        router.handle_location(&start);
+        router.handle_location(&normalize_deep_link(&start));
 
         // The link that resolved the start location (if any) is already
         // handled — record it as consumed so the first `track()` call, which
@@ -85,7 +143,7 @@ impl<State: 'static> RouterDeepLinks<State> {
             return;
         }
         *self.consumed.borrow_mut() = Some(link.clone());
-        self.router.handle_location(&link.url);
+        self.router.handle_location(&normalize_deep_link(&link.url));
     }
 
     /// The wired router — hand its [`controller()`](Router::controller) to
@@ -332,5 +390,67 @@ mod tests {
         // page — no panic.
         push_deep_link("/does/not/exist");
         assert_eq!(warm.track_and_paint(), ERROR);
+    }
+
+    // --- `normalize_deep_link` (Finding 8, 6e-fix-1 task 04): one rule
+    // branch per test, mirroring `path.rs`'s test-heavy style for its own
+    // hand-rolled parser.
+
+    #[test]
+    fn normalize_bare_path_passes_through() {
+        // Rule 1: no `://` at all — pass through unchanged, including
+        // already-normalized paths and query strings.
+        assert_eq!(normalize_deep_link("/item/7"), "/item/7");
+        assert_eq!(normalize_deep_link("/"), "/");
+        assert_eq!(normalize_deep_link("/search?q=asdf"), "/search?q=asdf");
+    }
+
+    #[test]
+    fn normalize_custom_scheme_host_and_path() {
+        // Rule 2, custom scheme: host + path segments both map into the
+        // result path.
+        assert_eq!(normalize_deep_link("fktest://item/7"), "/item/7");
+        assert_eq!(
+            normalize_deep_link("fktest://item/7/nested"),
+            "/item/7/nested"
+        );
+    }
+
+    #[test]
+    fn normalize_custom_scheme_host_only() {
+        // Custom scheme with a host and no further path segments.
+        assert_eq!(normalize_deep_link("fktest://settings"), "/settings");
+    }
+
+    #[test]
+    fn normalize_custom_scheme_hostless() {
+        // Rule 2, custom scheme, hostless (`scheme:///path`): the empty host
+        // before the triple slash contributes nothing.
+        assert_eq!(normalize_deep_link("fktest:///settings"), "/settings");
+    }
+
+    #[test]
+    fn normalize_https_universal_link_drops_host() {
+        // Rule 2, http(s): the host is dropped entirely, keeping only the
+        // path onward.
+        assert_eq!(normalize_deep_link("https://host/item/7"), "/item/7");
+        assert_eq!(normalize_deep_link("http://host/item/7"), "/item/7");
+        // Scheme match is case-insensitive.
+        assert_eq!(normalize_deep_link("HTTPS://host/item/7"), "/item/7");
+    }
+
+    #[test]
+    fn normalize_trailing_and_empty_edge_cases() {
+        // https with a trailing slash and no further segments -> root.
+        assert_eq!(normalize_deep_link("https://host/"), "/");
+        // https with no path at all -> root.
+        assert_eq!(normalize_deep_link("https://host"), "/");
+        // Custom scheme with a trailing slash after the host -> host only.
+        assert_eq!(normalize_deep_link("fktest://item/"), "/item");
+        // Custom scheme with nothing after the scheme delimiter at all ->
+        // root, gracefully (no panic on unmappable input).
+        assert_eq!(normalize_deep_link("fktest://"), "/");
+        // Empty string has no `://` -> Rule 1 passthrough, unchanged.
+        assert_eq!(normalize_deep_link(""), "");
     }
 }
