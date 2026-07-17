@@ -29,9 +29,8 @@ use peniko::Color;
 /// fallback). With no theme threaded in, the style's own color (black by default)
 /// is the unthemed fallback.
 // Every variant names an M3 "on_*" color role (`on_surface`/`on_primary`/
-// `on_surface_variant`) — the shared `On` prefix reflects the token
-// vocabulary, not a naming smell; a fourth role (`OnSecondaryContainer`, say)
-// would keep the same shape.
+// `on_surface_variant`/`on_primary_container`) — the shared `On` prefix
+// reflects the token vocabulary, not a naming smell.
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ThemeTextColor {
@@ -44,6 +43,10 @@ pub(crate) enum ThemeTextColor {
     /// surface (used by [`crate::material::navbar`]'s unselected item labels
     /// and [`crate::material::appbar`]'s trailing action slots' guidance).
     OnSurfaceVariant,
+    /// `colors.on_primary_container` — a label painted over a
+    /// `primary_container`-filled surface (used by
+    /// [`crate::material::fab`]'s extended-FAB visible label).
+    OnPrimaryContainer,
 }
 
 /// A declarative description of a run of text.
@@ -212,6 +215,7 @@ impl TextWidget {
                     ThemeTextColor::OnSurface => scheme.on_surface,
                     ThemeTextColor::OnPrimary => scheme.on_primary,
                     ThemeTextColor::OnSurfaceVariant => scheme.on_surface_variant,
+                    ThemeTextColor::OnPrimaryContainer => scheme.on_primary_container,
                 };
                 let mut style = self.style.clone();
                 style.color = color;
@@ -364,6 +368,16 @@ mod tests {
         assert_eq!(
             painted_color(view, Some(&theme)),
             theme.scheme().on_surface_variant
+        );
+    }
+
+    #[test]
+    fn on_primary_container_role_resolves_to_on_primary_container() {
+        let theme = Theme::m3_baseline();
+        let view = text("x").themed_role(ThemeTextColor::OnPrimaryContainer);
+        assert_eq!(
+            painted_color(view, Some(&theme)),
+            theme.scheme().on_primary_container
         );
     }
 
