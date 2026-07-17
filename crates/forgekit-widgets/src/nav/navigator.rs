@@ -52,9 +52,14 @@ use std::rc::Rc;
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EditingState, EventCtx, EventResult,
-    ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+    ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, SpringDesc, View, Widget,
 };
 use kurbo::{Point, Size};
+
+use super::transition::{
+    Layer, PageTransition, TransitionDriver, TransitionSpec, make_driver, resolve_layers,
+    settle_driver,
+};
 
 /// A page builder: a cheap closure that produces the page's view, re-run every
 /// rebuild so a retained page's content still reconciles against live app state
@@ -116,14 +121,19 @@ enum NavOp<State: 'static> {
         builder: PageBuilder<State>,
         opaque: bool,
         on_result: Option<ResultCallback<State>>,
+        /// Per-op transition override (`None` → the navigator's default).
+        transition: Option<TransitionSpec>,
     },
     /// Pop the top page (never the last/root page), delivering `result` to the
-    /// popped page's pusher-registered callback.
+    /// popped page's pusher-registered callback. A pop *reverses* the popped
+    /// page's own stored transition (no override slot).
     Pop { result: PopResult },
     /// Replace the top page in place.
     Replace {
         builder: PageBuilder<State>,
         opaque: bool,
+        /// Per-op transition override (`None` → the navigator's default).
+        transition: Option<TransitionSpec>,
     },
 }
 
@@ -160,12 +170,30 @@ impl<State: 'static> NavigatorController<State> {
         }
     }
 
-    /// Push an **opaque** page built by `builder` on top of the stack.
+    /// Push an **opaque** page built by `builder` on top of the stack, using the
+    /// navigator's default transition (instant unless the navigator sets one).
     pub fn push(&self, builder: impl Fn() -> AnyView<State> + 'static) {
         self.enqueue(NavOp::Push {
             builder: Rc::new(builder),
             opaque: true,
             on_result: None,
+            transition: None,
+        });
+    }
+
+    /// Push an **opaque** page with an explicit [`TransitionSpec`], overriding the
+    /// navigator's default for this push only. The spec is stored on the pushed
+    /// page and *reversed* when it is later popped.
+    pub fn push_with(
+        &self,
+        builder: impl Fn() -> AnyView<State> + 'static,
+        transition: TransitionSpec,
+    ) {
+        self.enqueue(NavOp::Push {
+            builder: Rc::new(builder),
+            opaque: true,
+            on_result: None,
+            transition: Some(transition),
         });
     }
 
@@ -176,6 +204,7 @@ impl<State: 'static> NavigatorController<State> {
             builder: Rc::new(builder),
             opaque: false,
             on_result: None,
+            transition: None,
         });
     }
 
@@ -194,6 +223,7 @@ impl<State: 'static> NavigatorController<State> {
             builder: Rc::new(builder),
             opaque: true,
             on_result: Some(Rc::new(on_result)),
+            transition: None,
         });
     }
 
@@ -211,11 +241,27 @@ impl<State: 'static> NavigatorController<State> {
         self.enqueue(NavOp::Pop { result });
     }
 
-    /// Replace the top page in place with an opaque page built by `builder`.
+    /// Replace the top page in place with an opaque page built by `builder`,
+    /// using the navigator's default transition.
     pub fn replace(&self, builder: impl Fn() -> AnyView<State> + 'static) {
         self.enqueue(NavOp::Replace {
             builder: Rc::new(builder),
             opaque: true,
+            transition: None,
+        });
+    }
+
+    /// Replace the top page with an explicit [`TransitionSpec`], overriding the
+    /// navigator's default for this replace only.
+    pub fn replace_with(
+        &self,
+        builder: impl Fn() -> AnyView<State> + 'static,
+        transition: TransitionSpec,
+    ) {
+        self.enqueue(NavOp::Replace {
+            builder: Rc::new(builder),
+            opaque: true,
+            transition: Some(transition),
         });
     }
 
@@ -234,6 +280,20 @@ impl<State: 'static> NavigatorController<State> {
 pub struct NavigatorView<State: 'static> {
     controller: NavigatorController<State>,
     initial: PageBuilder<State>,
+    /// The transition applied to a push/replace that supplies no per-op override.
+    /// Defaults to [`TransitionSpec::NONE`] (instant switches — the task-02
+    /// behavior).
+    default_transition: TransitionSpec,
+}
+
+impl<State: 'static> NavigatorView<State> {
+    /// Set the default page transition applied to every push/replace that does
+    /// not carry its own [`push_with`](NavigatorController::push_with)/
+    /// [`replace_with`](NavigatorController::replace_with) override.
+    pub fn transition(mut self, spec: TransitionSpec) -> Self {
+        self.default_transition = spec;
+        self
+    }
 }
 
 /// Build a [`NavigatorView`] driven by `controller`, whose initial (root) page is
@@ -245,6 +305,7 @@ pub fn navigator<State: 'static>(
     NavigatorView {
         controller: controller.clone(),
         initial: Rc::new(initial),
+        default_transition: TransitionSpec::NONE,
     }
 }
 
@@ -257,15 +318,34 @@ struct PageEntry<State: 'static> {
     pod: ChildPod,
     opaque: bool,
     on_result: Option<ResultCallback<State>>,
+    /// The transition this page was pushed/replaced with — *reversed* when the
+    /// page is later popped (a pop animates the popped page's own transition
+    /// backwards, Flutter-parity: a route carries its transition).
+    transition: TransitionSpec,
 }
 
-/// The reserved per-widget transition state (task 03).
-///
-/// Instant switches only in task 02; this zero-sized slot reserves the widget
-/// field so task 03 extends paint/layout (per-page paint offset is already the
-/// pod origin) without changing `NavigatorWidget`'s struct shape.
-#[derive(Default)]
-struct TransitionState;
+/// The single in-flight page transition a [`NavigatorWidget`] owns (Flutter
+/// parity: created per push/pop, disposed on settle). Pairs the progress
+/// [`TransitionDriver`] with the retained *leaving* page, when the op removed it
+/// from the stack (pop/replace); a push's leaving page stays in the stack below
+/// the new top, so `stashed` is `None` there.
+struct ActiveTransition<State: 'static> {
+    /// Drives `0.0..=1.0`; advanced from `PaintCtx::frame_time` during paint.
+    driver: TransitionDriver,
+    /// The visual preset (slide/fade/parallax geometry).
+    preset: PageTransition,
+    /// Direction: `true` reverses the horizontal motion + paint order (a pop).
+    is_pop: bool,
+    /// The removed page retained until settle (pop/replace). `None` for a push,
+    /// whose leaving page is still in the stack at `len - 2`.
+    stashed: Option<PageEntry<State>>,
+    /// The spring a manual [`settle`](NavigatorWidget::settle_transition) uses
+    /// when the timing mode is duration-based (a duration has no spring).
+    settle_spring: SpringDesc,
+    /// Set by paint when the driver reaches rest; the next rebuild finalizes the
+    /// transition (tears down `stashed`, resumes culling).
+    settled: bool,
+}
 
 /// The retained widget for a [`NavigatorView`]: owns the page stack and applies
 /// the [`NavigatorController`]'s queued ops at rebuild. See the [module docs](self).
@@ -277,9 +357,12 @@ pub struct NavigatorWidget<State: 'static> {
     /// Set on every stack mutation; the next paint publishes a cleared IME surface
     /// and clears this, so the platform keyboard hides deterministically.
     needs_ime_clear: bool,
-    /// Reserved for task 03; unused in task 02 (see [`TransitionState`]).
-    #[allow(dead_code)]
-    transition: TransitionState,
+    /// The navigator's default transition (per-op overrides win). Refreshed from
+    /// the view on rebuild so an app can change it live.
+    default_transition: TransitionSpec,
+    /// The single in-flight transition, if any (task 03). `None` between
+    /// transitions — the common case, where paint/layout cull normally.
+    transition: Option<ActiveTransition<State>>,
 }
 
 impl<State: 'static> NavigatorWidget<State> {
@@ -314,6 +397,73 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
+    /// The effective transition for an op, resolving a `None` per-op override to
+    /// the navigator's default.
+    fn effective_spec(&self, over: Option<TransitionSpec>) -> TransitionSpec {
+        over.unwrap_or(self.default_transition)
+    }
+
+    /// Begin a new transition, finalizing any in-flight one first (a new op
+    /// supersedes a running transition — snap it to its end and tear down its
+    /// retained page). `stashed` is the removed leaving page (pop/replace) or
+    /// `None` for a push (leaving stays in the stack).
+    fn start_transition(
+        &mut self,
+        spec: TransitionSpec,
+        is_pop: bool,
+        stashed: Option<PageEntry<State>>,
+        ctx: &mut BuildCtx<'_>,
+    ) {
+        self.finalize_transition(ctx);
+        let (driver, settle_spring) = make_driver(spec.timing);
+        self.transition = Some(ActiveTransition {
+            driver,
+            preset: spec.preset,
+            is_pop,
+            stashed,
+            settle_spring,
+            settled: false,
+        });
+    }
+
+    /// Dispose the active transition: tear down its retained (leaving) page, if
+    /// any, and drop it. Called on settle (from rebuild) and when a new op
+    /// supersedes a running transition.
+    fn finalize_transition(&mut self, ctx: &mut BuildCtx<'_>) {
+        if let Some(mut t) = self.transition.take()
+            && let Some(mut stashed) = t.stashed.take()
+        {
+            crate::teardown_child(&stashed.view, &mut stashed.pod, ctx);
+        }
+    }
+
+    /// Task 05 seam: pin the active transition's progress to `p` (an edge-swipe
+    /// drag holds it here between frames). No-op if no transition is active.
+    ///
+    /// The gesture that drives this lives in task 05; the navigator supplies the
+    /// held-progress driver state a swipe manipulates.
+    pub fn set_transition_progress(&mut self, p: f64) {
+        if let Some(t) = self.transition.as_mut() {
+            t.driver = TransitionDriver::Held { value: p };
+            t.settled = false;
+        }
+    }
+
+    /// Task 05 seam: release the active transition into a spring settle toward
+    /// `1.0` (non-negative `velocity`) or `0.0` (negative). No-op if no transition.
+    ///
+    /// Note: a settle toward `0.0` runs the *visual* reversal, but restoring the
+    /// stack (un-popping the retained page on a cancelled pop) is task 05's
+    /// responsibility — this seam only drives the progress driver.
+    pub fn settle_transition(&mut self, velocity: f64) {
+        if let Some(t) = self.transition.as_mut() {
+            let from = t.driver.value();
+            let target = if velocity >= 0.0 { 1.0 } else { 0.0 };
+            t.driver = settle_driver(t.settle_spring, from, velocity, target);
+            t.settled = false;
+        }
+    }
+
     /// Drain and apply the controller's queued ops (structural changes only),
     /// building/tearing down pods through `ctx`. Returns the accumulated dirtiness.
     fn apply_ops(&mut self, ops: Vec<NavOp<State>>, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
@@ -324,7 +474,9 @@ impl<State: 'static> NavigatorWidget<State> {
                     builder,
                     opaque,
                     on_result,
+                    transition,
                 } => {
+                    let spec = self.effective_spec(transition);
                     self.cancel_top();
                     let view = builder();
                     let pod = crate::build_child(&view, ctx);
@@ -334,8 +486,14 @@ impl<State: 'static> NavigatorWidget<State> {
                         pod,
                         opaque,
                         on_result,
+                        transition: spec,
                     });
                     self.needs_ime_clear = true;
+                    // A push's leaving page (now at `len - 2`) stays in the stack;
+                    // the transition keeps it painted (culling deferred to settle).
+                    if spec.is_animated() && self.pages.len() >= 2 {
+                        self.start_transition(spec, false, None, ctx);
+                    }
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
                 NavOp::Pop { result } => {
@@ -344,27 +502,48 @@ impl<State: 'static> NavigatorWidget<State> {
                     if self.pages.len() > 1 {
                         self.cancel_top();
                         let mut popped = self.pages.pop().expect("len checked > 1");
-                        crate::teardown_child(&popped.view, &mut popped.pod, ctx);
+                        let spec = popped.transition;
                         if let Some(callback) = popped.on_result.take() {
                             self.pending_results.push((callback, result));
                         }
                         self.needs_ime_clear = true;
+                        if spec.is_animated() {
+                            // Keep the popped page alive & painted, animating out;
+                            // torn down on settle (a pop reverses its transition).
+                            self.start_transition(spec, true, Some(popped), ctx);
+                        } else {
+                            crate::teardown_child(&popped.view, &mut popped.pod, ctx);
+                        }
                         flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                     }
                 }
-                NavOp::Replace { builder, opaque } => {
+                NavOp::Replace {
+                    builder,
+                    opaque,
+                    transition,
+                } => {
+                    let spec = self.effective_spec(transition);
                     self.cancel_top();
                     let view = builder();
                     let pod = crate::build_child(&view, ctx);
                     if let Some(top) = self.pages.last_mut() {
-                        crate::teardown_child(&top.view, &mut top.pod, ctx);
-                        *top = PageEntry {
+                        let entry = PageEntry {
                             builder,
                             view,
                             pod,
                             opaque,
                             on_result: None,
+                            transition: spec,
                         };
+                        if spec.is_animated() {
+                            // Stash the old top and animate the new one in over it
+                            // (push-like direction); torn down on settle.
+                            let old = std::mem::replace(top, entry);
+                            self.start_transition(spec, false, Some(old), ctx);
+                        } else {
+                            crate::teardown_child(&top.view, &mut top.pod, ctx);
+                            *top = entry;
+                        }
                     } else {
                         // Defensive: an empty stack should not occur (build seeds
                         // the root page), but replace-into-empty pushes.
@@ -374,6 +553,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             pod,
                             opaque,
                             on_result: None,
+                            transition: spec,
                         });
                     }
                     self.needs_ime_clear = true;
@@ -382,6 +562,139 @@ impl<State: 'static> NavigatorWidget<State> {
             }
         }
         flags
+    }
+
+    /// Lay out the two pages a transition involves (entering = top of stack,
+    /// leaving = the retained page or the page below), returning the union size.
+    /// Origins are reset to `ZERO`; paint applies the animated offset per frame.
+    fn layout_transition(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let mut size = Size::ZERO;
+        if let Some(entry) = self.pages.last_mut() {
+            let child = entry.pod.layout_child(ctx, bc);
+            entry.pod.set_origin(Point::ZERO);
+            size = Size::new(size.width.max(child.width), size.height.max(child.height));
+        }
+        // Leaving page: retained (pop/replace) or the page below (push).
+        let has_stashed = self
+            .transition
+            .as_ref()
+            .map(|t| t.stashed.is_some())
+            .unwrap_or(false);
+        if has_stashed {
+            if let Some(t) = self.transition.as_mut()
+                && let Some(stashed) = t.stashed.as_mut()
+            {
+                let child = stashed.pod.layout_child(ctx, bc);
+                stashed.pod.set_origin(Point::ZERO);
+                size = Size::new(size.width.max(child.width), size.height.max(child.height));
+            }
+        } else {
+            let n = self.pages.len();
+            if n >= 2 {
+                let child = self.pages[n - 2].pod.layout_child(ctx, bc);
+                self.pages[n - 2].pod.set_origin(Point::ZERO);
+                size = Size::new(size.width.max(child.width), size.height.max(child.height));
+            }
+        }
+        bc.constrain(size)
+    }
+
+    /// Paint a transition frame: advance the driver, resolve per-page geometry,
+    /// and paint both pages (clipped to the navigator area) in the order the
+    /// direction dictates. Requests the next frame while running; flags `settled`
+    /// (finalized on the next rebuild) once the driver reaches rest.
+    fn paint_transition(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let (adv, is_pop, preset, has_stashed) = {
+            let t = self.transition.as_mut().expect("transition present");
+            let adv = t.driver.advance(ctx.frame_time());
+            (adv, t.is_pop, t.preset, t.stashed.is_some())
+        };
+        let area = ctx.size();
+        let (enter_layer, leave_layer) = resolve_layers(preset, adv.value, is_pop, area);
+
+        // Clip every offset page to the navigator's own area — content that slides
+        // off-screen must not bleed past the navigator (relevant when nested).
+        scene.push_clip(ctx.origin(), area);
+        // Paint order: a push paints leaving (below) then entering (on top); a pop
+        // paints entering (revealed, below) then leaving (popped, on top).
+        if is_pop {
+            self.paint_entering(ctx, scene, enter_layer, area);
+            self.paint_leaving(ctx, scene, leave_layer, area, has_stashed);
+        } else {
+            self.paint_leaving(ctx, scene, leave_layer, area, has_stashed);
+            self.paint_entering(ctx, scene, enter_layer, area);
+        }
+        scene.pop_clip();
+
+        if adv.animating {
+            ctx.request_frame();
+        }
+        if adv.done {
+            // Settle: mark for finalize and request one more frame so the next
+            // rebuild tears down the retained page and resumes culling.
+            if let Some(t) = self.transition.as_mut() {
+                t.settled = true;
+            }
+            ctx.request_frame();
+        }
+    }
+
+    /// Paint the entering page (always the stack top) with `layer`.
+    fn paint_entering(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        layer: Layer,
+        area: Size,
+    ) {
+        if let Some(entry) = self.pages.last_mut() {
+            paint_page_layer(&mut entry.pod, ctx, scene, layer, area);
+        }
+    }
+
+    /// Paint the leaving page — the retained page (pop/replace) or the page below
+    /// the new top (push) — with `layer`.
+    fn paint_leaving(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        layer: Layer,
+        area: Size,
+        has_stashed: bool,
+    ) {
+        if has_stashed {
+            if let Some(t) = self.transition.as_mut()
+                && let Some(stashed) = t.stashed.as_mut()
+            {
+                paint_page_layer(&mut stashed.pod, ctx, scene, layer, area);
+            }
+        } else {
+            let n = self.pages.len();
+            if n >= 2 {
+                paint_page_layer(&mut self.pages[n - 2].pod, ctx, scene, layer, area);
+            }
+        }
+    }
+}
+
+/// Paint one transition page: offset its pod origin by the layer's `dx` (so paint
+/// and hit-testing move together), and composite at the layer's opacity via a
+/// `push_layer`/`pop_layer` pair when it is below full opacity.
+fn paint_page_layer(
+    pod: &mut ChildPod,
+    ctx: &mut PaintCtx,
+    scene: &mut dyn PaintScene,
+    layer: Layer,
+    area: Size,
+) {
+    pod.set_origin(Point::new(layer.dx, 0.0));
+    let alpha = layer.alpha.clamp(0.0, 1.0);
+    if alpha < 1.0 {
+        scene.push_layer(ctx.origin(), area, alpha);
+        pod.paint_child(ctx, scene);
+        scene.pop_layer();
+    } else {
+        pod.paint_child(ctx, scene);
     }
 }
 
@@ -398,10 +711,12 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 pod,
                 opaque: true,
                 on_result: None,
+                transition: self.default_transition,
             }],
             pending_results: Vec::new(),
             needs_ime_clear: false,
-            transition: TransitionState,
+            default_transition: self.default_transition,
+            transition: None,
         };
         // Apply any ops the app queued before the first frame.
         let ops = self.controller.drain();
@@ -418,10 +733,24 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
+        // Keep the widget's default transition in sync with the view so an app can
+        // change it live (per-op overrides always win over it).
+        element.default_transition = self.default_transition;
         // 1. Structural ops (view-driven): push/pop/replace the retained stack.
         let ops = self.controller.drain();
         if !ops.is_empty() {
             flags |= element.apply_ops(ops, ctx);
+        }
+        // 1b. Finalize a transition that settled during the previous paint: tear
+        //     down its retained (leaving) page and resume normal culling.
+        if element
+            .transition
+            .as_ref()
+            .map(|t| t.settled)
+            .unwrap_or(false)
+        {
+            element.finalize_transition(ctx);
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         // 2. Reconcile every retained page (including culled ones) by re-running
         //    its builder against live state — the pod, and thus the page's own
@@ -435,6 +764,8 @@ impl<State: 'static> View<State> for NavigatorView<State> {
     }
 
     fn teardown(&self, element: &mut NavigatorWidget<State>, ctx: &mut BuildCtx<'_>) {
+        // Tear down a transition's retained (leaving) page first, then the stack.
+        element.finalize_transition(ctx);
         for entry in &mut element.pages {
             crate::teardown_child(&entry.view, &mut entry.pod, ctx);
         }
@@ -443,6 +774,11 @@ impl<State: 'static> View<State> for NavigatorView<State> {
 
 impl<State: 'static> Widget for NavigatorWidget<State> {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // While a transition runs, both involved pages must be laid out (culling
+        // is deferred to settle — Flutter opaque-route parity).
+        if self.transition.is_some() {
+            return self.layout_transition(ctx, bc);
+        }
         // Lay out only the visible range (topmost opaque page + any transparent
         // pages above it); covered pages keep their retained widgets but are not
         // laid out while covered (re-laid-out on the next frame once revealed).
@@ -459,11 +795,17 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        // Paint the visible range bottom-to-top: only the topmost opaque page (and
-        // any transparent pages above it) — every fully-covered page is culled.
-        let start = self.base_visible_index();
-        for entry in &mut self.pages[start..] {
-            entry.pod.paint_child(ctx, scene);
+        if self.transition.is_some() {
+            // Animated page switch: paint both involved pages with per-frame
+            // offsets/opacity and drive the transition off the frame clock.
+            self.paint_transition(ctx, scene);
+        } else {
+            // Paint the visible range bottom-to-top: only the topmost opaque page
+            // (and any transparent pages above it) — fully-covered pages are culled.
+            let start = self.base_visible_index();
+            for entry in &mut self.pages[start..] {
+                entry.pod.paint_child(ctx, scene);
+            }
         }
         // Deterministic IME hide after a stack mutation: publish a cleared surface
         // so the platform keyboard drops immediately rather than waiting for the
@@ -484,6 +826,16 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
             for (callback, result) in pending {
                 callback(state, result);
             }
+        }
+        // Input-blocking contract (refuter-verified, STRICT): while a transition
+        // is in flight, suppress ALL routing to pages. Capture routing lives
+        // entirely inside this `event` (no RenderRoot bypass), so returning
+        // without routing guarantees a mid-transition `Down` reaches no page and
+        // records no `active`/focus path — the involved pages' captures were
+        // already synthetically cancelled at transition start (`cancel_top`).
+        // Routing resumes only once the transition is finalized (settled).
+        if self.transition.is_some() {
+            return EventResult::Ignored;
         }
         // Route to the top page only (capture/focus/blur handled by the shared
         // single-child router).
@@ -1005,5 +1357,343 @@ mod tests {
         assert_eq!(PopResult::of(7u8).take::<i64>(), None);
         assert!(PopResult::empty().is_empty());
         assert_eq!(PopResult::empty().take::<u8>(), None);
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 03: page-transition machinery.
+    // ---------------------------------------------------------------------
+
+    use super::super::transition::{PageTransition, Timing, TransitionSpec};
+    use forgekit_core::Curve;
+    use forgekit_theme::MotionSpring;
+    use std::time::Duration;
+
+    /// A recording scene that captures each fill's (origin, size) *and* the alpha
+    /// of the enclosing `push_layer` — so a transition test can assert both a
+    /// page's animated offset (origin) and its opacity.
+    #[derive(Default)]
+    struct TransitionScene {
+        fills: Vec<(Point, Size, f32)>,
+        layer_alpha: Vec<f32>,
+    }
+    impl PaintScene for TransitionScene {
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: peniko::Color) {
+            let alpha = self.layer_alpha.last().copied().unwrap_or(1.0);
+            self.fills.push((origin, size, alpha));
+        }
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_layer(&mut self, _origin: Point, _size: Size, alpha: f32) {
+            self.layer_alpha.push(alpha);
+        }
+        fn pop_layer(&mut self) {
+            self.layer_alpha.pop();
+        }
+    }
+
+    fn ft(ms: u64) -> FrameTime {
+        FrameTime::from_nanos(ms * 1_000_000)
+    }
+
+    /// Run one full frame (rebuild → layout → paint) at `time`, returning the
+    /// recorded fills and whether another frame was requested.
+    fn full_frame(
+        root: &mut RenderRoot<(), NavigatorView<()>>,
+        app: &mut impl FnMut(&mut ()) -> NavigatorView<()>,
+        state: &mut (),
+        time: FrameTime,
+    ) -> (Vec<(Point, Size, f32)>, bool) {
+        root.rebuild(app, state);
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = TransitionScene::default();
+        let out = root.paint(&mut scene, time);
+        (scene.fills, out.needs_frame)
+    }
+
+    /// Find the fill for the page of the given height (tests tag pages A/B by a
+    /// distinct height).
+    fn fill_h(fills: &[(Point, Size, f32)], h: f64) -> (Point, Size, f32) {
+        *fills
+            .iter()
+            .find(|(_, s, _)| (s.height - h).abs() < 1e-9)
+            .unwrap_or_else(|| panic!("no fill with height {h} in {fills:?}"))
+    }
+
+    // --- Criterion 1: push animates both pages with moving origins, settling at
+    //     final geometry; controller disposed after settle. ---
+
+    #[test]
+    fn push_animates_moving_origins_and_disposes_after_settle() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            // Root page A is 100 tall; pushed page B is 80 tall (so a test can
+            // tell them apart in the recorded fills).
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let spec = TransitionSpec::new(
+            PageTransition::M3SharedAxisX,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.push_with(|| sized_page(100.0, 80.0), spec);
+
+        // Seed frame: driver at 0. A (leaving) at rest, B (entering) slid in 30dp.
+        let (f0, nf0) = full_frame(&mut root, &mut app, &mut state, ft(0));
+        assert!(nf0, "a running transition requests frames");
+        assert_eq!(fill_h(&f0, 100.0).0.x, 0.0, "A at rest at start");
+        assert_eq!(
+            fill_h(&f0, 80.0).0.x,
+            30.0,
+            "B slid in by the 30dp shared axis"
+        );
+
+        // Mid frame (50ms → progress 0.5): both origins have moved inward.
+        let (f1, _) = full_frame(&mut root, &mut app, &mut state, ft(50));
+        let a1x = fill_h(&f1, 100.0).0.x;
+        let b1x = fill_h(&f1, 80.0).0.x;
+        assert!(a1x < 0.0, "A slides out to the left (was {a1x})");
+        assert!(b1x > 0.0 && b1x < 30.0, "B slides toward rest (was {b1x})");
+
+        // End frame (150ms → past the 100ms duration): settles at final geometry.
+        let (f2, nf2) = full_frame(&mut root, &mut app, &mut state, ft(150));
+        assert_eq!(fill_h(&f2, 80.0).0.x, 0.0, "B rests exactly at 0");
+        assert!(nf2, "the settling frame still requests one finalize frame");
+
+        // Finalize frame: the controller is disposed, culling resumes, and no
+        // further frame is requested.
+        let (f3, nf3) = full_frame(&mut root, &mut app, &mut state, ft(300));
+        assert!(!nf3, "no frame requested once the transition is disposed");
+        assert_eq!(f3.len(), 1, "culling resumed: only the top page paints");
+        assert_eq!(f3[0].1, Size::new(100.0, 80.0), "the surviving page is B");
+    }
+
+    // --- Criterion 2: input is blocked mid-transition; no page receives the Down
+    //     and no stale capture is left; routing resumes after settle. ---
+
+    #[test]
+    fn input_blocked_mid_transition_then_resumes() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let observed_a = Rc::new(Cell::new(0u32));
+        let observed_b = Rc::new(Cell::new(0u32));
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            let a = observed_a.clone();
+            move |_: &mut ()| {
+                let a = a.clone();
+                navigator(&ctrl, move || counter_page(&a))
+            }
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Push B (a counter) with a long, still-running transition.
+        let spec = TransitionSpec::new(
+            PageTransition::M3FadeThrough,
+            Timing::Duration(Duration::from_millis(1000), Curve::Linear),
+        );
+        {
+            let b = observed_b.clone();
+            controller.push_with(move || counter_page(&b), spec);
+        }
+        full_frame(&mut root, &mut app, &mut state, ft(0)); // seed; running
+
+        // A pointer Down mid-transition reaches NO page and records no capture.
+        root.event(&mut state, &down(5.0, 5.0));
+        assert!(
+            !root.is_pointer_captured(),
+            "no capture is recorded mid-transition"
+        );
+        full_frame(&mut root, &mut app, &mut state, ft(16));
+        assert_eq!(observed_a.get(), 0, "the Down did not reach page A");
+        assert_eq!(observed_b.get(), 0, "the Down did not reach page B");
+
+        // Advance past the end to settle, then finalize on the next rebuild.
+        full_frame(&mut root, &mut app, &mut state, ft(1100));
+        full_frame(&mut root, &mut app, &mut state, ft(1116));
+
+        // Routing has resumed with no stale block: a Down now reaches top page B.
+        root.event(&mut state, &down(5.0, 5.0));
+        full_frame(&mut root, &mut app, &mut state, ft(1132));
+        assert_eq!(observed_b.get(), 1, "routing resumed after the transition");
+        assert!(!root.is_pointer_captured());
+    }
+
+    // --- Criterion 3: the below page's secondary animation (iOS push parallax +
+    //     dim). ---
+
+    #[test]
+    fn ios_push_parallaxes_and_dims_below_page() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let spec = TransitionSpec::new(
+            PageTransition::IosPush,
+            Timing::Duration(Duration::from_millis(350), Curve::Linear),
+        );
+        controller.push_with(|| sized_page(100.0, 80.0), spec);
+
+        // Seed: below page A at rest, full opacity; incoming B a full width off.
+        let (f0, _) = full_frame(&mut root, &mut app, &mut state, ft(0));
+        assert_eq!(fill_h(&f0, 100.0).0.x, 0.0);
+        assert_eq!(fill_h(&f0, 100.0).2, 1.0);
+        assert_eq!(
+            fill_h(&f0, 80.0).0.x,
+            100.0,
+            "B enters a full width to the right"
+        );
+
+        // Halfway (175ms → 0.5): A (below) has parallaxed left and dimmed.
+        let (f1, _) = full_frame(&mut root, &mut app, &mut state, ft(175));
+        let a = fill_h(&f1, 100.0);
+        assert!(a.0.x < 0.0, "below page parallaxes left (was {})", a.0.x);
+        assert!(a.2 < 1.0, "below page is dimmed (alpha {})", a.2);
+    }
+
+    // --- Criterion 4: a spatial spring overshoots position, never opacity. ---
+
+    #[test]
+    fn spring_spatial_overshoots_position_but_not_opacity() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // M3 default spatial preset (damping 0.9) — overshoots.
+        let spring = MotionSpring {
+            damping_ratio: 0.9,
+            stiffness: 700.0,
+        };
+        let spec = TransitionSpec::spring(PageTransition::M3SharedAxisX, spring);
+        controller.push_with(|| sized_page(100.0, 80.0), spec);
+
+        let mut min_b_x = f64::MAX;
+        let mut max_alpha = f32::MIN;
+        let mut running = true;
+        let mut t = 0u64;
+        for _ in 0..2_000 {
+            let (fills, needs_frame) = full_frame(&mut root, &mut app, &mut state, ft(t));
+            // B (entering, height 80) is only present while the transition runs.
+            if let Some((p, _, a)) = fills
+                .iter()
+                .find(|(_, s, _)| (s.height - 80.0).abs() < 1e-9)
+            {
+                min_b_x = min_b_x.min(p.x);
+                max_alpha = max_alpha.max(*a);
+            }
+            running = needs_frame;
+            if !running {
+                break;
+            }
+            t += 8; // ~120fps
+        }
+        assert!(!running, "spring transition failed to settle");
+        // The entering page rests at x = 0; an under-damped spring carries it past
+        // that (x < 0) before settling — the overshoot the spatial preset exists
+        // to produce.
+        assert!(
+            min_b_x < -1e-3,
+            "expected a position overshoot past the resting x=0, min x was {min_b_x}"
+        );
+        // Opacity is fed the clamped value, so it never exceeds 1.0 even as the
+        // spatial spring overshoots.
+        assert!(
+            max_alpha <= 1.0 + 1e-6,
+            "opacity must never overshoot 1.0 (saw {max_alpha})"
+        );
+    }
+
+    // --- Replace with a transition retains + tears down the outgoing page. ---
+
+    #[test]
+    fn animated_replace_settles_to_new_page() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let spec = TransitionSpec::new(
+            PageTransition::M3FadeThrough,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.replace_with(|| sized_page(100.0, 40.0), spec);
+
+        // Drive to completion.
+        let mut last = Vec::new();
+        for t in [0u64, 50, 150, 300] {
+            let (fills, _) = full_frame(&mut root, &mut app, &mut state, ft(t));
+            last = fills;
+        }
+        // After settle only the new page (height 40) remains — the replaced page
+        // was retained during the animation and torn down at settle.
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].1, Size::new(100.0, 40.0));
+    }
+
+    // --- Pop reverses the popped page's transition and reveals the page below. ---
+
+    #[test]
+    fn animated_pop_reverses_and_reveals_below() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Push B instantly (no transition), then animate the pop.
+        controller.push_with(
+            || sized_page(100.0, 60.0),
+            TransitionSpec::new(
+                PageTransition::IosPush,
+                Timing::Duration(Duration::from_millis(100), Curve::Linear),
+            ),
+        );
+        // Settle the push first.
+        for t in [0u64, 50, 150, 300] {
+            full_frame(&mut root, &mut app, &mut state, ft(t));
+        }
+
+        // Now pop: the popped page (B) reverses its iOS transition (slides right),
+        // revealing A below it.
+        controller.pop();
+        let (f0, _) = full_frame(&mut root, &mut app, &mut state, ft(1000));
+        // Both A (100) and B (60) paint during the pop.
+        assert!(f0.iter().any(|(_, s, _)| (s.height - 100.0).abs() < 1e-9));
+        assert!(f0.iter().any(|(_, s, _)| (s.height - 60.0).abs() < 1e-9));
+
+        // Drive to completion: B is torn down, A revealed and culled to top.
+        let mut last = Vec::new();
+        for t in [1050u64, 1150, 1300] {
+            let (fills, _) = full_frame(&mut root, &mut app, &mut state, ft(t));
+            last = fills;
+        }
+        assert_eq!(last.len(), 1, "only the revealed page remains");
+        assert_eq!(last[0].1, Size::new(100.0, 100.0), "the revealed page is A");
     }
 }

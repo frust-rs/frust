@@ -58,6 +58,7 @@ pub use nav::navigator::{
     NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult, ResultCallback,
     navigator,
 };
+pub use nav::transition::{PageTransition, Timing, TransitionSpec};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
 pub use scroll::{ScrollView, ScrollWidget, scroll_view};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};

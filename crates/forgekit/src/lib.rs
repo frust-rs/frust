@@ -77,10 +77,10 @@ pub use forgekit_widgets::{
     Align, AlignView, Alignment, Axis, Button, ButtonView, Checkbox, CheckboxView, ChildKey,
     Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
     GestureDetectorView, Image, ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment,
-    NavigatorController, NavigatorView, Padding, PaddingView, PageBuilder, PopResult,
-    ResultCallback, Row, ScrollView, SizedBox, SizedBoxView, Slider, SliderView, Stack, StackView,
-    TextInput, TextInputView, TextView, button, checkbox, flexible, inflexible, keyed, navigator,
-    scroll_view, slider, text, text_input,
+    NavigatorController, NavigatorView, Padding, PaddingView, PageBuilder, PageTransition,
+    PopResult, ResultCallback, Row, ScrollView, SizedBox, SizedBoxView, Slider, SliderView, Stack,
+    StackView, TextInput, TextInputView, TextView, Timing, TransitionSpec, button, checkbox,
+    flexible, inflexible, keyed, navigator, scroll_view, slider, text, text_input,
 };
 
 /// The design-token vocabulary (spec §11): the [`Theme`] bundle plus its
