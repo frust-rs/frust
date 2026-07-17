@@ -50,30 +50,37 @@
 //! dialog box), labelled with the title text; the title, body, and each action
 //! become its accesskit children.
 //!
-//! # Keyboard operability (limitation)
+//! # Keyboard operability (task 07, 6d)
 //!
-//! **There is no keyboard focus or Escape-to-dismiss for this dialog today.**
-//! `Key` events route only down the recorded focus path (the
-//! [`InputEvent::is_focus_routed`] dispatch gate — see
-//! `docs/ARCHITECTURE.md`'s Event pipeline), and this widget never calls
-//! `request_focus`, so there is no focused chain for an Escape key to travel
-//! so Escape cannot reach it. The focus-routing path itself already exists
-//! (`EventCtx::request_focus` + focus-routed Key dispatch); this widget simply
-//! does not opt in yet — the opt-in plus Escape handling is deferred
-//! follow-on work. Dismissal is pointer-only: a scrim tap or an action button.
+//! **Escape-to-dismiss now works, once the dialog has focus.** A `Down`
+//! anywhere in the dialog (scrim, panel background, or an action) claims
+//! focus via `EventCtx::request_focus` — the dialog already captures its
+//! whole area, so this is a pure opt-in with no new hit-testing. Once
+//! focused, a focus-routed `Key(Escape)` invokes the *same* dismiss path as a
+//! scrim tap (`on_dismiss`). **There is still no hook to focus the dialog on
+//! appear** (auto-focus-on-appear) — a caller must complete one pointer
+//! interaction with the dialog before Escape does anything; that gap is
+//! deferred to a future focus-manager work item, not this task.
 //!
 //! The accesskit **modal** flag set above is nonetheless **kept deliberately**,
 //! not dropped. No platform `accesskit_*` adapter is wired yet (see
 //! `docs/ARCHITECTURE.md`'s Semantics pass), so there is no live assistive-tech
-//! audience the flag could currently mislead; it becomes load-bearing exactly
-//! when keyboard operability + adapter wiring land together in 6d.
+//! audience the flag could currently mislead.
+//!
+//! # State layer (task 07, 6d)
+//!
+//! This dialog has no `StateLayer` surface of its own (the scrim and panel are
+//! plain fills, not an M3 interactive surface) — there is nothing here for
+//! `StateLayer::set_focused` to wire into. Only widgets with their own state
+//! layer (none in this module) would gain focused-state chrome; this dialog
+//! does not invent one.
 
 use std::rc::Rc;
 
 use forgekit_core::accesskit::Role;
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
+    Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
 };
 use forgekit_text::LineHeight;
 use forgekit_theme::Theme;
@@ -521,13 +528,29 @@ impl Widget for DialogWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A press anywhere in the modal claims focus, so a subsequent Escape has
+        // a focus chain to travel (see the module docs' Keyboard operability
+        // note — this is the opt-in that note describes).
+        if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
+            ctx.request_focus();
+        }
         // An action already capturing (or freshly hit) consumes the event first.
         if crate::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
             return EventResult::Handled;
         }
+        // Escape (once focused) dismisses through the same path as a scrim tap.
+        if let InputEvent::Key(key_event) = event {
+            if key_event.key == Key::Named(NamedKey::Escape)
+                && let Some(on_dismiss) = self.on_dismiss.as_mut()
+            {
+                on_dismiss(ctx);
+                return EventResult::Handled;
+            }
+            return EventResult::Ignored;
+        }
         // Everything else is the modal barrier: pointer events are swallowed, a
         // press+release outside the panel dismisses. Non-pointer events the
-        // actions ignored fall through (the dialog owns no focus/scroll target).
+        // actions ignored fall through (the dialog owns no scroll target).
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
@@ -598,8 +621,19 @@ mod tests {
     use super::*;
     use crate::nav::navigator::{NavigatorView, navigator};
     use crate::nav::transition::TransitionSpec;
-    use forgekit_core::{FrameTime, PointerButton, PointerEvent, RenderRoot, any as core_any};
+    use forgekit_core::{
+        FrameTime, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, RenderRoot,
+        any as core_any,
+    };
     use forgekit_text::TextContext;
+
+    fn escape_event() -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Escape),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
     use std::any::Any;
 
     fn ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
@@ -936,6 +970,109 @@ mod tests {
             state.results,
             vec![None],
             "scrim tap pops with an empty result"
+        );
+    }
+
+    // --- Focus + Escape opt-in (task 07, 6d). ---
+
+    #[test]
+    fn escape_after_a_press_claims_focus_and_dismisses_via_navigator() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = app_page(&controller);
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        show_dialog(
+            &controller,
+            dialog,
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<bool>());
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        // Settle the entering M3FadeThrough transition so input reaches the page.
+        root.paint(&mut Recorder::default(), FrameTime::ZERO);
+        root.paint(
+            &mut Recorder::default(),
+            FrameTime::from_nanos(1_000_000_000),
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        // A press+release on the panel background (an empty dialog's panel is
+        // MIN_WIDTH x 2*DIALOG_PADDING, centered) claims focus but is swallowed —
+        // it does not itself dismiss (mirrors
+        // `press_on_panel_background_is_swallowed_without_dismissing`).
+        let (cx, cy) = (area.width / 2.0, area.height / 2.0);
+        root.event(&mut state, &ev(PointerPhase::Down, cx, cy));
+        root.event(&mut state, &ev(PointerPhase::Up, cx, cy));
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        assert!(
+            state.results.is_empty(),
+            "a panel-background press does not dismiss"
+        );
+
+        // Escape now reaches the focused dialog and dismisses it, the same
+        // dismiss path as a scrim tap.
+        root.event(&mut state, &escape_event());
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert_eq!(
+            state.results,
+            vec![None],
+            "Escape dismisses the focused dialog"
+        );
+    }
+
+    #[test]
+    fn escape_without_a_prior_press_does_nothing() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = app_page(&controller);
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        show_dialog(
+            &controller,
+            dialog,
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<bool>());
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), FrameTime::ZERO);
+        root.paint(
+            &mut Recorder::default(),
+            FrameTime::from_nanos(1_000_000_000),
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        // No pointer press yet — the dialog never claimed focus, so Escape has
+        // no focus chain to travel and is dropped (route_event_single finds no
+        // focused page pod).
+        root.event(&mut state, &escape_event());
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert!(
+            state.results.is_empty(),
+            "Escape without prior focus is a no-op"
         );
     }
 

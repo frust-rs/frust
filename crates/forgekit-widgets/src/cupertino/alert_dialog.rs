@@ -20,26 +20,32 @@
 //! (baked explicit — see [`crate::cupertino::tabbar`]'s Label color note for why
 //! these accent colors don't live-swap).
 //!
-//! # Keyboard operability (limitation)
+//! # Keyboard operability (task 07, 6d)
 //!
-//! **There is no keyboard focus or Escape-to-dismiss for this alert today.**
-//! `Key` events route only down the recorded focus path (the
-//! [`InputEvent::is_focus_routed`] dispatch gate — see
-//! `docs/ARCHITECTURE.md`'s Event pipeline), and this widget never calls
-//! `request_focus`, so there is no focused chain for an Escape key to travel
-//! so Escape cannot reach it. The focus-routing path itself already exists
-//! (`EventCtx::request_focus` + focus-routed Key dispatch); this widget simply
-//! does not opt in yet — the opt-in plus Escape handling is deferred
-//! follow-on work. Dismissal is pointer-only: a scrim tap or an action button.
+//! **Escape-to-dismiss now works, once the alert has focus.** A `Down`
+//! anywhere in the alert (scrim, panel background, or an action) claims focus
+//! via `EventCtx::request_focus` — the alert already captures its whole area,
+//! so this is a pure opt-in with no new hit-testing. Once focused, a
+//! focus-routed `Key(Escape)` invokes the same `controller.pop()` dismiss path
+//! as a scrim tap. **There is still no hook to focus the alert on appear**
+//! (auto-focus-on-appear) — a caller must complete one pointer interaction
+//! with the alert before Escape does anything; that gap is deferred to a
+//! future focus-manager work item, not this task.
+//!
 //! Its semantics node carries [`Role::AlertDialog`] but **no** accesskit modal
 //! flag (unlike [`crate::material::dialog`]/[`crate::material::sheet`]), so
-//! there is nothing to reconcile with a future adapter on that front; keyboard
-//! operability + platform `accesskit_*` adapter wiring is 6d scope.
+//! there is nothing to reconcile with a future adapter on that front.
+//!
+//! # State layer (task 07, 6d)
+//!
+//! This alert has no `StateLayer` surface of its own (the scrim, panel, and
+//! action rows are plain fills/hairlines, not an M3 interactive surface) —
+//! there is nothing here for `StateLayer::set_focused` to wire into.
 
 use forgekit_core::accesskit::Role;
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget,
+    Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
 use forgekit_text::{FontWeight, LineHeight};
 use forgekit_theme::Theme;
@@ -426,11 +432,24 @@ impl<State: 'static> Widget for CupertinoAlertDialogWidget<State> {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // Escape (once focused) dismisses through the same `controller.pop()`
+        // path as a scrim tap — see the module docs' Keyboard operability note.
+        if let InputEvent::Key(key_event) = event {
+            if key_event.key == Key::Named(NamedKey::Escape) {
+                self.controller.pop();
+                ctx.request_redraw();
+                return EventResult::Handled;
+            }
+            return EventResult::Ignored;
+        }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
         match p.phase {
             PointerPhase::Down => {
+                // A press anywhere in the alert claims focus, so a subsequent
+                // Escape has a focus chain to travel.
+                ctx.request_focus();
                 self.captured = true;
                 ctx.capture_pointer();
                 EventResult::Handled
@@ -489,9 +508,17 @@ impl<State: 'static> Widget for CupertinoAlertDialogWidget<State> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgekit_core::{BuildCtx, PointerButton, PointerEvent};
+    use forgekit_core::{BuildCtx, KeyEvent, Modifiers, PointerButton, PointerEvent};
     use forgekit_text::TextContext;
     use std::any::Any;
+
+    fn escape_event() -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Escape),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
 
     fn alert_view() -> CupertinoAlertDialogView<()> {
         CupertinoAlertDialogView {
@@ -715,6 +742,40 @@ mod tests {
         nav.drain();
         assert_eq!(nav.state.calls, 1, "the alert survived the no-op tap");
         assert_eq!(nav.state.received, Some(0));
+    }
+
+    // --- Focus + Escape opt-in (task 07, 6d). ---
+
+    #[test]
+    fn escape_after_a_panel_tap_claims_focus_and_dismisses() {
+        let mut nav = ModalHarness::new();
+        nav.show();
+        nav.settle();
+        // A tap inside the panel but not on an action claims focus without
+        // dismissing (mirrors `tap_inside_panel_but_not_an_action_is_a_noop`).
+        let (px, py) = nav.panel_top_center();
+        nav.tap(px, py);
+        nav.drain();
+        assert_eq!(nav.state.calls, 0, "the panel tap did not dismiss");
+
+        // Escape now reaches the focused alert and dismisses it, the same
+        // dismiss path as a scrim tap.
+        nav.root.event(&mut nav.state, &escape_event());
+        nav.drain();
+        assert_eq!(nav.state.calls, 1, "Escape dismisses the focused alert");
+        assert_eq!(nav.state.received, None, "Escape carries no action index");
+    }
+
+    #[test]
+    fn escape_without_a_prior_tap_does_nothing() {
+        let mut nav = ModalHarness::new();
+        nav.show();
+        nav.settle();
+        // No prior tap — the alert never claimed focus, so Escape has no
+        // focus chain to travel and is dropped.
+        nav.root.event(&mut nav.state, &escape_event());
+        nav.drain();
+        assert_eq!(nav.state.calls, 0, "Escape without prior focus is a no-op");
     }
 
     #[test]

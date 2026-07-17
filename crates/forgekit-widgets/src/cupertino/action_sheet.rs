@@ -21,25 +21,32 @@
 //! inset a real iOS sheet respects is **shell-future work** (documented,
 //! PLAN.md D5).
 //!
-//! # Keyboard operability (limitation)
+//! # Keyboard operability (task 07, 6d)
 //!
-//! **There is no keyboard focus or Escape-to-dismiss for this action sheet
-//! today.** `Key` events route only down the recorded focus path (the
-//! [`InputEvent::is_focus_routed`] dispatch gate — see
-//! `docs/ARCHITECTURE.md`'s Event pipeline), and this widget never calls
-//! `request_focus`, so there is no focused chain for an Escape key to travel
-//! so Escape cannot reach it. The focus-routing path itself already exists
-//! (`EventCtx::request_focus` + focus-routed Key dispatch); this widget simply
-//! does not opt in yet — the opt-in plus Escape handling is deferred
-//! follow-on work. Dismissal is pointer-only: a scrim tap, the cancel row, or an
-//! action row. Its semantics node is a [`Role::Menu`] container with **no**
-//! accesskit modal flag, so there is no modal-audience concern to reconcile;
-//! keyboard operability + platform `accesskit_*` adapter wiring is 6d scope.
+//! **Escape-to-dismiss now works, once the action sheet has focus.** A `Down`
+//! anywhere in the sheet (scrim, panel background, cancel row, or an action
+//! row) claims focus via `EventCtx::request_focus` — the sheet already
+//! captures its whole area, so this is a pure opt-in with no new hit-testing.
+//! Once focused, a focus-routed `Key(Escape)` invokes the same
+//! `controller.pop()` dismiss path as a scrim tap or the cancel row. **There
+//! is still no hook to focus the sheet on appear** (auto-focus-on-appear) — a
+//! caller must complete one pointer interaction with the sheet before Escape
+//! does anything; that gap is deferred to a future focus-manager work item,
+//! not this task.
+//!
+//! Its semantics node is a [`Role::Menu`] container with **no** accesskit
+//! modal flag, so there is no modal-audience concern to reconcile.
+//!
+//! # State layer (task 07, 6d)
+//!
+//! This action sheet has no `StateLayer` surface of its own (the scrim,
+//! panels, and rows are plain fills/hairlines, not an M3 interactive surface)
+//! — there is nothing here for `StateLayer::set_focused` to wire into.
 
 use forgekit_core::accesskit::Role;
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget,
+    Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
 use forgekit_theme::Theme;
 use kurbo::{Point, Rect, Size};
@@ -313,11 +320,25 @@ impl<State: 'static> Widget for CupertinoActionSheetWidget<State> {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // Escape (once focused) dismisses through the same `controller.pop()`
+        // path as a scrim tap / cancel row — see the module docs' Keyboard
+        // operability note.
+        if let InputEvent::Key(key_event) = event {
+            if key_event.key == Key::Named(NamedKey::Escape) {
+                self.controller.pop();
+                ctx.request_redraw();
+                return EventResult::Handled;
+            }
+            return EventResult::Ignored;
+        }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
         match p.phase {
             PointerPhase::Down => {
+                // A press anywhere in the action sheet claims focus, so a
+                // subsequent Escape has a focus chain to travel.
+                ctx.request_focus();
                 self.captured = true;
                 ctx.capture_pointer();
                 EventResult::Handled
@@ -378,7 +399,9 @@ impl<State: 'static> Widget for CupertinoActionSheetWidget<State> {
 mod tests {
     use super::*;
     use crate::nav::navigator::{NavigatorView, navigator};
-    use forgekit_core::{BuildCtx, FrameTime, PointerButton, PointerEvent, RenderRoot, any};
+    use forgekit_core::{
+        BuildCtx, FrameTime, KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot, any,
+    };
     use forgekit_text::TextContext;
     use std::any::Any;
 
@@ -386,6 +409,14 @@ mod tests {
 
     fn ft_secs(s: f64) -> FrameTime {
         FrameTime::from_nanos((s * 1_000_000_000.0) as u64)
+    }
+
+    fn escape_event() -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Escape),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
     }
 
     fn sheet_view() -> CupertinoActionSheetView<()> {
@@ -570,6 +601,40 @@ mod tests {
         h.drain();
         assert_eq!(h.state.calls, 1);
         assert_eq!(h.state.received, None);
+    }
+
+    // --- Focus + Escape opt-in (task 07, 6d). ---
+
+    #[test]
+    fn escape_after_a_press_claims_focus_and_dismisses() {
+        let mut h = Harness::new();
+        h.show();
+        h.settle();
+        // A bare `Down` on the top-left scrim claims focus; only the matching
+        // `Up` decides dismissal, so this alone does not dismiss.
+        h.root
+            .event(&mut h.state, &Harness::ev(PointerPhase::Down, 5.0, 5.0));
+        h.drain();
+        assert_eq!(h.state.calls, 0, "a bare Down does not dismiss");
+
+        // Escape now reaches the focused sheet and dismisses it, the same
+        // dismiss path as a scrim tap / cancel row.
+        h.root.event(&mut h.state, &escape_event());
+        h.drain();
+        assert_eq!(h.state.calls, 1, "Escape dismisses the focused sheet");
+        assert_eq!(h.state.received, None, "Escape carries no action index");
+    }
+
+    #[test]
+    fn escape_without_a_prior_press_does_nothing() {
+        let mut h = Harness::new();
+        h.show();
+        h.settle();
+        // No prior press — the sheet never claimed focus, so Escape has no
+        // focus chain to travel and is dropped.
+        h.root.event(&mut h.state, &escape_event());
+        h.drain();
+        assert_eq!(h.state.calls, 0, "Escape without prior focus is a no-op");
     }
 
     #[test]

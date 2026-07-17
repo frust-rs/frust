@@ -34,9 +34,17 @@
 //!   has only Down/Move/Up/Cancel — no
 //!   Enter/Leave/hover phase — so no widget can detect hover without future
 //!   input-pipeline work adding one.
-//! - **`focused` — awaiting focus routing.** A focus overlay needs a widget to
-//!   participate in the recorded focus path (`request_focus`/`Key` routing),
-//!   and none of the catalog widgets do; that wiring is 6d-adjacent.
+//! - **`focused` — the focus-routing prerequisite landed in 6d (task 07:
+//!   `material::dialog`/`sheet`, `cupertino::alert_dialog`/`action_sheet` all
+//!   now call `EventCtx::request_focus` on a `Down` and dismiss on a
+//!   focus-routed `Key(Escape)`), but **still unwired here**: none of those
+//!   four modals paint their own `StateLayer`-shaped actionable surface — each
+//!   is a plain scrim + panel modal barrier (fills/hairlines), not an M3
+//!   interactive surface with a content color a state layer would tint. There
+//!   was deliberately nothing to wire `set_focused` into without inventing
+//!   chrome no design calls for. A future widget that both participates in
+//!   focus routing *and* paints its own `StateLayer` (e.g. a focusable list
+//!   item, chip, or button) is what will make this state live.
 //! - **`dragged` — unwired.** No catalog widget reports a drag into
 //!   [`StateLayer::set_dragged`] yet.
 //!

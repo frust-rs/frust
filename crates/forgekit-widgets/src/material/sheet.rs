@@ -50,31 +50,38 @@
 //! dialog-ish surface (the same role the [`crate::material::dialog`] uses). Its
 //! content becomes the node's accesskit children.
 //!
-//! # Keyboard operability (limitation)
+//! # Keyboard operability (task 07, 6d)
 //!
-//! **There is no keyboard focus or Escape-to-dismiss for this sheet today.**
-//! `Key` events route only down the recorded focus path (the
-//! [`InputEvent::is_focus_routed`] dispatch gate — see
-//! `docs/ARCHITECTURE.md`'s Event pipeline), and this widget never calls
-//! `request_focus`, so there is no focused chain for an Escape key to travel
-//! so Escape cannot reach it. The focus-routing path itself already exists
-//! (`EventCtx::request_focus` + focus-routed Key dispatch); this widget simply
-//! does not opt in yet — the opt-in plus Escape handling is deferred
-//! follow-on work. Dismissal is pointer-only: a scrim tap or a drag-down on the
-//! handle.
+//! **Escape-to-dismiss now works, once the sheet has focus.** A `Down`
+//! anywhere in the sheet (scrim, handle, or panel background) claims focus
+//! via `EventCtx::request_focus` — the sheet already captures its whole area,
+//! so this is a pure opt-in with no new hit-testing. Once focused, a
+//! focus-routed `Key(Escape)` invokes the *same* dismiss path as a scrim tap
+//! or handle drag (`on_dismiss`) — unless the sheet's `content` itself holds
+//! the deeper focus path, in which case content gets first crack at the key
+//! (mirroring how an action consumes an event before the dialog's modal
+//! barrier does). **There is still no hook to focus the sheet on appear**
+//! (auto-focus-on-appear) — a caller must complete one pointer interaction
+//! with the sheet before Escape does anything; that gap is deferred to a
+//! future focus-manager work item, not this task.
 //!
 //! The accesskit **modal** flag set above is nonetheless **kept deliberately**,
 //! not dropped. No platform `accesskit_*` adapter is wired yet (see
 //! `docs/ARCHITECTURE.md`'s Semantics pass), so there is no live assistive-tech
-//! audience the flag could currently mislead; it becomes load-bearing exactly
-//! when keyboard operability + adapter wiring land together in 6d.
+//! audience the flag could currently mislead.
+//!
+//! # State layer (task 07, 6d)
+//!
+//! This sheet has no `StateLayer` surface of its own (the scrim, panel, and
+//! drag handle are plain fills, not an M3 interactive surface) — there is
+//! nothing here for `StateLayer::set_focused` to wire into.
 
 use std::rc::Rc;
 
 use forgekit_core::accesskit::Role;
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
+    Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
 };
 use forgekit_theme::Theme;
 use kurbo::{Point, Rect, RoundedRect, RoundedRectRadii, Shape, Size};
@@ -397,11 +404,27 @@ impl Widget for BottomSheetWidget {
         // 3. Fresh events.
         else {
             let InputEvent::Pointer(p) = event else {
-                // Focus/scroll events route to the content.
+                // Escape (when the sheet itself, not deeper content, holds the
+                // focus path) dismisses through the same path as a scrim/drag
+                // dismiss — content gets first crack at it if it holds the
+                // deeper focus path (mirrors an action's own routing
+                // precedence on `material::dialog`).
+                if let InputEvent::Key(key_event) = event
+                    && key_event.key == Key::Named(NamedKey::Escape)
+                    && !self.content.is_focused()
+                    && let Some(on_dismiss) = self.on_dismiss.as_mut()
+                {
+                    on_dismiss(ctx);
+                    return EventResult::Handled;
+                }
+                // Everything else focus-routed goes to the content.
                 return crate::route_event_single(&mut self.content, ctx, event);
             };
             match p.phase {
                 PointerPhase::Down => {
+                    // A Down anywhere in the sheet claims focus, so a
+                    // subsequent Escape has a focus chain to travel.
+                    ctx.request_focus();
                     // A Down in the handle strip begins a drag.
                     if self.handle_target.contains(p.position) {
                         self.drag_active = true;
@@ -444,8 +467,11 @@ impl Widget for BottomSheetWidget {
 mod tests {
     use super::*;
     use crate::nav::navigator::{NavigatorView, navigator};
+    use crate::nav::transition::TransitionSpec;
     use crate::test_support::leaf_any;
-    use forgekit_core::{PointerButton, PointerEvent, RenderRoot, any as core_any};
+    use forgekit_core::{
+        KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, RenderRoot, any as core_any,
+    };
     use forgekit_text::TextContext;
     use std::any::Any;
 
@@ -454,6 +480,14 @@ mod tests {
             phase,
             position: Point::new(x, y),
             button: PointerButton::Primary,
+        })
+    }
+
+    fn escape_event() -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Escape),
+            modifiers: Modifiers::default(),
+            repeat: false,
         })
     }
 
@@ -713,6 +747,121 @@ mod tests {
             state.results,
             vec![None],
             "scrim tap pops with an empty result"
+        );
+    }
+
+    // --- Focus + Escape opt-in (task 07, 6d). ---
+
+    #[test]
+    fn escape_after_a_short_handle_press_claims_focus_and_dismisses_via_navigator() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || core_any::<NavState, _>(bg_page(400.0, 600.0)))
+            }
+        };
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        {
+            let dismiss = controller.clone();
+            controller.push_transparent_for_result(
+                move || {
+                    let d = dismiss.clone();
+                    core_any::<NavState, _>(
+                        bottom_sheet(bg_page(400.0, 200.0))
+                            .on_dismiss(move |_s: &mut NavState| d.pop()),
+                    )
+                },
+                TransitionSpec::NONE,
+                |state: &mut NavState, result: PopResult| {
+                    state.results.push(result.take::<i32>());
+                },
+            );
+        }
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        // panel height = 48 (handle strip) + 200 (content) = 248; panel_y = 352.
+        // A short handle-strip drag (well under the 124px dismiss threshold)
+        // claims focus without itself dismissing (mirrors
+        // `short_handle_drag_does_not_dismiss`).
+        let handle_y = area.height - 248.0 + 10.0;
+        root.event(&mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+        root.event(&mut state, &ev(PointerPhase::Up, 200.0, handle_y + 10.0));
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        assert!(
+            state.results.is_empty(),
+            "a short handle drag does not dismiss"
+        );
+
+        // Escape now reaches the focused sheet and dismisses it, the same
+        // dismiss path as a scrim tap / long handle drag.
+        root.event(&mut state, &escape_event());
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert_eq!(
+            state.results,
+            vec![None],
+            "Escape dismisses the focused sheet"
+        );
+    }
+
+    #[test]
+    fn escape_without_a_prior_press_does_nothing() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || core_any::<NavState, _>(bg_page(400.0, 600.0)))
+            }
+        };
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        {
+            let dismiss = controller.clone();
+            controller.push_transparent_for_result(
+                move || {
+                    let d = dismiss.clone();
+                    core_any::<NavState, _>(
+                        bottom_sheet(bg_page(400.0, 200.0))
+                            .on_dismiss(move |_s: &mut NavState| d.pop()),
+                    )
+                },
+                TransitionSpec::NONE,
+                |state: &mut NavState, result: PopResult| {
+                    state.results.push(result.take::<i32>());
+                },
+            );
+        }
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        // No press yet — the sheet never claimed focus, so Escape has no focus
+        // chain to travel and is dropped.
+        root.event(&mut state, &escape_event());
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert!(
+            state.results.is_empty(),
+            "Escape without prior focus is a no-op"
         );
     }
 
