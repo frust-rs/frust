@@ -26,37 +26,75 @@
 //! 2026-07-17, per
 //! `workflow/plans/features/forgekit-phase-6c-widget-catalog/research/RESEARCH.md`'s
 //! `cupertino-tokens-idioms` claims and its R19/R20/R22 refuted-claims
-//! corrections):
+//! corrections), **refreshed 2026-07-18** against the mined swatches in
+//! `workflow/plans/features/forgekit-phase-6f-design-modernization/research/kit-colors-type-metrics.json`
+//! (Apple iOS 27 UI Kit, 107 named swatches across System Colors/Labels/
+//! Fills/Backgrounds/Separators/Grays/Liquid Glass/Fills-Vibrant — see that
+//! phase's `research/RESEARCH.md` §sketch-kit-token-mining) — every role
+//! below notes whether the 2026-07-18 kit value confirmed or changed the
+//! 2026-07-17 one:
 //!
 //! - `label`/`secondaryLabel`: Apple publishes `label` as opaque
-//!   `#000000`/`#FFFFFF` (light/dark). `secondaryLabel` is a **translucent**
-//!   token — `rgba(60,60,67,0.60)` light / `rgba(235,235,245,0.60)` dark (R22
-//!   correction; Noah Gilmore's "Backwards compatibility for iOS 13 system
-//!   colors", cross-verified with Sarunw's "Dark color cheat sheet"). Unlike
-//!   the M3 constructors, the Cupertino constructors below **do** store
-//!   non-opaque `Color`s for the handful of roles (`on_surface_variant`,
-//!   `outline_variant`) whose real iOS token is itself translucent —
-//!   flattening them to opaque would misrepresent the source value.
+//!   `#000000`/`#FFFFFF` (light/dark) — confirmed unchanged by the kit's
+//!   `Labels/Light|Dark/1 Primary` swatches. `secondaryLabel` is a
+//!   **translucent** token — `rgba(60,60,67,0.60)` light (unchanged,
+//!   `Labels/Light/2 Secondary`) / `rgba(234,234,244,0.60)` dark (kit's
+//!   `Labels/Dark/2 Secondary`, a 1-bit-per-channel refinement of the
+//!   pre-refresh `rgba(235,235,245,0.60)`). Unlike the M3 constructors, the
+//!   Cupertino constructors below **do** store non-opaque `Color`s for the
+//!   handful of roles (`on_surface_variant`, `outline_variant`) whose real
+//!   iOS token is itself translucent — flattening them to opaque would
+//!   misrepresent the source value.
 //! - System accent colors (`systemBlue`/`systemRed`/`systemPurple`/…) are
 //!   **community-measured, not Apple-published** — Apple deliberately
-//!   documents them as varying by trait environment. Values below are the
-//!   widely-cited community constants (colorsift.com / Apple's own
-//!   "Standard Colors" doc page, which states the same non-guarantee).
-//! - `separator`/`opaqueSeparator`: `separator` is the translucent hairline
-//!   token (`rgba(60,60,67,0.29)` light / `rgba(84,84,88,0.65)` dark, per
-//!   Sarunw's cheat sheet); `opaqueSeparator` is Apple's flattened opaque
-//!   variant for contexts that can't composite translucency.
+//!   documents them as varying by trait environment. Values below now come
+//!   from the iOS 27 UI Kit's `System Colors/Light|Dark/*` swatches
+//!   (2026-07-18), which shifted noticeably from the pre-refresh
+//!   colorsift.com/"Standard Colors" doc-page constants (e.g. `systemBlue`
+//!   light `#007AFF` → `#0087FF`, dark `#0A84FF` → `#0090FF`; `systemRed`
+//!   light `#FF3B30` → `#FF383C`, dark `#FF453A` → `#FF4245`; `systemPurple`
+//!   light `#AF52DE` → `#CB2FE0`, dark `#BF5AF2` → `#DB34F1`) — still a
+//!   design-tool snapshot rather than an Apple-published guarantee, so this
+//!   remains community/tool-measured, just a newer measurement.
+//! - `systemGray` (`secondary`): the kit's `Grays/Light|Dark/Gray` swatch is
+//!   `#8D8D92` for both brightnesses (kit confirms Apple's "same base hex
+//!   for light/dark" claim), a 1-bit-per-channel refinement of the
+//!   pre-refresh `#8E8E93`.
+//! - `separator`/`opaqueSeparator`: the 2026-07-18 kit refresh shows
+//!   `separator` (`outline_variant`) as `rgba(0,0,0,0.12)` light /
+//!   `rgba(255,255,255,0.12)` dark (`Separators/Light|Dark/Non-Opaque`) — a
+//!   **changed token** from the pre-refresh `rgba(60,60,67,0.29)` light /
+//!   `rgba(84,84,88,0.65)` dark values (Sarunw's cheat sheet), consistent
+//!   with iOS 26/27 simplifying the hairline to a flat black/white overlay
+//!   rather than a tinted gray; `opaqueSeparator` (`outline`) is the kit's
+//!   `Separators/Light|Dark/Opaque` swatch (`#C5C5C7` light, confirmed
+//!   `#38383A` dark unchanged) — Apple's flattened opaque variant for
+//!   contexts that can't composite translucency.
 //! - `systemBackground`/`secondarySystemBackground`/
-//!   `tertiarySystemBackground` and their `*GroupedBackground` counterparts
-//!   are Apple-documented (UIColor system background docs); this module
-//!   combines both triads into a 5-step `surface_container*` **elevation
-//!   ladder** to fill M3's `lowest/low/container/high/highest` slots — iOS
-//!   itself has no such explicit 5-step ladder concept (unlike M3's
-//!   `surfaceContainer*` scale), so this ordering (progressively more
-//!   saturated gray moving up the ladder) is a documented **ForgeKit
-//!   policy**, not an Apple/community source, mirroring how
-//!   [`crate::elevation`]'s shadow math is documented as tunable ForgeKit
-//!   policy rather than an Apple spec.
+//!   `tertiarySystemBackground` (mapped here to `surface`/`surface_dim`/
+//!   `surface_bright`) are Apple-documented (UIColor system background
+//!   docs); refreshed 2026-07-18 against the kit's `Backgrounds/Light|Dark -
+//!   Base/Primary|Secondary|Tertiary` swatches (`secondarySystemBackground`
+//!   light shifted `#F2F2F7` → `#F1F1F6`; dark's secondary/tertiary shifted
+//!   `#1C1C1E`/`#2C2C2E` → `#1B1B1D`/`#2B2B2D`; `systemBackground` itself
+//!   confirmed unchanged, opaque white/black). This module combines both the
+//!   `*Background` and `*GroupedBackground` triads into a 5-step
+//!   `surface_container*` **elevation ladder** to fill M3's
+//!   `lowest/low/container/high/highest` slots — iOS itself has no such
+//!   explicit 5-step ladder concept (unlike M3's `surfaceContainer*` scale),
+//!   so this ordering (progressively more saturated gray moving up the
+//!   ladder) is a documented **ForgeKit policy**, not an Apple/community
+//!   source, mirroring how [`crate::elevation`]'s shadow math is documented
+//!   as tunable ForgeKit policy rather than an Apple spec — the ladder's
+//!   intermediate steps are untouched by this refresh (only the ladder's
+//!   `lowest`/`bright` endpoints coincide with the literal
+//!   `systemBackground`/`tertiarySystemBackground` roles above).
+//! - The kit's `Labels - Liquid Glass/Light|Dark/*` swatch group (4 label
+//!   tones tuned for legibility over a glass material) is **not** mapped
+//!   into `ColorScheme` here, nor are the `Fills - Vibrant`/`Fills` groups —
+//!   those are glass-token territory owned by phase 6f task 01's
+//!   `GlassScale`, not a `ColorScheme` role; `ColorScheme` stays a flat,
+//!   opaque-surface role set as documented above.
 //! - M3-only concepts with **no iOS equivalent at all** — the `*_container`
 //!   tonal roles, the `*_fixed`/`*_fixed_dim`/`on_*_fixed_variant` roles
 //!   (brightness-invariant tones — see M3's own baseline, where e.g.
@@ -273,18 +311,23 @@ impl ColorScheme {
     /// table and the documented ForgeKit-authored fill-ins for M3 concepts
     /// with no iOS equivalent.
     pub const fn cupertino_light() -> Self {
-        // systemBlue — community-measured (Apple doesn't publish exact hex).
-        const SYSTEM_BLUE_LIGHT: Color = Color::from_rgb8(0x00, 0x7A, 0xFF);
-        const SYSTEM_BLUE_DARK: Color = Color::from_rgb8(0x0A, 0x84, 0xFF);
-        // systemPurple — community-measured, used as the "tertiary" accent.
-        const SYSTEM_PURPLE_LIGHT: Color = Color::from_rgb8(0xAF, 0x52, 0xDE);
-        // systemGray — Apple documents the same base hex for light/dark.
-        const SYSTEM_GRAY: Color = Color::from_rgb8(0x8E, 0x8E, 0x93);
-        // systemRed — community-measured.
-        const SYSTEM_RED_LIGHT: Color = Color::from_rgb8(0xFF, 0x3B, 0x30);
+        // systemBlue — community-measured (Apple doesn't publish exact
+        // hex); iOS 27 UI Kit `System Colors/Light/8 Blue`, 2026-07-18.
+        const SYSTEM_BLUE_LIGHT: Color = Color::from_rgb8(0x00, 0x87, 0xFF);
+        const SYSTEM_BLUE_DARK: Color = Color::from_rgb8(0x00, 0x90, 0xFF);
+        // systemPurple — community-measured, used as the "tertiary" accent;
+        // iOS 27 UI Kit `System Colors/Light/10 Purple`, 2026-07-18.
+        const SYSTEM_PURPLE_LIGHT: Color = Color::from_rgb8(0xCB, 0x2F, 0xE0);
+        // systemGray — Apple documents the same base hex for light/dark;
+        // iOS 27 UI Kit `Grays/Light|Dark/Gray`, 2026-07-18.
+        const SYSTEM_GRAY: Color = Color::from_rgb8(0x8D, 0x8D, 0x92);
+        // systemRed — community-measured; iOS 27 UI Kit
+        // `System Colors/Light/1 Red`, 2026-07-18.
+        const SYSTEM_RED_LIGHT: Color = Color::from_rgb8(0xFF, 0x38, 0x3C);
         const LABEL_LIGHT: Color = Color::from_rgb8(0x00, 0x00, 0x00);
-        // opaqueSeparator (Apple-documented flattened hairline).
-        const OPAQUE_SEPARATOR_LIGHT: Color = Color::from_rgb8(0xC6, 0xC6, 0xC8);
+        // opaqueSeparator (Apple-documented flattened hairline); iOS 27 UI
+        // Kit `Separators/Light/Opaque`, 2026-07-18.
+        const OPAQUE_SEPARATOR_LIGHT: Color = Color::from_rgb8(0xC5, 0xC5, 0xC7);
 
         Self {
             primary: SYSTEM_BLUE_LIGHT,
@@ -315,7 +358,8 @@ impl ColorScheme {
             tertiary_container: Color::from_rgb8(0xF3, 0xE1, 0xFB),
             on_tertiary_container: SYSTEM_PURPLE_LIGHT,
             tertiary_fixed: SYSTEM_PURPLE_LIGHT,
-            tertiary_fixed_dim: Color::from_rgb8(0xBF, 0x5A, 0xF2),
+            // iOS 27 UI Kit `System Colors/Dark/10 Purple`, 2026-07-18.
+            tertiary_fixed_dim: Color::from_rgb8(0xDB, 0x34, 0xF1),
             on_tertiary_fixed: Color::from_rgb8(0xFF, 0xFF, 0xFF),
             on_tertiary_fixed_variant: Color::from_rgb8(0x6B, 0x2E, 0x86),
 
@@ -324,13 +368,20 @@ impl ColorScheme {
             error_container: Color::from_rgb8(0xFF, 0xD9, 0xD6),
             on_error_container: SYSTEM_RED_LIGHT,
 
-            // systemBackground.
+            // systemBackground — iOS 27 UI Kit
+            // `Backgrounds/Light - Base/Primary`, 2026-07-18 (confirmed
+            // unchanged, opaque white).
             surface: Color::from_rgb8(0xFF, 0xFF, 0xFF),
             on_surface: LABEL_LIGHT,
-            // secondaryLabel — translucent per its real iOS token (R22).
+            // secondaryLabel — translucent per its real iOS token (R22),
+            // confirmed unchanged by `Labels/Light/2 Secondary`, 2026-07-18.
             on_surface_variant: Color::from_rgba8(0x3C, 0x3C, 0x43, 153),
-            // secondarySystemBackground.
-            surface_dim: Color::from_rgb8(0xF2, 0xF2, 0xF7),
+            // secondarySystemBackground — iOS 27 UI Kit
+            // `Backgrounds/Light - Base/Secondary`, 2026-07-18.
+            surface_dim: Color::from_rgb8(0xF1, 0xF1, 0xF6),
+            // tertiarySystemBackground — iOS 27 UI Kit
+            // `Backgrounds/Light - Base/Tertiary`, 2026-07-18 (confirmed
+            // unchanged, opaque white).
             surface_bright: Color::from_rgb8(0xFF, 0xFF, 0xFF),
             // ForgeKit-authored 5-step elevation ladder built from the iOS
             // background/gray tones (see module docs) — iOS has no native
@@ -342,8 +393,10 @@ impl ColorScheme {
             surface_container_highest: Color::from_rgb8(0xD1, 0xD1, 0xD6),
 
             outline: OPAQUE_SEPARATOR_LIGHT,
-            // separator — translucent per its real iOS token.
-            outline_variant: Color::from_rgba8(0x3C, 0x3C, 0x43, 74),
+            // separator — translucent per its real iOS token; iOS 27 UI Kit
+            // `Separators/Light/Non-Opaque`, 2026-07-18 (changed from the
+            // pre-refresh `rgba(60,60,67,0.29)` — see module docs).
+            outline_variant: Color::from_rgba8(0x00, 0x00, 0x00, 31),
             shadow: Color::from_rgb8(0x00, 0x00, 0x00),
             scrim: Color::from_rgb8(0x00, 0x00, 0x00),
             // "Inverse" roles reuse the opposite brightness's base tones.
@@ -359,13 +412,19 @@ impl ColorScheme {
     /// [`ColorScheme::cupertino_light`]; see that constructor's doc comment
     /// and the module docs' "Cupertino (iOS) mapping" section for sources.
     pub const fn cupertino_dark() -> Self {
-        const SYSTEM_BLUE_LIGHT: Color = Color::from_rgb8(0x00, 0x7A, 0xFF);
-        const SYSTEM_BLUE_DARK: Color = Color::from_rgb8(0x0A, 0x84, 0xFF);
-        const SYSTEM_PURPLE_DARK: Color = Color::from_rgb8(0xBF, 0x5A, 0xF2);
-        const SYSTEM_GRAY: Color = Color::from_rgb8(0x8E, 0x8E, 0x93);
-        const SYSTEM_RED_DARK: Color = Color::from_rgb8(0xFF, 0x45, 0x3A);
+        // iOS 27 UI Kit `System Colors/Light|Dark/8 Blue`, 2026-07-18.
+        const SYSTEM_BLUE_LIGHT: Color = Color::from_rgb8(0x00, 0x87, 0xFF);
+        const SYSTEM_BLUE_DARK: Color = Color::from_rgb8(0x00, 0x90, 0xFF);
+        // iOS 27 UI Kit `System Colors/Dark/10 Purple`, 2026-07-18.
+        const SYSTEM_PURPLE_DARK: Color = Color::from_rgb8(0xDB, 0x34, 0xF1);
+        // iOS 27 UI Kit `Grays/Light|Dark/Gray`, 2026-07-18.
+        const SYSTEM_GRAY: Color = Color::from_rgb8(0x8D, 0x8D, 0x92);
+        // iOS 27 UI Kit `System Colors/Dark/1 Red`, 2026-07-18.
+        const SYSTEM_RED_DARK: Color = Color::from_rgb8(0xFF, 0x42, 0x45);
         const LABEL_DARK: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
-        // opaqueSeparator (Apple-documented flattened hairline), dark.
+        // opaqueSeparator (Apple-documented flattened hairline), dark; iOS
+        // 27 UI Kit `Separators/Dark/Opaque`, 2026-07-18 (confirmed
+        // unchanged).
         const OPAQUE_SEPARATOR_DARK: Color = Color::from_rgb8(0x38, 0x38, 0x3A);
 
         Self {
@@ -391,7 +450,8 @@ impl ColorScheme {
             on_tertiary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
             tertiary_container: Color::from_rgb8(0x3B, 0x1F, 0x49),
             on_tertiary_container: SYSTEM_PURPLE_DARK,
-            tertiary_fixed: Color::from_rgb8(0xAF, 0x52, 0xDE),
+            // iOS 27 UI Kit `System Colors/Light/10 Purple`, 2026-07-18.
+            tertiary_fixed: Color::from_rgb8(0xCB, 0x2F, 0xE0),
             tertiary_fixed_dim: SYSTEM_PURPLE_DARK,
             on_tertiary_fixed: Color::from_rgb8(0xFF, 0xFF, 0xFF),
             on_tertiary_fixed_variant: Color::from_rgb8(0x6B, 0x2E, 0x86),
@@ -401,15 +461,20 @@ impl ColorScheme {
             error_container: Color::from_rgb8(0x4C, 0x16, 0x13),
             on_error_container: SYSTEM_RED_DARK,
 
-            // systemBackground, dark.
+            // systemBackground, dark — iOS 27 UI Kit
+            // `Backgrounds/Dark - Base/Primary`, 2026-07-18 (confirmed
+            // unchanged, opaque black).
             surface: Color::from_rgb8(0x00, 0x00, 0x00),
             on_surface: LABEL_DARK,
-            // secondaryLabel, dark — translucent per its real iOS token (R22).
-            on_surface_variant: Color::from_rgba8(0xEB, 0xEB, 0xF5, 153),
-            // secondarySystemBackground, dark.
-            surface_dim: Color::from_rgb8(0x1C, 0x1C, 0x1E),
-            // tertiarySystemBackground, dark — the "brightest" dark surface.
-            surface_bright: Color::from_rgb8(0x2C, 0x2C, 0x2E),
+            // secondaryLabel, dark — translucent per its real iOS token
+            // (R22); iOS 27 UI Kit `Labels/Dark/2 Secondary`, 2026-07-18.
+            on_surface_variant: Color::from_rgba8(0xEA, 0xEA, 0xF4, 153),
+            // secondarySystemBackground, dark — iOS 27 UI Kit
+            // `Backgrounds/Dark - Base/Secondary`, 2026-07-18.
+            surface_dim: Color::from_rgb8(0x1B, 0x1B, 0x1D),
+            // tertiarySystemBackground, dark — the "brightest" dark surface;
+            // iOS 27 UI Kit `Backgrounds/Dark - Base/Tertiary`, 2026-07-18.
+            surface_bright: Color::from_rgb8(0x2B, 0x2B, 0x2D),
             surface_container_lowest: Color::from_rgb8(0x00, 0x00, 0x00),
             surface_container_low: Color::from_rgb8(0x1C, 0x1C, 0x1E),
             surface_container: Color::from_rgb8(0x2C, 0x2C, 0x2E),
@@ -417,8 +482,10 @@ impl ColorScheme {
             surface_container_highest: Color::from_rgb8(0x48, 0x48, 0x4A),
 
             outline: OPAQUE_SEPARATOR_DARK,
-            // separator, dark — translucent per its real iOS token.
-            outline_variant: Color::from_rgba8(0x54, 0x54, 0x58, 166),
+            // separator, dark — translucent per its real iOS token; iOS 27
+            // UI Kit `Separators/Dark/Non-Opaque`, 2026-07-18 (changed from
+            // the pre-refresh `rgba(84,84,88,0.65)` — see module docs).
+            outline_variant: Color::from_rgba8(0xFF, 0xFF, 0xFF, 31),
             shadow: Color::from_rgb8(0x00, 0x00, 0x00),
             scrim: Color::from_rgb8(0x00, 0x00, 0x00),
             inverse_surface: Color::from_rgb8(0xFF, 0xFF, 0xFF),
@@ -496,22 +563,41 @@ mod tests {
     #[test]
     fn cupertino_light_spot_check() {
         let s = ColorScheme::cupertino_light();
-        assert_eq!(s.primary, Color::from_rgb8(0x00, 0x7A, 0xFF));
+        // iOS 27 UI Kit `System Colors/Light/8 Blue`, 2026-07-18 refresh.
+        assert_eq!(s.primary, Color::from_rgb8(0x00, 0x87, 0xFF));
         assert_eq!(s.surface, Color::from_rgb8(0xFF, 0xFF, 0xFF));
         assert_eq!(s.on_surface, Color::from_rgb8(0x00, 0x00, 0x00));
-        assert_eq!(s.error, Color::from_rgb8(0xFF, 0x3B, 0x30));
-        assert_eq!(s.outline, Color::from_rgb8(0xC6, 0xC6, 0xC8));
+        // iOS 27 UI Kit `System Colors/Light/1 Red`, 2026-07-18 refresh.
+        assert_eq!(s.error, Color::from_rgb8(0xFF, 0x38, 0x3C));
+        // iOS 27 UI Kit `Separators/Light/Opaque`, 2026-07-18 refresh.
+        assert_eq!(s.outline, Color::from_rgb8(0xC5, 0xC5, 0xC7));
+        // iOS 27 UI Kit `System Colors/Light/10 Purple`, 2026-07-18 refresh.
+        assert_eq!(s.tertiary, Color::from_rgb8(0xCB, 0x2F, 0xE0));
+        // iOS 27 UI Kit `Grays/Light/Gray`, 2026-07-18 refresh.
+        assert_eq!(s.secondary, Color::from_rgb8(0x8D, 0x8D, 0x92));
+        // iOS 27 UI Kit `Backgrounds/Light - Base/Secondary`, 2026-07-18
+        // refresh (secondarySystemBackground).
+        assert_eq!(s.surface_dim, Color::from_rgb8(0xF1, 0xF1, 0xF6));
         assert_eq!(s.surface_tint, s.primary);
     }
 
     #[test]
     fn cupertino_dark_spot_check() {
         let s = ColorScheme::cupertino_dark();
-        assert_eq!(s.primary, Color::from_rgb8(0x0A, 0x84, 0xFF));
+        // iOS 27 UI Kit `System Colors/Dark/8 Blue`, 2026-07-18 refresh.
+        assert_eq!(s.primary, Color::from_rgb8(0x00, 0x90, 0xFF));
         assert_eq!(s.surface, Color::from_rgb8(0x00, 0x00, 0x00));
         assert_eq!(s.on_surface, Color::from_rgb8(0xFF, 0xFF, 0xFF));
-        assert_eq!(s.error, Color::from_rgb8(0xFF, 0x45, 0x3A));
+        // iOS 27 UI Kit `System Colors/Dark/1 Red`, 2026-07-18 refresh.
+        assert_eq!(s.error, Color::from_rgb8(0xFF, 0x42, 0x45));
+        // iOS 27 UI Kit `Separators/Dark/Opaque`, 2026-07-18 (confirmed
+        // unchanged).
         assert_eq!(s.outline, Color::from_rgb8(0x38, 0x38, 0x3A));
+        // iOS 27 UI Kit `System Colors/Dark/10 Purple`, 2026-07-18 refresh.
+        assert_eq!(s.tertiary, Color::from_rgb8(0xDB, 0x34, 0xF1));
+        // iOS 27 UI Kit `Backgrounds/Dark - Base/Tertiary`, 2026-07-18
+        // refresh (tertiarySystemBackground, the "brightest" dark surface).
+        assert_eq!(s.surface_bright, Color::from_rgb8(0x2B, 0x2B, 0x2D));
         assert_eq!(s.surface_tint, s.primary);
     }
 
@@ -519,18 +605,21 @@ mod tests {
     fn cupertino_translucent_roles_carry_real_alpha() {
         // secondaryLabel/separator are genuinely translucent iOS tokens
         // (R22 correction) — unlike every M3 role, these two Cupertino
-        // fields intentionally carry a non-1.0 alpha (see module docs).
+        // fields intentionally carry a non-1.0 alpha (see module docs). The
+        // separator (outline_variant) alpha itself changed in the
+        // 2026-07-18 kit refresh (`Separators/Light|Dark/Non-Opaque`:
+        // 0.29/0.65 -> 0.12 for both brightnesses).
         let light = ColorScheme::cupertino_light();
         let [.., a] = light.on_surface_variant.to_rgba8().to_u8_array();
         assert_eq!(a, 153);
-        let [.., a] = light.outline_variant.to_rgba8().to_u8_array();
-        assert_eq!(a, 74);
+        let [r, g, b, a] = light.outline_variant.to_rgba8().to_u8_array();
+        assert_eq!((r, g, b, a), (0x00, 0x00, 0x00, 31));
 
         let dark = ColorScheme::cupertino_dark();
         let [.., a] = dark.on_surface_variant.to_rgba8().to_u8_array();
         assert_eq!(a, 153);
-        let [.., a] = dark.outline_variant.to_rgba8().to_u8_array();
-        assert_eq!(a, 166);
+        let [r, g, b, a] = dark.outline_variant.to_rgba8().to_u8_array();
+        assert_eq!((r, g, b, a), (0xFF, 0xFF, 0xFF, 31));
     }
 
     #[test]
