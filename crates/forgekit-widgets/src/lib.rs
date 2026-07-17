@@ -25,6 +25,7 @@ mod checkbox;
 mod flex;
 mod gesture;
 mod image;
+pub mod nav;
 mod padding;
 mod scroll;
 mod sized;
@@ -53,6 +54,10 @@ pub use flex::{
 };
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
+pub use nav::navigator::{
+    NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult, ResultCallback,
+    navigator,
+};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
 pub use scroll::{ScrollView, ScrollWidget, scroll_view};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
