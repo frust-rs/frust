@@ -506,6 +506,14 @@ impl<State: 'static> NavigatorWidget<State> {
     /// supersedes a running transition — snap it to its end and tear down its
     /// retained page). `stashed` is the removed leaving page (pop/replace) or
     /// `None` for a push (leaving stays in the stack).
+    ///
+    /// # Interactive supersede
+    ///
+    /// If the superseded transition is an *unreleased* interactive edge-swipe
+    /// pop, the [`finalize_transition`](Self::finalize_transition) call here
+    /// **completes** it (tears down the stashed page and queues its result
+    /// callback) rather than cancelling it — a programmatic op wins over an
+    /// in-flight drag, and the drag's page does not spring back.
     fn start_transition(
         &mut self,
         spec: TransitionSpec,
@@ -779,6 +787,19 @@ impl<State: 'static> NavigatorWidget<State> {
                 let dy = p.position.y - self.edge.down_start.y;
                 if dx > TOUCH_SLOP && dx.abs() > dy.abs() {
                     // Decisive rightward horizontal drag → STEAL from the page.
+                    // Re-validate stack depth at the steal site: a structural op
+                    // (a programmatic pop/replace) applied at a rebuild between
+                    // this arm's `Down` and now may have emptied the poppable
+                    // stack. `begin_interactive_pop`'s only depth check is a
+                    // debug-only `debug_assert!` (compiled out in release), so
+                    // without this guard a stale arm could pop the root page in a
+                    // release build — draining the stack to zero pages. If the
+                    // stack is no longer poppable, drop the stale arm and fall
+                    // through to normal routing rather than stealing.
+                    if self.pages.len() <= 1 {
+                        self.edge.armed = false;
+                        return self.route_top(ctx, event);
+                    }
                     let width = ctx.size().width.max(1.0);
                     let progress = (dx / width).clamp(0.0, 1.0);
                     self.begin_interactive_pop(progress);
@@ -821,6 +842,10 @@ impl<State: 'static> NavigatorWidget<State> {
                 } => {
                     let spec = self.effective_spec(transition);
                     self.cancel_top();
+                    // Disarm any pending edge-swipe: a structural stack mutation
+                    // invalidates an arm captured against the pre-mutation stack
+                    // (mirrors the capture/focus-clearing `cancel_top` contract).
+                    self.edge.armed = false;
                     let view = builder();
                     let pod = crate::build_child(&view, ctx);
                     self.pages.push(PageEntry {
@@ -844,6 +869,11 @@ impl<State: 'static> NavigatorWidget<State> {
                     // page is a no-op (its result payload is dropped).
                     if self.pages.len() > 1 {
                         self.cancel_top();
+                        // Disarm any pending edge-swipe: this pop shrinks the
+                        // stack, so an arm captured before it must not later steal
+                        // an interactive pop against the now-shallower stack
+                        // (mirrors the `cancel_top` capture/focus-clearing contract).
+                        self.edge.armed = false;
                         let mut popped = self.pages.pop().expect("len checked > 1");
                         let spec = popped.transition;
                         if let Some(callback) = popped.on_result.take() {
@@ -867,6 +897,10 @@ impl<State: 'static> NavigatorWidget<State> {
                 } => {
                     let spec = self.effective_spec(transition);
                     self.cancel_top();
+                    // Disarm any pending edge-swipe: replacing the top page
+                    // invalidates an arm captured against the outgoing page
+                    // (mirrors the `cancel_top` capture/focus-clearing contract).
+                    self.edge.armed = false;
                     let view = builder();
                     let pod = crate::build_child(&view, ctx);
                     if let Some(top) = self.pages.last_mut() {
@@ -2612,6 +2646,73 @@ mod tests {
         assert!(
             nav_widget(&root).transition.is_none(),
             "no interactive pop at depth 1"
+        );
+    }
+
+    // --- Regression (F1): a programmatic instant pop between an edge-swipe arm
+    //     and its steal must not empty the page stack. The arm is captured at
+    //     depth 2; a default (non-animated) pop applied at the next rebuild
+    //     shrinks the stack to the root page and never runs a transition (so the
+    //     `finalize_transition` arm-clearing never fires); a decisive rightward
+    //     Move must then NOT steal an interactive pop against the now-depth-1
+    //     stack — which, in a release build (where `begin_interactive_pop`'s only
+    //     depth guard is a compiled-out `debug_assert!`), would pop the root page
+    //     and leave zero pages. ---
+
+    #[test]
+    fn programmatic_pop_between_arm_and_steal_does_not_empty_stack() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        controller.push(|| sized_page(100.0, 60.0)); // B, instant → depth 2
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        // Arm the gesture on an edge Down at depth 2.
+        root.event(&mut state, &down(5.0, 50.0));
+        assert!(
+            nav_widget(&root).edge.armed,
+            "an edge-zone Down arms at depth 2"
+        );
+
+        // A programmatic instant (default non-animated) pop lands at the next
+        // rebuild, shrinking the stack to the root page — and disarming the stale
+        // edge gesture as a structural mutation, with no transition to clear it.
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(16));
+        assert_eq!(
+            nav_widget(&root).pages.len(),
+            1,
+            "the pop shrank the stack to the root page"
+        );
+        assert!(
+            !nav_widget(&root).edge.armed,
+            "the structural pop disarmed the stale edge gesture"
+        );
+
+        // A decisive rightward Move past the slop must NOT steal an interactive
+        // pop on the now-depth-1 stack (which would empty it).
+        root.event(&mut state, &move_to(60.0, 50.0));
+        assert!(
+            nav_widget(&root).transition.is_none(),
+            "no interactive pop was stolen on the depth-1 stack"
+        );
+        assert_eq!(
+            nav_widget(&root).pages.len(),
+            1,
+            "the root page is intact — the stack was never emptied"
+        );
+        assert!(
+            !nav_widget(&root).edge.armed,
+            "the stale arm did not survive"
         );
     }
 
