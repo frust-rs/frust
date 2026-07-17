@@ -132,6 +132,15 @@ final class ForgeKitViewController: UIViewController {
                 NSLog("ForgeKit: GPU init failed — rendering disabled for this session")
                 return
             }
+            // Attach the AccessKit adapter to this view (spec §9, phase 6d). The
+            // adapter dynamically subclasses the ForgeKitView to implement UIKit's
+            // accessibility methods, so it needs the *view* pointer (not the
+            // CAMetalLayer forgekit_init got). Do it here — once, before the view
+            // is shown/focused — which is the window AccessKit's SubclassingAdapter
+            // requires. Passed unretained: Rust holds the adapter only for the
+            // handle's lifetime and restores the view's class on forgekit_destroy,
+            // before this controller (and its view) is released.
+            forgekit_init_accessibility(handle, Unmanaged.passUnretained(forgeView).toOpaque())
             // Seed the theme's brightness from the platform's current
             // appearance before the first frame (task 08); live changes
             // arrive later via `traitCollectionDidChange`.

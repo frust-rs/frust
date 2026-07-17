@@ -18,6 +18,14 @@ log = { workspace = true }
 # through it — and `forgekit-render` is already built by the workspace regardless.
 forgekit-render = { workspace = true }
 
+# Unconditional: `ffi_support::build_tree_update` (the pure `SemanticsUpdate` →
+# `accesskit::TreeUpdate` assembly the iOS accesskit adapter pushes, phase 6d
+# task 05) is host-testable — it touches only the `accesskit` *core data crate*
+# (a data vocabulary crate that compiles on every target, already in the
+# workspace via forgekit-core). The iOS platform adapter (`accesskit_ios`) that
+# *consumes* the assembled update stays target-gated below.
+accesskit = { workspace = true }
+
 # The C-ABI runtime and the rest of the render/text stack are only ever compiled
 # for an iOS target; on the host this crate is (almost) empty but the macro and
 # the pure helpers still compile so `cargo test --workspace` stays green.

@@ -123,6 +123,41 @@ pub fn init(
     )
 }
 
+/// `forgekit_init_accessibility`: attach the accesskit adapter to the app's
+/// `ForgeKitView` (phase-6d task 05, D3-ios).
+///
+/// A distinct FFI entry from [`init`] because the accesskit `SubclassingAdapter`
+/// dynamically subclasses the **UIView**, whereas [`init`] only receives the
+/// `CAMetalLayer` (the GPU surface has no back-pointer to its owning view). Swift
+/// calls this once, on the first layout, immediately after `forgekit_init`
+/// returned a live handle and before the view is shown/focused — the window in
+/// which `SubclassingAdapter::new` must run (see [`crate::accessibility`]).
+///
+/// Both a null handle and a null view are benign no-ops (defensive, mirroring
+/// every other export): Swift only calls this with a non-null handle it just got
+/// from `forgekit_init` and `self.view`, but the native side never trusts that.
+/// Idempotent-adjacent: accesskit_ios panics if an adapter is *already* attached
+/// to the view, so Swift calls this exactly once (latched by the `handle == nil`
+/// first-init branch it lives in).
+pub fn init_accessibility(handle: *mut c_void, view: *mut c_void) {
+    guard("forgekit_init_accessibility", (), || {
+        if crate::ffi_support::handle_is_null(view) {
+            log::warn!(
+                "forgekit-shell-ios: forgekit_init_accessibility called with a null view; \
+                 accessibility not attached"
+            );
+            return;
+        }
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            // SAFETY: `view` is the app's live, unreleased `ForgeKitView` (UIView)
+            // pointer, delivered on the main thread on first layout before the view
+            // is shown — the contract `IosA11yAdapter::new`/accesskit_ios require.
+            unsafe { app.attach_accessibility(view) };
+        }
+    });
+}
+
 /// A no-op [`forgekit_reactive::FrameWaker`] for the mobile shell: the
 /// `CADisplayLink` loop already produces every frame regardless of a signal
 /// write, so there is nothing useful for the waker to do (contrast the

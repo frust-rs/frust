@@ -15,7 +15,43 @@
 use std::ffi::c_void;
 use std::fmt::Write as _;
 
+use accesskit::{Node, NodeId, Tree, TreeId, TreeUpdate};
 use forgekit_render::SurfacePhase;
+
+/// Assemble an `accesskit::TreeUpdate` from the flat pieces of a
+/// `forgekit_core::SemanticsUpdate` (phase-6d task 05, D3-ios).
+///
+/// This is the pure, host-testable core of the iOS accesskit push: the iOS
+/// adapter ([`crate::accessibility`]) calls it inside `Adapter::update_if_active`
+/// to turn a semantics pass into the incremental update accesskit consumes. It
+/// lives here (not in the target-gated adapter) so its correctness is covered by
+/// `cargo test --workspace` on the host, even though the `accesskit_ios` adapter
+/// that consumes the result is only ever compiled for iOS.
+///
+/// v1 pushes the **whole tree every update** (allowed because our node ids are
+/// stable across frames — phase-6d D1), so:
+/// - `tree` is always `Some(Tree::new(root))` (the whole-tree metadata accesskit
+///   requires on every full update);
+/// - `tree_id` is [`TreeId::ROOT`] — ForgeKit exposes a single root tree, no
+///   subtrees;
+/// - `focus` is the caller's already-resolved focus id
+///   (`SemanticsUpdate::focus_id()` — the focused node, or the root when nothing
+///   is focused, since accesskit's `focus` is non-optional).
+///
+/// `nodes` is moved through unchanged — our semantics pass already produces the
+/// exact `Vec<(NodeId, Node)>` shape `TreeUpdate` wants.
+pub(crate) fn build_tree_update(
+    nodes: Vec<(NodeId, Node)>,
+    root: NodeId,
+    focus: NodeId,
+) -> TreeUpdate {
+    TreeUpdate {
+        nodes,
+        tree: Some(Tree::new(root)),
+        tree_id: TreeId::ROOT,
+        focus,
+    }
+}
 
 /// Whether an opaque handle from the Swift side is the null sentinel.
 ///
@@ -402,6 +438,50 @@ mod tests {
         let json = ime_state_json(true, "a\"b", 1, 1, 0, 3, None);
         assert!(json.contains(r#""text":"a\"b""#));
         assert!(json.contains(r#""compBase":0,"compExt":3"#));
+    }
+
+    #[test]
+    fn tree_update_carries_full_tree_metadata_and_focus() {
+        use accesskit::Role;
+        let root = NodeId(1);
+        let button = NodeId(0x2_0000);
+        let nodes = vec![
+            (button, Node::new(Role::Button)),
+            (root, Node::new(Role::Window)),
+        ];
+        let update = build_tree_update(nodes, root, button);
+        // A full-tree update MUST carry `tree` metadata rooted at `root`.
+        assert_eq!(update.tree, Some(Tree::new(root)));
+        // Single root tree — no subtrees.
+        assert_eq!(update.tree_id, TreeId::ROOT);
+        // The resolved focus id is threaded straight through.
+        assert_eq!(update.focus, button);
+        // Nodes are moved through unchanged, order preserved.
+        assert_eq!(update.nodes.len(), 2);
+        assert_eq!(update.nodes[0].0, button);
+        assert_eq!(update.nodes[1].0, root);
+    }
+
+    #[test]
+    fn tree_update_defaults_focus_to_root_when_unfocused() {
+        // `SemanticsUpdate::focus_id()` returns the root when nothing is focused;
+        // this asserts the assembled update names the root as focus (accesskit's
+        // `focus` field is non-optional).
+        use accesskit::Role;
+        let root = NodeId(1);
+        let nodes = vec![(root, Node::new(Role::Window))];
+        let update = build_tree_update(nodes, root, root);
+        assert_eq!(update.focus, root);
+    }
+
+    #[test]
+    fn tree_update_allows_an_empty_node_list() {
+        // A bare (unbuilt) tree still assembles a valid update — the adapter push
+        // must never panic on an empty semantics pass.
+        let root = NodeId(1);
+        let update = build_tree_update(Vec::new(), root, root);
+        assert!(update.nodes.is_empty());
+        assert_eq!(update.tree, Some(Tree::new(root)));
     }
 
     #[test]

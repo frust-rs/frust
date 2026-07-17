@@ -31,6 +31,7 @@
 use std::any::Any;
 use std::ffi::c_void;
 
+use crate::accessibility::IosA11yAdapter;
 use forgekit_core::FrameTime;
 use forgekit_core::event::{
     EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerPhase,
@@ -109,6 +110,13 @@ pub struct IosAppHandle {
     /// *while* an override was active (during which `self.theme.brightness`
     /// itself does not move — see `effective_brightness_for_platform_change`).
     platform_brightness: Brightness,
+    /// The accesskit adapter, attached lazily by `forgekit_init_accessibility`
+    /// once Swift has a `ForgeKitView` (UIView) to hand over (phase-6d task 05).
+    /// `None` until then — `forgekit_init` only receives the `CAMetalLayer`, which
+    /// the accesskit `SubclassingAdapter` cannot subclass. While `Some`, `frame()`
+    /// drains its queued a11y actions (pre-rebuild) and pushes the post-layout
+    /// semantics tree to it (see [`Self::frame`]).
+    a11y: Option<IosA11yAdapter>,
 }
 
 impl IosAppHandle {
@@ -152,7 +160,29 @@ impl IosAppHandle {
             theme_override: ThemeOverrideWatcher::new(),
             theme_override_active: false,
             platform_brightness: Brightness::Light,
+            // Attached later, on the first layout, via `forgekit_init_accessibility`
+            // once Swift can supply the UIView (see the field doc).
+            a11y: None,
         }
+    }
+
+    /// Attach the accesskit adapter to the app's `ForgeKitView` (phase-6d task 05).
+    ///
+    /// Called once from [`crate::ffi_glue::init_accessibility`] on the first
+    /// layout, after `forgekit_init` returned this handle. Constructs an
+    /// [`IosA11yAdapter`] (which dynamically subclasses the view to implement the
+    /// UIKit accessibility methods) and stores it; from the next frame on, `frame()`
+    /// pushes semantics to it and routes its queued actions.
+    ///
+    /// # Safety
+    ///
+    /// `view` must be a valid, unreleased `UIView` (`ForgeKitView`) pointer, on the
+    /// UIKit main thread, before the view is first shown/focused — the contract
+    /// [`IosA11yAdapter::new`] forwards to accesskit_ios's `SubclassingAdapter::new`.
+    pub(crate) unsafe fn attach_accessibility(&mut self, view: *mut c_void) {
+        // SAFETY: forwarded from this fn's contract (live UIView*, main thread,
+        // pre-display) straight to the adapter constructor.
+        self.a11y = Some(unsafe { IosA11yAdapter::new(view) });
     }
 
     /// `forgekit_set_appearance`: flip the theme's brightness and re-push it to
@@ -386,6 +416,24 @@ impl IosAppHandle {
             return;
         }
 
+        // Drain any queued accessibility actions (VoiceOver activations, etc.)
+        // BEFORE the rebuild below, so a state change an action makes is picked up
+        // by this very frame — the same "mutate now, rebuild next" model touch/IME
+        // input uses (spec §9 / phase-6d D2). The handler enqueued these on the
+        // main thread; draining takes ownership of the batch so the queue's borrow
+        // is dropped before `perform_accessibility_action` re-enters the tree.
+        if let Some(a11y) = self.a11y.as_ref() {
+            for req in a11y.drain_actions() {
+                // `target_node.0` is the raw accesskit id the adapter reported;
+                // an unknown node or unmodelled action is a benign no-op (see
+                // `RenderRoot::perform_accessibility_action`). `needs_redraw` is
+                // dropped — the CADisplayLink loop already ticks the next frame.
+                let _ = self
+                    .app
+                    .perform_accessibility_action(req.target_node.0, req.action);
+            }
+        }
+
         // Rebuild under the root `Owner` so any signal read/`provide_context`
         // during a per-frame rebuild is tracked/scoped correctly, mirroring the
         // desktop shell (`runtime.with_owner(|| ...)`) and `create_handle`'s
@@ -406,6 +454,16 @@ impl IosAppHandle {
         {
             let text_ctx: &mut dyn Any = &mut self.text_ctx;
             self.app.layout(logical, text_ctx);
+        }
+
+        // Push the accessibility tree AFTER layout (node bounds come from the
+        // post-layout geometry — spec §9). The `push_if_active` closure walks the
+        // semantics tree only when an assistive technology is active, so this is a
+        // cheap early-return otherwise (phase-6d task 05). v1 pushes the whole tree
+        // every active frame; accesskit dedupes unchanged nodes internally.
+        if let Some(a11y) = self.a11y.as_ref() {
+            let app = &mut self.app;
+            a11y.push_if_active(|| app.semantics());
         }
 
         self.scene.reset();

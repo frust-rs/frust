@@ -1084,6 +1084,7 @@ dependencies = [
 name = "forgekit-shell-ios"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "accesskit_ios",
  "anyhow",
  "forgekit-core",

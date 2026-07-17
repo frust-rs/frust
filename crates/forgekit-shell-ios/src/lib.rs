@@ -39,6 +39,8 @@
 mod ffi_support;
 
 #[cfg(target_os = "ios")]
+mod accessibility;
+#[cfg(target_os = "ios")]
 mod app;
 #[cfg(target_os = "ios")]
 pub mod ffi_glue;
@@ -57,14 +59,17 @@ pub use forgekit_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (spec §10.2, Makepad `app_main!` precedent).
 ///
-/// Stamps out the twelve `forgekit_*` symbols the generated Swift app declares
+/// Stamps out the thirteen `forgekit_*` symbols the generated Swift app declares
 /// (the seven lifecycle/input exports, the three text-input exports —
 /// `forgekit_ime_apply`, `forgekit_ime_state_json`, `forgekit_string_free` —
-/// `forgekit_set_appearance` (task 08's dark-mode export), plus
-/// `forgekit_on_deep_link` (task 07's cold-start/running deep-link delivery)),
-/// each delegating to the non-generic runtime in [`ffi_glue`]. `forgekit_init`
-/// constructs the app's erased view tree and returns an opaque handle; the rest
-/// operate on that handle. It also initializes the process-wide
+/// `forgekit_set_appearance` (task 08's dark-mode export),
+/// `forgekit_on_deep_link` (task 07's cold-start/running deep-link delivery),
+/// plus `forgekit_init_accessibility` (phase-6d task 05's accesskit adapter
+/// attach — the one export whose UIView pointer the CAMetalLayer-only
+/// `forgekit_init` cannot supply)), each delegating to the non-generic runtime in
+/// [`ffi_glue`]. `forgekit_init` constructs the app's erased view tree and returns
+/// an opaque handle; the rest operate on that handle. It also initializes the
+/// process-wide
 /// [`forgekit_reactive::ReactiveRuntime`] (idempotent, framework-side inside
 /// [`ffi_glue::init`] rather than emitted here, so both arms below get it with
 /// no macro duplication) before the state/view tree is constructed.
@@ -110,6 +115,24 @@ macro_rules! ios_app {
             $crate::ffi_glue::init(metal_layer, width, height, scale, || {
                 $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $app_logic)
             })
+        }
+
+        /// `forgekit_init_accessibility`: attach the accesskit adapter to the
+        /// app's `ForgeKitView` (phase-6d task 05, D3-ios).
+        ///
+        /// Separate from `forgekit_init` because the accesskit `SubclassingAdapter`
+        /// needs the **UIView** pointer, whereas `forgekit_init` only receives the
+        /// `CAMetalLayer` (the GPU surface). Swift calls this once, on the first
+        /// layout, right after `forgekit_init` succeeds and before the view is
+        /// shown — passing `view` as the raw `ForgeKitView` pointer. A null handle
+        /// or null view is a benign no-op.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn forgekit_init_accessibility(
+            handle: *mut ::core::ffi::c_void,
+            view: *mut ::core::ffi::c_void,
+        ) {
+            $crate::ffi_glue::init_accessibility(handle, view)
         }
 
         /// `forgekit_resize`: resize the live surface (rotation / bounds change).

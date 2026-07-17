@@ -12,6 +12,13 @@
 // handle returned by forgekit_init — Swift owns the layer and must call
 // forgekit_destroy before releasing the view.
 void *forgekit_init(void *metal_layer, uint32_t width, uint32_t height, float scale);
+// Accessibility (spec §9, phase 6d): attach the AccessKit adapter to the app's
+// ForgeKitView. Separate from forgekit_init because the adapter subclasses the
+// *UIView*, whereas forgekit_init only gets the CAMetalLayer. Call this once,
+// on the first layout, right after forgekit_init returns a handle and before
+// the view is shown — pass the ForgeKitView pointer as `view`. A null handle or
+// null view is a no-op.
+void  forgekit_init_accessibility(void *handle, void *view);
 void  forgekit_resize(void *handle, uint32_t width, uint32_t height, float scale);
 // `timestamp_ns` is the CADisplayLink tick's `timestamp` (CFTimeInterval
 // seconds), converted to nanoseconds by the caller: UInt64(link.timestamp * 1_000_000_000).
