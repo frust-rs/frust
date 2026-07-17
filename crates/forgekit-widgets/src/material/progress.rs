@@ -1,8 +1,11 @@
 //! M3 progress indicators (Phase 6c, PLAN.md D5, task 10): linear (4dp) and
 //! circular (40dp) variants, both determinate and indeterminate. The circular
 //! variant needs the new `Command::Path`/`fill_path`/`stroke_path` primitive
-//! (PLAN.md D2b, task 05). Wavy/Expressive variants are experimental upstream
-//! and deferred (PLAN.md D5).
+//! (PLAN.md D2b, task 05). M3 Expressive **wavy** variants (Phase 6f, task
+//! 06 — `LinearWavyProgressIndicator`/`CircularWavyProgressIndicator`,
+//! `m3.material.io/components/progress-indicators/specs`,
+//! `research/RESEARCH.md:82-83`) are additive and opt-in — see the Wavy
+//! variants note below.
 //!
 //! [`LinearProgress`]/[`CircularProgress`] are both **controlled components**
 //! (`docs/CODE_STANDARDS.md`'s Interaction Semantics): the app passes a
@@ -33,6 +36,39 @@
 //! [`CIRCULAR_INDETERMINATE_SWEEP`] below) — visually "a segment/arc loops
 //! continuously", not upstream's exact choreography. Revisit if a future
 //! phase needs pixel-accurate parity.
+//!
+//! # Wavy variants
+//!
+//! [`LinearProgressView::wavy`]/[`CircularProgressView::wavy`] (plus the
+//! finer-grained [`LinearProgressView::wave_amplitude`]/`wave_wavelength`/
+//! `wave_speed` and their circular counterparts) opt a progress indicator
+//! into an M3 Expressive **wavy** active track: instead of a flat filled
+//! rect/arc, the active track renders as a sine wave with a given
+//! `amplitude`/`wavelength` (both logical px) whose phase advances over
+//! `wave_speed` (a duration per full phase cycle), driven by the same
+//! advance-during-paint [`AnimationController`] contract every animated
+//! widget in this crate uses (`docs/CODE_STANDARDS.md`'s Theming & Animation
+//! Conventions) — never a separate ticker. The **inactive** track always
+//! stays flat, per spec. Both [`ProgressValue::Determinate`] and
+//! [`ProgressValue::Indeterminate`] support wavy rendering: a determinate
+//! wave spans the filled fraction of the track/arc; an indeterminate wave
+//! spans the sweeping segment/arc from the existing single-segment
+//! approximation above. **At `amplitude <= 0.0` (the un-opted-in default)
+//! the render is byte-for-byte the existing flat path** — the wavy branch is
+//! only taken when `amplitude > 0.0`, so a caller who never touches the wavy
+//! builders sees no behavior change at all.
+//!
+//! [`WAVY_DEFAULT_AMPLITUDE`]/[`WAVY_DEFAULT_WAVELENGTH`]/
+//! [`WAVY_DEFAULT_PERIOD`] are the values `.wavy()` opts in with.
+//!
+//! **Community-approximate**: `m3.material.io/components/progress-indicators/specs`
+//! documents the wavy variant's existence and its `amplitude`/`wavelength`/
+//! `waveSpeed` parameters (`research/RESEARCH.md:82-83`) but not their
+//! default numeric values in a form this crate's research ledger captured;
+//! the three `WAVY_DEFAULT_*` constants below are chosen to read clearly as
+//! "a gentle wave" at this module's existing track dimensions (4dp linear
+//! thickness / 40dp circular diameter), not a verified pixel-for-pixel port
+//! of Compose's `WavyProgressIndicatorDefaults`.
 
 use std::f64::consts::{PI, TAU};
 use std::time::Duration;
@@ -44,7 +80,7 @@ use forgekit_core::{
 };
 use forgekit_scene::arc_path;
 use forgekit_theme::Theme;
-use kurbo::{Point, Size};
+use kurbo::{BezPath, Point, Size};
 use peniko::{Brush, Color};
 
 /// A progress indicator's controlled value (see the [module docs](self)).
@@ -67,6 +103,53 @@ impl ProgressValue {
         }
     }
 }
+
+// -- Wavy (shared by linear + circular) -----------------------------------
+
+/// Wavy-progress wave configuration, shared by [`LinearProgressView`]/
+/// [`CircularProgressView`] (see the [module docs](self)'s Wavy variants
+/// note). `amplitude` `<= 0.0` — the default — means "not wavy": every
+/// paint path branches on this to reproduce the flat-track render exactly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WaveParams {
+    /// Wave crest height, in logical px. `<= 0.0` degenerates to the flat
+    /// track.
+    amplitude: f64,
+    /// Crest-to-crest spacing, in logical px. Never read while
+    /// `amplitude <= 0.0`.
+    wavelength: f64,
+    /// Duration for the wave phase to advance one full cycle (`wave_speed`).
+    period: Duration,
+}
+
+impl Default for WaveParams {
+    fn default() -> Self {
+        WaveParams {
+            amplitude: 0.0,
+            wavelength: WAVY_DEFAULT_WAVELENGTH,
+            period: WAVY_DEFAULT_PERIOD,
+        }
+    }
+}
+
+/// Default wavy-indicator crest amplitude, in logical px, applied by
+/// `.wavy()`. **Community-approximate** — see the [module docs](self)'s Wavy
+/// variants note.
+const WAVY_DEFAULT_AMPLITUDE: f64 = 3.0;
+/// Default wavy-indicator wavelength (crest-to-crest spacing), in logical
+/// px, applied by `.wavy()`. **Community-approximate** — see the
+/// [module docs](self)'s Wavy variants note.
+const WAVY_DEFAULT_WAVELENGTH: f64 = 20.0;
+/// Default wavy-indicator wave phase period (`wave_speed`) applied by
+/// `.wavy()`. **Community-approximate** — see the [module docs](self)'s
+/// Wavy variants note.
+const WAVY_DEFAULT_PERIOD: Duration = Duration::from_millis(1800);
+
+/// Straight-line samples per full wavelength used to approximate the sine
+/// wave — the wavy counterpart of [`forgekit_scene::arc_path`]'s curve
+/// tolerance, chosen to read as smooth at the module's track dimensions
+/// without generating an excessive path element count.
+const WAVE_SAMPLES_PER_WAVELENGTH: f64 = 12.0;
 
 // -- Linear ------------------------------------------------------------
 
@@ -101,11 +184,15 @@ const LINEAR_INDETERMINATE_SEGMENT_FRACTION: f64 = 0.35;
 /// [module docs](self).
 pub struct LinearProgressView {
     value: ProgressValue,
+    wave: WaveParams,
 }
 
 /// Create a linear progress indicator driven by `value`.
 pub fn linear_progress(value: ProgressValue) -> LinearProgressView {
-    LinearProgressView { value }
+    LinearProgressView {
+        value,
+        wave: WaveParams::default(),
+    }
 }
 
 /// PascalCase alias for [`linear_progress`], matching the widget-fn
@@ -115,17 +202,55 @@ pub fn LinearProgress(value: ProgressValue) -> LinearProgressView {
     linear_progress(value)
 }
 
+impl LinearProgressView {
+    /// Opt into the M3 Expressive wavy active track at the
+    /// [`WAVY_DEFAULT_AMPLITUDE`]/[`WAVY_DEFAULT_WAVELENGTH`]/
+    /// [`WAVY_DEFAULT_PERIOD`] defaults — see the [module docs](self)'s Wavy
+    /// variants note.
+    pub fn wavy(mut self) -> Self {
+        self.wave.amplitude = WAVY_DEFAULT_AMPLITUDE;
+        self
+    }
+
+    /// Set the wave crest amplitude, in logical px. A value `<= 0.0`
+    /// degenerates the render back to the flat track (see the
+    /// [module docs](self)'s Wavy variants note); any positive value opts in
+    /// even without calling [`Self::wavy`] first.
+    pub fn wave_amplitude(mut self, amplitude: f64) -> Self {
+        self.wave.amplitude = amplitude;
+        self
+    }
+
+    /// Set the wave's crest-to-crest spacing, in logical px.
+    pub fn wave_wavelength(mut self, wavelength: f64) -> Self {
+        self.wave.wavelength = wavelength;
+        self
+    }
+
+    /// Set `wave_speed`: the duration for the wave phase to advance one full
+    /// cycle.
+    pub fn wave_speed(mut self, period: Duration) -> Self {
+        self.wave.period = period;
+        self
+    }
+}
+
 impl<State: 'static> View<State> for LinearProgressView {
     type Element = LinearProgressWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> LinearProgressWidget {
         let mut widget = LinearProgressWidget {
             value: self.value,
+            wave: self.wave,
             indeterminate: AnimationController::new(LINEAR_INDETERMINATE_PERIOD)
                 .with_curve(Curve::Linear),
+            wave_phase: AnimationController::new(self.wave.period).with_curve(Curve::Linear),
         };
         if matches!(widget.value, ProgressValue::Indeterminate) {
             widget.indeterminate.repeat();
+        }
+        if widget.wave.amplitude > 0.0 {
+            widget.wave_phase.repeat();
         }
         widget
     }
@@ -136,6 +261,7 @@ impl<State: 'static> View<State> for LinearProgressView {
         element: &mut LinearProgressWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
+        let mut changed = false;
         if prev.value != self.value {
             element.value = self.value;
             match self.value {
@@ -146,18 +272,71 @@ impl<State: 'static> View<State> for LinearProgressView {
                 }
                 ProgressValue::Determinate(_) => element.indeterminate.stop(),
             }
-            return ChangeFlags::PAINT;
+            changed = true;
         }
-        ChangeFlags::NONE
+        if prev.wave != self.wave {
+            element.wave = self.wave;
+            // A wave-param change resets the phase controller (a period
+            // change can't be applied to an in-flight `AnimationController`
+            // — see `docs/CODE_STANDARDS.md`'s advance-during-paint
+            // convention, which owns no external timer to retune).
+            element.wave_phase =
+                AnimationController::new(self.wave.period).with_curve(Curve::Linear);
+            if self.wave.amplitude > 0.0 {
+                element.wave_phase.repeat();
+            }
+            changed = true;
+        }
+        if changed {
+            ChangeFlags::PAINT
+        } else {
+            ChangeFlags::NONE
+        }
     }
 }
 
 /// The retained widget for a [`LinearProgressView`]. See the [module docs](self).
 pub struct LinearProgressWidget {
     value: ProgressValue,
+    wave: WaveParams,
     /// Drives the indeterminate sweep loop (`0.0..=1.0`, repeating). Idle
     /// (never advanced) while [`ProgressValue::Determinate`].
     indeterminate: AnimationController,
+    /// Drives the wavy active track's phase (`0.0..=1.0`, repeating). Idle
+    /// while `wave.amplitude <= 0.0`.
+    wave_phase: AnimationController,
+}
+
+/// Build a stroke path tracing a sine wave across `[0, width]`, vertically
+/// centered in `height` — the linear counterpart of [`wavy_arc_path`] below.
+/// Straight-line segments approximate the curve at
+/// [`WAVE_SAMPLES_PER_WAVELENGTH`] samples per wavelength (see the
+/// [module docs](self)'s Wavy variants note).
+fn linear_wave_path(
+    origin: Point,
+    width: f64,
+    height: f64,
+    amplitude: f64,
+    wavelength: f64,
+    phase: f64,
+) -> BezPath {
+    let mid_y = origin.y + height / 2.0;
+    let wavelength = wavelength.max(1.0);
+    let wave_y = |x: f64| mid_y - amplitude * (TAU * (x / wavelength + phase)).sin();
+
+    let step = (wavelength / WAVE_SAMPLES_PER_WAVELENGTH).max(1.0);
+    let mut path = BezPath::new();
+    path.move_to(Point::new(origin.x, wave_y(0.0)));
+    let mut x = step;
+    while x < width {
+        path.line_to(Point::new(origin.x + x, wave_y(x)));
+        x += step;
+    }
+    // Always land the final sample exactly at `width`, so a determinate
+    // fill/indeterminate segment's wave stops precisely at its clamped
+    // boundary regardless of how `width` divides by `step`.
+    path.line_to(Point::new(origin.x + width, wave_y(width)));
+    path
 }
 
 impl LinearProgressWidget {
@@ -191,17 +370,42 @@ impl Widget for LinearProgressWidget {
 
         scene.fill_rounded_rect(origin, size, radius, track);
 
+        let wavy = self.wave.amplitude > 0.0;
+        let phase = if wavy {
+            self.wave_phase.advance(ctx.frame_time());
+            self.wave_phase.value_clamped()
+        } else {
+            0.0
+        };
+
         match self.value {
             ProgressValue::Determinate(_) => {
                 let frac = self.value.determinate_fraction().unwrap_or(0.0);
                 let fill_width = size.width * frac;
                 if fill_width > 0.0 {
-                    scene.fill_rounded_rect(
-                        origin,
-                        Size::new(fill_width, size.height),
-                        radius,
-                        indicator,
-                    );
+                    if wavy {
+                        let path = linear_wave_path(
+                            origin,
+                            fill_width,
+                            size.height,
+                            self.wave.amplitude,
+                            self.wave.wavelength,
+                            phase,
+                        );
+                        scene.stroke_path(
+                            Point::ZERO,
+                            &path,
+                            size.height,
+                            &Brush::Solid(indicator),
+                        );
+                    } else {
+                        scene.fill_rounded_rect(
+                            origin,
+                            Size::new(fill_width, size.height),
+                            radius,
+                            indicator,
+                        );
+                    }
                 }
             }
             ProgressValue::Indeterminate => {
@@ -216,15 +420,36 @@ impl Widget for LinearProgressWidget {
                 let clipped_x = x.max(0.0);
                 let clipped_w = (x + segment_w).min(size.width) - clipped_x;
                 if clipped_w > 0.0 {
-                    scene.fill_rounded_rect(
-                        Point::new(origin.x + clipped_x, origin.y),
-                        Size::new(clipped_w, size.height),
-                        radius,
-                        indicator,
-                    );
+                    if wavy {
+                        let path = linear_wave_path(
+                            Point::new(origin.x + clipped_x, origin.y),
+                            clipped_w,
+                            size.height,
+                            self.wave.amplitude,
+                            self.wave.wavelength,
+                            phase,
+                        );
+                        scene.stroke_path(
+                            Point::ZERO,
+                            &path,
+                            size.height,
+                            &Brush::Solid(indicator),
+                        );
+                    } else {
+                        scene.fill_rounded_rect(
+                            Point::new(origin.x + clipped_x, origin.y),
+                            Size::new(clipped_w, size.height),
+                            radius,
+                            indicator,
+                        );
+                    }
                 }
                 ctx.request_frame();
             }
+        }
+
+        if wavy {
+            ctx.request_frame();
         }
     }
 
@@ -278,11 +503,15 @@ const CIRCULAR_INDETERMINATE_SWEEP: f64 = 0.75 * TAU;
 /// [module docs](self).
 pub struct CircularProgressView {
     value: ProgressValue,
+    wave: WaveParams,
 }
 
 /// Create a circular progress indicator driven by `value`.
 pub fn circular_progress(value: ProgressValue) -> CircularProgressView {
-    CircularProgressView { value }
+    CircularProgressView {
+        value,
+        wave: WaveParams::default(),
+    }
 }
 
 /// PascalCase alias for [`circular_progress`], matching the widget-fn
@@ -292,17 +521,56 @@ pub fn CircularProgress(value: ProgressValue) -> CircularProgressView {
     circular_progress(value)
 }
 
+impl CircularProgressView {
+    /// Opt into the M3 Expressive wavy active track at the
+    /// [`WAVY_DEFAULT_AMPLITUDE`]/[`WAVY_DEFAULT_WAVELENGTH`]/
+    /// [`WAVY_DEFAULT_PERIOD`] defaults — see the [module docs](self)'s Wavy
+    /// variants note.
+    pub fn wavy(mut self) -> Self {
+        self.wave.amplitude = WAVY_DEFAULT_AMPLITUDE;
+        self
+    }
+
+    /// Set the wave crest amplitude, in logical px. A value `<= 0.0`
+    /// degenerates the render back to the flat arc (see the
+    /// [module docs](self)'s Wavy variants note); any positive value opts in
+    /// even without calling [`Self::wavy`] first.
+    pub fn wave_amplitude(mut self, amplitude: f64) -> Self {
+        self.wave.amplitude = amplitude;
+        self
+    }
+
+    /// Set the wave's crest-to-crest spacing, interpreted as an arc-length
+    /// period, in logical px.
+    pub fn wave_wavelength(mut self, wavelength: f64) -> Self {
+        self.wave.wavelength = wavelength;
+        self
+    }
+
+    /// Set `wave_speed`: the duration for the wave phase to advance one full
+    /// cycle.
+    pub fn wave_speed(mut self, period: Duration) -> Self {
+        self.wave.period = period;
+        self
+    }
+}
+
 impl<State: 'static> View<State> for CircularProgressView {
     type Element = CircularProgressWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> CircularProgressWidget {
         let mut widget = CircularProgressWidget {
             value: self.value,
+            wave: self.wave,
             indeterminate: AnimationController::new(CIRCULAR_INDETERMINATE_PERIOD)
                 .with_curve(Curve::Linear),
+            wave_phase: AnimationController::new(self.wave.period).with_curve(Curve::Linear),
         };
         if matches!(widget.value, ProgressValue::Indeterminate) {
             widget.indeterminate.repeat();
+        }
+        if widget.wave.amplitude > 0.0 {
+            widget.wave_phase.repeat();
         }
         widget
     }
@@ -313,6 +581,7 @@ impl<State: 'static> View<State> for CircularProgressView {
         element: &mut CircularProgressWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
+        let mut changed = false;
         if prev.value != self.value {
             element.value = self.value;
             match self.value {
@@ -323,18 +592,73 @@ impl<State: 'static> View<State> for CircularProgressView {
                 }
                 ProgressValue::Determinate(_) => element.indeterminate.stop(),
             }
-            return ChangeFlags::PAINT;
+            changed = true;
         }
-        ChangeFlags::NONE
+        if prev.wave != self.wave {
+            element.wave = self.wave;
+            // See LinearProgressView::rebuild's matching comment: a
+            // period change resets the phase controller rather than retuning
+            // it in place.
+            element.wave_phase =
+                AnimationController::new(self.wave.period).with_curve(Curve::Linear);
+            if self.wave.amplitude > 0.0 {
+                element.wave_phase.repeat();
+            }
+            changed = true;
+        }
+        if changed {
+            ChangeFlags::PAINT
+        } else {
+            ChangeFlags::NONE
+        }
     }
 }
 
 /// The retained widget for a [`CircularProgressView`]. See the [module docs](self).
 pub struct CircularProgressWidget {
     value: ProgressValue,
+    wave: WaveParams,
     /// Drives the indeterminate rotation loop (`0.0..=1.0`, repeating). Idle
     /// (never advanced) while [`ProgressValue::Determinate`].
     indeterminate: AnimationController,
+    /// Drives the wavy active track's phase (`0.0..=1.0`, repeating). Idle
+    /// while `wave.amplitude <= 0.0`.
+    wave_phase: AnimationController,
+}
+
+/// Build a stroke path tracing a circular arc whose radius oscillates
+/// sinusoidally with angle — the circular counterpart of
+/// [`linear_wave_path`] above. `wavelength` (an arc-length period) is
+/// converted to an angular period via `wavelength / radius`, so the crest
+/// spacing reads consistently with a `linear_wave_path` call given the same
+/// `wavelength` (see the [module docs](self)'s Wavy variants note).
+fn wavy_arc_path(
+    center: Point,
+    radius: f64,
+    start_angle: f64,
+    sweep_angle: f64,
+    amplitude: f64,
+    wavelength: f64,
+    phase: f64,
+) -> BezPath {
+    let angular_wavelength = (wavelength.max(1.0) / radius.max(1.0)).max(f64::EPSILON);
+    let samples = ((sweep_angle.abs() / angular_wavelength) * WAVE_SAMPLES_PER_WAVELENGTH)
+        .ceil()
+        .clamp(2.0, 4096.0) as usize;
+
+    let mut path = BezPath::new();
+    for i in 0..=samples {
+        let t = i as f64 / samples as f64;
+        let angle = start_angle + sweep_angle * t;
+        let r = radius + amplitude * (TAU * (angle / angular_wavelength + phase)).sin();
+        let p = Point::new(center.x + r * angle.cos(), center.y + r * angle.sin());
+        if i == 0 {
+            path.move_to(p);
+        } else {
+            path.line_to(p);
+        }
+    }
+    path
 }
 
 impl CircularProgressWidget {
@@ -364,12 +688,32 @@ impl Widget for CircularProgressWidget {
         let center = Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
         let brush = Brush::Solid(color);
 
+        let wavy = self.wave.amplitude > 0.0;
+        let phase = if wavy {
+            self.wave_phase.advance(ctx.frame_time());
+            self.wave_phase.value_clamped()
+        } else {
+            0.0
+        };
+
         match self.value {
             ProgressValue::Determinate(_) => {
                 let frac = self.value.determinate_fraction().unwrap_or(0.0);
                 if frac > 0.0 {
                     let sweep = TAU * frac;
-                    let path = arc_path(center, radius, START_ANGLE, sweep);
+                    let path = if wavy {
+                        wavy_arc_path(
+                            center,
+                            radius,
+                            START_ANGLE,
+                            sweep,
+                            self.wave.amplitude,
+                            self.wave.wavelength,
+                            phase,
+                        )
+                    } else {
+                        arc_path(center, radius, START_ANGLE, sweep)
+                    };
                     scene.stroke_path(Point::ZERO, &path, CIRCULAR_STROKE, &brush);
                 }
             }
@@ -377,10 +721,26 @@ impl Widget for CircularProgressWidget {
                 self.indeterminate.advance(ctx.frame_time());
                 let t = self.indeterminate.value_clamped();
                 let start = START_ANGLE + t * TAU;
-                let path = arc_path(center, radius, start, CIRCULAR_INDETERMINATE_SWEEP);
+                let path = if wavy {
+                    wavy_arc_path(
+                        center,
+                        radius,
+                        start,
+                        CIRCULAR_INDETERMINATE_SWEEP,
+                        self.wave.amplitude,
+                        self.wave.wavelength,
+                        phase,
+                    )
+                } else {
+                    arc_path(center, radius, start, CIRCULAR_INDETERMINATE_SWEEP)
+                };
                 scene.stroke_path(Point::ZERO, &path, CIRCULAR_STROKE, &brush);
                 ctx.request_frame();
             }
+        }
+
+        if wavy {
+            ctx.request_frame();
         }
     }
 
@@ -531,6 +891,115 @@ mod tests {
         );
     }
 
+    // -- linear: wavy -------------------------------------------------------
+
+    fn build_linear_view(view: LinearProgressView) -> LinearProgressWidget {
+        let mut counter = 0u64;
+        <LinearProgressView as View<()>>::build(&view, &mut BuildCtx::new(&mut counter))
+    }
+
+    #[test]
+    fn linear_wavy_at_zero_amplitude_degenerates_to_the_flat_variant() {
+        let mut flat = build_linear(ProgressValue::Determinate(0.4));
+        let flat_scene = paint_at(
+            &mut flat,
+            Point::ZERO,
+            Size::new(200.0, LINEAR_TRACK_HEIGHT),
+        );
+
+        let view = linear_progress(ProgressValue::Determinate(0.4))
+            .wavy()
+            .wave_amplitude(0.0);
+        let mut wavy = build_linear_view(view);
+        let wavy_scene = paint_at(
+            &mut wavy,
+            Point::ZERO,
+            Size::new(200.0, LINEAR_TRACK_HEIGHT),
+        );
+
+        assert_eq!(
+            flat_scene.rrects, wavy_scene.rrects,
+            "amplitude 0 must paint byte-for-byte the same rects as the flat variant"
+        );
+        assert!(
+            wavy_scene.strokes.is_empty(),
+            "amplitude 0 must not emit a wave stroke"
+        );
+    }
+
+    #[test]
+    fn linear_wave_params_reach_the_render_state() {
+        let view = linear_progress(ProgressValue::Determinate(0.5))
+            .wave_amplitude(6.0)
+            .wave_wavelength(30.0)
+            .wave_speed(Duration::from_millis(900));
+        let w = build_linear_view(view);
+        assert_eq!(w.wave.amplitude, 6.0);
+        assert_eq!(w.wave.wavelength, 30.0);
+        assert_eq!(w.wave.period, Duration::from_millis(900));
+    }
+
+    #[test]
+    fn linear_wavy_determinate_strokes_a_wave_instead_of_filling_a_rect() {
+        let view = linear_progress(ProgressValue::Determinate(0.5)).wavy();
+        let mut w = build_linear_view(view);
+        let scene = paint_at(&mut w, Point::ZERO, Size::new(200.0, LINEAR_TRACK_HEIGHT));
+        assert_eq!(
+            scene.rrects.len(),
+            1,
+            "only the flat inactive track rect; the active fill is now a stroke"
+        );
+        assert_eq!(scene.strokes.len(), 1);
+    }
+
+    #[test]
+    fn linear_wavy_determinate_clamps_the_wave_to_the_clamped_fraction() {
+        let over = linear_progress(ProgressValue::Determinate(1.5)).wavy();
+        let mut w = build_linear_view(over);
+        let scene = paint_at(&mut w, Point::ZERO, Size::new(100.0, LINEAR_TRACK_HEIGHT));
+        assert_eq!(scene.strokes.len(), 1);
+        let (path, _) = &scene.strokes[0];
+        match path.elements().last() {
+            Some(PathEl::LineTo(p)) => {
+                assert!(
+                    (p.x - 100.0).abs() < 1e-9,
+                    "an out-of-range value still clamps the wave's rightmost sample to the track width"
+                );
+            }
+            other => panic!("expected the wave path's last element to be a LineTo, got {other:?}"),
+        }
+
+        let under = linear_progress(ProgressValue::Determinate(-0.5)).wavy();
+        let mut w = build_linear_view(under);
+        let scene = paint_at(&mut w, Point::ZERO, Size::new(100.0, LINEAR_TRACK_HEIGHT));
+        assert_eq!(
+            scene.strokes.len(),
+            0,
+            "clamped-to-zero fraction paints no wave stroke, mirroring the flat variant"
+        );
+    }
+
+    #[test]
+    fn linear_wavy_indeterminate_still_requests_frames() {
+        // Mirrors `linear_indeterminate_requests_a_frame_every_paint`: at the
+        // bare-core `FrameTime::ZERO` default, the sweeping segment starts
+        // fully off-track (no fill/stroke on the very first paint either
+        // way — see that test's comment), so this only asserts the shared
+        // "keeps requesting frames while wavy" contract, not a specific
+        // stroke count.
+        let view = linear_progress(ProgressValue::Indeterminate).wavy();
+        let mut w = build_linear_view(view);
+        for _ in 0..3 {
+            let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, LINEAR_TRACK_HEIGHT));
+            let mut scene = RecordingScene::default();
+            w.paint(&mut ctx, &mut scene);
+            assert!(
+                ctx.needs_frame(),
+                "a wavy indeterminate indicator must keep requesting frames"
+            );
+        }
+    }
+
     // -- circular: determinate geometry -----------------------------------
 
     #[test]
@@ -591,6 +1060,96 @@ mod tests {
                 "always paints exactly one arc segment"
             );
         }
+    }
+
+    // -- circular: wavy ------------------------------------------------------
+
+    fn build_circular_view(view: CircularProgressView) -> CircularProgressWidget {
+        let mut counter = 0u64;
+        <CircularProgressView as View<()>>::build(&view, &mut BuildCtx::new(&mut counter))
+    }
+
+    #[test]
+    fn circular_wavy_at_zero_amplitude_degenerates_to_the_flat_variant() {
+        let mut flat = build_circular(ProgressValue::Determinate(0.5));
+        let flat_scene = paint_at(
+            &mut flat,
+            Point::ZERO,
+            Size::new(CIRCULAR_DIAMETER, CIRCULAR_DIAMETER),
+        );
+
+        let view = circular_progress(ProgressValue::Determinate(0.5))
+            .wavy()
+            .wave_amplitude(0.0);
+        let mut wavy = build_circular_view(view);
+        let wavy_scene = paint_at(
+            &mut wavy,
+            Point::ZERO,
+            Size::new(CIRCULAR_DIAMETER, CIRCULAR_DIAMETER),
+        );
+
+        assert_eq!(flat_scene.strokes.len(), wavy_scene.strokes.len());
+        assert_eq!(
+            flat_scene.strokes[0], wavy_scene.strokes[0],
+            "amplitude 0 must stroke byte-for-byte the same arc path as the flat variant"
+        );
+    }
+
+    #[test]
+    fn circular_wave_params_reach_the_render_state() {
+        let view = circular_progress(ProgressValue::Determinate(0.5))
+            .wave_amplitude(4.0)
+            .wave_wavelength(15.0)
+            .wave_speed(Duration::from_millis(1200));
+        let w = build_circular_view(view);
+        assert_eq!(w.wave.amplitude, 4.0);
+        assert_eq!(w.wave.wavelength, 15.0);
+        assert_eq!(w.wave.period, Duration::from_millis(1200));
+    }
+
+    #[test]
+    fn circular_wavy_determinate_strokes_a_wavy_arc() {
+        let view = circular_progress(ProgressValue::Determinate(0.5)).wavy();
+        let mut w = build_circular_view(view);
+        let scene = paint_at(
+            &mut w,
+            Point::ZERO,
+            Size::new(CIRCULAR_DIAMETER, CIRCULAR_DIAMETER),
+        );
+        assert_eq!(scene.strokes.len(), 1);
+
+        let flat_scene = paint_at(
+            &mut build_circular(ProgressValue::Determinate(0.5)),
+            Point::ZERO,
+            Size::new(CIRCULAR_DIAMETER, CIRCULAR_DIAMETER),
+        );
+        assert_ne!(
+            scene.strokes[0].0, flat_scene.strokes[0].0,
+            "a positive amplitude must produce a different path than the flat arc"
+        );
+    }
+
+    #[test]
+    fn circular_wavy_zero_progress_paints_no_stroke() {
+        let view = circular_progress(ProgressValue::Determinate(0.0)).wavy();
+        let mut w = build_circular_view(view);
+        let scene = paint_at(
+            &mut w,
+            Point::ZERO,
+            Size::new(CIRCULAR_DIAMETER, CIRCULAR_DIAMETER),
+        );
+        assert!(scene.strokes.is_empty());
+    }
+
+    #[test]
+    fn circular_wavy_indeterminate_still_requests_frames_and_strokes_a_wave() {
+        let view = circular_progress(ProgressValue::Indeterminate).wavy();
+        let mut w = build_circular_view(view);
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(CIRCULAR_DIAMETER, CIRCULAR_DIAMETER));
+        let mut scene = RecordingScene::default();
+        w.paint(&mut ctx, &mut scene);
+        assert!(ctx.needs_frame());
+        assert_eq!(scene.strokes.len(), 1);
     }
 
     // -- semantics -----------------------------------------------------------
