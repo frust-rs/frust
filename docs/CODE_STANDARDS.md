@@ -251,8 +251,17 @@ interactive widget in `forgekit-widgets`:
 
 ## Theming & Animation Conventions
 
-- **Resolve theme tokens at paint/layout time, with an unthemed-fallback
-  constant per resolved value.** A themed widget looks up
+- **Paint-time resolution is always safe; layout-time-baked resolution is
+  only safe under the `set_theme` → `ChangeFlags` contract.** Most themed
+  widgets resolve tokens from `PaintCtx` on every paint pass and so
+  self-refresh on a live theme swap for free. `Text` instead bakes its
+  resolved glyph color into the shaped layout at LAYOUT time (see
+  `docs/ARCHITECTURE.md`'s Theme delivery); a widget adding layout-time-baked
+  resolution depends on relayout actually happening, so any dirty-tracking
+  work must treat a theme change as forcing `ChangeFlags::LAYOUT`, not just
+  `PAINT`.
+- **Resolve theme tokens with an unthemed-fallback constant per resolved
+  value.** A themed widget looks up
   `Theme::from_paint_ctx(ctx)`/`from_layout_ctx(ctx)`, falling back to a local
   constant (e.g. `Button`'s `FILL`/`RADIUS`) when no theme is threaded
   (bare-core tests, pre-theme apps) — a widget never assumes a theme is

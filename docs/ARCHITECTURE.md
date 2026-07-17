@@ -179,6 +179,15 @@ shell `provide_context`s a cloned `Theme` under the reactive root `Owner`, read
 reactively via `use_context::<Theme>()` in `Component::build`. A shell
 re-pushes both paths together on a brightness change (desktop's
 `WindowEvent::ThemeChanged`, or the mobile appearance exports below).
+Resolution timing is asymmetric: most themed widgets re-read the theme from
+`PaintCtx` every paint pass and self-refresh on a live swap for free, but
+`Text` bakes its resolved glyph color into the shaped layout at LAYOUT time
+and `paint` only replays that brush. This refreshes on a swap today because
+shells run layout unconditionally every frame — and stays correct by
+contract, not coincidence, because `RenderRoot::set_theme` marks
+`ChangeFlags::LAYOUT | PAINT` pending, so a future skip-layout optimization
+via `take_change_flags` remains correct across theme swaps (see
+`docs/CODE_STANDARDS.md`'s Theming conventions).
 
 **Event pipeline:** an `InputEvent` (a `PointerEvent` down/move/up/cancel, or
 a scroll delta — already translated into **logical**, density-independent
