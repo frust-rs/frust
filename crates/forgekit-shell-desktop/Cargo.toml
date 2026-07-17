@@ -21,6 +21,12 @@ forgekit-theme = { workspace = true }
 # module docs.
 forgekit-shell-common = { workspace = true }
 winit = { workspace = true }
+# Desktop accesskit adapter (phase 6d D3, wired in task 03) — winit
+# event-loop integration for the semantics tree; compiles unconditionally
+# like `winit` above (this crate is only ever included in the dependency
+# graph for non-Android builds, via `forgekit`'s
+# `cfg(not(target_os = "android"))` gate — see docs/ARCHITECTURE.md).
+accesskit_winit = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 pollster = { workspace = true }

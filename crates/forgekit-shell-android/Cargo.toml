@@ -37,6 +37,9 @@ jni = { workspace = true }
 ndk = { workspace = true }
 ndk-sys = { workspace = true }
 android_logger = { workspace = true }
+# Android accesskit adapter (phase 6d D3, wired in task 04) — target-gated
+# like the JNI deps above; nothing off-Android references it.
+accesskit_android = { workspace = true }
 
 # Only the macro-expansion smoke test (`jni_glue::macro_expansion`) needs a
 # concrete `View` to feed `android_app!`; the runtime itself stays widget-agnostic

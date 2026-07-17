@@ -60,6 +60,22 @@ android_system_properties = "0.1"
 # Android-compiling vocabulary crate); do not float to a new minor without a
 # fresh `cargo tree -d` / Android-compile check.
 accesskit = "0.24"
+# accessibility platform adapters (phase 6d D3) — each shell's seam onto its
+# native a11y API, all unifying on the `accesskit = "0.24"` pin above
+# (verified: accesskit_winit 0.33.2 needs accesskit ^0.24.1 + winit ^0.30.5 —
+# we're on winit 0.30.13; accesskit_android 0.7.5 and accesskit_ios 0.1.2 both
+# need accesskit ^0.24.1 too). Pinned to minor like the `accesskit` line
+# above, except accesskit_ios which is pinned exact per PLAN.md D3 (its 0.1.x
+# line is younger/less proven and never compiled on this host — see
+# docs/DEVELOPMENT.md's Version-Pin Policy).
+accesskit_winit = "0.33"
+accesskit_android = "0.7"
+accesskit_ios = "=0.1.2"
+# experimental CPU render-tier fallback (phase 6d D4) — optional, feature-gated
+# (`cpu-tier` on forgekit-render, NOT default), exact-pinned: pre-1.0 with an
+# unstable API, isolated behind the encode adapter so a breaking bump never
+# reaches the default GPU path.
+vello_cpu = "=0.0.9"
 # reactive stack (forgekit-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md / phase-5.5 research doc)
 reactive_graph = "0.2"

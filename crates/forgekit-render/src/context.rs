@@ -117,28 +117,6 @@ const fn is_ios_simulator() -> bool {
     cfg!(all(target_os = "ios", target_abi = "sim"))
 }
 
-/// The [`wgpu::DownlevelFlags`] the vello 0.9 render pipeline cannot run
-/// without. vello unconditionally allocates its working buffers with
-/// `BufferUsages::INDIRECT` (see `wgpu_engine.rs` — "TODO: only some buffers
-/// will need indirect"), and wgpu rejects creating any INDIRECT-usage buffer
-/// on a device whose adapter lacks [`wgpu::DownlevelFlags::INDIRECT_EXECUTION`].
-///
-/// The **iOS Simulator** is the platform where this bites: wgpu-hal 29 gates
-/// `INDIRECT_EXECUTION` on the `iOS_GPUFamily3_v1`/`macOS_GPUFamily1_v1`
-/// Metal feature sets, but the simulator only exposes the `Apple2` GPU family,
-/// so the flag is never set. This is a wgpu-29/vello-0.9-level simulator
-/// limitation (a sibling of [wgpu #7057](https://github.com/gfx-rs/wgpu/issues/7057))
-/// that cannot be patched under the version pin — hence we detect it up front
-/// and fail surface creation with a clear diagnostic instead of letting vello
-/// panic inside `create_buffer` on every frame.
-const REQUIRED_DOWNLEVEL_FLAGS: wgpu::DownlevelFlags = wgpu::DownlevelFlags::INDIRECT_EXECUTION;
-
-/// Pure check: does `flags` include everything the vello pipeline requires?
-/// Split out from the adapter query so it is unit-testable without a GPU.
-fn supports_required_downlevel_flags(flags: wgpu::DownlevelFlags) -> bool {
-    flags.contains(REQUIRED_DOWNLEVEL_FLAGS)
-}
-
 /// Number of uncaptured `wgpu` errors logged at error level per device before
 /// the handler latches into suppression. A single flaky frame under a driver
 /// hiccup (e.g. the Android emulator's SwiftShader path — see the
@@ -293,20 +271,28 @@ impl RenderContext {
                 .await
                 .map_err(|e| anyhow!("forgekit-render: no compatible GPU adapter: {e}"))?;
 
-        // Fail fast (with a diagnostic) if the adapter cannot run the vello
-        // pipeline, instead of letting vello panic in `create_buffer` every
-        // frame. The iOS Simulator is the known offender — see
-        // `REQUIRED_DOWNLEVEL_FLAGS`.
+        // Consult the tier probe (spec Phase 6, PLAN.md D4) instead of a
+        // bespoke downlevel check, so a failed GPU probe surfaces through the
+        // one diagnostic path `select_render_tier` owns (shared with its own
+        // unit tests). An explicit override (`FORGEKIT_RENDER_TIER`, or
+        // `forgekit run --render-tier` setting it for the spawned process)
+        // wins outright. The experimental `Cpu` tier is not yet wired into
+        // device creation (task 06 adds the vello_cpu encode path), so today
+        // only `Available(Gpu)` actually proceeds — everything else fails
+        // fast here exactly like the prior bespoke check did, just through
+        // the unified diagnosis.
         let downlevel = adapter.get_downlevel_capabilities();
-        if !supports_required_downlevel_flags(downlevel.flags) {
-            let missing = REQUIRED_DOWNLEVEL_FLAGS - downlevel.flags;
-            return Err(anyhow!(
-                "forgekit-render: GPU adapter `{}` lacks downlevel flags required by the vello \
-                 renderer ({missing:?}); this is the known wgpu-29/vello-0.9 iOS Simulator \
-                 limitation (INDIRECT_EXECUTION is unavailable on the simulator's Apple2 GPU \
-                 family). Run on a physical device.",
-                adapter.get_info().name,
-            ));
+        let caps = crate::tier::TierCaps {
+            downlevel_flags: downlevel.flags,
+            adapter_name: adapter.get_info().name,
+        };
+        let override_tier = crate::tier::render_tier_override_from_env();
+        let selection = crate::tier::select_render_tier(&caps, override_tier);
+        if !matches!(
+            selection.outcome,
+            crate::tier::TierOutcome::Available(crate::tier::RenderTier::Gpu)
+        ) {
+            return Err(anyhow!(selection.diagnosis));
         }
 
         let required_features = adapter.features() & vello_optional_features();
@@ -526,17 +512,6 @@ mod tests {
         let limits = effective_limits(base.clone(), true);
         assert_eq!(limits.min_uniform_buffer_offset_alignment, 512);
         assert_eq!(limits, base);
-    }
-
-    #[test]
-    fn downlevel_check_requires_indirect_execution() {
-        // A fully-capable adapter passes.
-        assert!(supports_required_downlevel_flags(
-            wgpu::DownlevelFlags::all()
-        ));
-        // The iOS Simulator shape: everything except INDIRECT_EXECUTION.
-        let sim_flags = wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::INDIRECT_EXECUTION;
-        assert!(!supports_required_downlevel_flags(sim_flags));
     }
 
     #[test]

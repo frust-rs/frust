@@ -82,6 +82,17 @@ pub enum Command {
     Run {
         #[command(flatten)]
         build: BuildArgs,
+
+        /// Force the render tier (`gpu`/`cpu`) `forgekit-render` probes for
+        /// at startup, by setting `FORGEKIT_RENDER_TIER` for the launched
+        /// process (see docs/DEVELOPMENT.md; `forgekit_render::select_render_tier`
+        /// / `RENDER_TIER_ENV_VAR`). **Desktop-preview only in v1**: the
+        /// `cargo run` fallback gets the env var directly; plumbing an
+        /// override to a launched Android/iOS device (`adb`/`devicectl`
+        /// env/intent extras) is not implemented yet — the on-device tier
+        /// probe still runs regardless, it just can't be forced from here.
+        #[arg(long = "render-tier", value_name = "TIER")]
+        render_tier: Option<RenderTierArg>,
     },
     /// Produce a distributable artifact (spec §12.5/12.6) — release-signed
     /// APK/AAB via Gradle, or an iOS app/IPA via `xcodebuild`. Defaults to
@@ -146,6 +157,29 @@ pub enum BuildTarget {
         #[arg(long = "export-method", value_name = "METHOD")]
         export_method: String,
     },
+}
+
+/// `forgekit run --render-tier` value (see `Command::Run`'s doc comment).
+/// Deliberately independent of `forgekit_render::RenderTier` — `forgekit-cli`
+/// has no compile-time dependency on the rendering stack (see
+/// `docs/ARCHITECTURE.md`) — but its two variants and their lowercase env
+/// string ([`RenderTierArg::env_value`]) must stay in sync with
+/// `forgekit_render::parse_render_tier_override`'s accepted values by hand.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum RenderTierArg {
+    Gpu,
+    Cpu,
+}
+
+impl RenderTierArg {
+    /// The value `FORGEKIT_RENDER_TIER` is set to for the spawned process.
+    pub fn env_value(self) -> &'static str {
+        match self {
+            RenderTierArg::Gpu => "gpu",
+            RenderTierArg::Cpu => "cpu",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -265,10 +299,11 @@ mod tests {
     fn parses_run_with_defaults() {
         let cli = Cli::parse_from(["forgekit", "run"]);
         match cli.command {
-            Command::Run { build } => {
+            Command::Run { build, render_tier } => {
                 assert!(!build.debug);
                 assert!(!build.profile);
                 assert!(!build.release);
+                assert_eq!(render_tier, None);
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -279,9 +314,52 @@ mod tests {
         let cli = Cli::parse_from(["forgekit", "-d", "emulator-5554", "run", "--release"]);
         assert_eq!(cli.device_id.as_deref(), Some("emulator-5554"));
         match cli.command {
-            Command::Run { build } => assert!(build.release),
+            Command::Run { build, .. } => assert!(build.release),
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_run_with_render_tier_gpu() {
+        let cli = Cli::parse_from(["forgekit", "run", "--render-tier", "gpu"]);
+        match cli.command {
+            Command::Run { render_tier, .. } => {
+                assert_eq!(render_tier, Some(RenderTierArg::Gpu));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_with_render_tier_cpu() {
+        let cli = Cli::parse_from(["forgekit", "run", "--render-tier", "cpu"]);
+        match cli.command {
+            Command::Run { render_tier, .. } => {
+                assert_eq!(render_tier, Some(RenderTierArg::Cpu));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_without_render_tier_is_none() {
+        let cli = Cli::parse_from(["forgekit", "run"]);
+        match cli.command {
+            Command::Run { render_tier, .. } => assert_eq!(render_tier, None),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_render_tier_value() {
+        let result = Cli::try_parse_from(["forgekit", "run", "--render-tier", "hybrid"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn render_tier_arg_env_values() {
+        assert_eq!(RenderTierArg::Gpu.env_value(), "gpu");
+        assert_eq!(RenderTierArg::Cpu.env_value(), "cpu");
     }
 
     #[test]

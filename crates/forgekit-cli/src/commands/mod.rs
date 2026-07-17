@@ -38,7 +38,7 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             deeplink_host,
         }),
         Command::Clean => clean::run(),
-        Command::Run { build } => run::run(build, cli.device_id, verbose),
+        Command::Run { build, render_tier } => run::run(build, cli.device_id, render_tier, verbose),
         Command::Build { target } => build::run(target),
     }
 }

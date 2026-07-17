@@ -13,6 +13,15 @@ kurbo.workspace = true
 forgekit-scene.workspace = true
 anyhow.workspace = true
 log.workspace = true
+# Experimental CPU render-tier fallback (phase 6d D4, wired in task 06) —
+# optional, only pulled in by the `cpu-tier` feature below; NOT part of the
+# default GPU path. Exact-pinned per the workspace Version-Pin Policy.
+vello_cpu = { workspace = true, optional = true }
+
+[features]
+# Experimental vello_cpu-backed CPU render tier (spec Phase 6, PLAN.md D4).
+# NOT default — the GPU (vello) path is unaffected when this is off.
+cpu-tier = ["dep:vello_cpu"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_system_properties.workspace = true
