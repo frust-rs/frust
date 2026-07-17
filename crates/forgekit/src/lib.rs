@@ -103,16 +103,18 @@ pub use forgekit_widgets::{
 /// crate directly, mirroring the baseline-widget re-export block above.
 pub use forgekit_widgets::{
     AppBar, AppBarView, AppBarWidget, AssistChip, AssistChipView, AssistChipWidget,
-    BottomSheetView, BottomSheetWidget, CardVariant, CardView, CardWidget, CircularProgress,
-    CircularProgressView, CircularProgressWidget, DialogView, DialogWidget, FabSize, FabView,
-    FabWidget, FilterChip, FilterChipView, FilterChipWidget, LinearProgress, LinearProgressView,
-    LinearProgressWidget, ListItem, ListItemLines, ListItemWidget, ListView, ListViewWidget,
-    LoadingIndicator, LoadingIndicatorView, LoadingIndicatorWidget, NavItem, NavigationBar,
-    NavigationBarView, NavigationBarWidget, ONE_LINE_HEIGHT, ProgressValue, RoundedPolygon, Switch,
-    SwitchView, SwitchWidget, THREE_LINE_HEIGHT, TWO_LINE_HEIGHT, app_bar, assist_chip,
-    bottom_sheet, card, circular_progress, dialog, elevated_card, extended_fab, fab, filled_card,
-    filter_chip, linear_progress, list_item, list_view, loading_indicator, morph_path, nav_item,
-    navigation_bar, outlined_card, show_bottom_sheet, show_dialog, switch,
+    BottomSheetView, BottomSheetWidget, ButtonGroup, ButtonGroupView, ButtonGroupWidget,
+    CardVariant, CardView, CardWidget, CircularProgress, CircularProgressView,
+    CircularProgressWidget, DialogView, DialogWidget, FabSize, FabView, FabWidget, FilterChip,
+    FilterChipView, FilterChipWidget, LinearProgress, LinearProgressView, LinearProgressWidget,
+    ListItem, ListItemLines, ListItemWidget, ListView, ListViewWidget, LoadingIndicator,
+    LoadingIndicatorView, LoadingIndicatorWidget, NavItem, NavigationBar, NavigationBarView,
+    NavigationBarWidget, ONE_LINE_HEIGHT, ProgressValue, RoundedPolygon, SplitButton,
+    SplitButtonView, SplitButtonWidget, Switch, SwitchView, SwitchWidget, THREE_LINE_HEIGHT,
+    TWO_LINE_HEIGHT, app_bar, assist_chip, bottom_sheet, button_group, card, circular_progress,
+    dialog, elevated_card, extended_fab, fab, filled_card, filter_chip, linear_progress, list_item,
+    list_view, loading_indicator, morph_path, nav_item, navigation_bar, outlined_card,
+    show_bottom_sheet, show_dialog, split_button, switch,
 };
 
 /// The Cupertino (iOS) widget catalog (Phase 6c, PLAN.md D5): the

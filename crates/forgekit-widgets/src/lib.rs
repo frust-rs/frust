@@ -81,6 +81,7 @@ pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
 // widgets' flat re-export shape above.
 // ---------------------------------------------------------------------
 pub use material::appbar::{AppBar, AppBarView, AppBarWidget, app_bar};
+pub use material::button_group::{ButtonGroup, ButtonGroupView, ButtonGroupWidget, button_group};
 pub use material::card::{
     CardVariant, CardView, CardWidget, card, elevated_card, filled_card, outlined_card,
 };
@@ -107,6 +108,7 @@ pub use material::progress::{
 };
 pub use material::shape_morph::{RoundedPolygon, morph_path};
 pub use material::sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
+pub use material::split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use material::switch::{Switch, SwitchView, SwitchWidget, switch};
 
 // ---------------------------------------------------------------------

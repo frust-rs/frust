@@ -30,8 +30,14 @@
 //!   Phase 6f (task 05).
 //! * [`loading_indicator`] — the M3 Expressive morphing loading indicator.
 //!   Added in Phase 6f (task 05).
+//! * [`button_group`] — the M3X connected, single-select button group (its
+//!   pressed-member emphasis is [`shape_morph`]'s second consumer). Added in
+//!   Phase 6f (task 07).
+//! * [`split_button`] — the M3X split button (leading action + trailing menu,
+//!   with a rotating chevron). Added in Phase 6f (task 07).
 
 pub mod appbar;
+pub mod button_group;
 pub mod card;
 pub mod chips;
 pub mod dialog;
@@ -43,5 +49,6 @@ pub mod navbar;
 pub mod progress;
 pub mod shape_morph;
 pub mod sheet;
+pub mod split_button;
 pub mod state_layer;
 pub mod switch;
