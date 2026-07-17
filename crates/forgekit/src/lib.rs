@@ -96,6 +96,17 @@ pub use forgekit_widgets::{
     ResolvedPage, Route, RouteBuilder, RouteParams, Router,
 };
 
+mod router_glue;
+
+/// Router ⇄ deep-link auto-wiring (Phase 6b, task 08): [`router_with_deep_links`]/
+/// [`RouterDeepLinks`] resolve a [`Router`]'s start location from the process's
+/// cold-start deep link (falling back to an app-supplied default) and keep
+/// navigating it on every subsequent warm link — see [`RouterDeepLinks`]'s doc
+/// for the precedence and dedupe contracts. This is the ONLY place in the
+/// facade that sees both `forgekit-widgets`' `Router` and `forgekit-reactive`'s
+/// deep-link source together; neither underlying crate depends on the other.
+pub use router_glue::{RouterDeepLinks, router_with_deep_links};
+
 /// The design-token vocabulary (spec §11): the [`Theme`] bundle plus its
 /// component token tables, flat-re-exported from `forgekit-theme` so app code
 /// never names that crate directly. A root component reads the active theme via

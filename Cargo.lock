@@ -756,6 +756,8 @@ dependencies = [
  "forgekit-shell-ios",
  "forgekit-theme",
  "forgekit-widgets",
+ "kurbo",
+ "peniko",
  "reactive_graph",
 ]
 

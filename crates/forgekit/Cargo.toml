@@ -32,3 +32,11 @@ anyhow = { workspace = true }
 # `cargo check --target *-linux-android -p forgekit` builds the whole graph.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 forgekit-shell-desktop = { workspace = true }
+
+[dev-dependencies]
+# Test-only: `router_glue`'s unit tests build GPU-free fixture widgets
+# (mirroring `forgekit-widgets::nav::router`'s own test fixtures) that
+# implement `forgekit_core::PaintScene`/`Widget` directly, whose signatures
+# name these geometry/brush types.
+kurbo = { workspace = true }
+peniko = { workspace = true }
