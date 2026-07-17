@@ -10,6 +10,7 @@ use forgekit_text::TextStyle;
 
 use crate::color::{Brightness, ColorScheme};
 use crate::elevation::Elevation;
+use crate::glass::GlassScale;
 use crate::motion::MotionScheme;
 use crate::shape::ShapeScale;
 use crate::typography::TypeScale;
@@ -41,6 +42,10 @@ pub struct Theme {
     pub shape: ShapeScale,
     pub elevation: Elevation,
     pub motion: MotionScheme,
+    /// The glass material scale (task 6f-01): [`GlassScale::opaque_material`]
+    /// on the Material baseline, [`GlassScale::ios27`] on Cupertino. No widget
+    /// consumes it yet — a later wave paints from it.
+    pub glass: GlassScale,
     pub brightness: Brightness,
     pub design_language: DesignLanguage,
 }
@@ -58,6 +63,7 @@ impl Theme {
             shape: ShapeScale::m3(),
             elevation: Elevation::m3(),
             motion: MotionScheme::m3_expressive(),
+            glass: GlassScale::opaque_material(),
             brightness: Brightness::Light,
             design_language: DesignLanguage::Material3,
         }
@@ -78,6 +84,7 @@ impl Theme {
             shape: ShapeScale::cupertino(),
             elevation: Elevation::cupertino(),
             motion: MotionScheme::cupertino(),
+            glass: GlassScale::ios27(),
             brightness: Brightness::Light,
             design_language: DesignLanguage::Cupertino,
         }
@@ -185,6 +192,16 @@ mod tests {
         assert_eq!(theme.dark, ColorScheme::cupertino_dark());
         assert_eq!(theme.brightness, Brightness::Light);
         assert_eq!(theme.design_language, DesignLanguage::Cupertino);
+    }
+
+    #[test]
+    fn baselines_carry_the_matching_glass_scale() {
+        use crate::glass::GlassScale;
+        // Material baseline → opaque glass; Cupertino baseline → iOS-27 glass.
+        assert_eq!(Theme::m3_baseline().glass, GlassScale::opaque_material());
+        assert_eq!(Theme::cupertino_baseline().glass, GlassScale::ios27());
+        assert!(Theme::m3_baseline().glass.chrome.is_opaque());
+        assert!(!Theme::cupertino_baseline().glass.chrome.is_opaque());
     }
 
     #[test]

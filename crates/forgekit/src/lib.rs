@@ -143,9 +143,19 @@ pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 /// never names that crate directly. A root component reads the active theme via
 /// [`use_context`]`::<`[`Theme`]`>()`; a widget reads it during paint/layout via
 /// `PaintCtx::theme_as`/`LayoutCtx::theme_as` (or `Theme::from_paint_ctx`).
+///
+/// Includes the glass material tokens (task 6f-01):
+///
+/// ```
+/// use forgekit::GlassScale;
+///
+/// let glass = GlassScale::ios27();
+/// assert_eq!(glass.chrome.blur_radius_intent, 75.0);
+/// assert!(!glass.control.is_opaque());
+/// ```
 pub use forgekit_theme::{
-    Brightness, ColorScheme, DesignLanguage, Elevation, ElevationLevel, MotionScheme, MotionSpring,
-    ShadowSpec, ShapeScale, SurfaceRole, Theme, TypeScale,
+    Brightness, ColorScheme, DesignLanguage, Elevation, ElevationLevel, GlassFill, GlassMaterial,
+    GlassScale, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, SurfaceRole, Theme, TypeScale,
 };
 
 /// App-facing theme override (PLAN.md D2 correction, task 6c-04):
@@ -518,6 +528,29 @@ mod root_owner_wrap {
             resolved,
             Some(RunCtxMarker(7)),
             "run() must wrap root.init() in the root Owner so provide_context sticks"
+        );
+    }
+}
+
+/// Facade-level check for task 6f-01: the glass material tokens
+/// ([`GlassScale`]/[`GlassMaterial`]/[`GlassFill`]) re-export through the
+/// `forgekit` facade, and the two baselines carry the matching scale.
+#[cfg(test)]
+mod glass_reexport {
+    use crate::{GlassFill, GlassMaterial, GlassScale, Theme};
+
+    // A build-time proof the types name-resolve through the facade.
+    #[allow(dead_code)]
+    fn _uses_all(_f: GlassFill, _m: GlassMaterial, _s: GlassScale) {}
+
+    #[test]
+    fn baselines_expose_glass_through_the_facade() {
+        assert!(Theme::m3_baseline().glass.chrome.is_opaque());
+        assert!(!Theme::cupertino_baseline().glass.control.is_opaque());
+        assert_eq!(
+            Theme::cupertino_baseline().glass,
+            GlassScale::ios27(),
+            "Cupertino baseline carries the iOS-27 glass scale"
         );
     }
 }

@@ -19,6 +19,7 @@
 
 pub mod color;
 pub mod elevation;
+pub mod glass;
 pub mod motion;
 pub mod shape;
 pub mod theme;
@@ -26,6 +27,7 @@ pub mod typography;
 
 pub use color::{Brightness, ColorScheme};
 pub use elevation::{Elevation, ElevationLevel, ShadowSpec, SurfaceRole};
+pub use glass::{GlassFill, GlassMaterial, GlassScale};
 pub use motion::{MotionScheme, MotionSpring};
 pub use shape::ShapeScale;
 pub use theme::{DesignLanguage, Theme};
