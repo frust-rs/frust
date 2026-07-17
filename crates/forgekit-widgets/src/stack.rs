@@ -8,7 +8,7 @@
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, View, Widget,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
 };
 use kurbo::{Point, Size};
 
@@ -87,6 +87,13 @@ impl Widget for StackWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         crate::route_event(&mut self.children, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent overlay container: forward each child (bottom-to-top).
+        for pod in &self.children {
+            pod.semantics_child(ctx);
+        }
     }
 }
 

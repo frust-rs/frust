@@ -252,6 +252,13 @@ impl<C: Component> Widget for ComponentWidget<C> {
         self.child.paint_child(ctx, scene);
     }
 
+    fn semantics(&self, ctx: &mut crate::semantics::SemanticsCtx) {
+        // A component contributes no node of its own (the state boundary is
+        // invisible to accessibility); forward to the child pod, exactly like a
+        // transparent single-child container.
+        self.child.semantics_child(ctx);
+    }
+
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // The state boundary: build an inner context over the component's *own*
         // local state, seeded with the outer focus flag, dispatch through the

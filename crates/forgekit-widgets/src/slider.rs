@@ -10,9 +10,10 @@
 
 use std::rc::Rc;
 
+use forgekit_core::accesskit::Role;
 use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
-    PaintScene, PointerPhase, View, Widget,
+    PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
 use forgekit_theme::Theme;
 use kurbo::{Point, Size};
@@ -201,6 +202,15 @@ impl Widget for SliderWidget {
                 EventResult::Handled
             }
         }
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A Slider node exposing its normalized `0.0..=1.0` value and range.
+        ctx.push_node(Role::Slider, |node| {
+            node.set_numeric_value(self.value);
+            node.set_min_numeric_value(0.0);
+            node.set_max_numeric_value(1.0);
+        });
     }
 }
 

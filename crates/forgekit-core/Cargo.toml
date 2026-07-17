@@ -10,4 +10,5 @@ tree_arena = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 forgekit-scene = { workspace = true }
+accesskit = { workspace = true }
 reactive_graph = { workspace = true }

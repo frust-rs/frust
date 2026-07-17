@@ -6,8 +6,10 @@
 //! threaded through [`LayoutCtx`]) and emits the resulting glyph runs during
 //! paint.
 
+use forgekit_core::accesskit::Role;
 use forgekit_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View,
+    Widget,
 };
 use forgekit_text::{
     FontFamily, FontStyle, FontWeight, LineHeight, TextContext, TextLayout, TextStyle,
@@ -235,6 +237,15 @@ impl Widget for TextWidget {
                 scene.draw_glyph_run(run);
             }
         }
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A static-text leaf: a Label node. accesskit guidance is that a
+        // Role::Label node carries its text in `value` (not `label`), so a
+        // screen reader announces the run's content.
+        ctx.push_node(Role::Label, |node| {
+            node.set_value(self.content.as_str());
+        });
     }
 }
 

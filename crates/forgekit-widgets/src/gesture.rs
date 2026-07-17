@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, TOUCH_SLOP, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, TOUCH_SLOP, View, Widget, any,
 };
 use kurbo::{Point, Size};
 
@@ -129,6 +129,11 @@ impl Widget for GestureDetectorWidget {
         }
         // Non-pointer (scroll) events pass straight through to the child.
         self.child.event_child(ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent tap-recognizer wrapper: forward to the single child.
+        self.child.semantics_child(ctx);
     }
 }
 

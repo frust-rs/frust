@@ -38,10 +38,11 @@
 
 use std::rc::Rc;
 
+use forgekit_core::accesskit::Role;
 use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EditingState, EventCtx, EventResult, FrameTime,
     ImeEvent, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase,
-    View, Widget,
+    SemanticsCtx, View, Widget,
 };
 use forgekit_text::{EditOp, EditingStateBytes, TextContext, TextEditor, TextStyle, utf16_to_byte};
 use forgekit_theme::Theme;
@@ -691,6 +692,18 @@ impl Widget for TextInputWidget {
                 self.handle_ime(ctx, e)
             }
             InputEvent::Scroll { .. } => EventResult::Ignored,
+        }
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A single-line TextInput node exposing its current text as `value`.
+        // accesskit tracks focus at the tree level, so a focused field records
+        // itself as the pass's focus node rather than carrying a per-node flag.
+        let id = ctx.push_node(Role::TextInput, |node| {
+            node.set_value(self.editor.text());
+        });
+        if self.focused {
+            ctx.set_focused(id);
         }
     }
 }

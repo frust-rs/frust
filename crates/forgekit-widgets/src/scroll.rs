@@ -29,11 +29,12 @@
 //! release seeds the fling clock from `frame_time` (a zero-delta frame), and each
 //! subsequent paint advances it by the inter-frame delta.
 
+use forgekit_core::accesskit::Role;
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FLING_STOP,
     FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent,
-    PointerPhase, ScrollDelta, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX, Widget, any,
-    fling_decay, fling_displacement,
+    PointerPhase, ScrollDelta, SemanticsCtx, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX,
+    Widget, any, fling_decay, fling_displacement,
 };
 use kurbo::{Point, Size};
 
@@ -341,6 +342,23 @@ impl Widget for ScrollWidget {
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         let t = self.event_time_ms();
         self.event_at(ctx, event, t)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A ScrollView node exposing the vertical scroll offset and its range,
+        // wrapping its scrolled content: `semantics_child` translates by the
+        // child's origin (which carries `-offset`), so descendant bounds reflect
+        // the scrolled position.
+        let max_offset = (self.content.height - self.viewport.height).max(0.0);
+        ctx.push_container(
+            Role::ScrollView,
+            |node| {
+                node.set_scroll_y(self.offset);
+                node.set_scroll_y_min(0.0);
+                node.set_scroll_y_max(max_offset);
+            },
+            |ctx| self.child.semantics_child(ctx),
+        );
     }
 }
 

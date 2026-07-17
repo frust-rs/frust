@@ -7,7 +7,7 @@
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
 };
 use kurbo::{Point, Size};
 
@@ -126,6 +126,11 @@ impl Widget for AlignWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         crate::route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent positioning wrapper: forward to the single child.
+        self.child.semantics_child(ctx);
     }
 }
 

@@ -54,6 +54,12 @@ android_logger = "0.15"
 # transitive dep of wgpu-hal on Android, so promoting it to direct adds no
 # new crates/size (see forgekit-render/Cargo.toml)
 android_system_properties = "0.1"
+# accessibility (forgekit-core's semantics seam, spec §9 / phase-6c D1) —
+# core data crate ONLY (no accesskit_* platform adapters; those are phase 6d).
+# Pinned to minor per the Version-Pin Policy (a pure-data, MSRV-compatible,
+# Android-compiling vocabulary crate); do not float to a new minor without a
+# fresh `cargo tree -d` / Android-compile check.
+accesskit = "0.24"
 # reactive stack (forgekit-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md / phase-5.5 research doc)
 reactive_graph = "0.2"

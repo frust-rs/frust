@@ -10,9 +10,10 @@
 
 use std::rc::Rc;
 
+use forgekit_core::accesskit::{Action, Role, Toggled};
 use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, PointerPhase, View, Widget, any,
+    PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
 };
 use forgekit_theme::Theme;
 use kurbo::{Point, Size};
@@ -89,6 +90,10 @@ pub fn Checkbox<State: 'static, F: Fn(&mut State, bool) + 'static>(
 pub struct CheckboxWidget {
     checked: bool,
     label: ChildPod,
+    /// The label text, retained for the semantics node's accessible name (a
+    /// checkbox is a single a11y node reading its name from here rather than
+    /// recursing into the inner `TextWidget`).
+    label_text: String,
     /// The pressed *visual* state; follows the cursor in/out while captured.
     pressed: bool,
     /// Armed by a `Down` (alongside `capture_pointer`), cleared on `Up`/`Cancel`.
@@ -110,6 +115,7 @@ impl<State: 'static> View<State> for CheckboxView<State> {
         CheckboxWidget {
             checked: self.checked,
             label: crate::build_child(&label_view, ctx),
+            label_text: self.label.clone(),
             pressed: false,
             captured: false,
             on_toggle: crate::erase_callback_arg(&self.on_toggle),
@@ -130,6 +136,7 @@ impl<State: 'static> View<State> for CheckboxView<State> {
             flags |= ChangeFlags::PAINT;
         }
         if prev.label != self.label {
+            element.label_text = self.label.clone();
             let prev_view = any::<State, _>(text(prev.label.clone()));
             let next_view = any::<State, _>(text(self.label.clone()));
             flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
@@ -219,6 +226,16 @@ impl Widget for CheckboxWidget {
                 EventResult::Handled
             }
         }
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A single CheckBox node carrying its toggle state and label; it fires a
+        // Click to toggle.
+        ctx.push_node(Role::CheckBox, |node| {
+            node.set_label(self.label_text.as_str());
+            node.set_toggled(Toggled::from(self.checked));
+            node.add_action(Action::Click);
+        });
     }
 }
 

@@ -12,7 +12,7 @@
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
 };
 use kurbo::{Point, Size};
 
@@ -410,6 +410,14 @@ impl Widget for FlexWidget {
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // Hit-test in reverse paint order (topmost/last-painted child first).
         crate::route_event(&mut self.children, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A transparent layout container: contribute no node of its own, just
+        // forward each child so their nodes attach to the enclosing node.
+        for pod in &self.children {
+            pod.semantics_child(ctx);
+        }
     }
 }
 

@@ -20,6 +20,7 @@ use kurbo::{Point, Size};
 use crate::anim::FrameTime;
 use crate::event::{EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerPhase};
 use crate::layout::BoxConstraints;
+use crate::semantics::{SemanticsCtx, SemanticsUpdate};
 use crate::tree::{WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
 use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene};
@@ -298,6 +299,46 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         } else {
             PaintOutcome::default()
         }
+    }
+
+    /// Collect the accessibility tree for the current frame (spec §9, phase-6c
+    /// D1), returning a [`SemanticsUpdate`] a platform adapter (`accesskit_*`,
+    /// phase 6d) can consume.
+    ///
+    /// Pull-based and stateless: the shell calls this when a platform a11y client
+    /// asks for the tree (or after a change), *never* per frame — this crate owns
+    /// no scheduling. Must run **after** [`RenderRoot::layout`], since node bounds
+    /// come from the pods' post-layout geometry.
+    ///
+    /// The result is always rooted at a synthetic [`accesskit::Role::Window`]
+    /// node covering the window, whose children are whatever the root widget
+    /// contributed. An unbuilt tree yields a bare window node with no children.
+    pub fn semantics(&self) -> SemanticsUpdate {
+        let mut ctx = SemanticsCtx::new(self.window_size);
+        let window = self.window_size;
+        let root_pod = self.root_id.and_then(|id| self.tree.pod(id));
+        let root_node = ctx.push_container(
+            accesskit::Role::Window,
+            |node| {
+                node.set_bounds(accesskit::Rect {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: window.width,
+                    y1: window.height,
+                });
+            },
+            |ctx| {
+                if let Some(pod) = root_pod {
+                    // The root pod sits at its recorded origin (ZERO today) with
+                    // its laid-out size; descend into that geometry, mirroring
+                    // how `ChildPod::semantics_child` threads a child's.
+                    ctx.descend(pod.origin().to_vec2(), pod.size(), |ctx| {
+                        pod.widget().semantics(ctx);
+                    });
+                }
+            },
+        );
+        ctx.finish(root_node)
     }
 
     /// Deliver an input event to the widget tree, returning what happened.

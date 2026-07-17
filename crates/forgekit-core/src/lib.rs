@@ -36,10 +36,18 @@ pub mod component;
 pub mod event;
 pub mod input;
 pub mod layout;
+pub mod semantics;
 pub mod tree;
 pub mod view;
 pub mod widget;
 
+/// Re-export of the [`accesskit`] accessibility vocabulary (roles, node
+/// builders, toggle/value state) widgets use to populate a
+/// [`semantics::SemanticsCtx`]. Re-exported here — the sole crate that depends
+/// on accesskit — so `forgekit-widgets` (and app code) name the vocabulary
+/// through `forgekit_core::accesskit::*` without a direct dependency; platform
+/// `accesskit_*` adapter crates are phase 6d and live in the shells.
+pub use accesskit;
 pub use anim::{
     AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
 };
@@ -54,6 +62,7 @@ pub use input::{
     WHEEL_LINE_PX, fling_decay, fling_displacement,
 };
 pub use layout::BoxConstraints;
+pub use semantics::{SemanticsCtx, SemanticsUpdate};
 pub use tree::{WidgetPod, WidgetTree};
 pub use view::{AnyView, BuildCtx, ChangeFlags, View, WidgetId, any};
 pub use widget::{ChildPod, LayoutCtx, PaintCtx, PaintOutcome, PaintScene, Widget};

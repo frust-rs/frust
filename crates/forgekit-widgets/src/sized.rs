@@ -7,7 +7,7 @@
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
 };
 use kurbo::{Point, Size};
 
@@ -145,6 +145,14 @@ impl Widget for SizedBoxWidget {
         match &mut self.child {
             Some(pod) => crate::route_event_single(pod, ctx, event),
             None => EventResult::Ignored,
+        }
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent fixed-size wrapper: forward to the child if any (a
+        // childless spacer contributes nothing).
+        if let Some(pod) = &self.child {
+            pod.semantics_child(ctx);
         }
     }
 }

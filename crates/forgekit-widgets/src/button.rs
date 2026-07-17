@@ -11,9 +11,10 @@
 
 use std::rc::Rc;
 
+use forgekit_core::accesskit::{Action, Role};
 use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, PointerPhase, View, Widget, any,
+    PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
 };
 use forgekit_theme::Theme;
 use kurbo::{Point, Size};
@@ -92,6 +93,10 @@ pub fn Button<State: 'static, F: Fn(&mut State) + 'static>(
 /// [`crate::TextWidget`] owned as a [`ChildPod`].
 pub struct ButtonWidget {
     label: ChildPod,
+    /// The label text, retained for the semantics node's accessible name (the
+    /// label lives inside the `label` pod as a `TextWidget`; a button is a single
+    /// a11y node, so it reads its name from here rather than recursing).
+    label_text: String,
     /// The pressed *visual* state (background darkens). Follows the cursor
     /// in/out while captured, and is purely cosmetic.
     pressed: bool,
@@ -144,6 +149,7 @@ impl<State: 'static> View<State> for ButtonView<State> {
         let label_view = label_view::<State>(self.label.clone());
         ButtonWidget {
             label: crate::build_child(&label_view, ctx),
+            label_text: self.label.clone(),
             pressed: false,
             captured: false,
             on_press: crate::erase_callback(&self.on_press),
@@ -160,6 +166,7 @@ impl<State: 'static> View<State> for ButtonView<State> {
         element.on_press = crate::erase_callback(&self.on_press);
         let mut flags = ChangeFlags::NONE;
         if prev.label != self.label {
+            element.label_text = self.label.clone();
             let prev_view = label_view::<State>(prev.label.clone());
             let next_view = label_view::<State>(self.label.clone());
             flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
@@ -246,6 +253,16 @@ impl Widget for ButtonWidget {
                 EventResult::Handled
             }
         }
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A button is a single a11y node (Role::Button) labelled by its text; it
+        // does not expose its inner label as a separate child node. It advertises
+        // the Click action it fires on release.
+        ctx.push_node(Role::Button, |node| {
+            node.set_label(self.label_text.as_str());
+            node.add_action(Action::Click);
+        });
     }
 }
 

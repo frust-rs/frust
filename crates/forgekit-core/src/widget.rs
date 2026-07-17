@@ -17,6 +17,7 @@ use peniko::{Brush, Color};
 use crate::anim::FrameTime;
 use crate::event::{EventCtx, EventResult, ImeState, InputEvent};
 use crate::layout::BoxConstraints;
+use crate::semantics::SemanticsCtx;
 
 /// The renderer-agnostic paint target a widget draws into.
 ///
@@ -551,6 +552,19 @@ pub trait Widget: Any {
     fn event(&mut self, _ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
         EventResult::Ignored
     }
+
+    /// Contribute this widget's accessibility node(s) into `ctx` (spec §9,
+    /// phase-6c D1).
+    ///
+    /// Defaulted to a no-op so non-semantic widgets (and every widget written
+    /// before this seam) are unaffected — exactly like [`Widget::event`]. A leaf
+    /// widget overrides it to call [`SemanticsCtx::push_node`] with its role and
+    /// state; a container overrides it to forward to each child via
+    /// [`ChildPod::semantics_child`] (a transparent container contributes no node
+    /// of its own, only recursion). The pass runs *after* layout, so
+    /// [`SemanticsCtx::origin`]/[`SemanticsCtx::size`] carry valid absolute
+    /// geometry.
+    fn semantics(&self, _ctx: &mut SemanticsCtx) {}
 }
 
 impl dyn Widget {
@@ -584,6 +598,10 @@ impl Widget for Box<dyn Widget> {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         (**self).event(ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        (**self).semantics(ctx);
     }
 }
 
@@ -730,6 +748,20 @@ impl ChildPod {
         if let Some(ime) = child_ctx.take_ime_state() {
             ctx.publish_ime_state(ime);
         }
+    }
+
+    /// Collect the child's semantics, translating the current absolute origin
+    /// into the child's space exactly like [`ChildPod::paint_child`] offsets its
+    /// paint origin (`child_origin = ctx.origin() + self.origin`).
+    ///
+    /// A container's [`Widget::semantics`] calls this for each of its
+    /// [`ChildPod`]s so their nodes attach under the container's node (or, for a
+    /// transparent container, under whatever encloses it — see
+    /// [`crate::semantics`]).
+    pub fn semantics_child(&self, ctx: &mut SemanticsCtx) {
+        ctx.descend(self.origin.to_vec2(), self.size, |ctx| {
+            self.widget.semantics(ctx);
+        });
     }
 
     /// Route an event into the child, translating its position into the child's
