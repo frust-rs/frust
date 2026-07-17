@@ -83,6 +83,19 @@ pub use forgekit_widgets::{
     flexible, inflexible, keyed, navigator, scroll_view, slider, text, text_input,
 };
 
+/// The declarative router vocabulary (spec §19's go_router-subset layer),
+/// flat-re-exported from `forgekit-widgets` so app code never names that
+/// crate directly: [`Router`] resolves a location against a [`Route`] table
+/// (built via [`RouteBuilder`]) into [`Resolution`]/[`ResolvedPage`]s driving
+/// a [`NavigatorController`], with `:param`/query parsing
+/// ([`Location`]/[`PathPattern`]/[`RouteParams`]), per-route/top-level
+/// [`Redirect`]s (loop-guarded at [`DEFAULT_REDIRECT_LIMIT`]), and an
+/// [`ErrorBuilder`] fallback for an unmatched location.
+pub use forgekit_widgets::{
+    DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Location, PathPattern, Redirect, Resolution,
+    ResolvedPage, Route, RouteBuilder, RouteParams, Router,
+};
+
 /// The design-token vocabulary (spec §11): the [`Theme`] bundle plus its
 /// component token tables, flat-re-exported from `forgekit-theme` so app code
 /// never names that crate directly. A root component reads the active theme via
@@ -114,6 +127,40 @@ pub mod input {
 /// on: signals, memos, and context, flat-re-exported from `forgekit-reactive`/
 /// `reactive_graph` so app authors never name either crate directly.
 pub use forgekit_reactive::{RwSignal, on_cleanup, provide_context, use_context};
+
+/// The deep-link read surface (spec §19; `forgekit-reactive`'s `app_links`-
+/// style process-wide source — see its module docs for the semantics): a
+/// mobile shell delivers a platform link via `forgekit-reactive`'s
+/// (crate-internal) `push_deep_link`, and app code reads it here —
+/// [`deep_links()`] returns a [`DeepLinks`] snapshot ([`DeepLinks::initial`])
+/// plus the live, trackable [`DeepLinks::latest`] signal a
+/// [`Component::build`] reads to react to cold-start and subsequent links
+/// uniformly. Router auto-wiring (resolving `deep_links()` against a
+/// [`Router`]) is a separate opt-in (task 08), not automatic here.
+///
+/// ```no_run
+/// use forgekit::{AnyView, Route, Router, any, deep_links, text};
+///
+/// struct AppState;
+///
+/// fn build_router() -> Router<AppState> {
+///     Router::new(vec![Route::new("/", |_params| -> AnyView<AppState> {
+///         any(text("home"))
+///     })])
+/// }
+///
+/// fn app_logic(_state: &mut AppState) -> impl forgekit::View<AppState> + use<> {
+///     let _router = build_router();
+///     // A late-subscribed read: `initial` sees a cold-start link (if any);
+///     // `latest` is the live signal a rebuild tracks for warm links.
+///     let links = deep_links();
+///     let _ = links.initial;
+///     let _ = links.latest;
+///     text("nav demo")
+/// }
+/// # let _ = app_logic;
+/// ```
+pub use forgekit_reactive::{DeepLink, DeepLinks, deep_links};
 pub use reactive_graph::computed::Memo;
 pub use reactive_graph::signal::{ReadSignal, WriteSignal, signal};
 // The access traits the signal types' methods are defined through — without

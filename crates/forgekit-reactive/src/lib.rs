@@ -4,16 +4,20 @@
 //! runtime, a custom [`any_spawner`] executor that routes `spawn` to that
 //! runtime and `spawn_local` to a UI-thread local task queue, a swappable
 //! [`FrameWaker`], and the root reactive [`Owner`]. It also re-exports the
-//! `reactive_graph` types the later programming-model tasks build on.
+//! `reactive_graph` types the later programming-model tasks build on, and
+//! owns the process-wide deep-link source shells write platform deep links
+//! into (see [`push_deep_link`]/[`deep_links`]).
 //!
 //! It is a leaf substrate: no `winit`, no `vello`/`wgpu`, no `forgekit-core`
 //! dependency. Shells own the wake-up wiring and call [`ReactiveRuntime::init`]
 //! (once, on the UI thread) and [`ReactiveRuntime::pump_local`] each frame.
 
+mod deep_link;
 mod executor;
 mod runtime;
 mod tracked;
 
+pub use deep_link::{DeepLink, DeepLinks, deep_links, push_deep_link};
 pub use runtime::{FrameWaker, ReactiveRuntime};
 pub use tracked::TrackedScope;
 
