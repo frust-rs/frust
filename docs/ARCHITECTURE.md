@@ -141,7 +141,12 @@ widget's optional `Widget::semantics` contribution into a flat
 `SemanticsUpdate` (node map, root id, focused node id). It is pull-based
 and un-scheduled: nothing calls it once per frame yet, and no shell wires
 it to a platform `accesskit_*` adapter yet — that integration is not part
-of this crate's scope (`forgekit-core` owns no platform wiring).
+of this crate's scope (`forgekit-core` owns no platform wiring). Nodes
+carry role/label/state/bounds; a modal flag is set by the two Material
+modals (`material::dialog`, `material::sheet` — not the Cupertino alert
+dialog, which sets no modal flag), but no catalog widget yet joins the
+keyboard focus-routing path, so the pass describes tree *structure*, not
+yet operability.
 
 **Signal-driven wake:** a write to a tracked signal fires the process-wide
 `FrameWaker` (`forgekit-reactive`; coalesced — N writes between tracked

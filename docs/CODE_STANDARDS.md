@@ -374,7 +374,11 @@ Semantics pass):
   than hardcoding its own overlay opacity. When more than one interaction
   state is active at once, the overlay opacity is the **maximum** of the
   active states', never their sum — M3 shows the strongest state, not a
-  stacked blend.
+  stacked blend. Of the four, only `pressed` is currently driven by any
+  shipping widget: `hovered` awaits a pointer-hover `PointerPhase` (none
+  exists yet), `focused` awaits widget focus routing, and `dragged` awaits a
+  consumer calling `set_dragged`. See `material/state_layer.rs`'s "Live vs.
+  aspirational states" module doc for the authoritative statement.
 
 ## Testing Patterns
 
