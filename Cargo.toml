@@ -24,8 +24,33 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # rendering stack — pins are LAW (vello 0.9 requires wgpu 29.0.3; do not bump independently)
-vello = "0.9.0"
-wgpu = "29.0.3"
+#
+# Feature trim (phase 7 task 15): the framework only ever drives vello
+# through wgpu (no CPU-side vello-only build), so `default-features = false`
+# + explicit `features = ["wgpu"]` drops vello's `wgpu_default` default
+# feature, which otherwise pulls in plain `wgpu/default` below it. `wgpu`
+# itself is trimmed to the backends ForgeKit's three shells can actually
+# reach: `wgsl` is vello's own shader frontend (its `wgpu` feature already
+# requires it); `vulkan` + `metal` + `dx12` are the per-OS GPU backends,
+# unioned additively across every target this workspace builds for (Android:
+# vulkan; iOS/macOS: metal; Windows: dx12 — `std/parking_lot` are wgpu's own
+# non-backend runtime plumbing, always needed). Deliberately dropped:
+# `gles` (no shell ever surfaces a GLES-only device — vello requires compute
+# shaders GLES can't provide, so a GLES fallback was never a real path; the
+# `cpu-tier` `vello_cpu` feature is the documented CPU fallback story
+# instead, see `docs/ARCHITECTURE.md`'s `RenderTier` row) and `webgpu` (wasm
+# target only, ForgeKit ships no wasm shell). See task 15's completion
+# summary for the `cargo tree -e features` proof these two (and their naga
+# frontends/backends) are absent from every target's dependency graph.
+vello = { version = "0.9.0", default-features = false, features = ["wgpu"] }
+wgpu = { version = "29.0.3", default-features = false, features = [
+    "std",
+    "parking_lot",
+    "wgsl",
+    "vulkan",
+    "metal",
+    "dx12",
+] }
 winit = "0.30.13"
 parley = "0.11.0"
 peniko = "0.6.1"
