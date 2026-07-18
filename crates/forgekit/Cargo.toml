@@ -44,6 +44,15 @@ forgekit-shell-desktop = { workspace = true }
 # Test-only: `router_glue`'s unit tests build GPU-free fixture widgets
 # (mirroring `forgekit-widgets::nav::router`'s own test fixtures) that
 # implement `forgekit_core::PaintScene`/`Widget` directly, whose signatures
-# name these geometry/brush types.
+# name these geometry/brush types. Also used by the ported facade integration
+# tests below (`tests/interaction_basics.rs`/`tests/interaction_text_input.rs`).
 kurbo = { workspace = true }
 peniko = { workspace = true }
+# Test-only: the ported counter/notes headless interaction tests
+# (`tests/interaction_basics.rs`/`tests/interaction_text_input.rs`) drive the
+# framework's `RenderRoot` directly with synthetic `InputEvent`s — the same
+# event seam the desktop shell's `dispatch` uses — shaping text through a real
+# `TextContext` (no GPU, no window) and recording paint output.
+forgekit-core = { workspace = true }
+forgekit-scene = { workspace = true }
+forgekit-text = { workspace = true }
