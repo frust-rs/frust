@@ -549,7 +549,9 @@ mod tests {
              \n\
              \x20\x20\x20\x20<application\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:allowBackup=\"true\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:icon=\"@mipmap/ic_launcher\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:label=\"{title}\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:roundIcon=\"@mipmap/ic_launcher_round\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar.Fullscreen\">\n\
              \n\
              \x20\x20\x20\x20\x20\x20\x20\x20<activity\n\
