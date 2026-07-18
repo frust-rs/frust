@@ -101,6 +101,10 @@ impl BuildInfo {
     /// Resolves [`BuildArgs`] into a [`BuildInfo`], using `default_mode` when
     /// none of `--debug`/`--profile`/`--release` is given (each command picks
     /// its own default, e.g. `run` → debug, `build *` → release).
+    ///
+    /// When mode is [`BuildMode::Profile`], automatically injects
+    /// `FORGEKIT_TRACE=1` into the defines (spec §14 "--profile mode tracing")
+    /// unless the user already provided a `FORGEKIT_TRACE` define.
     pub fn from_args(args: BuildArgs, default_mode: BuildMode) -> Result<Self, BuildInfoError> {
         let flags = [args.debug, args.profile, args.release];
         if flags.iter().filter(|set| **set).count() > 1 {
@@ -126,6 +130,13 @@ impl BuildInfo {
                 return Err(BuildInfoError::InvalidDefine(define.clone()));
             }
             defines.insert(key.to_string(), value.to_string());
+        }
+
+        // Auto-inject FORGEKIT_TRACE=1 in profile mode unless user provided it.
+        if mode == BuildMode::Profile {
+            defines
+                .entry("FORGEKIT_TRACE".to_string())
+                .or_insert_with(|| "1".to_string());
         }
 
         if let Some(n) = args.build_number
@@ -291,5 +302,91 @@ mod tests {
         assert_eq!(BuildMode::Debug.xcode_configuration(), "Debug");
         assert_eq!(BuildMode::Profile.xcode_configuration(), "Profile");
         assert_eq!(BuildMode::Release.xcode_configuration(), "Release");
+    }
+
+    #[test]
+    fn profile_mode_injects_forgekit_trace() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                profile: true,
+                ..args()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap();
+        assert_eq!(
+            info.defines.get("FORGEKIT_TRACE").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn debug_mode_does_not_inject_forgekit_trace() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                debug: true,
+                ..args()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap();
+        assert!(!info.defines.contains_key("FORGEKIT_TRACE"));
+    }
+
+    #[test]
+    fn release_mode_does_not_inject_forgekit_trace() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                release: true,
+                ..args()
+            },
+            BuildMode::Release,
+        )
+        .unwrap();
+        assert!(!info.defines.contains_key("FORGEKIT_TRACE"));
+    }
+
+    #[test]
+    fn user_defined_forgekit_trace_zero_wins_over_profile_injection() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                profile: true,
+                defines: vec!["FORGEKIT_TRACE=0".into()],
+                ..args()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap();
+        assert_eq!(
+            info.defines.get("FORGEKIT_TRACE").map(String::as_str),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn user_defined_forgekit_trace_custom_wins_over_profile_injection() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                profile: true,
+                defines: vec!["FORGEKIT_TRACE=custom_value".into()],
+                ..args()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap();
+        assert_eq!(
+            info.defines.get("FORGEKIT_TRACE").map(String::as_str),
+            Some("custom_value")
+        );
+    }
+
+    #[test]
+    fn profile_default_mode_injects_forgekit_trace() {
+        // Test that profile injection works when profile is the default mode
+        let info = BuildInfo::from_args(args(), BuildMode::Profile).unwrap();
+        assert_eq!(
+            info.defines.get("FORGEKIT_TRACE").map(String::as_str),
+            Some("1")
+        );
     }
 }
