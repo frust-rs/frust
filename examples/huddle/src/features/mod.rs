@@ -12,7 +12,13 @@
 //! - [`settings`] — the design-language + brightness selection spine and the
 //!   `SettingsController` → `set_app_theme` single-call-site mechanism.
 //!
-//! Phase C fills in the remaining feature slices (channels, messages, search,
+//! Added by a Phase C screen task (per `src/README-phase-c.md`'s explicit
+//! "adding a `pub mod <name>;` line ... only if its feature slice is new"
+//! exception — the only edit that task makes to this otherwise-frozen file):
+//! - [`search`] — the live channel/people/message filter (`SearchController`,
+//!   `signals + Memo`, no `ControllerCore`/`UseCase` — search is synchronous).
+//!
+//! Phase C fills in the remaining feature slices (channels, messages,
 //! activity, profile) alongside the screens that host them.
 //!
 //! Phase C additions (each a new feature slice registered by its own screen
@@ -23,4 +29,5 @@
 
 pub mod channels;
 pub mod messages;
+pub mod search;
 pub mod settings;
