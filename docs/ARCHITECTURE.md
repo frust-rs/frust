@@ -153,12 +153,13 @@ wraps `accesskit_android::InjectingAdapter` (attached via the
 `nativeInitAccessibility` JNI export and a vendored `Delegate.java`), and
 `forgekit-shell-ios` wraps `accesskit_ios::SubclassingAdapter` — source-complete
 but not yet compiled on this (non-macOS) host. An accesskit modal flag is set
-by `material::dialog`/`sheet` and `cupertino::alert_dialog`/`action_sheet`
-(the four modal widgets) only. The broader keyboard-operability set — claim
-keyboard focus on a first pointer interaction, dismiss on a focus-routed
-`Key(Escape)` (desktop only) — adds `material::fab_menu` (focus claimed on
-trigger/item/scrim `Down`; no modal flag) to those four; these five are the
-only catalog widgets on the keyboard operability path today.
+by `material::dialog`/`sheet` only (`cupertino::alert_dialog`/`action_sheet`
+deliberately omit it — see their module docs). The broader keyboard-operability
+set — claim keyboard focus on a first pointer interaction, dismiss on a
+focus-routed `Key(Escape)` (desktop only) — covers those two, the two
+Cupertino modals, and `material::fab_menu` (five widgets total), independent
+of the modal-flag distinction; these five are the only catalog widgets on the
+keyboard operability path today.
 
 **Signal-driven wake:** a write to a tracked signal fires the process-wide
 `FrameWaker` (`forgekit-reactive`; coalesced — N writes between tracked
