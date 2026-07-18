@@ -28,7 +28,7 @@ use crate::ShellState;
 /// navigator so the `show_*` helpers have a controller to push over (see the
 /// [module docs](self)).
 pub fn modals_screen() -> AnyView<ShellState> {
-    any(component(ModalsExhibit::default()))
+    any(component(ModalsExhibit))
 }
 
 /// The Modals exhibit's retained state: the inner navigator's controller (the

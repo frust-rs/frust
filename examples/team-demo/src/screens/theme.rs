@@ -176,17 +176,16 @@ fn elevation_cell(
 
 /// The theme page: color swatch grid, 15-token type scale, elevation cards.
 fn theme_page(theme: &Theme, scheme: ColorScheme) -> Vec<AnyView<ShellState>> {
-    let mut v: Vec<AnyView<ShellState>> = Vec::new();
-
-    v.push(any(text("Theme").size(28.0).color(scheme.on_surface)));
-    v.push(any(text(
-        "Material 3 color roles, type scale, and elevation — the ambient theme.",
-    )
-    .size(14.0)
-    .color(scheme.on_surface)));
-    v.push(any(SizedBox(None, Some(12.0))));
-
-    v.push(any(text("Color roles").size(20.0).color(scheme.on_surface)));
+    let mut v: Vec<AnyView<ShellState>> = vec![
+        any(text("Theme").size(28.0).color(scheme.on_surface)),
+        any(
+            text("Material 3 color roles, type scale, and elevation — the ambient theme.")
+                .size(14.0)
+                .color(scheme.on_surface),
+        ),
+        any(SizedBox(None, Some(12.0))),
+        any(text("Color roles").size(20.0).color(scheme.on_surface)),
+    ];
     let swatches = [
         (scheme.primary_container, "primary container"),
         (scheme.secondary_container, "secondary container"),

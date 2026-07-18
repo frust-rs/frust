@@ -24,7 +24,7 @@ use crate::ShellState;
 /// `selected_row` signal survives the router's per-rebuild page rebuild (see
 /// the [module docs](self)).
 pub fn cards_screen() -> AnyView<ShellState> {
-    any(component(CardsExhibit::default()))
+    any(component(CardsExhibit))
 }
 
 /// The Cards exhibit's retained state: which list row was last pressed.

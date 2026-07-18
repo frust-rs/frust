@@ -39,7 +39,7 @@ use crate::ShellState;
 /// [`RwSignal`] state survives the router's per-rebuild page rebuild (see the
 /// [module docs](self)).
 pub fn controls_screen() -> AnyView<ShellState> {
-    any(component(ControlsExhibit::default()))
+    any(component(ControlsExhibit))
 }
 
 /// The progress-indicator demo's determinate/indeterminate mode toggle.
