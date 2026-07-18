@@ -30,7 +30,7 @@
 
 use std::any::Any;
 use std::ffi::c_void;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::accessibility::IosA11yAdapter;
 use forgekit_core::FrameTime;
@@ -42,8 +42,8 @@ use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
 use forgekit_shell_common::{
-    AppTree, ThemeOverrideWatcher, effective_brightness_for_platform_change, logical_size,
-    sanitize_scale,
+    AppTree, FrameGate, FrameInputs, ThemeOverrideWatcher,
+    effective_brightness_for_platform_change, logical_size, sanitize_scale,
 };
 use forgekit_text::TextContext;
 use forgekit_theme::{Brightness, Theme};
@@ -126,6 +126,27 @@ pub struct IosAppHandle {
     /// separately (no clock reads at all when disabled, not just no
     /// recording).
     frame_stats: FrameStats,
+    /// The per-frame skip gate (spec §14 phase 7, task 18): consulted each
+    /// CADisplayLink tick to skip the rebuild/layout/paint/encode passes on an
+    /// idle frame (nothing changed), so CPU/GPU stay near zero on a static
+    /// screen — the iOS counterpart to the Android shell's frame gate (task 17).
+    /// Honors the `FORGEKIT_NO_FRAME_GATE` kill switch (resolved once at
+    /// construction — a set switch makes every frame run, pre-gate behavior
+    /// verbatim). Its resume-warmup is (re)opened on resume / resize / surface
+    /// recreation via [`FrameGate::note_resumed`] so the first ticks after those
+    /// transitions always run (their change signals may not be observable yet).
+    frame_gate: FrameGate,
+    /// Handle-side latch feeding [`FrameInputs::events_since_last_frame`]: set by
+    /// [`Self::dispatch_touch`]/[`Self::ime_apply`] whenever a touch/IME event
+    /// reaches the tree between frames, read and cleared once per [`Self::frame`].
+    /// Ensures a tap/keystroke on an otherwise-idle screen is never skipped.
+    events_since_last_frame: bool,
+    /// Handle-side latch feeding [`FrameInputs::last_needs_frame`]: the previous
+    /// paint's [`forgekit_core::PaintOutcome::needs_frame`] (an in-flight
+    /// animation/transition asking for another frame). Latched at the end of each
+    /// frame the gate runs; a skipped frame leaves it untouched. Without it the
+    /// gate would skip the follow-up frame a running animation needs.
+    last_needs_frame: bool,
     /// The startup-span recorder `ffi_glue::create_handle` began and stashed
     /// here via [`Self::set_startup_spans`] immediately after construction —
     /// held until the first frame this handle actually presents completes
@@ -161,6 +182,13 @@ impl IosAppHandle {
         app.set_theme(Box::new(theme.clone()));
         provide_context(theme.clone());
         app.rebuild();
+        // The gate honors the `FORGEKIT_NO_FRAME_GATE` kill switch at
+        // construction; seed its resume-warmup so the first frames after this
+        // handle is built run unconditionally (the surface just became ready and
+        // the first tick's change signals may not be observable yet — the same
+        // reason `resize`/`set_surface`/`resume` re-open the window).
+        let mut frame_gate = FrameGate::new();
+        frame_gate.note_resumed();
         Self {
             render_cx,
             renderer,
@@ -182,6 +210,9 @@ impl IosAppHandle {
             // Honors `perf::enabled()`'s cache internally; a no-op recorder
             // in a non-perf build (see the field doc).
             frame_stats: FrameStats::new(),
+            frame_gate,
+            events_since_last_frame: false,
+            last_needs_frame: false,
             // Stashed by `ffi_glue::create_handle` right after this call
             // returns (see `Self::set_startup_spans`).
             startup_spans: None,
@@ -315,6 +346,10 @@ impl IosAppHandle {
         // A successful recreate ends the SurfaceLost episode; future losses get a
         // fresh retry budget.
         self.recreate_failures = 0;
+        // A surface recreation forces the frame gate's resume-warmup: the first
+        // ticks against the fresh surface must run even before their change
+        // signals are observable (spec §14 phase 7, task 18).
+        self.frame_gate.note_resumed();
     }
 
     /// Resize the live surface in place (rotation / bounds change). The
@@ -327,6 +362,10 @@ impl IosAppHandle {
             .on_surface_changed(&self.render_cx, physical.0, physical.1);
         self.physical = physical;
         self.scale = scale;
+        // A resize (rotation / bounds change) forces the frame gate's
+        // resume-warmup so the next frames re-layout/paint at the new size even
+        // if no other change signal fires (spec §14 phase 7, task 18).
+        self.frame_gate.note_resumed();
     }
 
     /// Mark the app paused (`forgekit_pause`): subsequent `frame()`s are no-ops.
@@ -337,6 +376,10 @@ impl IosAppHandle {
     /// Mark the app resumed (`forgekit_resume`): `frame()`s do work again.
     pub(crate) fn resume(&mut self) {
         self.paused = false;
+        // Re-open the frame gate's resume-warmup: the first frames after
+        // foregrounding must run unconditionally (a backgrounded app's change
+        // signals may have been coalesced away — spec §14 phase 7, task 18).
+        self.frame_gate.note_resumed();
     }
 
     /// Whether the app is paused. `pub(crate)` so [`crate::ffi_glue`] can gate
@@ -389,6 +432,9 @@ impl IosAppHandle {
             button: PointerButton::Primary,
         });
         let _ = self.app.event(&event);
+        // Latch for the frame gate: a touch between frames must force the next
+        // frame to run so the mutated state is reflected (spec §14 phase 7).
+        self.events_since_last_frame = true;
     }
 
     /// Push a whole editing state from the platform IME mirror into the focused
@@ -400,6 +446,9 @@ impl IosAppHandle {
     /// dropped (mirror of [`Self::dispatch_touch`]).
     pub(crate) fn ime_apply(&mut self, state: EditingState) {
         let _ = self.app.ime_apply(state);
+        // Latch for the frame gate: an IME edit between frames must force the
+        // next frame to run (mirror of [`Self::dispatch_touch`]).
+        self.events_since_last_frame = true;
     }
 
     /// The IME surface the focused widget published (editing state + caret), for
@@ -407,6 +456,38 @@ impl IosAppHandle {
     /// Delegates to [`AppTree::ime_state`]; `None` when nothing is focused.
     pub(crate) fn ime_state(&self) -> Option<ImeState> {
         self.app.ime_state()
+    }
+
+    /// Publish the current accessibility tree to the iOS accesskit adapter, if it
+    /// changed since the last push (phase-6d D3-ios, generation-gated in task 18).
+    /// Must run **after** [`Self::frame`]'s layout so node bounds are valid.
+    ///
+    /// Gated on the semantics generation exactly like the desktop/Android
+    /// adapters (see `docs/CODE_STANDARDS.md`'s Semantics Conventions): the
+    /// [`AppTree::semantics_if_changed`] check skips reassembling+re-pushing an
+    /// unchanged tree, so a static screen pays no per-frame semantics cost — this
+    /// closes the iOS adapter's former "recompute-on-every-active-frame" fallback.
+    /// The adapter's own `update_if_active` is a second, finer gate: it pushes
+    /// only while an assistive technology is active. The assembled tree is also
+    /// snapshotted inside [`IosA11yAdapter::publish`] so a late-activating AT
+    /// (one that connects on a static screen this gate would otherwise skip) is
+    /// served real content immediately — the Android adapter's `tree_snapshot`
+    /// design.
+    fn publish_semantics(&mut self) {
+        // Cheap generation gate first (immutable `a11y` borrow, released before
+        // the `&mut self.app` call below), mirroring the Android shell's
+        // `publish_semantics`.
+        let last_gen = match self.a11y.as_ref() {
+            Some(a11y) => a11y.last_pushed_gen(),
+            None => return,
+        };
+        let Some(update) = self.app.semantics_if_changed(last_gen) else {
+            return; // tree unchanged since the last push
+        };
+        let current_gen = self.app.semantics_generation();
+        if let Some(a11y) = self.a11y.as_mut() {
+            a11y.publish(update, current_gen);
+        }
     }
 
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop
@@ -443,22 +524,31 @@ impl IosAppHandle {
         // Poll the app-facing theme override slot (task 6c-04) once per
         // frame, before the ready/paused gate — theme delivery needs no
         // renderer, so this stays in sync even while backgrounded/not-ready
-        // (mirroring the reactive-runtime pump just above).
-        match self.theme_override.poll() {
+        // (mirroring the reactive-runtime pump just above). Whether it changed is
+        // also a frame-gate input (`theme_or_appearance_changed`) captured here.
+        let theme_or_appearance_changed = match self.theme_override.poll() {
             Some(Some(theme)) => {
                 self.theme = theme;
                 self.theme_override_active = true;
                 self.push_theme();
+                true
             }
             Some(None) => {
                 self.theme = Theme::m3_baseline();
                 self.theme.brightness = self.platform_brightness;
                 self.theme_override_active = false;
                 self.push_theme();
+                true
             }
-            None => {}
-        }
+            None => false,
+        };
 
+        // Pause/ready gate FIRST — a paused/not-ready frame does no work and the
+        // frame gate is never even consulted (task 18: the existing early return
+        // stays first). Returning here also leaves the signals-dirty flag
+        // undrained (it is only `take`n past this gate below), so a tracked-signal
+        // write that lands while backgrounded is observed by the first frame
+        // after resume rather than being silently consumed on a no-op tick.
         let ready = self.phase() == SurfacePhase::SurfaceReady;
         if !crate::ffi_support::should_render_frame(ready, self.paused) {
             return false;
@@ -470,8 +560,12 @@ impl IosAppHandle {
         // input uses (spec §9 / phase-6d D2). The handler enqueued these on the
         // main thread; draining takes ownership of the batch so the queue's borrow
         // is dropped before `perform_accessibility_action` re-enters the tree.
+        // Whether any action ran is a frame-gate input (`a11y_action_performed`).
+        let mut a11y_action_performed = false;
         if let Some(a11y) = self.a11y.as_ref() {
-            for req in a11y.drain_actions() {
+            let actions = a11y.drain_actions();
+            a11y_action_performed = !actions.is_empty();
+            for req in actions {
                 // `target_node.0` is the raw accesskit id the adapter reported;
                 // an unknown node or unmodelled action is a benign no-op (see
                 // `RenderRoot::perform_accessibility_action`). `needs_redraw` is
@@ -480,6 +574,58 @@ impl IosAppHandle {
                     .app
                     .perform_accessibility_action(req.target_node.0, req.action);
             }
+        }
+
+        // Gather the RESEARCH §C OR-list of "something changed" signals and let
+        // the frame gate decide whether this frame runs (spec §14 phase 7, task
+        // 18 — mirrors the Android shell's task-17 wiring). `signals_dirty` is
+        // drained AFTER the pump above (the pump-first ordering contract — see
+        // `ReactiveRuntime::take_signals_dirty`) and only now that we are past the
+        // ready/paused gate, so a no-op tick never consumes it. The gate honors
+        // the `FORGEKIT_NO_FRAME_GATE` kill switch internally (always `Run` when
+        // disabled). Correctness over savings: every input defaults toward "run".
+        let signals_dirty = ReactiveRuntime::get().is_some_and(|rt| rt.take_signals_dirty());
+        let inputs = FrameInputs {
+            signals_dirty,
+            events_since_last_frame: self.events_since_last_frame,
+            // Both read straight from the retained tree's `RenderRoot` state: a
+            // mid-drag gesture or a focused/IME-active field must keep painting.
+            pointer_capture_active: self.app.is_pointer_captured(),
+            focus_or_ime_active: self.app.is_focus_active(),
+            last_needs_frame: self.last_needs_frame,
+            // Non-draining peek: a skipped frame leaves the flags for the next
+            // frame that runs to drain (spec §14 phase 7).
+            change_flags_pending: self.app.has_pending_change_flags(),
+            theme_or_appearance_changed,
+            // Surface (re)creation/resize is folded into the gate's resume-warmup
+            // via `note_resumed` (see `resize`/`set_surface`/`resume`), so it is
+            // not threaded as a separate per-frame latch here.
+            surface_changed_or_resized: false,
+            a11y_action_performed,
+            // Driven by the gate's own warmup countdown (`note_resumed`).
+            resumed_recently: false,
+        };
+        // The events latch has now been read into this frame's decision; reset it
+        // so the next frame only sees events that arrive from here on.
+        self.events_since_last_frame = false;
+
+        if self.frame_gate.decide(inputs).is_skip() {
+            // Nothing changed: skip rebuild/layout/paint/encode entirely. Record a
+            // skipped-frame stat (ZERO pass durations; counts toward `skipped=` in
+            // the perf log line) and return. The CADisplayLink keeps ticking — only
+            // frame *production* stops, callbacks don't (the accepted v1 shape,
+            // same as Android — see `docs/DEVELOPMENT.md`).
+            self.frame_stats.record(FramePasses {
+                rebuild: Duration::ZERO,
+                layout: Duration::ZERO,
+                paint: Duration::ZERO,
+                encode_present: Duration::ZERO,
+                skipped: true,
+            });
+            if self.frame_stats.should_emit() {
+                self.frame_stats.emit_log();
+            }
+            return false;
         }
 
         // Perf instrumentation (spec §14 phase 7.A task 09): read the cached
@@ -518,20 +664,15 @@ impl IosAppHandle {
         let layout = layout_start.map(|t| t.elapsed()).unwrap_or_default();
 
         // Push the accessibility tree AFTER layout (node bounds come from the
-        // post-layout geometry — spec §9). The `push_if_active` closure walks the
-        // semantics tree only when an assistive technology is active, so this is a
-        // cheap early-return otherwise (phase-6d task 05). v1 pushes the whole tree
-        // every active frame; accesskit dedupes unchanged nodes internally. Not
-        // folded into either pass's timing above/below — it is a11y-conditional
+        // post-layout geometry — spec §9), generation-gated so an unchanged tree
+        // is never re-walked or re-pushed (task 18 — see [`Self::publish_semantics`]).
+        // Not folded into either pass's timing above/below — it is a11y-conditional
         // work orthogonal to the rebuild/layout/paint/encode split.
-        if let Some(a11y) = self.a11y.as_ref() {
-            let app = &mut self.app;
-            a11y.push_if_active(|| app.semantics());
-        }
+        self.publish_semantics();
 
         let paint_start = perf_on.then(Instant::now);
         self.scene.reset();
-        {
+        let paint_outcome = {
             let mut builder = SceneBuilder::new(&mut self.scene);
             // HiDPI (spec task 08): lay out in logical pixels, then scale the
             // whole scene by the device pixel ratio for sharp glyphs.
@@ -540,15 +681,17 @@ impl IosAppHandle {
             // `Instant::now()` inside `forgekit-core`) — the `CADisplayLink`
             // timestamp forwarded from Swift.
             let frame_time = FrameTime::from_nanos(timestamp_ns);
-            // The paint pass returns a `needs_frame` continuation signal (spec's
-            // v1 animation seam). This shell runs a continuous CADisplayLink loop
-            // that already ticks the next frame every vsync, so the flag is
-            // irrelevant here and deliberately dropped — unlike the desktop shell,
-            // whose `ControlFlow::Wait` loop must honor it to keep animating.
-            let _ = self.app.paint(&mut builder, frame_time);
+            let outcome = self.app.paint(&mut builder, frame_time);
             builder.pop_transform();
-        }
+            outcome
+        };
         let paint = paint_start.map(|t| t.elapsed()).unwrap_or_default();
+        // Latch this paint's `needs_frame` continuation signal (spec's v1
+        // animation seam) for the NEXT frame's gate: unlike before task 18 — when
+        // the continuous CADisplayLink loop let this flag be dropped — the gate
+        // would now skip the follow-up frame an in-flight animation/transition
+        // needs, so it is fed forward via `FrameInputs::last_needs_frame`.
+        self.last_needs_frame = paint_outcome.needs_frame;
 
         // Clear to the live theme's surface color rather than a hardcoded
         // white, so a dark-scheme app doesn't render its dark-themed widgets

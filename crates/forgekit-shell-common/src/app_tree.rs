@@ -52,6 +52,23 @@ pub trait AppTree {
     /// [`AppTree::take_change_flags`].
     fn has_pending_change_flags(&self) -> bool;
 
+    /// Whether a captured pointer gesture is currently in flight (delegates to
+    /// [`RenderRoot::is_pointer_captured`]).
+    ///
+    /// A frame-gate input (spec §14 phase 7): a mid-drag captured widget may
+    /// track/animate the pointer, so the mobile shells feed this into
+    /// [`crate::FrameInputs::pointer_capture_active`] to keep producing frames
+    /// while a gesture is live rather than skipping it.
+    fn is_pointer_captured(&self) -> bool;
+
+    /// Whether some widget in the tree currently holds keyboard/IME focus
+    /// (delegates to [`RenderRoot::is_focus_active`]).
+    ///
+    /// A frame-gate input (spec §14 phase 7): a focused field's caret/selection
+    /// chrome may need repainting, so the mobile shells feed this into
+    /// [`crate::FrameInputs::focus_or_ime_active`].
+    fn is_focus_active(&self) -> bool;
+
     /// Lay the tree out against a logical (density-independent) size, threading
     /// the shell-owned `TextContext` down type-erased (spec §10.3).
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any);
@@ -162,6 +179,14 @@ where
 
     fn has_pending_change_flags(&self) -> bool {
         self.root.has_pending_change_flags()
+    }
+
+    fn is_pointer_captured(&self) -> bool {
+        self.root.is_pointer_captured()
+    }
+
+    fn is_focus_active(&self) -> bool {
+        self.root.is_focus_active()
     }
 
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any) {

@@ -68,21 +68,31 @@ impl ActionHandler for QueueingActionHandler {
     }
 }
 
-/// accesskit `ActivationHandler` that defers the initial tree.
+/// accesskit `ActivationHandler` that serves the last full tree the frame loop
+/// published.
 ///
-/// Returning `None` is valid and intentional: it tells accesskit "I'll send the
-/// full tree shortly" — the very next `IosAppHandle::frame()` calls
-/// `update_if_active`, which (because `request_initial_tree` returned `None`) is
-/// contractually required to, and does, push a **full** tree. ForgeKit's
-/// semantics pass always produces a full tree with stable ids (phase-6d D1), so
-/// this "defer, then full-push next frame" shape is always correct — and it avoids
-/// having the handler reach back into the app tree it cannot borrow (see
-/// [`QueueingActionHandler`]).
-struct DeferredActivationHandler;
+/// Returns a clone of the [`IosA11yAdapter`]'s `tree_snapshot` — the tree
+/// `IosAppHandle::publish_semantics` stores on every push — so an assistive
+/// technology that activates on a *static* screen (nothing semantics-relevant
+/// changed since the last push) still receives real content immediately rather
+/// than the adapter's placeholder window. `None` only before the first
+/// post-layout semantics pass, in which case the very next `update_if_active`
+/// (which the deferred-`None` contract requires to push a **full** tree) fills
+/// it in.
+///
+/// This snapshot is what lets `publish_semantics`'s generation gate safely
+/// *skip* re-pushing an unchanged tree without starving a late-activating AT —
+/// the same design the Android adapter's `ForgeActivationHandler`/`tree_snapshot`
+/// uses (phase-6d D3). It reaches only the shared snapshot slot, never the app
+/// tree it cannot borrow (see [`QueueingActionHandler`]). Runs on the UIKit main
+/// thread.
+struct SnapshotActivationHandler {
+    tree_snapshot: Rc<RefCell<Option<TreeUpdate>>>,
+}
 
-impl ActivationHandler for DeferredActivationHandler {
+impl ActivationHandler for SnapshotActivationHandler {
     fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
-        None
+        self.tree_snapshot.borrow().clone()
     }
 }
 
@@ -108,6 +118,17 @@ impl DeactivationHandler for NoopDeactivationHandler {
 pub(crate) struct IosA11yAdapter {
     adapter: SubclassingAdapter,
     queue: ActionQueue,
+    /// The latest full tree the frame loop published, served to a
+    /// late-activating AT through [`SnapshotActivationHandler`]. Shared (`Rc`)
+    /// with that handler; written on every [`Self::publish`]. `None` until the
+    /// first push. Mirrors the Android adapter's `tree_snapshot`.
+    tree_snapshot: Rc<RefCell<Option<TreeUpdate>>>,
+    /// The semantics generation last assembled and pushed, so
+    /// `IosAppHandle::publish_semantics` skips reassembling+re-pushing an
+    /// unchanged tree (the `semantics_generation`/`semantics_if_changed` dirty
+    /// gate — see `docs/CODE_STANDARDS.md`'s Semantics Conventions). Mirrors the
+    /// Android adapter's `last_pushed_gen`.
+    last_pushed_gen: u64,
 }
 
 impl IosA11yAdapter {
@@ -123,45 +144,68 @@ impl IosA11yAdapter {
     /// on the first layout, right after `forgekit_init` succeeds.
     pub(crate) unsafe fn new(view: *mut c_void) -> Self {
         let queue: ActionQueue = Rc::new(RefCell::new(VecDeque::new()));
+        let tree_snapshot: Rc<RefCell<Option<TreeUpdate>>> = Rc::new(RefCell::new(None));
         // SAFETY: forwarded from this fn's contract — `view` is a live `UIView*`
-        // and we are on the main thread. The action handler holds only a clone of
-        // the plain `Rc` queue (no tree borrow), satisfying the `'static` bound
-        // accesskit_ios requires without a `Send`/lock dance.
+        // and we are on the main thread. Both handlers hold only plain `Rc`
+        // clones (the action queue / the tree snapshot slot — no app-tree
+        // borrow), satisfying the `'static` bound accesskit_ios requires without
+        // a `Send`/lock dance.
         let adapter = unsafe {
             SubclassingAdapter::new(
                 view,
-                DeferredActivationHandler,
+                SnapshotActivationHandler {
+                    tree_snapshot: tree_snapshot.clone(),
+                },
                 QueueingActionHandler {
                     queue: queue.clone(),
                 },
                 NoopDeactivationHandler,
             )
         };
-        Self { adapter, queue }
+        Self {
+            adapter,
+            queue,
+            tree_snapshot,
+            last_pushed_gen: 0,
+        }
     }
 
-    /// Push a full semantics tree **iff** an assistive technology is active.
+    /// The semantics generation last pushed (see [`Self::last_pushed_gen`] field
+    /// docs) — read by `IosAppHandle::publish_semantics` before deciding whether
+    /// the tree changed enough to reassemble and re-push.
+    pub(crate) fn last_pushed_gen(&self) -> u64 {
+        self.last_pushed_gen
+    }
+
+    /// Publish one already-generation-gated semantics update to the adapter.
     ///
-    /// `factory` is only invoked when the adapter is active (VoiceOver / Switch
-    /// Control / Speak Screen running), so the semantics tree walk — and thus the
-    /// per-frame cost — is paid only while an AT actually needs it; when nothing is
-    /// listening this is a cheap early return inside `update_if_active`. The
-    /// resulting `QueuedEvents` is raised immediately (we are on the main thread and
-    /// hold no tree borrow — see the module docs).
+    /// The caller (`IosAppHandle::publish_semantics`) has already established via
+    /// [`AppTree::semantics_if_changed`](forgekit_shell_common::AppTree::semantics_if_changed)
+    /// that the tree changed since [`Self::last_pushed_gen`], so this always does
+    /// real work: it assembles the full `accesskit::TreeUpdate`, snapshots it for
+    /// a late-activating AT's `request_initial_tree`
+    /// ([`SnapshotActivationHandler`]), and hands it to `update_if_active` — which
+    /// pushes only while an assistive technology is active (a cheap no-op
+    /// otherwise) and returns the `QueuedEvents` to raise. Full-tree every push is
+    /// valid because our node ids are stable across frames (phase-6d D1) and
+    /// accesskit dedupes unchanged nodes internally.
     ///
-    /// v1 pushes the whole tree every active frame (accesskit dedupes unchanged
-    /// nodes internally, so this does not spam AT events — PLAN.md's
-    /// "full-tree-every-update acceptable v1"); generation-gated skipping (the
-    /// `semantics_if_changed` seam) is a later optimization.
-    pub(crate) fn push_if_active(&self, factory: impl FnOnce() -> SemanticsUpdate) {
-        let events = self.adapter.update_if_active(|| {
-            let update = factory();
-            let focus = update.focus_id();
-            crate::ffi_support::build_tree_update(update.nodes, update.root, focus)
-        });
-        if let Some(events) = events {
+    /// `generation` is the tree's current
+    /// [`semantics_generation`](forgekit_shell_common::AppTree::semantics_generation),
+    /// recorded so the next `publish_semantics` can gate again. The
+    /// `QueuedEvents` is raised immediately: we are on the main thread and hold
+    /// no app-tree borrow (see the module docs' threading model).
+    pub(crate) fn publish(&mut self, update: SemanticsUpdate, generation: u64) {
+        let focus = update.focus_id();
+        let tree_update = crate::ffi_support::build_tree_update(update.nodes, update.root, focus);
+        // Snapshot the full tree so a late-activating AT (one that connects on a
+        // static screen the generation gate would otherwise skip) is served real
+        // content immediately. Cloned once here, not per idle frame.
+        *self.tree_snapshot.borrow_mut() = Some(tree_update.clone());
+        if let Some(events) = self.adapter.update_if_active(move || tree_update) {
             events.raise();
         }
+        self.last_pushed_gen = generation;
     }
 
     /// Drain all queued action requests in FIFO order, transferring ownership to
