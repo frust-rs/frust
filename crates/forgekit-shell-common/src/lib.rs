@@ -7,8 +7,10 @@
 //! untrusted density into HiDPI layout math ([`sanitize_scale`]/[`logical_size`]),
 //! the app-facing theme override slot ([`set_app_theme`]/[`clear_app_theme`]/
 //! [`ThemeOverrideWatcher`] — see [`theme_override`]'s module docs for the
-//! layering rationale), and the [`perf`] module's frame-timing/startup-span
-//! instrumentation (spec §14 phase 7).
+//! layering rationale), the [`perf`] module's frame-timing/startup-span
+//! instrumentation, and the [`frame_gate`] module's shared skip-frame decision
+//! ([`FrameGate`]/[`FrameInputs`]/[`FrameDecision`]) the mobile shells consult
+//! to idle on unchanged frames (spec §14 phase 7).
 //!
 //! This crate is deliberately platform-free: it depends on `forgekit-core`
 //! (retained tree / `RenderRoot`) plus `forgekit-scene`/`forgekit-text`/
@@ -21,11 +23,13 @@
 
 mod app_tree;
 mod ffi_support;
+pub mod frame_gate;
 pub mod perf;
 mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
 pub use ffi_support::{guard, logical_size, sanitize_scale};
+pub use frame_gate::{FrameDecision, FrameGate, FrameInputs};
 pub use theme_override::{
     ThemeOverrideWatcher, clear_app_theme, effective_brightness_for_platform_change, set_app_theme,
     theme_override_active,

@@ -168,6 +168,21 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         flags
     }
 
+    /// Non-draining peek at the dirtiness accumulated since the last
+    /// [`RenderRoot::take_change_flags`] — `true` when any `LAYOUT`/`PAINT`
+    /// bit is pending, without clearing it.
+    ///
+    /// Complements [`take_change_flags`](RenderRoot::take_change_flags) for a
+    /// shell frame gate (spec §14 phase 7): the gate reads this as one of its
+    /// "should this frame run" inputs *before* deciding, so a frame it chooses
+    /// to skip leaves `pending` intact for the next non-skipped frame to drain
+    /// and act on. Draining stays the job of `take_change_flags`, called only
+    /// on a frame that actually runs its layout/paint passes. No behavioral
+    /// change to rebuild/layout/paint.
+    pub fn has_pending_change_flags(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// The root widget id, once built.
     pub fn root_id(&self) -> Option<WidgetId> {
         self.root_id
@@ -1093,6 +1108,29 @@ mod tests {
         assert!(flags.needs_layout());
         // Draining leaves it empty until the next rebuild.
         assert!(root.take_change_flags().is_empty());
+    }
+
+    #[test]
+    fn has_pending_change_flags_peeks_without_draining() {
+        // The frame-gate peek (phase 7): observe pending dirtiness without
+        // clearing it, so a skipped frame preserves the flags for the next
+        // frame that actually runs.
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        assert!(
+            !root.has_pending_change_flags(),
+            "a fresh root has nothing pending"
+        );
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+        root.rebuild(&mut app_logic, &mut state);
+        // First build accumulated LAYOUT|PAINT — the peek sees it...
+        assert!(root.has_pending_change_flags());
+        // ...and repeated peeks do NOT drain it.
+        assert!(root.has_pending_change_flags());
+        // Only `take_change_flags` drains.
+        assert!(!root.take_change_flags().is_empty());
+        assert!(!root.has_pending_change_flags());
     }
 
     #[test]

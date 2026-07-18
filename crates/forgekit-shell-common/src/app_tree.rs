@@ -12,7 +12,7 @@ use std::any::Any;
 use forgekit_core::accesskit;
 use forgekit_core::anim::FrameTime;
 use forgekit_core::event::{EditingState, EventOutcome, ImeEvent, ImeState, InputEvent};
-use forgekit_core::view::View;
+use forgekit_core::view::{ChangeFlags, View};
 use forgekit_core::{PaintOutcome, PaintScene, RenderRoot, SemanticsUpdate};
 use kurbo::Size;
 
@@ -27,6 +27,31 @@ use kurbo::Size;
 pub trait AppTree {
     /// Re-run `app_logic` and reconcile the retained tree (spec §5).
     fn rebuild(&mut self);
+
+    /// Take (and clear) the layout/paint dirtiness accumulated since the last
+    /// call (delegates to [`RenderRoot::take_change_flags`]).
+    ///
+    /// The frame-gate seam (spec §14 phase 7): a shell drives the layout-skip
+    /// decision off this — run [`AppTree::rebuild`], then run [`AppTree::layout`]
+    /// only if the drained flags [`ChangeFlags::needs_layout`] (or it's the
+    /// first frame, or the surface resized), then always [`AppTree::paint`].
+    /// The `set_theme ⇒ LAYOUT|PAINT` contract keeps `Text`'s layout-baked
+    /// theme color correct across a bare theme swap (see
+    /// `crate::frame_gate`'s module docs). Draining is the caller's commitment
+    /// to act on the flags this frame; use
+    /// [`AppTree::has_pending_change_flags`] to peek without draining when
+    /// gathering [`crate::FrameInputs`] for a frame that may be skipped.
+    fn take_change_flags(&mut self) -> ChangeFlags;
+
+    /// Non-draining peek at whether any layout/paint dirtiness is pending
+    /// (delegates to [`RenderRoot::has_pending_change_flags`]).
+    ///
+    /// The frame gate reads this as its `change_flags_pending`
+    /// [`crate::FrameInputs`] entry *before* deciding, so a frame it skips
+    /// leaves the flags intact for the next frame that runs to drain via
+    /// [`AppTree::take_change_flags`].
+    fn has_pending_change_flags(&self) -> bool;
+
     /// Lay the tree out against a logical (density-independent) size, threading
     /// the shell-owned `TextContext` down type-erased (spec §10.3).
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any);
@@ -125,9 +150,18 @@ where
     Logic: FnMut(&mut State) -> V + 'static,
 {
     fn rebuild(&mut self) {
-        // app_logic is cheap by construction (spec §5); a real dirty-tracking
-        // loop would skip this when state is unchanged.
+        // app_logic is cheap by construction (spec §5). The returned flags are
+        // merged into `RenderRoot::pending` and surfaced to the shell's frame
+        // gate via `take_change_flags`/`has_pending_change_flags` below.
         let _flags = self.root.rebuild(&mut self.logic, &mut self.state);
+    }
+
+    fn take_change_flags(&mut self) -> ChangeFlags {
+        self.root.take_change_flags()
+    }
+
+    fn has_pending_change_flags(&self) -> bool {
+        self.root.has_pending_change_flags()
     }
 
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any) {
@@ -271,6 +305,143 @@ mod tests {
         // state (it's a closure param above, but this also exercises the
         // AppTree seam end-to-end rather than just constructing the box).
         app.rebuild();
+    }
+
+    // --- Layout-skip contract (phase 7 frame gate) --------------------------
+    //
+    // The seam tasks 17/18 drive: rebuild -> (layout iff needs_layout / first
+    // frame / resize) -> paint. This proves the `set_theme => LAYOUT|PAINT`
+    // correctness anchor: a widget that BAKES its themed value at LAYOUT time
+    // (like `Text`'s glyph color) relayouts on a bare theme swap, while a
+    // no-change frame skips layout yet still paints the last-baked value.
+
+    use std::cell::Cell;
+
+    use forgekit_scene::{Command, Scene, SceneBuilder};
+
+    /// A type-erased "theme" carrying one scalar the baking widget reads at
+    /// layout time — stands in for `forgekit_theme::Theme` (the seam needs no
+    /// concrete theme type to be exercised).
+    struct BakeTheme {
+        value: f64,
+    }
+
+    /// Bakes the threaded theme's scalar into `baked` at LAYOUT time and
+    /// merely replays it at PAINT time (the `Text` layout-baked-color model).
+    /// `layouts` counts how many times layout actually ran.
+    struct BakeWidget {
+        layouts: Rc<Cell<u32>>,
+        baked: f64,
+    }
+    impl Widget for BakeWidget {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.layouts.set(self.layouts.get() + 1);
+            // Bake the themed value now; paint only replays it.
+            self.baked = ctx.theme_as::<BakeTheme>().map(|t| t.value).unwrap_or(0.0);
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            // Encode the baked scalar in the painted rect's width so a
+            // recording `Scene` reads it back without naming a color type;
+            // the color itself comes from a theme constructor (type inferred,
+            // so this crate needs no `peniko` dependency).
+            let color = forgekit_theme::ColorScheme::m3_baseline_light().primary;
+            scene.fill_rect(ctx.origin(), Size::new(self.baked, 1.0), color);
+        }
+    }
+
+    struct BakeView {
+        layouts: Rc<Cell<u32>>,
+    }
+    impl View<()> for BakeView {
+        type Element = BakeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> BakeWidget {
+            BakeWidget {
+                layouts: self.layouts.clone(),
+                baked: 0.0,
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut BakeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// Read back the width of the single `FillRect` the `BakeWidget` painted —
+    /// the baked scalar the recording `Scene` captured.
+    fn painted_baked(scene: &Scene) -> f64 {
+        scene
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                Command::FillRect { rect, .. } => Some(rect.width()),
+                _ => None,
+            })
+            .expect("BakeWidget paints exactly one FillRect")
+    }
+
+    /// Drive one shell-style frame through the `AppTree` seam: rebuild, then
+    /// layout ONLY when the drained flags need it (or `force_layout` for the
+    /// first frame / a resize), then always paint into a fresh `Scene`.
+    /// Returns the painted baked value.
+    fn drive_frame(app: &mut dyn AppTree, force_layout: bool) -> f64 {
+        app.rebuild();
+        let flags = app.take_change_flags();
+        if force_layout || flags.needs_layout() {
+            app.layout(Size::new(100.0, 100.0), &mut ());
+        }
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        app.paint(&mut builder, FrameTime::ZERO);
+        painted_baked(&scene)
+    }
+
+    #[test]
+    fn layout_skips_without_flags_but_relayouts_on_theme_swap() {
+        let layouts = Rc::new(Cell::new(0u32));
+        let lc = layouts.clone();
+        let mut app: Box<dyn AppTree> = new_boxed_app_with(
+            || (),
+            move |_s: &mut ()| BakeView {
+                layouts: lc.clone(),
+            },
+        );
+
+        // Frame 1 (first frame): theme set, layout must run and bake value 5.
+        app.set_theme(Box::new(BakeTheme { value: 5.0 }));
+        let painted = drive_frame(&mut *app, true);
+        assert_eq!(layouts.get(), 1, "first frame lays out");
+        assert_eq!(painted, 5.0, "baked the theme value at layout");
+
+        // Frame 2 (steady, no change): rebuild yields no flags -> layout
+        // SKIPPED, but paint still replays the last-baked value correctly.
+        let painted = drive_frame(&mut *app, false);
+        assert_eq!(layouts.get(), 1, "an unchanged frame skips layout");
+        assert_eq!(painted, 5.0, "paint-only frame still correct");
+
+        // Frame 3: a bare theme swap marks LAYOUT|PAINT pending, so layout
+        // RUNS again and re-bakes — the Text-color correctness anchor.
+        app.set_theme(Box::new(BakeTheme { value: 9.0 }));
+        let painted = drive_frame(&mut *app, false);
+        assert_eq!(
+            layouts.get(),
+            2,
+            "a theme swap forces relayout even with no view change"
+        );
+        assert_eq!(painted, 9.0, "re-baked the new theme value");
+
+        // Frame 4 (steady again): layout skipped, paints the new baked value.
+        let painted = drive_frame(&mut *app, false);
+        assert_eq!(
+            layouts.get(),
+            2,
+            "unchanged frame after the swap skips layout"
+        );
+        assert_eq!(painted, 9.0, "still correct with the swapped value");
     }
 
     // --- Root-owner regression test (review F1) -----------------------------
