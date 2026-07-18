@@ -28,6 +28,7 @@ mod convert;
 #[cfg(feature = "cpu-tier")]
 mod cpu_tier;
 mod lifecycle;
+mod pipeline_cache;
 mod renderer;
 mod tier;
 

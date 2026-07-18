@@ -282,6 +282,78 @@ impl RenderContext {
             .expect("device must be created before it is used (surface creation creates it)")
     }
 
+    /// Whether the live device was created with `wgpu::Features::PIPELINE_CACHE`.
+    ///
+    /// wgpu 29 only implements the persisted pipeline cache on Vulkan (Android);
+    /// Metal/desktop adapters never advertise the feature, so it is absent there
+    /// and [`create_pipeline_cache`](Self::create_pipeline_cache) returns `None`
+    /// — the renderer then behaves exactly as it did before this path existed.
+    /// Panics if no surface (and thus no device) has been created yet.
+    pub(crate) fn pipeline_cache_supported(&self) -> bool {
+        self.device_handle()
+            .device
+            .features()
+            .contains(wgpu::Features::PIPELINE_CACHE)
+    }
+
+    /// The adapter fingerprint a persisted pipeline-cache blob is tagged with
+    /// (see [`crate::pipeline_cache`]). Panics if no device has been created yet.
+    pub(crate) fn adapter_cache_key(&self) -> String {
+        crate::pipeline_cache::adapter_cache_key(&self.device_handle().adapter.get_info())
+    }
+
+    /// Creates a `wgpu::PipelineCache` for the live device, seeded from a
+    /// previously persisted, framed `blob` when it validates for this adapter.
+    ///
+    /// Returns `None` when the device lacks `PIPELINE_CACHE` support (Metal/
+    /// desktop) — the renderer then runs its original, cache-less path. A `blob`
+    /// that fails framing/adapter validation
+    /// ([`crate::pipeline_cache::unframe`]) is discarded and the cache starts
+    /// empty; a `None` `blob` is a cold start.
+    ///
+    /// # Safety
+    ///
+    /// This is the sole sanctioned unsafe site in this module. The wgpu contract
+    /// on [`wgpu::Device::create_pipeline_cache`] is that a non-`None` `data`
+    /// must have come from a prior `PipelineCache::get_data()` on a
+    /// `pipeline_cache_key`-compatible adapter. We uphold it two ways: (1) the
+    /// caller-supplied blob is `unframe`d against *this* adapter's fingerprint
+    /// **before** the unsafe call, so foreign or post-driver-update data never
+    /// reaches it; (2) `fallback: true` makes wgpu fall back to an empty cache
+    /// for any data it still rejects internally, rather than misbehaving.
+    /// Corrupt/mismatched data is therefore a silently-ignored cache miss, never
+    /// undefined behaviour.
+    pub(crate) fn create_pipeline_cache(&self, blob: Option<&[u8]>) -> Option<wgpu::PipelineCache> {
+        if !self.pipeline_cache_supported() {
+            return None;
+        }
+        let handle = self.device_handle();
+        let key = crate::pipeline_cache::adapter_cache_key(&handle.adapter.get_info());
+        let data = blob.and_then(|b| crate::pipeline_cache::unframe(b, &key));
+        log::debug!(
+            "forgekit-render: creating wgpu PipelineCache (seed: {})",
+            if data.is_some() {
+                "persisted blob"
+            } else {
+                "empty"
+            }
+        );
+        // SAFETY: see this method's `# Safety` section — `data` has already been
+        // validated against this adapter's fingerprint by `unframe`, and
+        // `fallback: true` turns any residual internal mismatch into a
+        // fall-back-to-empty cache rather than UB.
+        let cache = unsafe {
+            handle
+                .device
+                .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some("forgekit-render pipeline cache"),
+                    data,
+                    fallback: true,
+                })
+        };
+        Some(cache)
+    }
+
     /// Lazily create the logical device compatible with `surface`, requesting
     /// the adapter's own limits (never `Limits::default()`, which the iOS
     /// Simulator cannot satisfy) plus the #7057 alignment mitigation. Reuses

@@ -32,6 +32,13 @@ struct ReadySurface {
     /// The tier-specific renderer that fills `surface.target_view` each frame;
     /// the shared acquire/blit/present tail is tier-agnostic.
     backend: TierBackend,
+    /// The device's persisted `wgpu::PipelineCache` (handed to vello's
+    /// `RendererOptions` on the `Gpu` path) paired with the adapter fingerprint
+    /// its data is framed under, so [`SurfaceRenderer::pipeline_cache_data`] can
+    /// hand back a validatable blob. `None` on adapters without
+    /// `PIPELINE_CACHE` (Metal/desktop) — see
+    /// [`crate::context::RenderContext::create_pipeline_cache`].
+    pipeline_cache: Option<(wgpu::PipelineCache, String)>,
 }
 
 /// The per-surface renderer for the selected [`crate::RenderTier`].
@@ -85,6 +92,13 @@ pub struct SurfaceRenderer {
     /// Reset on a successful acquire, on giving up (transitioning to
     /// `SurfaceLost`), and on installing a fresh surface.
     consecutive_invalid: u8,
+    /// Persisted, framed `wgpu::PipelineCache` blob (see
+    /// [`crate::pipeline_cache`]) a prior run wrote and the shell restored from
+    /// disk via [`set_initial_pipeline_cache_data`](Self::set_initial_pipeline_cache_data),
+    /// consumed at the next surface install to seed vello's shader-pipeline
+    /// compilation. `None` is a cold start. Only meaningful on adapters with
+    /// `PIPELINE_CACHE` (Vulkan/Android); validated and discarded elsewhere.
+    initial_cache_data: Option<Vec<u8>>,
 }
 
 impl Default for SurfaceRenderer {
@@ -104,7 +118,44 @@ impl SurfaceRenderer {
             scene: vello::Scene::new(),
             state: SurfaceState::NoSurface,
             consecutive_invalid: 0,
+            initial_cache_data: None,
         }
+    }
+
+    /// Restores the persisted pipeline-cache blob a prior run produced via
+    /// [`pipeline_cache_data`](Self::pipeline_cache_data), to seed vello's
+    /// shader-pipeline compilation at the next surface install and cut warm-start
+    /// shader/pipeline compilation to near zero on Vulkan (Android).
+    ///
+    /// Builder-style (a setter rather than a new `on_surface_created*`
+    /// parameter) so the three surface-creation entry points — and every shell
+    /// call site — keep their signatures; the shell (persistence lands in tasks
+    /// 13/14) calls this once after [`SurfaceRenderer::new`] and before the
+    /// first `on_surface_created*`. Has no effect in practice on adapters
+    /// without `PIPELINE_CACHE` (Metal/desktop): the blob is validated against
+    /// the live adapter at install time and discarded on any mismatch. Passing
+    /// `None` clears any restored blob (a cold start).
+    pub fn set_initial_pipeline_cache_data(&mut self, data: Option<Vec<u8>>) {
+        self.initial_cache_data = data;
+    }
+
+    /// The current pipeline-cache data to persist, framed with the adapter
+    /// fingerprint so a later launch can validate it before reuse (see
+    /// [`crate::pipeline_cache`]).
+    ///
+    /// `None` when there is no live cache to read — no surface installed, or an
+    /// adapter without `PIPELINE_CACHE` (Metal/desktop) — or when the driver has
+    /// produced nothing to hand back yet. The shell (tasks 13/14) writes the
+    /// returned bytes to disk and feeds them back via
+    /// [`set_initial_pipeline_cache_data`](Self::set_initial_pipeline_cache_data)
+    /// on the next launch.
+    pub fn pipeline_cache_data(&self) -> Option<Vec<u8>> {
+        let SurfaceState::Ready(ready) = &self.state else {
+            return None;
+        };
+        let (cache, key) = ready.pipeline_cache.as_ref()?;
+        let data = cache.get_data()?;
+        Some(crate::pipeline_cache::frame(key, &data))
     }
 
     /// The current lifecycle phase (spec §8.1).
@@ -228,6 +279,17 @@ impl SurfaceRenderer {
         ctx: &RenderContext,
         surface: vello::util::RenderSurface<'static>,
     ) -> Result<()> {
+        // Seed vello's shader-pipeline compilation from a persisted
+        // `wgpu::PipelineCache` when the adapter supports it (Vulkan/Android) and
+        // the shell restored a validated blob via
+        // `set_initial_pipeline_cache_data`. Returns `None` on adapters without
+        // `PIPELINE_CACHE` (Metal/desktop) — the path is then byte-identical to
+        // before this existed. Created before the tier `match` so the `Gpu` arm
+        // can clone it into `RendererOptions`; the `Cpu` tier runs no GPU
+        // pipelines and leaves it unused (retained only so a later
+        // `pipeline_cache_data()` still has the handle).
+        let pipeline_cache = ctx.create_pipeline_cache(self.initial_cache_data.as_deref());
+
         // Pick the tier backend the context's probe selected (task 02 / task 06).
         // Only `Gpu` is reachable without the `cpu-tier` feature (the probe
         // never returns `Cpu` there, and `ensure_device` guards it), so the
@@ -248,6 +310,7 @@ impl SurfaceRenderer {
                 // `AaSupport::area_only()` — both public, non-`non_exhaustive`).
                 let renderer_options = vello::RendererOptions {
                     antialiasing_support: vello::AaSupport::area_only(),
+                    pipeline_cache: pipeline_cache.clone(),
                     ..Default::default()
                 };
                 let renderer = vello::Renderer::new(device, renderer_options).map_err(|e| {
@@ -271,10 +334,19 @@ impl SurfaceRenderer {
             SurfacePhase::SurfaceReady,
             "Created must reach SurfaceReady (spec §8.1)"
         );
+        // Pair the live pipeline cache with the adapter fingerprint its data is
+        // framed under, so `pipeline_cache_data()` can hand back a validatable
+        // blob without re-reading the adapter. `None` when the adapter lacks
+        // `PIPELINE_CACHE`.
+        let pipeline_cache = pipeline_cache.map(|cache| (cache, ctx.adapter_cache_key()));
         // Dropping the previous `SurfaceState` here tears down any prior surface
         // before the new one goes live (spec §8.1: no surface outlives a
         // transition).
-        self.state = SurfaceState::Ready(Box::new(ReadySurface { surface, backend }));
+        self.state = SurfaceState::Ready(Box::new(ReadySurface {
+            surface,
+            backend,
+            pipeline_cache,
+        }));
         // A freshly (re)installed surface starts a new `Invalid`-reconfigure
         // episode — any prior streak belonged to the surface just replaced.
         self.consecutive_invalid = 0;
@@ -345,6 +417,8 @@ impl SurfaceRenderer {
             scene: vello_scene,
             state,
             consecutive_invalid,
+            // Consumed only at surface install; irrelevant to the per-frame path.
+            initial_cache_data: _,
         } = self;
         let SurfaceState::Ready(ready) = state else {
             // Unreachable: `can_render()` above guaranteed SurfaceReady.
@@ -523,5 +597,26 @@ mod tests {
         let mut renderer = SurfaceRenderer::new();
         renderer.on_surface_changed(&ctx, 800, 600);
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+    }
+
+    #[test]
+    fn pipeline_cache_data_is_none_without_a_surface() {
+        // No GPU needed: with no installed surface there is no live cache to
+        // read back, regardless of whether a blob was restored.
+        let mut renderer = SurfaceRenderer::new();
+        assert_eq!(renderer.pipeline_cache_data(), None);
+        renderer.set_initial_pipeline_cache_data(Some(vec![1, 2, 3, 4]));
+        assert_eq!(renderer.pipeline_cache_data(), None);
+    }
+
+    #[test]
+    fn set_initial_pipeline_cache_data_none_clears_the_blob() {
+        // Setter is total and side-effect-free without a surface; clearing to
+        // `None` (a cold start) is a no-op on the observable `NoSurface` state.
+        let mut renderer = SurfaceRenderer::new();
+        renderer.set_initial_pipeline_cache_data(Some(vec![9, 9, 9]));
+        renderer.set_initial_pipeline_cache_data(None);
+        assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+        assert_eq!(renderer.pipeline_cache_data(), None);
     }
 }
