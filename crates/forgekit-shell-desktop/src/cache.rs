@@ -119,7 +119,7 @@ pub fn save_cache(data: &[u8]) {
         log::debug!("forgekit-shell-desktop: cache disabled (no cache dir)");
         return;
     };
-    if load_cache_from(&path).as_deref() == Some(data) {
+    if !cache_differs(load_cache_from(&path).as_deref(), data) {
         log::debug!(
             "forgekit-shell-desktop: cache unchanged, skipping write to {}",
             path.display()
@@ -127,6 +127,14 @@ pub fn save_cache(data: &[u8]) {
         return;
     }
     save_cache_to(&path, data);
+}
+
+/// Whether `new` differs from the previously-loaded blob — the pure seam
+/// behind [`save_cache`]'s skip-when-unchanged check, mirroring the Android
+/// shell's `ffi_support::pipeline_cache_differs` (same semantics, unit-tested
+/// the same way). `None` (nothing on disk) always differs.
+fn cache_differs(loaded: Option<&[u8]>, new: &[u8]) -> bool {
+    loaded != Some(new)
 }
 
 /// Path-parameterized body of [`save_cache`] — lets tests exercise the
@@ -220,6 +228,24 @@ mod tests {
             ))
             .join("forgekit")
             .join("pipeline_cache_desktop.bin")
+    }
+
+    /// The pure differs-check behind save_cache's skip-when-unchanged path
+    /// (mirror of Android's `pipeline_cache_differs` test coverage).
+    #[test]
+    fn test_cache_differs() {
+        assert!(cache_differs(None, b"x"), "nothing on disk always differs");
+        assert!(
+            cache_differs(None, b""),
+            "empty new blob vs no file differs"
+        );
+        assert!(
+            !cache_differs(Some(b"x"), b"x"),
+            "identical bytes: no write"
+        );
+        assert!(cache_differs(Some(b"x"), b"y"), "changed bytes differ");
+        assert!(cache_differs(Some(b"x"), b"xy"), "length change differs");
+        assert!(!cache_differs(Some(b""), b""), "both empty: no write");
     }
 
     /// load returns None for a non-existent file.
