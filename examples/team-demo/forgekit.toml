@@ -3,6 +3,17 @@ name = "team_demo"
 org = "it.f0x"
 description = "A new ForgeKit application."
 
+# Deep-link scheme registered in the generated Android manifest / iOS
+# Info.plist (task 08 — task 02 wired the app-side `router_with_deep_links`
+# but deferred the platform manifest scheme to this task). Informational
+# here — ForgeKit tooling doesn't parse this section; it documents what
+# `forgekit create --deeplink-scheme` baked into the platform templates.
+# Editing it does NOT re-render the manifest/Info.plist — re-run
+# `forgekit create --overwrite` (or edit the platform files directly) to
+# change it after scaffolding.
+[deeplink]
+scheme = "teamdemo"
+
 # [flavors]
 # dev = { app-id-suffix = ".dev" }
 # prod = {}

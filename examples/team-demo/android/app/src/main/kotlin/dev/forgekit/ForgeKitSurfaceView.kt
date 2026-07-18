@@ -1,6 +1,8 @@
 package dev.forgekit
 
 import android.content.Context
+import android.content.res.Configuration
+import android.os.Build
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
@@ -11,6 +13,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.View
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -55,7 +58,12 @@ class ForgeKitSurfaceView(context: Context) :
     // JNI exports implemented by `forgekit-shell-android` (spec Phase 2
     // task 24, Phase 4 IME) — these names and signatures are load-bearing,
     // matched exactly by `#[no_mangle] extern "system" fn Java_dev_forgekit_*`.
-    private external fun nativeInit(surface: Surface, scaleFactor: Float): Long
+    // `cacheDir` is the app's `context.cacheDir.absolutePath` — the Rust side
+    // persists the wgpu pipeline cache under it (`<cacheDir>/forgekit/`) so a
+    // warm start skips Vulkan shader-pipeline compilation. The JNI symbol name is
+    // unchanged (it doesn't encode params); this signature and the Rust
+    // `native_init` gained the parameter together.
+    private external fun nativeInit(surface: Surface, scaleFactor: Float, cacheDir: String): Long
 
     private external fun nativeOnSurfaceChanged(
         handle: Long,
@@ -101,11 +109,42 @@ class ForgeKitSurfaceView(context: Context) :
 
     private external fun nativeImeAction(handle: Long, action: Int)
 
+    // Appearance (spec §17, task 08): flip the app's theme brightness between
+    // light and dark. `dark` mirrors Configuration.UI_MODE_NIGHT_YES — see
+    // [isDarkMode]. Called once right after `nativeInit` returns a handle and
+    // again on every `onConfigurationChanged` (the manifest declares `uiMode`
+    // in `android:configChanges` so a system dark-mode toggle reaches here
+    // instead of recreating the activity).
+    private external fun nativeSetAppearance(handle: Long, dark: Boolean)
+
+    // Deep links (task 07). `url` is the raw `Intent.data` Uri's `toString()`,
+    // forwarded to `forgekit_reactive::push_deep_link` on the Rust side.
+    private external fun nativeOnDeepLink(handle: Long, url: String)
+
+    // Accessibility (spec §9, phase 6d). Attaches the accesskit Android adapter
+    // to this view. `view` is the accessibility host — always `this`
+    // (`ForgeKitSurfaceView` IS a `View`); the adapter installs a
+    // `View.AccessibilityDelegate` + `OnHoverListener` on it (posted to the UI
+    // thread) and depends on the bundled `dev.accesskit.android.Delegate` class.
+    // Best-effort: the Rust side isolates any init failure so a11y never blocks
+    // startup. Called once, right after `nativeInit` returns a live handle.
+    private external fun nativeInitAccessibility(handle: Long, view: View)
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
     /** Whether the Choreographer frame loop should keep re-posting itself. */
     private var running = false
+
+    /**
+     * A deep link delivered (by `MainActivity`) before [nativeInit] has
+     * returned a non-zero handle. Cold-start links routinely arrive this
+     * early — `MainActivity.onCreate` calls [onDeepLink] right after
+     * constructing this view, well before `surfaceCreated` (and therefore
+     * `nativeInit`) ever runs. Held here and flushed the moment `handle`
+     * becomes non-zero (queue-until-handle-ready).
+     */
+    private var pendingDeepLink: String? = null
 
     /**
      * The last IME surface Rust published (from `nativeImeState`). Seeds a freshly
@@ -142,6 +181,11 @@ class ForgeKitSurfaceView(context: Context) :
     private val scaleFactor: Float
         get() = resources.displayMetrics.density
 
+    /** Whether the platform currently reports a dark appearance preference. */
+    private val isDarkMode: Boolean
+        get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+
     init {
         holder.addCallback(this)
         // Required for a custom editor view to receive IME focus + text input.
@@ -149,17 +193,91 @@ class ForgeKitSurfaceView(context: Context) :
         isFocusableInTouchMode = true
     }
 
+    /**
+     * Set the frame rate hint on API 30+, requesting the display's maximum
+     * refresh rate. This is a HINT only — OEM policy and device capabilities
+     * override it. The Choreographer already follows the display's active rate
+     * regardless of this hint; this call just signals the platform that our
+     * surface can benefit from high-refresh rendering.
+     */
+    private fun setFrameRateHint(holder: SurfaceHolder) {
+        if (Build.VERSION.SDK_INT < 30) return
+
+        val display = display ?: return
+        val modes = display.supportedModes.ifEmpty { return }
+        val maxRefreshRate = modes.maxOf { it.refreshRate }
+
+        if (Build.VERSION.SDK_INT >= 31) {
+            holder.surface.setFrameRate(
+                maxRefreshRate,
+                Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                Surface.CHANGE_FRAME_RATE_ALWAYS
+            )
+        } else {
+            holder.surface.setFrameRate(
+                maxRefreshRate,
+                Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
+            )
+        }
+    }
+
     override fun surfaceCreated(holder: SurfaceHolder) {
+        setFrameRateHint(holder)
         if (handle == 0L) {
-            handle = nativeInit(holder.surface, scaleFactor)
+            handle = nativeInit(holder.surface, scaleFactor, context.cacheDir.absolutePath)
+            if (handle != 0L) {
+                nativeSetAppearance(handle, isDarkMode)
+                // Attach the accesskit accessibility adapter to this view (spec
+                // §9, phase 6d). Best-effort: the native side isolates any
+                // failure in its own guard, so a missing delegate class or JNI
+                // hiccup degrades to "no a11y" rather than blocking startup.
+                nativeInitAccessibility(handle, this)
+                // Flush a deep link that arrived before this handle existed
+                // (see `pendingDeepLink`'s doc comment) — a cold-start link
+                // must not be silently dropped just because it raced ahead
+                // of `nativeInit`.
+                pendingDeepLink?.let { url ->
+                    pendingDeepLink = null
+                    nativeOnDeepLink(handle, url)
+                }
+            }
         } else {
             nativeOnSurfaceChanged(handle, holder.surface, width, height)
         }
     }
 
+    /**
+     * Deliver a platform deep link — called by `MainActivity` for both the
+     * cold-start link (`onCreate`'s `intent?.data`) and a running-app link
+     * (`onNewIntent`) uniformly. Queues until [nativeInit] has returned a
+     * handle if the link arrives first (see [pendingDeepLink]); a `null`
+     * `url` (no data on the intent) is a no-op.
+     */
+    fun onDeepLink(url: String?) {
+        if (url == null) return
+        if (handle == 0L) {
+            pendingDeepLink = url
+        } else {
+            nativeOnDeepLink(handle, url)
+        }
+    }
+
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        setFrameRateHint(holder)
         if (handle != 0L) {
             nativeOnSurfaceChanged(handle, holder.surface, width, height)
+        }
+    }
+
+    /**
+     * The `android:configChanges` manifest entry includes `uiMode`, so a
+     * system light/dark toggle reaches here instead of recreating the
+     * activity — re-seed the theme's brightness from the fresh configuration.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (handle != 0L) {
+            nativeSetAppearance(handle, isDarkMode)
         }
     }
 
@@ -252,10 +370,10 @@ class ForgeKitSurfaceView(context: Context) :
             imm.hideSoftInputFromWindow(windowToken, 0)
         } else if (state.active) {
             // Steady active (no show/hide edge): reconcile the live mirror to the
-            // focused field's published state — a caret moved by a tap (Finding
-            // 10), or a whole-field text change from a field switch (Finding 9) or
-            // submit-clear. Compares against the LIVE editable, not the racing
-            // `lastKnownState`, so a pre-advanced snapshot can't defeat it.
+            // focused field's published state — a caret moved by a tap, or a
+            // whole-field text change from a field switch or a submit-clear.
+            // `reconcileTo` compares against the LIVE editable (not the racing
+            // `lastKnownState`), so a pre-advanced snapshot can't hide a change.
             activeConnection?.reconcileTo(state)
         }
     }
@@ -300,11 +418,11 @@ class ForgeKitSurfaceView(context: Context) :
         // is a cheap no-op, so re-posting is always correct while `running`.
         if (handle != 0L) {
             nativeOnFrame(handle, frameTimeNanos)
-            // Per-frame IME reconcile (Findings 9/10): pick up caret moves,
-            // field switches, and submit-clears that no InputConnection callback
-            // originated. `pollImeAfterDispatch` reconciles the live mirror to the
-            // focused field's published state; a no-op when they already match, so
-            // normal typing never triggers a spurious restart.
+            // Per-frame IME reconcile: pick up caret moves, field switches, and
+            // submit-clears that no InputConnection callback originated.
+            // `pollImeAfterDispatch` reconciles the live mirror to the focused
+            // field's published state; a no-op when they already match, so normal
+            // typing never triggers a spurious restart.
             pollImeAfterDispatch()
         }
         Choreographer.getInstance().postFrameCallback(this)
@@ -406,7 +524,8 @@ class ForgeKitSurfaceView(context: Context) :
          * originate: a tap that moved the caret (selection-only), or a whole-field
          * text change from a field switch / submit-clear. Compares against the
          * LIVE editable (not `lastKnownState`) so a pre-advanced snapshot cannot
-         * hide a divergence.
+         * hide a divergence. Selection-only changes move the IMM cursor without a
+         * `restartInput` (which would drop any active composition).
          */
         fun reconcileTo(state: ImeWireState) {
             val curText = editable.toString()
@@ -422,7 +541,7 @@ class ForgeKitSurfaceView(context: Context) :
                     Selection.setSelection(editable, state.selBase, state.selExt)
                 }
                 imm.updateSelection(this@ForgeKitSurfaceView, state.selBase, state.selExt, state.compBase, state.compExt)
-                // A later identical `sync()` must not short-circuit on the stale snapshot.
+                // A later identical `sync()` must not short-circuit on a stale snapshot.
                 lastPushed = null
             }
         }
@@ -473,14 +592,11 @@ class ForgeKitSurfaceView(context: Context) :
         }
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
-            // Soft keyboards emit backspace as `deleteSurroundingText`, but
-            // hardware keys (and some IMEs' DEL/ENTER) arrive here — let `super`
-            // translate them into edits on the mirror, then sync on key-down.
             // `BaseInputConnection.sendKeyEvent` does NOT edit the mirror for
             // KEYCODE_DEL/FORWARD_DEL — it only dispatches the key to the view.
-            // Many soft keyboards (Gboard on this device) deliver backspace this
-            // way rather than via `deleteSurroundingText`, so we must perform the
-            // edit on the mirror ourselves, then let `sync()` push it to Rust.
+            // Many soft keyboards (e.g. Gboard) deliver backspace this way rather
+            // than via `deleteSurroundingText`, so perform the edit on the mirror
+            // ourselves (at its current selection), then let `sync()` push it.
             if (event.action == KeyEvent.ACTION_DOWN &&
                 (event.keyCode == KeyEvent.KEYCODE_DEL ||
                     event.keyCode == KeyEvent.KEYCODE_FORWARD_DEL)

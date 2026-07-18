@@ -96,17 +96,35 @@ android {
                         "android/key.properties — see forgekit.toml [signing]",
                 )
             }
+            // R8 + resource shrink (Phase 7 task 12): the Kotlin/Java side is
+            // small (one view, one vendored accesskit delegate) so the dex win
+            // is modest, but shipping unminified release code is not the
+            // ForgeKit default. `proguard-rules.pro` carries the two keep
+            // rules R8 needs beyond AGP's own default rule set (JNI-bound
+            // classes it can't otherwise prove are live) — see that file's
+            // comments.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
         // Profile: release codegen with a debug-signed, non-debuggable package
         // for on-device performance measurement (spec §12.2). Its cargo profile
         // (`--profile profile`) keeps symbols/tracing on — see cargoNdkBuild.
+        // `initWith(release)` copies every build-type property, including
+        // `isMinifyEnabled`/`isShrinkResources`/`proguardFiles` above, so
+        // profile stays representative of release's minified/shrunk shape —
+        // no separate opt-in needed here.
         create("profile") {
             initWith(getByName("release"))
             signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += listOf("release", "debug")
             isDebuggable = false
         }
-        // `debug` is implicit (AGP-provided) and unchanged.
+        // `debug` is implicit (AGP-provided) and unchanged: no minification,
+        // so no keep-rule risk while iterating.
     }
 
     // Per-ABI APK splits, off by default. When enabled, one APK per ABI is
