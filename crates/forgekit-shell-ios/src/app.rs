@@ -601,8 +601,13 @@ impl IosAppHandle {
             events_since_last_frame: self.events_since_last_frame,
             // Both read straight from the retained tree's `RenderRoot` state: a
             // mid-drag gesture or a focused/IME-active field must keep painting.
+            // `ime_state().is_some()` is OR'd in as belt-and-braces, exactly as
+            // on Android (the two frame() bodies stay input-for-input
+            // comparable): a published IME surface must keep frames running
+            // even if the focus path and the published surface ever disagree
+            // for a frame (they converge one event pass later by contract).
             pointer_capture_active: self.app.is_pointer_captured(),
-            focus_or_ime_active: self.app.is_focus_active(),
+            focus_or_ime_active: self.app.is_focus_active() || self.app.ime_state().is_some(),
             last_needs_frame: self.last_needs_frame,
             // Non-draining peek: a skipped frame leaves the flags for the next
             // frame that runs to drain (spec §14 phase 7).
