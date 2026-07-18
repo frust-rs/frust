@@ -1,31 +1,592 @@
-//! Home tab — channels + DMs.
+//! Home tab — channels + DMs (Phase C, task 11).
 //!
-//! **Placeholder** (Phase C task: Home screen — channel/DM list with loading
-//! skeletons, swipeable archive/mute rows, unread badges, pull-to-refresh).
-//! Today it renders the scaffold and offers a single push into a channel feed
-//! so the `/` → `/channel/:id` flow is clickable end-to-end.
+//! A [`Component`] hosting a [`ChannelsController`](crate::features::channels)
+//! (via `clean_signals_forgekit::use_controller`, the same seam
+//! `settings_appearance` uses) that loads a channel + DM roster with a
+//! deliberate mock latency so the loading **skeletons** are visible. Each row
+//! is a [`swipeable_row`](crate::ui::swipeable::swipeable_row): swipe right to
+//! archive, left to mute, each raising an undo toast. A status-dot avatar (two
+//! rendered with [`Image`], the rest an initials circle painted via the
+//! `forgekit-core` escape hatch), an unread badge, and a lock icon for private
+//! channels complete each row. Pull-to-refresh re-runs the loader.
+//!
+//! # Why the escape hatch
+//!
+//! No facade widget paints an arbitrary-color filled circle or an animated
+//! shimmer, so [`FillBox`] and [`Shimmer`] below are small hand-rolled
+//! `View`/`Widget` pairs built directly against `forgekit-core` — the same
+//! precedent the pre-skeleton theme screen used for its `ColorBoxView`
+//! (`docs/ARCHITECTURE.md`'s "low-level escape hatch"). Everything else goes
+//! through the `forgekit` facade.
+//!
+//! # ListView vs. ScrollView
+//!
+//! The roster uses [`scroll_view`] wrapping a [`Column`], not the Material
+//! `ListView`: `ScrollView` is the only facade widget exposing
+//! `on_refresh_release` (pull-to-refresh), which this screen needs.
 
-use forgekit::{AnyView, Button, Column, NavigatorController, any};
+use std::sync::Arc;
+use std::time::Duration;
+
+use forgekit::{
+    Align, Alignment, AnimationController, AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets,
+    FlexView, GestureDetector, Get, Image, ImageFit, ImageSource, NavigatorController, Padding,
+    ProgressValue, Row, SizedBox, Stack, View, any, app_bar, circular_progress, component,
+    flexible, hero, icon, icons, inflexible, scroll_view, text, use_context,
+};
+use forgekit_core::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget,
+};
+use kurbo::Size;
+use peniko::Color;
+
+use clean_signals_forgekit::use_controller;
 
 use crate::HuddleState;
-use crate::mock;
-use crate::screens::{channel_feed, placeholder_body, scaffold};
+use crate::failure::HuddleFailure;
+use crate::features::channels::{self, ChannelItem, ChannelsController, DmItem};
+use crate::mock::UserStatus;
 
-/// The Home tab root. `controller` lets the demo push into a channel feed.
-pub fn home_screen(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
-    let body = any(Column(vec![
-        placeholder_body(
-            "Home: channels + DMs with skeletons, swipeable rows, unread badges (Phase C).",
+// ---------------------------------------------------------------------------
+// Palette / tunables
+// ---------------------------------------------------------------------------
+
+/// Swipe-right (archive) accent — a confirming green.
+const ARCHIVE_COLOR: Color = Color::from_rgb8(0x2E, 0x7D, 0x32);
+/// Swipe-left (mute) accent — a neutral slate.
+const MUTE_COLOR: Color = Color::from_rgb8(0x54, 0x6E, 0x7A);
+/// Unread badge fill.
+const BADGE_COLOR: Color = Color::from_rgb8(0xD3, 0x2F, 0x2F);
+/// The `#`-circle tint for channel rows.
+const CHANNEL_TINT: Color = Color::from_rgb8(0x5B, 0x53, 0x7D);
+
+/// The initials-avatar background palette, indexed by user id.
+const AVATAR_PALETTE: [Color; 6] = [
+    Color::from_rgb8(0x1E, 0x88, 0xE5),
+    Color::from_rgb8(0x8E, 0x24, 0xAA),
+    Color::from_rgb8(0x00, 0x89, 0x7B),
+    Color::from_rgb8(0xF4, 0x51, 0x1E),
+    Color::from_rgb8(0x39, 0x49, 0xAB),
+    Color::from_rgb8(0x6D, 0x4C, 0x41),
+];
+
+/// Avatar background for a user id.
+fn avatar_color(user_id: u32) -> Color {
+    AVATAR_PALETTE[(user_id as usize) % AVATAR_PALETTE.len()]
+}
+
+/// The status-dot color for a presence state.
+fn status_color(status: UserStatus) -> Color {
+    match status {
+        UserStatus::Online => Color::from_rgb8(0x43, 0xA0, 0x47),
+        UserStatus::Away => Color::from_rgb8(0xFB, 0x8C, 0x00),
+        UserStatus::Dnd => Color::from_rgb8(0xE5, 0x39, 0x35),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Escape-hatch leaf widgets
+// ---------------------------------------------------------------------------
+
+/// A filled rounded rect of an arbitrary color — the avatar/status-dot/badge
+/// primitive no facade widget paints. A circle is a `FillBox` with
+/// `radius == size / 2`.
+struct FillBox {
+    size: Size,
+    color: Color,
+    radius: f64,
+}
+
+/// The retained widget for a [`FillBox`].
+struct FillBoxWidget {
+    size: Size,
+    color: Color,
+    radius: f64,
+}
+
+/// Construct a [`FillBox`].
+fn fill_box(size: Size, color: Color, radius: f64) -> FillBox {
+    FillBox {
+        size,
+        color,
+        radius,
+    }
+}
+
+impl<State: 'static> View<State> for FillBox {
+    type Element = FillBoxWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> FillBoxWidget {
+        FillBoxWidget {
+            size: self.size,
+            color: self.color,
+            radius: self.radius,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        element: &mut FillBoxWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        element.size = self.size;
+        element.color = self.color;
+        element.radius = self.radius;
+        ChangeFlags::PAINT
+    }
+}
+
+impl Widget for FillBoxWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(self.size)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        scene.fill_rounded_rect(ctx.origin(), ctx.size(), self.radius, self.color);
+    }
+}
+
+/// A skeleton shimmer bar: a gray rounded rect whose alpha pulses via an
+/// [`AnimationController`] (spec §8's paint-driven animation contract).
+struct Shimmer {
+    size: Size,
+    radius: f64,
+}
+
+/// The retained widget for a [`Shimmer`].
+struct ShimmerWidget {
+    size: Size,
+    radius: f64,
+    anim: AnimationController,
+}
+
+/// Construct a [`Shimmer`] bar.
+fn shimmer(size: Size, radius: f64) -> Shimmer {
+    Shimmer { size, radius }
+}
+
+impl<State: 'static> View<State> for Shimmer {
+    type Element = ShimmerWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> ShimmerWidget {
+        let mut anim = AnimationController::new(Duration::from_millis(1100));
+        anim.repeat();
+        ShimmerWidget {
+            size: self.size,
+            radius: self.radius,
+            anim,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        element: &mut ShimmerWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        element.size = self.size;
+        element.radius = self.radius;
+        ChangeFlags::PAINT
+    }
+}
+
+impl Widget for ShimmerWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(self.size)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let animating = self.anim.advance(ctx.frame_time());
+        // Triangle wave 0→1→0 over the loop, mapped to a gentle alpha pulse.
+        let v = self.anim.value();
+        let tri = 1.0 - (2.0 * v - 1.0).abs();
+        let alpha = (0.18 + 0.20 * tri).clamp(0.0, 1.0);
+        let color = Color::from_rgba8(0xB0, 0xB0, 0xB0, (alpha * 255.0) as u8);
+        scene.fill_rounded_rect(ctx.origin(), ctx.size(), self.radius, color);
+        if animating {
+            ctx.request_frame();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Screen component
+// ---------------------------------------------------------------------------
+
+/// The Home tab root: a `Component` hosting the roster controller. `nav` lets
+/// row/avatar taps push detail pages.
+pub fn home_screen(nav: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
+    any(component(HomeScreen { nav }))
+}
+
+/// The Home screen `Component` (stateless config; state lives in [`HomeState`]).
+struct HomeScreen {
+    nav: NavigatorController<HuddleState>,
+}
+
+/// Retained Home state.
+struct HomeState {
+    controller: Arc<ChannelsController>,
+    nav: NavigatorController<HuddleState>,
+    toasts: crate::ui::toast::ToastController,
+    /// A decoded image used for a couple of DM avatars (`None` if decode fails).
+    logo: Option<ImageSource>,
+}
+
+impl forgekit::Component for HomeScreen {
+    type State = HomeState;
+
+    fn init(&self) -> HomeState {
+        let toasts = use_context::<crate::ui::toast::ToastController>().unwrap_or_default();
+        let controller =
+            use_controller::<ChannelsController, HuddleFailure>(ChannelsController::new);
+
+        // Kick off the initial load on the UI-thread task queue (the canonical
+        // clean-signals-forgekit pattern — `use_interval` reloads the same way;
+        // the ~600ms timer resolves via the reactive runtime's tokio context,
+        // which `pump_local` enters). The latency makes the skeletons visible.
+        let handle = controller.clone();
+        forgekit::spawn_local(async move {
+            handle.load().await;
+        });
+
+        let logo = ImageSource::decode(include_bytes!("../../assets/logo.png")).ok();
+
+        HomeState {
+            controller,
+            nav: self.nav.clone(),
+            toasts,
+            logo,
+        }
+    }
+
+    fn build(&self, state: &mut HomeState) -> AnyView<HomeState> {
+        let async_state = state.controller.data.get(); // tracked
+
+        let body: AnyView<HomeState> = if let Some(data) = async_state.value() {
+            roster_list(state, data, async_state.is_loading())
+        } else if async_state.is_loading() {
+            skeleton_list()
+        } else {
+            any(Align(
+                Alignment::CENTER,
+                text("Couldn't load channels.").size(15.0),
+            ))
+        };
+
+        any(FlexView::new(
+            Axis::Vertical,
+            vec![
+                inflexible(any(app_bar::<HomeState>("Huddle"))),
+                flexible(1, body),
+            ],
+        )
+        .cross_axis(CrossAxisAlignment::Stretch))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loading skeleton
+// ---------------------------------------------------------------------------
+
+/// The loading skeleton: shimmer rows standing in for the roster.
+fn skeleton_list() -> AnyView<HomeState> {
+    let mut rows: Vec<AnyView<HomeState>> = Vec::new();
+    for _ in 0..7 {
+        rows.push(skeleton_row());
+    }
+    any(scroll_view(Padding(EdgeInsets::all(8.0), Column(rows))))
+}
+
+/// One skeleton row: a shimmer circle + two shimmer lines.
+fn skeleton_row() -> AnyView<HomeState> {
+    any(Padding(
+        EdgeInsets::symmetric(8.0, 10.0),
+        FlexView::new(
+            Axis::Horizontal,
+            vec![
+                inflexible(any(shimmer(Size::new(40.0, 40.0), 20.0))),
+                inflexible(any(SizedBox(Some(12.0), None))),
+                flexible(
+                    1,
+                    any(Column(vec![
+                        any(shimmer(Size::new(150.0, 14.0), 4.0)),
+                        any(SizedBox(None, Some(6.0))),
+                        any(shimmer(Size::new(220.0, 12.0), 4.0)),
+                    ])),
+                ),
+            ],
+        )
+        .cross_axis(CrossAxisAlignment::Center),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Loaded roster
+// ---------------------------------------------------------------------------
+
+/// The loaded roster: sectioned Channels + Direct messages inside a
+/// pull-to-refresh scroll view.
+fn roster_list(
+    state: &HomeState,
+    data: &channels::ChannelsData,
+    refreshing: bool,
+) -> AnyView<HomeState> {
+    let mut children: Vec<AnyView<HomeState>> = Vec::new();
+
+    if refreshing {
+        children.push(any(Align(
+            Alignment::CENTER,
+            Padding(
+                EdgeInsets::all(8.0),
+                circular_progress(ProgressValue::Indeterminate),
+            ),
+        )));
+    }
+
+    children.push(section_header("Channels"));
+    for c in &data.channels {
+        children.push(channel_row(state, c));
+    }
+    children.push(section_header("Direct messages"));
+    for d in &data.dms {
+        children.push(dm_row(state, d));
+    }
+
+    any(
+        scroll_view(Padding(EdgeInsets::all(8.0), Column(children))).on_refresh_release(
+            move |s: &mut HomeState| {
+                let handle = s.controller.clone();
+                forgekit::spawn_local(async move {
+                    handle.load().await;
+                });
+            },
         ),
-        any(Button("Open #general", move |_s: &mut HuddleState| {
-            let c = controller.clone();
-            controller.push(move || {
-                channel_feed::channel_feed(
-                    c.clone(),
-                    mock::channel("general").unwrap().id.to_string(),
-                )
+    )
+}
+
+/// A section header row.
+fn section_header(title: &str) -> AnyView<HomeState> {
+    any(Padding(
+        EdgeInsets::symmetric(8.0, 12.0),
+        text(title.to_string()).size(13.0),
+    ))
+}
+
+/// A channel roster row (leading `#`/lock circle + name + preview + badge),
+/// wrapped in a swipeable row.
+fn channel_row(state: &HomeState, c: &ChannelItem) -> AnyView<HomeState> {
+    let leading = any(channel_circle());
+
+    // Title row: the name, plus a lock icon for a private channel.
+    let title: AnyView<HomeState> = if c.private {
+        any(Row(vec![
+            any(text(c.name.clone()).size(15.0)),
+            any(SizedBox(Some(6.0), None)),
+            any(icon(icons::LOCK).size(14.0)),
+        ]))
+    } else {
+        any(text(c.name.clone()).size(15.0))
+    };
+
+    let nav = state.nav.clone();
+    let route_id = c.id.clone();
+    let content = tappable_content(
+        title,
+        c.preview.clone(),
+        c.unread,
+        move |_s: &mut HomeState| {
+            let feed_nav = nav.clone();
+            let feed_id = route_id.clone();
+            nav.push(move || {
+                crate::screens::channel_feed::channel_feed(feed_nav.clone(), feed_id.clone())
             });
-        })),
+        },
+    );
+
+    let row = row_layout(leading, content);
+    swipe_wrap(row, c.id.clone(), format!("#{}", c.name), state)
+}
+
+/// A DM roster row (user avatar + name + preview + badge), wrapped in a
+/// swipeable row.
+fn dm_row(state: &HomeState, d: &DmItem) -> AnyView<HomeState> {
+    let leading = dm_avatar(state, d);
+
+    let title = any(text(d.name.clone()).size(15.0));
+    let nav = state.nav.clone();
+    let route_id = d.id.clone();
+    let content = tappable_content(
+        title,
+        d.preview.clone(),
+        d.unread,
+        move |_s: &mut HomeState| {
+            let feed_nav = nav.clone();
+            let feed_id = route_id.clone();
+            nav.push(move || {
+                crate::screens::channel_feed::channel_feed(feed_nav.clone(), feed_id.clone())
+            });
+        },
+    );
+
+    let row = row_layout(leading, content);
+    swipe_wrap(row, d.id.clone(), d.name.clone(), state)
+}
+
+/// The leading `#` circle for a channel row.
+fn channel_circle() -> AnyView<HomeState> {
+    any(Stack(vec![
+        any(fill_box(Size::new(40.0, 40.0), CHANNEL_TINT, 20.0)),
+        any(Align(
+            Alignment::CENTER,
+            text("#").size(18.0).color(Color::WHITE),
+        )),
+    ]))
+}
+
+/// A DM avatar: an image (for a chosen couple of users) or an initials circle,
+/// with a presence status dot, wrapped in a hero + a profile-navigating tap.
+fn dm_avatar(state: &HomeState, d: &DmItem) -> AnyView<HomeState> {
+    // A couple of users get a real `Image` avatar; the rest an initials circle.
+    let use_image = matches!(d.user_id, 2 | 5) && state.logo.is_some();
+    let base: AnyView<HomeState> = if use_image {
+        let src = state.logo.clone().expect("guarded by use_image");
+        any(SizedBox(Some(40.0), Some(40.0)).child(Image(src).fit(ImageFit::Cover)))
+    } else {
+        any(Stack(vec![
+            any(fill_box(
+                Size::new(40.0, 40.0),
+                avatar_color(d.user_id),
+                20.0,
+            )),
+            any(Align(
+                Alignment::CENTER,
+                text(d.initials.clone()).size(14.0).color(Color::WHITE),
+            )),
+        ]))
+    };
+
+    let dot = any(Align(
+        Alignment::new(1.0, 1.0),
+        fill_box(Size::new(12.0, 12.0), status_color(d.status), 6.0),
+    ));
+    let avatar = any(Stack(vec![base, dot]));
+
+    let nav = state.nav.clone();
+    let user_id = d.user_id;
+    any(
+        GestureDetector(hero(format!("avatar-{user_id}"), avatar)).on_tap(
+            move |_s: &mut HomeState| {
+                let id = user_id.to_string();
+                nav.push(move || crate::screens::profile::profile_screen(id.clone()));
+            },
+        ),
+    )
+}
+
+/// The tappable middle-of-row content: name/title, preview, and trailing unread
+/// badge — a `GestureDetector` firing `on_tap` (the row navigation).
+fn tappable_content<F: Fn(&mut HomeState) + 'static>(
+    title: AnyView<HomeState>,
+    preview: String,
+    unread: u32,
+    on_tap: F,
+) -> AnyView<HomeState> {
+    let column = any(Column(vec![
+        title,
+        any(SizedBox(None, Some(4.0))),
+        any(text(preview).size(12.0)),
     ]));
-    scaffold("Huddle", body)
+    any(GestureDetector(
+        FlexView::new(
+            Axis::Horizontal,
+            vec![flexible(1, column), inflexible(unread_badge(unread))],
+        )
+        .cross_axis(CrossAxisAlignment::Center),
+    )
+    .on_tap(on_tap))
+}
+
+/// The unread badge: a colored pill + count (empty when zero).
+fn unread_badge(count: u32) -> AnyView<HomeState> {
+    if count == 0 {
+        return any(SizedBox(None, None));
+    }
+    let label = if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
+    };
+    any(Padding(
+        EdgeInsets::symmetric(4.0, 0.0),
+        Stack(vec![
+            any(fill_box(Size::new(22.0, 18.0), BADGE_COLOR, 9.0)),
+            any(Align(
+                Alignment::CENTER,
+                text(label).size(11.0).color(Color::WHITE),
+            )),
+        ]),
+    ))
+}
+
+/// The horizontal row layout: leading avatar + tappable content.
+fn row_layout(leading: AnyView<HomeState>, content: AnyView<HomeState>) -> AnyView<HomeState> {
+    any(Padding(
+        EdgeInsets::symmetric(8.0, 10.0),
+        FlexView::new(
+            Axis::Horizontal,
+            vec![
+                inflexible(leading),
+                inflexible(any(SizedBox(Some(12.0), None))),
+                flexible(1, content),
+            ],
+        )
+        .cross_axis(CrossAxisAlignment::Center),
+    ))
+}
+
+/// Wrap a row in a [`swipeable_row`](crate::ui::swipeable::swipeable_row):
+/// swipe right → archive, left → mute, each raising an undo toast.
+fn swipe_wrap(
+    row: AnyView<HomeState>,
+    id: String,
+    label: String,
+    state: &HomeState,
+) -> AnyView<HomeState> {
+    let data = state.controller.data;
+
+    let archive_id = id.clone();
+    let archive_label = label.clone();
+    let archive_cb = move |s: &mut HomeState| {
+        let handle = s.controller.clone();
+        let op_id = archive_id.clone();
+        forgekit::spawn_local(async move {
+            handle.set_archived(op_id, true).await;
+        });
+        let undo_id = archive_id.clone();
+        s.toasts
+            .show_with_action(format!("Archived {archive_label}"), "Undo", move || {
+                channels::set_archived_flag(data, &undo_id, false)
+            });
+    };
+
+    let mute_id = id;
+    let mute_label = label;
+    let mute_cb = move |s: &mut HomeState| {
+        let handle = s.controller.clone();
+        let op_id = mute_id.clone();
+        forgekit::spawn_local(async move {
+            handle.set_muted(op_id, true).await;
+        });
+        let undo_id = mute_id.clone();
+        s.toasts
+            .show_with_action(format!("Muted {mute_label}"), "Undo", move || {
+                channels::set_muted_flag(data, &undo_id, false)
+            });
+    };
+
+    any(crate::ui::swipeable::swipeable_row(row)
+        .on_swipe_right(ARCHIVE_COLOR, archive_cb)
+        .on_swipe_left(MUTE_COLOR, mute_cb))
 }

@@ -15,4 +15,5 @@
 //! Phase C fills in the remaining feature slices (channels, messages, search,
 //! activity, profile) alongside the screens that host them.
 
+pub mod channels;
 pub mod settings;

@@ -40,13 +40,19 @@ forgekit = { path = "../../crates/forgekit" }
 clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
 clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signals-forgekit" }
 
-# This crate's PRODUCTION code depends on the `forgekit` facade alone (plus the
-# clean-signals spine above), per `docs/CODE_STANDARDS.md`'s State & Reactivity
-# Conventions — the Huddle skeleton (task 10) deleted the old gallery/theme/
-# motion screens that reached below the facade for a hand-rolled `View`/`Widget`
-# pair, so no production escape-hatch dependency remains. The lower-level crates
-# (`forgekit-core`/`kurbo`/`peniko`) are now needed ONLY by the headless test
-# harness, so they live in `[dev-dependencies]` below.
+# `forgekit-core` + `kurbo` + `peniko`: the Home screen (Phase C, task 11)
+# reintroduces the facade's documented "low-level escape hatch" (see
+# `docs/ARCHITECTURE.md`) for the two small hand-rolled `View`/`Widget` pairs no
+# facade widget covers — `ui/swipeable.rs`'s horizontal swipe-to-action row, and
+# `screens/home.rs`'s arbitrary-color avatar/badge fill (`FillBox`) and animated
+# loading `Shimmer`. This is the same production escape-hatch dependency the
+# pre-skeleton theme/motion screens carried (`git show
+# d02ad77~1:examples/huddle/Cargo.toml`); everything else in this crate still
+# depends on the `forgekit` facade alone, per `docs/CODE_STANDARDS.md`'s State &
+# Reactivity Conventions.
+forgekit-core = { path = "../../crates/forgekit-core" }
+kurbo = "0.13.1"
+peniko = "0.6.1"
 
 # Dev-only: the headless screen tests drive ForgeKit's `RenderRoot` directly
 # (the desktop shell's own rebuild/layout/paint seam) and pump the reactive
@@ -59,12 +65,9 @@ clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signal
 # tokio runtime itself — the toast auto-dismiss timer runs on the reactive
 # runtime's background executor via `forgekit::spawn`.
 [dev-dependencies]
-forgekit-core = { path = "../../crates/forgekit-core" }
 forgekit-reactive = { path = "../../crates/forgekit-reactive" }
 forgekit-scene = { path = "../../crates/forgekit-scene" }
 forgekit-text = { path = "../../crates/forgekit-text" }
-kurbo = "0.13.1"
-peniko = "0.6.1"
 reactive_graph = "0.2"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
 

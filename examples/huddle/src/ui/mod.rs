@@ -8,4 +8,5 @@
 //! - [`toast`] — the overlay toast/snackbar service ([`toast::ToastController`])
 //!   mounted in the shell's reserved overlay slot.
 
+pub mod swipeable;
 pub mod toast;
