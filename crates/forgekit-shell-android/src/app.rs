@@ -710,20 +710,18 @@ impl AndroidAppHandle {
         // latch as it is read, so a skipped frame does not leave a stale signal
         // for the next tick.
         //
-        // Two fields have no dedicated `AppTree` accessor and are handled by
-        // proxy, deliberately erring toward "run" (correctness beats savings):
-        // - `pointer_capture_active`: an active drag streams `ACTION_MOVE`
-        //   events, each tripping `events_since_last_frame`, so capture is
-        //   covered by the events latch. A finger held perfectly still mid-drag
-        //   produces no events *and* no visual change, so skipping is correct.
-        // - `focus_or_ime_active`: proxied by `ime_state().is_some()` — a
-        //   focused editable publishes an IME surface, so its blinking caret /
-        //   selection chrome keeps producing frames while focused.
+        // `pointer_capture_active`/`focus_or_ime_active` read the dedicated
+        // `AppTree` accessors (`is_pointer_captured`/`is_focus_active`), the
+        // same sources the iOS shell's gate uses — the two frame() bodies must
+        // stay input-for-input comparable. `ime_state().is_some()` is OR'd in
+        // as belt-and-braces: a published IME surface must keep frames running
+        // even if the focus path and the published surface ever disagree for a
+        // frame (they converge one event pass later by contract).
         let inputs = FrameInputs {
             signals_dirty,
             events_since_last_frame: std::mem::take(&mut self.events_since_last_frame),
-            pointer_capture_active: false,
-            focus_or_ime_active: self.app.ime_state().is_some(),
+            pointer_capture_active: self.app.is_pointer_captured(),
+            focus_or_ime_active: self.app.is_focus_active() || self.app.ime_state().is_some(),
             last_needs_frame: self.last_needs_frame,
             change_flags_pending: self.app.has_pending_change_flags(),
             theme_or_appearance_changed,
