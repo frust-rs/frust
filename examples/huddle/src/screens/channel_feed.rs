@@ -4,9 +4,29 @@
 //! with an avatar + name), link-preview and file-stub cards, reaction chips,
 //! a thread affordance, a typing indicator, loading skeletons, near-start
 //! pagination on `#firehose`, and the expanding multiline composer. All state
-//! lives in the [`MessagesController`](crate::features::messages) this screen's
-//! `Component` hosts via `clean_signals_forgekit::use_controller` (the same
-//! seam `settings_appearance` uses).
+//! lives in the [`MessagesController`](crate::features::messages) this
+//! screen sources via
+//! [`MessagesController::for_channel`](crate::features::messages::MessagesController::for_channel)
+//! — the shared per-channel-id registry (task 19) that lets a reply composed
+//! in an open [`crate::screens::thread`] update this same screen's rendered
+//! reply count, and vice versa.
+//!
+//! # Why a plain function, not a `Component` (mirrors `screens::thread`)
+//!
+//! An earlier version of this screen hosted its controller behind a
+//! `Component`'s retained state (via `clean_signals_forgekit::use_controller`).
+//! That fights the shared registry: a `Component`'s local state lives behind
+//! its own nested reactive `Owner`
+//! (`docs/ARCHITECTURE.md`'s Component state boundary), disposed when the
+//! page is torn down — fine for a controller genuinely owned by one screen,
+//! but not for one meant to outlive any single mount and be handed to a
+//! *different* screen (`screens::thread`) too. `channel_feed` is now a
+//! **plain** function, exactly the `screens::thread`/`features::search`/
+//! `features::activity` precedent: the shared controller comes from
+//! [`MessagesController::for_channel`], and only the composer's live text is
+//! genuinely screen-local, cached across rebuilds behind a `thread_local!`
+//! map keyed by channel id (this screen's counterpart to `screens::thread`'s
+//! `composer_for`, keyed there by root message id instead).
 //!
 //! # Two deliberate adaptations to the facade-only widget set
 //!
@@ -36,21 +56,21 @@
 //!   `filled_card`) rather than a `primary_container` tint, since the facade
 //!   exposes no color-scheme roles or explicit fill color to app code.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use forgekit::{
-    AnyView, Axis, Component, CrossAxisAlignment, DesignLanguage, EdgeInsets, FlexView, Get,
-    GetUntracked, MainAxisAlignment, NavigatorController, Padding, RwSignal, ScrollInfo, Set,
-    SizedBox, Theme, any, app_bar, assist_chip, cupertino_activity_indicator, elevated_card,
-    filled_card, filter_chip, flexible, icon, icons, inflexible, keyed, loading_indicator,
-    outlined_card, scroll_view, text, text_input, use_context,
+    AnyView, Axis, CrossAxisAlignment, DesignLanguage, EdgeInsets, FlexView, Get, GetUntracked,
+    MainAxisAlignment, NavigatorController, Padding, RwSignal, ScrollInfo, Set, SizedBox, Theme,
+    any, app_bar, assist_chip, cupertino_activity_indicator, elevated_card, filled_card,
+    filter_chip, flexible, icon, icons, inflexible, keyed, loading_indicator, outlined_card,
+    scroll_view, text, text_input, use_context,
 };
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, MessagesController};
 use crate::mock;
-use crate::screens::thread;
-use clean_signals_forgekit::use_controller;
 
 /// Distance (logical px) from the top of the feed at which the near-start
 /// "load older" trigger fires — the infinite-scroll edge for `#firehose`.
@@ -65,78 +85,46 @@ const SKELETON_COUNT: usize = 6;
 /// affordance). Real color-glyph rendering, verified in wave A.
 const QUICK_REACT: &str = "\u{1F44D}";
 
+/// Gets (or creates) the thread-local composer text for `channel_id` — see
+/// the module docs' "Why a plain function" section. The controller itself is
+/// shared (see
+/// [`MessagesController::for_channel`](crate::features::messages::MessagesController::for_channel));
+/// only the in-flight composer text is screen-local, keyed here so a
+/// different channel never bleeds into this one's composer.
+fn composer_for(channel_id: &str) -> RwSignal<String> {
+    thread_local! {
+        static COMPOSERS: RefCell<HashMap<String, RwSignal<String>>> =
+            RefCell::new(HashMap::new());
+    }
+    COMPOSERS.with(|cell| {
+        *cell
+            .borrow_mut()
+            .entry(channel_id.to_string())
+            .or_insert_with(|| RwSignal::new(String::new()))
+    })
+}
+
 /// The channel/DM feed route entry point. `navigator` lets the screen pop back
 /// and push into a thread; `channel_id` selects the conversation.
 pub fn channel_feed(
     navigator: NavigatorController<HuddleState>,
     channel_id: String,
 ) -> AnyView<HuddleState> {
-    any(forgekit::component(ChannelFeedScreen {
-        navigator,
-        channel_id,
-    }))
-}
+    let controller = MessagesController::for_channel(channel_id.clone());
+    let composer = composer_for(&channel_id);
+    let design = use_context::<Theme>()
+        .map(|t| t.design_language)
+        .unwrap_or(DesignLanguage::Material3);
 
-/// The channel-feed `Component` — stateless configuration (the route params);
-/// all mutable state lives in [`ChannelFeedState`].
-struct ChannelFeedScreen {
-    navigator: NavigatorController<HuddleState>,
-    channel_id: String,
-}
+    let bar = feed_app_bar(&channel_id, navigator);
+    let body = feed_body(&controller, design);
+    let composer_row = composer_bar(&controller, composer);
 
-/// Retained state: the hosted controller, the composer text signal, and the
-/// route params the build needs.
-struct ChannelFeedState {
-    controller: Arc<MessagesController>,
-    navigator: NavigatorController<HuddleState>,
-    channel_id: String,
-    /// The composer's live text (controlled `TextInput` value).
-    composer: RwSignal<String>,
-}
-
-impl Component for ChannelFeedScreen {
-    type State = ChannelFeedState;
-
-    fn init(&self) -> ChannelFeedState {
-        let channel_id = self.channel_id.clone();
-        let controller = use_controller::<MessagesController, crate::failure::HuddleFailure>({
-            let channel_id = channel_id.clone();
-            move || MessagesController::new(channel_id)
-        });
-
-        // Kick off the initial load on the background runtime; the skeleton
-        // shows until the loaded feed writes the `messages` signal.
-        forgekit::spawn({
-            let controller = Arc::clone(&controller);
-            async move {
-                controller.load().await;
-            }
-        });
-
-        ChannelFeedState {
-            controller,
-            navigator: self.navigator.clone(),
-            channel_id,
-            composer: RwSignal::new(String::new()),
-        }
-    }
-
-    fn build(&self, state: &mut ChannelFeedState) -> AnyView<ChannelFeedState> {
-        let controller = Arc::clone(&state.controller);
-        let design = use_context::<Theme>()
-            .map(|t| t.design_language)
-            .unwrap_or(DesignLanguage::Material3);
-
-        let bar = feed_app_bar(&state.channel_id, state.navigator.clone());
-        let body = feed_body(&controller, design);
-        let composer = composer_bar(&controller, state.composer);
-
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![inflexible(bar), flexible(1, body), inflexible(composer)],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch))
-    }
+    any(FlexView::new(
+        Axis::Vertical,
+        vec![inflexible(bar), flexible(1, body), inflexible(composer_row)],
+    )
+    .cross_axis(CrossAxisAlignment::Stretch))
 }
 
 /// The app bar: a back button, the channel/DM title, and a member-count
@@ -144,7 +132,7 @@ impl Component for ChannelFeedScreen {
 fn feed_app_bar(
     channel_id: &str,
     navigator: NavigatorController<HuddleState>,
-) -> AnyView<ChannelFeedState> {
+) -> AnyView<HuddleState> {
     let title = if let Some(ch) = mock::channel(channel_id) {
         let members = mock::users().len();
         format!("#{}  ·  {members} members", ch.name)
@@ -159,18 +147,14 @@ fn feed_app_bar(
     };
 
     let back = forgekit::GestureDetector(icon(icons::ARROW_BACK).size(24.0))
-        .on_tap(move |_st: &mut ChannelFeedState| navigator.pop());
+        .on_tap(move |_st: &mut HuddleState| navigator.pop());
 
-    any(app_bar::<ChannelFeedState>(title)
-        .leading(any(Padding(EdgeInsets::symmetric(4.0, 0.0), back))))
+    any(app_bar::<HuddleState>(title).leading(any(Padding(EdgeInsets::symmetric(4.0, 0.0), back))))
 }
 
 /// The scrolling feed area: skeletons while loading, else the keyed message
 /// column with the near-start pagination trigger and a trailing typing row.
-fn feed_body(
-    controller: &Arc<MessagesController>,
-    design: DesignLanguage,
-) -> AnyView<ChannelFeedState> {
+fn feed_body(controller: &Arc<MessagesController>, design: DesignLanguage) -> AnyView<HuddleState> {
     if controller.loading.get() {
         return skeletons();
     }
@@ -179,7 +163,7 @@ fn feed_body(
     let loading_older = controller.loading_older.get();
     let typing = controller.typing.get();
 
-    let mut children: Vec<forgekit::FlexChild<ChannelFeedState>> = Vec::new();
+    let mut children: Vec<forgekit::FlexChild<HuddleState>> = Vec::new();
 
     if loading_older {
         children.push(inflexible(loading_older_row(design)));
@@ -200,7 +184,7 @@ fn feed_body(
     let pager = Arc::clone(controller);
     any(
         scroll_view(Padding(EdgeInsets::all(12.0), column)).on_scroll(
-            move |_st: &mut ChannelFeedState, info: ScrollInfo| {
+            move |_st: &mut HuddleState, info: ScrollInfo| {
                 if info.offset <= NEAR_START_PX
                     && pager.has_more.get_untracked()
                     && !pager.loading_older.get_untracked()
@@ -217,10 +201,7 @@ fn feed_body(
 
 /// One message row: the bubble, aligned right (own) or left (others, with an
 /// avatar), inside horizontal breathing room.
-fn message_row(
-    controller: &Arc<MessagesController>,
-    msg: &FeedMessage,
-) -> AnyView<ChannelFeedState> {
+fn message_row(controller: &Arc<MessagesController>, msg: &FeedMessage) -> AnyView<HuddleState> {
     let bubble = message_bubble(controller, msg);
     let row = if msg.is_own() {
         FlexView::new(
@@ -244,11 +225,8 @@ fn message_row(
 
 /// The bubble card: author line (others only), body, reaction chips, and the
 /// thread affordance.
-fn message_bubble(
-    controller: &Arc<MessagesController>,
-    msg: &FeedMessage,
-) -> AnyView<ChannelFeedState> {
-    let mut lines: Vec<AnyView<ChannelFeedState>> = Vec::new();
+fn message_bubble(controller: &Arc<MessagesController>, msg: &FeedMessage) -> AnyView<HuddleState> {
+    let mut lines: Vec<AnyView<HuddleState>> = Vec::new();
 
     if !msg.is_own()
         && let Some(user) = mock::user(msg.author_id)
@@ -284,7 +262,7 @@ fn message_bubble(
 }
 
 /// The message body: plain text, a link-preview card, or a file-stub card.
-fn message_body(msg: &FeedMessage) -> AnyView<ChannelFeedState> {
+fn message_body(msg: &FeedMessage) -> AnyView<HuddleState> {
     match &msg.body {
         FeedBody::Text(t) => any(text(t.clone()).size(15.0)),
         FeedBody::Link { url, title } => any(outlined_card(Padding(
@@ -334,21 +312,21 @@ fn message_body(msg: &FeedMessage) -> AnyView<ChannelFeedState> {
 fn reaction_chips(
     controller: &Arc<MessagesController>,
     msg: &FeedMessage,
-) -> Option<AnyView<ChannelFeedState>> {
+) -> Option<AnyView<HuddleState>> {
     if msg.reactions.is_empty() && msg.is_own() {
         return None;
     }
 
-    let mut chips: Vec<forgekit::FlexChild<ChannelFeedState>> = Vec::new();
+    let mut chips: Vec<forgekit::FlexChild<HuddleState>> = Vec::new();
     for reaction in &msg.reactions {
         let label = format!("{} {}", reaction.emoji, reaction.count);
         let emoji = reaction.emoji.clone();
         let ctrl = Arc::clone(controller);
         let id = msg.id;
-        chips.push(inflexible(any(filter_chip::<ChannelFeedState, _>(
+        chips.push(inflexible(any(filter_chip::<HuddleState, _>(
             label,
             reaction.mine,
-            move |_st: &mut ChannelFeedState, _on: bool| ctrl.toggle_reaction(id, &emoji),
+            move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
         ))));
         chips.push(inflexible(any(SizedBox(Some(6.0), None))));
     }
@@ -356,9 +334,9 @@ fn reaction_chips(
     // The quick-react add chip.
     let ctrl = Arc::clone(controller);
     let id = msg.id;
-    chips.push(inflexible(any(assist_chip::<ChannelFeedState, _>(
+    chips.push(inflexible(any(assist_chip::<HuddleState, _>(
         QUICK_REACT,
-        move |_st: &mut ChannelFeedState| ctrl.toggle_reaction(id, QUICK_REACT),
+        move |_st: &mut HuddleState| ctrl.toggle_reaction(id, QUICK_REACT),
     )
     .leading("+"))));
 
@@ -368,8 +346,11 @@ fn reaction_chips(
     )))
 }
 
-/// The "N replies →" thread affordance; tapping pushes `/thread/:id`.
-fn thread_affordance(msg: &FeedMessage) -> AnyView<ChannelFeedState> {
+/// The "N replies →" thread affordance; tapping pushes `/thread/:id` via
+/// `state.nav`'s router (mirroring `screens::thread`'s own `s.nav.router()`
+/// back-action — this plain fn has no captured `NavigatorController` of its
+/// own to push imperatively with).
+fn thread_affordance(msg: &FeedMessage) -> AnyView<HuddleState> {
     let count = msg.reply_count();
     let label = format!(
         "{count} {} \u{2192}",
@@ -378,10 +359,8 @@ fn thread_affordance(msg: &FeedMessage) -> AnyView<ChannelFeedState> {
     let id = msg.id;
     any(Padding(
         EdgeInsets::symmetric(0.0, 4.0),
-        assist_chip::<ChannelFeedState, _>(label, move |st: &mut ChannelFeedState| {
-            let thread_id = id.to_string();
-            st.navigator
-                .push(move || thread::thread_screen(thread_id.clone()));
+        assist_chip::<HuddleState, _>(label, move |st: &mut HuddleState| {
+            st.nav.router().push(&format!("/thread/{id}"));
         })
         .leading("\u{1F4AC}"),
     ))
@@ -389,7 +368,7 @@ fn thread_affordance(msg: &FeedMessage) -> AnyView<ChannelFeedState> {
 
 /// A small avatar carrying the author's initials (the facade exposes no
 /// circular clip to app code, so a `filled_card` stands in for the disc).
-fn avatar(author_id: u32) -> AnyView<ChannelFeedState> {
+fn avatar(author_id: u32) -> AnyView<HuddleState> {
     let initials = mock::user(author_id).map(|u| u.initials).unwrap_or("?");
     any(filled_card(Padding(
         EdgeInsets::all(8.0),
@@ -398,8 +377,8 @@ fn avatar(author_id: u32) -> AnyView<ChannelFeedState> {
 }
 
 /// The typing indicator row (a self-animating facade spinner + label).
-fn typing_row(design: DesignLanguage) -> AnyView<ChannelFeedState> {
-    let spinner: AnyView<ChannelFeedState> = match design {
+fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
+    let spinner: AnyView<HuddleState> = match design {
         DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
         DesignLanguage::Material3 => any(loading_indicator()),
     };
@@ -418,8 +397,8 @@ fn typing_row(design: DesignLanguage) -> AnyView<ChannelFeedState> {
 }
 
 /// The "loading older…" row shown at the top while an older page is fetched.
-fn loading_older_row(design: DesignLanguage) -> AnyView<ChannelFeedState> {
-    let spinner: AnyView<ChannelFeedState> = match design {
+fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
+    let spinner: AnyView<HuddleState> = match design {
         DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
         DesignLanguage::Material3 => any(loading_indicator()),
     };
@@ -441,8 +420,8 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<ChannelFeedState> {
 }
 
 /// The loading skeleton: a column of grey placeholder bars.
-fn skeletons() -> AnyView<ChannelFeedState> {
-    let mut rows: Vec<AnyView<ChannelFeedState>> = Vec::new();
+fn skeletons() -> AnyView<HuddleState> {
+    let mut rows: Vec<AnyView<HuddleState>> = Vec::new();
     for _ in 0..SKELETON_COUNT {
         rows.push(any(Padding(
             EdgeInsets::all(8.0),
@@ -464,11 +443,11 @@ fn skeletons() -> AnyView<ChannelFeedState> {
 fn composer_bar(
     controller: &Arc<MessagesController>,
     composer: RwSignal<String>,
-) -> AnyView<ChannelFeedState> {
+) -> AnyView<HuddleState> {
     let value = composer.get(); // tracked
     let has_text = !value.trim().is_empty();
 
-    let mut column: Vec<AnyView<ChannelFeedState>> = Vec::new();
+    let mut column: Vec<AnyView<HuddleState>> = Vec::new();
 
     if has_text {
         column.push(affordance_chips());
@@ -477,25 +456,22 @@ fn composer_bar(
     // The multiline field: Enter inserts a newline, the send button / Shift+Enter
     // submits (the multiline default — see `TextInput::multiline`).
     let submit_ctrl = Arc::clone(controller);
-    let field = text_input(
-        value.clone(),
-        move |st: &mut ChannelFeedState, next: String| {
-            st.composer.set(next);
-        },
-    )
+    let field = text_input(value.clone(), move |_st: &mut HuddleState, next: String| {
+        composer.set(next);
+    })
     .multiline(5)
     .placeholder("Message")
-    .on_submit(move |st: &mut ChannelFeedState, submitted: String| {
-        submit(&submit_ctrl, st.composer, submitted);
+    .on_submit(move |_st: &mut HuddleState, submitted: String| {
+        submit(&submit_ctrl, composer, submitted);
     });
 
     let send_ctrl = Arc::clone(controller);
     let send_icon = icon(icons::SEND).size(24.0);
-    let send_btn: AnyView<ChannelFeedState> = if has_text {
+    let send_btn: AnyView<HuddleState> = if has_text {
         any(
-            forgekit::GestureDetector(send_icon).on_tap(move |st: &mut ChannelFeedState| {
-                let text = st.composer.get_untracked();
-                submit(&send_ctrl, st.composer, text);
+            forgekit::GestureDetector(send_icon).on_tap(move |_st: &mut HuddleState| {
+                let text = composer.get_untracked();
+                submit(&send_ctrl, composer, text);
             }),
         )
     } else {
@@ -525,21 +501,21 @@ fn composer_bar(
 
 /// The attachment / emoji affordance chips above the field. Inert for now (the
 /// pickers are Phase D sheets); they carry only a pressed state.
-fn affordance_chips() -> AnyView<ChannelFeedState> {
+fn affordance_chips() -> AnyView<HuddleState> {
     any(Padding(
         EdgeInsets::symmetric(0.0, 6.0),
         FlexView::new(
             Axis::Horizontal,
             vec![
-                inflexible(any(assist_chip::<ChannelFeedState, _>(
+                inflexible(any(assist_chip::<HuddleState, _>(
                     "Attach",
-                    |_st: &mut ChannelFeedState| {},
+                    |_st: &mut HuddleState| {},
                 )
                 .leading("\u{1F4CE}"))),
                 inflexible(any(SizedBox(Some(8.0), None))),
-                inflexible(any(assist_chip::<ChannelFeedState, _>(
+                inflexible(any(assist_chip::<HuddleState, _>(
                     "Emoji",
-                    |_st: &mut ChannelFeedState| {},
+                    |_st: &mut HuddleState| {},
                 )
                 .leading("\u{1F642}"))),
             ],

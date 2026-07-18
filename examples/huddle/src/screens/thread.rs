@@ -7,7 +7,7 @@
 //! API (`message`/`replies_for`/`reply_count`/`reply_in_thread`, built for
 //! this screen in task 12 — see that module's docs).
 //!
-//! # Why a thread-local session, not a `Component` (mirrors `screens::search`)
+//! # Why a thread-local composer, not a `Component` (mirrors `screens::search`)
 //!
 //! `src/routes.rs`'s `/thread/:id` entry (a frozen hub file, see
 //! `src/README-phase-c.md`) calls [`thread_screen`] with only the route
@@ -17,34 +17,30 @@
 //! wrapping this screen in a `Component` would trap its event handlers behind
 //! the component-state boundary (`docs/ARCHITECTURE.md`'s Component state
 //! boundary), unable to reach `state.nav.router()` for the back action and
-//! the "N replies →" round trip this screen's own tests exercise. `thread_screen`
-//! therefore stays a **plain** function closing over `&mut HuddleState`
-//! directly, and the retained state a plain page-builder would otherwise lose
-//! every rebuild (the composer text, the loaded [`MessagesController`]) lives
-//! behind a thread-local session — the same `thread_local!` pattern
+//! the "N replies →" round trip this screen's own tests exercise.
+//! `thread_screen` therefore stays a **plain** function closing over
+//! `&mut HuddleState` directly.
+//!
+//! Its [`MessagesController`] now comes from the shared per-channel-id
+//! registry
+//! ([`MessagesController::for_channel`](crate::features::messages::MessagesController::for_channel),
+//! task 19) rather than a screen-local instance — see that module's docs'
+//! "One shared controller per channel" section for why that closes this
+//! screen's former cross-page consistency gap: a reply composed here now
+//! updates the exact same signals an already-open `channel_feed` page (or a
+//! later-opened one) renders from. Only the composer's live text is
+//! genuinely screen-local (a reply in flight belongs to this visit to this
+//! thread, not the channel as a whole): it's cached across rebuilds behind a
+//! `thread_local!` map keyed by the thread's root message id — the same
+//! pattern
 //! [`SearchController::instance`](crate::features::search::SearchController::instance)
-//! and `screens::workspace_drawer`'s `entrance_progress` already use, keyed
-//! here by the thread's root message id so navigating between two different
-//! threads (or leaving and returning to the same one) reuses the right
-//! session rather than losing it or bleeding into the wrong one.
-//!
-//! # A known limitation: this session is independent of `channel_feed`'s
-//!
-//! [`crate::screens::channel_feed`] hosts its own `Arc<MessagesController>`
-//! per channel behind its `Component`'s retained state (via `use_controller`
-//! — see that module's docs), constructed directly (`MessagesController::new`)
-//! with no shared registry. This screen's thread-local session constructs
-//! its *own* `Arc<MessagesController>` for the same channel the same way, so a
-//! reply composed here updates *this* session's copy of the thread (and
-//! renders correctly here) but does not retroactively update an
-//! already-open `channel_feed` page's own copy — the two are genuinely
-//! separate live objects, since neither `src/routes.rs` nor `channel_feed.rs`
-//! (both outside this task's scope — see `src/README-phase-c.md`) hands this
-//! screen the feed's actual controller instance. Closing this gap for real
-//! (a per-channel-id shared controller registry) is a `features::messages`
-//! API change flagged as a follow-up hub task, not smuggled in here.
+//! and `screens::workspace_drawer`'s `entrance_progress` use, generalized
+//! from "one slot" to "one slot per thread" so navigating between two
+//! different threads (or leaving and returning to the same one) reuses the
+//! right composer rather than losing it or bleeding into the wrong one.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use forgekit::{
@@ -63,48 +59,22 @@ use crate::screens::placeholder_body;
 /// real per-message timestamp in the mock dataset).
 const PLACEHOLDER_TIME: &str = "9:41 AM";
 
-/// One thread's retained session: the channel-scoped controller and the
-/// composer's live text, cached across rebuilds (see the module docs).
-#[derive(Clone)]
-struct ThreadSession {
-    /// The root message id this session was built for — a session is reused
-    /// only while the caller keeps asking for the same thread.
-    root_id: u32,
-    controller: Arc<MessagesController>,
-    composer: RwSignal<String>,
-}
-
-/// Gets (or builds) the thread-local session for `root_id`/`channel_id` — see
-/// the module docs' "Why a thread-local session" section. Building a session
-/// spawns the controller's initial load (`forgekit::spawn`, the same
-/// background-runtime pattern `channel_feed`'s `Component::init` and
-/// `workspace_drawer`'s `entrance_progress` both use from outside a
-/// `Component` too).
-fn thread_session(root_id: u32, channel_id: &str) -> ThreadSession {
+/// Gets (or creates) the thread-local composer text for `root_id` — see the
+/// module docs' "Why a thread-local composer" section. The controller itself
+/// is no longer screen-local (see
+/// [`MessagesController::for_channel`](crate::features::messages::MessagesController::for_channel));
+/// only the in-flight reply text is, keyed here so a different thread never
+/// bleeds into this one's composer.
+fn composer_for(root_id: u32) -> RwSignal<String> {
     thread_local! {
-        static SESSION: RefCell<Option<ThreadSession>> = const { RefCell::new(None) };
+        static COMPOSERS: RefCell<HashMap<u32, RwSignal<String>>> =
+            RefCell::new(HashMap::new());
     }
-    SESSION.with(|cell| {
-        if let Some(session) = cell.borrow().as_ref()
-            && session.root_id == root_id
-        {
-            return session.clone();
-        }
-
-        let controller = Arc::new(MessagesController::new(channel_id));
-        {
-            let handle = Arc::clone(&controller);
-            forgekit::spawn(async move {
-                handle.load().await;
-            });
-        }
-        let session = ThreadSession {
-            root_id,
-            controller,
-            composer: RwSignal::new(String::new()),
-        };
-        *cell.borrow_mut() = Some(session.clone());
-        session
+    COMPOSERS.with(|cell| {
+        *cell
+            .borrow_mut()
+            .entry(root_id)
+            .or_insert_with(|| RwSignal::new(String::new()))
     })
 }
 
@@ -123,9 +93,8 @@ pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
     };
 
     let title = thread_title(root_msg.channel_id);
-    let session = thread_session(root_id, root_msg.channel_id);
-    let controller = session.controller;
-    let composer = session.composer;
+    let controller = MessagesController::for_channel(root_msg.channel_id);
+    let composer = composer_for(root_id);
 
     if controller.loading.get() {
         return thread_page(title, placeholder_body("Loading thread\u{2026}"), None);

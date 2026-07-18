@@ -29,18 +29,17 @@
 //! its own doc comment); [`settle_transitions`] is the same wait, reused after
 //! a later push/pop.
 //!
-//! # A documented, out-of-scope limitation this suite does NOT assert
+//! # The cross-page consistency task 19 closed
 //!
-//! `screens::thread`'s module docs spell out that its thread-local session
-//! hosts its *own* `MessagesController` instance, independent of an
-//! already-open `channel_feed` page's — so a reply composed here does not
-//! retroactively update a *different*, already-mounted feed page's own copy
-//! of the thread. Closing that gap needs a `features::messages` API change
-//! (a shared per-channel-id controller registry) flagged as a follow-up hub
-//! task, not this task's to make. What this suite asserts instead: the
-//! thread renders correctly, composing a reply appends it, and the
-//! thread-local session (not a per-visit-fresh one) is what makes a reply
-//! composed here still be there on a later visit to the *same* thread.
+//! An earlier version of this suite documented (but deliberately did not
+//! assert) a limitation: `screens::thread` and `screens::channel_feed` each
+//! constructed their own independent `MessagesController` for the same
+//! channel, so a reply composed here never showed up on an already-open
+//! feed's "N replies" affordance. Task 19 closed that gap with
+//! [`MessagesController::for_channel`](huddle::features::messages::MessagesController::for_channel),
+//! a shared per-channel-id registry both screens now source their instance
+//! from — see that module's docs. `a_reply_composed_in_the_thread_is_visible_on_the_feeds_shared_controller`
+//! below is the real cross-page assertion this suite previously deferred.
 
 use std::any::Any;
 use std::time::{Duration, Instant};
@@ -51,6 +50,7 @@ use forgekit_reactive::ReactiveRuntime;
 use forgekit_text::TextContext;
 use kurbo::{Point, Size};
 
+use huddle::features::messages::MessagesController;
 use huddle::{HuddleApp, HuddleState};
 
 mod support;
@@ -291,10 +291,10 @@ fn composing_a_reply_appends_it() {
 
 /// Popping back to the feed rebuilds cleanly (and the feed, independently
 /// loaded, renders too), and reopening the *same* thread afterward still
-/// shows the composed reply — the thread-local session persists across the
-/// round trip (see the module docs' "A documented, out-of-scope limitation"
-/// section for what this deliberately does NOT assert: a live-shared signal
-/// with an already-open `channel_feed` page).
+/// shows the composed reply — the shared per-channel-id controller
+/// ([`MessagesController::for_channel`](huddle::features::messages::MessagesController::for_channel))
+/// persists the reply across the round trip regardless of which screen's
+/// visit constructed it.
 #[test]
 fn back_then_reopening_the_same_thread_keeps_the_composed_reply() {
     let _g = serial();
@@ -319,5 +319,50 @@ fn back_then_reopening_the_same_thread_keeps_the_composed_reply() {
         reopened.rounded.len(),
         after_send.rounded.len(),
         "reopening the same thread still shows the composed reply"
+    );
+}
+
+/// Task 19's real cross-page assertion: open the feed, open its thread,
+/// compose a reply there, pop back to the feed — and the feed's own
+/// controller (fetched the exact way `screens::channel_feed` sources it,
+/// [`MessagesController::for_channel`]) already shows the incremented reply
+/// count, with no reload. `RecScene` doesn't capture a chip's label text
+/// (only glyph-run counts and rounded-rect geometry — see
+/// `tests/support/mod.rs`), so a paint-assert on the feed's "N replies"
+/// affordance can't distinguish "2 replies" from "3 replies" text; this is a
+/// controller-signal assertion instead, reading the exact same
+/// `MessagesController::messages` signal `screens::channel_feed::feed_body`
+/// renders `FeedMessage::reply_count` from.
+#[test]
+fn a_reply_composed_in_the_thread_is_visible_on_the_feeds_shared_controller() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (mut root, mut state, mut logic, mut tcx, mut t_ms, scene) = mount_thread(8, "engineering");
+    let before = MessagesController::for_channel("engineering")
+        .message(8)
+        .expect("root message exists")
+        .reply_count();
+
+    tap(&mut root, &mut state, composer_field_point(&scene));
+    type_text(&mut root, &mut state, "Great point!");
+    root.event(&mut state, &shift_enter());
+    t_ms += 16;
+    let _ = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
+
+    tap(&mut root, &mut state, BACK_ACTION);
+    let popped = settle_transitions(&mut root, &mut logic, &mut state, &mut tcx, &mut t_ms);
+    assert!(root.root_id().is_some(), "popping back rebuilds cleanly");
+    assert!(popped.glyph_runs > 0, "the feed renders after popping back");
+
+    let after = MessagesController::for_channel("engineering")
+        .message(8)
+        .expect("root message exists")
+        .reply_count();
+    assert_eq!(
+        after,
+        before + 1,
+        "the feed's own controller (the same registry entry the thread just wrote to) \
+         sees the reply composed in the thread"
     );
 }

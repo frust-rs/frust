@@ -1,17 +1,51 @@
 //! Messages feature domain — the channel/DM message-feed spine.
 //!
-//! [`MessagesController`] is the view model for one channel or DM (constructed
-//! per `channel_id` by [`crate::screens::channel_feed`]). It owns every signal
-//! the feed screen renders and drives the mock-latency load / send / react /
-//! thread-reply / pagination operations through an embedded
-//! [`ControllerCore`] (the `templates/AGENTS.md` controller rule, same shape as
-//! [`crate::features::settings`]).
+//! [`MessagesController`] is the view model for one channel or DM. It owns
+//! every signal the feed and thread screens render and drives the
+//! mock-latency load / send / react / thread-reply / pagination operations
+//! through an embedded [`ControllerCore`] (the `templates/AGENTS.md`
+//! controller rule, same shape as [`crate::features::settings`]).
+//!
+//! # One shared controller per channel
+//!
+//! [`MessagesController::for_channel`] is a per-`channel_id` registry (a
+//! `thread_local!` map, generalizing
+//! [`ActivityController::instance`](crate::features::activity::ActivityController::instance)'s
+//! single-slot thread-local singleton to one slot per channel): the first
+//! screen to visit a channel constructs its controller and kicks the initial
+//! [`load`](MessagesController::load) once, and every later visit — from
+//! [`crate::screens::channel_feed`] or [`crate::screens::thread`], in either
+//! order — reuses that same live `Arc`, with no reload and no second
+//! skeleton. This is what makes a reply composed in an open thread show up on
+//! an already-open feed's "N replies" affordance (and a message sent in the
+//! feed visible the moment its thread opens) — both screens read and write
+//! the exact same signals, not independent copies (task 19 closed this gap;
+//! `screens::channel_feed` and `screens::thread`'s own module docs cover how
+//! each screen now sources its instance). Construct a controller directly
+//! ([`MessagesController::new`] / [`with_latency`](MessagesController::with_latency))
+//! only for a test that wants its own isolated instance — every screen should
+//! go through `for_channel`.
+//!
+//! `for_channel` kicks its one-time initial load via
+//! [`forgekit::spawn_local`] rather than [`forgekit::spawn`] (the
+//! `Send`-background executor [`load`](MessagesController::load) itself is
+//! written against, and still uses for a later user-triggered op like `send`'s
+//! canned reply or `#firehose`'s pagination): a construct-then-immediately-
+//! read-back sequence — `for_channel` returning straight into the calling
+//! screen's own render reading `loading`/`messages` moments later — raced a
+//! background-thread write against that same-frame tracked read often enough
+//! to intermittently panic ("already disposed") under `cargo test`, since a
+//! registry hit now makes that exact sequence run on *every* visit to an
+//! already-loaded channel, not just a fresh mount. `spawn_local` (queued on
+//! the UI-thread-local task queue, run only when a shell/test pumps it —
+//! [`ActivityController::instance`]'s own mount-time kickoff uses the same)
+//! keeps that first write on the same thread as the read, closing the race.
 //!
 //! # Public API — designed with the thread view in mind
 //!
-//! `screens/thread.rs` is a LATER task that will consume this same controller
-//! (the `/channel/:id` → `/thread/:id` flow). Its needs shaped this module's
-//! surface, so the thread screen never touches the mock layer directly:
+//! `screens/thread.rs` consumes this same controller (the `/channel/:id` →
+//! `/thread/:id` flow); its needs shaped this module's surface, so the
+//! thread screen never touches the mock layer directly:
 //!
 //! - a **per-channel message list** — [`MessagesController::messages`]
 //!   (`RwSignal<Vec<FeedMessage>>`), newest last;
@@ -33,6 +67,9 @@
 //! sleep via `clean_signals::time::sleep` (the one sanctioned timer) and are
 //! driven off the screen through `forgekit::spawn`.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -334,6 +371,36 @@ impl MessagesController {
             typing: RwSignal::new(false),
             has_more: RwSignal::new(false),
         }
+    }
+
+    /// The single shared instance for `channel_id` — see the [module
+    /// docs](self)' "One shared controller per channel" section. Get-or-create:
+    /// the first call for a given `channel_id` constructs a fresh controller
+    /// with the default latencies and kicks its initial [`load`](Self::load)
+    /// once (the skeleton a screen's first visit shows); a later call for the
+    /// same `channel_id` — from either `channel_feed` or `thread`, in either
+    /// order — returns the same `Arc` with no reload.
+    pub fn for_channel(channel_id: impl Into<String>) -> Arc<Self> {
+        thread_local! {
+            static REGISTRY: RefCell<HashMap<String, Arc<MessagesController>>> =
+                RefCell::new(HashMap::new());
+        }
+        let channel_id = channel_id.into();
+        REGISTRY.with(|cell| {
+            if let Some(existing) = cell.borrow().get(&channel_id) {
+                return Arc::clone(existing);
+            }
+            let controller = Arc::new(MessagesController::new(channel_id.clone()));
+            {
+                let handle = Arc::clone(&controller);
+                forgekit::spawn_local(async move {
+                    handle.load().await;
+                });
+            }
+            cell.borrow_mut()
+                .insert(channel_id, Arc::clone(&controller));
+            controller
+        })
     }
 
     /// The channel/DM this controller feeds.
