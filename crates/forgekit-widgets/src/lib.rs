@@ -25,6 +25,8 @@ mod checkbox;
 pub mod cupertino;
 mod flex;
 mod gesture;
+mod icon;
+pub mod icons;
 mod image;
 pub mod material;
 pub mod nav;
@@ -55,6 +57,7 @@ pub use flex::{
     flexible, inflexible, keyed,
 };
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
+pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
 pub use nav::navigator::{
     NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult, ResultCallback,
