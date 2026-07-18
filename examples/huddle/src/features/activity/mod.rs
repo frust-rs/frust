@@ -18,10 +18,30 @@
 //! [`LoadActivity`]'s seed items are supplied at [`ActivityController::new`]
 //! construction time rather than the use case calling
 //! [`crate::mock::activity`] itself — production seeds it from that accessor
-//! (see [`crate::screens::activity`]), a test seeds its own list (including an
-//! empty one, to exercise the empty-feed shape without a screen mount) — the
-//! same seeding convention `SettingsController::new` uses for its selectors.
+//! (see [`ActivityController::instance`]), a test seeds its own list
+//! (including an empty one, to exercise the empty-feed shape without a screen
+//! mount) — the same seeding convention `SettingsController::new` uses for
+//! its selectors.
+//!
+//! # Why a thread-local instance, not a `Component` (mirrors `features::search`)
+//!
+//! [`crate::screens::activity`]'s module docs spell out why the screen is a
+//! **plain** function rather than a `Component`: `src/routes.rs`'s `/activity`
+//! entry (a frozen hub file, see `src/README-phase-c.md`) gives the screen no
+//! `NavigatorController`, so a row tap's `on_press` needs `&mut HuddleState`
+//! directly to reach `state.nav.router().push(..)` — a `Component`'s inner
+//! event handlers only ever see the component's own local `State`, never the
+//! outer `HuddleState` (`docs/ARCHITECTURE.md`'s Component state boundary).
+//! [`ActivityController::instance`] is the same `thread_local!`-backed
+//! singleton [`crate::features::search::SearchController::instance`]
+//! establishes: correctly scoped because this app's `RenderRoot`/reactive
+//! runtime pump always runs on one thread (a real process only ever has one),
+//! and each `#[test]` in `tests/activity.rs` gets its own fresh OS thread
+//! (Rust's default test harness never reuses one for a later test), so the
+//! thread-local never leaks across tests either.
 
+use std::cell::RefCell;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clean_signals::async_state::{AsyncState, async_state_signal};
@@ -29,7 +49,7 @@ use clean_signals::{ControllerCore, RunOptions, UseCase};
 use forgekit::{GetUntracked, RwSignal};
 
 use crate::failure::HuddleFailure;
-use crate::mock::ActivityItem;
+use crate::mock::{self, ActivityItem};
 
 /// Mock load latency ("~400ms → skeletons" per the task spec) — long enough
 /// that the screen's loading skeletons are actually visible before the feed
@@ -174,6 +194,34 @@ impl ActivityController {
                 RunOptions::default(),
             )
             .await;
+    }
+
+    /// The single, lazily-created controller instance for this thread —
+    /// see the [module docs](self)'s "Why a thread-local instance" section.
+    /// Seeds from the real [`crate::mock::activity`] (production's seed —
+    /// see the module docs' seeding note) and kicks off [`Self::load`] once,
+    /// the moment the instance is first created — mirroring
+    /// `screens::activity`'s former `Component::init`, which spawned the
+    /// same load exactly once per mount.
+    pub fn instance() -> Arc<Self> {
+        thread_local! {
+            static INSTANCE: RefCell<Option<Arc<ActivityController>>> =
+                const { RefCell::new(None) };
+        }
+        INSTANCE.with(|cell| {
+            if let Some(existing) = cell.borrow().as_ref() {
+                return Arc::clone(existing);
+            }
+            let controller = Arc::new(ActivityController::new(mock::activity()));
+            {
+                let handle = Arc::clone(&controller);
+                forgekit::spawn_local(async move {
+                    handle.load().await;
+                });
+            }
+            *cell.borrow_mut() = Some(Arc::clone(&controller));
+            controller
+        })
     }
 }
 

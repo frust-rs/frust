@@ -29,6 +29,11 @@
 //! `tests/home.rs`/`tests/search.rs`'s `settle_transitions`: by the time the
 //! feed resolves past its mocked latency the entrance cross-fade has long
 //! settled, the leaving Home page is torn down, and page input flows again.
+//! [`settle_transitions`] is the same wait, reused after a later row-tap push
+//! (into `/channel/:id`, a `Component`-hosted page with its own real async
+//! load — mirroring `tests/thread.rs`'s helper of the same name, which also
+//! pumps the UI-thread local queue and sleeps a real tick per iteration for
+//! exactly that reason) or a pop back to Activity.
 //!
 //! # Geometry
 //!
@@ -202,6 +207,36 @@ fn mount_loaded_activity_tab() -> (
     (root, state, logic, tcx, t_ms, loaded_scene)
 }
 
+/// Advances the paint clock (via `t_ms`) until no animation asks for another
+/// frame — settling a push/pop cross-fade so page input flows again. Mirrors
+/// `tests/thread.rs`'s helper of the same name: also pumps the UI-thread
+/// local queue and sleeps a real tick each iteration, since a page pushed or
+/// revealed here (`channel_feed`) kicks off its own real async load that
+/// needs wall-clock time to resolve, not just paint-clock ticks.
+fn settle_transitions(
+    root: &mut Root,
+    logic: &mut impl FnMut(&mut HuddleState) -> AnyView<HuddleState>,
+    state: &mut HuddleState,
+    tcx: &mut TextContext,
+    t_ms: &mut u64,
+) -> RecScene {
+    let runtime = ReactiveRuntime::get().expect("setup() installed the reactive runtime");
+    let deadline = Instant::now() + LOAD_WAIT;
+    loop {
+        runtime.pump_local();
+        std::thread::sleep(Duration::from_millis(1));
+        *t_ms += 16;
+        let (scene, needs_frame) = frame_at(root, logic, state, tcx, *t_ms);
+        if !needs_frame {
+            return scene;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a push/pop transition never settled"
+        );
+    }
+}
+
 /// The feed loads past its mocked latency and renders a row per mention — every
 /// mention starts unread, so the loaded scene paints leading avatars and
 /// trailing "Unread" chips that the loading skeleton never did.
@@ -275,49 +310,61 @@ fn mark_all_read_clears_the_unread_indicators() {
     );
 }
 
-/// Tapping a row opens the local in-tab channel detail view (see
-/// `src/screens/activity.rs`'s Navigation note): the detail rows carry no
-/// avatar/chip chrome, so both drop to zero — and the back action returns to
-/// the feed list (its unread indicators reappear).
+/// Tapping a row navigates to the mentioned channel's real `/channel/:id`
+/// feed (task 18: replacing task 14's local in-tab drill-down workaround —
+/// see `src/screens/activity.rs`'s module docs), and popping back returns to
+/// Activity with its feed state retained: the thread-local
+/// [`huddle::features::activity::ActivityController`] instance already holds
+/// the loaded rows, so no skeleton re-flash happens on the way back.
 #[test]
-fn tapping_a_row_opens_and_closes_the_channel_detail_view() {
+fn tapping_a_row_navigates_to_the_channel_feed_and_back_retains_state() {
     let _g = serial();
     let _ambient = setup();
 
     let (mut root, mut state, mut logic, mut tcx, mut t_ms, loaded_scene) =
         mount_loaded_activity_tab();
+    let avatars_before = row_avatars(&loaded_scene);
+    let chips_before = unread_chips(&loaded_scene);
 
     let row = first_row_center(&loaded_scene);
     tap(&mut root, &mut state, row);
 
-    // The drill-down is a local `ActivityState::open` toggle (no navigator
-    // push, so no cross-fade); one advanced-clock frame renders it.
-    t_ms += 16;
-    let (detail_scene, _) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
+    // Settle the push cross-fade (and the channel feed's own real async
+    // load): the tapped row navigated to a `/channel/:id` page — the mock
+    // channel it names always exists (every activity item is derived from a
+    // real channel message — see `mock::activity`), so it renders real
+    // content, not the "no such channel" fallback, and paints no
+    // Activity-tab "Unread" chip (the feed's own message bubbles never paint
+    // one).
+    let feed_scene = settle_transitions(&mut root, &mut logic, &mut state, &mut tcx, &mut t_ms);
+    assert!(root.root_id().is_some(), "navigating rebuilds cleanly");
     assert!(
-        detail_scene.glyph_runs > 0,
-        "the channel's messages render as text"
+        feed_scene.glyph_runs > 0,
+        "the destination channel feed renders text"
+    );
+    assert_ne!(
+        feed_scene.glyph_runs, loaded_scene.glyph_runs,
+        "the destination channel feed's render differs from Activity's own \
+         (the tap navigated, not merely repainted the same page)"
     );
     assert_eq!(
-        row_avatars(&detail_scene),
+        unread_chips(&feed_scene),
         0,
-        "the detail view's plain message rows have no avatar chrome"
-    );
-    assert_eq!(
-        unread_chips(&detail_scene),
-        0,
-        "nor any per-row unread chip"
+        "the channel feed paints no Activity-tab \"Unread\" chip"
     );
 
     tap(&mut root, &mut state, BACK_ACTION);
-    t_ms += 16;
-    let (back_scene, _) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
-    assert!(
-        unread_chips(&back_scene) > 0,
-        "the back action returns to the feed list (its unread indicators reappear)"
+    let back_scene = settle_transitions(&mut root, &mut logic, &mut state, &mut tcx, &mut t_ms);
+
+    assert_eq!(
+        row_avatars(&back_scene),
+        avatars_before,
+        "back returns to Activity with its rows still loaded (the thread-local \
+         controller instance retains them — no skeleton re-flash)"
     );
-    assert!(
-        row_avatars(&back_scene) > 0,
-        "the feed list's rows are back"
+    assert_eq!(
+        unread_chips(&back_scene),
+        chips_before,
+        "the unread indicators are exactly as they were before navigating away"
     );
 }
