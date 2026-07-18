@@ -39,3 +39,46 @@ forgekit-scene = { path = "../../crates/forgekit-scene" }
 forgekit-text = { path = "../../crates/forgekit-text" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
+
+# `--release` mode: fully optimized, stripped, single-panic-path binary for
+# store distribution (spec §12.2). Added here (phase 7 task 11) for
+# consistency with the root/template/catalog/team-demo manifests, even
+# though this package has no `forgekit build`-driven release pipeline of its
+# own (it's a desktop-only demo — see docs/DEVELOPMENT.md's Run section).
+# `lto = "fat"` + `codegen-units = 1` (measured 2026-07-18 against
+# `examples/catalog`'s release arm64-v8a `.so` via `scripts/size-report.sh`
+# — see `workflow/plans/features/forgekit-phase-7-performance/research/
+# BASELINE.md`): fat LTO + cgu=1 alone (opt-level 3, the default — no
+# override needed) shrank the prior baseline (lto="thin", no cgu override)
+# from 8.46MB to 7.52MB unstripped, an 11.1% win taken unconditionally.
+# `opt-level` "s"/"z" were also measured, but only *with* a shader/
+# render-stack (vello/wgpu*/naga) carve-out back to `opt-level = 3` — the
+# config that would actually ship, since sacrificing encode-path CPU perf
+# isn't acceptable — and under that carve-out "s" measured 7.36MB (-2.1% vs
+# the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%): neither clears
+# the task's ">5% meaningfully wins" bar once the carve-out that protects
+# render-path perf is in place, so `opt-level` stays at its default (3) and
+# no carve-out is needed.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# `--profile` mode: release performance with symbols + tracing kept for
+# on-device performance measurement (spec §12.2). Added for consistency with
+# the template/catalog/team-demo manifests.
+[profile.profile]
+inherits = "release"
+debug = true
+strip = "none"
+
+# Debug dep opt widening (phase 7 task 11): non-workspace-member dependencies
+# build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
+# workspace members and the profile's own package — verified against Cargo's
+# profile-override docs); this app's own code stays at the fast default dev
+# opt-level. Added here for consistency with the root/template/catalog
+# manifests, though this package has no shader-stack `[profile.dev.package.*]`
+# override list to keep in sync (unlike those three).
+[profile.dev.package."*"]
+opt-level = 1

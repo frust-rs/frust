@@ -59,9 +59,32 @@ peniko = "0.6.1"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution (spec §12.2).
+# store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
+# (phase 7 task 11, measured 2026-07-18 against `examples/catalog`'s release
+# arm64-v8a `.so` via `scripts/size-report.sh` — see `workflow/plans/
+# features/forgekit-phase-7-performance/research/BASELINE.md`; this
+# package's own arm64 `.so` could not be measured directly in the worktree
+# that ran this task, since the sibling `clean-signals-rs` checkout
+# `examples/team-demo` requires wasn't present — see BASELINE.md's
+# `scripts/size-report.sh` first-run note for the structural reason and the
+# `examples/catalog` stand-in this task's measurement reused): fat LTO +
+# cgu=1 alone (opt-level 3, the default — no override needed) shrank the
+# prior baseline (lto="thin", no cgu override) from 8.46MB to 7.52MB
+# unstripped, an 11.1% win taken unconditionally. `opt-level` "s"/"z" were
+# also measured, but only *with* a shader/render-stack (vello/wgpu*/naga)
+# carve-out back to `opt-level = 3` — the config that would actually ship,
+# since sacrificing encode-path CPU perf isn't acceptable — and under that
+# carve-out "s" measured 7.36MB (-2.1% vs the 7.52MB opt-3 config) and "z"
+# measured 7.28MB (-3.2%): neither clears the task's ">5% meaningfully wins"
+# bar once the carve-out that protects render-path perf is in place, so
+# `opt-level` stays at its default (3) and no carve-out is needed. This
+# block, its `[profile.profile]` counterpart, and the
+# `[profile.dev.package."*"]` wildcard below are hand-synced across the root
+# `Cargo.toml`, `templates/app/Cargo.toml.tmpl`, and `examples/catalog/
+# Cargo.toml` (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule).
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
@@ -72,3 +95,13 @@ panic = "abort"
 inherits = "release"
 debug = true
 strip = "none"
+
+# Debug dep opt widening (phase 7 task 11): non-workspace-member dependencies
+# build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
+# workspace members and the profile's own package — verified against Cargo's
+# profile-override docs); this app's own code stays at the fast default dev
+# opt-level. Added here for consistency with the root/template/catalog
+# manifests, though this package has no shader-stack `[profile.dev.package.*]`
+# override list to keep in sync (unlike those three).
+[profile.dev.package."*"]
+opt-level = 1
