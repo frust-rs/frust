@@ -14,6 +14,13 @@
 //!
 //! Phase C fills in the remaining feature slices (channels, messages, search,
 //! activity, profile) alongside the screens that host them.
+//!
+//! Phase C additions (each a new feature slice registered by its own screen
+//! task per `src/README-phase-c.md`'s "new feature slice" rule):
+//! - [`messages`] — the channel/DM message-feed view model (load / send /
+//!   react / thread-reply / pagination), hosted by
+//!   [`crate::screens::channel_feed`] and consumed later by the thread screen.
 
 pub mod channels;
+pub mod messages;
 pub mod settings;
