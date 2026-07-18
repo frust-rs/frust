@@ -17,14 +17,15 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::ptr::NonNull;
-use std::sync::Once;
+use std::sync::{Mutex, Once, OnceLock};
+use std::thread::JoinHandle;
 
 use accesskit_android::jni as ak_jni;
 use anyhow::{Context, Result};
 use jni::EnvUnowned;
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JObject, JString};
-use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
+use jni::sys::{JNI_VERSION_1_6, jboolean, jfloat, jint, jlong, jstring};
 use ndk::native_window::NativeWindow;
 
 use forgekit_core::event::{EditingState, ImeState};
@@ -45,6 +46,116 @@ use crate::ffi_support::{
 /// `init_entry` and `renderer_ready`. A crate-local literal rather than a
 /// `perf::SPAN_*` const because it is Android-pipeline-cache-specific.
 const SPAN_CACHE_LOADED: &str = "cache_loaded";
+
+/// Startup-span name (task 19): `create_handle` is about to join the background
+/// GPU pre-init thread [`JNI_OnLoad`] spawned at native-library load. Paired
+/// with [`SPAN_PREINIT_JOINED`] so the `forgekit-perf startup` line shows how
+/// long `nativeInit` blocked on the pre-init — i.e. the wgpu adapter/device
+/// bring-up NOT already overlapped by `nativeInit`'s own window-acquire +
+/// cache-load work above it. A near-zero delta means full overlap (the device
+/// was ready before the join); a large one means the pre-init was still running.
+const SPAN_PREINIT_STARTED: &str = "preinit_started";
+
+/// Startup-span name (task 19): the background GPU pre-init join returned — the
+/// pre-built device was adopted, or `create_handle` fell back to synchronous
+/// init. See [`SPAN_PREINIT_STARTED`].
+const SPAN_PREINIT_JOINED: &str = "preinit_joined";
+
+/// Task 19: the GPU pre-init join handle spawned by [`JNI_OnLoad`]. The
+/// background thread builds a [`forgekit_render::RenderContext`] and creates its
+/// logical device (wgpu instance + adapter + device, no surface — see
+/// [`forgekit_render::RenderContext::ensure_device_headless`]) off the JVM main
+/// thread, starting at native-library load, so [`create_handle`]'s
+/// timeout-free `.join()` mostly adopts finished work instead of doing it
+/// serially after `surfaceCreated`. Holds the thread's result:
+/// `Some(RenderContext)` on success, `None` if device init failed on the thread.
+/// [`take_preinit_context`] `take`s the handle exactly once; a second (absent)
+/// take, a panicked thread, or a `None` result all fall back to a fresh
+/// synchronous context.
+type PreInitResult = Option<forgekit_render::RenderContext>;
+static GPU_PREINIT: OnceLock<Mutex<Option<JoinHandle<PreInitResult>>>> = OnceLock::new();
+
+/// `JNI_OnLoad`: the JVM calls this once when the native library is loaded, well
+/// before the first `nativeInit` (task 19, spec §14 phase 7.E). Its only job is
+/// to kick off the background GPU pre-init so wgpu adapter/device creation
+/// overlaps the JVM's own Activity/Surface bring-up.
+///
+/// Defined here in the shell crate (not in the [`crate::android_app!`] macro)
+/// deliberately: `JNI_OnLoad` is a single, process-wide symbol — a per-app
+/// macro-emitted copy would collide. The macro-generated `nativeInit` references
+/// [`native_init`] in this module, so this object is already pulled into the
+/// generated `cdylib` link, carrying this export with it.
+///
+/// Returns [`JNI_VERSION_1_6`] unconditionally: the JVM refuses to load a library
+/// whose `JNI_OnLoad` reports an unsupported version, so even a panic inside the
+/// (guarded) spawn must not change the returned value. The spawn does nothing
+/// else blocking.
+#[unsafe(no_mangle)]
+pub extern "system" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> jint {
+    init_logger_once();
+    guard("JNI_OnLoad", (), spawn_gpu_preinit);
+    JNI_VERSION_1_6
+}
+
+/// Spawn the single background GPU pre-init thread (task 19), best-effort and
+/// single-shot: it builds a [`forgekit_render::RenderContext`] and creates its
+/// device with no surface, off the JVM main thread, so [`create_handle`] can join
+/// finished work. Idempotent — a second call (e.g. the library re-loaded in the
+/// same process) never spawns a second thread. A failed device init on the
+/// thread is logged and yields `None`; [`create_handle`] then falls back to a
+/// synchronous build.
+fn spawn_gpu_preinit() {
+    let slot = GPU_PREINIT.get_or_init(|| Mutex::new(None));
+    let Ok(mut slot_guard) = slot.lock() else {
+        return; // a prior panic poisoned the lock; skip pre-init, nativeInit falls back
+    };
+    if slot_guard.is_some() {
+        return; // already spawned this process
+    }
+    *slot_guard = Some(std::thread::spawn(|| {
+        let mut render_cx = forgekit_render::RenderContext::new();
+        match pollster::block_on(render_cx.ensure_device_headless()) {
+            Ok(()) => Some(render_cx),
+            Err(err) => {
+                log::warn!(
+                    "forgekit-shell-android: background GPU pre-init failed ({err:#}); \
+                     nativeInit will fall back to synchronous GPU init"
+                );
+                None
+            }
+        }
+    }));
+}
+
+/// Join the [`JNI_OnLoad`] GPU pre-init thread (task 19) and return the
+/// [`forgekit_render::RenderContext`] [`create_handle`] should use: the pre-built
+/// one (instance + adapter + device already created off-thread) when the
+/// background init succeeded, or a fresh synchronous `RenderContext` on any
+/// best-effort fallback case — pre-init absent (`JNI_OnLoad` never ran, or the
+/// handle was already taken by a prior `nativeInit`), the thread panicked, or its
+/// device init failed.
+///
+/// The `.join()` is timeout-free and never slower than the pre-task-19 status
+/// quo: the same adapter/device work ran serially inside `nativeInit` before, so
+/// at worst this blocks for the remainder of work already in flight. The
+/// adopt-vs-fallback decision itself is the host-tested
+/// [`crate::ffi_support::resolve_preinit`].
+fn take_preinit_context() -> forgekit_render::RenderContext {
+    let joined: Option<PreInitResult> = GPU_PREINIT
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
+        .and_then(|handle| match handle.join() {
+            Ok(result) => Some(result),
+            Err(_) => {
+                log::warn!(
+                    "forgekit-shell-android: GPU pre-init thread panicked; \
+                     falling back to synchronous GPU init"
+                );
+                None
+            }
+        });
+    crate::ffi_support::resolve_preinit(joined, forgekit_render::RenderContext::new)
+}
 
 /// Pump the process-wide [`ReactiveRuntime`]'s UI-thread local task queue, if
 /// the runtime has been initialized (it may not be, e.g. a JNI call arriving
@@ -182,7 +293,6 @@ fn create_handle(
         .context("forgekit-shell-android: ANativeWindow_fromSurface returned null")?;
     let physical = window_physical_size(&window);
 
-    let mut render_cx = forgekit_render::RenderContext::new();
     let mut renderer = forgekit_render::SurfaceRenderer::new();
 
     // Pipeline-cache persistence (task 13, spec §14 phase 7.B): restore the blob
@@ -195,10 +305,34 @@ fn create_handle(
     // (Metal/desktop — there is no iOS counterpart). `loaded_cache` (framed
     // bytes read verbatim from disk) is retained for the differs-check after
     // renderer creation.
+    //
+    // Done BEFORE the pre-init join below on purpose: this disk read overlaps the
+    // background GPU thread's adapter/device work, shrinking the join wait (task
+    // 19). The renderer build — and its pipeline cache — deliberately stays here
+    // at `nativeInit`, NOT on the pre-init thread: the pipeline cache needs
+    // `cache_dir`, which only arrives with `nativeInit` (task 13 option a) and is
+    // unknown at `JNI_OnLoad` time, so pre-init covers instance/adapter/device
+    // only and the renderer keeps its cache seeding. See the task-19 completion
+    // note for the pre-init/renderer split decision.
     let cache_path = cache_dir.as_deref().map(pipeline_cache_path);
     let loaded_cache = cache_path.as_deref().and_then(load_pipeline_cache);
     renderer.set_initial_pipeline_cache_data(loaded_cache.clone());
     startup_spans.record(SPAN_CACHE_LOADED);
+
+    // Adopt the `RenderContext` the `JNI_OnLoad` background thread has been
+    // building (wgpu instance + adapter + device) since native-library load
+    // (task 19, spec §14 phase 7.E), or fall back to a fresh synchronous one on
+    // any best-effort miss (pre-init absent/panicked/failed). Bracketed by
+    // `preinit_started`/`preinit_joined` so the `forgekit-perf startup` line
+    // shows how much of the GPU bring-up overlapped the window-acquire +
+    // cache-load work above — a near-zero window means full overlap. The
+    // `.join()` is never slower than the status quo (that adapter/device work ran
+    // serially here before). The surface install below reuses this device via
+    // `RenderContext::ensure_device`'s `is_surface_supported` check (Android's
+    // singular Vulkan adapter — see `ensure_device_headless`'s doc).
+    startup_spans.record(SPAN_PREINIT_STARTED);
+    let mut render_cx = take_preinit_context();
+    startup_spans.record(SPAN_PREINIT_JOINED);
 
     let window_ptr = window.ptr().as_ptr().cast::<c_void>();
 
@@ -215,16 +349,18 @@ fn create_handle(
     })
     .context("forgekit-shell-android: failed to create Android render surface")?;
 
-    // Adapter/device/renderer acquisition are one opaque, sequentially-awaited
-    // async call above (`RenderContext::ensure_device` plus the vello/surface
-    // setup inside `on_surface_created_from_android_window`) — this shell has
-    // no intermediate checkpoint into it without restructuring
-    // `forgekit-render`'s init sequence, which is explicitly out of scope
-    // here (task 19 owns that restructuring; this task instruments the
-    // existing sequential chain as-is so 19 has a before/after). Record all
-    // three spans at this single checkpoint for now; a coarse "renderer
-    // ready" delta is still useful, it just can't yet be split into its
-    // adapter/device/renderer sub-costs.
+    // With task 19's pre-init, the adapter + device were (usually) already built
+    // on the `JNI_OnLoad` background thread and adopted at the join above, so the
+    // `on_surface_created_from_android_window` call just now only did the vello
+    // renderer + surface setup (`ensure_device` reused the pre-built device via
+    // its `is_surface_supported` check). The adapter/device spans therefore mark
+    // "confirmed ready post-join", and the real GPU-overlap signal is the
+    // `preinit_started`→`preinit_joined` window plus `renderer_ready`. On a
+    // pre-init miss (fallback path) adapter/device were instead created here,
+    // synchronously, exactly as before task 19 — the spans stay meaningful either
+    // way. Still recorded at one checkpoint (no intermediate hook into the vello
+    // setup) so the perf-line schema task 08 established stays stable across
+    // shells.
     startup_spans.record(perf::SPAN_ADAPTER_READY);
     startup_spans.record(perf::SPAN_DEVICE_READY);
     startup_spans.record(perf::SPAN_RENDERER_READY);

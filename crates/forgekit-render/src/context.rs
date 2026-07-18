@@ -358,15 +358,61 @@ impl RenderContext {
     /// the adapter's own limits (never `Limits::default()`, which the iOS
     /// Simulator cannot satisfy) plus the #7057 alignment mitigation. Reuses
     /// an already-created device when it is compatible with `surface`, so
-    /// surface loss/recreation (rotation, backgrounding) never rebuilds it.
+    /// surface loss/recreation (rotation, backgrounding) never rebuilds it — and
+    /// so a device the [`ensure_device_headless`](Self::ensure_device_headless)
+    /// pre-init created before any surface existed is adopted here rather than
+    /// rebuilt (task 19, spec §14 phase 7.E).
     async fn ensure_device(&mut self, surface: &wgpu::Surface<'static>) -> Result<()> {
         if let Some(existing) = &self.device
             && existing.adapter.is_surface_supported(surface)
         {
             return Ok(());
         }
+        self.create_device(Some(surface)).await
+    }
+
+    /// Create the logical device **before any surface exists** (task 19, spec
+    /// §14 phase 7.E), so the wgpu instance/adapter/device bring-up can run on a
+    /// background thread kicked at native-library load (`JNI_OnLoad`) and be
+    /// joined by `nativeInit` instead of running serially after `surfaceCreated`.
+    /// Idempotent: a no-op when a device already exists.
+    ///
+    /// # Android singular-adapter assumption
+    ///
+    /// Requesting the adapter with `compatible_surface: None` picks wgpu's
+    /// default adapter rather than one filtered to a specific surface. On Android
+    /// the Vulkan backend exposes a single physical device, so the adapter chosen
+    /// here is the same one a later surface-filtered request would pick, and
+    /// [`ensure_device`](Self::ensure_device)'s `is_surface_supported` reuse check
+    /// accepts it — the surface created at `nativeInit` reuses this device with no
+    /// rebuild. On a hypothetical multi-adapter device where the pre-init adapter
+    /// did *not* support the eventual surface, `ensure_device` simply rebuilds the
+    /// device against that surface (still correct, just without the overlap win).
+    /// This is the sole caller that passes `None` below; desktop/iOS create their
+    /// device through the surface path and never invoke this.
+    pub async fn ensure_device_headless(&mut self) -> Result<()> {
+        if self.device.is_some() {
+            return Ok(());
+        }
+        self.create_device(None).await
+    }
+
+    /// Shared device-creation body for both the surface-bound
+    /// ([`ensure_device`](Self::ensure_device)) and pre-surface
+    /// ([`ensure_device_headless`](Self::ensure_device_headless)) paths.
+    ///
+    /// `compatible_surface` filters adapter selection to one that can present to
+    /// the given surface; `None` (the pre-init path) selects wgpu's default
+    /// adapter (see the singular-adapter note on `ensure_device_headless`). The
+    /// tier probe, limits mitigation, uncaptured-error handler, and device
+    /// request are identical either way — the surface only ever affected adapter
+    /// selection, never the device it yields.
+    async fn create_device(
+        &mut self,
+        compatible_surface: Option<&wgpu::Surface<'static>>,
+    ) -> Result<()> {
         let adapter =
-            wgpu::util::initialize_adapter_from_env_or_default(&self.instance, Some(surface))
+            wgpu::util::initialize_adapter_from_env_or_default(&self.instance, compatible_surface)
                 .await
                 .map_err(|e| anyhow!("forgekit-render: no compatible GPU adapter: {e}"))?;
 

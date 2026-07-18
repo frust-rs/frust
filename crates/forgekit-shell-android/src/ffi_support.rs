@@ -293,9 +293,64 @@ pub(crate) fn write_pipeline_cache_atomic(path: &Path, data: &[u8]) -> std::io::
     std::fs::rename(&tmp, path)
 }
 
+// ---------------------------------------------------------------------
+// GPU pre-init join resolution (task 19): the adopt-vs-fallback decision.
+//
+// `JNI_OnLoad` spawns a background thread that builds a `RenderContext` and
+// creates its device (see `crate::jni_glue`); `nativeInit` joins it. This is the
+// pure, host-testable core of that join's outcome handling — kept free of any
+// `jni`/GPU dependency (the real `RenderContext` is an Android-only dependency)
+// by staying generic over the context type.
+// ---------------------------------------------------------------------
+
+/// Resolve a joined `JNI_OnLoad` GPU pre-init outcome into the context
+/// `create_handle` uses (task 19). The `joined` argument encodes three cases the
+/// caller has already flattened the thread-join into:
+///
+/// - `Some(Some(ctx))` — the pre-init thread finished and produced a ready GPU
+///   context: **adopt it**.
+/// - `Some(None)` — the thread ran but its device init failed: **fall back** to a
+///   freshly built context via `fresh`.
+/// - `None` — no pre-init was present (`JNI_OnLoad` never ran, or a prior
+///   `nativeInit` already took the handle) or the thread panicked (the caller
+///   maps a join panic to `None`): **fall back**.
+///
+/// This is the strictly best-effort, single-shot contract the task requires — a
+/// panicked or absent pre-init is never fatal, it just costs this launch the
+/// synchronous GPU-init path it always had.
+pub(crate) fn resolve_preinit<T>(joined: Option<Option<T>>, fresh: impl FnOnce() -> T) -> T {
+    match joined {
+        Some(Some(ctx)) => ctx,
+        _ => fresh(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_preinit_adopts_a_ready_context() {
+        // Pre-init succeeded: the pre-built context is adopted, `fresh` unused.
+        let ctx = resolve_preinit(Some(Some(42)), || panic!("fresh must not run"));
+        assert_eq!(ctx, 42);
+    }
+
+    #[test]
+    fn resolve_preinit_falls_back_when_device_init_failed() {
+        // `Some(None)`: the thread ran but device init failed on it (the
+        // "poisoned result" case) — build fresh synchronously.
+        let ctx = resolve_preinit(Some(None), || 7);
+        assert_eq!(ctx, 7);
+    }
+
+    #[test]
+    fn resolve_preinit_falls_back_when_absent_or_panicked() {
+        // `None`: no pre-init spawned / already taken, or the thread panicked
+        // (mapped to `None` by the caller) — both take the fresh path.
+        let ctx = resolve_preinit(None, || 9);
+        assert_eq!(ctx, 9);
+    }
 
     #[test]
     fn zero_handle_is_not_live() {
