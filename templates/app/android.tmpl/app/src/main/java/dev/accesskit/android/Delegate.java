@@ -10,9 +10,10 @@
 // (`dev.accesskit.android.Delegate`) are load-bearing — do not rename or move.
 // The `embedded-dex` Cargo feature is deliberately NOT used (it needs API 26's
 // InMemoryDexClassLoader, above the generated project's minSdk 24), so the class
-// ships as source compiled into the app instead. No R8/ProGuard minification is
-// enabled in the generated build, so no keep rule is required; if minification
-// is added later, keep `dev.accesskit.android.**` and its native methods.
+// ships as source compiled into the app instead. Release/profile builds enable
+// R8 minification + resource shrinking (Phase 7 task 12); the generated
+// `android/app/proguard-rules.pro` keeps `dev.accesskit.android.**` whole for
+// exactly this dynamic-lookup reason — see that file's comments.
 
 package dev.accesskit.android;
 

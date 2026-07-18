@@ -14,6 +14,7 @@
   "android.tmpl/gradle/wrapper/gradle-wrapper.jar",
   "android.tmpl/gradle/wrapper/gradle-wrapper.properties",
   "android.tmpl/app/build.gradle.kts.tmpl",
+  "android.tmpl/app/proguard-rules.pro",
   "android.tmpl/app/src/main/AndroidManifest.xml.tmpl",
   "android.tmpl/app/src/main/kotlin/androidIdentifier/MainActivity.kt.tmpl",
   "android.tmpl/app/src/main/kotlin/dev/forgekit/ForgeKitSurfaceView.kt.tmpl",
