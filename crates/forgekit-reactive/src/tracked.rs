@@ -78,12 +78,23 @@ impl ScopeInner {
 
     /// Marks the scope dirty and, on the clean→dirty edge only, fires the frame
     /// waker. Callable from any thread (signal writes may originate anywhere).
+    ///
+    /// Also trips the process-wide signals-dirty flag
+    /// (`ReactiveRuntime::mark_signals_dirty`) on *every* call, not just the
+    /// clean→dirty edge below — that flag is a plain bool a shell drains once
+    /// per frame (`ReactiveRuntime::take_signals_dirty`), so any tracked
+    /// scope's invalidation should trip it, coalesced by nature since it has
+    /// no "already set" distinction to preserve.
     fn notify_dirty(&self) {
+        let rt = ReactiveRuntime::get();
+        if let Some(rt) = rt {
+            rt.mark_signals_dirty();
+        }
         // `swap` gives us the previous value atomically: only the thread that
         // observed `false` (the clean→dirty transition) fires the waker, so N
         // concurrent or sequential writes between tracks coalesce to one wake.
         let was_dirty = self.dirty.swap(true, Ordering::SeqCst);
-        if !was_dirty && let Some(rt) = ReactiveRuntime::get() {
+        if !was_dirty && let Some(rt) = rt {
             rt.wake();
         }
     }

@@ -5,6 +5,7 @@
 //! [`FrameWaker`] the executor fires to nudge the shell into pumping the
 //! UI-thread local task queue.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use any_spawner::Executor;
@@ -32,6 +33,12 @@ pub struct ReactiveRuntime {
     handle: Handle,
     root: Owner,
     waker: Mutex<FrameWaker>,
+    /// Process-wide "did any tracked signal change since I last asked" flag —
+    /// the reactive input to the mobile frame gate. Set by
+    /// [`crate::tracked::TrackedScope`]'s dirty path (any tracked scope's
+    /// invalidation trips it, coalesced by nature since it's a bool, not a
+    /// counter); drained by [`take_signals_dirty`](Self::take_signals_dirty).
+    signals_dirty: AtomicBool,
 }
 
 impl ReactiveRuntime {
@@ -69,6 +76,7 @@ impl ReactiveRuntime {
             handle: handle.clone(),
             root,
             waker: Mutex::new(waker),
+            signals_dirty: AtomicBool::new(false),
         };
 
         match RUNTIME.set(candidate) {
@@ -148,5 +156,149 @@ impl ReactiveRuntime {
     #[cfg(test)]
     pub(crate) fn handle(&self) -> Handle {
         self.handle.clone()
+    }
+
+    /// Trips the process-wide signals-dirty flag. Called from
+    /// [`crate::tracked::TrackedScope`]'s dirty-notification path — any
+    /// tracked scope's invalidation trips this, not just the coalesced
+    /// frame-waker edge, so a shell can ask "did *anything* change" cheaply
+    /// once per frame.
+    pub(crate) fn mark_signals_dirty(&self) {
+        self.signals_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Drains the signals-dirty flag: returns whether any tracked signal
+    /// changed since the last `take_signals_dirty` call, and clears it.
+    ///
+    /// **Ordering contract for shells:** pump local tasks
+    /// ([`pump_local`](Self::pump_local)) FIRST, then call this — a
+    /// `spawn_local` continuation that writes a signal during the pump must
+    /// be observed by the *same* frame's dirty check. Calling this before the
+    /// pump can miss a write a just-drained local task makes.
+    pub fn take_signals_dirty(&self) -> bool {
+        self.signals_dirty.swap(false, Ordering::SeqCst)
+    }
+
+    /// Non-draining peek at the signals-dirty flag (does not clear it).
+    /// Prefer [`take_signals_dirty`](Self::take_signals_dirty) for the actual
+    /// once-per-frame gate check; this is for tests/diagnostics that want to
+    /// observe the flag without consuming it.
+    pub fn signals_dirty(&self) -> bool {
+        self.signals_dirty.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tracked::TrackedScope;
+    use any_spawner::Executor;
+    use reactive_graph::signal::RwSignal;
+    use reactive_graph::traits::{Get, Set};
+
+    fn noop_waker() -> FrameWaker {
+        Arc::new(|| {})
+    }
+
+    /// Criterion 1: a write inside a tracked rebuild trips the process-wide
+    /// signals-dirty flag; `take_signals_dirty` drains it (true once, then
+    /// false with no intervening write).
+    #[test]
+    fn signals_dirty_set_by_tracked_write_and_drained_by_take() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let rt = ReactiveRuntime::init(noop_waker());
+        // Drain any flag left dirty by a previous test sharing this
+        // process-wide runtime.
+        rt.take_signals_dirty();
+
+        let scope = TrackedScope::new();
+        let sig = rt.with_owner(|| RwSignal::new(0));
+        scope.track(|| sig.get());
+        assert!(!rt.signals_dirty(), "no write yet — flag must be clean");
+
+        sig.set(1);
+        assert!(
+            rt.signals_dirty(),
+            "a write to a tracked signal must trip the process-wide flag"
+        );
+        assert!(
+            rt.take_signals_dirty(),
+            "take must observe the dirty flag and drain it"
+        );
+        assert!(
+            !rt.take_signals_dirty(),
+            "a second take with no intervening write must return false"
+        );
+    }
+
+    /// Criterion: writes from multiple distinct tracked scopes still coalesce
+    /// onto the one process-wide flag (a bool, not a counter) — one drain
+    /// clears every pending scope's contribution at once.
+    #[test]
+    fn signals_dirty_coalesces_across_scopes() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let rt = ReactiveRuntime::init(noop_waker());
+        rt.take_signals_dirty();
+
+        let scope_a = TrackedScope::new();
+        let scope_b = TrackedScope::new();
+        let sig_a = rt.with_owner(|| RwSignal::new(0));
+        let sig_b = rt.with_owner(|| RwSignal::new(0));
+        scope_a.track(|| sig_a.get());
+        scope_b.track(|| sig_b.get());
+
+        sig_a.set(1);
+        sig_b.set(1);
+        sig_a.set(2);
+
+        assert!(
+            rt.take_signals_dirty(),
+            "multiple writes across multiple scopes must still trip the flag"
+        );
+        assert!(
+            !rt.take_signals_dirty(),
+            "drain must clear every pending contribution at once"
+        );
+    }
+
+    /// The ordering contract: a spawned local task that writes a tracked
+    /// signal *during* `pump_local` must be observed by a `take_signals_dirty`
+    /// call that runs after the pump — the documented pump-first contract
+    /// shells rely on.
+    #[test]
+    fn signals_dirty_pump_then_take_ordering() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let rt = ReactiveRuntime::init(noop_waker());
+        rt.take_signals_dirty();
+
+        let scope = TrackedScope::new();
+        let sig = rt.with_owner(|| RwSignal::new(0));
+        scope.track(|| sig.get());
+
+        Executor::spawn_local(async move {
+            sig.set(1);
+        });
+        assert!(
+            !rt.signals_dirty(),
+            "the local task has not run yet — spawning it must not itself \
+             dirty the flag"
+        );
+
+        rt.pump_local();
+        assert!(
+            rt.take_signals_dirty(),
+            "a signal write from a pumped local task must be observed by \
+             take_signals_dirty called after the pump — the pump-first \
+             ordering contract"
+        );
     }
 }

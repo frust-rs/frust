@@ -6,7 +6,11 @@
 //! [`FrameWaker`], and the root reactive [`Owner`]. It also re-exports the
 //! `reactive_graph` types the later programming-model tasks build on, and
 //! owns the process-wide deep-link source shells write platform deep links
-//! into (see [`push_deep_link`]/[`deep_links`]).
+//! into (see [`push_deep_link`]/[`deep_links`]). A process-wide
+//! signals-dirty flag (`ReactiveRuntime::take_signals_dirty`), tripped by
+//! [`TrackedScope`]'s dirty path, lets a shell ask synchronously and cheaply
+//! once per frame "did any tracked signal change since I last asked" — the
+//! reactive input to the mobile frame gate.
 //!
 //! It is a leaf substrate: no `winit`, no `vello`/`wgpu`, no `forgekit-core`
 //! dependency. Shells own the wake-up wiring and call [`ReactiveRuntime::init`]
