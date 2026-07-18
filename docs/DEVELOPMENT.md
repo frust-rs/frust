@@ -45,9 +45,24 @@ crates (`vello`, `vello_shaders`, `vello_encoding`, `wgpu`, `wgpu-core`,
 `wgpu-hal`, `naga`). Debug-profile (`opt-level = 0`) shader
 compilation/translation on app launch is slow enough on mobile-class CPUs to
 trip the iOS launch watchdog; optimizing just this stack keeps the rest of a
-debug build fast while making dev-mode launches survive. The three manifests
-must be kept in sync by hand — a project scaffolded by `forgekit create`
-inherits the overrides from the template.
+debug build fast while making dev-mode launches survive. These three
+manifests must be kept in sync by hand (`cargo test -p forgekit-cli --test
+profile_sync` is the automated tripwire) — a project scaffolded by
+`forgekit create` inherits the overrides from the template. A separate
+`[profile.dev.package."*"]` wildcard (`opt-level = 1`) widens every other
+non-workspace-member dependency's debug optimization (a named override above
+still wins) and is hand-synced across five manifests: the three above plus
+`examples/team-demo/Cargo.toml` and `examples/inbox/Cargo.toml` (kept for
+consistency, though neither has a shader-stack list of its own).
+
+**Release-profile hardening.** `[profile.release]` (root, template, catalog,
+team-demo, inbox) sets `lto = "fat"`, `codegen-units = 1`, `strip =
+"symbols"`, `panic = "abort"`, at the default `opt-level = 3` — chosen over
+`"s"`/`"z"` because a smaller-opt-level win didn't clear a 5% bar once a
+render-stack carve-out protecting encode-path CPU perf was applied (measured
+via `scripts/size-report.sh`, below; see the root `Cargo.toml` comment and
+`workflow/plans/features/forgekit-phase-7-performance/research/BASELINE.md`
+for the full A/B).
 
 ## Run
 
@@ -169,6 +184,14 @@ probe's diagnosis, while `cpu` can always be forced. It is desktop-preview-only 
 run, `run` prints a not-plumbed note and the device still probes its own
 tier.
 
+**High refresh-rate hints.** A generated app's iOS `CADisplayLink` requests
+a 30–120Hz `preferredFrameRateRange` (`CADisableMinimumFrameDurationOnPhone`
+in `Info.plist.tmpl`); Android calls `Surface.setFrameRate()` (API 30+) with
+the display's max refresh rate on `surfaceCreated`/`surfaceChanged`. Both
+are hints, not guarantees — actual achieved rate is device/OEM/thermal-state
+dependent and unverifiable on the iOS Simulator (see *Known Issues* below)
+or on most Android emulators (which typically report only 60Hz).
+
 ## Release Builds
 
 ```bash
@@ -192,6 +215,14 @@ forgekit clean
 
 `--flavor <name>` needs a matching Gradle product flavor / Xcode
 scheme+configuration already declared in the generated project.
+
+**Android release minification.** A generated app's `release` (and
+`profile`) Gradle build type runs R8 (`isMinifyEnabled`/`isShrinkResources
+= true`) against `proguard-rules.pro` (ships two keep rules: the ForgeKit
+JNI surface and the vendored `accesskit_android` delegate); `forgekit build
+apk --debug` is unaffected. NDK r27+ already links `.so`s with 16KB-aligned
+`LOAD` segments by default, so no linker-flag change was needed for Android
+15's page-size requirement.
 
 ## Test
 
@@ -324,6 +355,29 @@ directly to change the scheme after the fact.
 To iterate on template files without rebuilding the embedded copy, pass the
 hidden, development-only `--template-dir <path>` flag to point at a
 filesystem copy of the template tree instead.
+
+## Instrumentation
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `FORGEKIT_TRACE` | Enables `forgekit-perf` frame/startup logging (`forgekit-shell-common::perf`). Runtime env var on any build; `forgekit run --profile`/`forgekit build --profile` auto-inject `--define FORGEKIT_TRACE=1` unless already set — opt out of that default with `--define FORGEKIT_TRACE=0`. | off |
+| `FORGEKIT_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/ARCHITECTURE.md`'s Frame gate) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FORGEKIT_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
+| `FORGEKIT_LOG` | Desktop-only stderr log level override (`forgekit-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. | `info` |
+| `FORGEKIT_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`) — see *Run* above. | adapter-probed |
+
+`FORGEKIT_TRACE=1 cargo run -p counter` prints one `forgekit-perf startup
+...` line, then periodic `forgekit-perf frame ...` summaries while
+interacting with the window.
+
+`scripts/size-report.sh [--app <dir>]` (default `examples/team-demo`) builds
+the arm64-v8a release `.so` via `cargo ndk`, reports its unstripped/stripped
+size (auto-discovering the NDK's `llvm-strip`), an APK/AAB per-ABI `.so` +
+dex breakdown when Gradle output already exists (no Gradle build
+triggered), and a desktop `cargo bloat --release -n 20` breakdown when
+`cargo-bloat` is installed — every missing-tool/artifact path degrades to a
+printed note rather than failing; only a build failure exits non-zero. See
+`workflow/plans/features/forgekit-phase-7-performance/research/BASELINE.md`
+for recorded baselines.
 
 ## Version-Pin Policy
 

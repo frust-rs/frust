@@ -26,6 +26,12 @@
     handle, the call into `on_surface_created_from_metal_layer`) — plus the
     `#[unsafe(no_mangle)]` attributes the `ios_app!` macro emits on its
     generated exports.
+  - `forgekit-render`'s `context.rs::RenderContext::create_pipeline_cache`
+    — one `unsafe { device.create_pipeline_cache(..) }` call building a
+    `wgpu::PipelineCache` from a shell-persisted blob. The blob is
+    `unframe`d and adapter-fingerprint-validated (`pipeline_cache::unframe`)
+    before this call, and wgpu's own `fallback: true` backstops any
+    residual mismatch — see `docs/ARCHITECTURE.md`'s GPU pipeline cache.
 - **No unwind across FFI.** Every platform export both shells define routes
   through `forgekit-shell-common`'s `guard` helper, which `catch_unwind`s and
   logs, returning a benign default instead of unwinding into JVM- or
@@ -285,11 +291,36 @@ Semantics pass):
   adapter wiring belong here; that integration lives in a shell, not
   `forgekit-core`.
 - **A platform adapter gates its pushes on `semantics_generation`/
-  `semantics_if_changed`, not on pushing every frame unconditionally.**
-  Desktop and Android compare the last-seen generation before rebuilding a
-  `TreeUpdate`; recompute-on-every-active-frame (the iOS adapter's current
-  behavior) is an accepted fallback only where the dirty gate isn't wired
-  yet, not the target steady state for a new adapter.
+  `semantics_if_changed`, not on pushing every frame unconditionally.** All
+  three shipping adapters (desktop, Android, iOS) compare the last-seen
+  generation before rebuilding a `TreeUpdate`; the iOS adapter additionally
+  serves a cached tree snapshot to a newly-activated screen reader so
+  gating never starves a VoiceOver connect against an already-settled
+  screen — the reference pattern a new adapter's activation handling
+  should follow.
+
+## Instrumentation & Frame-Gate Conventions
+
+- **Perf recording is always gated behind `perf::enabled()`, never
+  unconditional.** `forgekit-shell-common::perf`'s `FrameStats`/
+  `StartupSpans` no-op internally when disabled, but a shell should still
+  read `perf::enabled()` once per frame into a local bool and gate every
+  `Instant::now()` read behind it (`bool::then(Instant::now)`) on
+  FFI-sensitive paths (Android/iOS) so a disabled build takes zero clock
+  reads, not just zero recording; desktop's frame budget is generous enough
+  to skip this extra branch. Span names are `perf::SPAN_*` consts, not
+  string literals, so every shell logs the same names; a shell-local
+  milestone `perf.rs` has no const for (e.g. Android's on-disk cache-load
+  checkpoint) may still pass a `&'static str` literal straight to
+  `StartupSpans::record` rather than editing `perf.rs`.
+- **Frame-gate inputs default to must-run, never to skip.** A `FrameInputs`
+  field a shell doesn't have a precise signal for should stay `true`/be
+  fed conservatively rather than guessed `false` — over-running costs a
+  wasted frame, over-skipping drops real work (see
+  `docs/ARCHITECTURE.md`'s Frame gate). `FORGEKIT_NO_FRAME_GATE=1` (parsed
+  the same compile-time-or-runtime way as `FORGEKIT_TRACE`) forces every
+  tick to `Run`; reach for it first when diagnosing a suspected stuck-UI
+  report before assuming a widget bug.
 
 ## State & Reactivity Conventions
 
