@@ -31,8 +31,19 @@
 //! [`utf16_to_byte`] helpers) do the conversion in one concentrated, tested
 //! place. Geometry is Y-down logical pixels (parley 0.11's convention).
 //!
-//! v1 is single-line: the editor is built with no wrapping width. Multi-line
-//! (`set_width(Some(..))` plus vertical caret motion) is future work.
+//! # Single-line vs. wrapped multi-line
+//!
+//! The editor is built with no wrapping width, so it is single-line by default
+//! (one visual line, horizontal overflow). Calling
+//! [`set_wrap_width(Some(px))`](TextEditor::set_wrap_width) switches it into a
+//! wrapped multi-line mode: text soft-wraps at `px`,
+//! [`layout_size`](TextEditor::layout_size) reports the full wrapped height, a
+//! literal newline can be inserted with [`EditOp::InsertNewline`], and the
+//! [`EditOp::MoveUp`]/[`EditOp::MoveDown`] vertical caret motions (no-ops while
+//! single-line, since there is only one line) become real line-to-line motion
+//! through parley's line structure. Passing `None` restores single-line mode.
+//! Selection/IME byte↔UTF-16 indexing is unaffected by newlines — a `'\n'` is
+//! one byte / one UTF-16 unit and flows through the same conversion helpers.
 
 use std::ops::Range;
 
@@ -56,6 +67,12 @@ use crate::style::{
 pub enum EditOp {
     /// Insert text, replacing the current selection.
     Insert(String),
+    /// Insert a literal newline (`'\n'`), replacing the current selection.
+    ///
+    /// Only meaningful in wrapped multi-line mode (see
+    /// [`TextEditor::set_wrap_width`]); a single-line field routes Enter to
+    /// submit instead of emitting this op.
+    InsertNewline,
     /// Delete the grapheme before the caret (Backspace), or the selection.
     Backdelete,
     /// Delete the grapheme after the caret (Delete/Forward-delete), or the
@@ -157,7 +174,8 @@ impl TextEditor {
     /// v1 is single-line.
     pub fn new(style: &TextStyle) -> Self {
         let mut editor = PlainEditor::<Brush>::new(style.size);
-        // Single-line v1: no wrapping. Multi-line is future work.
+        // Single-line by default: no wrapping width. A widget opts into wrapped
+        // multi-line editing with `set_wrap_width(Some(px))`.
         editor.set_width(None);
         let styles = editor.edit_styles();
         styles.insert(StyleProperty::FontFamily(to_parley_family(&style.family)));
@@ -207,6 +225,7 @@ impl TextEditor {
                 let mut drv = self.editor.driver(font_cx, layout_cx);
                 match other {
                     EditOp::Insert(s) => drv.insert_or_replace_selection(&s),
+                    EditOp::InsertNewline => drv.insert_or_replace_selection("\n"),
                     EditOp::Backdelete => drv.backdelete(),
                     EditOp::Delete => drv.delete(),
                     EditOp::MoveLeft { select } => {
@@ -265,6 +284,32 @@ impl TextEditor {
         }
 
         self.editor.refresh_layout(font_cx, layout_cx);
+    }
+
+    /// Sets (or clears) the soft-wrap width, switching between wrapped
+    /// multi-line and single-line modes.
+    ///
+    /// `Some(px)` soft-wraps the text at `px` logical pixels and makes vertical
+    /// caret motion ([`EditOp::MoveUp`]/[`EditOp::MoveDown`]) and newline
+    /// insertion ([`EditOp::InsertNewline`]) meaningful; `None` restores the
+    /// single-line default. The layout is refreshed immediately so
+    /// [`layout_size`](Self::layout_size) and the geometry accessors observe the
+    /// new wrapping without waiting for the next [`apply`](Self::apply).
+    pub fn set_wrap_width(&mut self, width: Option<f32>, ctx: &mut TextContext) {
+        self.editor.set_width(width);
+        let (font_cx, layout_cx) = ctx.driver_contexts();
+        self.editor.refresh_layout(font_cx, layout_cx);
+    }
+
+    /// The number of visual lines in the current layout (1 for a non-empty
+    /// single-line field; more once wrapping or explicit newlines split it).
+    ///
+    /// Returns 0 before the first layout refresh.
+    pub fn line_count(&self) -> usize {
+        self.editor
+            .try_layout()
+            .map(|layout| layout.len())
+            .unwrap_or(0)
     }
 
     /// The current buffer text, including any composing preedit.
@@ -797,6 +842,119 @@ mod tests {
             wide_width > narrow_width,
             "the editor's own layout should widen with extra letter-spacing \
              the same way TextContext::layout's does: {narrow_width} vs {wide_width}"
+        );
+    }
+
+    // --- wrapped multi-line mode (task: textinput-multiline) ---
+
+    #[test]
+    fn single_line_mode_keeps_one_line_and_grows_horizontally() {
+        // With no wrap width, a long string stays on a single visual line and
+        // the layout width reflects the whole run.
+        let (mut ed, mut cx) = editor();
+        ed.apply(
+            EditOp::Insert("the quick brown fox jumps over the lazy dog".into()),
+            &mut cx,
+        );
+        assert_eq!(ed.line_count(), 1, "single-line mode never wraps");
+        let one_line_h = ed.layout_size().height;
+        assert!(one_line_h > 0.0);
+        assert!(
+            ed.layout_size().width > 100.0,
+            "single line grows horizontally"
+        );
+    }
+
+    #[test]
+    fn wrap_width_produces_multiple_lines_and_grows_vertically() {
+        let (mut ed, mut cx) = editor();
+        ed.apply(
+            EditOp::Insert("the quick brown fox jumps over the lazy dog".into()),
+            &mut cx,
+        );
+        let single_h = ed.layout_size().height;
+
+        // Constrain to a narrow width: the same text must wrap onto >1 line and
+        // the reported layout height must grow accordingly.
+        ed.set_wrap_width(Some(60.0), &mut cx);
+        assert!(
+            ed.line_count() > 1,
+            "narrow wrap width splits the run into multiple lines, got {}",
+            ed.line_count()
+        );
+        assert!(
+            ed.layout_size().height > single_h,
+            "wrapped multi-line layout is taller than the single line: {single_h} -> {}",
+            ed.layout_size().height
+        );
+
+        // Clearing the wrap width collapses back to a single line.
+        ed.set_wrap_width(None, &mut cx);
+        assert_eq!(ed.line_count(), 1, "None restores single-line mode");
+    }
+
+    #[test]
+    fn insert_newline_splits_into_two_lines() {
+        let (mut ed, mut cx) = editor();
+        // A wrap width is what makes vertical layout meaningful; wide enough that
+        // only the explicit newline splits the text.
+        ed.set_wrap_width(Some(400.0), &mut cx);
+        ed.apply(EditOp::Insert("ab".into()), &mut cx);
+        ed.apply(EditOp::InsertNewline, &mut cx);
+        ed.apply(EditOp::Insert("cd".into()), &mut cx);
+        assert_eq!(ed.text(), "ab\ncd");
+        assert_eq!(ed.line_count(), 2, "the newline creates a second line");
+        // Caret sits after the last char (byte offset 5: 'a''b''\n''c''d').
+        assert_eq!(ed.editing_state_bytes().extent, 5);
+    }
+
+    #[test]
+    fn move_up_down_navigate_across_a_newline() {
+        let (mut ed, mut cx) = editor();
+        ed.set_wrap_width(Some(400.0), &mut cx);
+        ed.apply(EditOp::Insert("abc".into()), &mut cx);
+        ed.apply(EditOp::InsertNewline, &mut cx);
+        ed.apply(EditOp::Insert("xyz".into()), &mut cx);
+        // Caret on line 2, at its end (byte 7).
+        let bottom = ed.editing_state_bytes().extent;
+        assert_eq!(bottom, 7);
+
+        // MoveUp lands on line 1 (byte offset within [0, 3]).
+        ed.apply(EditOp::MoveUp { select: false }, &mut cx);
+        let up = ed.editing_state_bytes().extent;
+        assert!(up <= 3, "move-up crosses the newline onto line 1, got {up}");
+
+        // MoveDown returns to line 2 (byte offset >= 4, past the newline).
+        ed.apply(EditOp::MoveDown { select: false }, &mut cx);
+        let down = ed.editing_state_bytes().extent;
+        assert!(
+            down >= 4,
+            "move-down crosses the newline back onto line 2, got {down}"
+        );
+    }
+
+    #[test]
+    fn utf16_selection_indices_are_correct_across_a_newline() {
+        let (mut ed, mut cx) = editor();
+        ed.set_wrap_width(Some(400.0), &mut cx);
+        // Line 1 "a😀" (1 byte + 4 bytes / 1 + 2 UTF-16 units), newline (1/1),
+        // line 2 "b" — select the whole buffer.
+        ed.apply(
+            EditOp::ApplyEditingState(EditingStateBytes {
+                text: format!("a{EMOJI}\nb"),
+                base: 0,
+                extent: format!("a{EMOJI}\nb").len(),
+                composing: None,
+            }),
+            &mut cx,
+        );
+        assert_eq!(ed.line_count(), 2, "the newline still splits the layout");
+        let st = ed.editing_state_utf16();
+        // 1 (a) + 2 (emoji) + 1 (\n) + 1 (b) = 5 UTF-16 units.
+        assert_eq!(st.selection_base, 0);
+        assert_eq!(
+            st.selection_extent, 5,
+            "the newline counts as exactly one UTF-16 unit"
         );
     }
 

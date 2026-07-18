@@ -1,5 +1,5 @@
-//! The `TextInput` interactive widget (spec §6.4 / Phase 4B): a single-line
-//! editable text field.
+//! The `TextInput` interactive widget (spec §6.4 / Phase 4B): an editable text
+//! field, single-line by default and optionally wrapped multi-line.
 //!
 //! [`text_input`] produces a [`TextInputView`] carrying the current `value`, a
 //! `placeholder`, an `on_change` callback, and an optional `on_submit`. Like the
@@ -35,6 +35,30 @@
 //! `paint` via [`PaintCtx::request_frame`] — the same animation contract the
 //! scroll fling uses. An edit/focus during the (clockless) event pass flags the
 //! blink for reset; the next paint records the blink epoch from `frame_time`.
+//!
+//! # Multi-line mode
+//!
+//! [`TextInputView::multiline(max_visible_lines)`](TextInputView::multiline)
+//! switches the field into a wrapped multi-line mode: the layout width from the
+//! incoming constraints is fed to the editor as a soft-wrap width (see
+//! `TextEditor::set_wrap_width`), so the field grows vertically one line at a
+//! time as content wraps or newlines are inserted, capped at
+//! `max_visible_lines`. Past the cap the box height is frozen and the text is
+//! scrolled vertically by a simple **keep-caret-in-view** paint offset
+//! (recomputed statelessly each pass from the caret's line rect — full
+//! `ScrollView`-style composition, momentum, and a scrollbar are intentionally
+//! out of scope for v1); a rectangular clip keeps the overflowing lines inside
+//! the box.
+//!
+//! Enter behavior is governed by
+//! [`submit_on_enter`](TextInputView::submit_on_enter): `true` (the single-line
+//! default) fires `on_submit`, `false` (the multi-line default) inserts a
+//! literal newline. **Shift+Enter always does the opposite of the mode's
+//! default** — the `Key` event surface exposes modifiers, so Shift is honored.
+//! A single-line field ignores this knob and always submits on Enter (its Enter
+//! path is unchanged). On the mobile IME path a Return arrives as a
+//! `Commit("\n")`: single-line (and submit-on-enter) fields treat it as submit,
+//! a newline-inserting multi-line field inserts the literal newline instead.
 
 use std::rc::Rc;
 
@@ -124,11 +148,18 @@ impl Chrome {
 /// A view-held, typed text callback (erased on build).
 type OnText<State> = Rc<dyn Fn(&mut State, String)>;
 
-/// A declarative single-line text field. See the [module docs](self).
+/// A declarative text field, single-line by default. See the [module docs](self).
 pub struct TextInputView<State: 'static> {
     value: String,
     placeholder: String,
     text_style: TextStyle,
+    /// `None` = single-line; `Some(n)` = wrapped multi-line capped at `n`
+    /// visible lines (see [`TextInputView::multiline`]).
+    max_visible_lines: Option<usize>,
+    /// Whether Enter submits (vs. inserts a newline). `None` = use the
+    /// mode-default (true single-line, false multi-line); `Some(_)` = an
+    /// explicit [`TextInputView::submit_on_enter`] override.
+    submit_on_enter: Option<bool>,
     on_change: OnText<State>,
     on_submit: Option<OnText<State>>,
 }
@@ -149,6 +180,8 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
         value: value.into(),
         placeholder: String::new(),
         text_style: TextStyle::default(),
+        max_visible_lines: None,
+        submit_on_enter: None,
         on_change: Rc::new(on_change),
         on_submit: None,
     }
@@ -185,6 +218,26 @@ impl<State: 'static> TextInputView<State> {
         self.text_style = text_style;
         self
     }
+
+    /// Make this a wrapped multi-line field that grows up to `max_visible_lines`
+    /// lines tall, then scrolls internally to keep the caret in view (see the
+    /// [module docs](self)). `max_visible_lines` is clamped to at least 1.
+    ///
+    /// Switches the default Enter behavior to insert a newline rather than
+    /// submit; override with [`submit_on_enter`](Self::submit_on_enter).
+    pub fn multiline(mut self, max_visible_lines: usize) -> Self {
+        self.max_visible_lines = Some(max_visible_lines.max(1));
+        self
+    }
+
+    /// Set whether Enter submits (`true`) or inserts a newline (`false`),
+    /// overriding the mode default (submit single-line, newline multi-line).
+    /// Shift+Enter always does the opposite. A single-line field always submits
+    /// on Enter regardless of this setting.
+    pub fn submit_on_enter(mut self, submit_on_enter: bool) -> Self {
+        self.submit_on_enter = Some(submit_on_enter);
+        self
+    }
 }
 
 /// The retained widget for a [`TextInputView`].
@@ -195,6 +248,14 @@ pub struct TextInputWidget {
     text_ctx: TextContext,
     style: TextStyle,
     placeholder: String,
+    /// `None` = single-line; `Some(n)` = wrapped multi-line capped at `n`
+    /// visible lines. Drives the wrap-width feed in `layout`, the height cap,
+    /// and the keep-caret-in-view scroll offset (see the [module docs](self)).
+    max_visible_lines: Option<usize>,
+    /// Resolved Enter behavior: `true` submits, `false` inserts a newline.
+    /// Defaults to true single-line / false multi-line; Shift+Enter inverts it
+    /// (multi-line only — a single-line field always submits).
+    submit_on_enter: bool,
     /// The widget's event-pass view of its focus: set on a `Down` inside,
     /// cleared on Escape / a blur `Down` this widget observes. NOT authoritative
     /// for painting — `paint` reads `PaintCtx::has_focus()` (the pod-recorded
@@ -232,9 +293,61 @@ impl TextInputWidget {
     }
 
     /// The top-left of the text content within a `height`-tall field (vertically
-    /// centered, never above the top padding).
+    /// centered, never above the top padding). Single-line placement.
     fn text_top(&self, height: f64) -> f64 {
         ((height - self.content_height()) / 2.0).max(PAD_Y)
+    }
+
+    /// Height of one text line from the editor's own metrics, falling back to a
+    /// sensible line height before the first layout / when the field is empty.
+    fn line_height(&self) -> f64 {
+        let h = self.editor.layout_size().height;
+        let n = self.editor.line_count();
+        if h > 0.0 && n > 0 {
+            h / n as f64
+        } else {
+            self.style.size as f64 * 1.25
+        }
+    }
+
+    /// The vertical scroll offset (content shifted up, in logical px) that keeps
+    /// the caret's line in view once the content outgrows the visible box. Zero
+    /// in single-line mode or while the content fits. Recomputed statelessly
+    /// each pass from the caret rect — a v1 keep-caret-in-view stand-in for a
+    /// full scroll composition (see the [module docs](self)).
+    fn scroll_y(&self, field_height: f64) -> f64 {
+        if self.max_visible_lines.is_none() {
+            return 0.0;
+        }
+        let visible = (field_height - 2.0 * PAD_Y).max(0.0);
+        let content = self.editor.layout_size().height;
+        if content <= visible {
+            return 0.0;
+        }
+        let max_off = content - visible;
+        let (y0, y1) = match self.editor.cursor_rect(CARET_W) {
+            Some(c) => (c.y0, c.y1),
+            None => (0.0, 0.0),
+        };
+        // Reveal the caret's bottom edge, clamp to the scrollable range, then
+        // pull back up if that hid the caret's top edge (caret taller motion).
+        let mut off = if y1 > visible { y1 - visible } else { 0.0 };
+        off = off.clamp(0.0, max_off);
+        if y0 < off {
+            off = y0.clamp(0.0, max_off);
+        }
+        off
+    }
+
+    /// The y of the text content's top within a `height`-tall field: the
+    /// single-line centered placement, or the multi-line top-padded placement
+    /// shifted up by the keep-caret-in-view scroll offset.
+    fn content_origin_y(&self, height: f64) -> f64 {
+        if self.max_visible_lines.is_some() {
+            PAD_Y - self.scroll_y(height)
+        } else {
+            self.text_top(height)
+        }
     }
 
     /// Reset the blink so the caret is visible from the next painted frame
@@ -297,7 +410,7 @@ impl TextInputWidget {
             composing_base: es.composing_base,
             composing_extent: es.composing_extent,
         };
-        let offset = origin.to_vec2() + Vec2::new(PAD_X, self.text_top(size.height));
+        let offset = origin.to_vec2() + Vec2::new(PAD_X, self.content_origin_y(size.height));
         let caret = self.editor.cursor_rect(CARET_W).map(|c| {
             Rect::new(
                 c.x0 + offset.x,
@@ -324,7 +437,7 @@ impl TextInputWidget {
     fn editor_point(&self, pos: Point, height: f64) -> (f32, f32) {
         (
             (pos.x - PAD_X) as f32,
-            (pos.y - self.text_top(height)) as f32,
+            (pos.y - self.content_origin_y(height)) as f32,
         )
     }
 
@@ -358,19 +471,47 @@ impl TextInputWidget {
                     NamedKey::Home => self.apply_edit(ctx, EditOp::Home { select }),
                     NamedKey::End => self.apply_edit(ctx, EditOp::End { select }),
                     NamedKey::Enter => {
-                        let text = self.editor.text().to_string();
-                        if let Some(cb) = &mut self.on_submit {
-                            cb(ctx, text);
+                        // Single-line always submits (Enter is never a newline).
+                        // Multi-line: the resolved `submit_on_enter`, inverted by
+                        // Shift, decides submit vs. insert-newline.
+                        let submit = if self.max_visible_lines.is_some() {
+                            self.submit_on_enter ^ modifiers.shift
+                        } else {
+                            true
+                        };
+                        if submit {
+                            let text = self.editor.text().to_string();
+                            if let Some(cb) = &mut self.on_submit {
+                                cb(ctx, text);
+                            }
+                            ctx.request_redraw();
+                        } else {
+                            self.apply_edit(ctx, EditOp::InsertNewline);
                         }
-                        ctx.request_redraw();
                     }
                     NamedKey::Escape => {
                         ctx.release_focus();
                         self.focused = false;
                         ctx.request_redraw();
                     }
-                    // Single-line v1: vertical motion and Tab traversal are no-ops.
-                    NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::Tab => {
+                    // Vertical motion drives the caret across lines in multi-line
+                    // mode; in single-line mode there is only one line, so it (and
+                    // Tab traversal) are no-ops.
+                    NamedKey::ArrowUp => {
+                        if self.max_visible_lines.is_some() {
+                            self.apply_edit(ctx, EditOp::MoveUp { select });
+                        } else {
+                            return EventResult::Ignored;
+                        }
+                    }
+                    NamedKey::ArrowDown => {
+                        if self.max_visible_lines.is_some() {
+                            self.apply_edit(ctx, EditOp::MoveDown { select });
+                        } else {
+                            return EventResult::Ignored;
+                        }
+                    }
+                    NamedKey::Tab => {
                         return EventResult::Ignored;
                     }
                 }
@@ -394,10 +535,16 @@ impl TextInputWidget {
             }
             ImeEvent::Commit(s) => {
                 // iOS Return contract (task 56 / RESEARCH §ios): the Return key on a
-                // UITextInput arrives as `insertText("\n")` → `Commit("\n")`. On this
-                // single-line widget a lone newline commit means SUBMIT, exactly like
-                // `NamedKey::Enter` — it must never insert a literal '\n'.
+                // UITextInput arrives as `insertText("\n")` → `Commit("\n")`. On a
+                // single-line (or submit-on-enter) widget a lone newline commit means
+                // SUBMIT, exactly like `NamedKey::Enter` — it must never insert a
+                // literal '\n'. A newline-inserting multi-line field instead lands
+                // the literal newline, matching its `NamedKey::Enter` behavior.
                 if s == "\n" || s == "\r" || s == "\r\n" {
+                    if self.max_visible_lines.is_some() && !self.submit_on_enter {
+                        self.apply_edit(ctx, EditOp::InsertNewline);
+                        return EventResult::Handled;
+                    }
                     let text = self.editor.text().to_string();
                     if let Some(cb) = &mut self.on_submit {
                         cb(ctx, text);
@@ -427,6 +574,16 @@ impl TextInputWidget {
             ImeEvent::Enabled | ImeEvent::Disabled => EventResult::Handled,
         }
     }
+}
+
+/// Resolve the effective Enter-submits behavior: an explicit
+/// [`TextInputView::submit_on_enter`] wins, otherwise the mode default (submit
+/// single-line, insert-newline multi-line).
+fn resolve_submit_on_enter(
+    max_visible_lines: Option<usize>,
+    submit_on_enter: Option<bool>,
+) -> bool {
+    submit_on_enter.unwrap_or(max_visible_lines.is_none())
 }
 
 /// Convert a shell-facing (UTF-16-indexed) [`EditingState`] into the byte-indexed
@@ -473,6 +630,8 @@ impl<State: 'static> View<State> for TextInputView<State> {
             text_ctx,
             style,
             placeholder: self.placeholder.clone(),
+            max_visible_lines: self.max_visible_lines,
+            submit_on_enter: resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter),
             focused: false,
             captured: false,
             blink_epoch: FrameTime::ZERO,
@@ -503,6 +662,15 @@ impl<State: 'static> View<State> for TextInputView<State> {
             element.placeholder = self.placeholder.clone();
             flags |= ChangeFlags::PAINT;
         }
+        // Reconcile the multi-line configuration. A change to the visible-line
+        // cap changes the height clamp (relayout), and either knob can change
+        // the resolved Enter behavior.
+        if prev.max_visible_lines != self.max_visible_lines {
+            element.max_visible_lines = self.max_visible_lines;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        element.submit_on_enter =
+            resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter);
         // Controlled reconcile: adopt the app-confirmed value only when it differs
         // from what the editor currently holds, so an accepted edit leaves the
         // selection untouched and a rejected/normalized one is pulled back in.
@@ -521,7 +689,20 @@ impl Widget for TextInputWidget {
         } else {
             DEFAULT_WIDTH
         };
-        let height = self.content_height() + 2.0 * PAD_Y;
+        let height = match self.max_visible_lines {
+            Some(max_lines) => {
+                // Feed the content width to the editor as a soft-wrap width so
+                // it reflows, then clamp the reported content height to the
+                // [1, max_lines] line band (+ padding); overflow scrolls in paint.
+                let wrap_w = (width - 2.0 * PAD_X).max(0.0) as f32;
+                self.editor.set_wrap_width(Some(wrap_w), &mut self.text_ctx);
+                let line_h = self.line_height();
+                let content = self.editor.layout_size().height.max(line_h);
+                let capped = content.min(line_h * max_lines as f64);
+                capped + 2.0 * PAD_Y
+            }
+            None => self.content_height() + 2.0 * PAD_Y,
+        };
         bc.constrain(Size::new(width, height))
     }
 
@@ -569,7 +750,23 @@ impl Widget for TextInputWidget {
             chrome.bg,
         );
 
-        let text_origin = Point::new(origin.x + PAD_X, origin.y + self.text_top(size.height));
+        let text_origin = Point::new(
+            origin.x + PAD_X,
+            origin.y + self.content_origin_y(size.height),
+        );
+
+        // Multi-line content can overflow the capped box; clip the text band so
+        // scrolled-out lines stay inside the field. Popped at the end of paint.
+        let clip_content = self.max_visible_lines.is_some();
+        if clip_content {
+            scene.push_clip(
+                Point::new(origin.x + BORDER_W, origin.y + PAD_Y),
+                Size::new(
+                    (size.width - 2.0 * BORDER_W).max(0.0),
+                    (size.height - 2.0 * PAD_Y).max(0.0),
+                ),
+            );
+        }
 
         if self.editor.text().is_empty() && !focused {
             // Placeholder: shaped on demand through the widget-owned context.
@@ -616,6 +813,10 @@ impl Widget for TextInputWidget {
                     chrome.caret,
                 );
             }
+        }
+
+        if clip_content {
+            scene.pop_clip();
         }
     }
 
@@ -1415,5 +1616,227 @@ mod tests {
     impl PaintScene for NullScene {
         fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
         fn draw_text(&mut self, _o: Point, _t: &str) {}
+    }
+
+    // --- Multi-line mode (task: textinput-multiline) ---
+
+    /// A 3-visible-line multi-line field (newline-on-Enter default).
+    fn multiline_logic(state: &mut AppState) -> TextInputView<AppState> {
+        text_input(state.value.clone(), |s: &mut AppState, v: String| {
+            s.changes += 1;
+            if !s.reject {
+                s.value = v;
+            }
+        })
+        .multiline(3)
+        .on_submit(|s: &mut AppState, v: String| {
+            s.submits += 1;
+            s.last_submit = v;
+        })
+    }
+
+    /// A multi-line field that submits on Enter (newline only on Shift+Enter).
+    fn multiline_submit_logic(state: &mut AppState) -> TextInputView<AppState> {
+        text_input(state.value.clone(), |s: &mut AppState, v: String| {
+            s.changes += 1;
+            s.value = v;
+        })
+        .multiline(3)
+        .submit_on_enter(true)
+        .on_submit(|s: &mut AppState, v: String| {
+            s.submits += 1;
+            s.last_submit = v;
+        })
+    }
+
+    /// A tall window so the field's natural (capped) height is never clamped by
+    /// the root constraints; returns the laid-out field height.
+    fn relayout(root: &mut RenderRoot<AppState, TextInputView<AppState>>) -> f64 {
+        root.layout(Size::new(300.0, 800.0)).height
+    }
+
+    #[test]
+    fn multiline_height_grows_per_line_up_to_cap_then_stops() {
+        let mut state = AppState::default();
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut multiline_logic, &mut state);
+        let h1 = relayout(&mut root); // one (empty) line
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        // Enter inserts a newline in this newline-on-Enter field.
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        let h2 = relayout(&mut root); // two lines
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        let h3 = relayout(&mut root); // three lines (== the cap)
+
+        assert!(h2 > h1, "a second line grows the field: {h1} -> {h2}");
+        assert!(h3 > h2, "a third line grows the field: {h2} -> {h3}");
+
+        // A fourth and fifth line exceed the 3-line cap: the box height freezes.
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        let h4 = relayout(&mut root);
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        let h5 = relayout(&mut root);
+        assert_eq!(h4, h3, "height stops growing at the visible-line cap");
+        assert_eq!(h5, h4, "still capped past the cap");
+    }
+
+    #[test]
+    fn multiline_scroll_offset_engages_only_past_the_cap() {
+        let mut state = AppState::default();
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut multiline_logic, &mut state);
+        root.layout(Size::new(300.0, 800.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        // Within the cap (two lines) the content fits: no scroll.
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        let h = relayout(&mut root);
+        assert_eq!(
+            widget(&root).scroll_y(h),
+            0.0,
+            "content within the cap never scrolls"
+        );
+
+        // Push past the cap: the caret (on the last line) must be kept in view by
+        // a positive scroll offset.
+        for _ in 0..4 {
+            root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        }
+        let h = relayout(&mut root);
+        assert!(
+            widget(&root).scroll_y(h) > 0.0,
+            "content past the cap scrolls to keep the caret in view"
+        );
+    }
+
+    #[test]
+    fn enter_inserts_newline_in_multiline_by_default() {
+        let mut state = AppState::default();
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut multiline_logic, &mut state);
+        root.layout(Size::new(300.0, 800.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        root.event(&mut state, &ch("a"));
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        root.event(&mut state, &ch("b"));
+
+        assert_eq!(
+            widget(&root).editor.text(),
+            "a\nb",
+            "Enter inserts a newline"
+        );
+        assert_eq!(state.submits, 0, "a newline-on-Enter field does not submit");
+        assert_eq!(state.value, "a\nb", "the newline flows through on_change");
+    }
+
+    #[test]
+    fn shift_enter_submits_in_a_newline_on_enter_multiline() {
+        let mut state = AppState::default();
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut multiline_logic, &mut state);
+        root.layout(Size::new(300.0, 800.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("h"));
+        root.event(&mut state, &ch("i"));
+
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        root.event(&mut state, &named(NamedKey::Enter, shift));
+
+        assert_eq!(state.submits, 1, "Shift+Enter inverts the default → submit");
+        assert_eq!(state.last_submit, "hi");
+        assert!(
+            !widget(&root).editor.text().contains('\n'),
+            "Shift+Enter must not insert a newline here"
+        );
+    }
+
+    #[test]
+    fn submit_on_enter_multiline_submits_and_shift_enter_inserts_newline() {
+        let mut state = AppState::default();
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut multiline_submit_logic, &mut state);
+        root.layout(Size::new(300.0, 800.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("h"));
+        root.event(&mut state, &ch("i"));
+
+        // Plain Enter submits (explicit submit_on_enter(true)).
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        assert_eq!(
+            state.submits, 1,
+            "Enter submits when submit_on_enter is set"
+        );
+        assert!(!widget(&root).editor.text().contains('\n'));
+
+        // Shift+Enter inverts it → insert a newline instead.
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        root.event(&mut state, &named(NamedKey::Enter, shift));
+        assert_eq!(state.submits, 1, "Shift+Enter does not submit here");
+        assert!(
+            widget(&root).editor.text().contains('\n'),
+            "Shift+Enter inserts a newline when submit_on_enter is set"
+        );
+    }
+
+    #[test]
+    fn ime_newline_commit_inserts_newline_in_multiline() {
+        // The iOS Return path (Commit("\n")) inserts a literal newline in a
+        // newline-on-Enter multi-line field, rather than submitting.
+        let mut state = AppState::default();
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut multiline_logic, &mut state);
+        root.layout(Size::new(300.0, 800.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("\n".to_string())),
+        );
+
+        assert!(
+            widget(&root).editor.text().contains('\n'),
+            "a newline commit lands a literal newline in a multi-line field"
+        );
+        assert_eq!(state.submits, 0, "the newline commit does not submit");
+    }
+
+    #[test]
+    fn arrow_up_down_move_caret_across_lines_in_multiline() {
+        let mut state = AppState::default();
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut multiline_logic, &mut state);
+        root.layout(Size::new(300.0, 800.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        root.event(&mut state, &ch("b"));
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        root.event(&mut state, &ch("c"));
+        root.event(&mut state, &ch("d")); // caret at end of line 2 (byte 5)
+        assert_eq!(widget(&root).editor.editing_state_bytes().extent, 5);
+
+        // ArrowUp crosses onto line 1 (byte offset within [0, 2]).
+        root.event(&mut state, &named(NamedKey::ArrowUp, Modifiers::default()));
+        let up = widget(&root).editor.editing_state_bytes().extent;
+        assert!(up <= 2, "ArrowUp moves the caret onto line 1, got {up}");
+
+        // ArrowDown returns to line 2 (byte offset >= 3, past the newline).
+        root.event(
+            &mut state,
+            &named(NamedKey::ArrowDown, Modifiers::default()),
+        );
+        let down = widget(&root).editor.editing_state_bytes().extent;
+        assert!(
+            down >= 3,
+            "ArrowDown moves the caret back to line 2, got {down}"
+        );
     }
 }
