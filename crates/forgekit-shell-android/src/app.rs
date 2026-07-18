@@ -656,21 +656,12 @@ impl AndroidAppHandle {
         // writes must be observed by *this* frame's dirty check below.
         crate::jni_glue::pump_reactive_runtime();
 
-        // Reactive signals-dirty (task 07), drained right after the pump per the
-        // pump-first ordering contract: did any tracked signal change since the
-        // last frame? Draining here (once per frame) is correct even on a frame
-        // the gate goes on to skip — a skip means "nothing changed", so there is
-        // no dirty edge to preserve.
-        let signals_dirty = ReactiveRuntime::get()
-            .map(|rt| rt.take_signals_dirty())
-            .unwrap_or(false);
-
         // Poll the app-facing theme override slot (task 6c-04) once per
         // frame, before the surface-ready gate — theme delivery needs no
         // renderer, so this stays in sync even while the surface is torn down
         // (mirroring the reactive-runtime pump just above). A poll that changes
         // the theme is a frame-gate input (`theme_or_appearance_changed`).
-        let mut theme_or_appearance_changed = std::mem::take(&mut self.appearance_dirty);
+        let mut theme_or_appearance_changed = false;
         match self.theme_override.poll() {
             Some(Some(theme)) => {
                 self.theme = theme;
@@ -705,6 +696,17 @@ impl AndroidAppHandle {
             return;
         }
 
+        // Reactive signals-dirty (task 07), drained only past the surface-ready
+        // gate — mirroring the iOS shell — so a signal written during a
+        // not-ready window is never consumed by a tick that can't render; it is
+        // observed by the first ready frame instead. The pump-first ordering
+        // contract still holds (the pump above runs before this drain). On a
+        // frame the gate goes on to skip the drain is still correct: a skip
+        // means "nothing changed", so there is no dirty edge to preserve.
+        let signals_dirty = ReactiveRuntime::get()
+            .map(|rt| rt.take_signals_dirty())
+            .unwrap_or(false);
+
         // Gather the remaining inputs from the tree's existing accessors and the
         // handle-side latches, then let the gate decide. `mem::take` clears each
         // latch as it is read, so a skipped frame does not leave a stale signal
@@ -724,7 +726,14 @@ impl AndroidAppHandle {
             focus_or_ime_active: self.app.is_focus_active() || self.app.ime_state().is_some(),
             last_needs_frame: self.last_needs_frame,
             change_flags_pending: self.app.has_pending_change_flags(),
-            theme_or_appearance_changed,
+            // The `appearance_dirty` latch (set by `set_appearance`) is taken
+            // only past the surface-ready gate — like `signals_dirty` above —
+            // so an appearance flip during a not-ready window is observed by
+            // the first ready frame instead of being discarded. (`push_theme`'s
+            // LAYOUT|PAINT change flags carry correctness either way; the
+            // explicit latch is belt-and-suspenders, mirrored on iOS.)
+            theme_or_appearance_changed: theme_or_appearance_changed
+                || std::mem::take(&mut self.appearance_dirty),
             surface_changed_or_resized: std::mem::take(&mut self.surface_dirty),
             a11y_action_performed,
             // The gate's own warmup counter (seeded by `note_resumed`) drives

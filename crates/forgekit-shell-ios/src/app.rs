@@ -147,6 +147,13 @@ pub struct IosAppHandle {
     /// frame the gate runs; a skipped frame leaves it untouched. Without it the
     /// gate would skip the follow-up frame a running animation needs.
     last_needs_frame: bool,
+    /// Handle-side latch feeding [`FrameInputs::theme_or_appearance_changed`]:
+    /// set by [`Self::set_appearance`] on an OS-driven light/dark flip, taken
+    /// only past the pause/ready gate (like the signals-dirty drain) so a flip
+    /// while backgrounded is observed by the first frame after resume.
+    /// `push_theme`'s LAYOUT|PAINT change flags carry correctness either way;
+    /// this explicit latch is belt-and-suspenders, mirroring the Android shell.
+    appearance_dirty: bool,
     /// The startup-span recorder `ffi_glue::create_handle` began and stashed
     /// here via [`Self::set_startup_spans`] immediately after construction —
     /// held until the first frame this handle actually presents completes
@@ -213,6 +220,7 @@ impl IosAppHandle {
             frame_gate,
             events_since_last_frame: false,
             last_needs_frame: false,
+            appearance_dirty: false,
             // Stashed by `ffi_glue::create_handle` right after this call
             // returns (see `Self::set_startup_spans`).
             startup_spans: None,
@@ -284,6 +292,9 @@ impl IosAppHandle {
             platform,
         );
         self.push_theme();
+        // Frame-gate latch: an OS appearance flip must force the next ready
+        // frame to Run (see the `appearance_dirty` field doc).
+        self.appearance_dirty = true;
     }
 
     /// Push the current [`Self::theme`] to both delivery paths — boxed
@@ -596,7 +607,11 @@ impl IosAppHandle {
             // Non-draining peek: a skipped frame leaves the flags for the next
             // frame that runs to drain (spec §14 phase 7).
             change_flags_pending: self.app.has_pending_change_flags(),
-            theme_or_appearance_changed,
+            // The `appearance_dirty` latch (set by `set_appearance`) is taken
+            // only past the pause/ready gate — like the signals-dirty drain —
+            // mirroring the Android shell input-for-input.
+            theme_or_appearance_changed: theme_or_appearance_changed
+                || std::mem::take(&mut self.appearance_dirty),
             // Surface (re)creation/resize is folded into the gate's resume-warmup
             // via `note_resumed` (see `resize`/`set_surface`/`resume`), so it is
             // not threaded as a separate per-frame latch here.
