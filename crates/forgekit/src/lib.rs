@@ -175,6 +175,15 @@ pub use forgekit_theme::{
     GlassScale, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, SurfaceRole, Theme, TypeScale,
 };
 
+/// The color type every [`ColorScheme`] role is expressed in
+/// ([`peniko::Color`]), re-exported so app code can author its own color
+/// values (e.g. a custom accent palette that composes onto a baseline
+/// [`ColorScheme`]) without naming `peniko` directly — the same
+/// facade-only-dependency rule the theme re-exports above follow. Construct
+/// one with [`Color::from_rgb8`]/[`Color::new`]; read its channels via
+/// `Color::components` (`[f32; 4]`, straight-alpha RGBA).
+pub use peniko::Color;
+
 /// App-facing theme override (PLAN.md D2 correction, task 6c-04):
 /// [`set_app_theme`] forces the app's active [`Theme`] end-to-end — both
 /// delivery paths a shell owned exclusively before this (widget paint/layout

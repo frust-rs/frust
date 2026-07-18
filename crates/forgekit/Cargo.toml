@@ -13,6 +13,12 @@ forgekit-reactive = { workspace = true }
 # Elevation, MotionScheme, ...) as the facade's design-token vocabulary — see
 # lib.rs's re-exports and docs/ARCHITECTURE.md's Theme delivery.
 forgekit-theme = { workspace = true }
+# Load-bearing: `peniko::Color` is re-exported flat (see lib.rs) so app code can
+# author its own color values (e.g. a custom accent palette composing onto a
+# baseline `ColorScheme`) without naming `peniko` directly. Already in the graph
+# transitively via forgekit-theme/-widgets; named here so the re-export resolves
+# in the library (not just the dev-dependency copy below).
+peniko = { workspace = true }
 # Named directly (not just through forgekit-reactive) for the facade's flat
 # re-export surface (`Memo`, `signal`, `spawn`/`spawn_local`) — see
 # `forgekit::run`/the reactive re-exports in `lib.rs`.

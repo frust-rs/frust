@@ -1,22 +1,117 @@
-//! You tab — the current user's card and the entry into the settings stack.
+//! You tab (`/you`) — the current user's card and the entry into the settings
+//! stack (Huddle showcase, task 15).
 //!
-//! **Placeholder** (Phase C task: You screen — the current user's profile card,
-//! status, and account actions). Today it renders the scaffold and pushes into
-//! the settings stack so the `/you` → `/you/settings` flow is clickable.
+//! The header is the current user's card: a hero-wrapped avatar (tag
+//! `avatar-u1`, the shared-element source for the `/user/:id` profile page), the
+//! display name, `@handle`, and presence. Below it, a settings entry row plus two
+//! inert-but-styled account rows (Saved items, Preferences) — each a
+//! [`list_item`] with a leading glyph and a trailing [`icons::CHEVRON_RIGHT`].
 
-use forgekit::{AnyView, Button, Column, NavigatorController, any};
+use forgekit::{
+    Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView,
+    Image, ImageFit, NavigatorController, Padding, SizedBox, Stack, Theme, any, app_bar, flexible,
+    hero, icon, icons, inflexible, list_item, scroll_view, text, use_context,
+};
 
 use crate::HuddleState;
-use crate::screens::{placeholder_body, scaffold, settings};
+use crate::features::settings::solid_source;
+use crate::mock;
+use crate::screens::{profile, settings};
 
-/// The You tab root. `controller` lets the demo push the settings stack.
+/// The You tab root. `controller` pushes the settings stack and the profile page.
 pub fn you_screen(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
-    let body = any(Column(vec![
-        placeholder_body("You: your profile card, status, and account actions (Phase C)."),
-        any(Button("Settings", move |_s: &mut HuddleState| {
-            let c = controller.clone();
-            controller.push(move || settings::settings_screen(c.clone()));
-        })),
-    ]));
-    scaffold("You", body)
+    let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+    let scheme = theme.scheme();
+
+    let me = mock::user(mock::CURRENT_USER_ID);
+    let (name, initials, handle, status) = match me {
+        Some(u) => (
+            u.name.to_string(),
+            u.initials.to_string(),
+            handle_for(u.name),
+            u.status.label().to_string(),
+        ),
+        None => (
+            "You".to_string(),
+            "?".to_string(),
+            "@you".to_string(),
+            "Online".to_string(),
+        ),
+    };
+
+    // The hero-wrapped avatar block (tag `avatar-u1` → the profile page's hero).
+    let avatar = any(hero(
+        "avatar-u1",
+        avatar_block(initials, scheme.primary, scheme.on_primary),
+    ));
+
+    let profile_controller = controller.clone();
+    let user_id = me.map(|u| u.id).unwrap_or(mock::CURRENT_USER_ID);
+    let user_card = list_item(name)
+        .supporting(format!("{handle} · {status}"))
+        .leading(avatar)
+        .trailing(icon(icons::CHEVRON_RIGHT))
+        .on_press(move |_s: &mut HuddleState| {
+            let id = user_id.to_string();
+            profile_controller.push(move || profile::profile_screen(id.clone()));
+        });
+
+    let settings_controller = controller.clone();
+    let settings_row = list_item("Settings")
+        .supporting("Notifications, appearance, about")
+        .leading(icon(icons::SETTINGS))
+        .trailing(icon(icons::CHEVRON_RIGHT))
+        .on_press(move |_s: &mut HuddleState| {
+            let c = settings_controller.clone();
+            settings_controller.push(move || settings::settings_screen(c.clone()));
+        });
+
+    // Inert-but-styled account rows (no `on_press`): the showcase renders the
+    // affordance without a destination.
+    let saved_row = list_item("Saved items")
+        .supporting("Bookmarked messages")
+        .leading(icon(icons::STAR))
+        .trailing(icon(icons::CHEVRON_RIGHT));
+    let prefs_row = list_item("Preferences")
+        .supporting("Language, accessibility")
+        .leading(icon(icons::PALETTE))
+        .trailing(icon(icons::CHEVRON_RIGHT));
+
+    let body = any(scroll_view(Padding(
+        EdgeInsets::all(12.0),
+        Column(vec![
+            any(user_card),
+            any(SizedBox(None, Some(16.0))),
+            any(settings_row),
+            any(saved_row),
+            any(prefs_row),
+        ]),
+    )));
+
+    any(FlexView::new(
+        Axis::Vertical,
+        vec![
+            inflexible(any(app_bar::<HuddleState>("You"))),
+            flexible(1, body),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Stretch))
+}
+
+/// A square avatar block: a solid `primary`-filled 56×56 tile with the user's
+/// initials centered in `on_primary`.
+fn avatar_block(initials: String, fill: Color, on_fill: Color) -> AnyView<HuddleState> {
+    let tile =
+        any(SizedBox(Some(56.0), Some(56.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
+    let label = any(Align(
+        Alignment::CENTER,
+        text(initials).size(20.0).color(on_fill),
+    ));
+    any(Stack(vec![tile, label]))
+}
+
+/// Derive an `@handle` from a display name — the first name, lowercased.
+fn handle_for(name: &str) -> String {
+    let first = name.split_whitespace().next().unwrap_or(name);
+    format!("@{}", first.to_lowercase())
 }

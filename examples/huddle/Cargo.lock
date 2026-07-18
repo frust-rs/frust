@@ -984,6 +984,7 @@ dependencies = [
  "forgekit-shell-ios",
  "forgekit-theme",
  "forgekit-widgets",
+ "peniko",
  "reactive_graph",
 ]
 

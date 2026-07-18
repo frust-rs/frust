@@ -1,19 +1,105 @@
-//! About page (`/you/settings/about`).
+//! About page (`/you/settings/about`) — app icon, version, and a few card rows
+//! (Huddle showcase, task 15).
 //!
-//! **Placeholder** (Phase C task: About — app version, credits, and licenses).
-//! Today it renders a short about blurb.
+//! The app icon is painted from `assets/logo.png` via [`Image`] when the bytes
+//! decode, degrading to an initials block (the same solid-tile escape hatch the
+//! You tab's avatar uses) otherwise. Below it: the app name + version, a
+//! [`filled_card`] Licenses row (inert), and an [`outlined_card`] "ForgeKit"
+//! link-style row that raises a toast (no real browser — a showcase non-goal).
 
-use forgekit::AnyView;
+use forgekit::{
+    Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView,
+    Image, ImageFit, ImageSource, Padding, SizedBox, Stack, Theme, any, app_bar, filled_card,
+    flexible, inflexible, outlined_card, scroll_view, text, use_context,
+};
 
 use crate::HuddleState;
-use crate::screens::{placeholder_body, scaffold};
+use crate::features::settings::solid_source;
+
+/// The bundled app-icon bytes (the anvil logo), decoded once per build.
+const LOGO_PNG: &[u8] = include_bytes!("../../assets/logo.png");
 
 /// The about page.
 pub fn about_screen() -> AnyView<HuddleState> {
-    scaffold(
-        "About",
-        placeholder_body(
-            "Huddle — the ForgeKit showcase app. Version, credits, licenses (Phase C).",
-        ),
+    let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+    let scheme = theme.scheme();
+
+    let icon_block = match ImageSource::decode(LOGO_PNG) {
+        Ok(source) => {
+            any(SizedBox(Some(72.0), Some(72.0)).child(Image(source).fit(ImageFit::Contain)))
+        }
+        // Escape hatch: a solid-primary tile with the app initial.
+        Err(_) => initials_block("H", scheme.primary, scheme.on_primary),
+    };
+
+    let header = any(Column(vec![
+        any(Align(Alignment::CENTER, icon_block)),
+        any(SizedBox(None, Some(12.0))),
+        any(Align(Alignment::CENTER, text("Huddle").size(24.0))),
+        any(Align(
+            Alignment::CENTER,
+            text(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(13.0),
+        )),
+        any(Align(
+            Alignment::CENTER,
+            text("The ForgeKit showcase app").size(13.0),
+        )),
+    ]));
+
+    let licenses = any(Padding(
+        EdgeInsets::symmetric(0.0, 6.0),
+        filled_card(Padding(
+            EdgeInsets::all(16.0),
+            Column(vec![
+                any(text("Open-source licenses").size(15.0)),
+                any(text("Material Symbols · Parley · Vello").size(12.0)),
+            ]),
+        )),
+    ));
+
+    // A link-style card (outlined variant) that raises a toast on tap.
+    let forgekit_link = any(Padding(
+        EdgeInsets::symmetric(0.0, 6.0),
+        outlined_card(Padding(
+            EdgeInsets::all(16.0),
+            Column(vec![
+                any(text("ForgeKit").size(15.0)),
+                any(text("forgekit.dev").size(12.0)),
+            ]),
+        ))
+        .on_press(|s: &mut HuddleState| {
+            s.toasts.show("Opens forgekit.dev");
+        }),
+    ));
+
+    let body = any(scroll_view(Padding(
+        EdgeInsets::all(20.0),
+        Column(vec![
+            header,
+            any(SizedBox(None, Some(24.0))),
+            licenses,
+            forgekit_link,
+        ]),
+    )));
+
+    any(FlexView::new(
+        Axis::Vertical,
+        vec![
+            inflexible(any(app_bar::<HuddleState>("About"))),
+            flexible(1, body),
+        ],
     )
+    .cross_axis(CrossAxisAlignment::Stretch))
+}
+
+/// A 72×72 solid-`fill` tile with a centered initial in `on_fill` — the app-icon
+/// fallback when the bundled logo fails to decode.
+fn initials_block(initial: &str, fill: Color, on_fill: Color) -> AnyView<HuddleState> {
+    let tile =
+        any(SizedBox(Some(72.0), Some(72.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
+    let label = any(Align(
+        Alignment::CENTER,
+        text(initial.to_string()).size(32.0).color(on_fill),
+    ));
+    any(Stack(vec![tile, label]))
 }
