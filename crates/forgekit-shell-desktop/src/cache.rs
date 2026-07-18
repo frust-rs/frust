@@ -57,8 +57,14 @@ pub fn cache_path() -> PathBuf {
 /// Returns `None` on any failure (file not found, read error, etc.),
 /// logging at debug level. The cache is optional; startup continues either way.
 pub fn load_cache() -> Option<Vec<u8>> {
-    let path = cache_path();
-    match fs::read(&path) {
+    load_cache_from(&cache_path())
+}
+
+/// Path-parameterized body of [`load_cache`] — lets tests exercise the
+/// logic against a scratch path without ever touching the user's real
+/// cache directory.
+fn load_cache_from(path: &std::path::Path) -> Option<Vec<u8>> {
+    match fs::read(path) {
         Ok(data) => {
             log::debug!(
                 "forgekit-shell-desktop: loaded cache from {}",
@@ -91,7 +97,13 @@ pub fn load_cache() -> Option<Vec<u8>> {
 /// the log with errors on every frame). Should be called on a background thread
 /// (never blocking the UI thread).
 pub fn save_cache(data: &[u8]) {
-    let path = cache_path();
+    save_cache_to(&cache_path(), data);
+}
+
+/// Path-parameterized body of [`save_cache`] — lets tests exercise the
+/// atomic-write logic against a scratch path without ever touching the
+/// user's real cache directory.
+fn save_cache_to(path: &std::path::Path, data: &[u8]) {
     if path.as_os_str().is_empty() {
         log::debug!("forgekit-shell-desktop: cache disabled (no cache dir)");
         return;
@@ -112,7 +124,7 @@ pub fn save_cache(data: &[u8]) {
     // Write atomically: temp file + rename.
     let temp_path = path.with_extension("tmp");
     match fs::write(&temp_path, data) {
-        Ok(()) => match fs::rename(&temp_path, &path) {
+        Ok(()) => match fs::rename(&temp_path, path) {
             Ok(()) => {
                 log::debug!("forgekit-shell-desktop: saved cache to {}", path.display());
             }
@@ -162,23 +174,48 @@ mod tests {
         assert!(path.ends_with("forgekit/pipeline_cache_desktop.bin"));
     }
 
-    /// Test that load_cache returns None for a non-existent file.
-    /// This is a smoke test; the real contract is "returns None on file not found".
-    #[test]
-    fn test_load_cache_not_found() {
-        // On most machines the cache file won't exist, so load_cache() returns None.
-        // If a cache file does exist locally, it will be loaded. Either way, this
-        // verifies that load_cache() doesn't panic on the common no-cache-found case.
-        let _result = load_cache();
+    /// A unique scratch path under the OS temp dir — tests must NEVER
+    /// write to the user's real cache directory (`~/.cache`), so every
+    /// I/O test goes through the `_from`/`_to` path-parameterized seams.
+    fn scratch_path(tag: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "forgekit-cache-test-{}-{}",
+                std::process::id(),
+                tag
+            ))
+            .join("forgekit")
+            .join("pipeline_cache_desktop.bin")
     }
 
-    /// Smoke test: save_cache doesn't panic when called (directory creation, atomic write).
-    /// A real integration test would use tempfile to verify the file is actually written.
+    /// load returns None for a non-existent file.
     #[test]
-    fn test_save_cache_smoke() {
-        // Call save_cache with a small blob and verify it doesn't panic.
-        // The actual file write depends on permissions and the cache dir existing,
-        // so this is just a smoke test.
-        save_cache(b"test-cache-data");
+    fn test_load_cache_not_found() {
+        let path = scratch_path("not-found");
+        assert!(load_cache_from(&path).is_none());
+    }
+
+    /// Atomic write round-trip: save creates parent dirs, writes the blob,
+    /// leaves no temp file behind; a second save overwrites.
+    #[test]
+    fn test_save_cache_round_trip_and_overwrite() {
+        let path = scratch_path("round-trip");
+        save_cache_to(&path, b"test-cache-data");
+        assert_eq!(
+            load_cache_from(&path).as_deref(),
+            Some(&b"test-cache-data"[..])
+        );
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "temp file left behind"
+        );
+
+        save_cache_to(&path, b"second-write");
+        assert_eq!(
+            load_cache_from(&path).as_deref(),
+            Some(&b"second-write"[..])
+        );
+
+        let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 }
