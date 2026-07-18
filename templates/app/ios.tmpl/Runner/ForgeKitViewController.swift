@@ -43,6 +43,16 @@ final class ForgeKitViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        // Perf instrumentation (spec §14 phase 7.A task 09): marks
+        // viewDidLoad's entry on the same console stream the Rust side's
+        // `forgekit-perf startup ...`/`forgekit-perf frame ...` lines land
+        // on (captured together via `simctl launch --console-pty`/Xcode),
+        // so the app-launch-to-view-load gap is measurable from one stream
+        // — mirrors the Android shell's `MainActivity.onCreate` log line
+        // (task 08). Unconditional (not gated on FORGEKIT_TRACE): this is
+        // host-app Swift code the Rust `perf::enabled()` switch doesn't
+        // reach, and a single log line at launch has no measurable cost.
+        NSLog("forgekit-perf vc-load")
         let scale = UIScreen.main.scale
         view.contentScaleFactor = scale
         forgeView.metalLayer.contentsScale = scale

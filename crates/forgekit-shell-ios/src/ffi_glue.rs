@@ -26,6 +26,7 @@ use anyhow::{Context, Result, bail};
 use forgekit_core::event::{EditingState, ImeState};
 use forgekit_reactive::{ReactiveRuntime, push_deep_link};
 use forgekit_render::{RenderContext, SurfaceRenderer};
+use forgekit_shell_common::perf::{self, StartupSpans};
 use forgekit_shell_common::{AppTree, guard};
 
 use crate::accessibility::IosA11yAdapter;
@@ -195,6 +196,15 @@ fn create_handle(
     scale: f32,
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> Result<*mut c_void> {
+    // Startup-span recorder (spec §14 phase 7.A task 09): begins its epoch
+    // right here. Every call against it is a no-op when perf instrumentation
+    // is disabled (see `perf::enabled`). There is no iOS-side hook for
+    // `SPAN_NATIVE_LIB_LOAD` — by the time this function runs, the dylib is
+    // already loaded and executing Rust — so `SPAN_INIT_ENTRY` is the first
+    // span this shell records (mirrors the Android shell's `create_handle`).
+    let mut startup = StartupSpans::begin();
+    startup.record(perf::SPAN_INIT_ENTRY);
+
     if crate::ffi_support::handle_is_null(metal_layer) {
         bail!("forgekit-shell-ios: forgekit_init called with a null CAMetalLayer");
     }
@@ -215,6 +225,16 @@ fn create_handle(
         )
     })
     .context("forgekit-shell-ios: failed to create Metal render surface")?;
+    // `RenderContext::ensure_device` (see `forgekit-render/src/context.rs`)
+    // creates the adapter, the logical device, and this call's surface/
+    // renderer readiness in one async chain with no finer-grained seam
+    // exposed to a shell — all three spans land at this single point rather
+    // than three distinct timestamps, an acknowledged granularity limit
+    // (the Android shell's `on_surface_created_from_android_window` has the
+    // same shape).
+    startup.record(perf::SPAN_ADAPTER_READY);
+    startup.record(perf::SPAN_DEVICE_READY);
+    startup.record(perf::SPAN_RENDERER_READY);
 
     // Process-wide reactive runtime init (idempotent — `ReactiveRuntime::init`'s
     // own `OnceLock` provides the process-once property). The Swift-side
@@ -238,10 +258,17 @@ fn create_handle(
     // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
     // Retain `metal_layer` in the handle so a later `SurfaceLost` can be recovered
     // by recreating the surface from it (iOS never re-delivers the layer).
-    let handle = rt.with_owner(|| {
+    let mut handle = rt.with_owner(|| {
         let app = make_app();
         IosAppHandle::new(render_cx, renderer, metal_layer, physical, scale, app)
     });
+    // `IosAppHandle::new` runs the app's first `rebuild()` synchronously as
+    // its last step before returning, so recording the span here is
+    // effectively the same instant as the rebuild's completion.
+    startup.record(perf::SPAN_FIRST_REBUILD_DONE);
+    // Stash for `render_frame` to complete once this handle actually
+    // presents its first frame (see `IosAppHandle::latch_first_frame_presented`).
+    handle.set_startup_spans(startup);
 
     // SAFETY: hand a uniquely-owned boxed handle to Swift as a raw pointer; it is
     // reclaimed exactly once in `destroy`.
@@ -343,7 +370,14 @@ pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) {
                 let (physical, scale) = (app.physical(), app.scale());
                 recover_surface(app, physical, scale);
             }
-            app.frame(timestamp_ns);
+            // `frame` reports whether this tick actually presented a frame
+            // (`FrameOutcome::Rendered`); the first-presented-frame startup
+            // span (spec §14 phase 7.A task 09) is latched here, exactly
+            // once, the first time it does — see
+            // `IosAppHandle::latch_first_frame_presented`'s idempotency doc.
+            if app.frame(timestamp_ns) {
+                app.latch_first_frame_presented();
+            }
         }
     });
 }

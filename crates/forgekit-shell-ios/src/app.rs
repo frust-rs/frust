@@ -30,6 +30,7 @@
 
 use std::any::Any;
 use std::ffi::c_void;
+use std::time::Instant;
 
 use crate::accessibility::IosA11yAdapter;
 use forgekit_core::FrameTime;
@@ -39,6 +40,7 @@ use forgekit_core::event::{
 use forgekit_reactive::{ReactiveRuntime, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
+use forgekit_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
 use forgekit_shell_common::{
     AppTree, ThemeOverrideWatcher, effective_brightness_for_platform_change, logical_size,
     sanitize_scale,
@@ -117,6 +119,20 @@ pub struct IosAppHandle {
     /// drains its queued a11y actions (pre-rebuild) and pushes the post-layout
     /// semantics tree to it (see [`Self::frame`]).
     a11y: Option<IosA11yAdapter>,
+    /// Per-frame pass-timing recorder (spec §14 phase 7.A task 09) — honors
+    /// the process-wide [`perf::enabled`] switch itself, so every call
+    /// against it is a cheap no-op in a non-perf build; [`Self::frame`]
+    /// still gates its own `Instant::now()` reads behind [`perf::enabled`]
+    /// separately (no clock reads at all when disabled, not just no
+    /// recording).
+    frame_stats: FrameStats,
+    /// The startup-span recorder `ffi_glue::create_handle` began and stashed
+    /// here via [`Self::set_startup_spans`] immediately after construction —
+    /// held until the first frame this handle actually presents completes
+    /// and emits the one-line startup summary (see
+    /// [`Self::latch_first_frame_presented`]), then dropped. `None` before
+    /// that stash call and after the summary has been emitted once.
+    startup_spans: Option<StartupSpans>,
 }
 
 impl IosAppHandle {
@@ -163,6 +179,38 @@ impl IosAppHandle {
             // Attached later, on the first layout, via `forgekit_init_accessibility`
             // once Swift can supply the UIView (see the field doc).
             a11y: None,
+            // Honors `perf::enabled()`'s cache internally; a no-op recorder
+            // in a non-perf build (see the field doc).
+            frame_stats: FrameStats::new(),
+            // Stashed by `ffi_glue::create_handle` right after this call
+            // returns (see `Self::set_startup_spans`).
+            startup_spans: None,
+        }
+    }
+
+    /// Stash the startup-span recorder `ffi_glue::create_handle` began (see
+    /// its docs) so [`Self::latch_first_frame_presented`] can complete it
+    /// once this handle actually presents its first frame. Called exactly
+    /// once, immediately after construction returns.
+    pub(crate) fn set_startup_spans(&mut self, spans: StartupSpans) {
+        self.startup_spans = Some(spans);
+    }
+
+    /// Complete the startup-span summary on the first frame this handle
+    /// actually presents (`FrameOutcome::Rendered`, reported by
+    /// [`Self::frame`]'s `bool` return): records
+    /// [`perf::SPAN_FIRST_FRAME_PRESENTED`], emits the one
+    /// `forgekit-perf startup ...` summary line, then drops the recorder.
+    ///
+    /// Idempotent by construction (`Option::take`): a `None` — already
+    /// latched, or never stashed (perf disabled, so `ffi_glue::create_handle`
+    /// still stashes a disabled recorder whose `emit_log` is itself a
+    /// no-op) — is a no-op, so `ffi_glue::render_frame` can call this
+    /// unconditionally after every [`Self::frame`] call that returns `true`.
+    pub(crate) fn latch_first_frame_presented(&mut self) {
+        if let Some(mut spans) = self.startup_spans.take() {
+            spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
+            spans.emit_log();
         }
     }
 
@@ -376,7 +424,12 @@ impl IosAppHandle {
     /// this frame becomes a no-op, and the *next* `forgekit_render_frame`/
     /// `forgekit_resize` FFI entry recreates the surface from the retained
     /// `metal_layer` (see [`crate::ffi_glue`]) before rendering resumes.
-    pub(crate) fn frame(&mut self, timestamp_ns: u64) {
+    ///
+    /// Returns whether this call actually presented a frame
+    /// (`FrameOutcome::Rendered`) — [`crate::ffi_glue::render_frame`] uses this
+    /// to latch the first-presented-frame startup span exactly once (see
+    /// [`Self::latch_first_frame_presented`]); every other caller may ignore it.
+    pub(crate) fn frame(&mut self, timestamp_ns: u64) -> bool {
         // Pump the UI-thread reactive local-task queue BEFORE the ready/paused
         // gate below: placed after it, queued `spawn_local` completions (e.g. a
         // signal write scheduled from a background task) would stall for as
@@ -408,7 +461,7 @@ impl IosAppHandle {
 
         let ready = self.phase() == SurfacePhase::SurfaceReady;
         if !crate::ffi_support::should_render_frame(ready, self.paused) {
-            return;
+            return false;
         }
 
         // Drain any queued accessibility actions (VoiceOver activations, etc.)
@@ -429,16 +482,27 @@ impl IosAppHandle {
             }
         }
 
+        // Perf instrumentation (spec §14 phase 7.A task 09): read the cached
+        // switch exactly once per frame and gate every `Instant::now()` read
+        // below behind it — a disabled build takes zero clock reads on this
+        // path, not merely a no-op record (`FrameStats::record` itself is
+        // also a no-op when disabled, but the timer reads this guard skips
+        // are the actual hot-path cost the task's acceptance criteria call
+        // out).
+        let perf_on = perf::enabled();
+
         // Rebuild under the root `Owner` so any signal read/`provide_context`
         // during a per-frame rebuild is tracked/scoped correctly, mirroring the
         // desktop shell (`runtime.with_owner(|| ...)`) and `create_handle`'s
         // initial construction. Degrade gracefully to an unwrapped rebuild if
         // the runtime is somehow absent — the frame path must never panic
         // across the C-ABI boundary.
+        let rebuild_start = perf_on.then(Instant::now);
         match ReactiveRuntime::get() {
             Some(rt) => rt.with_owner(|| self.app.rebuild()),
             None => self.app.rebuild(),
         }
+        let rebuild = rebuild_start.map(|t| t.elapsed()).unwrap_or_default();
 
         // Sanitize once per frame; layout and the paint transform below MUST
         // consume this identical value (an untrusted `f32` scale from the FFI
@@ -446,21 +510,26 @@ impl IosAppHandle {
         let scale = sanitize_scale(self.scale);
         let (lw, lh) = logical_size(self.physical.0, self.physical.1, scale);
         let logical = Size::new(lw, lh);
+        let layout_start = perf_on.then(Instant::now);
         {
             let text_ctx: &mut dyn Any = &mut self.text_ctx;
             self.app.layout(logical, text_ctx);
         }
+        let layout = layout_start.map(|t| t.elapsed()).unwrap_or_default();
 
         // Push the accessibility tree AFTER layout (node bounds come from the
         // post-layout geometry — spec §9). The `push_if_active` closure walks the
         // semantics tree only when an assistive technology is active, so this is a
         // cheap early-return otherwise (phase-6d task 05). v1 pushes the whole tree
-        // every active frame; accesskit dedupes unchanged nodes internally.
+        // every active frame; accesskit dedupes unchanged nodes internally. Not
+        // folded into either pass's timing above/below — it is a11y-conditional
+        // work orthogonal to the rebuild/layout/paint/encode split.
         if let Some(a11y) = self.a11y.as_ref() {
             let app = &mut self.app;
             a11y.push_if_active(|| app.semantics());
         }
 
+        let paint_start = perf_on.then(Instant::now);
         self.scene.reset();
         {
             let mut builder = SceneBuilder::new(&mut self.scene);
@@ -479,25 +548,45 @@ impl IosAppHandle {
             let _ = self.app.paint(&mut builder, frame_time);
             builder.pop_transform();
         }
+        let paint = paint_start.map(|t| t.elapsed()).unwrap_or_default();
 
         // Clear to the live theme's surface color rather than a hardcoded
         // white, so a dark-scheme app doesn't render its dark-themed widgets
         // over a white canvas (6e Finding 6).
-        match self
-            .renderer
-            .render(&self.render_cx, &self.scene, self.theme.scheme().surface)
-        {
+        let encode_start = perf_on.then(Instant::now);
+        let render_result =
+            self.renderer
+                .render(&self.render_cx, &self.scene, self.theme.scheme().surface);
+        let encode_present = encode_start.map(|t| t.elapsed()).unwrap_or_default();
+
+        self.frame_stats.record(FramePasses {
+            rebuild,
+            layout,
+            paint,
+            encode_present,
+            skipped: false,
+        });
+        if self.frame_stats.should_emit() {
+            self.frame_stats.emit_log();
+        }
+
+        match render_result {
             // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
             // next CADisplayLink frame draws against the fresh configuration.
-            Ok(FrameOutcome::Redraw) => {}
+            Ok(FrameOutcome::Redraw) => false,
             // Surface lost: dropped by the machine. The next render_frame/resize
             // FFI entry recreates it from the retained `metal_layer` (see
             // `ffi_glue`), bounded by the CADisplayLink cadence — not a busy loop.
             Ok(FrameOutcome::SurfaceLost) => {
                 log::warn!("forgekit-shell-ios: surface lost; recreating on next frame/resize");
+                false
             }
-            Ok(FrameOutcome::Rendered | FrameOutcome::Skipped) => {}
-            Err(err) => log::error!("forgekit-shell-ios: render error: {err:#}"),
+            Ok(FrameOutcome::Rendered) => true,
+            Ok(FrameOutcome::Skipped) => false,
+            Err(err) => {
+                log::error!("forgekit-shell-ios: render error: {err:#}");
+                false
+            }
         }
     }
 }
