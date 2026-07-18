@@ -5,13 +5,14 @@
 //! load runs on the shared background reactive runtime (its timer is a
 //! process-global the parallel `cargo test` default would otherwise race).
 
+use std::any::Any;
 use std::time::{Duration, Instant};
 
 use forgekit::{AnyView, Component};
-use forgekit_core::{PointerPhase, RenderRoot};
+use forgekit_core::{FrameTime, PointerPhase, RenderRoot};
 use forgekit_reactive::ReactiveRuntime;
 use forgekit_text::TextContext;
-use kurbo::Point;
+use kurbo::{Point, Size};
 
 use huddle::{HuddleApp, HuddleState};
 
@@ -45,6 +46,58 @@ fn render_until_loaded(
             "the roster did not load within the deadline"
         );
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Rebuild + layout + paint like [`support::frame`], but painting at `t_ms` on a
+/// caller-advanced clock instead of the shared harness's pinned
+/// [`FrameTime::ZERO`]. Returns the recorded scene together with whether the
+/// paint asked for another frame (i.e. an animation — such as a page transition —
+/// is still running).
+fn frame_at(
+    root: &mut Root,
+    logic: &mut impl FnMut(&mut HuddleState) -> AnyView<HuddleState>,
+    state: &mut HuddleState,
+    tcx: &mut TextContext,
+    t_ms: u64,
+) -> (support::RecScene, bool) {
+    root.rebuild(logic, state);
+    let tcx_any: &mut dyn Any = tcx;
+    root.layout_with_text(Size::new(support::W, support::H), tcx_any);
+    let mut scene = support::RecScene::default();
+    let outcome = root.paint(&mut scene, FrameTime::from_nanos(t_ms * 1_000_000));
+    (scene, outcome.needs_frame)
+}
+
+/// Drive the paint clock forward until no animation asks for another frame,
+/// settling the app's boot-time entrance transition, and return the settled
+/// scene.
+///
+/// The app mounts *two* Home pages at boot — the navigator's seeded root page and
+/// the router's pushed `"/"` route — so an `M3FadeThrough` cross-fade is in flight
+/// on the first frames. The shared [`support::frame`] helper paints at
+/// [`FrameTime::ZERO`], which freezes that transition forever; and while a
+/// transition runs the navigator suppresses ALL page input (its input-blocking
+/// contract), so a gesture dispatched mid-transition never reaches the roster.
+/// Advancing the clock lets the entrance settle (the leaving page is torn down)
+/// exactly as a real shell's monotonic clock does within ~300ms.
+fn settle_transitions(
+    root: &mut Root,
+    logic: &mut impl FnMut(&mut HuddleState) -> AnyView<HuddleState>,
+    state: &mut HuddleState,
+    tcx: &mut TextContext,
+) -> support::RecScene {
+    let mut t_ms = 50u64;
+    loop {
+        t_ms += 16;
+        let (scene, needs_frame) = frame_at(root, logic, state, tcx, t_ms);
+        if !needs_frame {
+            return scene;
+        }
+        assert!(
+            t_ms < 50 + 16 * 300,
+            "the boot-time entrance transition never settled"
+        );
     }
 }
 
@@ -105,13 +158,20 @@ fn swipe_right_archives_with_an_undo_toast() {
     let mut tcx = TextContext::new();
 
     let loading = frame(&mut root, &mut logic, &mut state, &mut tcx);
-    let loaded = render_until_loaded(
+    render_until_loaded(
         &mut root,
         &mut logic,
         &mut state,
         &mut tcx,
         loading.glyph_runs,
     );
+
+    // Settle the boot-time entrance cross-fade before driving the gesture: while a
+    // transition is in flight the navigator blocks all page input, so a swipe
+    // dispatched now would be swallowed (see `settle_transitions`). The settled
+    // scene paints only the live roster, so its first row circle is a real
+    // swipeable row (not a frozen leaving-page skeleton).
+    let loaded = settle_transitions(&mut root, &mut logic, &mut state, &mut tcx);
 
     let center = first_row_center(&loaded);
     let y = center.y;

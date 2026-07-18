@@ -342,17 +342,17 @@ impl Widget for SwipeableWidget {
         scene.push_clip(origin, size);
 
         // Reveal the matching action strip behind the (about-to-be-offset) child.
-        if self.offset > 0.0 {
-            if let Some(color) = self.right_color {
-                let strip = Size::new(self.offset.min(size.width), size.height);
-                Self::paint_action(scene, origin, strip, color);
-            }
-        } else if self.offset < 0.0 {
-            if let Some(color) = self.left_color {
-                let w = (-self.offset).min(size.width);
-                let strip_origin = Point::new(origin.x + size.width - w, origin.y);
-                Self::paint_action(scene, strip_origin, Size::new(w, size.height), color);
-            }
+        if self.offset > 0.0
+            && let Some(color) = self.right_color
+        {
+            let strip = Size::new(self.offset.min(size.width), size.height);
+            Self::paint_action(scene, origin, strip, color);
+        } else if self.offset < 0.0
+            && let Some(color) = self.left_color
+        {
+            let w = (-self.offset).min(size.width);
+            let strip_origin = Point::new(origin.x + size.width - w, origin.y);
+            Self::paint_action(scene, strip_origin, Size::new(w, size.height), color);
         }
 
         self.sync_child_origin();
@@ -408,14 +408,14 @@ impl Widget for SwipeableWidget {
             PointerPhase::Up => {
                 if self.dragging {
                     // Commit past the threshold (an Up — state mutation is allowed).
-                    if self.offset > self.commit_px() {
-                        if let Some(cb) = self.on_swipe_right.as_mut() {
-                            cb(ctx);
-                        }
-                    } else if self.offset < -self.commit_px() {
-                        if let Some(cb) = self.on_swipe_left.as_mut() {
-                            cb(ctx);
-                        }
+                    if self.offset > self.commit_px()
+                        && let Some(cb) = self.on_swipe_right.as_mut()
+                    {
+                        cb(ctx);
+                    } else if self.offset < -self.commit_px()
+                        && let Some(cb) = self.on_swipe_left.as_mut()
+                    {
+                        cb(ctx);
                     }
                     // Spring closed either way.
                     self.settling = true;
