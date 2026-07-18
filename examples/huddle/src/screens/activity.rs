@@ -81,7 +81,7 @@ impl forgekit::Component for ActivityScreen {
     }
 
     fn build(&self, state: &mut ActivityState) -> AnyView<ActivityState> {
-        if let Some(item) = state.open.clone() {
+        if let Some(item) = state.open {
             return detail_view(item);
         }
 

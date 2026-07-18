@@ -40,12 +40,21 @@ const LOAD_LATENCY_MS: u64 = 400;
 /// read/unread flag. `mock::ActivityItem` carries no read/unread field of its
 /// own (`src/mock/**` is a frozen hub file — see `src/README-phase-c.md`), so
 /// every freshly loaded item starts unread until [`MarkAllRead`] clears it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ActivityRow {
     /// The underlying mention.
     pub item: ActivityItem,
     /// Whether this row is still unread.
     pub unread: bool,
+}
+
+/// Id-based equality: `mock::ActivityItem` (a frozen hub type) derives no
+/// `PartialEq`, and mock rows are static data keyed by `message_id`, so
+/// message-id + unread-flag equality is exact row equality.
+impl PartialEq for ActivityRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.item.message_id == other.item.message_id && self.unread == other.unread
+    }
 }
 
 /// Loads the activity feed after a mocked network delay. `items` is supplied
