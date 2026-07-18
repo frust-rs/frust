@@ -772,18 +772,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "counter"
-version = "0.1.0"
-dependencies = [
- "forgekit",
- "forgekit-core",
- "forgekit-scene",
- "forgekit-text",
- "kurbo",
- "peniko",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1384,16 +1372,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gallery"
-version = "0.1.0"
-dependencies = [
- "forgekit",
- "forgekit-core",
- "kurbo",
- "peniko",
-]
-
-[[package]]
 name = "gethostname"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1551,13 +1529,6 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
-
-[[package]]
-name = "hello"
-version = "0.1.0"
-dependencies = [
- "forgekit",
-]
 
 [[package]]
 name = "hermit-abi"
@@ -2033,15 +2004,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "navdemo"
-version = "0.1.0"
-dependencies = [
- "forgekit",
- "forgekit-core",
- "forgekit-reactive",
-]
-
-[[package]]
 name = "ndk"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2081,18 +2043,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
-]
-
-[[package]]
-name = "notes"
-version = "0.1.0"
-dependencies = [
- "forgekit",
- "forgekit-core",
- "forgekit-scene",
- "forgekit-text",
- "kurbo",
- "peniko",
 ]
 
 [[package]]

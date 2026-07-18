@@ -4,12 +4,14 @@
 //! is the only enforcement):
 //!
 //! - `[profile.dev.package.<shader-crate>]` overrides (spec §12.9, 6e
-//!   Finding 5) live in THREE manifests (root, template, catalog) — drift
+//!   Finding 5) live in THREE manifests (root, template, team-demo) — drift
 //!   silently reopens the iOS launch-watchdog crash.
 //! - `[profile.release]` hardening and the `[profile.dev.package."*"]`
-//!   wildcard (phase 7 task 11) live in FIVE manifests (those three plus
-//!   team-demo and inbox) — drift silently reopens the measured size/perf
-//!   regression (review round-0 finding 4).
+//!   wildcard (phase 7 task 11) live in the SAME three manifests (root,
+//!   template, team-demo — phase 8's examples-convergence deleted `catalog`
+//!   and `inbox`, folding their hand-sync role into `team-demo`) — drift
+//!   silently reopens the measured size/perf regression (review round-0
+//!   finding 4).
 //!
 //! The template manifest contains minijinja placeholders elsewhere in the
 //! file, so the blocks are extracted line-wise rather than TOML-parsed.
@@ -58,20 +60,21 @@ fn section_pairs(manifest: &str, header: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// The five manifests carrying the phase-7 hand-synced profile blocks.
-fn five_manifests() -> Vec<std::path::PathBuf> {
+/// The three manifests carrying the phase-7 hand-synced profile blocks
+/// (root, template, team-demo — phase 8's examples-convergence deleted the
+/// `catalog` and `inbox` examples, the other two manifests this used to
+/// compare).
+fn three_manifests() -> Vec<std::path::PathBuf> {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     vec![
         repo_root.join("Cargo.toml"),
         repo_root.join("templates/app/Cargo.toml.tmpl"),
-        repo_root.join("examples/catalog/Cargo.toml"),
         repo_root.join("examples/team-demo/Cargo.toml"),
-        repo_root.join("examples/inbox/Cargo.toml"),
     ]
 }
 
 fn assert_section_identical(header: &str, expect_keys: &[&str]) {
-    let manifests = five_manifests();
+    let manifests = three_manifests();
     let blocks: Vec<BTreeMap<String, String>> = manifests
         .iter()
         .map(|path| {
@@ -91,7 +94,7 @@ fn assert_section_identical(header: &str, expect_keys: &[&str]) {
         assert_eq!(
             &blocks[0],
             other,
-            "{header} in {} has drifted from the root Cargo.toml — the five \
+            "{header} in {} has drifted from the root Cargo.toml — the three \
              manifests must stay identical (DEVELOPMENT.md; phase-7 review \
              round-0 finding 4)",
             path.display()
@@ -100,7 +103,7 @@ fn assert_section_identical(header: &str, expect_keys: &[&str]) {
 }
 
 #[test]
-fn release_profile_identical_across_all_five_manifests() {
+fn release_profile_identical_across_all_three_manifests() {
     assert_section_identical(
         "[profile.release]",
         &["lto", "codegen-units", "strip", "panic"],
@@ -108,18 +111,13 @@ fn release_profile_identical_across_all_five_manifests() {
 }
 
 #[test]
-fn dev_wildcard_override_identical_across_all_five_manifests() {
+fn dev_wildcard_override_identical_across_all_three_manifests() {
     assert_section_identical("[profile.dev.package.\"*\"]", &["opt-level"]);
 }
 
 #[test]
 fn shader_stack_dev_overrides_identical_across_all_three_manifests() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let manifests = [
-        repo_root.join("Cargo.toml"),
-        repo_root.join("templates/app/Cargo.toml.tmpl"),
-        repo_root.join("examples/catalog/Cargo.toml"),
-    ];
+    let manifests = three_manifests();
 
     let overrides: Vec<BTreeMap<String, String>> = manifests
         .iter()

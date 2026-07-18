@@ -1,20 +1,19 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "examples/*"]
-# examples/inbox is a standalone package (its own [workspace] root, own
-# Cargo.lock) so its git+rev clean-signals dependency never enters the root
-# workspace graph — `exclude` beats the `examples/*` members glob (see
-# docs/DEVELOPMENT.md's Version-Pin Policy).
-# examples/team-demo is likewise standalone (its own [workspace] root, own
-# Cargo.lock) — a `forgekit create`-generated project embedded verbatim to
-# gate the Android build pipeline end-to-end (see
-# workflow/plans/features/team-demo-android).
-# examples/catalog is likewise standalone (own [workspace] root, own
-# Cargo.lock) — converted in phase 6e so `forgekit run`/`build` can install it
-# on real devices: the generated iOS Xcode build phase resolves
-# `target/<triple>/<profile>/libcatalog.a` relative to the project directory,
-# which a root-workspace member's shared `target/` would break.
-exclude = ["examples/inbox", "examples/team-demo", "examples/catalog"]
+# examples/team-demo is the sole example (phase 8 examples-convergence:
+# hello/counter/notes/gallery/navdemo/catalog/inbox were folded into it and
+# deleted) — standalone (its own [workspace] root, own Cargo.lock) for two
+# independent reasons: (1) its `clean-signals`/`clean-signals-forgekit` path
+# deps point at a sibling `clean-signals-rs` checkout, which must never enter
+# the root workspace graph (see docs/DEVELOPMENT.md's Version-Pin Policy);
+# (2) its generated Android AND iOS projects (`forgekit run`/`build` install
+# targets, gained in phase 8) need a project-local `target/` dir — the
+# generated iOS Xcode build phase resolves
+# `target/<triple>/<profile>/libteam_demo.a` relative to the project
+# directory, which a root-workspace member's shared `target/` would break
+# (the same rationale the now-deleted `catalog` example carried).
+exclude = ["examples/team-demo"]
 
 [workspace.package]
 version = "0.1.0"
@@ -139,9 +138,10 @@ forgekit = { path = "crates/forgekit" }
 # packages, not the whole dependency graph (`opt-level = 3`'s further gain
 # over 2 is marginal for straight-line shader-translation code and not worth
 # its added compile-time cost). This is forgekit's own workspace dev
-# workflow (`cargo run -p hello`, etc.); the same override lands in
-# `templates/app/Cargo.toml.tmpl` (every generated app) and
-# `examples/catalog/Cargo.toml` (the 6e repro vehicle).
+# workflow (building/testing the crates in this workspace directly); the
+# same override lands in `templates/app/Cargo.toml.tmpl` (every generated
+# app) and `examples/team-demo/Cargo.toml` (the 6e repro vehicle, formerly
+# the now-deleted `catalog` example, before phase 8's examples-convergence).
 [profile.dev.package.vello]
 opt-level = 2
 
@@ -171,10 +171,11 @@ opt-level = 2
 # (opt-level 2) still win over this wildcard since a named package override
 # takes precedence over `"*"`. Targets emulator/debug first-frame cost —
 # parley/swash/image/kurbo compiled at `opt-level = 0` are part of that cost.
-# Hand-synced across `templates/app/Cargo.toml.tmpl`, `examples/catalog/
-# Cargo.toml`, `examples/team-demo/Cargo.toml`, and `examples/inbox/
-# Cargo.toml` (the last two for consistency — neither has a shader-stack
-# override list to keep in sync).
+# Hand-synced across `templates/app/Cargo.toml.tmpl` and `examples/team-demo/
+# Cargo.toml` (phase 8's examples-convergence dropped the other two
+# manifests this used to be hand-synced against — the now-deleted `catalog`
+# and `inbox` examples' own `Cargo.toml`s — along with the examples
+# themselves).
 [profile.dev.package."*"]
 opt-level = 1
 
@@ -183,10 +184,10 @@ opt-level = 1
 # from the root workspace (`hello`/`counter`/`notes`/`gallery`/`navdemo`)
 # silently fell back to Cargo's own release defaults (no LTO, cgu=16,
 # opt-level 3, no strip/abort). `lto = "fat"` + `codegen-units = 1`
-# (phase 7 task 11, measured 2026-07-18 against `examples/catalog`'s release
-# arm64-v8a `.so` via `scripts/size-report.sh` — see `workflow/plans/
-# features/forgekit-phase-7-performance/research/BASELINE.md`): fat LTO +
-# cgu=1 alone (opt-level 3, the default — no override needed) shrank the
+# (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
+# example's release arm64-v8a `.so` via `scripts/size-report.sh` — see
+# `workflow/plans/features/forgekit-phase-7-performance/research/BASELINE.md`):
+# fat LTO + cgu=1 alone (opt-level 3, the default — no override needed) shrank the
 # prior baseline (lto="thin", no cgu override) from 8.46MB to 7.52MB
 # unstripped, an 11.1% win taken unconditionally. `opt-level` "s"/"z" were
 # also measured, but only *with* a shader/render-stack (vello/wgpu*/naga)
@@ -197,9 +198,11 @@ opt-level = 1
 # bar once the carve-out that protects render-path perf is in place, so
 # `opt-level` stays at its default (3) and no carve-out is needed. This
 # block and the wildcard dev override above are hand-synced across
-# `templates/app/Cargo.toml.tmpl`, `examples/catalog/Cargo.toml`,
-# `examples/team-demo/Cargo.toml`, and `examples/inbox/Cargo.toml`
-# (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule).
+# `templates/app/Cargo.toml.tmpl` and `examples/team-demo/Cargo.toml`
+# (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule; phase 8's
+# examples-convergence dropped the other two manifests this used to be
+# hand-synced against — the now-deleted `catalog` and `inbox` examples' own
+# `Cargo.toml`s — along with the examples themselves).
 [profile.release]
 lto = "fat"
 codegen-units = 1
