@@ -31,8 +31,8 @@ use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
 use forgekit_shell_common::{
-    AppTree, ThemeOverrideWatcher, effective_brightness_for_platform_change, logical_size,
-    sanitize_scale,
+    AppTree, FrameGate, FrameInputs, ThemeOverrideWatcher,
+    effective_brightness_for_platform_change, logical_size, sanitize_scale,
 };
 use forgekit_text::TextContext;
 use forgekit_theme::{Brightness, Theme};
@@ -110,6 +110,52 @@ pub struct AndroidAppHandle {
     /// the latch that guarantees a single emission and costs nothing (no
     /// clock read) on every later frame.
     startup_spans: Option<StartupSpans>,
+    /// The skip-frame gate (task 17, spec §14 phase 7): consulted once per
+    /// [`Self::frame`] after the per-tick inputs are gathered. When it returns
+    /// [`FrameDecision::Skip`](forgekit_shell_common::FrameDecision::Skip) the
+    /// frame's rebuild/layout/paint/encode/present passes are all skipped and
+    /// only a `skipped` [`FramePasses`] is recorded — CPU/GPU stay near idle
+    /// while nothing changes. The Choreographer keeps posting frames regardless
+    /// (only frame *production* stops); the loop cadence is unchanged. Honors
+    /// the [`FORGEKIT_NO_FRAME_GATE`](forgekit_shell_common::frame_gate::NO_FRAME_GATE_VAR)
+    /// kill switch (resolved once at construction) — a disabled gate always
+    /// runs, matching pre-gate behavior verbatim.
+    frame_gate: FrameGate,
+    /// Latch: a pointer/IME event reached the tree since the last frame. Set by
+    /// [`Self::dispatch_touch`]/[`Self::ime_apply`]/[`Self::ime_action`] (the
+    /// JNI event entry points that run *between* frames), read-and-cleared each
+    /// frame into [`FrameInputs::events_since_last_frame`]. This is what keeps a
+    /// mid-drag gesture producing frames: Android delivers a continuous stream
+    /// of `MotionEvent.ACTION_MOVE`s during a drag, each tripping this latch (so
+    /// it also stands in for pointer-capture, which has no `AppTree` accessor —
+    /// see [`Self::frame`]'s input-gathering).
+    events_since_last_frame: bool,
+    /// Latch: the GPU surface was (re)created or resized since the last frame.
+    /// Set by [`Self::set_window`]/[`Self::resize`], read-and-cleared each frame
+    /// into [`FrameInputs::surface_changed_or_resized`] (and, in the same frame,
+    /// used to force the layout pass so the new dimensions take effect). Those
+    /// same lifecycle transitions also open the gate's resume-warmup window (see
+    /// [`FrameGate::note_resumed`]).
+    surface_dirty: bool,
+    /// Latch: the platform light/dark preference changed since the last frame
+    /// (`nativeSetAppearance` → [`Self::set_appearance`]). Read-and-cleared each
+    /// frame into [`FrameInputs::theme_or_appearance_changed`] (OR'd with the
+    /// in-frame theme-override poll result). Belt-and-suspenders with the change
+    /// flags [`Self::set_appearance`]'s `push_theme` already marks.
+    appearance_dirty: bool,
+    /// Latch: the previous paint pass asked for another frame
+    /// ([`forgekit_core::PaintOutcome::needs_frame`] — a running animation/
+    /// transition). Set from each run frame's paint return, read into
+    /// [`FrameInputs::last_needs_frame`] so an in-flight animation keeps
+    /// producing frames until it settles (whereupon paint returns `false` and
+    /// the gate may skip again).
+    last_needs_frame: bool,
+    /// Whether the layout pass has run at least once. Until it has, the
+    /// layout-skip seam in [`Self::frame`] force-runs layout (a paint before the
+    /// first layout would have no valid geometry); after the first layout it is
+    /// gated on the drained [`ChangeFlags`](forgekit_core::view::ChangeFlags)
+    /// (or a surface resize).
+    first_layout_done: bool,
 }
 
 /// Per-handle accessibility state (phase 6d D3): the injecting accesskit Android
@@ -269,6 +315,13 @@ impl AndroidAppHandle {
         provide_context(theme.clone());
         app.rebuild();
         startup_spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+        // Seed the resume-warmup window so the first handful of frames run
+        // unconditionally (surface just came up; the first tick's change
+        // signals may not yet be observable — see `FrameGate::note_resumed`).
+        // The initial `rebuild()` above also leaves change flags pending, which
+        // independently forces the first frame to run and to lay out.
+        let mut frame_gate = FrameGate::new();
+        frame_gate.note_resumed();
         Self {
             render_cx,
             renderer,
@@ -285,6 +338,12 @@ impl AndroidAppHandle {
             a11y: None,
             frame_stats: FrameStats::new(),
             startup_spans: Some(startup_spans),
+            frame_gate,
+            events_since_last_frame: false,
+            surface_dirty: false,
+            appearance_dirty: false,
+            last_needs_frame: false,
+            first_layout_done: false,
         }
     }
 
@@ -318,19 +377,24 @@ impl AndroidAppHandle {
     /// before `self.app` is touched — this both keeps the lock hold-time
     /// minimal and sidesteps borrowing `self.a11y` across the `&mut self.app`
     /// calls. The `needs_redraw` each action returns is implicit here: the
-    /// continuous Choreographer loop already repaints every tick (mirroring
-    /// [`Self::dispatch_touch`]).
-    fn apply_pending_accessibility_actions(&mut self) {
+    /// continuous Choreographer loop already reconsiders the frame every tick.
+    ///
+    /// Returns whether any action was applied this call, which [`Self::frame`]
+    /// feeds into [`FrameInputs::a11y_action_performed`] so an assistive-tech
+    /// action forces the frame to run (the state it mutated must be reflected).
+    fn apply_pending_accessibility_actions(&mut self) -> bool {
         let drained: Vec<(NodeId, Action)> = match self.a11y.as_ref() {
             Some(a11y) => match a11y.pending_actions.lock() {
                 Ok(mut queue) => queue.drain(..).collect(),
                 Err(_) => Vec::new(),
             },
-            None => return,
+            None => return false,
         };
+        let performed = !drained.is_empty();
         for (node_id, action) in drained {
             let _ = self.app.perform_accessibility_action(node_id.0, action);
         }
+        performed
     }
 
     /// Publish the current accessibility tree to the adapter (phase 6d D3), if it
@@ -385,6 +449,12 @@ impl AndroidAppHandle {
             self.theme.brightness,
             platform,
         );
+        // Frame-gate input (task 17): an appearance change must force the next
+        // frame to run so the re-themed tree repaints. `push_theme` below also
+        // marks LAYOUT|PAINT change flags, so this is belt-and-suspenders with
+        // `change_flags_pending` — but it maps the appearance edit onto its own
+        // `theme_or_appearance_changed` input directly.
+        self.appearance_dirty = true;
         self.push_theme();
     }
 
@@ -428,6 +498,11 @@ impl AndroidAppHandle {
     pub(crate) fn set_window(&mut self, window: NativeWindow, physical: (u32, u32)) {
         self.physical = physical;
         self.window = Some(window);
+        // Surface (re)creation: force the next frame to run (and lay out at the
+        // new dimensions) and open the gate's resume-warmup window — the first
+        // ticks after a surface swap must not be gated away (task 17).
+        self.surface_dirty = true;
+        self.frame_gate.note_resumed();
     }
 
     /// Resize the live surface in place (same window, new dimensions). Safe: the
@@ -436,6 +511,11 @@ impl AndroidAppHandle {
         self.renderer
             .on_surface_changed(&self.render_cx, physical.0, physical.1);
         self.physical = physical;
+        // In-place resize: force the next frame to run and relayout at the new
+        // size, and open the warmup window (task 17) — same rationale as
+        // `set_window`.
+        self.surface_dirty = true;
+        self.frame_gate.note_resumed();
     }
 
     /// Tear the surface down (`surfaceDestroyed`): drop the renderer's surface
@@ -475,6 +555,11 @@ impl AndroidAppHandle {
             position,
             button: PointerButton::Primary,
         });
+        // Frame-gate latch (task 17): an event between frames must force the
+        // next frame to run so the tree reflects the dispatch. Set even on a
+        // no-op dispatch — correctness beats savings, and the gate defaults to
+        // "must run" when in doubt.
+        self.events_since_last_frame = true;
         let _ = self.app.event(&event);
     }
 
@@ -487,6 +572,9 @@ impl AndroidAppHandle {
     ///
     /// [`ImeEvent::ApplyEditingState`]: forgekit_core::event::ImeEvent::ApplyEditingState
     pub(crate) fn ime_apply(&mut self, state: EditingState) {
+        // Frame-gate latch (task 17): an IME edit between frames forces the next
+        // frame to run (see `dispatch_touch`).
+        self.events_since_last_frame = true;
         let _ = self.app.ime_apply(state);
     }
 
@@ -510,6 +598,9 @@ impl AndroidAppHandle {
             modifiers: Modifiers::default(),
             repeat: false,
         });
+        // Frame-gate latch (task 17): a soft-keyboard action forces the next
+        // frame to run (see `dispatch_touch`).
+        self.events_since_last_frame = true;
         let _ = self.app.event(&event);
     }
 
@@ -526,29 +617,73 @@ impl AndroidAppHandle {
     /// across surface loss; this makes those cheap). On `FrameOutcome::SurfaceLost`
     /// the machine has already dropped the surface; recovery waits for the next
     /// `surfaceChanged`/`surfaceCreated` rather than recreating mid-frame.
+    ///
+    /// # Frame gate (task 17, spec §14 phase 7)
+    ///
+    /// The pass order is contract-critical: **pump first**, then gather every
+    /// [`FrameInputs`] signal, then [`FrameGate::decide`]. On a [`Skip`] the
+    /// rebuild/layout/paint/encode/present passes are all bypassed (only a
+    /// `skipped` [`FramePasses`] is recorded); on a [`Run`] the passes proceed
+    /// as before, with the layout pass itself finer-gated on the drained
+    /// [`ChangeFlags`](forgekit_core::view::ChangeFlags). Every input either
+    /// reads a tree accessor or a handle-side latch cleared here — see the
+    /// inline comments at each gather site for the RESEARCH §C mapping.
+    ///
+    /// The pump → gather → decide ordering and the latch lifecycle are asserted
+    /// only by inspection, not a unit test: this whole module is
+    /// `#[cfg(target_os = "android")]` (it needs a live GPU surface + JNI handle
+    /// to construct an [`AndroidAppHandle`]), so it never runs under the host
+    /// `cargo test --workspace`. The decision logic it drives *is* exhaustively
+    /// host-tested where it lives — `forgekit_shell_common::frame_gate`'s
+    /// `decide`/warmup/kill-switch tests — so what stays unverified here is only
+    /// the wiring, which the `cargo check --target aarch64-linux-android` gate
+    /// compile-checks and the manual 7.E device checklist exercises.
+    ///
+    /// [`Skip`]: forgekit_shell_common::FrameDecision::Skip
+    /// [`Run`]: forgekit_shell_common::FrameDecision::Run
     pub(crate) fn frame(&mut self, frame_time_nanos: u64) {
-        // Pump the reactive runtime's local task queue BEFORE the surface-ready
-        // gate below: a controller-driven `spawn_local` task must keep draining
-        // every Choreographer tick even while the surface is torn down (e.g.
+        // ---------------------------------------------------------------
+        // Per-tick input gathering (contract order, task 17 / task 07):
+        // pump FIRST, then gather every FrameInputs signal, THEN decide.
+        // ---------------------------------------------------------------
+
+        // Pump the reactive runtime's local task queue BEFORE anything else: a
+        // controller-driven `spawn_local` task must keep draining every
+        // Choreographer tick even while the surface is torn down (e.g.
         // mid-rotation) or not yet created, not just once it's ready — otherwise
-        // local tasks stall through surface churn.
+        // local tasks stall through surface churn. Pumping first is also task
+        // 07's documented ordering contract: a signal a just-drained local task
+        // writes must be observed by *this* frame's dirty check below.
         crate::jni_glue::pump_reactive_runtime();
+
+        // Reactive signals-dirty (task 07), drained right after the pump per the
+        // pump-first ordering contract: did any tracked signal change since the
+        // last frame? Draining here (once per frame) is correct even on a frame
+        // the gate goes on to skip — a skip means "nothing changed", so there is
+        // no dirty edge to preserve.
+        let signals_dirty = ReactiveRuntime::get()
+            .map(|rt| rt.take_signals_dirty())
+            .unwrap_or(false);
 
         // Poll the app-facing theme override slot (task 6c-04) once per
         // frame, before the surface-ready gate — theme delivery needs no
         // renderer, so this stays in sync even while the surface is torn down
-        // (mirroring the reactive-runtime pump just above).
+        // (mirroring the reactive-runtime pump just above). A poll that changes
+        // the theme is a frame-gate input (`theme_or_appearance_changed`).
+        let mut theme_or_appearance_changed = std::mem::take(&mut self.appearance_dirty);
         match self.theme_override.poll() {
             Some(Some(theme)) => {
                 self.theme = theme;
                 self.theme_override_active = true;
                 self.push_theme();
+                theme_or_appearance_changed = true;
             }
             Some(None) => {
                 self.theme = Theme::m3_baseline();
                 self.theme.brightness = self.platform_brightness;
                 self.theme_override_active = false;
                 self.push_theme();
+                theme_or_appearance_changed = true;
             }
             None => {}
         }
@@ -557,11 +692,53 @@ impl AndroidAppHandle {
         // frame (phase 6d D3), before the surface-ready gate and before the
         // rebuild below so an action's state change is reflected this frame.
         // Cheap (a no-op) whenever nothing is queued, which is the common case.
-        self.apply_pending_accessibility_actions();
+        // Whether anything was applied is a frame-gate input.
+        let a11y_action_performed = self.apply_pending_accessibility_actions();
 
         if self.phase() != SurfacePhase::SurfaceReady {
+            // Surface not ready (Kotlin keeps posting frames across surface
+            // loss): nothing to render or gate. The reactive pump + theme poll
+            // above already ran so state stays live through surface churn; the
+            // event/surface latches are intentionally *not* cleared here so the
+            // first ready frame still sees them. No FrameStats row is recorded
+            // for a not-ready tick (it never was pre-gate either).
             return;
         }
+
+        // Gather the remaining inputs from the tree's existing accessors and the
+        // handle-side latches, then let the gate decide. `mem::take` clears each
+        // latch as it is read, so a skipped frame does not leave a stale signal
+        // for the next tick.
+        //
+        // Two fields have no dedicated `AppTree` accessor and are handled by
+        // proxy, deliberately erring toward "run" (correctness beats savings):
+        // - `pointer_capture_active`: an active drag streams `ACTION_MOVE`
+        //   events, each tripping `events_since_last_frame`, so capture is
+        //   covered by the events latch. A finger held perfectly still mid-drag
+        //   produces no events *and* no visual change, so skipping is correct.
+        // - `focus_or_ime_active`: proxied by `ime_state().is_some()` — a
+        //   focused editable publishes an IME surface, so its blinking caret /
+        //   selection chrome keeps producing frames while focused.
+        let inputs = FrameInputs {
+            signals_dirty,
+            events_since_last_frame: std::mem::take(&mut self.events_since_last_frame),
+            pointer_capture_active: false,
+            focus_or_ime_active: self.app.ime_state().is_some(),
+            last_needs_frame: self.last_needs_frame,
+            change_flags_pending: self.app.has_pending_change_flags(),
+            theme_or_appearance_changed,
+            surface_changed_or_resized: std::mem::take(&mut self.surface_dirty),
+            a11y_action_performed,
+            // The gate's own warmup counter (seeded by `note_resumed`) drives
+            // the resume-warmup Run; leaving this `false` and relying on the
+            // counter avoids double-counting (both force a Run identically).
+            resumed_recently: false,
+        };
+
+        // The surface (re)creation / resize that set `surface_dirty` also forces
+        // the layout pass this frame (new dimensions must take effect); ditto the
+        // very first frame, before any layout has established geometry.
+        let force_layout = inputs.surface_changed_or_resized || !self.first_layout_done;
 
         // Perf instrumentation (task 08, spec §14 phase 7.A): the process-wide
         // switch is one cached bool read (`perf::enabled`'s `OnceLock`), not a
@@ -569,6 +746,27 @@ impl AndroidAppHandle {
         // `bool::then`, so a disabled build/run never reads a timer on this
         // hot path (guard first, per this module's perf convention).
         let perf_on = perf::enabled();
+
+        if self.frame_gate.decide(inputs).is_skip() {
+            // Skip path (task 17): nothing changed — return before rebuild, so
+            // CPU/GPU stay near idle. Record a `skipped` FramePasses (all-zero
+            // pass durations) so the skip counter accumulates in the perf log
+            // line; the Choreographer keeps re-posting callbacks, so only frame
+            // *production* stops, not the loop cadence.
+            self.frame_stats.record(FramePasses {
+                skipped: true,
+                ..FramePasses::default()
+            });
+            if self.frame_stats.should_emit() {
+                self.frame_stats.emit_log();
+            }
+            return;
+        }
+
+        // ---------------------------------------------------------------
+        // Run path: rebuild -> (layout iff needed) -> paint -> encode/present,
+        // timed as before (task 08's instrumentation preserved).
+        // ---------------------------------------------------------------
 
         // Rebuild under the root `Owner` so any signal read/`provide_context`
         // during a per-frame rebuild is tracked/scoped correctly, mirroring the
@@ -583,16 +781,26 @@ impl AndroidAppHandle {
         }
         let rebuild_time = rebuild_start.map_or(Duration::ZERO, |t| t.elapsed());
 
+        // Layout-skip seam (task 16 / frame_gate module docs): drain the change
+        // flags the rebuild (or a prior `set_theme`) accumulated, and run layout
+        // only if they need it — or the first frame / a surface resize forces it.
+        // The `set_theme => LAYOUT|PAINT` contract keeps `Text`'s layout-baked
+        // glyph color correct across a bare theme swap (it marks LAYOUT pending,
+        // so a theme change always relayouts even with no view change). Paint
+        // still always runs below, replaying the last-baked geometry on a
+        // layout-skipped frame.
+        let needs_layout = self.app.take_change_flags().needs_layout();
         // Sanitize once per frame; layout and the paint transform below MUST
         // consume this identical value (an untrusted JNI `jfloat` density
         // must never let the two passes disagree — see `sanitize_scale`).
         let scale = sanitize_scale(self.scale);
-        let (lw, lh) = logical_size(self.physical.0, self.physical.1, scale);
-        let logical = Size::new(lw, lh);
         let layout_start = perf_on.then(Instant::now);
-        {
+        if needs_layout || force_layout {
+            let (lw, lh) = logical_size(self.physical.0, self.physical.1, scale);
+            let logical = Size::new(lw, lh);
             let text_ctx: &mut dyn Any = &mut self.text_ctx;
             self.app.layout(logical, text_ctx);
+            self.first_layout_done = true;
         }
         let layout_time = layout_start.map_or(Duration::ZERO, |t| t.elapsed());
 
@@ -613,11 +821,13 @@ impl AndroidAppHandle {
             // `frameTimeNanos`, forwarded from Kotlin via `nativeOnFrame`.
             let frame_time = FrameTime::from_nanos(frame_time_nanos);
             // The paint pass returns a `needs_frame` continuation signal (spec's
-            // v1 animation seam). This shell runs a continuous Choreographer loop
-            // that already posts the next frame every tick, so the flag is
-            // irrelevant here and deliberately dropped — unlike the desktop shell,
-            // whose `ControlFlow::Wait` loop must honor it to keep animating.
-            let _ = self.app.paint(&mut builder, frame_time);
+            // v1 animation seam). The Choreographer keeps posting frames, but
+            // the frame gate (task 17) now decides whether each is *produced* —
+            // so this flag is no longer irrelevant: latch it into
+            // `last_needs_frame` so an in-flight animation/transition forces the
+            // next frame to run (and stops forcing once it settles).
+            let outcome = self.app.paint(&mut builder, frame_time);
+            self.last_needs_frame = outcome.needs_frame;
             builder.pop_transform();
         }
         let paint_time = paint_start.map_or(Duration::ZERO, |t| t.elapsed());
