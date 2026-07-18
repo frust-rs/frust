@@ -3,8 +3,12 @@
 //!
 //! [`scroll_view`] wraps a child that is laid out with unbounded height; the
 //! view itself takes the incoming constraints and paints the child offset by
-//! `-scroll_offset` inside a clip. Offsets are clamped to `[0, content −
-//! viewport]` — no overscroll.
+//! `-scroll_offset` inside a clip. Offsets settle within `[0, content −
+//! viewport]`; a pointer *drag* past an edge is allowed out of range with
+//! iOS-style rubber-band resistance ([`OVERSCROLL_RESISTANCE`]) and settles back
+//! on release (wheel and fling stay hard-clamped). See [`ScrollView::on_scroll`]
+//! for scroll observation and [`ScrollView::on_refresh_release`] for the
+//! pull-to-refresh trigger.
 //!
 //! # Gesture takeover
 //!
@@ -29,6 +33,8 @@
 //! release seeds the fling clock from `frame_time` (a zero-delta frame), and each
 //! subsequent paint advances it by the inter-frame delta.
 
+use std::rc::Rc;
+
 use forgekit_core::accesskit::Role;
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FLING_STOP,
@@ -38,15 +44,107 @@ use forgekit_core::{
 };
 use kurbo::{Point, Size};
 
+use crate::{ErasedArgCallback, ErasedCallback};
+
+/// iOS-style rubber-band resistance applied to the past-edge portion of a drag:
+/// the visible out-of-range displacement is `raw_excess * OVERSCROLL_RESISTANCE`.
+///
+/// **Community-approximate**: UIScrollView's rubber-banding is a
+/// diminishing-returns curve (roughly `d·(1 − 1/(1 + d/dim·c))`), not a
+/// published constant. A flat `0.5` factor is the common community linear
+/// approximation — half the raw finger travel shows past the edge, giving the
+/// pull a heavier feel the further it is dragged in *raw* terms while staying
+/// cheap and deterministic to reason about. Tunable in one place if a
+/// diminishing curve is wanted later.
+const OVERSCROLL_RESISTANCE: f64 = 0.5;
+
+/// Pull-past-top distance (logical px, measured on the *resisted* overscroll)
+/// beyond which releasing fires [`ScrollView::on_refresh_release`] — the
+/// pull-to-refresh trigger.
+///
+/// **Community-approximate**: iOS's `UIRefreshControl` trigger distance is not a
+/// published constant; ~64pt is the value community reimplementations converge
+/// on for a comfortable pull.
+const REFRESH_TRIGGER_PX: f64 = 64.0;
+
+/// Per-millisecond retain factor for the release-settle animation that returns
+/// an overscrolled surface to its clamped edge: after `dt` ms the remaining
+/// distance to the edge is scaled by `SETTLE_DECAY.powf(dt)`.
+///
+/// **Community-approximate**: `0.988` settles ~95% of the way in ≈250 ms, an
+/// iOS-like snap-back with no published spring spec to match.
+const SETTLE_DECAY: f64 = 0.988;
+
+/// Distance (logical px) below which the settle animation snaps exactly to the
+/// edge and stops, so it terminates instead of asymptotically approaching.
+const SETTLE_STOP_PX: f64 = 0.5;
+
+/// A scroll observation snapshot handed to [`ScrollView::on_scroll`].
+///
+/// `offset` is the clamped scroll position in `[0, max_offset]`; `overscroll` is
+/// the signed past-edge displacement (negative = pulled past the top, positive =
+/// pulled past the bottom), zero while the surface rests in range. During a
+/// drag past an edge, `offset` pins at the edge and `overscroll` carries the
+/// (resisted) pull.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollInfo {
+    /// The clamped scroll offset in `[0, max_offset]` (px scrolled down).
+    pub offset: f64,
+    /// The maximum scroll offset (`content − viewport`, never negative).
+    pub max_offset: f64,
+    /// Signed past-edge displacement: negative past the top, positive past the
+    /// bottom, `0.0` while in range.
+    pub overscroll: f64,
+}
+
+/// A view-held scroll-observation callback (erased to [`ErasedArgCallback`] on
+/// build).
+type OnScroll<State> = Rc<dyn Fn(&mut State, ScrollInfo)>;
+
+/// A view-held pull-to-refresh release callback (erased to [`ErasedCallback`] on
+/// build).
+type OnRefresh<State> = Rc<dyn Fn(&mut State)>;
+
 /// A declarative vertical scroll surface. See the [module docs](self).
 pub struct ScrollView<State: 'static> {
     child: AnyView<State>,
+    /// Fired whenever the offset/overscroll changes (drag, wheel, or — one event
+    /// late — fling/settle). See [`ScrollView::on_scroll`].
+    on_scroll: Option<OnScroll<State>>,
+    /// Fired on pointer `Up` when the past-top overscroll exceeded
+    /// [`REFRESH_TRIGGER_PX`]. See [`ScrollView::on_refresh_release`].
+    on_refresh_release: Option<OnRefresh<State>>,
 }
 
 impl<State: 'static> ScrollView<State> {
     /// Wrap `child` in a vertical scroll view.
     pub fn new<V: View<State>>(child: V) -> Self {
-        Self { child: any(child) }
+        Self {
+            child: any(child),
+            on_scroll: None,
+            on_refresh_release: None,
+        }
+    }
+
+    /// Observe scroll position changes. The callback receives a [`ScrollInfo`]
+    /// snapshot each time the offset or overscroll changes due to input (drag,
+    /// wheel), and — one event late — for fling/settle motion driven at paint
+    /// time (the paint pass carries no [`EventCtx`], so the notification is
+    /// recorded and delivered on the next event, the same controlled-component
+    /// convention the interactive widgets follow). A `Cancel` clears any pending
+    /// notification without firing it.
+    pub fn on_scroll<F: Fn(&mut State, ScrollInfo) + 'static>(mut self, callback: F) -> Self {
+        self.on_scroll = Some(Rc::new(callback));
+        self
+    }
+
+    /// The pull-to-refresh trigger: fires on pointer `Up` when the surface was
+    /// pulled past the top by more than [`REFRESH_TRIGGER_PX`] (post-resistance),
+    /// so an app gets a single "release past threshold" signal without
+    /// reimplementing overscroll thresholding. Never fires on a `Cancel`.
+    pub fn on_refresh_release<F: Fn(&mut State) + 'static>(mut self, callback: F) -> Self {
+        self.on_refresh_release = Some(Rc::new(callback));
+        self
     }
 }
 
@@ -59,7 +157,10 @@ pub fn scroll_view<State: 'static, V: View<State>>(child: V) -> ScrollView<State
 /// The retained widget for a [`ScrollView`].
 pub struct ScrollWidget {
     child: ChildPod,
-    /// Current scroll offset in `[0, max_offset]` (px scrolled down).
+    /// Current *effective* scroll offset (px scrolled down). Normally in
+    /// `[0, max_offset]`, but a drag past an edge lets it go out of range (with
+    /// [`OVERSCROLL_RESISTANCE`] applied) until the release-settle brings it back;
+    /// the fling/wheel/layout paths still hard-clamp via [`ScrollWidget::set_offset`].
     offset: f64,
     /// Resolved viewport size (this widget's own size).
     viewport: Size,
@@ -67,6 +168,22 @@ pub struct ScrollWidget {
     content: Size,
     /// Whether we have taken the gesture over as a scroll drag.
     scrolling: bool,
+    /// The raw (un-resisted) drag position accumulated during an active scroll
+    /// drag; seeded from `offset` at takeover and moved by each drag delta.
+    /// [`OVERSCROLL_RESISTANCE`] is applied to its out-of-range portion to derive
+    /// the effective `offset`, so the resistance never compounds across moves.
+    drag_raw: f64,
+    /// Whether a release-settle animation is returning an overscrolled surface to
+    /// its clamped edge (driven at paint via [`ScrollWidget::settle_tick`]).
+    settling: bool,
+    /// A scroll notification produced by the paint-time fling/settle pump (which
+    /// carries no [`EventCtx`]); delivered to `on_scroll` on the next event and
+    /// cleared by a `Cancel` without firing.
+    pending_scroll_notify: bool,
+    /// The scroll observation callback (`None` if the view set none).
+    on_scroll: Option<ErasedArgCallback<ScrollInfo>>,
+    /// The pull-to-refresh release callback (`None` if the view set none).
+    on_refresh_release: Option<ErasedCallback>,
     /// Whether a `Down` has armed an active gesture (distinct from `scrolling`,
     /// which only becomes true after the drag passes the slop). Set on `Down`
     /// and cleared on `Up`/`Cancel`; the slop/takeover math runs only while it
@@ -97,6 +214,11 @@ impl ScrollWidget {
             viewport: Size::ZERO,
             content: Size::ZERO,
             scrolling: false,
+            drag_raw: 0.0,
+            settling: false,
+            pending_scroll_notify: false,
+            on_scroll: None,
+            on_refresh_release: None,
             down_active: false,
             down_start: Point::ZERO,
             last_drag: Point::ZERO,
@@ -136,6 +258,83 @@ impl ScrollWidget {
         self.child.set_origin(Point::new(0.0, -self.offset));
     }
 
+    /// A snapshot of the current scroll position for [`ScrollView::on_scroll`]:
+    /// the clamped `offset`, the `max_offset`, and the signed past-edge
+    /// `overscroll` (negative past the top). See [`ScrollInfo`].
+    fn scroll_info(&self) -> ScrollInfo {
+        let max = self.max_offset();
+        let overscroll = if self.offset < 0.0 {
+            self.offset
+        } else if self.offset > max {
+            self.offset - max
+        } else {
+            0.0
+        };
+        ScrollInfo {
+            offset: self.offset.clamp(0.0, max),
+            max_offset: max,
+            overscroll,
+        }
+    }
+
+    /// Fire `on_scroll` (if set) with the current [`ScrollInfo`]. Called from the
+    /// event pass after an input-driven offset/overscroll change.
+    fn notify_scroll(&mut self, ctx: &mut EventCtx) {
+        let info = self.scroll_info();
+        if let Some(cb) = self.on_scroll.as_mut() {
+            cb(ctx, info);
+        }
+    }
+
+    /// Deliver a fling/settle notification recorded at paint time (which had no
+    /// [`EventCtx`]) on the next event — one event of latency, the same
+    /// controlled-component convention the fling clock already relies on.
+    fn deliver_pending_scroll(&mut self, ctx: &mut EventCtx) {
+        if self.pending_scroll_notify {
+            self.pending_scroll_notify = false;
+            self.notify_scroll(ctx);
+        }
+    }
+
+    /// Derive the effective `offset` from the raw drag position, applying
+    /// [`OVERSCROLL_RESISTANCE`] to whatever portion is past an edge. Keeping the
+    /// raw position separate means the resistance is applied once per frame, not
+    /// compounded across successive drag moves.
+    fn apply_drag_offset(&mut self) {
+        let max = self.max_offset();
+        let raw = self.drag_raw;
+        self.offset = if raw < 0.0 {
+            raw * OVERSCROLL_RESISTANCE
+        } else if raw > max {
+            max + (raw - max) * OVERSCROLL_RESISTANCE
+        } else {
+            raw
+        };
+    }
+
+    /// Advance a release-settle by `dt_ms`, easing the effective `offset` back to
+    /// its clamped edge and returning whether it is still animating. Pure and
+    /// deterministic (mirrors [`ScrollWidget::tick`]); the paint pump and the
+    /// tests both drive it.
+    pub fn settle_tick(&mut self, dt_ms: f64) -> bool {
+        if !self.settling {
+            return false;
+        }
+        let max = self.max_offset();
+        let target = self.offset.clamp(0.0, max);
+        let remaining = target - self.offset;
+        if remaining.abs() <= SETTLE_STOP_PX {
+            self.offset = target;
+            self.settling = false;
+            self.sync_child_origin();
+            return false;
+        }
+        let retained = SETTLE_DECAY.powf(dt_ms);
+        self.offset = target - remaining * retained;
+        self.sync_child_origin();
+        true
+    }
+
     /// Advance an in-flight fling by `dt_ms`, returning whether it is still
     /// animating. Pure and deterministic — the paint-time pump and the tests
     /// both drive it.
@@ -156,13 +355,16 @@ impl ScrollWidget {
         }
     }
 
-    /// Advance the fling by the wall-clock delta since the last paint, and signal
-    /// [`PaintCtx::request_frame`] while it is still running so the shell keeps
-    /// scheduling frames (the desktop `ControlFlow::Wait` loop would otherwise
-    /// idle). Stops signalling once [`ScrollWidget::tick`] brings the fling to
-    /// rest (`|velocity|` below [`FLING_STOP`], or a scroll bound reached).
+    /// Advance the fling *or* the release-settle by the delta since the last
+    /// paint, and signal [`PaintCtx::request_frame`] while either is still running
+    /// so the shell keeps scheduling frames (the desktop `ControlFlow::Wait` loop
+    /// would otherwise idle). A fling stops once [`ScrollWidget::tick`] brings it
+    /// to rest (`|velocity|` below [`FLING_STOP`], or a scroll bound reached); a
+    /// settle stops once [`ScrollWidget::settle_tick`] reaches the edge. Because
+    /// this path carries no [`EventCtx`], an offset change here records a pending
+    /// `on_scroll` notification delivered on the next event.
     fn pump_fling(&mut self, ctx: &mut PaintCtx) {
-        if self.fling.is_none() {
+        if self.fling.is_none() && !self.settling {
             self.last_anim = None;
             return;
         }
@@ -173,11 +375,18 @@ impl ScrollWidget {
         };
         self.last_anim = Some(now);
         if dt > 0.0 {
-            self.tick(dt);
+            if self.fling.is_some() {
+                self.tick(dt);
+            } else {
+                self.settle_tick(dt);
+            }
+            // The offset moved from a non-input source — record a notification the
+            // next event delivers (the paint pass has no EventCtx to fire it now).
+            self.pending_scroll_notify = true;
         }
-        // `tick` clears `self.fling` once the fling reaches rest; while it is
-        // still set, ask the shell for another frame to continue animating.
-        if self.fling.is_some() {
+        // While either animation is still in flight, ask the shell for another
+        // frame to continue it.
+        if self.fling.is_some() || self.settling {
             ctx.request_frame();
         }
     }
@@ -194,6 +403,14 @@ impl ScrollWidget {
     /// The event body, parameterised on an explicit timestamp so velocity math
     /// is deterministic in tests; [`Widget::event`] supplies the real clock.
     fn event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
+        // A fling/settle notification recorded at paint time is delivered on the
+        // next event — except a Cancel, which clears it without firing (below).
+        if !matches!(
+            event,
+            InputEvent::Pointer(p) if p.phase == PointerPhase::Cancel
+        ) {
+            self.deliver_pending_scroll(ctx);
+        }
         match event {
             // Focus-routed events (Key/Ime) bypass the scroll gesture machinery
             // and go straight to the child if it holds the recorded focus path.
@@ -209,9 +426,13 @@ impl ScrollWidget {
                     ScrollDelta::Lines(_, y) => y * WHEEL_LINE_PX,
                     ScrollDelta::Pixels(_, y) => *y,
                 };
+                // Wheel scrolling stays hard-clamped — no overscroll rubber-band on
+                // desktop wheel input.
                 self.fling = None;
+                self.settling = false;
                 self.set_offset(self.offset + dy);
                 self.sync_child_origin();
+                self.notify_scroll(ctx);
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -220,6 +441,7 @@ impl ScrollWidget {
                     self.scrolling = false;
                     self.down_active = true;
                     self.fling = None;
+                    self.settling = false;
                     self.last_anim = None;
                     self.down_start = p.position;
                     self.last_drag = p.position;
@@ -241,13 +463,22 @@ impl ScrollWidget {
                     if self.scrolling {
                         let dy = p.position.y - self.last_drag.y;
                         self.last_drag = p.position;
-                        self.set_offset(self.offset - dy);
+                        // Accumulate the raw drag position (unclamped) and derive
+                        // the resisted effective offset — a drag past an edge shows
+                        // an iOS-style rubber-band overscroll.
+                        self.drag_raw -= dy;
+                        self.apply_drag_offset();
                         self.sync_child_origin();
+                        self.notify_scroll(ctx);
                         ctx.request_redraw();
                     } else if (p.position.y - self.down_start.y).abs() > TOUCH_SLOP {
                         // Take the gesture over: cancel the child, stop forwarding.
                         self.scrolling = true;
+                        self.settling = false;
                         self.last_drag = p.position;
+                        // Seed the raw drag position from the current (in-range)
+                        // offset so overscroll accrues from here.
+                        self.drag_raw = self.offset;
                         self.send_child_cancel(ctx, p.position);
                         self.child.set_active(false);
                         ctx.request_redraw();
@@ -258,12 +489,29 @@ impl ScrollWidget {
                 }
                 PointerPhase::Up => {
                     if self.scrolling {
-                        let finger_v = self.tracker.velocity();
-                        if finger_v.abs() > FLING_STOP {
-                            // Offset moves opposite the finger.
-                            self.fling = Some(-finger_v);
-                            self.last_anim = None;
+                        let info = self.scroll_info();
+                        // Pull-to-refresh: released past the top trigger fires the
+                        // app hook (an Up, so mutating state is allowed).
+                        if info.overscroll < -REFRESH_TRIGGER_PX
+                            && let Some(cb) = self.on_refresh_release.as_mut()
+                        {
+                            cb(ctx);
                         }
+                        if info.overscroll != 0.0 {
+                            // Released while overscrolled: settle back to the edge,
+                            // never fling out of range.
+                            self.fling = None;
+                            self.settling = true;
+                            self.last_anim = None;
+                        } else {
+                            let finger_v = self.tracker.velocity();
+                            if finger_v.abs() > FLING_STOP {
+                                // Offset moves opposite the finger.
+                                self.fling = Some(-finger_v);
+                                self.last_anim = None;
+                            }
+                        }
+                        self.notify_scroll(ctx);
                     } else {
                         self.child.event_child(ctx, event);
                     }
@@ -278,6 +526,13 @@ impl ScrollWidget {
                     self.child.set_active(false);
                     self.scrolling = false;
                     self.down_active = false;
+                    // Cancel never mutates state and never fires a callback: drop
+                    // any pending notification and snap an overscrolled surface back
+                    // into range (no settle animation, no on_scroll/on_refresh).
+                    self.settling = false;
+                    self.pending_scroll_notify = false;
+                    self.set_offset(self.offset);
+                    self.sync_child_origin();
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -290,7 +545,10 @@ impl<State: 'static> View<State> for ScrollView<State> {
     type Element = ScrollWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ScrollWidget {
-        ScrollWidget::new(crate::build_child(&self.child, ctx))
+        let mut widget = ScrollWidget::new(crate::build_child(&self.child, ctx));
+        widget.on_scroll = self.on_scroll.as_ref().map(crate::erase_callback_arg);
+        widget.on_refresh_release = self.on_refresh_release.as_ref().map(crate::erase_callback);
+        widget
     }
 
     fn rebuild(
@@ -299,6 +557,9 @@ impl<State: 'static> View<State> for ScrollView<State> {
         element: &mut ScrollWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
+        // Closures are not comparable — always reinstall the erased adapters.
+        element.on_scroll = self.on_scroll.as_ref().map(crate::erase_callback_arg);
+        element.on_refresh_release = self.on_refresh_release.as_ref().map(crate::erase_callback);
         crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
@@ -706,5 +967,164 @@ mod tests {
         w.set_offset(w.offset);
         assert_eq!(w.max_offset(), 50.0);
         assert_eq!(w.offset(), 50.0);
+    }
+
+    // --- Overscroll (pull-to-refresh seam) ---
+
+    #[test]
+    fn drag_past_top_overscrolls_with_resistance_then_settles_back() {
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        // Down, then a drag downward crossing the slop takes the gesture over.
+        dispatch(&mut w, &ev(PointerPhase::Down, 50.0), 0.0);
+        dispatch(&mut w, &ev(PointerPhase::Move, 90.0), 16.0); // 40px > slop → takeover
+        assert!(w.scrolling);
+        assert_eq!(w.offset(), 0.0, "the takeover move does not itself scroll");
+        // Drag 20px further down past the already-at-top edge → resisted overscroll.
+        dispatch(&mut w, &ev(PointerPhase::Move, 110.0), 32.0);
+        assert!(w.offset() < 0.0, "a drag past the top overscrolls negative");
+        assert_eq!(
+            w.offset(),
+            -10.0,
+            "overscroll is the raw excess (-20) * OVERSCROLL_RESISTANCE (0.5)"
+        );
+        // Release → a settle animation, not a fling; it returns to the edge.
+        dispatch(&mut w, &ev(PointerPhase::Up, 110.0), 48.0);
+        assert!(
+            !w.is_flinging(),
+            "an overscrolled release settles, never flings"
+        );
+        let mut steps = 0;
+        while w.settle_tick(16.0) {
+            steps += 1;
+            assert!(steps < 10_000, "settle failed to terminate");
+        }
+        assert_eq!(
+            w.offset(),
+            0.0,
+            "the surface settles back to the clamped edge"
+        );
+    }
+
+    #[test]
+    fn wheel_never_overscrolls_past_top() {
+        let mut w = laid_out(200.0, 100.0, 1000.0);
+        // A large negative wheel delta at the top stays hard-clamped at 0 — no
+        // rubber-band on wheel input.
+        dispatch(&mut w, &scroll(50.0, false, -5000.0), 0.0);
+        assert_eq!(w.offset(), 0.0);
+        assert!(!w.settling, "wheel input starts no settle animation");
+    }
+
+    /// A state that records every `ScrollInfo` its `on_scroll` observes.
+    #[derive(Default)]
+    struct ScrollLog {
+        infos: Vec<ScrollInfo>,
+        refreshes: u32,
+    }
+
+    /// A fixed-size content view generic over the state type (the shared `leaf`
+    /// fixture is `View<()>` only), so a scroll view can wrap it over `ScrollLog`.
+    struct Content(Size);
+    struct ContentW(Size);
+    impl<S: 'static> View<S> for Content {
+        type Element = ContentW;
+        fn build(&self, _c: &mut BuildCtx<'_>) -> ContentW {
+            ContentW(self.0)
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut ContentW, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for ContentW {
+        fn layout(&mut self, _c: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.0)
+        }
+        fn paint(&mut self, _c: &mut PaintCtx, _s: &mut dyn PaintScene) {}
+    }
+
+    /// Build+lay out a scroll widget over `ScrollLog` state with the given
+    /// callbacks installed.
+    fn observed(with_refresh: bool) -> ScrollWidget {
+        let mut view: ScrollView<ScrollLog> = scroll_view(Content(Size::new(200.0, 1000.0)))
+            .on_scroll(|s: &mut ScrollLog, info| s.infos.push(info));
+        if with_refresh {
+            view = view.on_refresh_release(|s: &mut ScrollLog| s.refreshes += 1);
+        }
+        let mut counter = 0u64;
+        let mut w = View::<ScrollLog>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
+        w
+    }
+
+    fn run_log(w: &mut ScrollWidget, state: &mut ScrollLog, e: &InputEvent, t: f64) {
+        let sa: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, w.viewport);
+        w.event_at(&mut ctx, e, t);
+    }
+
+    #[test]
+    fn on_scroll_observes_drag_deltas() {
+        let mut w = observed(false);
+        let mut state = ScrollLog::default();
+        run_log(&mut w, &mut state, &ev(PointerPhase::Down, 100.0), 0.0);
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 70.0), 16.0); // takeover
+        // Two scrolling drags upward move the content down.
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 40.0), 32.0);
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 10.0), 48.0);
+        assert!(!state.infos.is_empty(), "on_scroll fired on the drag");
+        let last = state.infos.last().unwrap();
+        assert!(
+            last.offset > 0.0,
+            "the observed offset grew as content scrolled"
+        );
+        assert_eq!(last.overscroll, 0.0, "an in-range drag has no overscroll");
+        assert_eq!(last.max_offset, 900.0);
+    }
+
+    #[test]
+    fn on_refresh_release_fires_only_past_trigger_and_only_on_release() {
+        // A small pull (under the trigger) does not fire on release.
+        let mut w = observed(true);
+        let mut state = ScrollLog::default();
+        run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 180.0), 32.0); // raw -90 → -45
+        assert_eq!(w.offset(), -45.0, "under the trigger (|-45| < 64)");
+        run_log(&mut w, &mut state, &ev(PointerPhase::Up, 180.0), 48.0);
+        assert_eq!(
+            state.refreshes, 0,
+            "release under the trigger does not refresh"
+        );
+
+        // A large pull past the trigger fires exactly once, on release.
+        let mut w = observed(true);
+        let mut state = ScrollLog::default();
+        run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 290.0), 32.0); // raw -200 → -100
+        assert_eq!(w.offset(), -100.0, "past the trigger (|-100| > 64)");
+        assert_eq!(state.refreshes, 0, "no fire before release");
+        run_log(&mut w, &mut state, &ev(PointerPhase::Up, 290.0), 48.0);
+        assert_eq!(state.refreshes, 1, "release past the trigger fires once");
+    }
+
+    #[test]
+    fn cancel_during_overscroll_never_fires_refresh_and_snaps_back() {
+        let mut w = observed(true);
+        let mut state = ScrollLog::default();
+        run_log(&mut w, &mut state, &ev(PointerPhase::Down, 50.0), 0.0);
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 90.0), 16.0); // takeover
+        run_log(&mut w, &mut state, &ev(PointerPhase::Move, 290.0), 32.0); // past trigger
+        assert_eq!(w.offset(), -100.0);
+        // A Cancel (gesture steal) must not fire on_refresh_release and snaps the
+        // overscroll away with no settle animation.
+        run_log(&mut w, &mut state, &ev(PointerPhase::Cancel, 290.0), 48.0);
+        assert_eq!(
+            state.refreshes, 0,
+            "Cancel never fires the refresh callback"
+        );
+        assert_eq!(w.offset(), 0.0, "Cancel snaps the surface back into range");
+        assert!(!w.settling);
     }
 }

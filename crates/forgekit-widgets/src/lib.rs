@@ -70,7 +70,7 @@ pub use nav::router::{
 };
 pub use nav::transition::{PageTransition, Timing, TransitionSpec};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
-pub use scroll::{ScrollView, ScrollWidget, scroll_view};
+pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
 pub use stack::{Stack, StackView, StackWidget};

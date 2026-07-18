@@ -93,10 +93,16 @@ use forgekit_core::{
 };
 use kurbo::{Point, Size};
 
+use crate::ErasedCallback;
+
 /// Extra items materialized above and below the visible window, so a small
 /// scroll (or a fling's per-frame advance) reveals already-built rows instead of
 /// a blank edge before the next rebuild re-windows.
 const BUFFER: isize = 2;
+
+/// A view-held near-start "load older" callback (erased to [`ErasedCallback`] on
+/// build).
+type OnNearStart<State> = Rc<dyn Fn(&mut State)>;
 
 /// A declarative, virtualized vertical list. See the [module docs](self).
 ///
@@ -107,6 +113,12 @@ pub struct ListView<State: 'static> {
     item_count: usize,
     item_extent: f64,
     builder: Rc<dyn Fn(usize) -> AnyView<State>>,
+    /// Fired (edge-triggered) when the scrolled window comes within
+    /// `near_start_threshold` of content start — the "load older" edge. See
+    /// [`ListView::on_near_start`].
+    on_near_start: Option<OnNearStart<State>>,
+    /// Distance from content start (px) at which `on_near_start` fires.
+    near_start_threshold: f64,
 }
 
 impl<State: 'static> ListView<State> {
@@ -141,7 +153,29 @@ impl<State: 'static> ListView<State> {
             item_count,
             item_extent,
             builder: Rc::new(builder),
+            on_near_start: None,
+            near_start_threshold: 0.0,
         }
+    }
+
+    /// Fire `callback` when the scrolled window comes within `threshold_px` of
+    /// content **start** — the load-older edge for a newest-at-bottom chat list.
+    ///
+    /// The callback is **edge-triggered**: it fires once per approach and rearms
+    /// only after the user scrolls away past `2 × threshold_px` (or the item
+    /// count changes). Drag, wheel, and fling motion all observe it — fling
+    /// motion is driven at paint time (no [`forgekit_core::EventCtx`]), so a
+    /// fling-triggered fire is recorded and delivered on the next event, one
+    /// event late; a `Cancel` clears a pending fire without invoking the
+    /// callback.
+    pub fn on_near_start<F: Fn(&mut State) + 'static>(
+        mut self,
+        callback: F,
+        threshold_px: f64,
+    ) -> Self {
+        self.on_near_start = Some(Rc::new(callback));
+        self.near_start_threshold = threshold_px;
+        self
     }
 }
 
@@ -186,6 +220,17 @@ pub struct ListViewWidget {
     /// Last animation frame time for the paint-time fling pump; `None` seeds the
     /// clock (zero-delta) on the first paint after a release.
     last_anim: Option<FrameTime>,
+    /// The near-start "load older" callback (`None` if the view set none).
+    on_near_start: Option<ErasedCallback>,
+    /// Distance from content start (px) at which `on_near_start` fires.
+    near_start_threshold: f64,
+    /// Whether `on_near_start` is armed to fire on the next near-start approach.
+    /// Cleared when it fires; rearmed after scrolling away past `2 × threshold`
+    /// or an item-count change.
+    near_start_armed: bool,
+    /// A near-start fire detected by the paint-time fling pump (no `EventCtx`);
+    /// delivered on the next event, cleared by a `Cancel` without firing.
+    pending_near_start: bool,
 }
 
 impl ListViewWidget {
@@ -205,6 +250,50 @@ impl ListViewWidget {
             fling: None,
             last_frame_time: FrameTime::ZERO,
             last_anim: None,
+            on_near_start: None,
+            near_start_threshold: 0.0,
+            near_start_armed: true,
+            pending_near_start: false,
+        }
+    }
+
+    /// Edge-detect the near-start "load older" condition, mutating the armed
+    /// state: rearm once scrolled away past `2 × threshold`, and return `true`
+    /// exactly once when armed and the offset comes within `threshold` of content
+    /// start. Callers fire the callback on a `true` return.
+    fn evaluate_near_start(&mut self) -> bool {
+        if self.on_near_start.is_none() || self.item_count == 0 {
+            return false;
+        }
+        let threshold = self.near_start_threshold;
+        if self.offset > 2.0 * threshold {
+            self.near_start_armed = true;
+        }
+        if self.near_start_armed && self.offset <= threshold {
+            self.near_start_armed = false;
+            return true;
+        }
+        false
+    }
+
+    /// Fire `on_near_start` during the event pass if the near-start edge just
+    /// triggered.
+    fn fire_near_start(&mut self, ctx: &mut EventCtx) {
+        if self.evaluate_near_start()
+            && let Some(cb) = self.on_near_start.as_mut()
+        {
+            cb(ctx);
+        }
+    }
+
+    /// Deliver a near-start fire recorded by the paint-time fling pump on the
+    /// next event (one event of latency — the paint pass has no `EventCtx`).
+    fn deliver_pending_near_start(&mut self, ctx: &mut EventCtx) {
+        if self.pending_near_start {
+            self.pending_near_start = false;
+            if let Some(cb) = self.on_near_start.as_mut() {
+                cb(ctx);
+            }
         }
     }
 
@@ -313,6 +402,11 @@ impl ListViewWidget {
         self.last_anim = Some(now);
         if dt > 0.0 {
             self.tick(dt);
+            // The fling moved the offset with no `EventCtx` in scope; if it
+            // crossed the near-start edge, record the fire for the next event.
+            if self.evaluate_near_start() {
+                self.pending_near_start = true;
+            }
         }
         if self.fling.is_some() {
             ctx.request_frame();
@@ -335,6 +429,14 @@ impl ListViewWidget {
     /// Adapted from [`crate::ScrollWidget`], routing to the *window* of children
     /// via [`crate::route_event`] rather than a single child.
     fn event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
+        // A fling-driven near-start fire recorded at paint time is delivered on
+        // the next event — except a Cancel, which clears it without firing.
+        if !matches!(
+            event,
+            InputEvent::Pointer(p) if p.phase == PointerPhase::Cancel
+        ) {
+            self.deliver_pending_near_start(ctx);
+        }
         match event {
             InputEvent::Key(_) | InputEvent::Ime(_) => {
                 crate::route_event(&mut self.children, ctx, event)
@@ -347,6 +449,7 @@ impl ListViewWidget {
                 self.fling = None;
                 self.set_offset(self.offset + dy);
                 self.sync_child_origins();
+                self.fire_near_start(ctx);
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -374,6 +477,7 @@ impl ListViewWidget {
                         self.last_drag = p.position;
                         self.set_offset(self.offset - dy);
                         self.sync_child_origins();
+                        self.fire_near_start(ctx);
                         ctx.request_redraw();
                     } else if (p.position.y - self.down_start.y).abs() > TOUCH_SLOP {
                         // Take the gesture over: cancel the armed child, stop
@@ -407,6 +511,9 @@ impl ListViewWidget {
                     crate::route_event(&mut self.children, ctx, event);
                     self.scrolling = false;
                     self.down_active = false;
+                    // Cancel never fires a callback: drop any pending near-start
+                    // fire without invoking it.
+                    self.pending_near_start = false;
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -420,6 +527,8 @@ impl<State: 'static> View<State> for ListView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ListViewWidget {
         let mut widget = ListViewWidget::new(self.item_count, self.item_extent);
+        widget.on_near_start = self.on_near_start.as_ref().map(crate::erase_callback);
+        widget.near_start_threshold = self.near_start_threshold;
         // Conservative initial window from a zero viewport (converges within one
         // extra frame via paint's continuation request — see the module docs).
         let (start, end) = widget.desired_window();
@@ -439,9 +548,16 @@ impl<State: 'static> View<State> for ListView<State> {
         element: &mut ListViewWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
+        // Closures are not comparable — always reinstall the erased adapter.
+        element.on_near_start = self.on_near_start.as_ref().map(crate::erase_callback);
+        element.near_start_threshold = self.near_start_threshold;
+
         let mut flags = ChangeFlags::NONE;
         if element.item_count != self.item_count {
             element.item_count = self.item_count;
+            // Content length changed — rearm the near-start "load older" edge so a
+            // list that grew (older rows loaded) can trigger again.
+            element.near_start_armed = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if element.item_extent != self.item_extent {
@@ -910,5 +1026,133 @@ mod tests {
             .filter(|(_, n)| n.role() == Role::ListItem)
             .count();
         assert_eq!(list_items, materialized);
+    }
+
+    // --- (7) Near-start "load older" callback. ---
+
+    /// A state that counts near-start fires (the "load older" trigger).
+    #[derive(Default)]
+    struct Loads {
+        count: u32,
+    }
+
+    /// Build a widget with a near-start callback installed, over a known viewport,
+    /// bypassing the View layer (the callback path is exercised via `event_at`).
+    fn near_start_widget(threshold: f64) -> ListViewWidget {
+        let mut w = ListViewWidget::new(1000, 50.0);
+        w.viewport = Size::new(200.0, 200.0);
+        w.near_start_threshold = threshold;
+        let cb: Rc<dyn Fn(&mut Loads)> = Rc::new(|s: &mut Loads| s.count += 1);
+        w.on_near_start = Some(crate::erase_callback(&cb));
+        w.near_start_armed = true;
+        w
+    }
+
+    fn wheel(px: f64) -> InputEvent {
+        InputEvent::Scroll {
+            position: Point::new(10.0, 50.0),
+            delta: ScrollDelta::Pixels(0.0, px),
+        }
+    }
+
+    fn run_loads(w: &mut ListViewWidget, state: &mut Loads, e: &InputEvent) {
+        let sa: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, w.viewport);
+        w.event_at(&mut ctx, e, 0.0);
+    }
+
+    #[test]
+    fn on_near_start_fires_near_start_and_rearms_after_scrolling_away() {
+        let mut w = near_start_widget(100.0);
+        let mut state = Loads::default();
+
+        // Scroll away from the start (past 2×threshold = 200) → no fire.
+        run_loads(&mut w, &mut state, &wheel(500.0));
+        assert_eq!(w.offset(), 500.0);
+        assert_eq!(state.count, 0, "away from the start does not fire");
+
+        // Scroll back within the threshold of the start → fires once.
+        run_loads(&mut w, &mut state, &wheel(-460.0));
+        assert_eq!(w.offset(), 40.0);
+        assert_eq!(
+            state.count, 1,
+            "nearing the start fires the load-older hook"
+        );
+
+        // Staying near the start does not re-fire (edge-triggered, disarmed).
+        run_loads(&mut w, &mut state, &wheel(-20.0));
+        assert_eq!(w.offset(), 20.0);
+        assert_eq!(state.count, 1, "no re-fire while still near the start");
+
+        // Scroll away past 2×threshold to rearm, then back → fires again.
+        run_loads(&mut w, &mut state, &wheel(500.0));
+        assert_eq!(state.count, 1);
+        run_loads(&mut w, &mut state, &wheel(-480.0));
+        assert_eq!(w.offset(), 40.0);
+        assert_eq!(state.count, 2, "rearmed after scrolling away, fires again");
+    }
+
+    #[test]
+    fn on_near_start_does_not_fire_at_the_bottom() {
+        let mut w = near_start_widget(100.0);
+        let mut state = Loads::default();
+        // Scroll to the very bottom — nowhere near the start edge.
+        run_loads(&mut w, &mut state, &wheel(1_000_000.0));
+        assert_eq!(w.offset(), w.max_offset());
+        assert_eq!(state.count, 0, "the bottom is not the load-older edge");
+    }
+
+    #[test]
+    fn near_start_content_growth_rearms_across_rebuild() {
+        // A fling-free rebuild path: growing item_count (older rows loaded) rearms
+        // the edge so a subsequent near-start approach fires again.
+        let loads = Rc::new(Cell::new(0u32));
+        let loads_l = loads.clone();
+        let count = Rc::new(Cell::new(1000usize));
+        let count_l = count.clone();
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let loads = loads_l.clone();
+            list_view(count_l.get(), 50.0, |i| any::<(), _>(gen_stub(i)))
+                .on_near_start(move |_: &mut ()| loads.set(loads.get() + 1), 100.0)
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        // At the top (offset 0), a wheel nudge within the threshold fires once.
+        root.event(&mut state, &wheel(10.0));
+        assert_eq!(loads.get(), 1, "near-start fires at the top");
+        // Still near start: no re-fire.
+        root.event(&mut state, &wheel(5.0));
+        assert_eq!(loads.get(), 1);
+
+        // Grow the content (older rows loaded) → rebuild rearms the edge.
+        count.set(2000);
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+        root.event(&mut state, &wheel(5.0));
+        assert_eq!(loads.get(), 2, "content growth rearms the load-older edge");
+    }
+
+    #[test]
+    fn cancel_clears_a_pending_near_start_without_firing() {
+        let mut w = near_start_widget(100.0);
+        let mut state = Loads::default();
+        // Simulate a fling-driven near-start recorded at paint time.
+        w.pending_near_start = true;
+        // A Cancel must drop it without invoking the callback.
+        run_loads(&mut w, &mut state, &ev(PointerPhase::Cancel, 50.0));
+        assert!(!w.pending_near_start);
+        assert_eq!(state.count, 0, "Cancel never fires the callback");
+
+        // A pending fire is otherwise delivered on the next (non-Cancel) event.
+        w.pending_near_start = true;
+        run_loads(&mut w, &mut state, &ev(PointerPhase::Down, 50.0));
+        assert!(!w.pending_near_start);
+        assert_eq!(
+            state.count, 1,
+            "a pending fire is delivered on the next event"
+        );
     }
 }
