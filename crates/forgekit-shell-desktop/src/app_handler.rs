@@ -43,6 +43,10 @@ use forgekit_core::view::View;
 use forgekit_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
+use forgekit_shell_common::perf::{
+    FramePasses, FrameStats, SPAN_ADAPTER_READY, SPAN_DEVICE_READY, SPAN_FIRST_FRAME_PRESENTED,
+    SPAN_FIRST_REBUILD_DONE, SPAN_INIT_ENTRY, SPAN_RENDERER_READY, StartupSpans,
+};
 use forgekit_shell_common::{ThemeOverrideWatcher, effective_brightness_for_platform_change};
 use forgekit_text::TextContext;
 use forgekit_theme::{Brightness, Theme};
@@ -104,6 +108,19 @@ where
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
 {
+    // Install the stderr `log::Log` sink once, so `forgekit-shell-common::perf`'s
+    // `log::info!` startup-span/frame-stats lines below are actually visible
+    // (desktop had no logger at all before this — see `logger`'s module docs).
+    crate::logger::init_once();
+
+    // Perf instrumentation (spec §14 phase 7.A, task 10): `run_desktop` is the
+    // desktop shell's init-entry point, mirroring the mobile shells'
+    // `nativeInit`/`forgekit_init` span (see `forgekit_shell_common::perf`'s
+    // module docs). A no-op recorder unless `FORGEKIT_TRACE` is set (compile-
+    // or runtime-side) — see `perf::enabled`'s docs.
+    let mut startup_spans = StartupSpans::begin();
+    startup_spans.record(SPAN_INIT_ENTRY);
+
     // winit 0.30 has no `EventLoop::<T>::new()` — the typed-user-event loop is
     // built through the builder only.
     let event_loop = EventLoop::<ShellUserEvent>::with_user_event().build()?;
@@ -156,6 +173,11 @@ where
         theme_seeded: false,
         theme_override: ThemeOverrideWatcher::new(),
         theme_override_active: false,
+        startup_spans,
+        renderer_spans_recorded: false,
+        first_rebuild_recorded: false,
+        first_frame_recorded: false,
+        frame_stats: FrameStats::new(),
     };
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
@@ -415,6 +437,36 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// the override wins entirely until `clear_app_theme` runs (see
     /// `effective_brightness_for_platform_change`).
     theme_override_active: bool,
+    /// Perf instrumentation (spec §14 phase 7.A, task 10): named startup
+    /// milestones from `run_desktop`'s entry epoch, emitted once as a single
+    /// summary line after the first frame presents. A no-op recorder unless
+    /// `FORGEKIT_TRACE` is set - see `forgekit_shell_common::perf`'s module
+    /// docs.
+    startup_spans: StartupSpans,
+    /// Whether `SPAN_ADAPTER_READY`/`SPAN_DEVICE_READY`/`SPAN_RENDERER_READY`
+    /// have already been recorded. Desktop has no finer-grained visibility
+    /// into `on_surface_created`'s internals than "it returned" (adapter,
+    /// device, and renderer creation all happen inside that one async call -
+    /// see `forgekit-render::RenderContext::ensure_device`/`install_surface`),
+    /// so all three spans are recorded together at that single observable
+    /// boundary, on the first successful surface creation only - a later
+    /// suspend/resume surface recreation must not re-record them.
+    renderer_spans_recorded: bool,
+    /// Whether `SPAN_FIRST_REBUILD_DONE` has already been recorded - the
+    /// desktop shell rebuilds every redraw-requested frame, but the span is
+    /// only meaningful once, for the app's first rebuild.
+    first_rebuild_recorded: bool,
+    /// Whether `SPAN_FIRST_FRAME_PRESENTED` has already been recorded (and
+    /// `StartupSpans::emit_log` fired) - set on the first
+    /// `FrameOutcome::Rendered`.
+    first_frame_recorded: bool,
+    /// Perf instrumentation (task 10): per-pass frame timings
+    /// (rebuild/layout/paint/encode+present), aggregated into rolling
+    /// percentiles and emitted periodically while frames are actually being
+    /// produced - desktop is dirty-driven (spec §8), so this piggybacks on
+    /// `RedrawRequested` rather than a timer; see `FrameStats::should_emit`'s
+    /// docs for the emit cadence.
+    frame_stats: FrameStats,
 }
 
 impl<State, Logic, V> ShellHandler<State, Logic, V>
@@ -623,6 +675,17 @@ where
                 event_loop.exit();
                 return;
             }
+            // Perf instrumentation (task 10): adapter/device/renderer creation
+            // all happen inside the single `on_surface_created` call above -
+            // see `renderer_spans_recorded`'s docs for why all three spans land
+            // at this one boundary. Only the first surface creation counts as
+            // "startup"; a later suspend/resume recreation is not re-recorded.
+            if !self.renderer_spans_recorded {
+                self.startup_spans.record(SPAN_ADAPTER_READY);
+                self.startup_spans.record(SPAN_DEVICE_READY);
+                self.startup_spans.record(SPAN_RENDERER_READY);
+                self.renderer_spans_recorded = true;
+            }
         }
 
         // Seed the theme once, before the first rebuild: read the window's
@@ -827,12 +890,20 @@ where
                 // a later write dirties the scope and wakes the loop). Fields
                 // are borrowed disjointly so the tracking closure captures only
                 // what the rebuild needs, not all of `self`.
+                let rebuild_start = Instant::now();
                 let runtime = self.runtime;
                 let scope = &self.scope;
                 let root = &mut self.root;
                 let app_logic = &mut self.app_logic;
                 let state = &mut self.state;
                 let _flags = runtime.with_owner(|| scope.track(|| root.rebuild(app_logic, state)));
+                let rebuild_dur = rebuild_start.elapsed();
+                // Perf instrumentation (task 10): the app's first-ever rebuild,
+                // recorded once.
+                if !self.first_rebuild_recorded {
+                    self.startup_spans.record(SPAN_FIRST_REBUILD_DONE);
+                    self.first_rebuild_recorded = true;
+                }
                 // A rebuild can change which widget is focused / what it
                 // publishes without an intervening event (e.g. state-driven
                 // focus), so re-sync the platform IME here too (task 54).
@@ -848,7 +919,9 @@ where
                     physical.height as f64 / scale,
                 );
                 let text_ctx: &mut dyn Any = &mut self.text_ctx;
+                let layout_start = Instant::now();
                 self.root.layout_with_text(logical, text_ctx);
+                let layout_dur = layout_start.elapsed();
 
                 // Push a fresh semantics tree to the accesskit adapter if it may
                 // have changed since the last push (phase 6d D3's dirty gate —
@@ -868,6 +941,7 @@ where
                 // own stored time (task 06 swaps this single expression for a
                 // platform vsync timestamp on mobile).
                 let frame_time = FrameTime::from_nanos(self.epoch.elapsed().as_nanos() as u64);
+                let paint_start = Instant::now();
                 let paint_outcome = {
                     let mut builder = SceneBuilder::new(&mut self.scene);
                     builder.push_transform(Affine::scale(scale));
@@ -875,6 +949,7 @@ where
                     builder.pop_transform();
                     outcome
                 };
+                let paint_dur = paint_start.elapsed();
 
                 // Animation driver (spec v1 seam): if paint advanced animation
                 // state (e.g. a scroll fling) it asks for another frame here.
@@ -904,11 +979,29 @@ where
                 // Clear to the live theme's surface color rather than a
                 // hardcoded white, so a dark-scheme app doesn't render its
                 // dark-themed widgets over a white canvas (6e Finding 6).
-                match self.renderer.render(
-                    &self.render_cx,
-                    &self.scene,
-                    self.theme.scheme().surface,
-                ) {
+                let encode_start = Instant::now();
+                let render_outcome =
+                    self.renderer
+                        .render(&self.render_cx, &self.scene, self.theme.scheme().surface);
+                let encode_dur = encode_start.elapsed();
+
+                // Perf instrumentation (task 10): one FramePasses record per
+                // produced frame, piggybacking on this event-driven redraw path
+                // rather than a timer (desktop is dirty-driven, spec §8) — see
+                // `frame_stats`'s docs. `should_emit`/`emit_log` rate-limit the
+                // periodic summary line to roughly once per 2s of frame time.
+                self.frame_stats.record(FramePasses {
+                    rebuild: rebuild_dur,
+                    layout: layout_dur,
+                    paint: paint_dur,
+                    encode_present: encode_dur,
+                    skipped: false,
+                });
+                if self.frame_stats.should_emit() {
+                    self.frame_stats.emit_log();
+                }
+
+                match render_outcome {
                     // Stale swapchain (e.g. mid-resize): reconfigured internally,
                     // so ask for another frame against the fresh configuration.
                     Ok(FrameOutcome::Redraw) => window.request_redraw(),
@@ -930,7 +1023,17 @@ where
                             }
                         }
                     }
-                    Ok(FrameOutcome::Rendered | FrameOutcome::Skipped) => {}
+                    Ok(FrameOutcome::Rendered) => {
+                        // Perf instrumentation (task 10): the app's first-ever
+                        // presented frame — record once, then emit the whole
+                        // startup-span summary line.
+                        if !self.first_frame_recorded {
+                            self.startup_spans.record(SPAN_FIRST_FRAME_PRESENTED);
+                            self.startup_spans.emit_log();
+                            self.first_frame_recorded = true;
+                        }
+                    }
+                    Ok(FrameOutcome::Skipped) => {}
                     Err(err) => eprintln!("forgekit: render error: {err}"),
                 }
             }

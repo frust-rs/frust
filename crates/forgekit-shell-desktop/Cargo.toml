@@ -31,3 +31,9 @@ kurbo = { workspace = true }
 peniko = { workspace = true }
 pollster = { workspace = true }
 anyhow = { workspace = true }
+# Perf instrumentation (task 10): the desktop shell installs its own stderr
+# `log::Log` sink (see `logger.rs`) so `forgekit-shell-common::perf`'s
+# `log::info!` startup-span/frame-stats lines are actually visible — mirrors
+# `forgekit-shell-ios`'s own `StderrLogger` (zero new transitive deps, `log`
+# is already pulled in via `forgekit-shell-common`).
+log = { workspace = true }

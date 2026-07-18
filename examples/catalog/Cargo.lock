@@ -1071,6 +1071,7 @@ dependencies = [
  "forgekit-text",
  "forgekit-theme",
  "kurbo",
+ "log",
  "peniko",
  "pollster",
  "winit",
