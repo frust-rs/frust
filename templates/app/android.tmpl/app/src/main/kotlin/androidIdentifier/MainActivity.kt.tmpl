@@ -3,6 +3,7 @@ package {{ android_identifier }}
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import dev.forgekit.ForgeKitSurfaceView
 
 /**
@@ -24,6 +25,13 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Perf instrumentation (spec §14 phase 7.A, task 08): a single fixed
+        // marker at activity-create entry, under the same "forgekit" logcat
+        // tag the Rust side's `forgekit-perf startup ...`/`forgekit-perf
+        // frame ...` lines use, so the Kotlin-side gap (process start ->
+        // surfaceCreated -> native init) is measurable from the same
+        // logcat stream. No other behavior change.
+        Log.i("forgekit", "forgekit-perf activity-create")
         surfaceView = ForgeKitSurfaceView(this)
         setContentView(surfaceView)
         surfaceView.onDeepLink(intent?.data?.toString())

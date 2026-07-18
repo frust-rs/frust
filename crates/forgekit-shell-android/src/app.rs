@@ -13,6 +13,7 @@
 use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use accesskit_android::InjectingAdapter;
 use accesskit_android::jni as ak_jni;
@@ -28,6 +29,7 @@ use forgekit_core::event::{
 use forgekit_reactive::{ReactiveRuntime, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
+use forgekit_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
 use forgekit_shell_common::{
     AppTree, ThemeOverrideWatcher, effective_brightness_for_platform_change, logical_size,
     sanitize_scale,
@@ -93,6 +95,21 @@ pub struct AndroidAppHandle {
     /// `Drop` detaches the delegate through its own retained `JavaVM`, touching
     /// neither the surface nor the window.
     a11y: Option<AndroidA11y>,
+    /// Per-frame pass timing (task 08, spec §14 phase 7.A): rebuild/layout/
+    /// paint/encode+present durations, aggregated and rate-limit logged
+    /// (`forgekit-perf frame ...`) by [`Self::frame`]. Honors the
+    /// process-wide [`perf::enabled`] switch — a disabled recorder allocates
+    /// and records nothing.
+    frame_stats: FrameStats,
+    /// The cold-start span recorder begun in
+    /// [`crate::jni_glue::create_handle`] (`StartupSpans::begin()`), carried
+    /// through so [`Self::frame`]'s first successful render can record
+    /// [`perf::SPAN_FIRST_FRAME_PRESENTED`] and emit the one
+    /// `forgekit-perf startup ...` summary line. `Option::take`n at that
+    /// point, so the field is `None` for the rest of the handle's lifetime —
+    /// the latch that guarantees a single emission and costs nothing (no
+    /// clock read) on every later frame.
+    startup_spans: Option<StartupSpans>,
 }
 
 /// Per-handle accessibility state (phase 6d D3): the injecting accesskit Android
@@ -232,6 +249,12 @@ impl AndroidAppHandle {
     /// Must be called under the root reactive `Owner` (see
     /// `crate::jni_glue::create_handle`) so `provide_context` isn't a silent
     /// no-op.
+    ///
+    /// `startup_spans` is the cold-start recorder `create_handle` began
+    /// before any of the above (task 08, spec §14 phase 7.A): this method
+    /// records [`perf::SPAN_FIRST_REBUILD_DONE`] right after the initial
+    /// `rebuild()` below, then carries the recorder into the returned handle
+    /// for `Self::frame` to finish (first frame presented + emit).
     pub(crate) fn new(
         render_cx: RenderContext,
         renderer: SurfaceRenderer,
@@ -239,11 +262,13 @@ impl AndroidAppHandle {
         physical: (u32, u32),
         scale: f32,
         mut app: Box<dyn AppTree>,
+        mut startup_spans: StartupSpans,
     ) -> Self {
         let theme = Theme::m3_baseline();
         app.set_theme(Box::new(theme.clone()));
         provide_context(theme.clone());
         app.rebuild();
+        startup_spans.record(perf::SPAN_FIRST_REBUILD_DONE);
         Self {
             render_cx,
             renderer,
@@ -258,6 +283,8 @@ impl AndroidAppHandle {
             theme_override_active: false,
             platform_brightness: Brightness::Light,
             a11y: None,
+            frame_stats: FrameStats::new(),
+            startup_spans: Some(startup_spans),
         }
     }
 
@@ -536,16 +563,25 @@ impl AndroidAppHandle {
             return;
         }
 
+        // Perf instrumentation (task 08, spec §14 phase 7.A): the process-wide
+        // switch is one cached bool read (`perf::enabled`'s `OnceLock`), not a
+        // clock read — every `Instant::now()` below is gated behind it via
+        // `bool::then`, so a disabled build/run never reads a timer on this
+        // hot path (guard first, per this module's perf convention).
+        let perf_on = perf::enabled();
+
         // Rebuild under the root `Owner` so any signal read/`provide_context`
         // during a per-frame rebuild is tracked/scoped correctly, mirroring the
         // desktop shell (`runtime.with_owner(|| ...)`) and `create_handle`'s
         // initial construction. Degrade gracefully to an unwrapped rebuild if
         // the runtime is somehow absent — the frame path must never panic
         // across the JNI boundary.
+        let rebuild_start = perf_on.then(Instant::now);
         match ReactiveRuntime::get() {
             Some(rt) => rt.with_owner(|| self.app.rebuild()),
             None => self.app.rebuild(),
         }
+        let rebuild_time = rebuild_start.map_or(Duration::ZERO, |t| t.elapsed());
 
         // Sanitize once per frame; layout and the paint transform below MUST
         // consume this identical value (an untrusted JNI `jfloat` density
@@ -553,10 +589,12 @@ impl AndroidAppHandle {
         let scale = sanitize_scale(self.scale);
         let (lw, lh) = logical_size(self.physical.0, self.physical.1, scale);
         let logical = Size::new(lw, lh);
+        let layout_start = perf_on.then(Instant::now);
         {
             let text_ctx: &mut dyn Any = &mut self.text_ctx;
             self.app.layout(logical, text_ctx);
         }
+        let layout_time = layout_start.map_or(Duration::ZERO, |t| t.elapsed());
 
         // Publish the accessibility tree post-layout (phase 6d D3), so node
         // bounds are valid. A cheap no-op unless the tree changed AND a screen
@@ -564,6 +602,7 @@ impl AndroidAppHandle {
         self.publish_semantics();
 
         self.scene.reset();
+        let paint_start = perf_on.then(Instant::now);
         {
             let mut builder = SceneBuilder::new(&mut self.scene);
             // HiDPI (spec task 08): lay out in logical pixels, then scale the
@@ -581,14 +620,18 @@ impl AndroidAppHandle {
             let _ = self.app.paint(&mut builder, frame_time);
             builder.pop_transform();
         }
+        let paint_time = paint_start.map_or(Duration::ZERO, |t| t.elapsed());
 
         // Clear to the live theme's surface color rather than a hardcoded
         // white, so a dark-scheme app doesn't render its dark-themed widgets
         // over a white canvas (6e Finding 6).
-        match self
-            .renderer
-            .render(&self.render_cx, &self.scene, self.theme.scheme().surface)
-        {
+        let encode_start = perf_on.then(Instant::now);
+        let render_result =
+            self.renderer
+                .render(&self.render_cx, &self.scene, self.theme.scheme().surface);
+        let encode_present_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+        match render_result {
             // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
             // next Choreographer frame draws against the fresh configuration.
             Ok(FrameOutcome::Redraw) => {}
@@ -597,8 +640,34 @@ impl AndroidAppHandle {
             Ok(FrameOutcome::SurfaceLost) => {
                 log::warn!("forgekit-shell-android: surface lost; awaiting surfaceChanged");
             }
-            Ok(FrameOutcome::Rendered | FrameOutcome::Skipped) => {}
+            Ok(FrameOutcome::Rendered) => {
+                // First successful present (task 08): close out the cold-start
+                // span recorder exactly once. `Option::take` both consumes it
+                // and doubles as the latch — every later `Rendered` frame sees
+                // `None` here at no cost beyond the `Option` check.
+                if let Some(mut spans) = self.startup_spans.take() {
+                    spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
+                    spans.emit_log();
+                }
+            }
+            Ok(FrameOutcome::Skipped) => {}
             Err(err) => log::error!("forgekit-shell-android: render error: {err:#}"),
+        }
+
+        // Record this frame's pass timings (task 08). `FrameStats::record`/
+        // `should_emit`/`emit_log` are themselves cheap no-ops when disabled
+        // (the recorder's own `enabled` flag, captured once at construction —
+        // see `FrameStats::new`), so no extra gating is needed here beyond the
+        // `perf_on`-gated timer reads above.
+        self.frame_stats.record(FramePasses {
+            rebuild: rebuild_time,
+            layout: layout_time,
+            paint: paint_time,
+            encode_present: encode_present_time,
+            skipped: false,
+        });
+        if self.frame_stats.should_emit() {
+            self.frame_stats.emit_log();
         }
     }
 }

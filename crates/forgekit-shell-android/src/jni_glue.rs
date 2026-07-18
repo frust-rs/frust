@@ -28,6 +28,7 @@ use ndk::native_window::NativeWindow;
 
 use forgekit_core::event::{EditingState, ImeState};
 use forgekit_reactive::{ReactiveRuntime, push_deep_link};
+use forgekit_shell_common::perf::{self, StartupSpans};
 use forgekit_shell_common::{AppTree, guard};
 
 use crate::app::AndroidAppHandle;
@@ -139,6 +140,14 @@ fn create_handle(
     scale: jfloat,
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> Result<jlong> {
+    // Cold-start span recorder (task 08, spec §14 phase 7.A). `begin()` marks
+    // the epoch; every span below is a delta from here, closed out by
+    // `AndroidAppHandle::frame`'s first successful render (see that method).
+    // A no-op recorder (allocates nothing further) when `perf::enabled()` is
+    // false.
+    let mut startup_spans = StartupSpans::begin();
+    startup_spans.record(perf::SPAN_INIT_ENTRY);
+
     // SAFETY: `env`/`surface` are the live JVM handles for this call.
     let window = unsafe { native_window_from_surface(env, surface) }
         .context("forgekit-shell-android: ANativeWindow_fromSurface returned null")?;
@@ -160,6 +169,20 @@ fn create_handle(
         )
     })
     .context("forgekit-shell-android: failed to create Android render surface")?;
+
+    // Adapter/device/renderer acquisition are one opaque, sequentially-awaited
+    // async call above (`RenderContext::ensure_device` plus the vello/surface
+    // setup inside `on_surface_created_from_android_window`) — this shell has
+    // no intermediate checkpoint into it without restructuring
+    // `forgekit-render`'s init sequence, which is explicitly out of scope
+    // here (task 19 owns that restructuring; this task instruments the
+    // existing sequential chain as-is so 19 has a before/after). Record all
+    // three spans at this single checkpoint for now; a coarse "renderer
+    // ready" delta is still useful, it just can't yet be split into its
+    // adapter/device/renderer sub-costs.
+    startup_spans.record(perf::SPAN_ADAPTER_READY);
+    startup_spans.record(perf::SPAN_DEVICE_READY);
+    startup_spans.record(perf::SPAN_RENDERER_READY);
 
     // Process-once (the runtime's own `OnceLock` provides that property; a
     // repeat call — e.g. an activity recreated in the same process — just
@@ -187,7 +210,15 @@ fn create_handle(
     // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
     let handle = rt.with_owner(|| {
         let app = make_app();
-        AndroidAppHandle::new(render_cx, renderer, window, physical, scale, app)
+        AndroidAppHandle::new(
+            render_cx,
+            renderer,
+            window,
+            physical,
+            scale,
+            app,
+            startup_spans,
+        )
     });
 
     // SAFETY: hand a uniquely-owned boxed handle to the JVM as `jlong`; it is
