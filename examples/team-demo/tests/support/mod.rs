@@ -2,9 +2,14 @@
 //! paint target, a one-frame helper, a recording waker, an ambient-owner setup,
 //! and an async pump-poll loop — lifted from `clean-signals-forgekit`'s own
 //! `tests/support/mod.rs` (itself the ForgeKit `examples/inbox` recipe), factored
-//! so every `tests/*.rs` file (each its own crate root) can share it. The only
-//! addition over the copied base is [`RecScene`] recording rounded-rect geometry
-//! (field/button chrome) so a test can locate and tap the banner's Dismiss button.
+//! so every `tests/*.rs` file (each its own crate root) can share it. Over the
+//! copied base this module additionally carries [`RecScene`] recording
+//! rounded-rect geometry (field/button chrome) so a test can locate and tap a
+//! button, plus generic [`pointer`]/[`tap`]/[`center`] pointer-event helpers and
+//! [`char_key`]/[`named_key`] keyboard-event helpers (lifted from `tests/team.rs`'s
+//! original per-file copies and `forgekit-widgets::textinput`'s own test harness)
+//! so every `tests/*.rs` file can drive a real synthetic tap or keystroke without
+//! re-deriving the event shapes.
 //!
 //! Not every test uses every helper.
 #![allow(dead_code)]
@@ -14,7 +19,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use forgekit_core::{FrameTime, PaintScene, RenderRoot, View};
+use forgekit_core::{
+    FrameTime, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene, PointerButton,
+    PointerEvent, PointerPhase, RenderRoot, View,
+};
 use forgekit_reactive::{FrameWaker, ReactiveRuntime};
 use forgekit_scene::GlyphRun;
 use forgekit_text::TextContext;
@@ -133,4 +141,47 @@ pub fn pump_frames<S: 'static, V: View<S>>(
         std::thread::sleep(Duration::from_millis(1));
         frame(root, logic, state, tcx);
     }
+}
+
+/// A synthetic pointer event at `p` (logical coordinates), the shape every
+/// platform boundary already normalizes to before it reaches `RenderRoot`.
+pub fn pointer(phase: PointerPhase, p: Point) -> InputEvent {
+    InputEvent::Pointer(PointerEvent {
+        phase,
+        position: p,
+        button: PointerButton::Primary,
+    })
+}
+
+/// A full tap (Down then Up) at `p` — fires a `Button`'s `on_press` only when
+/// both land inside its bounds (see `docs/CODE_STANDARDS.md`'s
+/// "fire on up-inside" convention).
+pub fn tap<S: 'static, V: View<S>>(root: &mut RenderRoot<S, V>, state: &mut S, p: Point) {
+    root.event(state, &pointer(PointerPhase::Down, p));
+    root.event(state, &pointer(PointerPhase::Up, p));
+}
+
+/// The center point of a recorded `(origin, size)` rounded-rect — where a tap
+/// should land to hit that chrome.
+pub fn center((origin, size): (Point, Size)) -> Point {
+    Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0)
+}
+
+/// A typed-character key event (already-resolved text, mirroring a platform's
+/// `KeyEvent.text` — see `forgekit_core::event::Key::Character`'s doc).
+pub fn char_key(c: &str) -> InputEvent {
+    InputEvent::Key(KeyEvent {
+        key: Key::Character(c.to_string()),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+}
+
+/// A named (control/navigation) key event with no modifiers held.
+pub fn named_key(key: NamedKey) -> InputEvent {
+    InputEvent::Key(KeyEvent {
+        key: Key::Named(key),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
 }
