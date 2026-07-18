@@ -70,5 +70,12 @@
 		</dict>
 	</array>
 {%- endif %}
+	<!-- Enable 120Hz on ProMotion iPhone hardware. This key is REQUIRED for
+	     >60fps refresh rates on iPhone Pro models (Apple Foundation reference:
+	     CADisplayLink preferredFrameRateRange, accessed 2026-07-18). Without it,
+	     the system silently caps at 60Hz even if preferredFrameRateRange requests
+	     higher. -->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 </dict>
 </plist>

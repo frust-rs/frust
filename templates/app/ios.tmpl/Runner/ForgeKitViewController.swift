@@ -211,6 +211,15 @@ final class ForgeKitViewController: UIViewController {
     private func startDisplayLink() {
         guard displayLink == nil else { return }
         let link = CADisplayLink(target: self, selector: #selector(renderFrame(_:)))
+        // Enable up to 120Hz on ProMotion hardware (iOS 15+): request the device's
+        // maximum refresh rate with a minimum of 30fps to let the system down-clock
+        // on idle/thermal throttle (the framework's own dirty-gate, task 16-18, is
+        // what actually saves power on skipped frames).
+        link.preferredFrameRateRange = CAFrameRateRange(
+            minimum: 30,
+            maximum: Float(UIScreen.main.maximumFramesPerSecond),
+            preferred: Float(UIScreen.main.maximumFramesPerSecond)
+        )
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
