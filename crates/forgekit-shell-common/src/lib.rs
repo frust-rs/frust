@@ -5,9 +5,10 @@
 //! native handle drive any app's `State`/`app_logic`, a handful of pure
 //! helpers for crossing an FFI boundary safely ([`guard`]) and turning an
 //! untrusted density into HiDPI layout math ([`sanitize_scale`]/[`logical_size`]),
-//! and the app-facing theme override slot ([`set_app_theme`]/[`clear_app_theme`]/
+//! the app-facing theme override slot ([`set_app_theme`]/[`clear_app_theme`]/
 //! [`ThemeOverrideWatcher`] — see [`theme_override`]'s module docs for the
-//! layering rationale).
+//! layering rationale), and the [`perf`] module's frame-timing/startup-span
+//! instrumentation (spec §14 phase 7).
 //!
 //! This crate is deliberately platform-free: it depends on `forgekit-core`
 //! (retained tree / `RenderRoot`) plus `forgekit-scene`/`forgekit-text`/
@@ -20,6 +21,7 @@
 
 mod app_tree;
 mod ffi_support;
+pub mod perf;
 mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
