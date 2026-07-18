@@ -51,7 +51,7 @@ use crate::mock;
 
 /// A text-matched message: the fields a search result row needs, without
 /// re-deriving them from [`mock::Message`] at render time.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MessageHit {
     /// The matched message's id.
     pub message_id: u32,
@@ -74,6 +74,27 @@ pub struct SearchResults {
     pub users: Vec<mock::User>,
     /// Text messages whose body matches, capped at [`MAX_MESSAGE_HITS`].
     pub messages: Vec<MessageHit>,
+}
+
+/// Id-based equality (the `Memo` recompute gate). Mock rows are static data
+/// keyed by id, so section-wise id equality is exact result equality; the
+/// frozen `mock` types themselves don't derive `PartialEq`.
+impl PartialEq for SearchResults {
+    fn eq(&self, other: &Self) -> bool {
+        self.channels.len() == other.channels.len()
+            && self.users.len() == other.users.len()
+            && self.messages == other.messages
+            && self
+                .channels
+                .iter()
+                .zip(&other.channels)
+                .all(|(a, b)| a.id == b.id)
+            && self
+                .users
+                .iter()
+                .zip(&other.users)
+                .all(|(a, b)| a.id == b.id)
+    }
 }
 
 impl SearchResults {

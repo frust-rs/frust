@@ -6,28 +6,44 @@
 //! [`support::serial`] lock first, mirroring `tests/shell.rs`'s own
 //! convention (see that file's harness docs).
 //!
-//! Row-tap coordinates below are exact, not measured guesses: the search
-//! field row and each section header are forced to a fixed height via
-//! `SizedBox` (`screens/search.rs`'s private `FIELD_HEIGHT`/
-//! `SECTION_HEADER_HEIGHT` constants, mirrored here as the same magic
-//! numbers since `screens` is a private module unreachable from this
-//! integration-test crate), and a two-line result row's `TWO_LINE_HEIGHT`
-//! (72px, re-exported from `forgekit-widgets`) is a fixed, non-font-metric-
-//! dependent constant — so `AppBar(64) + field(56) + header(32) +
-//! half-row(36) = 188` is fully deterministic, the same style of
-//! hand-computed offset `tests/shell.rs`'s bottom-bar test (`bar_y = 568.0`)
-//! already relies on.
+//! The field-focus tap and each section/row-tap coordinate below are forced to
+//! fixed heights via `SizedBox` (`screens/search.rs`'s private `FIELD_HEIGHT`/
+//! `SECTION_HEADER_HEIGHT` constants, mirrored here as the same magic numbers
+//! since `screens` is a private module unreachable from this integration-test
+//! crate), and a two-line result row's `TWO_LINE_HEIGHT` (72px, re-exported
+//! from `forgekit-widgets`) is a fixed, non-font-metric-dependent constant —
+//! so `AppBar(64) + field(56) + header(32) + half-row(36) = 188` is fully
+//! deterministic, the same style of hand-computed offset `tests/shell.rs`'s
+//! bottom-bar test (`bar_y = 568.0`) already relies on. The one exception is
+//! the *clear* button: the close icon paints no locatable rect and sits at the
+//! field row's trailing edge, so its tap point is derived empirically from the
+//! painted field chrome (see [`clear_button_point`]).
+//!
+//! # Settling the boot/tab transition before typing
+//!
+//! The shell's navigator runs an `M3FadeThrough` cross-fade at boot and again
+//! when a tab is selected. The shared [`support::frame`] helper paints at
+//! [`FrameTime::ZERO`], which freezes that transition forever — and while a
+//! transition is in flight the navigator suppresses ALL page input, so a field
+//! tap (and therefore every keystroke) dispatched mid-transition never reaches
+//! the search page. [`boot_to_search`] therefore advances the paint clock past
+//! the transition ([`settle_transitions`], the same fix `tests/home.rs` uses
+//! for its swipe gesture) before any test drives the field. The bottom-bar tab
+//! tap itself is shell chrome outside the navigator's page-input region, so it
+//! still lands during the frozen transition (as `tests/shell.rs` relies on).
+
+use std::any::Any;
 
 use forgekit::{AnyView, Component, GetUntracked};
-use forgekit_core::RenderRoot;
+use forgekit_core::{FrameTime, RenderRoot};
 use forgekit_text::TextContext;
-use kurbo::Point;
+use kurbo::{Point, Size};
 
 use huddle::features::search::{MAX_MESSAGE_HITS, SearchController};
 use huddle::{HuddleApp, HuddleState};
 
 mod support;
-use support::{RecScene, W, char_key, frame, serial, setup, tap};
+use support::{H, RecScene, W, char_key, frame, serial, setup, tap};
 
 type Root = RenderRoot<HuddleState, AnyView<HuddleState>>;
 
@@ -51,10 +67,27 @@ fn field_point() -> Point {
     Point::new(400.0, APP_BAR_HEIGHT + FIELD_HEIGHT / 2.0)
 }
 
-/// A point at the clear (`icons::CLOSE`) button's trailing edge, only present
-/// once the query is non-empty.
-fn clear_button_point() -> Point {
-    Point::new(W - 10.0, APP_BAR_HEIGHT + FIELD_HEIGHT / 2.0)
+/// The painted search-field chrome: the widest recorded rounded rect. It spans
+/// nearly the full window width, dwarfing the bottom-bar item chrome, so
+/// `max_by` width isolates it regardless of whether the clear button is present
+/// (which shrinks the field to make room for the trailing icon).
+fn field_chrome(scene: &RecScene) -> (Point, Size) {
+    scene
+        .rounded
+        .iter()
+        .copied()
+        .max_by(|a, b| a.1.width.partial_cmp(&b.1.width).unwrap())
+        .expect("the search field paints its chrome (a rounded rect)")
+}
+
+/// The clear (`icons::CLOSE`) button center, present once the query is
+/// non-empty. The icon is `inflexible` immediately trailing the `flexible`
+/// field, so it sits just past the field chrome's right edge at the field's
+/// vertical center — derived from the paint recording because the icon itself
+/// paints only a glyph run, no locatable rect.
+fn clear_button_point(scene: &RecScene) -> Point {
+    let (origin, size) = field_chrome(scene);
+    Point::new(origin.x + size.width + 9.0, origin.y + size.height / 2.0)
 }
 
 /// The center of the first result row (right after the field + one section
@@ -79,8 +112,49 @@ fn goto_search(root: &mut Root, state: &mut HuddleState) {
     tap(root, state, SEARCH_TAB);
 }
 
-/// Builds the app, renders the first frame, and switches to the Search tab —
-/// the common setup every test below starts from.
+/// Rebuild + layout + paint like [`support::frame`], but painting at `t_ms` on a
+/// caller-advanced clock instead of the shared harness's pinned
+/// [`FrameTime::ZERO`]. Returns the recorded scene and whether the paint asked
+/// for another frame (an animation — such as a page transition — is still
+/// running). Mirrors `tests/home.rs`'s helper of the same name.
+fn frame_at(
+    root: &mut Root,
+    state: &mut HuddleState,
+    tcx: &mut TextContext,
+    t_ms: u64,
+) -> (RecScene, bool) {
+    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    root.rebuild(&mut logic, state);
+    let tcx_any: &mut dyn Any = tcx;
+    root.layout_with_text(Size::new(W, H), tcx_any);
+    let mut scene = RecScene::default();
+    let outcome = root.paint(&mut scene, FrameTime::from_nanos(t_ms * 1_000_000));
+    (scene, outcome.needs_frame)
+}
+
+/// Advance the paint clock until no animation asks for another frame, settling
+/// the boot/tab-switch (or push/pop) cross-fade so page input flows again and
+/// only the destination page renders. Returns the settled scene (see the
+/// module docs, and `tests/home.rs`'s helper of the same name).
+fn settle_transitions(root: &mut Root, state: &mut HuddleState, tcx: &mut TextContext) -> RecScene {
+    let mut t_ms = 50u64;
+    loop {
+        t_ms += 16;
+        let (scene, needs_frame) = frame_at(root, state, tcx, t_ms);
+        if !needs_frame {
+            return scene;
+        }
+        assert!(
+            t_ms < 50 + 16 * 300,
+            "the boot/tab-switch entrance transition never settled"
+        );
+    }
+}
+
+/// Builds the app, renders the first frame, switches to the Search tab, and
+/// settles the ensuing cross-fade (see the module docs) — the common setup
+/// every test below starts from, leaving the Search page live and accepting
+/// input.
 fn boot_to_search() -> (Root, HuddleState, TextContext) {
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
@@ -89,7 +163,7 @@ fn boot_to_search() -> (Root, HuddleState, TextContext) {
 
     frame(&mut root, &mut logic, &mut state, &mut tcx);
     goto_search(&mut root, &mut state);
-    frame(&mut root, &mut logic, &mut state, &mut tcx);
+    settle_transitions(&mut root, &mut state, &mut tcx);
 
     (root, state, tcx)
 }
@@ -140,9 +214,9 @@ fn clear_button_resets_the_query_and_results() {
     assert!(!controller.results.get_untracked().is_empty());
 
     // A fresh frame renders the clear button (query non-empty) at the field
-    // row's trailing edge.
-    rebuild(&mut root, &mut state, &mut tcx);
-    tap(&mut root, &mut state, clear_button_point());
+    // row's trailing edge; locate it from the paint recording and tap it.
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+    tap(&mut root, &mut state, clear_button_point(&scene));
 
     assert_eq!(
         controller.query.get_untracked(),
@@ -203,16 +277,20 @@ fn a_channel_result_row_navigates_to_its_channel_feed() {
 
     tap(&mut root, &mut state, first_result_row_point());
 
-    let after = rebuild(&mut root, &mut state, &mut tcx);
+    // Settle the push cross-fade: the tapped row navigated to the channel feed,
+    // whose settled render differs from Search's (proving the tap navigated,
+    // not merely that a mid-transition frame paints both pages).
+    let after = settle_transitions(&mut root, &mut state, &mut tcx);
     assert!(root.root_id().is_some(), "navigating rebuilds cleanly");
     assert_ne!(
         after.glyph_runs, before.glyph_runs,
-        "tapping the row navigated away from Search (the paint output changed)"
+        "tapping the row navigated away from Search (the destination render differs)"
     );
 
-    // Round trip: popping back restores the same Search render.
+    // Round trip: popping back — and settling the pop cross-fade — restores the
+    // same Search render.
     state.nav.router().controller().pop();
-    let restored = rebuild(&mut root, &mut state, &mut tcx);
+    let restored = settle_transitions(&mut root, &mut state, &mut tcx);
     assert_eq!(
         restored.glyph_runs, before.glyph_runs,
         "popping back returns to the same Search render"
