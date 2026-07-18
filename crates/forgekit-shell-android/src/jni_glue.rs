@@ -15,6 +15,7 @@
 //! lifetime.
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::sync::Once;
 
@@ -32,7 +33,18 @@ use forgekit_shell_common::perf::{self, StartupSpans};
 use forgekit_shell_common::{AppTree, guard};
 
 use crate::app::AndroidAppHandle;
-use crate::ffi_support::{ImeJsonState, build_ime_state_json, normalize_ime_indices};
+use crate::ffi_support::{
+    ImeJsonState, build_ime_state_json, load_pipeline_cache, normalize_ime_indices,
+    pipeline_cache_differs, pipeline_cache_path, write_pipeline_cache_atomic,
+};
+
+/// Startup-span name (task 13): the persisted pipeline-cache blob has been read
+/// from disk (or found absent) and handed to the renderer, recorded just before
+/// surface creation. Bracketed by task 08's cold-start recorder so the
+/// warm-start win shows up in the `forgekit-perf startup` line between
+/// `init_entry` and `renderer_ready`. A crate-local literal rather than a
+/// `perf::SPAN_*` const because it is Android-pipeline-cache-specific.
+const SPAN_CACHE_LOADED: &str = "cache_loaded";
 
 /// Pump the process-wide [`ReactiveRuntime`]'s UI-thread local task queue, if
 /// the runtime has been initialized (it may not be, e.g. a JNI call arriving
@@ -115,15 +127,27 @@ unsafe fn handle_mut<'a>(handle: jlong) -> Option<&'a mut AndroidAppHandle> {
 /// `make_app` is supplied by the macro and erases the app's `State`/`app_logic`;
 /// on any failure (null window, GPU init error, panic) returns `0`, matching
 /// Kotlin's "no native side yet" sentinel.
+///
+/// `cache_dir` is the app's `context.cacheDir.absolutePath` (task 13), read into
+/// a Rust `String` up front — before the surface handle is touched below — so
+/// the `env` borrow is released early (mirrors [`native_ime_apply`]'s string
+/// read). It is used to persist the wgpu pipeline cache across launches; an
+/// unreadable/empty value simply disables persistence (a cold compile every
+/// launch), never fails init.
 pub fn native_init(
-    env: EnvUnowned,
+    mut env: EnvUnowned,
     surface: JObject,
     scale: jfloat,
+    cache_dir: JString,
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> jlong {
     init_logger_once();
     guard("nativeInit", 0, || {
-        match create_handle(&env, &surface, scale, make_app) {
+        let cache_dir = env
+            .with_env(|env| cache_dir.try_to_string(env))
+            .resolve::<LogErrorAndDefault>();
+        let cache_dir = (!cache_dir.is_empty()).then_some(cache_dir);
+        match create_handle(&env, &surface, scale, cache_dir, make_app) {
             Ok(handle) => handle,
             Err(err) => {
                 log::error!("forgekit-shell-android: nativeInit failed: {err:#}");
@@ -134,10 +158,15 @@ pub fn native_init(
 }
 
 /// Fallible body of [`native_init`], separated so the happy path reads top-down.
+///
+/// `cache_dir` (when `Some`) is the app cache directory the pipeline-cache blob
+/// is loaded from before GPU init and saved back to after renderer creation
+/// (task 13, spec §14 phase 7.B) — best-effort and Vulkan-only.
 fn create_handle(
     env: &EnvUnowned,
     surface: &JObject,
     scale: jfloat,
+    cache_dir: Option<String>,
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> Result<jlong> {
     // Cold-start span recorder (task 08, spec §14 phase 7.A). `begin()` marks
@@ -155,6 +184,22 @@ fn create_handle(
 
     let mut render_cx = forgekit_render::RenderContext::new();
     let mut renderer = forgekit_render::SurfaceRenderer::new();
+
+    // Pipeline-cache persistence (task 13, spec §14 phase 7.B): restore the blob
+    // a prior launch persisted so vello's Vulkan shader pipelines are reused
+    // rather than recompiled on this warm start. Must be set BEFORE the surface
+    // install below (that's where vello's renderer — and its pipeline cache — is
+    // created). Best-effort and Vulkan-only: `forgekit-render` validates the
+    // blob against the live adapter at install time and silently starts from an
+    // empty cache on any mismatch, or on adapters without `PIPELINE_CACHE`
+    // (Metal/desktop — there is no iOS counterpart). `loaded_cache` (framed
+    // bytes read verbatim from disk) is retained for the differs-check after
+    // renderer creation.
+    let cache_path = cache_dir.as_deref().map(pipeline_cache_path);
+    let loaded_cache = cache_path.as_deref().and_then(load_pipeline_cache);
+    renderer.set_initial_pipeline_cache_data(loaded_cache.clone());
+    startup_spans.record(SPAN_CACHE_LOADED);
+
     let window_ptr = window.ptr().as_ptr().cast::<c_void>();
 
     // SAFETY: `window_ptr` comes from the just-acquired `window`, which is moved
@@ -183,6 +228,16 @@ fn create_handle(
     startup_spans.record(perf::SPAN_ADAPTER_READY);
     startup_spans.record(perf::SPAN_DEVICE_READY);
     startup_spans.record(perf::SPAN_RENDERER_READY);
+
+    // Persist the pipeline cache the driver populated while creating vello's
+    // renderer above, if it changed from what we loaded (task 13). Spawns a
+    // detached background thread for the write so the first frame never blocks on
+    // disk I/O; a no-op on Metal/desktop (`pipeline_cache_data()` returns `None`
+    // without `PIPELINE_CACHE`) and when nothing changed. All failures logged and
+    // ignored — persistence is best-effort.
+    if let Some(path) = cache_path {
+        persist_pipeline_cache_if_changed(path, loaded_cache.as_deref(), &renderer);
+    }
 
     // Process-once (the runtime's own `OnceLock` provides that property; a
     // repeat call — e.g. an activity recreated in the same process — just
@@ -224,6 +279,39 @@ fn create_handle(
     // SAFETY: hand a uniquely-owned boxed handle to the JVM as `jlong`; it is
     // reclaimed exactly once in `native_on_destroy`.
     Ok(Box::into_raw(Box::new(handle)) as jlong)
+}
+
+/// Persist the current pipeline-cache blob to `path` on a background thread if it
+/// differs from `loaded` (task 13).
+///
+/// Reads [`SurfaceRenderer::pipeline_cache_data`](forgekit_render::SurfaceRenderer::pipeline_cache_data)
+/// (framed + adapter-fingerprinted; `None` without Vulkan `PIPELINE_CACHE`), and
+/// spawns a **detached** writer thread so the first frame never waits on disk
+/// I/O — the write outlives this function and the returned handle by design.
+/// Every failure is logged and ignored: a failed persist only costs the next
+/// launch its cold-compile time.
+fn persist_pipeline_cache_if_changed(
+    path: PathBuf,
+    loaded: Option<&[u8]>,
+    renderer: &forgekit_render::SurfaceRenderer,
+) {
+    let Some(data) = renderer.pipeline_cache_data() else {
+        return; // no cache to persist (Metal/desktop, or nothing compiled)
+    };
+    if !pipeline_cache_differs(loaded, &data) {
+        return; // unchanged since load — skip the rewrite
+    }
+    std::thread::spawn(move || match write_pipeline_cache_atomic(&path, &data) {
+        Ok(()) => log::debug!(
+            "forgekit-shell-android: persisted pipeline cache ({} bytes) to {}",
+            data.len(),
+            path.display()
+        ),
+        Err(err) => log::warn!(
+            "forgekit-shell-android: failed to persist pipeline cache to {}: {err}",
+            path.display()
+        ),
+    });
 }
 
 /// `nativeOnSurfaceChanged`: recreate the surface against a new window, or resize

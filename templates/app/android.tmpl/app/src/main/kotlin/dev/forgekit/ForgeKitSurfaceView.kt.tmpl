@@ -58,7 +58,12 @@ class ForgeKitSurfaceView(context: Context) :
     // JNI exports implemented by `forgekit-shell-android` (spec Phase 2
     // task 24, Phase 4 IME) — these names and signatures are load-bearing,
     // matched exactly by `#[no_mangle] extern "system" fn Java_dev_forgekit_*`.
-    private external fun nativeInit(surface: Surface, scaleFactor: Float): Long
+    // `cacheDir` is the app's `context.cacheDir.absolutePath` — the Rust side
+    // persists the wgpu pipeline cache under it (`<cacheDir>/forgekit/`) so a
+    // warm start skips Vulkan shader-pipeline compilation. The JNI symbol name is
+    // unchanged (it doesn't encode params); this signature and the Rust
+    // `native_init` gained the parameter together.
+    private external fun nativeInit(surface: Surface, scaleFactor: Float, cacheDir: String): Long
 
     private external fun nativeOnSurfaceChanged(
         handle: Long,
@@ -219,7 +224,7 @@ class ForgeKitSurfaceView(context: Context) :
     override fun surfaceCreated(holder: SurfaceHolder) {
         setFrameRateHint(holder)
         if (handle == 0L) {
-            handle = nativeInit(holder.surface, scaleFactor)
+            handle = nativeInit(holder.surface, scaleFactor, context.cacheDir.absolutePath)
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
                 // Attach the accesskit accessibility adapter to this view (spec

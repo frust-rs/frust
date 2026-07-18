@@ -9,6 +9,8 @@
 //! on the host (`cargo test --workspace`), even though the code that calls it
 //! ([`crate::jni_glue`]) is `#[cfg(target_os = "android")]`.
 
+use std::path::{Path, PathBuf};
+
 /// Whether an opaque handle from the JVM points at a live native side.
 ///
 /// Kotlin initialises `handle` to `0` and every native call is guarded on it
@@ -235,6 +237,62 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
     )
 }
 
+// ---------------------------------------------------------------------
+// Pipeline-cache persistence (task 13): pure path / diff / IO helpers.
+//
+// The Android shell persists wgpu's `PipelineCache` blob across launches so
+// second-and-later starts skip Vulkan shader-pipeline compilation (see
+// `crate::jni_glue::create_handle`). These helpers are the host-testable core of
+// that path — the on-disk location, the "did the blob change" check, and the
+// atomic read/write. All I/O is best-effort: the caller logs-and-ignores every
+// failure, since starting from an empty cache is always a correct fallback.
+// ---------------------------------------------------------------------
+
+/// The on-disk path of the persisted pipeline-cache blob:
+/// `<cache_dir>/forgekit/pipeline_cache.bin`.
+///
+/// `cache_dir` is the app's `context.cacheDir.absolutePath`, delivered across the
+/// JNI boundary by `nativeInit` (see `ForgeKitSurfaceView.surfaceCreated`). The
+/// `forgekit` subdirectory keeps the framework's file out of the app's own cache
+/// namespace.
+pub(crate) fn pipeline_cache_path(cache_dir: &str) -> PathBuf {
+    Path::new(cache_dir)
+        .join("forgekit")
+        .join("pipeline_cache.bin")
+}
+
+/// Whether a freshly read cache blob differs from the one loaded at startup, so
+/// an unchanged blob is never rewritten (once the cache stabilises across
+/// launches, no disk churn). A `None` `loaded` (no prior blob on disk) always
+/// differs from any `new` payload.
+pub(crate) fn pipeline_cache_differs(loaded: Option<&[u8]>, new: &[u8]) -> bool {
+    loaded != Some(new)
+}
+
+/// Read the persisted pipeline-cache blob, or `None` if it is absent or
+/// unreadable. Best-effort: a missing/corrupt file is treated as a cold start
+/// (the renderer starts from an empty cache), never an error.
+pub(crate) fn load_pipeline_cache(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+/// Atomically persist `data` to `path`: create the parent directory, write to a
+/// process-unique temp sibling, then rename it over `path`.
+///
+/// The rename is an atomic swap on the same filesystem, so a concurrent reader
+/// (a parallel launch) never observes a half-written file. Returns the
+/// underlying `io::Error` on any failure so the caller can log it; persistence
+/// is best-effort and a failure only means the next launch pays the cold-compile
+/// cost again.
+pub(crate) fn write_pipeline_cache_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_file_name(format!("pipeline_cache.bin.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +444,77 @@ mod tests {
             "{json}"
         );
         assert!(!json.contains("NaN") && !json.contains("inf"), "{json}");
+    }
+
+    // -----------------------------------------------------------------
+    // Pipeline-cache persistence helpers (task 13)
+    // -----------------------------------------------------------------
+
+    /// A fresh, unique temp directory for a round-trip I/O test. Not cleaned up
+    /// eagerly — the OS reaps the temp dir; each test uses a distinct path so
+    /// parallel runs never collide.
+    fn unique_temp_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("forgekit-pcache-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pipeline_cache_path_is_under_forgekit_subdir() {
+        let path = pipeline_cache_path("/data/user/0/it.f0x.demo/cache");
+        assert!(path.ends_with("forgekit/pipeline_cache.bin"), "{path:?}");
+        assert_eq!(
+            path,
+            Path::new("/data/user/0/it.f0x.demo/cache/forgekit/pipeline_cache.bin")
+        );
+    }
+
+    #[test]
+    fn pipeline_cache_differs_reports_changes() {
+        // No prior blob always differs from any new payload.
+        assert!(pipeline_cache_differs(None, b"anything"));
+        assert!(pipeline_cache_differs(None, b""));
+        // Identical bytes do not differ (skip the rewrite).
+        assert!(!pipeline_cache_differs(Some(b"same"), b"same"));
+        assert!(!pipeline_cache_differs(Some(b""), b""));
+        // Any content or length change differs.
+        assert!(pipeline_cache_differs(Some(b"old"), b"new"));
+        assert!(pipeline_cache_differs(Some(b"short"), b"shorter-plus"));
+    }
+
+    #[test]
+    fn load_missing_pipeline_cache_returns_none() {
+        let dir = unique_temp_dir();
+        let path = dir.join("forgekit").join("pipeline_cache.bin");
+        assert_eq!(load_pipeline_cache(&path), None);
+    }
+
+    #[test]
+    fn write_then_load_pipeline_cache_round_trips() {
+        let dir = unique_temp_dir();
+        // The parent `forgekit/` dir does not exist yet — the write must create it.
+        let path = dir.join("forgekit").join("pipeline_cache.bin");
+        let blob = vec![0u8, 1, 2, 3, 250, 251, 252, 253];
+        write_pipeline_cache_atomic(&path, &blob).unwrap();
+        assert!(path.exists(), "atomic write must create the target file");
+        assert_eq!(load_pipeline_cache(&path), Some(blob));
+    }
+
+    #[test]
+    fn write_pipeline_cache_overwrites_existing() {
+        let dir = unique_temp_dir();
+        let path = dir.join("forgekit").join("pipeline_cache.bin");
+        write_pipeline_cache_atomic(&path, b"first version").unwrap();
+        write_pipeline_cache_atomic(&path, b"second").unwrap();
+        assert_eq!(load_pipeline_cache(&path), Some(b"second".to_vec()));
+        // The temp sibling must not linger after a successful rename.
+        let leftover = dir
+            .join("forgekit")
+            .join(format!("pipeline_cache.bin.{}.tmp", std::process::id()));
+        assert!(!leftover.exists(), "temp file should be renamed away");
     }
 }

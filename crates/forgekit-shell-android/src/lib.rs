@@ -122,14 +122,22 @@ macro_rules! android_app {
     };
     ($state_ty:ty, $state_init:expr, $app_logic:expr $(,)?) => {
         /// JNI `nativeInit`: create the native handle for one surface.
+        ///
+        /// `cache_dir` is the app's `context.cacheDir.absolutePath` (task 13),
+        /// used to persist the wgpu pipeline cache across launches so a warm
+        /// start skips Vulkan shader-pipeline compilation. Same export name as
+        /// before — the mangled JNI symbol does not encode Java-side params — but
+        /// the Kotlin `external` declaration and this signature gained the
+        /// `String cacheDir` parameter together (see `ForgeKitSurfaceView`).
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeInit<'local>(
             env: $crate::__jni::EnvUnowned<'local>,
             _class: $crate::__jni::JClass<'local>,
             surface: $crate::__jni::JObject<'local>,
             scale: $crate::__jni::jfloat,
+            cache_dir: $crate::__jni::JString<'local>,
         ) -> $crate::__jni::jlong {
-            $crate::jni_glue::native_init(env, surface, scale, || {
+            $crate::jni_glue::native_init(env, surface, scale, cache_dir, || {
                 $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $app_logic)
             })
         }
