@@ -112,7 +112,13 @@ fn catalog_builds_switches_tabs_and_completes_a_modal_round_trip() {
     );
     root.rebuild(&mut logic, &mut state); // the pushed page's first build
     controller.pop_with_result(PopResult::of("confirmed".to_string()));
-    root.rebuild(&mut logic, &mut state); // the structural pop applies here
+    // The structural pop applies on this frame. A REAL frame (layout at
+    // W×H + paint), not a bare rebuild: the flush below is an event pass,
+    // and pointer events route by hit test against laid-out bounds — an
+    // un-laid-out tree silently swallows the event and the queued
+    // on_result never runs (the bug this comment is the tombstone of).
+    let mut tcx = forgekit_text::TextContext::new();
+    support::frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert_eq!(
         last_result.get_untracked(),
         None,
@@ -120,12 +126,14 @@ fn catalog_builds_switches_tabs_and_completes_a_modal_round_trip() {
     );
     // The next event pass flushes the queued on_result callback with
     // `&mut State` (mirrors `nav::navigator`'s own
-    // `pop_result_reaches_callback_with_state` test).
+    // `pop_result_reaches_callback_with_state` test). Aim at the page
+    // content area (window center) — chrome (top app bar / bottom tab bar)
+    // must not swallow the event before it reaches the navigator.
     root.event(
         &mut state,
         &InputEvent::Pointer(PointerEvent {
             phase: PointerPhase::Move,
-            position: Point::new(5.0, 5.0),
+            position: Point::new(support::W / 2.0, support::H / 2.0),
             button: PointerButton::Primary,
         }),
     );

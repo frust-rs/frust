@@ -47,6 +47,35 @@ use support::{center, char_key, frame, named_key, pointer, pump_frames, setup, t
 
 type Root = RenderRoot<ShellState, AnyView<ShellState>>;
 
+/// Rounded-rect chrome the SHELL contributes on every route (these tests
+/// mount the whole `ShellApp`, not a bare screen): the top app bar's
+/// Profile `Button` and the bottom navigation bar's active-destination
+/// indicator. Screen-level expectations below are stated as
+/// `screen + SHELL_CHROME`.
+const SHELL_CHROME: usize = 2;
+
+/// The rects present in `after` but not (by geometry) in `before` — the
+/// robust way to find a freshly-appeared button (banner Dismiss, row
+/// Delete) regardless of where shell chrome sits in the y-order.
+fn new_rects(
+    after: &support::RecScene,
+    before: &support::RecScene,
+) -> Vec<(kurbo::Point, kurbo::Size)> {
+    after
+        .rounded
+        .iter()
+        .copied()
+        .filter(|(p, s)| {
+            !before.rounded.iter().any(|(bp, bs)| {
+                (bp.x - p.x).abs() < 0.5
+                    && (bp.y - p.y).abs() < 0.5
+                    && (bs.width - s.width).abs() < 0.5
+                    && (bs.height - s.height).abs() < 0.5
+            })
+        })
+        .collect()
+}
+
 /// Mounts the shell under the Material 3 baseline and navigates it to `route`,
 /// returning the mounted root/state/logic/text-context plus the first painted
 /// scene at that route (a real layout+paint pass, matching `tests/team.rs`'s
@@ -138,17 +167,22 @@ fn notes_blank_submit_surfaces_a_validation_banner_that_dismiss_clears() {
     let _ambient = setup();
     let (mut root, mut state, mut logic, mut tcx, baseline) = mount_at("/notes");
 
-    // Only the (empty) `TextInput` field paints a rounded rect before any
-    // note or banner exists.
     // A `TextInput` paints two rounded rects per field (a border-colored
     // rect plus an inset background fill — see `textinput.rs`'s `paint`), so
-    // the lone notes field alone accounts for 2.
+    // the lone notes field accounts for 2, plus the shell's 2.
     assert_eq!(
         baseline.rounded.len(),
-        2,
-        "the notes field's border+fill are the only rounded-rect chrome          before any note/banner"
+        2 + SHELL_CHROME,
+        "the notes field's border+fill plus shell chrome, before any note/banner"
     );
-    let field = baseline.rounded[0];
+    // The field is the screen-area rect: below the app bar, above the tab
+    // bar — i.e. neither of the shell-chrome extremes. Pick the widest rect
+    // (the field spans the content width; the chrome buttons/pill don't).
+    let field = *baseline
+        .rounded
+        .iter()
+        .max_by(|a, b| a.1.width.partial_cmp(&b.1.width).unwrap())
+        .expect("the notes field rect");
 
     tap(&mut root, &mut state, center(field));
     root.event(&mut state, &named_key(NamedKey::Enter));
@@ -157,28 +191,24 @@ fn notes_blank_submit_surfaces_a_validation_banner_that_dismiss_clears() {
     let with_banner = frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert_eq!(
         with_banner.rounded.len(),
-        3,
-        "a blank submit adds the banner's Dismiss button (field's 2 + Dismiss's 1)"
+        3 + SHELL_CHROME,
+        "a blank submit adds the banner's Dismiss button"
     );
     assert!(
         with_banner.glyph_runs > baseline.glyph_runs,
         "the banner message + Dismiss label paint more glyph runs"
     );
 
-    // The banner sits above the field in `notes.rs`'s child order, so it has
-    // the smaller `y` (mirrors `tests/team.rs`'s own banner-location trick).
-    let dismiss = with_banner
-        .rounded
-        .iter()
-        .copied()
-        .min_by(|a, b| a.0.y.partial_cmp(&b.0.y).unwrap())
+    // Dismiss is the one rect that exists now but not at baseline.
+    let dismiss = *new_rects(&with_banner, &baseline)
+        .first()
         .expect("a rounded rect for the Dismiss button");
     tap(&mut root, &mut state, center(dismiss));
     let after = frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert_eq!(
         after.rounded.len(),
-        2,
-        "Dismiss clears the banner, leaving only the field's border+fill"
+        2 + SHELL_CHROME,
+        "Dismiss clears the banner, leaving field + shell chrome"
     );
 }
 
@@ -191,11 +221,16 @@ fn notes_add_then_delete_round_trips_through_the_real_controller() {
     let (mut root, mut state, mut logic, mut tcx, baseline) = mount_at("/notes");
     assert_eq!(
         baseline.rounded.len(),
-        2,
-        "just the field's border+fill, no notes yet"
+        2 + SHELL_CHROME,
+        "just the field's border+fill plus shell chrome, no notes yet"
     );
 
-    let field = baseline.rounded[0];
+    // Widest rect = the content-width notes field (see the blank-submit test).
+    let field = *baseline
+        .rounded
+        .iter()
+        .max_by(|a, b| a.1.width.partial_cmp(&b.1.width).unwrap())
+        .expect("the notes field rect");
     tap(&mut root, &mut state, center(field));
     for c in "Buy milk".chars() {
         root.event(&mut state, &char_key(&c.to_string()));
@@ -206,18 +241,14 @@ fn notes_add_then_delete_round_trips_through_the_real_controller() {
     let with_note = frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert_eq!(
         with_note.rounded.len(),
-        3,
+        3 + SHELL_CHROME,
         "the field's border+fill plus the new row's Delete button"
     );
     assert!(with_note.glyph_runs > baseline.glyph_runs);
 
-    // The submitted row (and its Delete button) is appended after the field,
-    // so it has the larger `y`.
-    let delete = with_note
-        .rounded
-        .iter()
-        .copied()
-        .max_by(|a, b| a.0.y.partial_cmp(&b.0.y).unwrap())
+    // Delete is the one rect that exists now but not at baseline.
+    let delete = *new_rects(&with_note, &baseline)
+        .first()
         .expect("a rounded rect for the Delete button");
     tap(&mut root, &mut state, center(delete));
     pump_frames(&mut root, &mut logic, &mut state, &mut tcx, 5);
@@ -225,8 +256,8 @@ fn notes_add_then_delete_round_trips_through_the_real_controller() {
     let after = frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert_eq!(
         after.rounded.len(),
-        2,
-        "deleting the only note returns to just the field's border+fill"
+        2 + SHELL_CHROME,
+        "deleting the only note returns to field + shell chrome"
     );
 }
 
@@ -246,17 +277,20 @@ fn profile_save_with_the_seeded_valid_profile_raises_no_banner() {
 
     // Three `TextInput` fields (name/role/email), each 2 rounded rects
     // (border+fill — see `textinput.rs`'s `paint`), plus the Save button (1),
-    // no banner yet.
+    // plus the shell's 2 — no banner yet.
     assert_eq!(
         baseline.rounded.len(),
-        7,
-        "three fields' border+fill (6) plus Save (1), no banner before any          save attempt"
+        7 + SHELL_CHROME,
+        "three fields' border+fill (6) + Save (1) + shell chrome, no banner"
     );
 
+    // Save is the lowest rect in the PAGE area — exclude the bottom tab
+    // bar's chrome (bottom ~15% of the window) before taking max-y.
     let save = baseline
         .rounded
         .iter()
         .copied()
+        .filter(|(p, _)| p.y < support::H * 0.85)
         .max_by(|a, b| a.0.y.partial_cmp(&b.0.y).unwrap())
         .expect("a rounded rect for the Save button");
     tap(&mut root, &mut state, center(save));
@@ -265,7 +299,7 @@ fn profile_save_with_the_seeded_valid_profile_raises_no_banner() {
     let after = frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert_eq!(
         after.rounded.len(),
-        7,
+        7 + SHELL_CHROME,
         "a successful save raises no Dismiss-able banner"
     );
 }
