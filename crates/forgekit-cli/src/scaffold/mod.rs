@@ -656,6 +656,13 @@ mod tests {
              \t\t<string>UIInterfaceOrientationLandscapeLeft</string>\n\
              \t\t<string>UIInterfaceOrientationLandscapeRight</string>\n\
              \t</array>\n\
+             \t<!-- Enable 120Hz on ProMotion iPhone hardware. This key is REQUIRED for\n\
+             \t     >60fps refresh rates on iPhone Pro models (Apple Foundation reference:\n\
+             \t     CADisplayLink preferredFrameRateRange, accessed 2026-07-18). Without it,\n\
+             \t     the system silently caps at 60Hz even if preferredFrameRateRange requests\n\
+             \t     higher. -->\n\
+             \t<key>CADisableMinimumFrameDurationOnPhone</key>\n\
+             \t<true/>\n\
              </dict>\n\
              </plist>";
         assert!(
