@@ -40,6 +40,19 @@ forgekit = { path = "../../crates/forgekit" }
 clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
 clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signals-forgekit" }
 
+# `forgekit-core` + `kurbo` + `peniko`: needed only by the theme/motion
+# screens' hand-rolled `ColorBoxView`/`MotionBoxView` `View`/`Widget` pair
+# (task 04, ported from `examples/gallery`) — an arbitrary-color filled rect
+# and a real blurred drop shadow, plus a paint-driven puck animation, that no
+# facade widget paints (see `docs/ARCHITECTURE.md`'s "low-level escape hatch"
+# note on `forgekit::App::new`, and `examples/gallery/src/lib.rs`'s module
+# docs for the precedent). Everything else in this crate depends on the
+# `forgekit` facade alone, per `docs/CODE_STANDARDS.md`'s State & Reactivity
+# Conventions.
+forgekit-core = { path = "../../crates/forgekit-core" }
+kurbo = "0.13.1"
+peniko = "0.6.1"
+
 # Dev-only: the headless team-screen tests drive ForgeKit's `RenderRoot` directly
 # (the desktop shell's own rebuild/layout/paint seam) and pump the reactive
 # runtime's UI-thread local task queue frame by frame — no GPU, no window. The
@@ -49,13 +62,10 @@ clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signal
 # `#[tokio::test]` unit modules (their `clean_signals::time::sleep`s need a tokio
 # time driver); the crate's own production code never spawns a tokio runtime.
 [dev-dependencies]
-forgekit-core = { path = "../../crates/forgekit-core" }
 forgekit-reactive = { path = "../../crates/forgekit-reactive" }
 forgekit-scene = { path = "../../crates/forgekit-scene" }
 forgekit-text = { path = "../../crates/forgekit-text" }
 reactive_graph = "0.2"
-kurbo = "0.13.1"
-peniko = "0.6.1"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
