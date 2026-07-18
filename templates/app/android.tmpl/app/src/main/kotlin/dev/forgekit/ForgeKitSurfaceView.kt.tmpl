@@ -2,6 +2,7 @@ package dev.forgekit
 
 import android.content.Context
 import android.content.res.Configuration
+import android.os.Build
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
@@ -187,7 +188,36 @@ class ForgeKitSurfaceView(context: Context) :
         isFocusableInTouchMode = true
     }
 
+    /**
+     * Set the frame rate hint on API 30+, requesting the display's maximum
+     * refresh rate. This is a HINT only — OEM policy and device capabilities
+     * override it. The Choreographer already follows the display's active rate
+     * regardless of this hint; this call just signals the platform that our
+     * surface can benefit from high-refresh rendering.
+     */
+    private fun setFrameRateHint(holder: SurfaceHolder) {
+        if (Build.VERSION.SDK_INT < 30) return
+
+        val display = display ?: return
+        val modes = display.supportedModes.ifEmpty { return }
+        val maxRefreshRate = modes.maxOf { it.refreshRate }
+
+        if (Build.VERSION.SDK_INT >= 31) {
+            holder.surface.setFrameRate(
+                maxRefreshRate,
+                Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                Surface.CHANGE_FRAME_RATE_ALWAYS
+            )
+        } else {
+            holder.surface.setFrameRate(
+                maxRefreshRate,
+                Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
+            )
+        }
+    }
+
     override fun surfaceCreated(holder: SurfaceHolder) {
+        setFrameRateHint(holder)
         if (handle == 0L) {
             handle = nativeInit(holder.surface, scaleFactor)
             if (handle != 0L) {
@@ -228,6 +258,7 @@ class ForgeKitSurfaceView(context: Context) :
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        setFrameRateHint(holder)
         if (handle != 0L) {
             nativeOnSurfaceChanged(handle, holder.surface, width, height)
         }
