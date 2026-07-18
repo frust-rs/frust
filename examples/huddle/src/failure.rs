@@ -1,9 +1,9 @@
 //! The app's closed failure enum.
 //!
 //! One `Failure` implementor for the whole app (small enough for a single
-//! feature slice not to need its own). Every use case and repository maps
-//! its errors into this type at the data-layer boundary — see
-//! `features::team::data::repositories`.
+//! app not to need per-feature error types). Every use case maps its errors
+//! into this generic retry/failure vocabulary at the domain boundary — see
+//! `docs/CODE_STANDARDS.md`'s "Generic-over-`F` failures" convention.
 
 use clean_signals::Failure;
 use std::fmt;
@@ -13,7 +13,7 @@ use std::fmt;
 /// Matched exhaustively by presentation code (never string-matched) per
 /// `docs/CODE_STANDARDS.md`'s "Generic-over-`F` failures" convention.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TeamFailure {
+pub enum HuddleFailure {
     /// A transient transport/server error. Safe to retry.
     Network(String),
     /// Input rejected by domain rules (e.g. an empty/too-short name). Not
@@ -21,25 +21,25 @@ pub enum TeamFailure {
     Validation(String),
 }
 
-impl fmt::Display for TeamFailure {
+impl fmt::Display for HuddleFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TeamFailure::Network(msg) => write!(f, "network error: {msg}"),
-            TeamFailure::Validation(msg) => write!(f, "validation error: {msg}"),
+            HuddleFailure::Network(msg) => write!(f, "network error: {msg}"),
+            HuddleFailure::Validation(msg) => write!(f, "validation error: {msg}"),
         }
     }
 }
 
-impl Failure for TeamFailure {
+impl Failure for HuddleFailure {
     fn user_message(&self) -> String {
         match self {
-            TeamFailure::Network(_) => "Connection problem — please try again.".to_string(),
-            TeamFailure::Validation(msg) => msg.clone(),
+            HuddleFailure::Network(_) => "Connection problem — please try again.".to_string(),
+            HuddleFailure::Validation(msg) => msg.clone(),
         }
     }
 
     fn is_retryable(&self) -> bool {
-        matches!(self, TeamFailure::Network(_))
+        matches!(self, HuddleFailure::Network(_))
     }
 }
 
@@ -49,14 +49,14 @@ mod tests {
 
     #[test]
     fn network_is_retryable_with_generic_user_message() {
-        let f = TeamFailure::Network("upstream 500".to_string());
+        let f = HuddleFailure::Network("upstream 500".to_string());
         assert!(f.is_retryable());
         assert_eq!(f.user_message(), "Connection problem — please try again.");
     }
 
     #[test]
     fn validation_is_not_retryable_and_surfaces_its_own_message() {
-        let f = TeamFailure::Validation("Name cannot be empty.".to_string());
+        let f = HuddleFailure::Validation("Name cannot be empty.".to_string());
         assert!(!f.is_retryable());
         assert_eq!(f.user_message(), "Name cannot be empty.");
     }

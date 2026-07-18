@@ -1,5 +1,4 @@
-//! Settings feature domain (wave-2 task 06) — the design-language +
-//! brightness selection spine.
+//! Settings feature domain — the design-language + brightness selection spine.
 //!
 //! [`SettingsController`] owns the two selection signals ([`DesignChoice`] and
 //! [`BrightnessChoice`]) and drives the [`SetTheme`] use case, which is the
@@ -9,18 +8,14 @@
 //! change here live-swaps all four tabs at once and, because the override is a
 //! process-global (`docs/ARCHITECTURE.md`'s Theme delivery), survives navigation.
 //!
-//! The controller is hosted inside [`crate::screens::settings`]'s `Component`
-//! via `clean_signals_forgekit::use_controller` — exactly how
-//! [`TeamController`](crate::features::team::presentation) reaches its own
-//! screen (task 02's registration seam). The *effect* is app-global (the theme
-//! override is process-wide); the controller instance itself is component-scoped
-//! and disposed on teardown.
+//! The controller is hosted inside [`crate::screens::settings_appearance`]'s
+//! `Component` via `clean_signals_forgekit::use_controller`. The *effect* is
+//! app-global (the theme override is process-wide); the controller instance
+//! itself is component-scoped and disposed on teardown.
 //!
-//! [`SetTheme`] mirrors
-//! [`UpdateMember`](crate::features::team::domain::use_cases::UpdateMember)'s
-//! shape — a `clean_signals::UseCase` — but is a *synchronous* use case: its
-//! `execute` never awaits (no repository, no I/O) and never fails. It reuses the
-//! app's single [`TeamFailure`] enum as its `Failure` associated type purely to
+//! [`SetTheme`] is a *synchronous* `clean_signals::UseCase`: its `execute`
+//! never awaits (no repository, no I/O) and never fails. It reuses the app's
+//! single [`HuddleFailure`] enum as its `Failure` associated type purely to
 //! satisfy the trait bound; the `Ok` path is the only one it ever takes.
 
 use clean_signals::{ControllerCore, RunOptions, UseCase};
@@ -28,7 +23,7 @@ use forgekit::{
     Brightness, DesignLanguage, GetUntracked, RwSignal, Theme, clear_app_theme, set_app_theme,
 };
 
-use crate::failure::TeamFailure;
+use crate::failure::HuddleFailure;
 
 /// The design-language selection: follow the platform (`System`) or force one
 /// of the two baselines.
@@ -186,7 +181,7 @@ pub struct SetThemeParams {
     pub current: Theme,
 }
 
-/// The synchronous theme-application use case (mirrors `UpdateMember`'s shape).
+/// The synchronous theme-application use case.
 ///
 /// [`compose`]s the decision, then applies it — the single call site of
 /// `set_app_theme`/`clear_app_theme` in the whole app. Never awaits, never
@@ -198,9 +193,9 @@ pub struct SetTheme;
 impl UseCase for SetTheme {
     type Params = SetThemeParams;
     type Output = ThemeDecision;
-    type Failure = TeamFailure;
+    type Failure = HuddleFailure;
 
-    async fn execute(&self, params: SetThemeParams) -> Result<ThemeDecision, TeamFailure> {
+    async fn execute(&self, params: SetThemeParams) -> Result<ThemeDecision, HuddleFailure> {
         let decision = compose(params.design, params.brightness, &params.current);
         match &decision {
             ThemeDecision::Clear => clear_app_theme(),
@@ -210,14 +205,13 @@ impl UseCase for SetTheme {
     }
 }
 
-/// View model for the settings screen.
+/// View model for the appearance settings screen.
 ///
 /// Holds the two selection signals the screen's selectors are controlled by,
 /// embeds a [`ControllerCore`] by composition (the `templates/AGENTS.md`
-/// controller rule, same as [`TeamController`](crate::features::team::presentation)),
-/// and runs [`SetTheme`] through it.
+/// controller rule), and runs [`SetTheme`] through it.
 pub struct SettingsController {
-    core: ControllerCore<TeamFailure>,
+    core: ControllerCore<HuddleFailure>,
     set_theme: SetTheme,
     /// The selected design language (drives the language selector).
     pub design: RwSignal<DesignChoice>,
@@ -241,7 +235,7 @@ impl SettingsController {
     /// Apply the current selections app-wide. `current` is the ambient theme the
     /// screen read this frame (used to resolve a `System` axis). Routed through
     /// [`ControllerCore::run`] so the clean-architecture spine (use case →
-    /// controller → screen) stays visible, exactly like `TeamController::rename`.
+    /// controller → screen) stays visible.
     pub async fn apply(&self, current: Theme) {
         let params = SetThemeParams {
             design: self.design.get_untracked(),
@@ -249,7 +243,7 @@ impl SettingsController {
             current,
         };
         // Infallible by construction; the `Result` is ignored (there is no
-        // failure path to surface, unlike the roster's rename).
+        // failure path to surface).
         let _ = self
             .core
             .run(&self.set_theme, params, RunOptions::default())
@@ -257,8 +251,8 @@ impl SettingsController {
     }
 }
 
-impl AsRef<ControllerCore<TeamFailure>> for SettingsController {
-    fn as_ref(&self) -> &ControllerCore<TeamFailure> {
+impl AsRef<ControllerCore<HuddleFailure>> for SettingsController {
+    fn as_ref(&self) -> &ControllerCore<HuddleFailure> {
         &self.core
     }
 }

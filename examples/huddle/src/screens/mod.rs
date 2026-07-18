@@ -1,24 +1,54 @@
-//! Every showcase screen module, declared here in task 02 so wave-2 tasks edit
-//! ONLY their own screen file (never this `mod.rs`, `routes.rs`, `shell.rs`,
-//! `lib.rs`, or `controllers.rs`) — the placeholder contract that keeps wave 2
-//! parallel (see the crate docs).
+//! Every Huddle screen module, declared here in the skeleton (task 10).
 //!
-//! - **Real, shipped in task 02:** [`showcase_menu`], [`nav_playground`],
-//!   [`member_detail`].
-//! - **Placeholders** (each carries the doc comment naming its owning wave-2
-//!   task): [`widgets_controls`], [`widgets_cards`], [`widgets_modals`],
-//!   [`widgets_appbars`], [`theme`], [`motion`], [`notes`], [`settings`],
-//!   [`profile`].
+//! This `mod.rs` is a **hub file** — Phase C screen tasks edit ONLY their own
+//! `screens/<name>.rs` (and their `features/<name>/**`), never this file, nor
+//! `lib.rs`/`shell.rs`/`routes.rs`/`mock/`/`ui/` (see `src/README-phase-c.md`).
+//! Each screen below is a **placeholder** carrying a doc comment naming the
+//! Phase C task that fills it; the only non-placeholder is
+//! [`settings_appearance`], which already hosts the live theme-swap mechanism.
+//!
+//! Every screen renders and navigates TODAY via the shared [`scaffold`] helper:
+//! its own [`app_bar`](forgekit::app_bar) plus a centered body.
 
-pub mod member_detail;
-pub mod motion;
-pub mod nav_playground;
-pub mod notes;
+pub mod activity;
+pub mod channel_feed;
+pub mod home;
 pub mod profile;
+pub mod search;
 pub mod settings;
-pub mod showcase_menu;
-pub mod theme;
-pub mod widgets_appbars;
-pub mod widgets_cards;
-pub mod widgets_controls;
-pub mod widgets_modals;
+pub mod settings_about;
+pub mod settings_appearance;
+pub mod settings_notifications;
+pub mod thread;
+pub mod workspace_drawer;
+pub mod you;
+
+use forgekit::{
+    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, any, app_bar, flexible,
+    inflexible, text,
+};
+
+use crate::HuddleState;
+
+/// A titled screen scaffold: the screen's own [`app_bar`](forgekit::app_bar) at
+/// the top and a centered `body` filling the rest. The shared shape every
+/// placeholder screen (and many Phase C screens) is built from.
+pub fn scaffold(title: &str, body: AnyView<HuddleState>) -> AnyView<HuddleState> {
+    any(FlexView::new(
+        Axis::Vertical,
+        vec![
+            inflexible(any(app_bar::<HuddleState>(title))),
+            flexible(1, any(Align(Alignment::CENTER, body))),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Stretch))
+}
+
+/// A placeholder body: a big "…" plus a note describing what Phase C will build
+/// here. Used by every screen that isn't wired up yet.
+pub fn placeholder_body(note: &str) -> AnyView<HuddleState> {
+    any(Column(vec![
+        any(text("\u{2026}").size(48.0)),
+        any(text(note).size(14.0)),
+    ]))
+}

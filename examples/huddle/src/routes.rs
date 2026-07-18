@@ -1,92 +1,77 @@
-//! The showcase's full route table (finalized here in task 02; wave-2 tasks
-//! fill their own screen files, never this one).
+//! Huddle's full route table — a **hub file finalized in the skeleton (task
+//! 10)**. Phase C screen tasks fill their own `screens/<name>.rs`, never this
+//! file (see `src/README-phase-c.md`).
 //!
-//! Thirteen routes covering every destination in the plan:
-//! `/`, `/member/:id`, `/profile`, `/widgets/{controls,cards,modals,appbars}`,
-//! `/showcase`, `/theme`, `/motion`, `/notes`, `/nav`, and `/settings`. Each
-//! route's page builder is a plain `Fn(&RouteParams) -> AnyView<ShellState>`
-//! captured once (see `forgekit_widgets::navigator`'s module docs) — the
-//! controller is cloned into every builder that needs to pop/push, exactly as
-//! `examples/navdemo`'s `build_routes` wires it.
+//! Twelve routes covering every destination in the plan:
+//! `/` (Home tab), `/search`, `/activity`, `/you`, `/channel/:id`,
+//! `/thread/:id`, `/user/:id`, `/you/settings`, `/you/settings/notifications`,
+//! `/you/settings/appearance`, `/you/settings/about`, and
+//! `/workspace-switcher`. Each page builder is a plain
+//! `Fn(&RouteParams) -> AnyView<HuddleState>` captured once; the navigator
+//! [`controller`](forgekit::NavigatorController) is cloned into every builder
+//! that pushes a nested page.
 
-use std::sync::Arc;
+use forgekit::{AnyView, NavigatorController, Route, RouteParams};
 
-use forgekit::{AnyView, NavigatorController, Route, RouteParams, any, component};
-
-use crate::ShellSignals;
-use crate::ShellState;
-use crate::features::team::domain::repositories::TeamRepository;
-use crate::features::team::presentation::TeamScreen;
+use crate::HuddleState;
 use crate::screens;
 
-/// The `/` route (and the navigator's initial page): the async team roster,
-/// hosted as a [`TeamScreen`] [`Component`](forgekit::Component) so its `init`
-/// runs under a real component reactive `Owner` (controller-disposal-on-teardown
-/// and the failure-listener subscription both scope to it). `repo` is the
-/// injected backend the composition root built once.
-pub fn team_page(repo: Arc<dyn TeamRepository + Send + Sync>) -> AnyView<ShellState> {
-    any(component(TeamScreen::new(repo)))
+/// The `/` route (and the navigator's initial page): the Home tab.
+pub fn home_page(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
+    screens::home::home_screen(controller)
 }
 
 /// Build the full route table. `controller` is created *before* this table (so
-/// no circularity with the [`Router`](forgekit::Router) it will be attached
-/// to); `signals` is the shell-wide `Copy` bundle every stateful page reads;
-/// `repo` is cloned into the `/` route's `TeamScreen`.
-pub fn build_routes(
-    controller: NavigatorController<ShellState>,
-    signals: ShellSignals,
-    repo: Arc<dyn TeamRepository + Send + Sync>,
-) -> Vec<Route<ShellState>> {
+/// there is no circularity with the [`Router`](forgekit::Router) it attaches
+/// to) and cloned into every builder that pushes a nested page.
+pub fn build_routes(controller: NavigatorController<HuddleState>) -> Vec<Route<HuddleState>> {
     vec![
         Route::new("/", {
-            let repo = Arc::clone(&repo);
-            move |_params: &RouteParams| team_page(Arc::clone(&repo))
+            let controller = controller.clone();
+            move |_params: &RouteParams| home_page(controller.clone())
         }),
-        Route::new("/member/:id", {
+        Route::new("/search", |_params: &RouteParams| {
+            screens::search::search_screen()
+        }),
+        Route::new("/activity", |_params: &RouteParams| {
+            screens::activity::activity_screen()
+        }),
+        Route::new("/you", {
+            let controller = controller.clone();
+            move |_params: &RouteParams| screens::you::you_screen(controller.clone())
+        }),
+        Route::new("/channel/:id", {
             let controller = controller.clone();
             move |params: &RouteParams| {
                 let id = params.get("id").cloned().unwrap_or_default();
-                screens::member_detail::member_detail(id, controller.clone(), signals)
+                screens::channel_feed::channel_feed(controller.clone(), id)
             }
         }),
-        Route::new("/profile", |_params: &RouteParams| {
-            screens::profile::profile_screen()
+        Route::new("/thread/:id", |params: &RouteParams| {
+            let id = params.get("id").cloned().unwrap_or_default();
+            screens::thread::thread_screen(id)
         }),
-        Route::new("/widgets/controls", |_params: &RouteParams| {
-            screens::widgets_controls::controls_screen()
+        Route::new("/user/:id", |params: &RouteParams| {
+            let id = params.get("id").cloned().unwrap_or_default();
+            screens::profile::profile_screen(id)
         }),
-        Route::new("/widgets/cards", |_params: &RouteParams| {
-            screens::widgets_cards::cards_screen()
-        }),
-        Route::new("/widgets/modals", |_params: &RouteParams| {
-            screens::widgets_modals::modals_screen()
-        }),
-        Route::new("/widgets/appbars", |_params: &RouteParams| {
-            screens::widgets_appbars::appbars_screen()
-        }),
-        Route::new("/showcase", {
+        Route::new("/you/settings", {
             let controller = controller.clone();
-            move |_params: &RouteParams| {
-                screens::showcase_menu::showcase_menu(controller.clone(), signals)
-            }
+            move |_params: &RouteParams| screens::settings::settings_screen(controller.clone())
         }),
-        Route::new("/theme", |_params: &RouteParams| {
-            screens::theme::theme_screen()
+        Route::new("/you/settings/notifications", |_params: &RouteParams| {
+            screens::settings_notifications::notifications_screen()
         }),
-        Route::new("/motion", |_params: &RouteParams| {
-            screens::motion::motion_screen()
+        Route::new("/you/settings/appearance", |_params: &RouteParams| {
+            screens::settings_appearance::appearance_screen()
         }),
-        Route::new("/notes", |_params: &RouteParams| {
-            screens::notes::notes_screen()
+        Route::new("/you/settings/about", |_params: &RouteParams| {
+            screens::settings_about::about_screen()
         }),
-        Route::new("/nav", {
-            let controller = controller.clone();
-            move |_params: &RouteParams| {
-                screens::nav_playground::nav_playground(controller.clone(), signals)
-            }
-        }),
-        Route::new("/settings", |_params: &RouteParams| {
-            screens::settings::settings_screen()
+        // Transparent push (top drawer) — see `workspace_drawer`'s transition
+        // note; the skeleton routes it through the normal navigator transition.
+        Route::new("/workspace-switcher", |_params: &RouteParams| {
+            screens::workspace_drawer::workspace_drawer_screen()
         }),
     ]
 }

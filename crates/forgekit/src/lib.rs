@@ -76,13 +76,22 @@ pub use forgekit_core::view::{AnyView, View, any};
 pub use forgekit_widgets::{
     Align, AlignView, Alignment, Axis, Button, ButtonView, Checkbox, CheckboxView, ChildKey,
     Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
-    GestureDetectorView, HeroView, Image, ImageError, ImageFit, ImageSource, ImageView,
-    MainAxisAlignment, NavigatorController, NavigatorView, Padding, PaddingView, PageBuilder,
-    PageTransition, PopResult, ResultCallback, Row, ScrollView, SizedBox, SizedBoxView, Slider,
+    GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView, IconWidget, Image,
+    ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment, NavigatorController,
+    NavigatorView, Padding, PaddingView, PageBuilder, PageTransition, PopResult, Radio, RadioView,
+    RadioWidget, ResultCallback, Row, ScrollInfo, ScrollView, SizedBox, SizedBoxView, Slider,
     SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing, TransitionSpec,
-    button, checkbox, flexible, hero, inflexible, keyed, navigator, scroll_view, slider, text,
-    text_input,
+    button, checkbox, flexible, hero, icon, inflexible, keyed, navigator, radio, scroll_view,
+    slider, text, text_input,
 };
+
+/// The vendored Material Symbols starter icon set (Huddle showcase, Phase A),
+/// flat-re-exported so app code names `forgekit::icons::HOME` rather than the
+/// underlying `forgekit-widgets` crate. Each entry is an
+/// [`IconSource`](crate::IconSource) usable directly with [`icon`](crate::icon);
+/// an app can also supply its own vector icons via
+/// [`IconData::from_path`](crate::IconData::from_path).
+pub use forgekit_widgets::icons;
 
 /// The declarative router vocabulary (spec §19's go_router-subset layer),
 /// flat-re-exported from `forgekit-widgets` so app code never names that

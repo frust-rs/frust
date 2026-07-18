@@ -15,8 +15,8 @@
 #![allow(dead_code)]
 
 use std::any::Any;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use forgekit_core::{
@@ -79,6 +79,20 @@ pub fn recording_waker() -> FrameWaker {
     Arc::new(move || {
         counter.fetch_add(1, Ordering::SeqCst);
     })
+}
+
+/// A process-wide serialization guard for tests that touch process-global
+/// reactive state (`push_deep_link`, `set_app_theme`, the shared background
+/// executor's timing). Two such tests in the same binary would otherwise race
+/// under default parallel `cargo test` — the known `ported.rs` flake this
+/// harness avoids by having each such test take this lock first. Poisoning is
+/// ignored (a panicking test still releases a usable guard) so one failure
+/// doesn't cascade into spurious failures in the rest of the binary.
+pub fn serial() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// Installs the reactive runtime and an ambient owner for a test, mirroring the
