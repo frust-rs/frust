@@ -4,12 +4,12 @@
 //! is the only enforcement):
 //!
 //! - `[profile.dev.package.<shader-crate>]` overrides (spec §12.9, 6e
-//!   Finding 5) live in THREE manifests (root, template, team-demo) — drift
+//!   Finding 5) live in THREE manifests (root, template, huddle) — drift
 //!   silently reopens the iOS launch-watchdog crash.
 //! - `[profile.release]` hardening and the `[profile.dev.package."*"]`
 //!   wildcard (phase 7 task 11) live in the SAME three manifests (root,
-//!   template, team-demo — phase 8's examples-convergence deleted `catalog`
-//!   and `inbox`, folding their hand-sync role into `team-demo`) — drift
+//!   template, huddle — phase 8's examples-convergence deleted `catalog`
+//!   and `inbox`, folding their hand-sync role into `huddle`) — drift
 //!   silently reopens the measured size/perf regression (review round-0
 //!   finding 4).
 //!
@@ -61,7 +61,7 @@ fn section_pairs(manifest: &str, header: &str) -> BTreeMap<String, String> {
 }
 
 /// The three manifests carrying the phase-7 hand-synced profile blocks
-/// (root, template, team-demo — phase 8's examples-convergence deleted the
+/// (root, template, huddle — phase 8's examples-convergence deleted the
 /// `catalog` and `inbox` examples, the other two manifests this used to
 /// compare).
 fn three_manifests() -> Vec<std::path::PathBuf> {
@@ -69,7 +69,7 @@ fn three_manifests() -> Vec<std::path::PathBuf> {
     vec![
         repo_root.join("Cargo.toml"),
         repo_root.join("templates/app/Cargo.toml.tmpl"),
-        repo_root.join("examples/team-demo/Cargo.toml"),
+        repo_root.join("examples/huddle/Cargo.toml"),
     ]
 }
 

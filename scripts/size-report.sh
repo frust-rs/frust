@@ -9,7 +9,7 @@
 # device-targeted build.
 #
 # Usage: scripts/size-report.sh [--app <dir>]
-#   --app <dir>   App directory to measure (default: examples/team-demo,
+#   --app <dir>   App directory to measure (default: examples/huddle,
 #                 relative to the repo root this script lives in).
 #
 # Exits non-zero only if the release arm64-v8a build itself fails. Missing
@@ -22,7 +22,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
-APP_REL="examples/team-demo"
+APP_REL="examples/huddle"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -52,7 +52,7 @@ case "$APP_REL" in
 esac
 
 if [ ! -f "${APP_DIR}/Cargo.toml" ]; then
-  echo "error: no Cargo.toml at ${APP_DIR} — expected an app dir (e.g. examples/team-demo)" >&2
+  echo "error: no Cargo.toml at ${APP_DIR} — expected an app dir (e.g. examples/huddle)" >&2
   exit 2
 fi
 
