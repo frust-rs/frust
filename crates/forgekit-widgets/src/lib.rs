@@ -59,6 +59,7 @@ pub use flex::{
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
+pub use nav::hero::{HeroView, HeroWidget, hero};
 pub use nav::navigator::{
     NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult, ResultCallback,
     navigator,

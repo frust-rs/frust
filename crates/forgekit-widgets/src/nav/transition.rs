@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use forgekit_core::{AnimationController, Curve, FrameTime, Spring, SpringDesc};
 use forgekit_theme::MotionSpring;
-use kurbo::Size;
+use kurbo::{Affine, Point, Rect, Size};
 
 // --- Named preset constants (see per-constant source comments) --------------
 
@@ -498,6 +498,52 @@ pub fn resolve_layers(
     }
 }
 
+// --- Shared-element ("hero") morph geometry (task 07) -----------------------
+
+/// Linearly interpolate two rects — origin and size independently — at `t`.
+///
+/// The shared-element ("hero") morph interpolates a tagged element's source
+/// rect (its rest position on the outgoing page) toward its destination rect
+/// (its rest position on the incoming page) each transition frame. The caller
+/// clamps `t` to `[0, 1]` when a well-defined (non-negative-extent) rect is
+/// required — a spatial-spring overshoot past `1.0` would otherwise flip a
+/// dimension.
+pub fn lerp_rect(from: Rect, to: Rect, t: f64) -> Rect {
+    let lerp = |a: f64, b: f64| a + (b - a) * t;
+    Rect::from_origin_size(
+        Point::new(lerp(from.x0, to.x0), lerp(from.y0, to.y0)),
+        Size::new(
+            lerp(from.width(), to.width()),
+            lerp(from.height(), to.height()),
+        ),
+    )
+}
+
+/// The affine transform mapping rect `from` onto rect `to`: a translation plus
+/// a non-uniform scale taken about `from`'s top-left, so `from`'s corners land
+/// exactly on `to`'s.
+///
+/// A hero wrapper pushes this ([`PaintScene::push_transform`](forgekit_core::PaintScene::push_transform))
+/// to repaint its retained subtree at the interpolated morph rect — position
+/// **and** scale, the real morph the pure origin-offset seam every other paint
+/// call uses cannot express. A zero-extent `from` on an axis degenerates to an
+/// identity scale on that axis (no division by zero).
+pub fn rect_to_rect(from: Rect, to: Rect) -> Affine {
+    let sx = if from.width().abs() > f64::EPSILON {
+        to.width() / from.width()
+    } else {
+        1.0
+    };
+    let sy = if from.height().abs() > f64::EPSILON {
+        to.height() / from.height()
+    } else {
+        1.0
+    };
+    Affine::translate((to.x0, to.y0))
+        * Affine::scale_non_uniform(sx, sy)
+        * Affine::translate((-from.x0, -from.y0))
+}
+
 /// A linear ramp: `0` at `start`, `1` at `end`, clamped outside. Used for the
 /// threshold cross-fades. `start == end` degenerates to a step at `start`.
 fn ramp(t: f64, start: f64, end: f64) -> f32 {
@@ -686,6 +732,42 @@ mod tests {
         assert_eq!(a.value, 0.4);
         assert!(!a.animating);
         assert!(!a.done, "a held driver never reports done (drag paused)");
+    }
+
+    #[test]
+    fn lerp_rect_interpolates_origin_and_size_independently() {
+        let from = Rect::from_origin_size(Point::new(0.0, 0.0), Size::new(20.0, 20.0));
+        let to = Rect::from_origin_size(Point::new(100.0, 40.0), Size::new(200.0, 80.0));
+        // Endpoints are exact.
+        assert_eq!(lerp_rect(from, to, 0.0), from);
+        assert_eq!(lerp_rect(from, to, 1.0), to);
+        // Halfway: origin and size each land midway.
+        let mid = lerp_rect(from, to, 0.5);
+        assert_eq!(mid.origin(), Point::new(50.0, 20.0));
+        assert_eq!(mid.size(), Size::new(110.0, 50.0));
+    }
+
+    #[test]
+    fn rect_to_rect_maps_corners_exactly() {
+        let from = Rect::from_origin_size(Point::new(10.0, 20.0), Size::new(20.0, 20.0));
+        let to = Rect::from_origin_size(Point::new(100.0, 200.0), Size::new(80.0, 40.0));
+        let t = rect_to_rect(from, to);
+        let tl = t * Point::new(from.x0, from.y0);
+        let br = t * Point::new(from.x1, from.y1);
+        assert!((tl.x - to.x0).abs() < 1e-9 && (tl.y - to.y0).abs() < 1e-9);
+        assert!((br.x - to.x1).abs() < 1e-9 && (br.y - to.y1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rect_to_rect_zero_extent_source_is_identity_scale() {
+        // A zero-width/height source must not divide by zero — it degenerates to
+        // an identity scale on that axis (a pure translation of the origin).
+        let from = Rect::from_origin_size(Point::new(5.0, 5.0), Size::new(0.0, 0.0));
+        let to = Rect::from_origin_size(Point::new(9.0, 12.0), Size::new(0.0, 0.0));
+        let t = rect_to_rect(from, to);
+        let mapped = t * Point::new(5.0, 5.0);
+        assert!((mapped.x - 9.0).abs() < 1e-9 && (mapped.y - 12.0).abs() < 1e-9);
+        assert!(t.as_coeffs()[0].is_finite() && t.as_coeffs()[3].is_finite());
     }
 
     #[test]

@@ -11,9 +11,13 @@
 //!   opaque-page paint culling, and the page-switch capture/focus/IME contract.
 //!   Instant page switches only — transitions arrive in task 03.
 //! * [`transition`] — page-transition animations (task 03). A doc-only stub today.
+//! * [`hero`] — shared-element ("hero") transition wrapper (task 07): the
+//!   [`hero(tag, child)`](hero::hero) view that morphs a tagged element between
+//!   two pages during a transition.
 //! * [`router`] — declarative route table (a later task). A doc-only stub today.
 //! * [`path`] — path/URL parsing for the router (a later task). A doc-only stub today.
 
+pub mod hero;
 pub mod navigator;
 pub mod path;
 pub mod router;

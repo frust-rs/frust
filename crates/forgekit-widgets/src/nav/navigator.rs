@@ -48,18 +48,19 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EditingState, EventCtx, EventResult,
-    FrameTime, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SpringDesc,
-    TOUCH_SLOP, VelocityTracker, View, Widget,
+    FrameTime, HeroDirective, HeroFrames, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene,
+    PointerPhase, SpringDesc, TOUCH_SLOP, VelocityTracker, View, Widget,
 };
-use kurbo::{Point, Size};
+use kurbo::{Point, Rect, Size, Vec2};
 
 use super::transition::{
-    Layer, PageTransition, TransitionDriver, TransitionSpec, make_driver, resolve_layers,
-    settle_driver,
+    Layer, PageTransition, TransitionDriver, TransitionSpec, lerp_rect, make_driver,
+    resolve_layers, settle_driver,
 };
 
 // --- Edge-swipe tuning constants (see per-constant approximation notes) ------
@@ -435,6 +436,16 @@ struct ActiveTransition<State: 'static> {
     /// pushes the stashed page back onto the stack instead of tearing it down (the
     /// page was never really popped). See [`NavigatorWidget::finalize_transition`].
     restore_on_finalize: bool,
+    /// Shared-element ("hero") state (task 07). Page-local rects of the tagged
+    /// heroes discovered on the **leaving** page during the previous transition
+    /// paint, keyed by tag. `layout`/`paint` capture these each frame; the next
+    /// frame reads them to place the morph overlay. Empty until the first paint
+    /// discovers any (so the morph starts a frame into the flight — the rects
+    /// are static page layout, so the delay is invisible).
+    hero_leaving: HashMap<String, Rect>,
+    /// Page-local hero rects discovered on the **entering** page — the morph
+    /// target endpoint. See [`hero_leaving`](ActiveTransition::hero_leaving).
+    hero_entering: HashMap<String, Rect>,
 }
 
 /// The interactive edge-swipe gesture state (task 05). Mirrors
@@ -562,6 +573,8 @@ impl<State: 'static> NavigatorWidget<State> {
             settled: false,
             interactive: false,
             restore_on_finalize: false,
+            hero_leaving: HashMap::new(),
+            hero_entering: HashMap::new(),
         });
     }
 
@@ -682,6 +695,8 @@ impl<State: 'static> NavigatorWidget<State> {
             settled: false,
             interactive: true,
             restore_on_finalize: false,
+            hero_leaving: HashMap::new(),
+            hero_entering: HashMap::new(),
         });
         self.needs_ime_clear = true;
     }
@@ -1017,21 +1032,59 @@ impl<State: 'static> NavigatorWidget<State> {
             (adv, t.is_pop, t.preset, t.stashed.is_some())
         };
         let area = ctx.size();
+        let nav_origin = ctx.origin();
         let (enter_layer, leave_layer) = resolve_layers(preset, adv.value, is_pop, area);
+
+        // Shared-element ("hero") directives for this frame, derived from the
+        // rects the *previous* frame captured (page layout is static during a
+        // transition, so last frame's rects are the current resting geometry).
+        // The morph rect is clamped-progress interpolated so a spatial-spring
+        // overshoot past 1.0 never flips a hero dimension.
+        let (enter_dirs, leave_dirs) =
+            self.hero_directives(adv.value.clamp(0.0, 1.0), is_pop, nav_origin);
 
         // Clip every offset page to the navigator's own area — content that slides
         // off-screen must not bleed past the navigator (relevant when nested).
-        scene.push_clip(ctx.origin(), area);
+        scene.push_clip(nav_origin, area);
         // Paint order: a push paints leaving (below) then entering (on top); a pop
-        // paints entering (revealed, below) then leaving (popped, on top).
+        // paints entering (revealed, below) then leaving (popped, on top). Each
+        // page paints with a hero reporter installed so its tagged descendants
+        // report their rects and the matched endpoint paints (or suppresses) the
+        // morph. The overlay is painted by the hero on the page drawn LAST, so it
+        // always lands above both page layers.
+        let (new_entering, new_leaving);
         if is_pop {
-            self.paint_entering(ctx, scene, enter_layer, area);
-            self.paint_leaving(ctx, scene, leave_layer, area, has_stashed);
+            new_entering =
+                self.paint_entering_heroes(ctx, scene, enter_layer, area, nav_origin, enter_dirs);
+            new_leaving = self.paint_leaving_heroes(
+                ctx,
+                scene,
+                leave_layer,
+                area,
+                nav_origin,
+                has_stashed,
+                leave_dirs,
+            );
         } else {
-            self.paint_leaving(ctx, scene, leave_layer, area, has_stashed);
-            self.paint_entering(ctx, scene, enter_layer, area);
+            new_leaving = self.paint_leaving_heroes(
+                ctx,
+                scene,
+                leave_layer,
+                area,
+                nav_origin,
+                has_stashed,
+                leave_dirs,
+            );
+            new_entering =
+                self.paint_entering_heroes(ctx, scene, enter_layer, area, nav_origin, enter_dirs);
         }
         scene.pop_clip();
+
+        // Store this frame's captured rects for next frame's directives.
+        if let Some(t) = self.transition.as_mut() {
+            t.hero_entering = new_entering;
+            t.hero_leaving = new_leaving;
+        }
 
         if adv.animating {
             ctx.request_frame();
@@ -1046,42 +1099,140 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
-    /// Paint the entering page (always the stack top) with `layer`.
-    fn paint_entering(
+    /// Compute this frame's per-page hero [`HeroDirective`]s from the rects the
+    /// previous paint captured. A tag present on **both** pages is a matched
+    /// shared element: the hero on the page painted last (on top — entering for
+    /// a push, leaving for a pop) paints the morph at the interpolated absolute
+    /// rect; its counterpart is suppressed. Returns `(entering, leaving)`
+    /// directive maps.
+    fn hero_directives(
+        &self,
+        p: f64,
+        is_pop: bool,
+        nav_origin: Point,
+    ) -> (
+        HashMap<String, HeroDirective>,
+        HashMap<String, HeroDirective>,
+    ) {
+        let mut enter_dirs = HashMap::new();
+        let mut leave_dirs = HashMap::new();
+        let Some(t) = self.transition.as_ref() else {
+            return (enter_dirs, leave_dirs);
+        };
+        for (tag, leaving_rect) in &t.hero_leaving {
+            let Some(entering_rect) = t.hero_entering.get(tag) else {
+                continue;
+            };
+            let interp = lerp_rect(*leaving_rect, *entering_rect, p);
+            let dest =
+                Rect::from_origin_size(nav_origin + interp.origin().to_vec2(), interp.size());
+            let (painter, suppressed) = if is_pop {
+                (&mut leave_dirs, &mut enter_dirs)
+            } else {
+                (&mut enter_dirs, &mut leave_dirs)
+            };
+            painter.insert(tag.clone(), HeroDirective::Morph { dest });
+            suppressed.insert(tag.clone(), HeroDirective::Suppress);
+        }
+        (enter_dirs, leave_dirs)
+    }
+
+    /// Paint the entering page (always the stack top) with `layer`, a hero
+    /// reporter installed, returning its captured page-local hero rects.
+    fn paint_entering_heroes(
         &mut self,
         ctx: &mut PaintCtx,
         scene: &mut dyn PaintScene,
         layer: Layer,
         area: Size,
-    ) {
+        nav_origin: Point,
+        directives: HashMap<String, HeroDirective>,
+    ) -> HashMap<String, Rect> {
         if let Some(entry) = self.pages.last_mut() {
-            paint_page_layer(&mut entry.pod, ctx, scene, layer, area);
+            let reference = nav_origin + Vec2::new(layer.dx, layer.dy);
+            paint_page_heroes(
+                &mut entry.pod,
+                ctx,
+                scene,
+                layer,
+                area,
+                reference,
+                directives,
+            )
+        } else {
+            HashMap::new()
         }
     }
 
     /// Paint the leaving page — the retained page (pop/replace) or the page below
-    /// the new top (push) — with `layer`.
-    fn paint_leaving(
+    /// the new top (push) — with `layer`, a hero reporter installed, returning
+    /// its captured page-local hero rects.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_leaving_heroes(
         &mut self,
         ctx: &mut PaintCtx,
         scene: &mut dyn PaintScene,
         layer: Layer,
         area: Size,
+        nav_origin: Point,
         has_stashed: bool,
-    ) {
+        directives: HashMap<String, HeroDirective>,
+    ) -> HashMap<String, Rect> {
+        let reference = nav_origin + Vec2::new(layer.dx, layer.dy);
         if has_stashed {
             if let Some(t) = self.transition.as_mut()
                 && let Some(stashed) = t.stashed.as_mut()
             {
-                paint_page_layer(&mut stashed.pod, ctx, scene, layer, area);
+                return paint_page_heroes(
+                    &mut stashed.pod,
+                    ctx,
+                    scene,
+                    layer,
+                    area,
+                    reference,
+                    directives,
+                );
             }
+            HashMap::new()
         } else {
             let n = self.pages.len();
             if n >= 2 {
-                paint_page_layer(&mut self.pages[n - 2].pod, ctx, scene, layer, area);
+                paint_page_heroes(
+                    &mut self.pages[n - 2].pod,
+                    ctx,
+                    scene,
+                    layer,
+                    area,
+                    reference,
+                    directives,
+                )
+            } else {
+                HashMap::new()
             }
         }
     }
+}
+
+/// Paint one transition page with a hero reporter installed over its subtree,
+/// returning the page-local rects its tagged descendants captured. `reference`
+/// is the page's absolute top-left this frame (nav origin + the layer's
+/// animated offset), subtracted from each reported rect so captures are stable
+/// across the slide.
+#[allow(clippy::too_many_arguments)]
+fn paint_page_heroes(
+    pod: &mut ChildPod,
+    ctx: &mut PaintCtx,
+    scene: &mut dyn PaintScene,
+    layer: Layer,
+    area: Size,
+    reference: Point,
+    directives: HashMap<String, HeroDirective>,
+) -> HashMap<String, Rect> {
+    let registry = RefCell::new(HeroFrames::new(reference, directives));
+    ctx.with_hero_registry(&registry, |page_ctx| {
+        paint_page_layer(pod, page_ctx, scene, layer, area);
+    });
+    registry.into_inner().into_captured()
 }
 
 /// Paint one transition page: offset its pod origin by the layer's `dx`/`dy` (so
@@ -3032,5 +3183,367 @@ mod tests {
             !nav_widget(&root_plain).pop_swipe_enabled,
             "the default (instant) preset leaves the pop-swipe off"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 07: shared-element ("hero") transitions.
+    // ---------------------------------------------------------------------
+
+    use kurbo::Affine;
+
+    /// A recording scene that separates page fills painted at the identity
+    /// transform (`plain`) from fills painted under a pushed transform
+    /// (`morphs`, recorded as their transformed bounding boxes) — so a hero test
+    /// can assert the morph overlay's interpolated rect and that a suppressed
+    /// endpoint painted nothing at its rest position.
+    #[derive(Default)]
+    struct HeroScene {
+        transforms: Vec<Affine>,
+        plain: Vec<(Point, Size)>,
+        morphs: Vec<Rect>,
+    }
+    impl PaintScene for HeroScene {
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: peniko::Color) {
+            let rect = Rect::from_origin_size(origin, size);
+            match self.transforms.last() {
+                Some(t) => self.morphs.push(t.transform_rect_bbox(rect)),
+                None => self.plain.push((origin, size)),
+            }
+        }
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_transform(&mut self, transform: Affine) {
+            let composed = self.transforms.last().copied().unwrap_or(Affine::IDENTITY) * transform;
+            self.transforms.push(composed);
+        }
+        fn pop_transform(&mut self) {
+            self.transforms.pop();
+        }
+    }
+
+    /// A page that is a single tagged hero wrapping a fixed-size leaf (hero at
+    /// page-local origin).
+    fn hero_leaf_page(tag: &'static str, w: f64, h: f64) -> AnyView<()> {
+        any(crate::hero(
+            tag,
+            SizedLeaf {
+                size: Size::new(w, h),
+            },
+        ))
+    }
+
+    /// A page whose tagged hero is inset by `(left, top)` — so its page-local
+    /// rect differs from a [`hero_leaf_page`]'s, giving the morph a real
+    /// translation *and* (with a different size) scale to interpolate.
+    fn hero_offset_page(tag: &'static str, w: f64, h: f64, left: f64, top: f64) -> AnyView<()> {
+        any(crate::Padding(
+            crate::EdgeInsets {
+                left,
+                top,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            crate::hero(
+                tag,
+                SizedLeaf {
+                    size: Size::new(w, h),
+                },
+            ),
+        ))
+    }
+
+    fn hero_frame(
+        root: &mut RenderRoot<(), NavigatorView<()>>,
+        app: &mut impl FnMut(&mut ()) -> NavigatorView<()>,
+        state: &mut (),
+        time: FrameTime,
+    ) -> (HeroScene, bool) {
+        root.rebuild(app, state);
+        root.layout(Size::new(200.0, 200.0));
+        let mut scene = HeroScene::default();
+        let out = root.paint(&mut scene, time);
+        (scene, out.needs_frame)
+    }
+
+    /// Whether `rects` holds a rect approximately equal to `(origin, size)`.
+    fn has_rect(rects: &[Rect], origin: Point, size: Size) -> bool {
+        rects.iter().any(|r| {
+            (r.x0 - origin.x).abs() < 1e-6
+                && (r.y0 - origin.y).abs() < 1e-6
+                && (r.width() - size.width).abs() < 1e-6
+                && (r.height() - size.height).abs() < 1e-6
+        })
+    }
+
+    #[test]
+    fn hero_push_morphs_between_pages_and_suppresses_endpoints() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            // Root A: a 40x40 hero at (0,0). It is the leaving page's endpoint.
+            move |_: &mut ()| navigator(&ctrl, || hero_leaf_page("avatar", 40.0, 40.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        // Push B: an 80x80 hero inset to (20,30) — the entering endpoint.
+        let spec = TransitionSpec::new(
+            PageTransition::M3SharedAxisX,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.push_with(|| hero_offset_page("avatar", 80.0, 80.0, 20.0, 30.0), spec);
+
+        // Seed frame (p=0): no rects captured yet, so both endpoints paint
+        // normally and no morph overlay is painted (discovery frame).
+        let (f0, _) = hero_frame(&mut root, &mut app, &mut state, ft(0));
+        assert!(f0.morphs.is_empty(), "no morph on the discovery frame");
+        assert!(
+            has_rect(
+                &f0.plain
+                    .iter()
+                    .map(|(o, s)| Rect::from_origin_size(*o, *s))
+                    .collect::<Vec<_>>(),
+                Point::new(0.0, 0.0),
+                Size::new(40.0, 40.0),
+            ),
+            "A's hero paints normally on the seed frame: {:?}",
+            f0.plain
+        );
+
+        // Mid frame (p=0.5): the matched endpoints morph. The overlay rect is the
+        // interpolation of A's (0,0,40,40) and B's (20,30,80,80):
+        //   origin = (10, 15), size = (60, 60). Both endpoints are suppressed at
+        //   their rest positions (only the morph paints the shared element).
+        let (f1, _) = hero_frame(&mut root, &mut app, &mut state, ft(50));
+        assert!(
+            has_rect(&f1.morphs, Point::new(10.0, 15.0), Size::new(60.0, 60.0)),
+            "morph overlay interpolates source→target: {:?}",
+            f1.morphs
+        );
+        let plain_rects: Vec<Rect> = f1
+            .plain
+            .iter()
+            .map(|(o, s)| Rect::from_origin_size(*o, *s))
+            .collect();
+        assert!(
+            !has_rect(&plain_rects, Point::new(0.0, 0.0), Size::new(40.0, 40.0)),
+            "A's endpoint is suppressed mid-flight: {:?}",
+            f1.plain
+        );
+
+        // Settle + finalize: culling resumes, only B's hero paints — normally.
+        let mut t = 150u64;
+        loop {
+            let (fr, needs) = hero_frame(&mut root, &mut app, &mut state, ft(t));
+            if !needs {
+                assert!(
+                    fr.morphs.is_empty(),
+                    "no morph once settled: {:?}",
+                    fr.morphs
+                );
+                assert!(
+                    has_rect(
+                        &fr.plain
+                            .iter()
+                            .map(|(o, s)| Rect::from_origin_size(*o, *s))
+                            .collect::<Vec<_>>(),
+                        Point::new(20.0, 30.0),
+                        Size::new(80.0, 80.0),
+                    ),
+                    "B's hero rests at its own position after settle: {:?}",
+                    fr.plain
+                );
+                break;
+            }
+            t += 16;
+            assert!(t < 5000, "transition failed to settle");
+        }
+    }
+
+    #[test]
+    fn hero_tag_on_one_side_only_never_morphs() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || hero_leaf_page("avatar", 40.0, 40.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        // Push B carrying a DIFFERENT tag: no tag is present on both pages, so no
+        // morph ever paints and both heroes paint normally throughout.
+        let spec = TransitionSpec::new(
+            PageTransition::M3SharedAxisX,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.push_with(|| hero_offset_page("other", 80.0, 80.0, 20.0, 30.0), spec);
+
+        for t in [0u64, 50, 100] {
+            let (fr, _) = hero_frame(&mut root, &mut app, &mut state, ft(t));
+            assert!(
+                fr.morphs.is_empty(),
+                "an unmatched tag must not morph (frame {t}): {:?}",
+                fr.morphs
+            );
+        }
+    }
+
+    #[test]
+    fn hero_pop_morphs_backward_and_finalizes_normal() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || hero_leaf_page("avatar", 40.0, 40.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        // Push B (animated) and let it settle so we start the pop from rest.
+        let spec = TransitionSpec::new(
+            PageTransition::M3SharedAxisX,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.push_with(|| hero_offset_page("avatar", 80.0, 80.0, 20.0, 30.0), spec);
+        let mut t = 0u64;
+        loop {
+            let (_, needs) = hero_frame(&mut root, &mut app, &mut state, ft(t));
+            if !needs {
+                break;
+            }
+            t += 16;
+            assert!(t < 5000, "push failed to settle");
+        }
+
+        // Pop B: the pop reverses B's stored transition and morphs the shared
+        // element from B's rest rect back toward A's.
+        controller.pop();
+        // Seed frame (discovery).
+        hero_frame(&mut root, &mut app, &mut state, ft(t));
+        // Mid frame (~half the 100ms reversed transition): the morph is present.
+        let (fmid, _) = hero_frame(&mut root, &mut app, &mut state, ft(t + 50));
+        assert!(
+            !fmid.morphs.is_empty(),
+            "the pop paints a hero morph overlay: {:?}",
+            fmid.morphs
+        );
+
+        // Settle + finalize: only the revealed root A remains, painting normally.
+        let mut t2 = t + 100;
+        loop {
+            let (fr, needs) = hero_frame(&mut root, &mut app, &mut state, ft(t2));
+            if !needs {
+                assert!(
+                    fr.morphs.is_empty(),
+                    "no morph once popped: {:?}",
+                    fr.morphs
+                );
+                assert!(
+                    has_rect(
+                        &fr.plain
+                            .iter()
+                            .map(|(o, s)| Rect::from_origin_size(*o, *s))
+                            .collect::<Vec<_>>(),
+                        Point::new(0.0, 0.0),
+                        Size::new(40.0, 40.0),
+                    ),
+                    "the revealed root hero paints normally after the pop: {:?}",
+                    fr.plain
+                );
+                break;
+            }
+            t2 += 16;
+            assert!(t2 < 10000, "pop failed to settle");
+        }
+    }
+
+    #[test]
+    fn hero_edge_swipe_cancel_restores_endpoints() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| {
+                navigator(&ctrl, || hero_leaf_page("avatar", 40.0, 40.0)).pop_swipe(true)
+            }
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        // Push B with the iOS-push preset so it is swipe-poppable; settle it.
+        let spec = TransitionSpec::new(
+            PageTransition::IosPush,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.push_with(|| hero_offset_page("avatar", 80.0, 80.0, 20.0, 30.0), spec);
+        let mut t = 0u64;
+        loop {
+            let (_, needs) = hero_frame(&mut root, &mut app, &mut state, ft(t));
+            if !needs {
+                break;
+            }
+            t += 16;
+            assert!(t < 5000, "push failed to settle");
+        }
+
+        // Begin an edge swipe: a left-edge Down then a rightward drag steals into
+        // an interactive (Held) pop.
+        root.event(&mut state, &down(5.0, 100.0));
+        hero_frame(&mut root, &mut app, &mut state, ft(t + 16));
+        root.event(&mut state, &move_to(40.0, 100.0));
+        assert!(
+            nav_widget(&root).transition.is_some(),
+            "the edge drag started an interactive pop"
+        );
+        // A held frame past discovery paints the morph following the drag.
+        hero_frame(&mut root, &mut app, &mut state, ft(t + 32));
+        let (held, _) = hero_frame(&mut root, &mut app, &mut state, ft(t + 48));
+        assert!(
+            !held.morphs.is_empty(),
+            "the interactive pop paints a hero morph while held: {:?}",
+            held.morphs
+        );
+
+        // Drag back toward the edge (low progress, leftward velocity) and release
+        // there → the pop cancels and springs back rather than completing.
+        root.event(&mut state, &move_to(8.0, 100.0));
+        hero_frame(&mut root, &mut app, &mut state, ft(t + 64));
+        root.event(&mut state, &up(7.0, 100.0));
+        let mut t2 = t + 80;
+        loop {
+            let (fr, needs) = hero_frame(&mut root, &mut app, &mut state, ft(t2));
+            if !needs {
+                assert_eq!(
+                    nav_widget(&root).pages.len(),
+                    2,
+                    "the cancelled pop restored B onto the stack"
+                );
+                assert!(
+                    fr.morphs.is_empty(),
+                    "no morph lingers after the cancel settles: {:?}",
+                    fr.morphs
+                );
+                assert!(
+                    has_rect(
+                        &fr.plain
+                            .iter()
+                            .map(|(o, s)| Rect::from_origin_size(*o, *s))
+                            .collect::<Vec<_>>(),
+                        Point::new(20.0, 30.0),
+                        Size::new(80.0, 80.0),
+                    ),
+                    "B's hero paints normally after the cancel: {:?}",
+                    fr.plain
+                );
+                break;
+            }
+            t2 += 16;
+            assert!(t2 < 10000, "cancel failed to settle");
+        }
     }
 }

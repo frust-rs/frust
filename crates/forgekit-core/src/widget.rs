@@ -9,7 +9,8 @@
 //! * **paint** — emit draw commands into a scene.
 
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 
 use forgekit_scene::{GlyphRun, SceneBuilder};
@@ -171,6 +172,23 @@ pub trait PaintScene {
     /// Defaulted to a no-op so pre-existing recorder scenes stay valid; see
     /// [`PaintScene::fill_path`].
     fn stroke_path(&mut self, _origin: Point, _path: &BezPath, _width: f64, _brush: &Brush) {}
+
+    /// Push an affine `transform`, composed with the current one, onto the
+    /// backend transform stack; subsequent draws are transformed until the
+    /// matching [`PaintScene::pop_transform`].
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation composes and records it. Unlike the
+    /// origin-offset convention every other method uses (a pure translation),
+    /// this is the one seam that also carries scale/rotation — the
+    /// shared-element ("hero") morph is the first consumer, repainting a tagged
+    /// subtree under a rect→rect transform (position **and** scale) so it
+    /// morphs between two pages during a navigation transition.
+    fn push_transform(&mut self, _transform: Affine) {}
+
+    /// Pop the most recently pushed transform, restoring the previous one.
+    /// Defaulted to a no-op; see [`PaintScene::push_transform`].
+    fn pop_transform(&mut self) {}
 }
 
 /// Bridges the provisional [`PaintScene`] boundary onto the real
@@ -246,6 +264,14 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn stroke_path(&mut self, origin: Point, path: &BezPath, width: f64, brush: &Brush) {
         SceneBuilder::stroke_path(self, path_at(origin, path), width, brush.clone());
+    }
+
+    fn push_transform(&mut self, transform: Affine) {
+        SceneBuilder::push_transform(self, transform);
+    }
+
+    fn pop_transform(&mut self) {
+        SceneBuilder::pop_transform(self);
     }
 }
 
@@ -395,6 +421,12 @@ pub struct PaintCtx<'a> {
     /// `None` in bare-core tests and pre-theme apps — a supported state, so
     /// [`PaintCtx::theme_as`] returns `Option` rather than panicking.
     theme: Option<&'a dyn Any>,
+    /// A tagged-rect ("hero") reporter a container installs over a subtree via
+    /// [`PaintCtx::with_hero_registry`], threaded to descendants by
+    /// [`ChildPod::paint_child`] like the theme/clock. `None` in the normal
+    /// case (no shared-element transition in flight), so
+    /// [`PaintCtx::report_hero`] is a no-op returning [`HeroDirective::Normal`].
+    hero: Option<&'a RefCell<HeroFrames>>,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -414,6 +446,7 @@ impl<'a> PaintCtx<'a> {
             has_focus: false,
             frame_time: FrameTime::ZERO,
             theme: None,
+            hero: None,
         }
     }
 
@@ -541,6 +574,142 @@ impl<'a> PaintCtx<'a> {
     pub fn take_ime_state(&mut self) -> Option<ImeState> {
         self.ime_state.take()
     }
+
+    /// Report a tagged ("hero") element's absolute paint `bounds` and read back
+    /// what it should do this frame.
+    ///
+    /// A no-op returning [`HeroDirective::Normal`] unless a container installed
+    /// a reporter via [`PaintCtx::with_hero_registry`] over this subtree
+    /// (the normal case — no shared-element transition in flight). When a
+    /// reporter is installed, `bounds` is recorded (page-local, i.e. relative
+    /// to the reporter's reference origin, so it stays stable under a page's
+    /// per-frame animated transition offset), and the directive the installer
+    /// set for `tag` is returned — [`HeroDirective::Suppress`] (skip painting,
+    /// this endpoint is morphed by its counterpart) or
+    /// [`HeroDirective::Morph`] (repaint under a rect→rect transform to the
+    /// morph destination).
+    pub fn report_hero(&mut self, tag: &str, bounds: Rect) -> HeroDirective {
+        match self.hero {
+            Some(cell) => {
+                let mut frames = cell.borrow_mut();
+                let local = Rect::from_origin_size(
+                    bounds.origin() - frames.reference.to_vec2(),
+                    bounds.size(),
+                );
+                frames.captured.insert(tag.to_string(), local);
+                frames
+                    .directives
+                    .get(tag)
+                    .copied()
+                    .unwrap_or(HeroDirective::Normal)
+            }
+            None => HeroDirective::Normal,
+        }
+    }
+
+    /// Run `f` with a paint context that has `registry` installed as the
+    /// tagged-rect ("hero") reporter, threading this context's clock/theme/
+    /// focus/geometry down unchanged. A container paints a subtree inside the
+    /// closure; descendants report through [`PaintCtx::report_hero`], and the
+    /// container reads the captured rects back from `registry` afterward. Any
+    /// continuation-frame request or IME publish made inside bubbles back onto
+    /// `self`, mirroring [`ChildPod::paint_child`]'s absorb.
+    pub fn with_hero_registry(
+        &mut self,
+        registry: &RefCell<HeroFrames>,
+        f: impl FnOnce(&mut PaintCtx),
+    ) {
+        let mut child = PaintCtx {
+            origin: self.origin,
+            size: self.size,
+            needs_frame: false,
+            ime_state: None,
+            has_focus: self.has_focus,
+            frame_time: self.frame_time,
+            theme: self.theme,
+            hero: Some(registry),
+        };
+        f(&mut child);
+        if child.needs_frame {
+            self.needs_frame = true;
+        }
+        if let Some(ime) = child.ime_state.take() {
+            self.ime_state = Some(ime);
+        }
+    }
+
+    /// Seed the hero reporter lent by an ancestor. Called by
+    /// [`ChildPod::paint_child`] for each child, mirroring how `theme` is
+    /// threaded, so a nested hero wrapper observes the same reporter.
+    pub(crate) fn set_hero(&mut self, hero: Option<&'a RefCell<HeroFrames>>) {
+        self.hero = hero;
+    }
+
+    /// The hero reporter this context carries, for re-lending to a child
+    /// context (copied, so it does not hold a borrow of `self`).
+    pub(crate) fn hero_ref(&self) -> Option<&'a RefCell<HeroFrames>> {
+        self.hero
+    }
+}
+
+/// A tagged-rect reporter threaded through the paint pass, letting a container
+/// discover where tagged ("hero") descendants painted and drive a
+/// shared-element morph between two of them across a navigation transition.
+///
+/// Generic vocabulary — `forgekit-core` carries no navigation knowledge here,
+/// the same way its [`semantics`](crate::semantics) node collector carries no
+/// widget-catalog knowledge. A container installs one over a subtree with
+/// [`PaintCtx::with_hero_registry`]; descendants report through
+/// [`PaintCtx::report_hero`].
+#[derive(Debug, Default)]
+pub struct HeroFrames {
+    /// The absolute top-left of the enclosing surface this paint, subtracted
+    /// from each reported rect so captures are stored surface-local (stable
+    /// across a page's per-frame animated transition offset).
+    reference: Point,
+    /// Surface-local rects reported by tagged descendants this paint.
+    captured: HashMap<String, Rect>,
+    /// Per-tag paint directive the installer set for this paint.
+    directives: HashMap<String, HeroDirective>,
+}
+
+impl HeroFrames {
+    /// A reporter with `reference` as the enclosing surface's absolute top-left
+    /// and per-tag paint `directives` (empty for a pure discovery pass).
+    pub fn new(reference: Point, directives: HashMap<String, HeroDirective>) -> Self {
+        Self {
+            reference,
+            captured: HashMap::new(),
+            directives,
+        }
+    }
+
+    /// The surface-local rects captured this paint, keyed by tag.
+    pub fn captured(&self) -> &HashMap<String, Rect> {
+        &self.captured
+    }
+
+    /// Consume the reporter, returning the captured surface-local rects.
+    pub fn into_captured(self) -> HashMap<String, Rect> {
+        self.captured
+    }
+}
+
+/// What a reported hero should do this paint — the reply
+/// [`PaintCtx::report_hero`] hands back to a tagged ("hero") wrapper.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HeroDirective {
+    /// Paint normally (no active flight involves this tag) — the default.
+    Normal,
+    /// Skip painting the child: this endpoint is being morphed by the other
+    /// surface's matching hero, so it must not also paint at its rest position.
+    Suppress,
+    /// Paint the child under a transform mapping the hero's own absolute paint
+    /// bounds onto `dest` (absolute) — the morph overlay for this frame.
+    Morph {
+        /// The absolute destination rect the hero's bounds morph onto.
+        dest: Rect,
+    },
 }
 
 /// The result of a whole [`crate::app::RenderRoot::paint`] pass.
@@ -773,6 +942,10 @@ impl ChildPod {
         // Thread the app's active theme down unchanged (copied ref, so the child
         // context holds no borrow of the parent), mirroring the clock.
         child_ctx.set_theme(ctx.theme_ref());
+        // Thread the tagged-rect ("hero") reporter down the same way, so a hero
+        // wrapper nested arbitrarily deep under an installer sees it. `None` in
+        // the normal case (no shared-element transition in flight).
+        child_ctx.set_hero(ctx.hero_ref());
         // Thread the pod's recorded focus path into paint (the mirror of how
         // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
         // observes a container-routed blur that never reached its `event()`.
