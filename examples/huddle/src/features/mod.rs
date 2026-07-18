@@ -26,7 +26,10 @@
 //! - [`messages`] — the channel/DM message-feed view model (load / send /
 //!   react / thread-reply / pagination), hosted by
 //!   [`crate::screens::channel_feed`] and consumed later by the thread screen.
+//! - [`activity`] (Phase C task 14) — the mentions feed's async load +
+//!   mark-all-read controller.
 
+pub mod activity;
 pub mod channels;
 pub mod messages;
 pub mod search;
