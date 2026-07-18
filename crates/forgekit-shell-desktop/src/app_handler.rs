@@ -661,6 +661,16 @@ where
         if self.renderer.phase() != SurfacePhase::SurfaceReady {
             let size = window.inner_size();
             let (width, height) = (size.width.max(1), size.height.max(1));
+
+            // Load the persisted pipeline cache before surface creation (task 14).
+            // On macOS (Metal) `pipeline_cache_data()` will be `None`, so this is
+            // a no-op there; on Linux/Windows (Vulkan) it seeds the shader-pipeline
+            // compilation to near-zero on warm starts.
+            let cache_data = crate::cache::load_cache();
+            if cache_data.is_some() {
+                self.renderer.set_initial_pipeline_cache_data(cache_data);
+            }
+
             // spec §11: single-threaded here — the CPU/GPU render-thread split
             // lands in a later phase; for the preview shell one thread suffices.
             if let Err(err) = pollster::block_on(self.renderer.on_surface_created(
@@ -675,6 +685,15 @@ where
                 event_loop.exit();
                 return;
             }
+
+            // Save the updated pipeline cache on a background thread (task 14).
+            // All failures are logged-and-ignored; cache is best-effort.
+            if let Some(cache) = self.renderer.pipeline_cache_data() {
+                std::thread::spawn(move || {
+                    crate::cache::save_cache(&cache);
+                });
+            }
+
             // Perf instrumentation (task 10): adapter/device/renderer creation
             // all happen inside the single `on_surface_created` call above -
             // see `renderer_spans_recorded`'s docs for why all three spans land

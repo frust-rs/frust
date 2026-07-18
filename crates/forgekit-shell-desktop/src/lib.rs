@@ -7,6 +7,7 @@
 //! [`run_desktop`].
 
 mod app_handler;
+mod cache;
 mod logger;
 
 pub use app_handler::run_desktop;
