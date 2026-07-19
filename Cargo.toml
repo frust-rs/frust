@@ -13,7 +13,12 @@ members = ["crates/*", "examples/*"]
 # build phase resolves `target/<triple>/<profile>/libhuddle.a` relative to
 # the project directory, which a root-workspace member's shared `target/`
 # would break (the same rationale the now-deleted `catalog` example carried).
-exclude = ["examples/huddle"]
+# examples/bubblebench (the Flutter-Impeller-issue-#180958 bubble-physics
+# benchmark port) is standalone for huddle's reason (2) alone: it is a full
+# `forgekit create` scaffold whose generated Android/iOS projects need a
+# project-local `target/` dir, and its generated Cargo.toml carries its own
+# `[profile.*]` blocks, which only take effect in a workspace root.
+exclude = ["examples/huddle", "examples/bubblebench"]
 
 [workspace.package]
 version = "0.1.0"
