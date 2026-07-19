@@ -6,7 +6,7 @@
 //! velocity threshold for 30 consecutive frames stops the animation until a
 //! touch wakes it).
 //!
-//! Pure data + math: no ForgeKit, no clock. One [`BubblePhysics::update`] call
+//! Pure data + math: no Frust, no clock. One [`BubblePhysics::update`] call
 //! is one frame's step, exactly like the repro's per-vsync `Ticker` callback —
 //! the chart widget calls it once per painted frame.
 

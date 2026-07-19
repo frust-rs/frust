@@ -17,12 +17,12 @@
 //! [`TextLayout`]s as glyph runs. The repro hand-rolls the same caching with
 //! `TextPainter`s.
 
-use forgekit::{FrameTime, RwSignal, Set};
-use forgekit_core::{
+use frust::{FrameTime, RwSignal, Set};
+use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
     PaintScene, PointerPhase, View, Widget,
 };
-use forgekit_text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust_text::{FontWeight, TextContext, TextLayout, TextStyle};
 use kurbo::{BezPath, Circle, Point, Shape, Size};
 use peniko::color::DynamicColor;
 use peniko::{Brush, Color, ColorStop, Gradient};

@@ -508,11 +508,11 @@ dependencies = [
 name = "bubblebench"
 version = "0.1.0"
 dependencies = [
- "forgekit",
- "forgekit-core",
- "forgekit-reactive",
- "forgekit-scene",
- "forgekit-text",
+ "frust",
+ "frust-core",
+ "frust-reactive",
+ "frust-scene",
+ "frust-text",
  "kurbo",
  "peniko",
  "reactive_graph",
@@ -964,29 +964,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
-name = "forgekit"
+name = "frust"
 version = "0.1.0"
 dependencies = [
  "any_spawner",
  "anyhow",
- "forgekit-core",
- "forgekit-reactive",
- "forgekit-shell-android",
- "forgekit-shell-common",
- "forgekit-shell-desktop",
- "forgekit-shell-ios",
- "forgekit-theme",
- "forgekit-widgets",
+ "frust-core",
+ "frust-reactive",
+ "frust-shell-android",
+ "frust-shell-common",
+ "frust-shell-desktop",
+ "frust-shell-ios",
+ "frust-theme",
+ "frust-widgets",
  "peniko",
  "reactive_graph",
 ]
 
 [[package]]
-name = "forgekit-core"
+name = "frust-core"
 version = "0.1.0"
 dependencies = [
  "accesskit",
- "forgekit-scene",
+ "frust-scene",
  "kurbo",
  "peniko",
  "reactive_graph",
@@ -994,7 +994,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "forgekit-reactive"
+name = "frust-reactive"
 version = "0.1.0"
 dependencies = [
  "any_spawner",
@@ -1004,12 +1004,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "forgekit-render"
+name = "frust-render"
 version = "0.1.0"
 dependencies = [
  "android_system_properties",
  "anyhow",
- "forgekit-scene",
+ "frust-scene",
  "kurbo",
  "log",
  "peniko",
@@ -1018,7 +1018,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "forgekit-scene"
+name = "frust-scene"
 version = "0.1.0"
 dependencies = [
  "kurbo",
@@ -1026,19 +1026,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "forgekit-shell-android"
+name = "frust-shell-android"
 version = "0.1.0"
 dependencies = [
  "accesskit_android",
  "android_logger",
  "anyhow",
- "forgekit-core",
- "forgekit-reactive",
- "forgekit-render",
- "forgekit-scene",
- "forgekit-shell-common",
- "forgekit-text",
- "forgekit-theme",
+ "frust-core",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-common",
+ "frust-text",
+ "frust-theme",
  "jni 0.22.4",
  "kurbo",
  "log",
@@ -1049,30 +1049,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "forgekit-shell-common"
+name = "frust-shell-common"
 version = "0.1.0"
 dependencies = [
- "forgekit-core",
- "forgekit-scene",
- "forgekit-text",
- "forgekit-theme",
+ "frust-core",
+ "frust-scene",
+ "frust-text",
+ "frust-theme",
  "kurbo",
  "log",
 ]
 
 [[package]]
-name = "forgekit-shell-desktop"
+name = "frust-shell-desktop"
 version = "0.1.0"
 dependencies = [
  "accesskit_winit",
  "anyhow",
- "forgekit-core",
- "forgekit-reactive",
- "forgekit-render",
- "forgekit-scene",
- "forgekit-shell-common",
- "forgekit-text",
- "forgekit-theme",
+ "frust-core",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-common",
+ "frust-text",
+ "frust-theme",
  "kurbo",
  "log",
  "peniko",
@@ -1081,19 +1081,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "forgekit-shell-ios"
+name = "frust-shell-ios"
 version = "0.1.0"
 dependencies = [
  "accesskit",
  "accesskit_ios",
  "anyhow",
- "forgekit-core",
- "forgekit-reactive",
- "forgekit-render",
- "forgekit-scene",
- "forgekit-shell-common",
- "forgekit-text",
- "forgekit-theme",
+ "frust-core",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-common",
+ "frust-text",
+ "frust-theme",
  "kurbo",
  "log",
  "peniko",
@@ -1101,32 +1101,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "forgekit-text"
+name = "frust-text"
 version = "0.1.0"
 dependencies = [
- "forgekit-scene",
+ "frust-scene",
  "kurbo",
  "parley",
  "peniko",
 ]
 
 [[package]]
-name = "forgekit-theme"
+name = "frust-theme"
 version = "0.1.0"
 dependencies = [
- "forgekit-core",
- "forgekit-text",
+ "frust-core",
+ "frust-text",
  "peniko",
 ]
 
 [[package]]
-name = "forgekit-widgets"
+name = "frust-widgets"
 version = "0.1.0"
 dependencies = [
- "forgekit-core",
- "forgekit-scene",
- "forgekit-text",
- "forgekit-theme",
+ "frust-core",
+ "frust-scene",
+ "frust-text",
+ "frust-theme",
  "image",
  "kurbo",
  "peniko",

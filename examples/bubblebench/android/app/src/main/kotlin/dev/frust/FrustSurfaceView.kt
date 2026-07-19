@@ -1,4 +1,4 @@
-package dev.forgekit
+package dev.frust
 
 import android.content.Context
 import android.content.res.Configuration
@@ -22,21 +22,21 @@ import org.json.JSONException
 import org.json.JSONObject
 
 /**
- * The ForgeKit Android render surface (spec Phase 2 §10.1). Package
- * `dev.forgekit` is fixed across every generated app — it's what keeps the
- * JNI export names (`Java_dev_forgekit_ForgeKitSurfaceView_native*`)
+ * The Frust Android render surface (spec Phase 2 §10.1). Package
+ * `dev.frust` is fixed across every generated app — it's what keeps the
+ * JNI export names (`Java_dev_frust_FrustSurfaceView_native*`)
  * stable, so do not rename or move this file. The app's own
  * `MainActivity` (package `it.f0x.bubblebench`) owns the activity
  * lifecycle and forwards `onResume`/`onPause`/`onDestroy` here.
  *
  * Soft-keyboard text input (spec §14 Phase 4) uses the Flutter-proven
- * **state-sync** contract, not op-forwarding: [ForgeKitInputConnection] owns
+ * **state-sync** contract, not op-forwarding: [FrustInputConnection] owns
  * composition mechanics against a mirror [Editable], pushes the whole editing
  * state into Rust via `nativeImeApply`, then pulls the reconciled state back via
  * `nativeImeState` to keep the `InputMethodManager` synchronised. No AndroidX
  * dependency is used.
  */
-class ForgeKitSurfaceView(context: Context) :
+class FrustSurfaceView(context: Context) :
     SurfaceView(context),
     SurfaceHolder.Callback,
     Choreographer.FrameCallback {
@@ -55,11 +55,11 @@ class ForgeKitSurfaceView(context: Context) :
         private const val IME_RESYNC_FRAMES = 3
     }
 
-    // JNI exports implemented by `forgekit-shell-android` (spec Phase 2
+    // JNI exports implemented by `frust-shell-android` (spec Phase 2
     // task 24, Phase 4 IME) — these names and signatures are load-bearing,
-    // matched exactly by `#[no_mangle] extern "system" fn Java_dev_forgekit_*`.
+    // matched exactly by `#[no_mangle] extern "system" fn Java_dev_frust_*`.
     // `cacheDir` is the app's `context.cacheDir.absolutePath` — the Rust side
-    // persists the wgpu pipeline cache under it (`<cacheDir>/forgekit/`) so a
+    // persists the wgpu pipeline cache under it (`<cacheDir>/frust/`) so a
     // warm start skips Vulkan shader-pipeline compilation. The JNI symbol name is
     // unchanged (it doesn't encode params); this signature and the Rust
     // `native_init` gained the parameter together.
@@ -118,12 +118,12 @@ class ForgeKitSurfaceView(context: Context) :
     private external fun nativeSetAppearance(handle: Long, dark: Boolean)
 
     // Deep links (task 07). `url` is the raw `Intent.data` Uri's `toString()`,
-    // forwarded to `forgekit_reactive::push_deep_link` on the Rust side.
+    // forwarded to `frust_reactive::push_deep_link` on the Rust side.
     private external fun nativeOnDeepLink(handle: Long, url: String)
 
     // Accessibility (spec §9, phase 6d). Attaches the accesskit Android adapter
     // to this view. `view` is the accessibility host — always `this`
-    // (`ForgeKitSurfaceView` IS a `View`); the adapter installs a
+    // (`FrustSurfaceView` IS a `View`); the adapter installs a
     // `View.AccessibilityDelegate` + `OnHoverListener` on it (posted to the UI
     // thread) and depends on the bundled `dev.accesskit.android.Delegate` class.
     // Best-effort: the Rust side isolates any init failure so a11y never blocks
@@ -148,7 +148,7 @@ class ForgeKitSurfaceView(context: Context) :
 
     /**
      * The last IME surface Rust published (from `nativeImeState`). Seeds a freshly
-     * created [ForgeKitInputConnection]'s mirror and `EditorInfo.initialSel*`, and
+     * created [FrustInputConnection]'s mirror and `EditorInfo.initialSel*`, and
      * lets [pollImeAfterDispatch] detect active-state edges.
      */
     private var lastKnownState: ImeWireState? = null
@@ -168,12 +168,12 @@ class ForgeKitSurfaceView(context: Context) :
     private var imeResyncFrames = 0
 
     /**
-     * The live [ForgeKitInputConnection] Gboard is bound to (set in
+     * The live [FrustInputConnection] Gboard is bound to (set in
      * [onCreateInputConnection]). Held so a framework-side edit (a submit
      * clearing the field) can reseed its mirror [Editable] directly, instead of
      * only reacting to IME-originated calls.
      */
-    private var activeConnection: ForgeKitInputConnection? = null
+    private var activeConnection: FrustInputConnection? = null
 
     private val imm: InputMethodManager
         get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
@@ -311,7 +311,7 @@ class ForgeKitSurfaceView(context: Context) :
     /**
      * Forward a hardware / injected **Enter** to the focused editable as the
      * field's editor action (submit), the same path Gboard's Done key drives
-     * through [ForgeKitInputConnection.performEditorAction].
+     * through [FrustInputConnection.performEditorAction].
      *
      * Soft-keyboard text (including its own Enter) arrives through the
      * [InputConnection]; but a *physical* keyboard — and `adb shell input
@@ -343,7 +343,7 @@ class ForgeKitSurfaceView(context: Context) :
         val state = lastKnownState
         outAttrs.initialSelStart = state?.selBase ?: -1
         outAttrs.initialSelEnd = state?.selExt ?: -1
-        return ForgeKitInputConnection().also {
+        return FrustInputConnection().also {
             it.seed(state)
             activeConnection = it
         }
@@ -352,7 +352,7 @@ class ForgeKitSurfaceView(context: Context) :
     /**
      * After every native dispatch, reconcile the soft keyboard with the focused
      * widget's IME surface: newly-active ⇒ take focus + show the keyboard (and
-     * restart input so a fresh [ForgeKitInputConnection] is seeded from the new
+     * restart input so a fresh [FrustInputConnection] is seeded from the new
      * state); newly-inactive ⇒ hide it.
      */
     private fun pollImeAfterDispatch() {
@@ -487,8 +487,8 @@ class ForgeKitSurfaceView(context: Context) :
      * `fullEditor = true` so `BaseInputConnection` edits our own [getEditable]
      * rather than dispatching key events to the (non-existent) view text machinery.
      */
-    private inner class ForgeKitInputConnection :
-        BaseInputConnection(this@ForgeKitSurfaceView, true) {
+    private inner class FrustInputConnection :
+        BaseInputConnection(this@FrustSurfaceView, true) {
 
         private val editable = SpannableStringBuilder()
 
@@ -533,14 +533,14 @@ class ForgeKitSurfaceView(context: Context) :
             val curEnd = Selection.getSelectionEnd(editable)
             if (curText != state.text) {
                 seed(state)
-                imm.updateSelection(this@ForgeKitSurfaceView, state.selBase, state.selExt, state.compBase, state.compExt)
-                imm.restartInput(this@ForgeKitSurfaceView)
+                imm.updateSelection(this@FrustSurfaceView, state.selBase, state.selExt, state.compBase, state.compExt)
+                imm.restartInput(this@FrustSurfaceView)
             } else if (curStart != state.selBase || curEnd != state.selExt) {
                 val len = editable.length
                 if (state.selBase in 0..len && state.selExt in 0..len) {
                     Selection.setSelection(editable, state.selBase, state.selExt)
                 }
-                imm.updateSelection(this@ForgeKitSurfaceView, state.selBase, state.selExt, state.compBase, state.compExt)
+                imm.updateSelection(this@FrustSurfaceView, state.selBase, state.selExt, state.compBase, state.compExt)
                 // A later identical `sync()` must not short-circuit on a stale snapshot.
                 lastPushed = null
             }
@@ -688,14 +688,14 @@ class ForgeKitSurfaceView(context: Context) :
             // last two args are the *candidates* (composing) range, not named
             // composing params (a common miscoding).
             imm.updateSelection(
-                this@ForgeKitSurfaceView,
+                this@FrustSurfaceView,
                 state.selBase,
                 state.selExt,
                 state.compBase,
                 state.compExt,
             )
             if (wholesale) {
-                imm.restartInput(this@ForgeKitSurfaceView)
+                imm.restartInput(this@FrustSurfaceView)
             }
         }
     }

@@ -1,4 +1,4 @@
-//! Bubblebench — a ForgeKit port of the Flutter bubble-physics performance
+//! Bubblebench — a Frust port of the Flutter bubble-physics performance
 //! repro from flutter/flutter#180958 (Impeller: 5–20 FPS on Adreno 840 where
 //! Skia holds ~120).
 //!
@@ -8,16 +8,16 @@
 //! touch-drag repulsion, an FPS readout, Pause/Play, and Reset. See
 //! [`physics`] for the simulation port and [`chart`] for the canvas widget;
 //! this module is only the shell — app state, the HUD overlay, and the
-//! [`forgekit::app!`] entry binding all three platforms.
+//! [`frust::app!`] entry binding all three platforms.
 //!
-//! Run it with `cargo run` (desktop preview) or `forgekit run` (Android/iOS).
-//! For per-pass frame timings use `FORGEKIT_TRACE=1` (see
+//! Run it with `cargo run` (desktop preview) or `frust run` (Android/iOS).
+//! For per-pass frame timings use `FRUST_TRACE=1` (see
 //! `docs/DEVELOPMENT.md`'s Instrumentation).
 
 pub mod chart;
 pub mod physics;
 
-use forgekit::{
+use frust::{
     AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get, Padding, RwSignal,
     SizedBox, Stack, Theme, any, button, flexible, inflexible, set_app_theme, text,
 };
@@ -75,7 +75,7 @@ fn app_logic(state: &mut AppState) -> AnyView<AppState> {
     let info = text(
         "Bubble Physics Performance Test — 60 bubbles with radial-gradient \
          fills and shaped text runs, repainted every frame. Touch to interact. \
-         ForgeKit port of the flutter/flutter#180958 Impeller repro.",
+         Frust port of the flutter/flutter#180958 Impeller repro.",
     )
     .size(12.0)
     .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xB3));
@@ -127,5 +127,5 @@ impl Component for BubblebenchApp {
 // `BubblebenchApp` to all three platforms — the Android JNI exports
 // (`target_os = "android"` only), the iOS C-ABI exports (unconditional;
 // self-gated to `target_os = "ios"`), and (on desktop) the hidden
-// `__forgekit_main` that `main.rs` calls.
-forgekit::app!(BubblebenchApp);
+// `__frust_main` that `main.rs` calls.
+frust::app!(BubblebenchApp);

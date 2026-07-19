@@ -12,46 +12,46 @@ publish = false
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `forgekit_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
+# `frust_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
 # library for the desktop `main.rs` preview binary (spec §12.9).
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# NOTE: temporary path dependency pointing at the ForgeKit repo checkout
-# that generated this project (spec §12.3: "forgekit_path" mechanism is
-# explicitly temporary). Once ForgeKit crates are published, `forgekit
+# NOTE: temporary path dependency pointing at the Frust repo checkout
+# that generated this project (spec §12.3: "frust_path" mechanism is
+# explicitly temporary). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead.
-forgekit = { path = "../../crates/forgekit" }
+frust = { path = "../../crates/frust" }
 
-# `forgekit-core` + `kurbo` + `peniko`: the facade's documented "low-level
+# `frust-core` + `kurbo` + `peniko`: the facade's documented "low-level
 # escape hatch" (see `docs/ARCHITECTURE.md`), the same production dependency
 # `examples/huddle` carries for its hand-rolled widgets. Here it backs
 # `src/chart.rs`'s `BubbleChart` — a custom `View`/`Widget` pair painting the
 # benchmark's gradient circles + shaped text runs directly through
 # `PaintScene::fill_path`/`stroke_path`/`draw_glyph_run` — which no facade
-# widget covers. `forgekit-text` is the shaping surface the chart drives from
+# widget covers. `frust-text` is the shaping surface the chart drives from
 # layout (the same `TextContext` the shell already threads through
-# `LayoutCtx`). Everything else in this crate depends on the `forgekit`
+# `LayoutCtx`). Everything else in this crate depends on the `frust`
 # facade alone.
-forgekit-core = { path = "../../crates/forgekit-core" }
-forgekit-text = { path = "../../crates/forgekit-text" }
+frust-core = { path = "../../crates/frust-core" }
+frust-text = { path = "../../crates/frust-text" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
 
-# Dev-only: the headless tests drive ForgeKit's `RenderRoot` directly (the
+# Dev-only: the headless tests drive Frust's `RenderRoot` directly (the
 # desktop shell's own rebuild/layout/paint seam) — no GPU, no window — the
 # same harness shape as `examples/huddle/tests/support/mod.rs`.
 [dev-dependencies]
-forgekit-reactive = { path = "../../crates/forgekit-reactive" }
-forgekit-scene = { path = "../../crates/forgekit-scene" }
+frust-reactive = { path = "../../crates/frust-reactive" }
+frust-scene = { path = "../../crates/frust-scene" }
 reactive_graph = "0.2"
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
 # store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
 # (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
 # example's release arm64-v8a `.so` via `scripts/size-report.sh` in the
-# ForgeKit repo — see `workflow/plans/features/forgekit-phase-7-performance/
+# Frust repo — see `workflow/plans/features/frust-phase-7-performance/
 # research/BASELINE.md`): fat LTO + cgu=1 alone (opt-level 3, the default —
 # no override needed) shrank the prior baseline (lto="thin", no cgu
 # override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
@@ -63,7 +63,7 @@ reactive_graph = "0.2"
 # neither clears the task's ">5% meaningfully wins" bar once the carve-out
 # that protects render-path perf is in place, so `opt-level` stays at its
 # default (3) and no carve-out is needed. This block and its
-# `[profile.profile]` counterpart are hand-synced with ForgeKit's own root
+# `[profile.profile]` counterpart are hand-synced with Frust's own root
 # `Cargo.toml` and `examples/huddle/Cargo.toml` (phase 8's
 # examples-convergence deleted the `catalog` and `inbox` examples this used
 # to be hand-synced against, along with the examples themselves).
@@ -84,12 +84,12 @@ strip = "none"
 # `[profile.dev]` per-package overrides for the render/shader-compile stack
 # (6e Finding 5 / 6e-fix-1 task 03): vello/wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
-# physical iOS device that the OS SIGKILLs a debug `forgekit run` before the
+# physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes. This app's
 # own code stays at the default dev opt-level (fast incremental rebuilds) —
 # only these dependencies are bumped. `docs/spec.md` §12.9 documents
 # `opt-level = 1` for deps generally; `opt-level = 2` is used here for the
-# shader-compile-heavy crates specifically (see forgekit's own root
+# shader-compile-heavy crates specifically (see frust's own root
 # `Cargo.toml` for the full rationale — the same override, kept in sync).
 [profile.dev.package.vello]
 opt-level = 2
@@ -120,7 +120,7 @@ opt-level = 2
 # win over this wildcard since a named package override takes precedence
 # over `"*"`. Targets emulator/debug first-frame cost — parley/swash/image/
 # kurbo compiled at `opt-level = 0` are part of that cost. Hand-synced with
-# ForgeKit's own root `Cargo.toml` and `examples/huddle/Cargo.toml` (phase
+# Frust's own root `Cargo.toml` and `examples/huddle/Cargo.toml` (phase
 # 8's examples-convergence deleted the `catalog` and `inbox` examples this
 # used to be hand-synced against, along with the examples themselves).
 [profile.dev.package."*"]

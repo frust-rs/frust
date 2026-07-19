@@ -12,13 +12,13 @@
 
 use std::any::Any;
 
-use forgekit::{AnyView, GetUntracked, RwSignal, any, component};
-use forgekit_core::{
+use frust::{AnyView, GetUntracked, RwSignal, any, component};
+use frust_core::{
     FrameTime, InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase, RenderRoot, View,
 };
-use forgekit_reactive::ReactiveRuntime;
-use forgekit_scene::GlyphRun;
-use forgekit_text::TextContext;
+use frust_reactive::ReactiveRuntime;
+use frust_scene::GlyphRun;
+use frust_text::TextContext;
 use kurbo::{BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
 use reactive_graph::owner::Owner;

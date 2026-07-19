@@ -8,7 +8,7 @@ description = "Bubble physics performance benchmark (port of Flutter Impeller is
 # prod = {}
 
 # Android release signing is driven by `android/key.properties`, a Java
-# properties file the Gradle build reads (this file is NOT parsed by ForgeKit).
+# properties file the Gradle build reads (this file is NOT parsed by Frust).
 # It must be gitignored (the generated .gitignore already excludes
 # `key.properties` and `*.jks`) so the keystore/passwords never enter version
 # control. Keys:
@@ -20,7 +20,7 @@ description = "Bubble physics performance benchmark (port of Flutter Impeller is
 #   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
 #     -storetype JKS -keysize 2048 -validity 10000 -alias upload
 # Without key.properties, release builds fall back to debug signing (a Gradle
-# warning is logged); `forgekit build` makes a missing keystore a hard error.
+# warning is logged); `frust build` makes a missing keystore a hard error.
 # [signing]
 # keystore = "android/key.properties"
 
