@@ -1,11 +1,21 @@
 //! Thread view (`/thread/:id`).
 //!
 //! The root message's full thread: the parent message rendered prominently
-//! (full bubble + reactions row), a "N replies" divider, the replies
-//! (compact bubbles, keyed list), and a reply composer at the bottom —
+//! (header + body + reactions row), a "N replies" divider, the replies
+//! (compact rows, keyed list), and a reply composer at the bottom —
 //! consuming [`features::messages`](crate::features::messages)' controller
 //! API (`message`/`replies_for`/`reply_count`/`reply_in_thread`, built for
 //! this screen in task 12 — see that module's docs).
+//!
+//! # Flat rows (device-parity-round2 task R2b)
+//!
+//! The root/reply rows are now FLAT, matching `screens::channel_feed`'s own
+//! R2 restyle: no `elevated_card`/`outlined_card` wrapper (this screen's own
+//! last shadow-in-scroll site, per R2's B3 shadow check) — a plain
+//! `Padding(12h/6v)` content column instead, and the avatar is a 40px
+//! [`crate::ui::fill_box::fill_box`] disc rather than a `filled_card` tile.
+//! Attachment tiles use [`crate::ui::fill_box::filled_box`] (`filled_card`
+//! minus its 16px inset) exactly like `channel_feed::message_body`.
 //!
 //! # Why a thread-local composer, not a `Component` (mirrors `screens::search`)
 //!
@@ -44,17 +54,58 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use forgekit::{
-    Align, Alignment, AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
-    Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar, elevated_card, hero,
-    icon, icons, inflexible, keyed, outlined_card, scroll_view, text, text_input,
+    Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView,
+    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar,
+    hero, icon, icons, inflexible, keyed, scroll_view, text, text_input,
 };
+use kurbo::Size;
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, FeedReply, MessagesController};
 use crate::mock;
 use crate::screens::placeholder_body;
+use crate::ui::fill_box::{fill_box, filled_box};
 use crate::ui::sheet::{action_menu, emoji_grid, sheet, sheet_action_row};
 use crate::ui::swipeable::press_pop;
+
+// ---------------------------------------------------------------------------
+// Flat-row metrics (device-parity-round2 task R2b) — duplicated with the same
+// names from `screens::channel_feed`'s own R2 constants rather than shared
+// through a new module (R2b's spec: "prefer whatever is cleanest without
+// creating a new module"); each screen owns its own visual helpers per
+// `src/README-phase-c.md`'s Phase C disjointness convention (see this
+// module's own `avatar` doc below).
+// ---------------------------------------------------------------------------
+
+/// Avatar tile side length — see `channel_feed::AVATAR_SIZE`.
+const AVATAR_SIZE: f64 = 40.0;
+/// Avatar corner radius: a full circle at [`AVATAR_SIZE`].
+const AVATAR_RADIUS: f64 = AVATAR_SIZE / 2.0;
+/// The initials monogram inside an avatar circle — see
+/// `channel_feed::AVATAR_MONOGRAM_SIZE`.
+const AVATAR_MONOGRAM_SIZE: f32 = 15.0;
+
+/// Attachment-tile fill — see `channel_feed::TILE_FILL` (the M3
+/// `surface_container_highest` value `filled_card` resolved to as its
+/// unthemed fallback).
+const TILE_FILL: Color = Color::from_rgb8(0xE6, 0xE0, 0xE9);
+
+/// The initials-avatar background palette, indexed by user id — see
+/// `channel_feed::AVATAR_PALETTE` (kept identical so the same author reads
+/// the same color across screens).
+const AVATAR_PALETTE: [Color; 6] = [
+    Color::from_rgb8(0x1E, 0x88, 0xE5),
+    Color::from_rgb8(0x8E, 0x24, 0xAA),
+    Color::from_rgb8(0x00, 0x89, 0x7B),
+    Color::from_rgb8(0xF4, 0x51, 0x1E),
+    Color::from_rgb8(0x39, 0x49, 0xAB),
+    Color::from_rgb8(0x6D, 0x4C, 0x41),
+];
+
+/// Avatar background for a user id — see `channel_feed::avatar_color`.
+fn avatar_color(user_id: u32) -> Color {
+    AVATAR_PALETTE[(user_id as usize) % AVATAR_PALETTE.len()]
+}
 
 /// A quick, static header timestamp — mirrors `channel_feed`'s own
 /// placeholder ("real color-glyph rendering, verified in wave A"; there is no
@@ -315,9 +366,11 @@ fn reply_list(replies: &[FeedReply], sheet_sig: RwSignal<ThreadSheet>) -> AnyVie
 }
 
 /// The root message, rendered prominently: avatar + author + time header,
-/// body, and a reactions row — the same visual vocabulary as
-/// `channel_feed::message_bubble`, just a single elevated card rather than a
-/// left/right-aligned row (this is the thread's one parent, not a feed row).
+/// body, and a reactions row — the same FLAT visual vocabulary as
+/// `channel_feed::message_bubble` (task R2b), just a single content column
+/// rather than a left/right-aligned row (this is the thread's one parent, not
+/// a feed row). No `elevated_card` wrapper any more — that was this screen's
+/// last shadow-in-scroll site R2's B3 check flagged.
 fn root_bubble(
     controller: &Arc<MessagesController>,
     root: &FeedMessage,
@@ -350,8 +403,11 @@ fn root_bubble(
         lines.push(reactions);
     }
 
+    // FLAT ROW (device-parity-round2 task R2b, mirroring
+    // `channel_feed::message_bubble`): a plain padded content column
+    // (12h/6v), no `elevated_card` wrapper.
     let inner = Padding(
-        EdgeInsets::all(16.0),
+        EdgeInsets::symmetric(12.0, 6.0),
         FlexView::new(
             Axis::Vertical,
             lines.into_iter().map(inflexible).collect::<Vec<_>>(),
@@ -362,54 +418,65 @@ fn root_bubble(
     // Long-press opens the root message's context menu (React/Copy/Delete).
     let id = root.id;
     any(
-        GestureDetector(elevated_card(inner)).on_long_press(move |_st: &mut HuddleState| {
+        GestureDetector(inner).on_long_press(move |_st: &mut HuddleState| {
             sheet_sig.set(ThreadSheet::Menu(Some(id)));
         }),
     )
 }
 
 /// The root message's body — text, link preview, or file stub (mirrors
-/// `channel_feed::message_body`).
+/// `channel_feed::message_body`). Attachment tiles keep a boxed look but
+/// COMPACT (task R2b, matching R2's item 5 exactly): `filled_box(radius 8) +
+/// Padding(10)`, not an `outlined_card` (whose 16px inset would balloon the
+/// tile the same way it did the old feed — BUG.md B2).
 fn root_body(body: &FeedBody) -> AnyView<HuddleState> {
     match body {
         FeedBody::Text(t) => any(text(t.clone()).size(16.0)),
-        FeedBody::Link { url, title } => any(outlined_card(Padding(
-            EdgeInsets::all(8.0),
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(any(FlexView::new(
-                        Axis::Horizontal,
-                        vec![
-                            inflexible(any(icon(icons::LINK).size(16.0))),
-                            inflexible(any(SizedBox(Some(6.0), None))),
-                            inflexible(any(text(title.clone()).size(14.0))),
-                        ],
-                    ))),
-                    inflexible(any(text(url.clone()).size(12.0))),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Start),
-        ))),
-        FeedBody::File { name, size } => any(outlined_card(Padding(
-            EdgeInsets::all(8.0),
-            FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(any(icon(icons::DESCRIPTION).size(24.0))),
-                    inflexible(any(SizedBox(Some(8.0), None))),
-                    inflexible(any(FlexView::new(
-                        Axis::Vertical,
-                        vec![
-                            inflexible(any(text(name.clone()).size(14.0))),
-                            inflexible(any(text(size.clone()).size(12.0))),
-                        ],
-                    )
-                    .cross_axis(CrossAxisAlignment::Start))),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
-        ))),
+        FeedBody::Link { url, title } => any(filled_box(
+            Padding(
+                EdgeInsets::all(10.0),
+                FlexView::new(
+                    Axis::Vertical,
+                    vec![
+                        inflexible(any(FlexView::new(
+                            Axis::Horizontal,
+                            vec![
+                                inflexible(any(icon(icons::LINK).size(16.0))),
+                                inflexible(any(SizedBox(Some(6.0), None))),
+                                inflexible(any(text(title.clone()).size(14.0))),
+                            ],
+                        ))),
+                        inflexible(any(text(url.clone()).size(12.0))),
+                    ],
+                )
+                .cross_axis(CrossAxisAlignment::Start),
+            ),
+            TILE_FILL,
+            8.0,
+        )),
+        FeedBody::File { name, size } => any(filled_box(
+            Padding(
+                EdgeInsets::all(10.0),
+                FlexView::new(
+                    Axis::Horizontal,
+                    vec![
+                        inflexible(any(icon(icons::DESCRIPTION).size(24.0))),
+                        inflexible(any(SizedBox(Some(8.0), None))),
+                        inflexible(any(FlexView::new(
+                            Axis::Vertical,
+                            vec![
+                                inflexible(any(text(name.clone()).size(14.0))),
+                                inflexible(any(text(size.clone()).size(12.0))),
+                            ],
+                        )
+                        .cross_axis(CrossAxisAlignment::Start))),
+                    ],
+                )
+                .cross_axis(CrossAxisAlignment::Center),
+            ),
+            TILE_FILL,
+            8.0,
+        )),
     }
 }
 
@@ -444,18 +511,29 @@ fn reaction_chips(
     ))
 }
 
-/// A small avatar carrying the author's initials — duplicated locally rather
-/// than shared with `channel_feed`'s own copy (each Phase C screen owns its
-/// own visual helpers, keeping the two files disjoint per
-/// `src/README-phase-c.md`). Wrapped in a `hero("avatar-{author_id}")` shared
-/// element + a tap opening the author's profile (`/user/:id`) — the same
-/// "avatar tap anywhere" contract the feed avatar now carries (task 22).
+/// A 40px circular initials avatar — duplicated locally rather than shared
+/// with `channel_feed`'s own copy (each Phase C screen owns its own visual
+/// helpers, keeping the two files disjoint per `src/README-phase-c.md`), but
+/// now built off the same `fill_box` disc + `SizedBox+Align` monogram idiom
+/// as `channel_feed::avatar` (task R2b) rather than a `filled_card` tile.
+/// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap opening
+/// the author's profile (`/user/:id`) — the same "avatar tap anywhere"
+/// contract the feed avatar carries (task 22).
 fn avatar(author_id: u32) -> AnyView<HuddleState> {
     let initials = mock::user(author_id).map(|u| u.initials).unwrap_or("?");
-    let tile = forgekit::filled_card(Padding(
-        EdgeInsets::all(8.0),
-        text(initials.to_string()).size(12.0),
-    ));
+    let tile = any(Stack(vec![
+        any(fill_box(
+            Size::new(AVATAR_SIZE, AVATAR_SIZE),
+            avatar_color(author_id),
+            AVATAR_RADIUS,
+        )),
+        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+            Alignment::CENTER,
+            text(initials.to_string())
+                .size(AVATAR_MONOGRAM_SIZE)
+                .color(Color::WHITE),
+        ))),
+    ]));
     any(
         GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
             move |st: &mut HuddleState| {
@@ -485,14 +563,18 @@ fn empty_replies_state() -> AnyView<HuddleState> {
     ))
 }
 
-/// One compact reply bubble: author + text, no reactions/thread affordance
-/// (the spec's "compact bubbles" — this thread has no nested sub-threads).
+/// One compact reply row: author + text, no reactions/thread affordance (the
+/// spec's "compact bubbles" — this thread has no nested sub-threads). FLAT
+/// (task R2b, matching `channel_feed::message_bubble`'s 12h/6v inset exactly)
+/// — no `outlined_card` wrapper; the row carries no rounded chrome of its own
+/// any more (a headless test locates a new reply by its glyph runs, not a
+/// rounded-rect count — see `tests/thread.rs`).
 fn reply_bubble(reply: &FeedReply, sheet_sig: RwSignal<ThreadSheet>) -> AnyView<HuddleState> {
     let author = mock::user(reply.author_id)
         .map(|u| u.name)
         .unwrap_or("Someone");
     let inner = Padding(
-        EdgeInsets::symmetric(12.0, 8.0),
+        EdgeInsets::symmetric(12.0, 6.0),
         FlexView::new(
             Axis::Vertical,
             vec![
@@ -504,13 +586,13 @@ fn reply_bubble(reply: &FeedReply, sheet_sig: RwSignal<ThreadSheet>) -> AnyView<
     );
     // Long-press opens a Copy/Delete menu (replies carry no reaction model, so
     // no React row — `Menu(None)`).
-    any(GestureDetector(Padding(
-        EdgeInsets::symmetric(0.0, 4.0),
-        outlined_card(inner),
-    ))
-    .on_long_press(move |_st: &mut HuddleState| {
-        sheet_sig.set(ThreadSheet::Menu(None));
-    }))
+    any(
+        GestureDetector(Padding(EdgeInsets::symmetric(0.0, 4.0), inner)).on_long_press(
+            move |_st: &mut HuddleState| {
+                sheet_sig.set(ThreadSheet::Menu(None));
+            },
+        ),
+    )
 }
 
 /// The reply composer: a `.multiline(5)` field plus a send (`icons::SEND`)

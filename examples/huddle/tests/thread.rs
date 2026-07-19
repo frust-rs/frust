@@ -100,11 +100,11 @@ const CONTENT_BOTTOM: f64 = 520.0;
 
 /// The composer field's chrome: the bottommost rounded rect within the
 /// thread page's own content (above [`CONTENT_BOTTOM`]) — the field is the
-/// last thing laid out before the persistent bottom bar, and root/reply
-/// bubble cards (wider than the field, once the trailing send icon eats into
-/// its width) sit above it, so "bottommost", not "widest" (unlike
-/// `tests/search.rs::field_chrome`, which has no competing wide chrome), is
-/// what isolates it.
+/// last thing laid out before the persistent bottom bar, and the root
+/// header's avatar disc (the only other rounded chrome the flat root/reply
+/// rows paint as of task R2b) sits well above it near the header, so
+/// "bottommost", not "widest" (unlike `tests/search.rs::field_chrome`, which
+/// has no competing chrome), is what isolates it.
 fn composer_field_point(scene: &RecScene) -> Point {
     let (origin, size) = scene
         .rounded
@@ -236,12 +236,17 @@ fn mount_thread(
 }
 
 /// The loaded thread renders the root message plus its two mock-seeded
-/// replies, painting seven rounded rects: the root's `elevated_card` (1) +
-/// avatar (1), one `outlined_card` per reply (2), the composer's `TextInput`
-/// chrome (2 — a border rect plus a slightly inset fill rect, see
-/// `forgekit-widgets::textinput`'s paint impl), and the persistent bottom
-/// navigation bar's own selection-indicator pill (1) — plus real text glyphs
-/// for every header/body line.
+/// replies, painting four rounded rects: the root header's `fill_box` avatar
+/// disc (1 — the root/reply rows themselves are FLAT as of
+/// device-parity-round2 task R2b, painting no card chrome of their own), the
+/// composer's `TextInput` chrome (2 — a border rect plus a slightly inset
+/// fill rect, see `forgekit-widgets::textinput`'s paint impl), and the
+/// persistent bottom navigation bar's own selection-indicator pill (1) — plus
+/// real text glyphs for every header/body line. (Pre-R2b this was 7: the
+/// root's `elevated_card` + avatar + one `outlined_card` per reply — task R2b
+/// de-carded the root/reply rows the same way R2 de-carded the feed, so the
+/// count dropped by the 3 removed card fills: 7 − 1 (root card) − 2 (reply
+/// cards) = 4.)
 #[test]
 fn thread_renders_root_and_existing_replies() {
     let _g = serial();
@@ -256,14 +261,19 @@ fn thread_renders_root_and_existing_replies() {
     );
     assert_eq!(
         scene.rounded.len(),
-        7,
-        "root card + avatar + 2 reply cards + the composer's 2-rect chrome + the bottom bar pill"
+        4,
+        "root avatar disc + the composer's 2-rect chrome + the bottom bar pill \
+         (flat rows paint no card chrome of their own — task R2b)"
     );
 }
 
 /// Composing a reply (typing into the composer, then Shift+Enter to submit —
-/// see [`shift_enter`]) appends it: one more `outlined_card` reply bubble
-/// paints, and the composer clears.
+/// see [`shift_enter`]) appends it. As of device-parity-round2 task R2b the
+/// reply row is FLAT (no `outlined_card`), so a new reply paints no rounded
+/// chrome of its own — the rounded-rect count stays put and the new reply is
+/// observed instead through its own author/text glyph runs (deliberate, not a
+/// loosened assertion: pre-R2b this asserted `before + 1` off the removed
+/// card's fill rect).
 #[test]
 fn composing_a_reply_appends_it() {
     let _g = serial();
@@ -280,8 +290,8 @@ fn composing_a_reply_appends_it() {
     let (after, _) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
     assert_eq!(
         after.rounded.len(),
-        before + 1,
-        "the composed reply appended one more reply bubble"
+        before,
+        "a flat reply row paints no rounded chrome of its own (task R2b)"
     );
     assert!(
         after.glyph_runs > scene.glyph_runs,
