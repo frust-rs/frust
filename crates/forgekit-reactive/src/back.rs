@@ -31,14 +31,24 @@
 //! `SystemNavigator.pop`". The facade's `BackHandler` refreshes it to
 //! `controller.can_pop()` each rebuild.
 //!
-//! # Timing note
+//! # Timing: a live provider closes the stale-window
 //!
-//! [`handles_back`] is refreshed at **rebuild time**. A press that races a
-//! same-frame stack change reads the *previous* answer — this matches
-//! Flutter's pre-registered `setFrameworkHandlesBack` semantics (RESEARCH.md)
-//! and is acceptable: the window is one frame, and a mis-predicted
-//! root-level back is a no-op pop (the navigator's own `len > 1` guard stays
-//! authoritative) rather than an incorrect navigation.
+//! [`handles_back`] has two sources. The polled [`set_handles_back`] flag is
+//! refreshed at **rebuild time**, so it is stale by up to one frame — a press
+//! racing a same-frame stack change reads the *previous* answer, and if the
+//! frame gate skips the settle frame that stale answer can persist. On its own
+//! that window can let a root-level back fall through to activity-finish while
+//! the stack is still poppable.
+//!
+//! To close it, the facade's `BackHandler` also registers a **live provider**
+//! (see [`set_can_pop_provider`]) that [`handles_back`] consults *first*: the
+//! provider reads the navigator's CURRENT stack depth at press time — after the
+//! navigator's `apply_ops` has published it — so a back press is always decided
+//! against the real depth rather than a rebuild-time snapshot, with no
+//! one-frame lag. The polled flag stays the fallback when no provider is
+//! registered (an app with no `BackHandler`); there the navigator's own
+//! `len > 1` guard still makes a mis-predicted root-level back a safe no-op pop
+//! rather than an incorrect navigation.
 //!
 //! # Thread contract
 //!
@@ -50,7 +60,13 @@
 //! rather than panicking or buffering (the same rationale as the deep-link
 //! source). [`set_handles_back`]/[`handles_back`], like `theme_override`, carry
 //! no thread constraint — a shell polls `handles_back` from its own frame loop.
+//! The **live provider** slot ([`set_can_pop_provider`]/[`clear_can_pop_provider`])
+//! is the exception: its closure captures an `Rc`-backed `NavigatorController`
+//! (`!Send`), so it lives in UI-thread-affine `thread_local` storage and
+//! `set_can_pop_provider` panics if called off the UI thread — the same
+//! wiring-bug convention `push_back_press`/`Executor::spawn_local` enforce.
 
+use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -79,8 +95,22 @@ static COUNTER: OnceLock<RwSignal<u64>> = OnceLock::new();
 
 /// The process-global "framework handles the next back press" flag. A plain
 /// [`AtomicBool`] (no reactive tracking — a shell polls it), defaulting to
-/// `false` (see the module docs' `handles_back` section).
+/// `false` (see the module docs' `handles_back` section). The **fallback**
+/// answer [`handles_back`] returns when no live provider is registered.
 static HANDLES_BACK: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// The live "can the framework pop?" provider (see the module docs' timing
+    /// section). UI-thread-affine because the closure the facade's `BackHandler`
+    /// registers captures an `Rc`-backed `NavigatorController` (`!Send`); it
+    /// therefore lives here in `thread_local` storage rather than a global, and
+    /// [`set_can_pop_provider`] panics off the UI thread. When set,
+    /// [`handles_back`] consults it in preference to the polled [`HANDLES_BACK`]
+    /// flag, so a back press reads the navigator's CURRENT depth (post-
+    /// `apply_ops`) rather than a stale rebuild-time snapshot.
+    static CAN_POP_PROVIDER: RefCell<Option<Box<dyn Fn() -> bool>>> =
+        const { RefCell::new(None) };
+}
 
 /// Returns the process-wide back-press counter signal, creating it (under the
 /// reactive root [`Owner`](reactive_graph::owner::Owner)) on first access.
@@ -155,11 +185,61 @@ pub fn set_handles_back(handles: bool) {
     HANDLES_BACK.store(handles, Ordering::Relaxed);
 }
 
+/// Register a live provider [`handles_back`] consults to answer "would a back
+/// press pop?" against the navigator's CURRENT stack depth, not a rebuild-time
+/// snapshot. The facade's `BackHandler` registers `move || controller.can_pop()`,
+/// so a press arriving between frames — after `apply_ops` published the new
+/// depth but before the next rebuild refreshed the polled flag — is decided
+/// correctly instead of falling through to activity finish (see the module
+/// docs' timing section). A registered provider wins over
+/// [`set_handles_back`]'s flag; [`clear_can_pop_provider`] unregisters it.
+///
+/// # Panics
+///
+/// Panics if called off the UI thread. The provider captures an `Rc`-backed
+/// `NavigatorController` (`!Send`) and lives in UI-thread `thread_local`
+/// storage, so registering it from another thread is a wiring bug — the same
+/// convention [`push_back_press`]/`Executor::spawn_local` enforce.
+pub fn set_can_pop_provider(provider: Box<dyn Fn() -> bool>) {
+    if !is_ui_thread() {
+        panic!(
+            "forgekit-reactive: set_can_pop_provider was called off the UI thread. The can-pop \
+             provider captures an Rc-backed NavigatorController (!Send) and lives in UI-thread \
+             storage — this is a wiring bug: register it from the UI thread (the one \
+             `ReactiveRuntime::init` ran on), the same contract `push_back_press`/\
+             `Executor::spawn_local` enforce."
+        );
+    }
+    CAN_POP_PROVIDER.with(|slot| *slot.borrow_mut() = Some(provider));
+}
+
+/// Unregister the live can-pop provider (see [`set_can_pop_provider`]),
+/// restoring the polled [`handles_back`] fallback. The facade's `BackHandler`
+/// registers this via `on_cleanup` so a torn-down host component stops holding
+/// its controller alive here. Idempotent — safe to call with no provider
+/// registered, and it carries no thread constraint (clearing another thread's
+/// empty slot is a harmless no-op).
+pub fn clear_can_pop_provider() {
+    CAN_POP_PROVIDER.with(|slot| *slot.borrow_mut() = None);
+}
+
 /// Whether the framework wants to consume the next back press. A shell polls
 /// this to decide whether a back press should be routed into the app (`true`)
 /// or fall through to the platform / activity finish (`false`, the default
 /// until glue publishes otherwise — see the module docs).
+///
+/// A live provider (see [`set_can_pop_provider`]), when registered, wins: it is
+/// queried against the navigator's CURRENT depth so a press is never mis-decided
+/// against a stale rebuild-time snapshot. Otherwise this returns the polled
+/// [`set_handles_back`] flag.
 pub fn handles_back() -> bool {
+    // A live provider reads the navigator's current stack depth at call time —
+    // the whole point of the slot is to bypass the polled flag's one-frame lag.
+    // The closure only reads the controller's depth cell (never re-enters this
+    // module), so calling it under the borrow is safe.
+    if let Some(answer) = CAN_POP_PROVIDER.with(|slot| slot.borrow().as_ref().map(|f| f())) {
+        return answer;
+    }
     HANDLES_BACK.load(Ordering::Relaxed)
 }
 
@@ -247,6 +327,65 @@ mod tests {
         assert_eq!(back_presses().count.get_untracked(), consumed);
     }
 
+    /// The live can-pop provider wins over the polled `handles_back` flag and is
+    /// queried afresh each call (so it reflects the CURRENT navigator depth, not
+    /// a rebuild-time snapshot), and unregistering it restores the flag fallback.
+    /// Serializes on the waker lock since `ReactiveRuntime::init` swaps the
+    /// process-wide waker (and marks this thread as the UI thread, which
+    /// `set_can_pop_provider` requires).
+    #[test]
+    fn can_pop_provider_wins_and_unregisters() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+
+        // Start from a known state: no provider, flag false.
+        clear_can_pop_provider();
+        set_handles_back(false);
+        assert!(!handles_back(), "no provider + flag false -> false");
+        set_handles_back(true);
+        assert!(
+            handles_back(),
+            "no provider -> the polled flag is the answer"
+        );
+
+        // Register a live provider driven by a local cell; point the polled flag
+        // the OPPOSITE way so the assertions can only pass if the provider wins.
+        let live = Rc::new(Cell::new(true));
+        let probe = live.clone();
+        set_can_pop_provider(Box::new(move || probe.get()));
+
+        set_handles_back(false);
+        assert!(
+            handles_back(),
+            "a registered provider wins over the (opposite) polled flag"
+        );
+
+        // The provider is queried live each call — flipping the cell (as a
+        // post-apply_ops depth change would) is observed immediately, with no
+        // rebuild in between: the whole point of the slot.
+        live.set(false);
+        set_handles_back(true);
+        assert!(
+            !handles_back(),
+            "the provider is re-queried live, not cached, and still wins"
+        );
+
+        // Unregistering restores the polled-flag fallback.
+        clear_can_pop_provider();
+        assert!(handles_back(), "after clear, the flag (true) answers again");
+        set_handles_back(false);
+        assert!(!handles_back(), "fallback tracks the flag once more");
+
+        // Idempotent: a second clear with nothing registered is a safe no-op.
+        clear_can_pop_provider();
+        assert!(!handles_back());
+    }
+
     /// The UI-thread contract is enforced (mirrors `push_deep_link`'s
     /// off-thread panic). Serializes on the waker lock since
     /// `ReactiveRuntime::init` swaps the process-wide waker.
@@ -259,6 +398,23 @@ mod tests {
         let _rt = ReactiveRuntime::init(Arc::new(|| {}));
 
         std::thread::spawn(push_back_press)
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    /// Registering the live provider off the UI thread is a wiring bug and
+    /// panics — the closure captures an `Rc`-backed controller (`!Send`), so it
+    /// can only live in the UI thread's storage. Serializes on the waker lock
+    /// since `ReactiveRuntime::init` swaps the process-wide waker.
+    #[test]
+    #[should_panic(expected = "wiring bug")]
+    fn set_provider_off_ui_thread_panics() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+
+        std::thread::spawn(|| set_can_pop_provider(Box::new(|| true)))
             .join()
             .unwrap_or_else(|e| std::panic::resume_unwind(e));
     }

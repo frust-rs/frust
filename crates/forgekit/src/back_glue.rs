@@ -19,23 +19,35 @@
 //!    `len > 1` guard is authoritative, and the shell already routed a
 //!    root-level back to the platform because `handles_back` was false); and
 //! 2. **refreshes** [`set_handles_back`]`(controller.can_pop())` so the shell's
-//!    next-press decision matches the current stack depth.
+//!    polled-flag fallback matches the current stack depth, and
+//! 3. registers, once at construction, a **live can-pop provider**
+//!    ([`set_can_pop_provider`]) reading `controller.can_pop()` — the primary
+//!    source the shell's `handles_back()` consults (see the timing note).
 //!
-//! # Timing
+//! # Timing: the live provider closes the stale-window
 //!
-//! `handles_back` is refreshed at rebuild time (when `track` runs). A press
-//! that races a same-frame stack change reads the *previous* answer — this
-//! matches Flutter's pre-registered `setFrameworkHandlesBack` semantics
-//! (RESEARCH.md) and is acceptable: the window is one frame, and a
-//! mis-predicted root-level back is a no-op pop rather than a wrong navigation.
-//! See `forgekit_reactive::back`'s module docs for the same note.
+//! `track` runs during a rebuild's *build* pass, **before** the navigator's
+//! `apply_ops` (a later reconciliation step) publishes the new stack depth — so
+//! the polled [`set_handles_back`] flag it writes lags a stack change by one
+//! frame, and if the frame gate skips the settle frame that stale `false` can
+//! persist and let a root-level back fall through to activity-finish while the
+//! stack is still poppable. To close that window, [`new`](BackHandler::new)
+//! registers a live provider (`move || controller.can_pop()`) that
+//! `forgekit_reactive::handles_back` queries in preference to the flag: it reads
+//! the navigator's CURRENT depth at press time (after `apply_ops` published it),
+//! so a back press is always decided against the real depth, with no one-frame
+//! lag. The provider is UI-thread-affine (it captures the `Rc`-backed
+//! controller) and is unregistered via `on_cleanup` when the host component
+//! tears down. See `forgekit_reactive::back`'s module docs for the source-side
+//! contract.
 
-use std::cell::Cell;
-use std::rc::Rc;
-
-use forgekit_reactive::{back_presses, set_handles_back};
+use forgekit_reactive::{
+    back_presses, clear_can_pop_provider, on_cleanup, set_can_pop_provider, set_handles_back,
+};
 use forgekit_widgets::NavigatorController;
 use reactive_graph::traits::{Get, GetUntracked};
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// A [`NavigatorController`] wired to the process-wide back-press source (see
 /// the module docs). Construct once with [`attach_back_handler`] (or
@@ -59,13 +71,26 @@ impl<State: 'static> BackHandler<State> {
     /// Wire `controller` to the back-press source. Records the current
     /// back-press count as already-consumed (so a press delivered before this
     /// handler existed does not trigger a spurious pop on the first
-    /// [`track`](Self::track)) and publishes the initial
-    /// [`set_handles_back`]`(controller.can_pop())`.
+    /// [`track`](Self::track)), publishes the initial
+    /// [`set_handles_back`]`(controller.can_pop())` fallback flag, and registers
+    /// a **live can-pop provider** so a press between frames reads the
+    /// navigator's current depth rather than the rebuild-time flag (see the
+    /// module docs' timing note). The provider is unregistered via `on_cleanup`
+    /// when the host component's owner is disposed.
     ///
-    /// Call this once per controller (e.g. from `Component::init`).
+    /// Call this once per controller (e.g. from `Component::init`) — from the UI
+    /// thread, since the provider slot is UI-thread-affine (it captures the
+    /// `Rc`-backed controller). A `Component::init` always runs on the UI thread.
     pub fn new(controller: NavigatorController<State>) -> Self {
         let consumed = Rc::new(Cell::new(back_presses().count.get_untracked()));
         set_handles_back(controller.can_pop());
+        // Register the live provider (device-parity fix F2): `handles_back()`
+        // consults this in preference to the polled flag, reading the CURRENT
+        // stack depth at press time. Unregister it when the owning component
+        // tears down (a no-op outside an owner, e.g. in unit tests).
+        let provider_controller = controller.clone();
+        set_can_pop_provider(Box::new(move || provider_controller.can_pop()));
+        on_cleanup(clear_can_pop_provider);
         Self {
             controller,
             consumed,
@@ -73,14 +98,19 @@ impl<State: 'static> BackHandler<State> {
     }
 
     /// Track the live back-press counter and pop the navigator on any press not
-    /// yet consumed, then refresh the framework's `handles_back` flag from the
-    /// current stack depth. Call from every `Component::build`.
+    /// yet consumed, then refresh the framework's `handles_back` **fallback**
+    /// flag from the current stack depth. Call from every `Component::build`.
     ///
     /// Dedup'd by the consumed marker (see the module docs): a rebuild re-run
     /// that observes the same already-consumed count neither pops nor
     /// double-counts. A press at the root (`!can_pop`) is consumed but pops
     /// nothing — the shell already bubbled it to the platform because
     /// `handles_back` was false.
+    ///
+    /// The `set_handles_back` write here maintains only the *fallback* flag; the
+    /// live provider registered in [`new`](Self::new) is what a shell's
+    /// `handles_back()` actually reads, so this flag's one-frame lag no longer
+    /// affects the press decision (see the module docs' timing note).
     pub fn track(&self) {
         let count = back_presses().count.get();
         if count != self.consumed.get() {
@@ -93,7 +123,9 @@ impl<State: 'static> BackHandler<State> {
                 self.controller.pop();
             }
         }
-        // Refresh at rebuild time (see the module docs' timing note).
+        // Refresh the fallback flag at rebuild time. The live provider (see the
+        // module docs' timing note) is authoritative; this only keeps the
+        // no-provider fallback roughly in sync.
         set_handles_back(self.controller.can_pop());
     }
 
@@ -154,7 +186,9 @@ pub fn attach_back_handler<State: 'static>(
 mod tests {
     use super::*;
     use forgekit_core::{AnyView, RenderRoot, any};
-    use forgekit_reactive::{ReactiveRuntime, handles_back, push_back_press};
+    use forgekit_reactive::{
+        ReactiveRuntime, clear_can_pop_provider, handles_back, push_back_press,
+    };
     use forgekit_widgets::{NavigatorView, navigator};
     use std::sync::Arc;
 
@@ -203,18 +237,20 @@ mod tests {
     }
 
     // All criteria in ONE `#[test]`: `forgekit_reactive::back`'s process-wide
-    // counter and `handles_back` flag are shared by every test in this binary,
-    // and this is the only test in `forgekit`'s suite that touches them — a
-    // single function gives deterministic ordering without a crate-private test
-    // lock (unreachable from here), and it asserts nothing about waker counts.
+    // counter, `handles_back` flag, and live-provider slot are shared by every
+    // test in this binary, and this is the only test in `forgekit`'s suite that
+    // touches them — a single function gives deterministic ordering without a
+    // crate-private test lock (unreachable from here), and it asserts nothing
+    // about waker counts.
     //
-    // Note the documented one-frame refresh lag (see the module docs' timing
-    // note): `track()` runs during a rebuild's build pass, *before* the
-    // navigator's `apply_ops` publishes the new depth in the same rebuild, so
-    // `handles_back` reflects the *previous* frame's depth. A stack change is
-    // therefore mirrored into `handles_back` on the rebuild *after* the one
-    // that applied it — this test settles with an extra `rebuild()` where it
-    // asserts on the flag.
+    // F2 (device-parity fix): the stale-false window is CLOSED. `track()` runs
+    // during a rebuild's build pass, before the navigator's `apply_ops`
+    // publishes the new depth in the same rebuild, so the polled flag lags by a
+    // frame — but `Harness::new` registered a live can-pop provider, so
+    // `handles_back()` reads the CURRENT depth and needs NO settle rebuild. Every
+    // `handles_back()` assertion below therefore runs on the SAME rebuild that
+    // applied the stack change, which is exactly the stale-window the old code
+    // failed in.
     #[test]
     fn back_handler_glue() {
         let _rt = ReactiveRuntime::init(Arc::new(|| {}));
@@ -223,28 +259,33 @@ mod tests {
 
         // At the root: depth 1 (authoritative from the widget), and the
         // framework does NOT handle back (a root-level back must bubble to the
-        // platform).
+        // platform) — no settle rebuild needed.
         assert_eq!(h.depth(), 1, "starts at the root page");
-        h.rebuild(); // settle the flag from the now-published depth 1
         assert!(
             !handles_back(),
             "root-level back bubbles: handles_back false"
         );
 
-        // Push two pages: depth updates immediately (published at apply_ops);
-        // handles_back mirrors it one rebuild later (the timing note).
+        // Push a page and rebuild ONCE. This is the stale-window: `track()` wrote
+        // the flag from the pre-push depth (1 -> false), THEN `apply_ops` raised
+        // the depth to 2 later in the same rebuild. Without the live provider a
+        // back press here would fall through to activity-finish while the stack is
+        // poppable (the A2 defect). With it, `handles_back()` is true immediately.
         h.back.controller().push(page);
         h.rebuild();
         assert_eq!(h.depth(), 2, "push published to depth immediately");
-        h.rebuild(); // settle
-        assert!(handles_back(), "a poppable stack sets handles_back true");
+        assert!(
+            handles_back(),
+            "stale-window closed: a poppable stack reports handles_back true on the \
+             SAME rebuild that pushed, with no settle frame"
+        );
+
         h.back.controller().push(page);
         h.rebuild();
         assert_eq!(h.depth(), 3);
-        h.rebuild();
-        assert!(handles_back());
+        assert!(handles_back(), "still poppable, still no settle frame");
 
-        // A back press pops one page on the next track()/rebuild.
+        // A back press in that same-frame window pops instead of falling through.
         push_back_press();
         h.rebuild();
         assert_eq!(h.depth(), 2, "one back press pops one page");
@@ -254,13 +295,15 @@ mod tests {
         h.rebuild();
         assert_eq!(h.depth(), 2, "no new press -> no extra pop");
 
-        // Another press pops down to the root; handles_back flips to false once
-        // the depth-1 stack is re-observed on the following rebuild.
+        // Another press pops down to the root; handles_back flips to false on the
+        // same rebuild the depth-1 stack is published (no settle).
         push_back_press();
         h.rebuild();
         assert_eq!(h.depth(), 1, "back at the root");
-        h.rebuild(); // settle
-        assert!(!handles_back(), "root again: handles_back false");
+        assert!(
+            !handles_back(),
+            "root again: handles_back false immediately"
+        );
 
         // A back press at the root is a safe no-op (the press is consumed but
         // pops nothing — the shell already bubbled it since handles_back false).
@@ -268,5 +311,13 @@ mod tests {
         h.rebuild();
         assert_eq!(h.depth(), 1, "pop-at-root is a no-op");
         assert!(!handles_back());
+
+        // Provider unregistration is safe: after clearing, `handles_back()` falls
+        // back to the polled flag (last set to the depth-1 `false`).
+        clear_can_pop_provider();
+        assert!(
+            !handles_back(),
+            "after clear, handles_back reads the polled fallback flag"
+        );
     }
 }

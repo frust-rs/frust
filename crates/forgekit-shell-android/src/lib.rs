@@ -366,9 +366,15 @@ macro_rules! android_app {
         /// RESEARCH.md "Android back"). Returns `JNI_TRUE` when the framework
         /// consumed the press (it will pop on the next rebuild — Kotlin must not
         /// finish the activity), `JNI_FALSE` when it should fall through to the
-        /// default `OnBackPressedDispatcher` (activity finish). Kotlin calls this
-        /// from an `OnBackPressedCallback` whose `isEnabled` it toggles off the
-        /// framework's advertised `handles_back` answer.
+        /// default `OnBackPressedDispatcher` (activity finish). The generated
+        /// template's `MainActivity` registers an **always-enabled**
+        /// `OnBackPressedCallback` that calls this via
+        /// `ForgeKitSurfaceView.dispatchBackPress()`; on a `false` return it
+        /// momentarily disables itself, re-dispatches `onBackPressed()` to fall
+        /// through to the platform default, then re-enables — the standard
+        /// consume-or-fall-through idiom (the callback's `isEnabled` is NOT bound
+        /// to the framework's `handles_back` answer; the Rust side owns that
+        /// decision per call).
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeOnBackPress<'local>(
             _env: $crate::__jni::EnvUnowned<'local>,

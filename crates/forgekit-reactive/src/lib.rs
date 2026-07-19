@@ -24,7 +24,10 @@ mod executor;
 mod runtime;
 mod tracked;
 
-pub use back::{BackPresses, back_presses, handles_back, push_back_press, set_handles_back};
+pub use back::{
+    BackPresses, back_presses, clear_can_pop_provider, handles_back, push_back_press,
+    set_can_pop_provider, set_handles_back,
+};
 pub use deep_link::{DeepLink, DeepLinks, deep_links, push_deep_link};
 pub use runtime::{FrameWaker, ReactiveRuntime};
 pub use tracked::TrackedScope;

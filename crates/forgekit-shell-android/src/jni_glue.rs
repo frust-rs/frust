@@ -771,13 +771,17 @@ pub fn native_on_insets_changed(
 /// `JNI_FALSE` lets the default `OnBackPressedDispatcher` run (activity finish).
 ///
 /// The read of [`handles_back`] is synchronous while the [`push_back_press`] pop
-/// is applied asynchronously on the next rebuild — the Flutter pre-registration
-/// contract (`setFrameworkHandlesBack`, RESEARCH.md): the shell already knows,
-/// from the previous frame's published answer, whether to route this press into
-/// the app. A mis-predicted root-level back is a no-op pop, never a wrong
-/// navigation. Pumps the reactive local-task queue first, like the other input
-/// entry points, so a just-drained task's state is observed before the decision.
-/// A missing handle returns `false` (no live app ⇒ let the platform exit).
+/// is applied on the next rebuild. [`handles_back`] consults the facade's live
+/// can-pop provider (device-parity fix F2 — see `forgekit_reactive::back`'s
+/// timing note), so it reflects the navigator's CURRENT stack depth at press
+/// time rather than a stale previous-frame snapshot: a press arriving right
+/// after a page push is decided against the real depth, not a rebuild-time flag
+/// the frame gate might not yet have refreshed. A root-level back still reports
+/// `false` and falls through, and the navigator's own `len > 1` guard keeps a
+/// mis-predicted pop a safe no-op. Pumps the reactive local-task queue first,
+/// like the other input entry points, so a just-drained task's state is observed
+/// before the decision. A missing handle returns `false` (no live app ⇒ let the
+/// platform exit).
 pub fn native_on_back_press(handle: jlong) -> jboolean {
     guard("nativeOnBackPress", false, || {
         pump_reactive_runtime();

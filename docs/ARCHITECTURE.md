@@ -425,13 +425,20 @@ equivalent — back is a navigation-bar affordance there), which calls
 `forgekit-reactive::back` owns, mirroring `deep_link`'s shape above but
 counting presses rather than carrying a payload. The facade's `BackHandler`
 dedupes by the last-consumed count and pops the attached
-`NavigatorController` when `can_pop()`; `set_handles_back`/`handles_back()`
-is a second, independent flag `BackHandler::track()` publishes from the
-navigator's stack depth each rebuild, which the shell reads *before*
-deciding whether to consume a press itself (mirroring Flutter's
-`popRoute`/`setFrameworkHandlesBack` pre-registration contract) — a
-stale-by-one-frame read costs at most a no-op pop, never a wrong
-navigation.
+`NavigatorController` when `can_pop()`; `handles_back()` is the second,
+independent answer the shell reads *before* deciding whether to consume a
+press itself (mirroring Flutter's `popRoute`/`setFrameworkHandlesBack`
+pre-registration contract). It has two sources: the polled
+`set_handles_back` flag `BackHandler::track()` refreshes from the navigator's
+stack depth each rebuild — stale by up to one frame, and the fallback — and a
+**live can-pop provider** the `BackHandler` registers (`set_can_pop_provider`,
+a UI-thread-affine slot reading `controller.can_pop()`, unregistered via
+`on_cleanup`), which `handles_back()` consults first. The provider reads the
+navigator's CURRENT depth at press time (after the rebuild's `apply_ops`
+published it), closing the stale-false window where a poppable-stack back
+press could otherwise fall through to activity-finish; the navigator's own
+`len > 1` guard keeps any residual mis-prediction a safe no-op pop rather than
+a wrong navigation.
 
 **CLI flow:** `Cli` (clap) parses into a `Command`, dispatched to a
 `commands::*` handler. `create` renders the embedded `templates/app/` tree
