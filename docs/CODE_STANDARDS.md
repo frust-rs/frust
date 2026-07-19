@@ -380,7 +380,7 @@ Semantics pass):
   rule for every `examples/*` crate, not just reactive types**: an example's
   `Cargo.toml` should depend on `forgekit` alone. `examples/huddle` — the sole
   example — mostly holds to this but carries a **documented**
-  `forgekit-core`/`forgekit-theme`/`kurbo`/`peniko` escape-hatch dependency
+  `forgekit-core`/`kurbo`/`peniko` escape-hatch dependency
   (see its `Cargo.toml`'s comment) for the handful of custom app widgets no
   facade widget covers: `ui/swipeable`'s swipe-to-action row, `ui/sheet`'s
   modal sheet (both theme-aware, resolving fill/marker colors with a

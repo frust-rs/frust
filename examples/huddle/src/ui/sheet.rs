@@ -59,14 +59,13 @@ use std::rc::Rc;
 
 use forgekit::{
     Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector, IconSource, Padding, SizedBox,
-    filled_card, flexible, icon, inflexible, text,
+    Theme, filled_card, flexible, icon, inflexible, text,
 };
 use forgekit_core::{
     AnimationController, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx,
     EventResult, FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton,
     PointerEvent, PointerPhase, SemanticsCtx, TOUCH_SLOP, View, Widget, any,
 };
-use forgekit_theme::Theme;
 use kurbo::{Point, Size};
 use peniko::Color;
 use std::time::Duration;

@@ -31,12 +31,12 @@
 
 use std::rc::Rc;
 
+use forgekit::Theme;
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FrameTime,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase,
     SemanticsCtx, TOUCH_SLOP, View, Widget, any,
 };
-use forgekit_theme::Theme;
 use kurbo::{Affine, Point, Size};
 use peniko::Color;
 

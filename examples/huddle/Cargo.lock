@@ -1428,7 +1428,6 @@ dependencies = [
  "forgekit-reactive",
  "forgekit-scene",
  "forgekit-text",
- "forgekit-theme",
  "kurbo",
  "peniko",
  "reactive_graph",

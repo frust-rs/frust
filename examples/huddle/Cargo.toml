@@ -51,11 +51,7 @@ clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signal
 # show d02ad77~1:examples/huddle/Cargo.toml`); everything else in this crate
 # still depends on the `forgekit` facade alone, per `docs/CODE_STANDARDS.md`'s
 # State & Reactivity Conventions.
-# `forgekit_theme` is added to support theme-aware rendering in escape-hatch
-# widgets (sheet and swipeable panels), following the theming conventions in
-# `docs/CODE_STANDARDS.md`.
 forgekit-core = { path = "../../crates/forgekit-core" }
-forgekit-theme = { path = "../../crates/forgekit-theme" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
 
