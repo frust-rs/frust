@@ -12,11 +12,20 @@ use frust::{
     AnyView, Axis, Button, Column, Component, FlexView, Image, ImageFit, ImageSource, Row,
     SizedBox, View, any, keyed, scroll_view, text, text_input,
 };
+// `frust-shared-preferences`: a platform plugin (not part of the `frust`
+// facade — added to `Cargo.toml` like any other Frust plugin) this app uses
+// to persist its notes list + draft across a kill+relaunch. See
+// `AppState::new`/`save_notes`/`save_draft` below for the whole demo.
+use frust_shared_preferences::SharedPreferences;
 
 /// The embedded logo bytes, decoded once at startup (see [`AppState::new`]).
 /// Bundling them with `include_bytes!` keeps the app self-contained — no runtime
 /// asset path to resolve on Android/iOS.
 const LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
+
+/// `frust-shared-preferences` keys this app persists under.
+const NOTES_KEY: &str = "notes";
+const DRAFT_KEY: &str = "draft";
 
 /// Application state (spec §5 `app_logic` model): the view is a pure function of
 /// these fields, and every interaction mutates one of them.
@@ -32,16 +41,57 @@ pub struct AppState {
     /// The decode-once logo handle, re-passed into [`Image`] every frame (a cheap
     /// `Arc` clone — never a re-decode).
     pub logo: ImageSource,
+    /// The platform preferences handle `frust-shared-preferences::standard`
+    /// opened at startup, or `None` if it's unavailable this run (e.g. an
+    /// old scaffold missing the Android `nativeInitPlatform` call, or a
+    /// backend that hasn't landed on this target yet). Every save below
+    /// degrades to a silent no-op when this is `None` — losing persistence
+    /// is never a reason to panic or block the app from booting.
+    prefs: Option<SharedPreferences>,
 }
 
 impl AppState {
-    /// Build the initial state, decoding the embedded logo exactly once.
+    /// Build the initial state, decoding the embedded logo exactly once and
+    /// loading any previously-saved notes + draft back in (the
+    /// `frust-shared-preferences` demo: see the module doc).
     pub fn new() -> Self {
+        let prefs = match SharedPreferences::standard() {
+            Ok(prefs) => Some(prefs),
+            Err(err) => {
+                // Fall back to empty state rather than panicking — an old
+                // scaffold or a not-yet-implemented backend just means this
+                // run won't persist notes.
+                eprintln!("preferences unavailable, notes won't persist this run: {err}");
+                None
+            }
+        };
+
+        // Reassign ids on load: only the note text round-trips through
+        // preferences (`set_string_list`), the ids are a local reconciliation
+        // key (spec §6.3), regenerated fresh every launch.
+        let mut next_id = 0;
+        let notes = prefs
+            .as_ref()
+            .and_then(|p| p.get_string_list(NOTES_KEY))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|text| {
+                let id = next_id;
+                next_id += 1;
+                (id, text)
+            })
+            .collect();
+        let draft = prefs
+            .as_ref()
+            .and_then(|p| p.get_string(DRAFT_KEY))
+            .unwrap_or_default();
+
         Self {
-            draft: String::new(),
-            notes: Vec::new(),
-            next_id: 0,
+            draft,
+            notes,
+            next_id,
             logo: ImageSource::decode(LOGO_PNG).expect("the embedded logo PNG is valid"),
+            prefs,
         }
     }
 
@@ -53,8 +103,32 @@ impl AppState {
             let id = self.next_id;
             self.next_id += 1;
             self.notes.push((id, trimmed.to_string()));
+            self.save_notes();
         }
         self.draft.clear();
+        self.save_draft();
+    }
+
+    /// Persist the current note texts through `frust-shared-preferences`, a
+    /// no-op when no preferences handle is available (see `prefs`' doc).
+    fn save_notes(&self) {
+        let Some(prefs) = &self.prefs else {
+            return;
+        };
+        let texts: Vec<String> = self.notes.iter().map(|(_, text)| text.clone()).collect();
+        if let Err(err) = prefs.set_string_list(NOTES_KEY, texts) {
+            eprintln!("failed to save notes: {err}");
+        }
+    }
+
+    /// Persist the in-progress draft, so a kill+relaunch resumes mid-note.
+    fn save_draft(&self) {
+        let Some(prefs) = &self.prefs else {
+            return;
+        };
+        if let Err(err) = prefs.set_string(DRAFT_KEY, self.draft.clone()) {
+            eprintln!("failed to save draft: {err}");
+        }
     }
 }
 
@@ -91,6 +165,7 @@ pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<> {
                     any(SizedBox(Some(12.0), None)),
                     any(Button("Delete", move |s: &mut AppState| {
                         s.notes.retain(|(nid, _)| *nid != id);
+                        s.save_notes();
                     })),
                 ]),
             )
@@ -104,6 +179,7 @@ pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<> {
     children.push(any(
         text_input(draft, |s: &mut AppState, v: String| {
             s.draft = v;
+            s.save_draft();
         })
         .placeholder("Write a note, then press Enter")
         .on_submit(|s: &mut AppState, v: String| {

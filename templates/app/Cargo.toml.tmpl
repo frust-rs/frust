@@ -18,6 +18,14 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # create` will emit a version dependency here instead.
 frust = { path = "{{ frust_path }}" }
 
+# `frust-shared-preferences` demo (plugin-system spec): a platform plugin
+# the notes app below uses to persist its notes list + draft, the same way
+# a real app would add any other Frust plugin (spec §12.3's `frust_path`
+# temporary-path mechanism applies here too — `frust_path` resolves to
+# `crates/frust`, so `../../plugins/shared-preferences` walks back up to
+# the repo root and down into the plugin's own directory).
+frust-shared-preferences = { path = "{{ frust_path }}/../../plugins/shared-preferences" }
+
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
 # store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
 # (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
