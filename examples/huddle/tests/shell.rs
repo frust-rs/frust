@@ -14,7 +14,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use forgekit::{AnyView, Component, GetUntracked, PopResult, Theme, TransitionSpec};
+use forgekit::{
+    AnyView, Component, GetUntracked, PopResult, Theme, TransitionSpec, handles_back,
+    push_back_press,
+};
 use forgekit_core::RenderRoot;
 use forgekit_text::TextContext;
 use kurbo::Point;
@@ -108,6 +111,65 @@ fn routes_push_and_pop_without_panicking() {
     state.nav.router().controller().pop();
     root.rebuild(&mut logic, &mut state);
     assert!(root.root_id().is_some(), "a pop rebuilds cleanly");
+}
+
+/// The Android/gesture back contract (device-parity task 14, item 3): a back
+/// press pops the mounted navigator, and `forgekit::handles_back` mirrors
+/// whether the framework will consume the *next* press (a single-page stack
+/// bubbles to the platform instead). `state.back.track()` runs every
+/// `HuddleApp::build` (see `lib.rs`), so a plain `rebuild()` — no layout/paint
+/// needed, exactly like `routes_push_and_pop_without_panicking` above — is
+/// enough to drive it.
+///
+/// `handles_back` refreshes one rebuild *after* the stack change that would
+/// flip it (`BackHandler::track`'s documented timing-lag contract); every
+/// assertion on the flag below settles with one extra `rebuild()` first,
+/// mirroring `forgekit`'s own `back_glue` test.
+#[test]
+fn back_press_pops_the_navigator_and_root_bubbles_to_the_platform() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut root: Root = RenderRoot::new();
+    let mut state = HuddleApp.init();
+    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+
+    root.rebuild(&mut logic, &mut state);
+    root.rebuild(&mut logic, &mut state); // settle the initial handles_back read
+    assert_eq!(state.back.controller().depth(), 1, "starts at the tab root");
+    assert!(
+        !handles_back(),
+        "a single-page stack bubbles back to the platform"
+    );
+
+    // Push a detail page: depth updates immediately; handles_back mirrors it
+    // one rebuild later.
+    state.nav.router().push("/channel/general");
+    root.rebuild(&mut logic, &mut state);
+    assert_eq!(state.back.controller().depth(), 2, "the push is published");
+    root.rebuild(&mut logic, &mut state); // settle
+    assert!(handles_back(), "a poppable stack sets handles_back true");
+
+    // A back press pops one page.
+    push_back_press();
+    root.rebuild(&mut logic, &mut state);
+    assert_eq!(
+        state.back.controller().depth(),
+        1,
+        "one back press pops the pushed page"
+    );
+    root.rebuild(&mut logic, &mut state); // settle
+    assert!(
+        !handles_back(),
+        "back at the root: handles_back reports false again"
+    );
+
+    // A back press at the root is a safe no-op (consumed but pops nothing —
+    // the shell already bubbled it to the platform since handles_back was
+    // false).
+    push_back_press();
+    root.rebuild(&mut logic, &mut state);
+    assert_eq!(state.back.controller().depth(), 1, "pop-at-root is a no-op");
 }
 
 /// A modal pushed transparently through the real, mounted `NavigatorController`

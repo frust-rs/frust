@@ -65,14 +65,14 @@ use forgekit::{
     FlexView, GestureDetector, Get, GetUntracked, MainAxisAlignment, NavigatorController, Padding,
     RwSignal, ScrollInfo, Set, SizedBox, Stack, Theme, Update, any, app_bar, assist_chip,
     cupertino_activity_indicator, elevated_card, filled_card, filter_chip, flexible, hero, icon,
-    icons, inflexible, keyed, loading_indicator, outlined_card, scroll_view, text, text_input,
-    use_context,
+    icons, inflexible, keyed, loading_indicator, outlined_card, safe_area, scroll_view, text,
+    text_input, use_context,
 };
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, MessagesController};
 use crate::mock;
-use crate::ui::sheet::{action_menu, emoji_grid, sheet, sheet_action_row};
+use crate::ui::sheet::{action_menu, avoid_keyboard, emoji_grid, sheet, sheet_action_row};
 use crate::ui::swipeable::{SwipeMarker, press_pop, swipeable_row};
 
 /// Distance (logical px) from the top of the feed at which the near-start
@@ -292,7 +292,13 @@ fn feed_app_bar(
     let back = forgekit::GestureDetector(icon(icons::ARROW_BACK).size(24.0))
         .on_tap(move |_st: &mut HuddleState| navigator.pop());
 
-    any(app_bar::<HuddleState>(title).leading(any(Padding(EdgeInsets::symmetric(4.0, 0.0), back))))
+    // Clears the top status-bar/cutout inset (device-parity task 14, item 1)
+    // — see `shell::bottom_bar`'s doc for the matching known v1 background-
+    // extension gap.
+    any(safe_area(
+        app_bar::<HuddleState>(title).leading(any(Padding(EdgeInsets::symmetric(4.0, 0.0), back))),
+    )
+    .bottom(false))
 }
 
 /// The scrolling feed area: skeletons while loading, else the keyed message
@@ -700,7 +706,14 @@ fn composer_bar(
         any(send_icon)
     };
 
-    any(Padding(
+    // Rides above the on-screen keyboard (device-parity task 14, item 2): the
+    // composer sits at the window bottom under edge-to-edge + `adjustResize`
+    // (see `templates/app/android.tmpl` / `examples/huddle/android`'s task-08
+    // wiring), so it must consume the raw IME occlusion itself rather than
+    // relying on a window resize. `avoid_keyboard` pads by the live
+    // `WindowInsets::view_insets.bottom` — the same raw inset `ui::sheet`'s
+    // bottom-anchored panel consumes for its own keyboard avoidance.
+    any(avoid_keyboard(Padding(
         EdgeInsets::all(8.0),
         FlexView::new(
             Axis::Horizontal,
@@ -715,7 +728,7 @@ fn composer_bar(
             ],
         )
         .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )))
 }
 
 /// One composer affordance icon button (attach / emoji): a `filled_card`-backed

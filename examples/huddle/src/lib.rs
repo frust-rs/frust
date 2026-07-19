@@ -42,9 +42,10 @@ mod shell;
 use std::rc::Rc;
 
 use forgekit::{
-    AnyView, Axis, Component, CrossAxisAlignment, DesignLanguage, FlexView, NavigatorController,
-    PageTransition, Router, RouterDeepLinks, RwSignal, Stack, Theme, TransitionSpec, any, flexible,
-    inflexible, navigator, provide_context, router_with_deep_links, use_context,
+    AnyView, Axis, BackHandler, Component, CrossAxisAlignment, DesignLanguage, FlexView,
+    NavigatorController, PageTransition, Router, RouterDeepLinks, RwSignal, Stack, Theme,
+    TransitionSpec, any, attach_back_handler, flexible, inflexible, navigator, provide_context,
+    router_with_deep_links, use_context,
 };
 
 use shell::Tab;
@@ -58,6 +59,13 @@ pub struct HuddleState {
     /// a cold-start link already arrived). `Rc` so the bottom bar's closures —
     /// rebuilt fresh every `build` — can cheaply clone a handle into each tap.
     pub nav: Rc<RouterDeepLinks<HuddleState>>,
+    /// The Android/gesture back-press ⇄ navigator glue (device-parity task 14):
+    /// wired to the *same* [`NavigatorController`] as [`nav`](Self::nav) (a
+    /// clone sharing the same `Rc`-backed depth — see [`BackHandler`]'s docs),
+    /// so a platform back press pops whatever page the router pushed and
+    /// `forgekit::handles_back` mirrors the live stack depth. [`track`](BackHandler::track)
+    /// is called every `build`, alongside `nav.track()`.
+    pub back: BackHandler<HuddleState>,
     /// The bottom navigation's selected destination (see [`shell::Tab`]).
     pub tab: RwSignal<Tab>,
     /// The app-wide toast/snackbar handle, mounted in the shell's overlay slot
@@ -89,14 +97,28 @@ impl Component for HuddleApp {
         // wins over "/" — see `RouterDeepLinks::new`'s doc.
         let nav = router_with_deep_links(router, "/");
 
+        // Wired to the same controller (a clone sharing its `Rc`-backed depth
+        // — see `HuddleState::back`'s doc) so a platform back press pops
+        // whatever the router pushed.
+        let back = attach_back_handler(controller);
+
         HuddleState {
             nav: Rc::new(nav),
+            back,
             tab: RwSignal::new(Tab::default()),
             toasts,
         }
     }
 
     fn build(&self, state: &mut HuddleState) -> AnyView<HuddleState> {
+        // Consumes a new back press (pop if the stack can) and refreshes
+        // `handles_back` from the current depth — see `BackHandler::track`'s
+        // docs for the one-rebuild refresh lag. Drawer/sheet-first dismissal
+        // on back is a known gap: `BackHandler` has no app-level intercept
+        // hook today (see this crate's device-parity task 14 completion
+        // summary), so an open sheet/drawer does not yet close on a back
+        // press — only the navigator pops.
+        state.back.track();
         // Navigates on a new warm deep link; a no-op otherwise (dedup'd).
         state.nav.track();
 

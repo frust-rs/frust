@@ -41,6 +41,19 @@
 //! reaction picker (real color glyphs, verified in wave A). Both are generic
 //! over the app state so the feed and thread screens (and task 21's
 //! create-channel) share them.
+//!
+//! # Keyboard avoidance (device-parity task 14)
+//!
+//! [`SheetWidget::layout`] rides the panel above the on-screen keyboard: it
+//! reads the *raw* `WindowInsets::view_insets.bottom` off `LayoutCtx` (not the
+//! derived, safe-area `padding()` `forgekit_widgets::safe_area` consumes —
+//! that formula intentionally clamps to zero under an IME overlap, backwards
+//! for a widget that must proactively avoid it) and shrinks the height
+//! available to the panel by that amount, since the shell never resizes the
+//! window itself under edge-to-edge (`examples/huddle/android`/`ios`'s task-08
+//! wiring) — a sheet must consume the inset itself. [`avoid_keyboard`] exposes
+//! the same raw-inset bottom padding as a small standalone wrapper for content
+//! that isn't a [`sheet`] (`channel_feed`'s composer bar).
 
 use std::rc::Rc;
 
@@ -236,9 +249,12 @@ pub struct SheetWidget {
     content: ChildPod,
     /// This widget's own resolved (full-bleed) size.
     size: Size,
-    /// The panel's natural height (grab handle + content), <= `size.height`.
+    /// The panel's natural height (grab handle + content), clamped to the
+    /// height still available above the live keyboard occlusion (device-
+    /// parity task 14 — see `layout`'s `available` local).
     panel_height: f64,
-    /// The panel's settled top edge (`size.height - panel_height`).
+    /// The panel's settled top edge (`available - panel_height`, where
+    /// `available = size.height - view_insets.bottom` — see `layout`).
     panel_top: f64,
     /// The entrance slide-up controller (value 0→1, offset = `(1-v)*height`).
     entrance: AnimationController,
@@ -384,8 +400,22 @@ impl Widget for SheetWidget {
         let content_bc = BoxConstraints::new(Size::new(w, 0.0), Size::new(w, f64::INFINITY));
         let content_size = self.content.layout_child(ctx, &content_bc);
 
-        self.panel_height = (GRAB_HANDLE_H + content_size.height).min(h);
-        self.panel_top = (h - self.panel_height).max(0.0);
+        // Keyboard avoidance (device-parity task 14, item 2): the panel rides
+        // above the on-screen keyboard rather than being covered by it. Reads
+        // the *raw* IME occlusion (`view_insets.bottom`, not the derived
+        // safe-area `padding()` a `SafeArea` widget consumes — that formula
+        // intentionally clamps to zero under an IME overlap, which is the
+        // wrong direction here) directly off `LayoutCtx::window_insets`, since
+        // the shell never resizes the window itself under edge-to-edge (see
+        // `examples/huddle/android`/`ios`'s task-08 wiring) — the sheet must
+        // avoid the keyboard, not rely on a shrunk window. `available` is the
+        // full-bleed height minus that occlusion; the panel (and, transitively,
+        // its content) never extends into it.
+        let inset_bottom = ctx.window_insets().view_insets.bottom.max(0.0);
+        let available = (h - inset_bottom).max(0.0);
+
+        self.panel_height = (GRAB_HANDLE_H + content_size.height).min(available);
+        self.panel_top = (available - self.panel_height).max(0.0);
         self.sync_content_origin();
         bc.constrain(self.size)
     }
@@ -857,11 +887,94 @@ pub fn action_menu<State: 'static>(rows: Vec<AnyView<State>>) -> AnyView<State> 
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Standalone keyboard avoidance (device-parity task 14, item 2)
+// ---------------------------------------------------------------------------
+
+/// Pads `child`'s bottom edge by the window's *raw* live keyboard occlusion
+/// (`WindowInsets::view_insets.bottom`) — the same inset [`SheetWidget::layout`]
+/// consumes for its own panel (see the [module docs](self)'s Keyboard
+/// avoidance section), exposed standalone for bottom-anchored content that
+/// isn't a [`sheet`] overlay (`channel_feed`'s composer bar). Unlike
+/// `forgekit_widgets::safe_area`, this reads the *raw* inset, not the derived
+/// safe-area `padding()` (which intentionally clamps to zero under an IME
+/// overlap — the wrong direction for proactive keyboard avoidance).
+pub struct KeyboardAvoidView<State: 'static> {
+    child: AnyView<State>,
+}
+
+/// Wrap `child` so its bottom edge tracks the window's live keyboard
+/// occlusion. See the [`KeyboardAvoidView`] docs.
+pub fn avoid_keyboard<State: 'static, V: View<State>>(child: V) -> KeyboardAvoidView<State> {
+    KeyboardAvoidView { child: any(child) }
+}
+
+/// The retained widget for a [`KeyboardAvoidView`].
+pub struct KeyboardAvoidWidget {
+    child: ChildPod,
+}
+
+impl<State: 'static> View<State> for KeyboardAvoidView<State> {
+    type Element = KeyboardAvoidWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> KeyboardAvoidWidget {
+        KeyboardAvoidWidget {
+            child: build_child(&self.child, ctx),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut KeyboardAvoidWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+    }
+
+    fn teardown(&self, element: &mut KeyboardAvoidWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.child, &mut element.child, ctx);
+    }
+}
+
+impl Widget for KeyboardAvoidWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Dynamic, like `SheetWidget::layout` above: the inset arrives via
+        // `ctx` fresh every pass rather than being a view-declared constant
+        // (mirrors `forgekit_widgets::safe_area`'s rationale for not wrapping
+        // a `Padding`).
+        let bottom = ctx.window_insets().view_insets.bottom.max(0.0);
+        let child_bc = BoxConstraints::new(
+            Size::new(bc.min().width, (bc.min().height - bottom).max(0.0)),
+            Size::new(bc.max().width, (bc.max().height - bottom).max(0.0)),
+        );
+        let child_size = self.child.layout_child(ctx, &child_bc);
+        self.child.set_origin(Point::new(0.0, 0.0));
+        bc.constrain(Size::new(child_size.width, child_size.height + bottom))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.child.paint_child(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        self.child.event_child(ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent inset wrapper, mirroring `SafeArea`: forward to the child.
+        self.child.semantics_child(ctx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgekit_core::{BuildCtx, LayoutCtx, PaintCtx};
+    use forgekit_core::{
+        BuildCtx, LayoutCtx, PaintCtx, RenderRoot, WindowEdgeInsets, WindowInsets,
+    };
     use kurbo::Size;
+    use std::any::Any;
 
     /// A recording paint scene that captures filled rects for color inspection.
     #[derive(Default)]
@@ -974,5 +1087,103 @@ mod tests {
             scheme.surface_container_low, PANEL_FILL,
             "theme surface differs from fallback"
         );
+    }
+
+    fn sheet_widget(root: &RenderRoot<(), SheetView<()>>) -> &SheetWidget {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<SheetWidget>()
+            .expect("root is a SheetWidget")
+    }
+
+    /// A pushed IME inset (device-parity task 14, item 2) lifts the panel's
+    /// settled top edge above the simulated keyboard — driven via
+    /// `RenderRoot::set_insets` (mirrors `forgekit-widgets::safe_area`'s test
+    /// harness pattern).
+    #[test]
+    fn ime_inset_lifts_the_panel_above_the_keyboard() {
+        fn logic(_: &mut ()) -> SheetView<()> {
+            sheet(SizedBox(Some(300.0), Some(100.0)))
+        }
+        let mut root: RenderRoot<(), SheetView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+
+        // No insets: the panel settles flush with the window bottom.
+        root.layout(Size::new(400.0, 600.0));
+        let w = sheet_widget(&root);
+        let flush_panel_height = w.panel_height;
+        assert_eq!(
+            w.panel_top + w.panel_height,
+            600.0,
+            "with no keyboard the panel's bottom edge sits at the window bottom"
+        );
+
+        // A 340px keyboard occlusion: the panel's bottom edge rises by exactly
+        // that amount, well clear of the simulated IME.
+        root.set_insets(WindowInsets::new(
+            WindowEdgeInsets::ZERO,
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, 340.0),
+        ));
+        root.layout(Size::new(400.0, 600.0));
+        let w = sheet_widget(&root);
+        assert_eq!(
+            w.panel_height, flush_panel_height,
+            "short content is unaffected by the clamp"
+        );
+        assert_eq!(
+            w.panel_top + w.panel_height,
+            600.0 - 340.0,
+            "the panel's bottom edge rises to clear the keyboard exactly"
+        );
+    }
+
+    /// Tall content clamps the panel to the height still available above the
+    /// keyboard, rather than extending into (or past) it.
+    #[test]
+    fn ime_inset_clamps_panel_height_for_tall_content() {
+        fn logic(_: &mut ()) -> SheetView<()> {
+            sheet(SizedBox(Some(300.0), Some(500.0)))
+        }
+        let mut root: RenderRoot<(), SheetView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.set_insets(WindowInsets::new(
+            WindowEdgeInsets::ZERO,
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, 340.0),
+        ));
+        root.layout(Size::new(400.0, 600.0));
+        let w = sheet_widget(&root);
+        let available = 600.0 - 340.0;
+        assert_eq!(
+            w.panel_height, available,
+            "the panel clamps to the height available above the keyboard"
+        );
+        assert_eq!(w.panel_top, 0.0, "a clamped panel starts at the very top");
+    }
+
+    #[test]
+    fn avoid_keyboard_pads_the_bottom_by_the_raw_view_insets() {
+        fn logic(_: &mut ()) -> KeyboardAvoidView<()> {
+            avoid_keyboard(SizedBox(Some(100.0), Some(40.0)))
+        }
+        let mut root: RenderRoot<(), KeyboardAvoidView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+
+        // No keyboard: no added padding.
+        let size = root.layout(Size::new(200.0, 200.0));
+        assert_eq!(size, Size::new(100.0, 40.0));
+
+        // A 120px keyboard adds exactly that much to the reported height —
+        // *raw* `view_insets`, unlike `safe_area`'s derived `padding()` (which
+        // would clamp toward zero here since there is no system-bar
+        // `view_padding` to subtract against).
+        root.set_insets(WindowInsets::new(
+            WindowEdgeInsets::ZERO,
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, 120.0),
+        ));
+        let size = root.layout(Size::new(200.0, 200.0));
+        assert_eq!(size, Size::new(100.0, 160.0));
     }
 }

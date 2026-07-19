@@ -55,8 +55,8 @@ use forgekit::{
     DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get, Image, ImageFit, ImageSource,
     NavigatorController, Padding, PopResult, ProgressValue, Row, SizedBox, Stack, Theme, View,
     action, any, app_bar, button, circular_progress, component, dialog, flexible, hero, icon,
-    icons, inflexible, scroll_view, show_cupertino_alert, show_dialog, switch, text, text_input,
-    use_context,
+    icons, inflexible, safe_area, scroll_view, show_cupertino_alert, show_dialog, switch, text,
+    text_input, use_context,
 };
 use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget,
@@ -357,9 +357,16 @@ impl forgekit::Component for HomeScreen {
             .map(|t| t.design_language)
             .unwrap_or(DesignLanguage::Material3);
 
-        let bar = any(app_bar::<HomeState>("Huddle")
-            .leading(workspace_tile(&state.nav))
-            .actions(vec![create_channel_action()]));
+        // The app bar clears the top status-bar/cutout inset (device-parity
+        // task 14, item 1) — its own background still only fills the
+        // un-padded bar height (see `shell::bottom_bar`'s doc for the same
+        // known v1 gap on the opposite edge).
+        let bar = any(safe_area(
+            app_bar::<HomeState>("Huddle")
+                .leading(workspace_tile(&state.nav))
+                .actions(vec![create_channel_action()]),
+        )
+        .bottom(false));
 
         let screen = any(
             FlexView::new(Axis::Vertical, vec![inflexible(bar), flexible(1, body)])

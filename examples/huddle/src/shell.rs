@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use forgekit::{
     AnyView, DesignLanguage, Get, RouterDeepLinks, RwSignal, Set, any, cupertino_tab_bar, icon,
-    icons, nav_item, navigation_bar, tab_item,
+    icons, nav_item, navigation_bar, safe_area, tab_item,
 };
 
 use crate::HuddleState;
@@ -91,13 +91,22 @@ impl Tab {
 /// [`cupertino_tab_bar`] (per the active `design`), each with a per-tab
 /// [`icon`]. Selecting a destination records it in `tab` (the highlight) and
 /// drives the router to that tab's route.
+///
+/// Wrapped in [`safe_area`] (device-parity task 14, item 1) so the bar's
+/// bottom edge clears the system gesture/nav bar — `top` stays unpadded (the
+/// bar already sits directly under the tab-shell's own content) while
+/// `left`/`right` stay enabled for a landscape display cutout. This is a
+/// huddle-side composition, not a `forgekit-widgets` change: the bar's own
+/// background still only fills its un-padded content height (it does not
+/// extend a themed fill under the inset the way a native edge-to-edge bar
+/// would) — a known v1 gap, see this task's completion summary.
 pub fn bottom_bar(
     design: DesignLanguage,
     nav: Rc<RouterDeepLinks<HuddleState>>,
     tab: RwSignal<Tab>,
 ) -> AnyView<HuddleState> {
     let selected = tab.get().index();
-    match design {
+    let bar: AnyView<HuddleState> = match design {
         DesignLanguage::Material3 => any(navigation_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()
@@ -122,5 +131,6 @@ pub fn bottom_bar(
                 nav.router().go(t.route());
             },
         )),
-    }
+    };
+    any(safe_area(bar).top(false))
 }
