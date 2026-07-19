@@ -1058,6 +1058,7 @@ dependencies = [
  "kurbo",
  "log",
  "ndk",
+ "ndk-context",
  "ndk-sys",
  "peniko",
  "pollster",
