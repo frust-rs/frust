@@ -332,7 +332,7 @@ and Back flow for the Rust-side contract this glue calls into.
 |---|---|---|
 | `FORGEKIT_TRACE` | Enables `forgekit-perf` frame/startup logging (`forgekit-shell-common::perf`). Runtime env var on any build; `forgekit run --profile`/`forgekit build --profile` auto-inject `--define FORGEKIT_TRACE=1` unless already set — opt out of that default with `--define FORGEKIT_TRACE=0`. | off |
 | `FORGEKIT_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/ARCHITECTURE.md`'s Frame gate) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FORGEKIT_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
-| `FORGEKIT_LOG` | Desktop-only stderr log level override (`forgekit-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger also suppresses `vello`-target `Error`/`Warn` records below `debug` (see *Known Issues*' vello bitmap-emoji note); `FORGEKIT_LOG=debug` re-enables them. | `info` |
+| `FORGEKIT_LOG` | Desktop-only stderr log level override (`forgekit-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger suppresses only known-noisy vello Error/Warn messages below `debug` (see *Known Issues*' vello bitmap-emoji note); unknown vello errors still surface at the default level. Pass `FORGEKIT_LOG=debug` to see all vello log lines when debugging the render stack. | `info` |
 | `FORGEKIT_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`) — see *Run* above. | adapter-probed |
 
 `FORGEKIT_TRACE=1 (cd examples/huddle && cargo run)` prints one
@@ -456,7 +456,8 @@ Color Emoji CBDT strikes are known in the wild to use palette-indexed PNGs
 at smaller sizes, which would trigger this defect; no Android
 device/emulator has confirmed either way. If an on-device check finds a
 broken glyph, revisit vendoring the one-line `Transformations::EXPAND` fix
-before taking a future vello major-version bump. The desktop logger already
-suppresses vello's own `Error`/`Warn` spam below `debug` (see
-*Instrumentation*'s `FORGEKIT_LOG` row) so a triggered glyph can't spam
-stderr in the meantime.
+before taking a future vello major-version bump. The desktop logger suppresses
+known-noisy vello `Error`/`Warn` messages (e.g. "Unsupported `output_color_type`",
+"Invalid PNG in font") below `debug` (see *Instrumentation*'s `FORGEKIT_LOG` row),
+so a triggered glyph can't spam stderr; other vello errors still surface at the
+default level to catch unexpected render issues.

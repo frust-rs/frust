@@ -19,21 +19,44 @@
 //! `emit_log` call to a no-op when tracing is off, so a plain `cargo run`
 //! still prints nothing even with this sink installed.
 //!
-//! One target-specific carve-out: `vello`'s own `log::error!`/`log::warn!`
-//! calls are suppressed at the default level (see
-//! [`StderrLogger::enabled`]) — vello 0.9's bitmap-emoji decode path can log
-//! an unfixed-upstream error once per paint for a glyph it can't decode
+//! One target-specific carve-out: vello 0.9's bitmap-emoji decode path logs
+//! certain unfixed-upstream errors/warnings (e.g. "Unsupported `output_color_type`",
+//! "Invalid PNG in font") once per paint for glyphs it can't decode
 //! (`workflow/plans/features/device-parity/tasks/15-emoji-colortype.md`,
-//! linebender/vello#1031), which would otherwise spam every frame. Pass
-//! `FORGEKIT_LOG=debug` (or `trace`) to see vello's own log lines again when
+//! linebender/vello#1031). These specific messages are suppressed at the default
+//! level to avoid per-frame spam; other vello errors/warnings still surface. Pass
+//! `FORGEKIT_LOG=debug` (or `trace`) to see all vello log lines again when
 //! actually debugging the render stack.
 
 use std::io::Write;
 use std::sync::Once;
 
 /// Target prefix for vello's own `log` calls (`vello::scene`, etc.) — see
-/// [`StderrLogger::enabled`]'s vello-noise carve-out below.
+/// [`StderrLogger::log`]'s vello-noise carve-out below.
 const VELLO_TARGET_PREFIX: &str = "vello";
+
+/// Known-noisy vello error/warning messages that should be suppressed at the
+/// default log level to avoid per-frame spam. These come from unfixed-upstream
+/// vello issues (e.g. linebender/vello#1031). Other vello errors/warnings still
+/// surface even below debug level.
+const VELLO_NOISY_MESSAGES: &[&str] = &["Unsupported `output_color_type`", "Invalid PNG in font"];
+
+/// Returns true if this record should be suppressed (not logged), false otherwise.
+/// Only known-noisy vello messages are suppressed, at levels below debug.
+fn should_suppress_record(
+    metadata: &log::Metadata,
+    level_filter: log::LevelFilter,
+    message: &str,
+) -> bool {
+    // Only suppress specific known-noisy vello Error/Warn messages
+    // below debug level to avoid per-frame spam.
+    metadata.target().starts_with(VELLO_TARGET_PREFIX)
+        && metadata.level() <= log::Level::Warn
+        && level_filter < log::LevelFilter::Debug
+        && VELLO_NOISY_MESSAGES
+            .iter()
+            .any(|&noisy| message.contains(noisy))
+}
 
 /// A minimal `log::Log` writing to stderr, installed once in [`init_once`].
 struct StderrLogger {
@@ -42,27 +65,18 @@ struct StderrLogger {
 
 impl log::Log for StderrLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        // vello 0.9's bitmap-emoji decode path (`scene.rs`'s
-        // `output_color_type` check, see
-        // `workflow/plans/features/device-parity/tasks/15-emoji-colortype.md`)
-        // logs an `error!`/`warn!` once *per paint* for any glyph it can't
-        // decode (upstream, unfixed: linebender/vello#1031) — every default
-        // level (`Info` and below) would otherwise print that line every
-        // frame for as long as the affected glyph stays on screen. Suppress
-        // vello's own Error/Warn noise unless `FORGEKIT_LOG` explicitly asks
-        // for `debug`/`trace` (i.e. the caller is deliberately debugging the
-        // render stack, not just running the app).
-        if metadata.target().starts_with(VELLO_TARGET_PREFIX)
-            && metadata.level() <= log::Level::Warn
-            && self.level < log::LevelFilter::Debug
-        {
-            return false;
-        }
+        // Keep enabled() permissive — filtering is done in log() where the
+        // message content is available.
         metadata.level() <= self.level
     }
 
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
+            let message = format!("{}", record.args());
+            if should_suppress_record(record.metadata(), self.level, &message) {
+                // This is a known-noisy vello message — suppress it
+                return;
+            }
             // A failed write to stderr is nothing we can act on here; drop it.
             let _ = writeln!(
                 std::io::stderr(),
@@ -102,46 +116,82 @@ pub fn init_once() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use log::{Level, Log, Metadata, MetadataBuilder};
+    use log::{Level, Metadata, MetadataBuilder};
 
     fn metadata(target: &str, level: Level) -> Metadata<'_> {
         MetadataBuilder::new().target(target).level(level).build()
     }
 
     #[test]
-    fn vello_error_suppressed_at_default_level() {
-        let logger = StderrLogger {
-            level: log::LevelFilter::Info,
-        };
-        assert!(!logger.enabled(&metadata("vello::scene", Level::Error)));
-        assert!(!logger.enabled(&metadata("vello::scene", Level::Warn)));
+    fn known_noisy_vello_error_suppressed_at_default_level() {
+        let vello_meta = metadata("vello::scene", Level::Error);
+        let noisy_msg = "Unsupported `output_color_type`";
+        // At Info level (below debug), known-noisy messages are suppressed
+        assert!(should_suppress_record(
+            &vello_meta,
+            log::LevelFilter::Info,
+            noisy_msg
+        ));
+
+        // The "Invalid PNG in font" message is also suppressed
+        let png_msg = "Invalid PNG in font";
+        assert!(should_suppress_record(
+            &vello_meta,
+            log::LevelFilter::Info,
+            png_msg
+        ));
     }
 
     #[test]
-    fn vello_error_shown_when_debug_requested() {
-        let logger = StderrLogger {
-            level: log::LevelFilter::Debug,
-        };
-        assert!(logger.enabled(&metadata("vello::scene", Level::Error)));
+    fn known_noisy_vello_error_shown_when_debug_requested() {
+        let vello_meta = metadata("vello::scene", Level::Error);
+        let noisy_msg = "Unsupported `output_color_type`";
+        // At Debug level, even known-noisy messages are shown
+        assert!(!should_suppress_record(
+            &vello_meta,
+            log::LevelFilter::Debug,
+            noisy_msg
+        ));
+    }
+
+    #[test]
+    fn unknown_vello_error_shown_at_default_level() {
+        let vello_meta = metadata("vello::scene", Level::Error);
+        let unknown_msg = "Some other vello error that we haven't seen before";
+        // Unknown vello errors are not suppressed, even at default level
+        assert!(!should_suppress_record(
+            &vello_meta,
+            log::LevelFilter::Info,
+            unknown_msg
+        ));
     }
 
     #[test]
     fn vello_info_and_below_unaffected() {
-        let logger = StderrLogger {
-            level: log::LevelFilter::Info,
-        };
-        // Only the Error/Warn noise carve-out applies; vello Info lines
-        // still follow the normal level filter.
-        assert!(logger.enabled(&metadata("vello::scene", Level::Info)));
-        assert!(!logger.enabled(&metadata("vello::scene", Level::Debug)));
+        let vello_info = metadata("vello::scene", Level::Info);
+        let vello_debug = metadata("vello::scene", Level::Debug);
+        // Info level is not suppressed (suppression only applies to Error/Warn)
+        assert!(!should_suppress_record(
+            &vello_info,
+            log::LevelFilter::Info,
+            "Unsupported `output_color_type`"
+        ));
+        // Debug level messages follow normal filtering (level too low)
+        assert!(!should_suppress_record(
+            &vello_debug,
+            log::LevelFilter::Info,
+            "Unsupported `output_color_type`"
+        ));
     }
 
     #[test]
     fn non_vello_targets_unaffected() {
-        let logger = StderrLogger {
-            level: log::LevelFilter::Info,
-        };
-        assert!(logger.enabled(&metadata("forgekit_shell_common::perf", Level::Error)));
-        assert!(logger.enabled(&metadata("forgekit_shell_common::perf", Level::Info)));
+        let perf_error = metadata("forgekit_shell_common::perf", Level::Error);
+        // Non-vello targets are never suppressed, even with noisy-sounding messages
+        assert!(!should_suppress_record(
+            &perf_error,
+            log::LevelFilter::Info,
+            "Unsupported `output_color_type`"
+        ));
     }
 }
