@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "examples/*"]
+# plugins/shared-preferences is an explicit member (the `crates/*` glob
+# doesn't cover `plugins/`) — a platform plugin (frust-plugin + FFI crates
+# only, no frust-* framework deps), unlike the excluded facade-tier
+# plugins/clean-signals-frust below, which stays out of the root graph.
+members = ["crates/*", "examples/*", "plugins/shared-preferences"]
 # examples/huddle (renamed from its prior directory name, task 09) is the
 # sole example (phase 8 examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own

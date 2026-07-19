@@ -1,0 +1,55 @@
+[package]
+name = "frust-shared-preferences"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# The Android platform-handle substrate this crate's Android backend will
+# call through (task 06); the only `frust-*` dependency this crate is
+# allowed (platform-plugin charter — see `frust-plugin`'s crate doc).
+frust-plugin = { path = "../../crates/frust-plugin" }
+# PrefsError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# The file backend's on-disk JSON map encoding.
+serde_json = { workspace = true }
+
+# Android's real SharedPreferences backend (task 06) calls through
+# frust-plugin::android::with_jni_env, which already carries the `jni` dep;
+# this crate depends on it directly too so its own JNI signature calls
+# (Context.getSharedPreferences, edit()/put*/apply()) don't need to go
+# through frust-plugin's re-export. Target-gated like frust-plugin's own dep.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# The Apple NSUserDefaults backend (task 06) — objc2/objc2-foundation with an
+# explicit, minimal feature list rather than objc2-foundation's large default
+# set. Declared now (Phase 2 step 2 of the plugin-system plan) so task 06
+# only has to write source, not chase feature-resolution errors.
+#
+# `NSNumber` is deliberately NOT in this list: verified against the vendored
+# objc2-foundation 0.3.2 source (`src/number.rs`'s `mod number;` is
+# unconditional in `lib.rs`, no `#[cfg(feature = ...)]` gate) that NSNumber
+# has no feature flag at all — it is always compiled, unlike every other type
+# below. `std` is included because it is NOT itself a default-off feature
+# that these types need; it gates `alloc`-backed conversions (e.g. `NSString`
+# `Display`/`ToString`) this backend needs and must be requested explicitly
+# once `default-features = false` turns objc2-foundation's (huge) default
+# list off.
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+objc2 = { workspace = true }
+# Not `{ workspace = true }`: Cargo's workspace-dependency inheritance
+# forbids a member from overriding `default-features` unless the
+# workspace-level entry already sets it explicitly, and
+# `[workspace.dependencies]`'s `objc2-foundation = "0.3"` doesn't (it's
+# unreferenced elsewhere — see its Cargo.toml comment). The version below is
+# kept in sync with that workspace pin by hand (Version-Pin Policy).
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSUserDefaults",
+    "NSString",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+] }
