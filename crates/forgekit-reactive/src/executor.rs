@@ -10,6 +10,10 @@
 //! [`ReactiveRuntime::pump_local`](crate::ReactiveRuntime::pump_local).
 
 use std::cell::{Cell, RefCell};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 
 use any_spawner::{CustomExecutor, PinnedFuture, PinnedLocalFuture};
 use futures::executor::{LocalPool, LocalSpawner};
@@ -69,6 +73,88 @@ pub(crate) fn run_until_stalled() {
     });
 }
 
+/// A [`Waker`] that, when woken, nudges BOTH the internal `LocalPool` task
+/// bookkeeping AND the shell.
+///
+/// The `LocalPool` hands each polled task its own internal waker via the poll
+/// `Context`. A future that returns `Pending` (e.g. one awaiting a
+/// `tokio::time::sleep`) registers *that* waker with whatever will re-wake it —
+/// here, the background runtime's timer driver, running on a tokio worker
+/// thread. When the timer fires it wakes only the `LocalPool` waker, marking the
+/// task ready in the pool's internal queue — but nothing tells the shell to
+/// actually *run* [`ReactiveRuntime::pump_local`], so a parked desktop
+/// `ControlFlow::Wait` loop never drains the ready task (see ../BUG.md B1).
+///
+/// [`WakeBridge`] substitutes this composite waker for the pool's own before
+/// polling the inner future, so a re-wake from any source both (a) keeps the
+/// pool's bookkeeping intact (`inner.wake`) and (b) fires the installed
+/// [`FrameWaker`](crate::FrameWaker) so the shell pumps
+/// ([`ReactiveRuntime::wake`](crate::ReactiveRuntime::wake)).
+///
+/// `Send + Sync` is required because re-wakes arrive from the tokio timer
+/// thread; the wrapped `inner` [`Waker`] is `Send + Sync` and
+/// `ReactiveRuntime::wake` reaches a process-global. On mobile the installed
+/// waker is a no-op (the continuous frame loop needs no nudge — see
+/// [`ReactiveRuntime::init`](crate::ReactiveRuntime::init)), so firing it there
+/// is harmless.
+struct CompositeWaker {
+    /// The `LocalPool`'s own waker for this task — must still be woken so the
+    /// pool moves the task from parked to ready.
+    inner: Waker,
+}
+
+impl CompositeWaker {
+    /// Fires the installed [`FrameWaker`] by resolving the runtime at wake time.
+    ///
+    /// Reads the CURRENT runtime/waker rather than a captured clone: a relaunched
+    /// shell swaps the waker via `ReactiveRuntime::init` without rebuilding the
+    /// runtime, and `ReactiveRuntime::wake` re-reads the live waker under its
+    /// lock — so a re-wake always nudges the shell that currently owns wake-up
+    /// (the same path spawn-time firing uses).
+    fn wake_shell() {
+        if let Some(rt) = crate::ReactiveRuntime::get() {
+            rt.wake();
+        }
+    }
+}
+
+impl Wake for CompositeWaker {
+    fn wake(self: Arc<Self>) {
+        Self::wake_shell();
+        self.inner.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        Self::wake_shell();
+        self.inner.wake_by_ref();
+    }
+}
+
+/// Wraps a `spawn_local` future so every poll swaps the `LocalPool`'s task waker
+/// for a [`CompositeWaker`]. This is the seam that closes the desktop wake gap
+/// (../BUG.md B1): whatever the inner future clones out of the poll `Context`
+/// and hands to its re-wake source is the composite waker, so a later re-wake
+/// fires the [`FrameWaker`](crate::FrameWaker) too, not just the pool's own.
+struct WakeBridge {
+    inner: PinnedLocalFuture<()>,
+}
+
+impl Future for WakeBridge {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        // `WakeBridge` holds only a `Pin<Box<..>>` (itself `Unpin`) and no
+        // self-referential state, so it is `Unpin` and `get_mut` needs no
+        // `unsafe`.
+        let this = self.get_mut();
+        let composite = Waker::from(Arc::new(CompositeWaker {
+            inner: cx.waker().clone(),
+        }));
+        let mut inner_cx = Context::from_waker(&composite);
+        this.inner.as_mut().poll(&mut inner_cx)
+    }
+}
+
 /// The ForgeKit `any_spawner` executor. Stored inside `any_spawner`'s global
 /// `OnceLock`, so it must be `Send + Sync + 'static` — it is, holding only a
 /// cloneable [`Handle`].
@@ -105,6 +191,13 @@ impl CustomExecutor for ForgeExecutor {
             );
         }
 
+        // Wrap the future so each poll installs a composite waker: a later
+        // re-wake (e.g. the tokio timer driver completing a `sleep` the future
+        // awaits) then fires the FrameWaker too, not just the LocalPool's own
+        // waker — closing the desktop wake gap (see [`WakeBridge`] / ../BUG.md
+        // B1). Without this, only the spawn-time `wake()` below ever nudges the
+        // shell, so a parked desktop loop never pumps the completion.
+        let fut = WakeBridge { inner: fut };
         LOCAL_SPAWNER.with(|spawner| {
             spawner
                 .spawn_local(fut)
@@ -123,5 +216,96 @@ impl CustomExecutor for ForgeExecutor {
     fn poll_local(&self) {
         let _guard = self.handle.enter();
         run_until_stalled();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{FrameWaker, ReactiveRuntime};
+    use any_spawner::Executor;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// A recording waker: an `Arc<AtomicUsize>` bumped once per `wake()`.
+    fn recording_waker() -> (FrameWaker, Arc<AtomicUsize>) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let seen = counter.clone();
+        let waker: FrameWaker = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        (waker, seen)
+    }
+
+    /// The exact broken link from ../BUG.md B1: a spawned local future that
+    /// returns `Pending` awaiting a `tokio::time::sleep` is re-woken by the
+    /// background runtime's timer driver *from a tokio worker thread*. That
+    /// re-wake must fire the FrameWaker so a parked shell pumps — pre-fix it
+    /// reached only the `LocalPool`'s internal waker and the count never moved
+    /// after the initial spawn (verified failing against the pre-fix executor
+    /// via `git stash`).
+    ///
+    /// Serialized on `WAKER_TEST_LOCK` because the FrameWaker is process-global
+    /// and swappable (see its doc in `lib.rs`).
+    #[test]
+    fn spawn_local_rewake_from_timer_thread_fires_frame_waker() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let (waker, count) = recording_waker();
+        let rt = ReactiveRuntime::init(waker);
+
+        let done = Arc::new(AtomicUsize::new(0));
+        let flag = done.clone();
+
+        let before = count.load(Ordering::SeqCst);
+        Executor::spawn_local(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            flag.fetch_add(1, Ordering::SeqCst);
+        });
+        // The spawn-time firing bumps the waker exactly once (existing contract).
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            before + 1,
+            "spawn_local should fire the frame waker once at spawn"
+        );
+
+        // Drain the initial pump: the future registers its sleep timer with the
+        // background runtime's timer driver and returns Pending — i.e. stalls.
+        rt.pump_local();
+        assert_eq!(
+            done.load(Ordering::SeqCst),
+            0,
+            "future must still be pending — the 50ms timer has not fired"
+        );
+        let after_pump = count.load(Ordering::SeqCst);
+
+        // Wait for the timer thread's re-wake WITHOUT any further pump. This is
+        // the assertion that fails pre-fix: the re-wake reaches only the
+        // LocalPool waker, so the FrameWaker count never moves here. Post-fix the
+        // composite waker fires it from the timer thread.
+        let start = Instant::now();
+        while count.load(Ordering::SeqCst) == after_pump && start.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            count.load(Ordering::SeqCst) > after_pump,
+            "a timer-driven re-wake must fire the FrameWaker with no pump in \
+             between (this is the desktop wake gap the composite waker closes)"
+        );
+
+        // Now that a wake arrived, a pump drains the ready task to completion.
+        let start = Instant::now();
+        while done.load(Ordering::SeqCst) == 0 && start.elapsed() < Duration::from_secs(5) {
+            rt.pump_local();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            done.load(Ordering::SeqCst),
+            1,
+            "the local future should complete after the re-wake + pump"
+        );
     }
 }
