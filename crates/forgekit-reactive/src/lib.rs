@@ -6,7 +6,9 @@
 //! [`FrameWaker`], and the root reactive [`Owner`]. It also re-exports the
 //! `reactive_graph` types the later programming-model tasks build on, and
 //! owns the process-wide deep-link source shells write platform deep links
-//! into (see [`push_deep_link`]/[`deep_links`]). A process-wide
+//! into (see [`push_deep_link`]/[`deep_links`]) and the process-wide Android
+//! back-press source next to it (see [`push_back_press`]/[`back_presses`] and
+//! the `handles_back` flag). A process-wide
 //! signals-dirty flag (`ReactiveRuntime::take_signals_dirty`), tripped by
 //! [`TrackedScope`]'s dirty path, lets a shell ask synchronously and cheaply
 //! once per frame "did any tracked signal change since I last asked" — the
@@ -16,11 +18,13 @@
 //! dependency. Shells own the wake-up wiring and call [`ReactiveRuntime::init`]
 //! (once, on the UI thread) and [`ReactiveRuntime::pump_local`] each frame.
 
+mod back;
 mod deep_link;
 mod executor;
 mod runtime;
 mod tracked;
 
+pub use back::{BackPresses, back_presses, handles_back, push_back_press, set_handles_back};
 pub use deep_link::{DeepLink, DeepLinks, deep_links, push_deep_link};
 pub use runtime::{FrameWaker, ReactiveRuntime};
 pub use tracked::TrackedScope;

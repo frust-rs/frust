@@ -47,7 +47,7 @@
 //! relayout-every-frame invariant the theme path leans on.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -174,12 +174,24 @@ enum NavOp<State: 'static> {
 /// them at its next rebuild (see the [module docs](self)).
 pub struct NavigatorController<State: 'static> {
     ops: Rc<RefCell<Vec<NavOp<State>>>>,
+    /// The current page-stack **depth**, published by the attached
+    /// [`NavigatorWidget`] on every `build`/`rebuild`/`apply_ops` (device-parity
+    /// task 05). The widget owns the authoritative stack; this shared cell is
+    /// the read seam [`depth`](Self::depth)/[`can_pop`](Self::can_pop) expose so
+    /// the facade's back handler (and app code) can ask "would a pop do
+    /// anything?" without reaching into the widget. `0` until a widget attaches.
+    ///
+    /// `forgekit-widgets` stays reactive-free: this is a plain `Rc<Cell<_>>`,
+    /// not a signal — a shell/facade polls it at rebuild time (see the timing
+    /// note in `forgekit-reactive::back`).
+    depth: Rc<Cell<usize>>,
 }
 
 impl<State: 'static> Clone for NavigatorController<State> {
     fn clone(&self) -> Self {
         Self {
             ops: Rc::clone(&self.ops),
+            depth: Rc::clone(&self.depth),
         }
     }
 }
@@ -195,7 +207,34 @@ impl<State: 'static> NavigatorController<State> {
     pub fn new() -> Self {
         Self {
             ops: Rc::new(RefCell::new(Vec::new())),
+            depth: Rc::new(Cell::new(0)),
         }
+    }
+
+    /// The current page-stack depth of the navigator this controller drives, as
+    /// last published by that navigator's `build`/`rebuild`, or `0` if no
+    /// navigator is attached yet (device-parity task 05).
+    ///
+    /// **Advisory**: this reflects the depth at the last rebuild, so a query
+    /// racing a same-frame stack change sees the previous value (the
+    /// rebuild-time refresh contract — see [`can_pop`](Self::can_pop) and
+    /// `forgekit-reactive::back`'s timing note).
+    pub fn depth(&self) -> usize {
+        self.depth.get()
+    }
+
+    /// Whether a [`pop`](Self::pop) would actually remove a page — `true` iff
+    /// the navigator has more than one page ([`depth`](Self::depth)` > 1`).
+    ///
+    /// **Advisory**, for exactly the Android back contract (RESEARCH.md): the
+    /// facade's back handler reads this to decide whether a back press pops or
+    /// bubbles to the platform, and publishes it as
+    /// `forgekit-reactive::set_handles_back`. The authoritative guard stays the
+    /// widget's own `len > 1` check in [`apply_ops`](NavigatorWidget) — a pop at
+    /// the root remains a safe no-op even if this raced stale, so a
+    /// mis-predicted root-level back never removes the last page.
+    pub fn can_pop(&self) -> bool {
+        self.depth.get() > 1
     }
 
     /// Push an **opaque** page built by `builder` on top of the stack, using the
@@ -503,9 +542,24 @@ pub struct NavigatorWidget<State: 'static> {
     /// carries no clock of its own (spec §8 provides time only at paint). The
     /// same seam [`ScrollWidget`](crate::ScrollWidget) uses.
     last_frame_time: FrameTime,
+    /// The shared depth slot published to the [`NavigatorController`] every
+    /// `build`/`rebuild` (device-parity task 05). A clone of the controller's
+    /// `Rc<Cell<usize>>`, updated by [`publish_depth`](Self::publish_depth)
+    /// after every stack mutation so `NavigatorController::can_pop` reads the
+    /// authoritative page count.
+    depth: Rc<Cell<usize>>,
 }
 
 impl<State: 'static> NavigatorWidget<State> {
+    /// Publish the current page-stack depth to the shared controller slot
+    /// (device-parity task 05). Called after every stack mutation — at the end
+    /// of `apply_ops`, and at the end of `build`/`rebuild` (so a transition
+    /// finalize that changed the stack is reflected too) — so
+    /// `NavigatorController::depth`/`can_pop` read the authoritative count.
+    fn publish_depth(&self) {
+        self.depth.set(self.pages.len());
+    }
+
     /// The index of the topmost **opaque** page — the bottom of the visible
     /// (laid-out + painted) range. Pages below it are culled. With no opaque page
     /// at all (an all-transparent stack), everything is visible.
@@ -983,6 +1037,9 @@ impl<State: 'static> NavigatorWidget<State> {
                 }
             }
         }
+        // Publish the (possibly changed) stack depth so `NavigatorController::
+        // can_pop` reflects this batch of ops (device-parity task 05).
+        self.publish_depth();
         flags
     }
 
@@ -1278,12 +1335,17 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             pop_swipe_enabled: self.resolve_pop_swipe(),
             edge: EdgeSwipe::new(),
             last_frame_time: FrameTime::ZERO,
+            depth: Rc::clone(&self.controller.depth),
         };
         // Apply any ops the app queued before the first frame.
         let ops = self.controller.drain();
         if !ops.is_empty() {
             widget.apply_ops(ops, ctx);
         }
+        // Publish the initial (post-any-queued-ops) depth so `can_pop` is
+        // authoritative from the first frame, even if no ops ran (device-parity
+        // task 05).
+        widget.publish_depth();
         widget
     }
 
@@ -1323,6 +1385,11 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             flags |= crate::rebuild_child(&entry.view, &next_view, &mut entry.pod, ctx);
             entry.view = next_view;
         }
+        // Republish depth at rebuild time — the rebuild-time refresh contract
+        // the back handler relies on (device-parity task 05). A settled-
+        // transition finalize (step 1b) above can change the stack, so publish
+        // once more here after `apply_ops` already did.
+        element.publish_depth();
         flags
     }
 
@@ -1602,6 +1669,65 @@ mod tests {
         root.layout(Size::new(100.0, 100.0));
         root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
         assert_eq!(observed.get(), 1, "page A's widget state survived push→pop");
+    }
+
+    // --- Device-parity task 05: the controller's depth slot tracks the stack
+    //     through rebuilds, and `can_pop` mirrors it. ---
+
+    #[test]
+    fn controller_depth_and_can_pop_track_the_stack() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+
+        // Before any navigator attaches, depth is 0 and can_pop is false (an
+        // app with no navigator must let back exit).
+        assert_eq!(controller.depth(), 0, "no navigator attached yet");
+        assert!(!controller.can_pop(), "can_pop is false with no navigator");
+
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(10.0, 10.0))
+        };
+        let mut state = ();
+
+        // First rebuild seeds the root page: depth 1, still can't pop the root.
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 1, "root page published on build");
+        assert!(!controller.can_pop(), "a single (root) page cannot pop");
+
+        // Push B: depth 2, can_pop true (published at rebuild, when apply_ops runs).
+        controller.push(|| sized_page(20.0, 20.0));
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2, "push published through rebuild");
+        assert!(controller.can_pop(), "a two-page stack can pop");
+
+        // Push C: depth 3.
+        controller.push(|| sized_page(30.0, 30.0));
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 3);
+        assert!(controller.can_pop());
+
+        // Pop back down to the root: depth returns to 1, can_pop false again.
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2);
+        assert!(controller.can_pop());
+
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 1, "back at the root");
+        assert!(!controller.can_pop(), "root again: pop is a no-op");
+
+        // A pop at the root is a safe no-op — depth stays 1 (the widget's
+        // len > 1 guard is authoritative, can_pop is advisory).
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.depth(),
+            1,
+            "pop-at-root does not remove the root"
+        );
+        assert!(!controller.can_pop());
     }
 
     // --- Criterion 2: a pop result reaches the on_result callback with state. ---

@@ -144,7 +144,20 @@ pub use forgekit_widgets::{
     show_cupertino_alert, tab_item,
 };
 
+mod back_glue;
 mod router_glue;
+
+/// Android back-press ⇄ navigator auto-wiring (device-parity task 05):
+/// [`attach_back_handler`]/[`BackHandler`] pop a [`NavigatorController`] on a
+/// platform back press and keep `forgekit-reactive`'s `handles_back` flag in
+/// sync with the stack depth, so a shell knows whether a root-level back should
+/// fall through to the platform (activity finish). Mirrors
+/// [`RouterDeepLinks`]'s shape and, like it, is the ONLY place in the facade
+/// that sees both `forgekit-widgets`' `NavigatorController` and
+/// `forgekit-reactive`'s back-press source together — see [`BackHandler`]'s doc
+/// for the consume/dedupe and timing contracts. Call [`BackHandler::track`]
+/// from every `Component::build`.
+pub use back_glue::{BackHandler, attach_back_handler};
 
 /// Router ⇄ deep-link auto-wiring (Phase 6b, task 08): [`router_with_deep_links`]/
 /// [`RouterDeepLinks`] resolve a [`Router`]'s start location from the process's
@@ -268,6 +281,19 @@ pub use forgekit_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// "simulate deep link" button calls it directly to demonstrate warm-link
 /// navigation without a real platform link.
 pub use forgekit_reactive::{DeepLink, DeepLinks, deep_links, push_deep_link};
+
+/// The Android back-press source (device-parity task 05; `forgekit-reactive`'s
+/// process-wide back source — see its `back` module docs). A mobile shell
+/// delivers a hardware/gesture back press via [`push_back_press`], and the
+/// facade's [`BackHandler`] reads it via [`back_presses`] to pop a navigator;
+/// [`set_handles_back`]/[`handles_back`] are the "framework consumes the next
+/// back" flag a shell polls to decide whether a root-level back falls through
+/// to the platform. App code normally uses [`attach_back_handler`] rather than
+/// these directly; [`push_back_press`] is also the desktop dev seam (no shell
+/// writes on desktop yet).
+pub use forgekit_reactive::{
+    BackPresses, back_presses, handles_back, push_back_press, set_handles_back,
+};
 pub use reactive_graph::computed::Memo;
 pub use reactive_graph::signal::{ReadSignal, WriteSignal, signal};
 // The access traits the signal types' methods are defined through — without
