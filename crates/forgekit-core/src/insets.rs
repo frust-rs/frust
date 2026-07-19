@@ -150,10 +150,7 @@ mod tests {
 
     #[test]
     fn edge_insets_zero_is_all_zero() {
-        assert_eq!(
-            EdgeInsets::ZERO,
-            EdgeInsets::new(0.0, 0.0, 0.0, 0.0)
-        );
+        assert_eq!(EdgeInsets::ZERO, EdgeInsets::new(0.0, 0.0, 0.0, 0.0));
         assert_eq!(EdgeInsets::ZERO, EdgeInsets::default());
     }
 

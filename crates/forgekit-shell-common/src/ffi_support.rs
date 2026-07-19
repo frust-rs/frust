@@ -154,10 +154,7 @@ mod tests {
     #[test]
     fn logical_insets_divides_each_edge_by_scale() {
         // A @2x display: a 48px status bar + 68px home-indicator padding, IME up.
-        let insets = logical_insets(
-            [0.0, 48.0, 0.0, 68.0, 0.0, 0.0, 0.0, 680.0],
-            2.0,
-        );
+        let insets = logical_insets([0.0, 48.0, 0.0, 68.0, 0.0, 0.0, 0.0, 680.0], 2.0);
         assert_eq!(
             insets,
             WindowInsets::new(
