@@ -1,0 +1,30 @@
+[app]
+name = "bubblebench"
+org = "it.f0x"
+description = "Bubble physics performance benchmark (port of Flutter Impeller issue #180958 repro)"
+
+# [flavors]
+# dev = { app-id-suffix = ".dev" }
+# prod = {}
+
+# Android release signing is driven by `android/key.properties`, a Java
+# properties file the Gradle build reads (this file is NOT parsed by ForgeKit).
+# It must be gitignored (the generated .gitignore already excludes
+# `key.properties` and `*.jks`) so the keystore/passwords never enter version
+# control. Keys:
+#   storePassword=<keystore password>
+#   keyPassword=<key password>
+#   keyAlias=<key alias>
+#   storeFile=<path to .jks, relative to the android/ dir>
+# Generate an upload keystore with:
+#   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
+#     -storetype JKS -keysize 2048 -validity 10000 -alias upload
+# Without key.properties, release builds fall back to debug signing (a Gradle
+# warning is logged); `forgekit build` makes a missing keystore a hard error.
+# [signing]
+# keystore = "android/key.properties"
+
+# Override the derived iOS bundle identifier (defaults to
+# `org.camelCase(name)`, e.g. `it.f0x.bubblebench`).
+# [ios]
+# identifier = "it.f0x.bubblebench"
