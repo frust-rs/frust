@@ -288,6 +288,27 @@ Android manifest intent filter / iOS `Info.plist`; editing it does not
 re-render either, so re-scaffold (`--overwrite`) or edit the platform files
 directly to change the scheme after the fact.
 
+### Safe-area / keyboard / back manual test (Android + iOS)
+
+A device/emulator gate for the inset and back contracts (see
+`docs/ARCHITECTURE.md`'s Inset delivery / Back flow), against an installed
+app (`forgekit run -d <device>`) — none of these has a CLI trigger like the
+deep-link gate above, so each is a person-driven check:
+
+- **Safe-area:** rotate the device and confirm top/bottom-anchored content
+  reflows around the status bar/notch/gesture-nav insets in both
+  orientations.
+- **Keyboard:** focus a text field near the bottom of the screen and
+  confirm surrounding content shifts to stay clear of the on-screen
+  keyboard, then dismiss it and confirm the layout returns.
+- **Back:** press the hardware/gesture back control on a pushed route and
+  confirm it pops one level; at the root route, confirm it falls through
+  to the platform's own default (app exit/backgrounding) rather than a
+  no-op.
+- **Density refresh:** move a running app between displays of different
+  density (or a rescaled emulator window) and confirm inset/scale-dependent
+  layout rescales rather than sticking to the launch-time density.
+
 ### Template development
 
 `forgekit create` embeds `templates/app/` into the binary at compile time.
@@ -297,13 +318,21 @@ filesystem copy of the template tree instead. Every scaffold also gets a
 default launcher icon set (Android mipmap densities, iOS `AppIcon.appiconset`)
 rendered from the template tree alongside the app code.
 
+The Android template wires edge-to-edge (`Theme.NoTitleBar`,
+`WindowCompat.setDecorFitsSystemWindows(false)`),
+`android:windowSoftInputMode="adjustResize"`, and the `androidx.core`/
+`androidx.activity` Gradle dependencies the generated Kotlin insets/back
+glue needs; the iOS template's view controller registers matching
+safe-area/keyboard observers — see `docs/ARCHITECTURE.md`'s Inset delivery
+and Back flow for the Rust-side contract this glue calls into.
+
 ## Instrumentation
 
 | Variable | Purpose | Default |
 |---|---|---|
 | `FORGEKIT_TRACE` | Enables `forgekit-perf` frame/startup logging (`forgekit-shell-common::perf`). Runtime env var on any build; `forgekit run --profile`/`forgekit build --profile` auto-inject `--define FORGEKIT_TRACE=1` unless already set — opt out of that default with `--define FORGEKIT_TRACE=0`. | off |
 | `FORGEKIT_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/ARCHITECTURE.md`'s Frame gate) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FORGEKIT_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
-| `FORGEKIT_LOG` | Desktop-only stderr log level override (`forgekit-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. | `info` |
+| `FORGEKIT_LOG` | Desktop-only stderr log level override (`forgekit-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger also suppresses `vello`-target `Error`/`Warn` records below `debug` (see *Known Issues*' vello bitmap-emoji note); `FORGEKIT_LOG=debug` re-enables them. | `info` |
 | `FORGEKIT_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`) — see *Run* above. | adapter-probed |
 
 `FORGEKIT_TRACE=1 (cd examples/huddle && cargo run)` prints one
@@ -412,3 +441,22 @@ diagnostic. **Physical iOS devices are unaffected** (Apple7+ GPUs expose the
 flag; verified rendering on an iPhone 13 mini) — this is a simulator-only
 gap, not an iOS-wide one. Use a physical device for a pixel-accurate check
 until a future wgpu/vello upgrade closes the gap.
+
+### vello bitmap color-emoji decode (desktop confirmed safe; Android CBDT at risk)
+
+vello 0.9's bitmap-glyph decode path (`sbix`/COLR bitmap strikes) errors
+and skips any glyph whose PNG isn't already `(RGBA, 8-bit)` — pinned,
+unfixed upstream ([linebender/vello#1031](https://github.com/linebender/vello/issues/1031),
+open as of 2026-07-16; not addressable under the Version-Pin Policy without
+vendoring). Confirmed **safe** for huddle's current desktop emoji set: every
+reaction-emoji glyph's Apple Color Emoji `sbix` strike is uniformly RGBA8 at
+every size. The one **unverified, at-risk** path is Android's CBDT bitmap
+strikes (see `docs/ARCHITECTURE.md`'s `forgekit-text` row) — legacy Noto
+Color Emoji CBDT strikes are known in the wild to use palette-indexed PNGs
+at smaller sizes, which would trigger this defect; no Android
+device/emulator has confirmed either way. If an on-device check finds a
+broken glyph, revisit vendoring the one-line `Transformations::EXPAND` fix
+before taking a future vello major-version bump. The desktop logger already
+suppresses vello's own `Error`/`Warn` spam below `debug` (see
+*Instrumentation*'s `FORGEKIT_LOG` row) so a triggered glyph can't spam
+stderr in the meantime.

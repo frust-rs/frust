@@ -203,11 +203,16 @@ interactive widget in `forgekit-widgets`:
   focused child exactly like `capture_pointer` records the active one, and a
   container simply forwards `Key`/`Ime` events to its focused child. A
   `Down` that doesn't (re)claim focus on the child it hits blurs the chain
-  (blur-on-outside-tap). A structural container rebuild — a child-count
-  change, an `AnyView` type swap, or a keyed reorder — clears both the
-  capture and focus paths; `RenderRoot`'s cached `focus_active`/`ime_state`
-  are not pushed at rebuild time and self-correct on the next event pass,
-  the same convergence contract the capture-cancel case below already uses.
+  (blur-on-outside-tap). **A structural container rebuild clears capture and
+  focus only where identity is actually lost — preservation is
+  stable-prefix/key-matched, not a blanket clear:** positional
+  reconciliation clears a child's recorded path only at/after the first
+  index whose concrete type changed (an unchanged leading prefix keeps its
+  path); keyed reconciliation clears it only for a removed or type-swapped
+  child — a key-matched reorder relocates the widget, and its recorded
+  path, intact. `RenderRoot`'s cached `focus_active`/`ime_state` are not
+  pushed at rebuild time and self-correct on the next event pass, the same
+  convergence contract the capture-cancel case below already uses.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key,
   view)` marks a `Flex` child list for identity-based reconciliation; once
@@ -228,6 +233,16 @@ interactive widget in `forgekit-widgets`:
   converts to density-independent logical pixels before building an
   `InputEvent` — widget/container code never divides by scale factor; only
   the shell's FFI-boundary helpers do.
+
+- **Insets follow the same physical-at-FFI, logical-inside rule as
+  coordinates.** A platform delivers occlusion in physical px (Android
+  `Insets`) or already-logical points (iOS `safeAreaInsets`); either way the
+  FFI-boundary `logical_insets` helper (mirroring `logical_size`) is the one
+  place that reconciles it — widget code only ever sees a resolved
+  `WindowInsets` in logical px (see `docs/ARCHITECTURE.md`'s Inset
+  delivery). An inset change needs no new frame-gate input: `set_insets`
+  rides the existing `ChangeFlags::LAYOUT | PAINT` pending path, the same
+  contract a theme swap uses.
 
 - **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear
   internal flags (`self.pressed`/`self.captured`/`self.armed`) and request a
@@ -365,21 +380,35 @@ Semantics pass):
   rule for every `examples/*` crate, not just reactive types**: an example's
   `Cargo.toml` should depend on `forgekit` alone. `examples/huddle` — the sole
   example — mostly holds to this but carries a **documented**
-  `forgekit-core`/`kurbo`/`peniko` escape-hatch dependency (see its
-  `Cargo.toml`'s comment) for the handful of custom app widgets no facade
-  widget covers: `ui/swipeable`'s swipe-to-action row, `ui/sheet`'s modal
-  sheet, `screens/home`'s avatar-fill/`Shimmer` loading effect, and
-  `ui/toast`'s `toast_entrance` slide-up/fade entrance widget. A new example
-  reaching for this escape hatch should first check whether the gap belongs
-  in the facade instead.
+  `forgekit-core`/`forgekit-theme`/`kurbo`/`peniko` escape-hatch dependency
+  (see its `Cargo.toml`'s comment) for the handful of custom app widgets no
+  facade widget covers: `ui/swipeable`'s swipe-to-action row, `ui/sheet`'s
+  modal sheet (both theme-aware, resolving fill/marker colors with a
+  hardcoded fallback per the Theming conventions above), `screens/home`'s
+  avatar-fill/`Shimmer` loading effect, and `ui/toast`'s `toast_entrance`
+  slide-up/fade entrance widget. A new example reaching for this escape
+  hatch should first check whether the gap belongs in the facade instead.
+- **A rebuild must run inside a `TrackedScope` for a signal write to wake it
+  later — an untracked read is a silent wake hazard, not a stale value.**
+  `.get()` subscribes only when called from *inside* a live
+  `TrackedScope::track` closure; both shells now guarantee this for their
+  per-frame rebuild (desktop's `scope.track(|| root.rebuild(..))`, mirrored
+  on mobile by a persistent per-`AppHandle` `TrackedScope` — see
+  `docs/ARCHITECTURE.md`'s Signal-driven wake). A render-relevant read taken
+  via `*_untracked`/`get_untracked` anywhere in that path never subscribes,
+  so a later write flips no dirty flag and the shell may never repaint
+  until an unrelated input forces a frame. Reserve `*_untracked` for
+  genuine non-rendering reads — a disposal/liveness probe, an imperative
+  event-handler one-shot, a test assertion — never for a value a `build`
+  return depends on.
 
 ## Theming & Animation Conventions
 
 - **Paint-time resolution is always safe; layout-time-baked resolution is
   only safe under the `set_theme` → `ChangeFlags` contract.** Most themed
   widgets resolve tokens from `PaintCtx` on every paint pass and so
-  self-refresh on a live theme swap for free. `Text` instead bakes its
-  resolved glyph color into the shaped layout at LAYOUT time (see
+  self-refresh on a live theme swap for free. `Text` and `TextInput` instead
+  bake their resolved glyph color into the shaped layout at LAYOUT time (see
   `docs/ARCHITECTURE.md`'s Theme delivery); a widget adding layout-time-baked
   resolution depends on relayout actually happening, so any dirty-tracking
   work must treat a theme change as forcing `ChangeFlags::LAYOUT`, not just
@@ -409,13 +438,9 @@ Semantics pass):
   research doc's claim lacks (or conflicts with) a citable primary source,
   fetch the primary source and record `<source>, retrieved <date>` in the
   module doc, alongside the existing **Community-approximate** marker
-  (above) for values that stay genuinely unsourced. Reference cases:
-  `typography.rs`'s M3-Expressive emphasized-role count, resolved against
-  `androidx.compose.material3`'s `TypeScaleTokens.kt` (retrieved
-  2026-07-18); `color.rs`'s Cupertino palette refresh and several
-  `cupertino::*` metrics (`switch.rs`'s 64×28 track, `button.rs`'s
-  size-class heights), each citing a specific named record in the mined
-  `kit-colors-type-metrics.json`/`glass-recipes.json` research ledgers.
+  (above) for values that stay genuinely unsourced (e.g. `align.rs`'s
+  Flutter-parity citation of `shifted_box.dart`, or `typography.rs`'s
+  M3-Expressive role count against `TypeScaleTokens.kt`).
 - **Event-pass code never reads a theme — `EventCtx` carries none.** Only
   `LayoutCtx`/`PaintCtx` thread a theme; a metric an event handler also needs
   (hit-test padding, caret geometry) stays a plain constant read from both
@@ -434,18 +459,11 @@ Semantics pass):
   no ambient ticker (see `docs/ARCHITECTURE.md`'s Frame pipeline).
 - **State-layer opacity has one source: `material::state_layer`'s constants.**
   `HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/`DRAGGED_OPACITY` (M3
-  `StateTokens`) live in that one module; a catalog widget imports them rather
-  than hardcoding its own overlay opacity. When more than one interaction
-  state is active at once, the overlay opacity is the **maximum** of the
-  active states', never their sum — M3 shows the strongest state, not a
-  stacked blend. Of the four, only `pressed` is currently driven by any
-  shipping widget: `hovered` awaits a pointer-hover `PointerPhase` (none
-  exists yet); `focused` awaits a widget that both participates in focus
-  routing *and* paints its own `StateLayer` surface — the four modal widgets
-  now claim keyboard focus (see `docs/ARCHITECTURE.md`'s Semantics pass) but
-  paint no `StateLayer` chrome, so this state stays unwired; `dragged` awaits
-  a consumer calling `set_dragged`. See `material/state_layer.rs`'s "Live vs.
-  aspirational states" module doc for the authoritative statement.
+  `StateTokens`) live in that one module; a catalog widget imports them
+  rather than hardcoding its own overlay opacity, and takes the **maximum**
+  of concurrently-active states' opacity, never their sum. Only `pressed`
+  is currently wired by any shipping widget; see `material/state_layer.rs`'s
+  "Live vs. aspirational states" module doc for the rest.
 
 ## Testing Patterns
 
