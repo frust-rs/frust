@@ -18,9 +18,22 @@
 //! runtime env var) gates every `FrameStats`/`StartupSpans` recording and
 //! `emit_log` call to a no-op when tracing is off, so a plain `cargo run`
 //! still prints nothing even with this sink installed.
+//!
+//! One target-specific carve-out: `vello`'s own `log::error!`/`log::warn!`
+//! calls are suppressed at the default level (see
+//! [`StderrLogger::enabled`]) — vello 0.9's bitmap-emoji decode path can log
+//! an unfixed-upstream error once per paint for a glyph it can't decode
+//! (`workflow/plans/features/device-parity/tasks/15-emoji-colortype.md`,
+//! linebender/vello#1031), which would otherwise spam every frame. Pass
+//! `FORGEKIT_LOG=debug` (or `trace`) to see vello's own log lines again when
+//! actually debugging the render stack.
 
 use std::io::Write;
 use std::sync::Once;
+
+/// Target prefix for vello's own `log` calls (`vello::scene`, etc.) — see
+/// [`StderrLogger::enabled`]'s vello-noise carve-out below.
+const VELLO_TARGET_PREFIX: &str = "vello";
 
 /// A minimal `log::Log` writing to stderr, installed once in [`init_once`].
 struct StderrLogger {
@@ -29,6 +42,22 @@ struct StderrLogger {
 
 impl log::Log for StderrLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
+        // vello 0.9's bitmap-emoji decode path (`scene.rs`'s
+        // `output_color_type` check, see
+        // `workflow/plans/features/device-parity/tasks/15-emoji-colortype.md`)
+        // logs an `error!`/`warn!` once *per paint* for any glyph it can't
+        // decode (upstream, unfixed: linebender/vello#1031) — every default
+        // level (`Info` and below) would otherwise print that line every
+        // frame for as long as the affected glyph stays on screen. Suppress
+        // vello's own Error/Warn noise unless `FORGEKIT_LOG` explicitly asks
+        // for `debug`/`trace` (i.e. the caller is deliberately debugging the
+        // render stack, not just running the app).
+        if metadata.target().starts_with(VELLO_TARGET_PREFIX)
+            && metadata.level() <= log::Level::Warn
+            && self.level < log::LevelFilter::Debug
+        {
+            return false;
+        }
         metadata.level() <= self.level
     }
 
@@ -68,4 +97,51 @@ pub fn init_once() {
             log::set_max_level(level);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::{Level, Log, Metadata, MetadataBuilder};
+
+    fn metadata(target: &str, level: Level) -> Metadata<'_> {
+        MetadataBuilder::new().target(target).level(level).build()
+    }
+
+    #[test]
+    fn vello_error_suppressed_at_default_level() {
+        let logger = StderrLogger {
+            level: log::LevelFilter::Info,
+        };
+        assert!(!logger.enabled(&metadata("vello::scene", Level::Error)));
+        assert!(!logger.enabled(&metadata("vello::scene", Level::Warn)));
+    }
+
+    #[test]
+    fn vello_error_shown_when_debug_requested() {
+        let logger = StderrLogger {
+            level: log::LevelFilter::Debug,
+        };
+        assert!(logger.enabled(&metadata("vello::scene", Level::Error)));
+    }
+
+    #[test]
+    fn vello_info_and_below_unaffected() {
+        let logger = StderrLogger {
+            level: log::LevelFilter::Info,
+        };
+        // Only the Error/Warn noise carve-out applies; vello Info lines
+        // still follow the normal level filter.
+        assert!(logger.enabled(&metadata("vello::scene", Level::Info)));
+        assert!(!logger.enabled(&metadata("vello::scene", Level::Debug)));
+    }
+
+    #[test]
+    fn non_vello_targets_unaffected() {
+        let logger = StderrLogger {
+            level: log::LevelFilter::Info,
+        };
+        assert!(logger.enabled(&metadata("forgekit_shell_common::perf", Level::Error)));
+        assert!(logger.enabled(&metadata("forgekit_shell_common::perf", Level::Info)));
+    }
 }
