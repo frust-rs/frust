@@ -701,7 +701,15 @@ impl Widget for TextInputWidget {
                 let capped = content.min(line_h * max_lines as f64);
                 capped + 2.0 * PAD_Y
             }
-            None => self.content_height() + 2.0 * PAD_Y,
+            None => {
+                // A field rebuilt from multiline into single-line mode may still
+                // carry a stale wrap width on its editor (e.g. `.multiline(..)`
+                // dropped from the view) — reset it so `content_height`/
+                // `content_origin_y` agree with this branch's single-line,
+                // centered placement instead of a leftover wrapped layout.
+                self.editor.set_wrap_width(None, &mut self.text_ctx);
+                self.content_height() + 2.0 * PAD_Y
+            }
         };
         bc.constrain(Size::new(width, height))
     }
@@ -1837,6 +1845,73 @@ mod tests {
         assert!(
             down >= 3,
             "ArrowDown moves the caret back to line 2, got {down}"
+        );
+    }
+
+    /// Regression: `Widget::layout`'s single-line branch must reset the
+    /// editor's wrap width, or a field rebuilt from multiline into single-line
+    /// keeps the stale wrapped layout — `content_height` (and, downstream, the
+    /// text's vertical placement) stays wrong until something else happens to
+    /// touch the wrap width again.
+    #[test]
+    fn multiline_to_single_line_rebuild_resets_wrap_width() {
+        // Long enough to wrap across several lines at a narrow width.
+        let long_text = "one two three four five six seven eight nine ten".to_string();
+        let mut state = AppState {
+            value: long_text.clone(),
+            ..AppState::default()
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut multiline_logic, &mut state);
+        let multi_height = root.layout(Size::new(120.0, 800.0)).height;
+        assert!(
+            widget(&root).editor.line_count() > 1,
+            "seed text must actually wrap for this regression to be meaningful"
+        );
+
+        // Rebuild the *same* root into a single-line field (multiline dropped)
+        // with the identical text — the value is unchanged, so `rebuild` never
+        // calls `set_controlled_value`; only `max_visible_lines` flips to
+        // `None`, exercising the single-line `layout` branch on a widget whose
+        // editor still carries the old wrap width.
+        root.rebuild(&mut app_logic, &mut state);
+        let single_height = root.layout(Size::new(120.0, 800.0)).height;
+
+        assert_eq!(
+            widget(&root).editor.line_count(),
+            1,
+            "single-line relayout must reset the wrap width so the editor \
+             reflows back onto one line"
+        );
+        assert!(
+            single_height < multi_height,
+            "single-line relayout must collapse the stale wrapped height: \
+             multi={multi_height}, single={single_height}"
+        );
+
+        // Cross-check against a field built single-line from scratch with the
+        // same text/width: the rebuilt-down field must match it exactly, not
+        // merely be smaller.
+        let mut fresh_state = AppState {
+            value: long_text,
+            ..AppState::default()
+        };
+        let mut fresh_root = RenderRoot::new();
+        fresh_root.rebuild(&mut app_logic, &mut fresh_state);
+        let fresh_height = fresh_root.layout(Size::new(120.0, 800.0)).height;
+        assert_eq!(
+            single_height, fresh_height,
+            "a multiline->single-line rebuild must match a field built \
+             single-line from scratch"
+        );
+
+        // Layout and caret placement agree: the origin's centering formula is
+        // now measured against the corrected (single-line) content height.
+        let w = widget(&root);
+        assert_eq!(
+            w.content_origin_y(single_height),
+            w.text_top(single_height),
+            "single-line mode must use the centered single-line placement"
         );
     }
 }
