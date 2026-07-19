@@ -56,10 +56,13 @@ pub fn logical_size(physical_width: u32, physical_height: u32, scale: f64) -> (f
 ///
 /// where `view_padding` is the system-UI occlusion (status/navigation bars,
 /// cutout) and `view_insets` the fully-obscured area (the IME) — see
-/// [`WindowInsets`]. Each value is divided by `scale` to convert device px to
-/// logical px, mirroring [`logical_size`]'s HiDPI math, so the framework
-/// receives insets in the same logical space it lays out in (spec §10.3's
-/// logical-coordinate contract — the same discipline pointer events follow).
+/// [`WindowInsets`]. Each edge value is sanitized (non-finite or negative → 0.0)
+/// **before** being divided by `scale` to convert device px to logical px,
+/// mirroring [`logical_size`]'s HiDPI math and [`sanitize_scale`]'s defensive
+/// posture. A platform-supplied inset must never propagate non-finite or negative
+/// into the layout/paint passes. The framework receives insets in the same
+/// logical space it lays out in (spec §10.3's logical-coordinate contract — the
+/// same discipline pointer events follow).
 ///
 /// `scale` must already have passed through [`sanitize_scale`] (finite,
 /// strictly positive); a shell's per-frame driver sanitizes the platform
@@ -68,7 +71,8 @@ pub fn logical_size(physical_width: u32, physical_height: u32, scale: f64) -> (f
 /// that contract exactly as [`logical_size`] does.
 #[inline]
 pub fn logical_insets(physical: [f64; 8], scale: f64) -> WindowInsets {
-    let to_logical = |px: f64| px / scale;
+    let sanitize_edge = |px: f64| if px.is_finite() && px >= 0.0 { px } else { 0.0 };
+    let to_logical = |px: f64| sanitize_edge(px) / scale;
     WindowInsets::new(
         EdgeInsets::new(
             to_logical(physical[0]),
@@ -180,6 +184,48 @@ mod tests {
         let scale = sanitize_scale(f32::NAN); // -> 1.0
         let insets = logical_insets([0.0, 44.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], scale);
         assert_eq!(insets.view_padding, EdgeInsets::new(0.0, 44.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn logical_insets_sanitizes_nan_edges_to_zero() {
+        // Non-finite edge values must not propagate NaN into the layout/paint passes.
+        let physical = [f64::NAN, 44.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let insets = logical_insets(physical, 2.0);
+        assert_eq!(insets.view_padding, EdgeInsets::new(0.0, 22.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn logical_insets_sanitizes_infinite_edges_to_zero() {
+        // Non-finite edge values must not propagate Inf into the layout/paint passes.
+        let physical = [
+            f64::INFINITY,
+            44.0,
+            f64::NEG_INFINITY,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let insets = logical_insets(physical, 2.0);
+        assert_eq!(insets.view_padding, EdgeInsets::new(0.0, 22.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn logical_insets_sanitizes_negative_edges_to_zero() {
+        // Negative edge values must not propagate as insets (they're nonsensical).
+        let physical = [-10.0, 44.0, 0.0, -5.0, 0.0, 0.0, 0.0, 0.0];
+        let insets = logical_insets(physical, 2.0);
+        assert_eq!(insets.view_padding, EdgeInsets::new(0.0, 22.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn logical_insets_normal_values_unchanged() {
+        // Valid finite, non-negative edges pass through normally.
+        let physical = [8.0, 44.0, 16.0, 34.0, 0.0, 0.0, 0.0, 340.0];
+        let insets = logical_insets(physical, 2.0);
+        assert_eq!(insets.view_padding, EdgeInsets::new(4.0, 22.0, 8.0, 17.0));
+        assert_eq!(insets.view_insets, EdgeInsets::new(0.0, 0.0, 0.0, 170.0));
     }
 
     #[test]
