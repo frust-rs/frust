@@ -8,10 +8,18 @@
 //! the *requested* text through `on_change`, and the next `rebuild` reconciles
 //! the app-confirmed `value` back into the underlying [`TextEditor`] (task 52) —
 //! set-if-different, preserving the selection while the text is unchanged. The
-//! content text's style (defaulting to 16px black) can be set with
-//! [`TextInputView::text_style`], applied to the widget's [`TextEditor`] at
-//! build time; it never touches the chrome color constants or padding/caret
-//! sizing below.
+//! content text's style (family/weight/style/size/letter-spacing/line-height,
+//! plus color when set explicitly) can be set with [`TextInputView::text_style`];
+//! it never touches the chrome color constants or padding/caret sizing below.
+//! Mirroring [`Text`](crate::TextView)'s [`effective_style`](TextInputWidget::effective_style)
+//! pattern: when the app did **not** call `.text_style(...)`, the glyph color
+//! resolves from the active theme's `on_surface` role at LAYOUT time (where
+//! `TextInput`, like `Text`, bakes its color into the shaped editor state),
+//! falling back to black with no theme threaded; an explicit `.text_style(...)`
+//! always wins (explicit > theme > black fallback). This baked-at-layout
+//! resolution is safe only under the `set_theme` → `ChangeFlags::LAYOUT`
+//! contract (`docs/CODE_STANDARDS.md`'s Theming conventions) — already
+//! guaranteed by `RenderRoot::set_theme`.
 //!
 //! # Text context ownership
 //!
@@ -153,6 +161,11 @@ pub struct TextInputView<State: 'static> {
     value: String,
     placeholder: String,
     text_style: TextStyle,
+    /// Whether the app set the content style explicitly (via
+    /// [`TextInputView::text_style`]). When `false` and a theme is active, the
+    /// glyph color resolves from the theme's `on_surface` role; an explicit
+    /// style always wins (explicit > theme > black fallback).
+    text_style_explicit: bool,
     /// `None` = single-line; `Some(n)` = wrapped multi-line capped at `n`
     /// visible lines (see [`TextInputView::multiline`]).
     max_visible_lines: Option<usize>,
@@ -180,6 +193,7 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
         value: value.into(),
         placeholder: String::new(),
         text_style: TextStyle::default(),
+        text_style_explicit: false,
         max_visible_lines: None,
         submit_on_enter: None,
         on_change: Rc::new(on_change),
@@ -212,10 +226,14 @@ impl<State: 'static> TextInputView<State> {
 
     /// Set the content text's style (family/weight/style/size/color/
     /// letter-spacing/line-height), applied to the field's [`TextEditor`].
-    /// Default is unchanged (16px black). Does not affect the chrome colors
-    /// or padding/caret constants.
+    /// Marks the color as explicitly set, so it wins over the themed default
+    /// (explicit > theme > black fallback — see the [module docs](self)).
+    /// Default (no call) resolves the color from the active theme's
+    /// `on_surface` role, falling back to black with no theme threaded. Does
+    /// not affect the chrome colors or padding/caret constants.
     pub fn text_style(mut self, text_style: TextStyle) -> Self {
         self.text_style = text_style;
+        self.text_style_explicit = true;
         self
     }
 
@@ -246,7 +264,22 @@ pub struct TextInputWidget {
     editor: TextEditor,
     /// The widget's own font/layout context — see the [module docs](self).
     text_ctx: TextContext,
+    /// The declared (builder) style — family/weight/style/size/letter-spacing/
+    /// line-height, plus the app's own color when [`text_style_explicit`] is
+    /// `true`. Layout metrics (`content_height`/`text_top`/`line_height`) read
+    /// this directly; the *color* actually installed on `editor` may differ —
+    /// see [`applied_style`](Self::applied_style).
     style: TextStyle,
+    /// Whether the app set the content style explicitly — see [`TextInputView`].
+    text_style_explicit: bool,
+    /// The style last installed on `editor` (the resolved effective style —
+    /// see [`effective_style`](Self::effective_style)). Compared against the
+    /// freshly-resolved style at each `layout` to detect a theme swap or a
+    /// rebuilt `style`/`text_style_explicit`, in which case [`apply_style`]
+    /// rebuilds `editor` with the new style.
+    ///
+    /// [`apply_style`]: Self::apply_style
+    applied_style: TextStyle,
     placeholder: String,
     /// `None` = single-line; `Some(n)` = wrapped multi-line capped at `n`
     /// visible lines. Drives the wrap-width feed in `layout`, the height cap,
@@ -283,6 +316,48 @@ fn inside(pos: Point, size: Size) -> bool {
 }
 
 impl TextInputWidget {
+    /// The style to shape the editor with: `style` unchanged when the color was
+    /// set explicitly (or no theme is active), otherwise `style` with its color
+    /// replaced by the theme's `on_surface` role. Mirrors
+    /// [`crate::TextWidget`]'s `effective_style` — resolving the color here at
+    /// LAYOUT time (where `TextInput`, like `Text`, bakes the glyph brush into
+    /// the editor's shaped state) keeps the unthemed path pixel-identical to
+    /// before this retrofit.
+    fn effective_style(&self, theme: Option<&Theme>) -> TextStyle {
+        if self.text_style_explicit {
+            return self.style.clone();
+        }
+        match theme {
+            Some(theme) => {
+                let mut style = self.style.clone();
+                style.color = theme.scheme().on_surface;
+                style
+            }
+            None => self.style.clone(),
+        }
+    }
+
+    /// Rebuild `editor` with `style`, preserving the current editing state
+    /// (text/selection/composing) across the reconstruction — `TextEditor`
+    /// exposes no post-construction style setter, so a style change (an app
+    /// rebuild with a different `.text_style(...)`, or a theme swap re-resolving
+    /// the themed color at the next `layout`) reconstructs the editor rather
+    /// than mutating it in place.
+    ///
+    /// A desktop-path IME preedit (parley's own `raw_compose`) does not survive
+    /// a mid-composition style swap — `ApplyEditingState` re-seeds it as a
+    /// platform-tracked composing region instead (still reported correctly by
+    /// `editing_state_utf16`/`editing_state_bytes`), a narrow, acceptable edge
+    /// case since changing `text_style` mid-keystroke-composition is not a
+    /// realistic app pattern.
+    fn apply_style(&mut self, style: TextStyle) {
+        let state = self.editor.editing_state_bytes();
+        self.editor = TextEditor::new(&style);
+        self.editor
+            .apply(EditOp::ApplyEditingState(state), &mut self.text_ctx);
+        self.applied_style = style;
+    }
+
     /// The single-line text height from the editor's refreshed metrics, floored
     /// to a sensible line height for an empty field.
     fn content_height(&self) -> f64 {
@@ -628,7 +703,9 @@ impl<State: 'static> View<State> for TextInputView<State> {
         TextInputWidget {
             editor,
             text_ctx,
-            style,
+            style: style.clone(),
+            text_style_explicit: self.text_style_explicit,
+            applied_style: style,
             placeholder: self.placeholder.clone(),
             max_visible_lines: self.max_visible_lines,
             submit_on_enter: resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter),
@@ -671,6 +748,20 @@ impl<State: 'static> View<State> for TextInputView<State> {
         }
         element.submit_on_enter =
             resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter);
+        // Text style reconcile (task 03): a changed declared style or explicit-
+        // flag invalidates the style actually installed on the editor. The
+        // editor itself is only rebuilt in `layout` (`effective_style`/
+        // `apply_style`), mirroring `Text::rebuild`'s cache-invalidate-now,
+        // resolve-at-layout split — this is also what makes a bare theme swap
+        // (no view change at all, so `rebuild` never runs) still pick up the
+        // new color, since `layout` always re-resolves against `applied_style`.
+        if prev.text_style != self.text_style
+            || prev.text_style_explicit != self.text_style_explicit
+        {
+            element.style = self.text_style.clone();
+            element.text_style_explicit = self.text_style_explicit;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
         // Controlled reconcile: adopt the app-confirmed value only when it differs
         // from what the editor currently holds, so an accepted edit leaves the
         // selection untouched and a rejected/normalized one is pulled back in.
@@ -683,7 +774,15 @@ impl<State: 'static> View<State> for TextInputView<State> {
 }
 
 impl Widget for TextInputWidget {
-    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Resolve the themed style and rebuild the editor if it drifted from
+        // what's currently installed (a theme swap, or a rebuild-invalidated
+        // `style`/`text_style_explicit` — see `effective_style`/`apply_style`).
+        let effective = self.effective_style(Theme::from_layout_ctx(ctx));
+        if effective != self.applied_style {
+            self.apply_style(effective);
+        }
+
         let width = if bc.max().width.is_finite() {
             bc.max().width
         } else {
@@ -1484,6 +1583,166 @@ mod tests {
             ime.editing.text, "",
             "paint refreshes the shell-facing IME state to the controlled-cleared value \
              (without this, the mobile IME mirror re-pushes the stale text)"
+        );
+    }
+
+    // --- Themed text color (task 03) ---
+
+    /// Records each glyph run's solid brush color (mirrors `text.rs`'s
+    /// `GlyphRecorder`).
+    #[derive(Default)]
+    struct TextGlyphRecorder {
+        colors: Vec<Color>,
+    }
+
+    impl PaintScene for TextGlyphRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: forgekit_scene::GlyphRun) {
+            if let peniko::Brush::Solid(color) = run.brush {
+                self.colors.push(color);
+            }
+        }
+    }
+
+    /// Paint `root` and return the first content glyph run's brush color.
+    fn painted_text_color(root: &mut RenderRoot<AppState, TextInputView<AppState>>) -> Color {
+        let mut rec = TextGlyphRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+        *rec.colors.first().expect("one glyph run painted")
+    }
+
+    #[test]
+    fn unthemed_text_input_keeps_black_default() {
+        // Parity: with no theme threaded in, the glyph color stays exactly the
+        // TextStyle default (black) — unchanged from before this retrofit.
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut root = harness(&mut state);
+        assert_eq!(painted_text_color(&mut root), Color::BLACK);
+    }
+
+    #[test]
+    fn themed_dark_text_input_resolves_on_surface() {
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut root = harness(&mut state);
+
+        let mut theme = Theme::m3_baseline();
+        theme.brightness = forgekit_theme::Brightness::Dark;
+        let expected = theme.scheme().on_surface;
+        assert_ne!(
+            expected,
+            Color::BLACK,
+            "fixture sanity: dark on_surface must differ from the black fallback"
+        );
+        root.set_theme(Box::new(theme));
+        root.layout(Size::new(300.0, 200.0));
+
+        assert_eq!(
+            painted_text_color(&mut root),
+            expected,
+            "a themed field's glyphs resolve to on_surface(dark), not black"
+        );
+    }
+
+    #[test]
+    fn explicit_text_style_wins_over_theme() {
+        let custom = Color::from_rgb8(10, 20, 30);
+        fn logic(state: &mut AppState) -> TextInputView<AppState> {
+            text_input(state.value.clone(), |s: &mut AppState, v: String| {
+                s.value = v;
+            })
+            .text_style(TextStyle::new(16.0, Color::from_rgb8(10, 20, 30)))
+        }
+
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut root: RenderRoot<AppState, TextInputView<AppState>> = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.set_theme(Box::new(Theme::m3_baseline()));
+        root.layout(Size::new(300.0, 200.0));
+
+        assert_eq!(
+            painted_text_color(&mut root),
+            custom,
+            "an explicit .text_style() color wins over the themed default"
+        );
+    }
+
+    #[test]
+    fn rebuild_with_new_text_style_relayouts_with_new_metrics() {
+        // rebuild() must reconcile a changed text_style: a larger font size
+        // rebuilds the underlying TextEditor (via `apply_style`) and grows the
+        // field's measured height on the next layout.
+        fn logic_a(state: &mut AppState) -> TextInputView<AppState> {
+            text_input(state.value.clone(), |s: &mut AppState, v: String| {
+                s.value = v;
+            })
+            .text_style(TextStyle::new(16.0, Color::BLACK))
+        }
+        fn logic_b(state: &mut AppState) -> TextInputView<AppState> {
+            text_input(state.value.clone(), |s: &mut AppState, v: String| {
+                s.value = v;
+            })
+            .text_style(TextStyle::new(40.0, Color::BLACK))
+        }
+
+        let mut state = AppState::default();
+        let mut root: RenderRoot<AppState, TextInputView<AppState>> = RenderRoot::new();
+        root.rebuild(&mut logic_a, &mut state);
+        let size_a = root.layout(Size::new(300.0, 200.0));
+
+        root.rebuild(&mut logic_b, &mut state);
+        let size_b = root.layout(Size::new(300.0, 200.0));
+
+        assert!(
+            size_b.height > size_a.height,
+            "a rebuild with a larger text_style size grows the field height \
+             ({size_a:?} -> {size_b:?})"
+        );
+    }
+
+    #[test]
+    fn theme_swap_with_no_view_change_repaints_new_glyph_color() {
+        // Mirrors `text.rs`'s regression of the same name: a bare `set_theme`
+        // with no view change must still re-resolve the baked color at the
+        // next layout, per the `set_theme` -> `ChangeFlags::LAYOUT` contract.
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut root = harness(&mut state);
+
+        let mut theme_a = Theme::m3_baseline();
+        theme_a.brightness = forgekit_theme::Brightness::Light;
+        let color_a = theme_a.scheme().on_surface;
+        root.set_theme(Box::new(theme_a));
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(painted_text_color(&mut root), color_a);
+
+        let mut theme_b = Theme::m3_baseline();
+        theme_b.brightness = forgekit_theme::Brightness::Dark;
+        let color_b = theme_b.scheme().on_surface;
+        assert_ne!(
+            color_a, color_b,
+            "fixture sanity: themes must actually differ"
+        );
+        root.set_theme(Box::new(theme_b));
+        root.layout(Size::new(300.0, 200.0));
+
+        assert_eq!(
+            painted_text_color(&mut root),
+            color_b,
+            "a bare theme swap (no view change) must re-resolve the themed glyph \
+             color at the next layout"
         );
     }
 
