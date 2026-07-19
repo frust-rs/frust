@@ -364,7 +364,7 @@ mod tests {
         let state = controller.data.get_untracked();
         let data = state.value().expect("loaded cleanly on the first attempt");
         assert_eq!(data.channels.len(), 6, "6 channels");
-        assert_eq!(data.dms.len(), 8, "8 DMs");
+        assert_eq!(data.dms.len(), 9, "9 DMs (one an empty DM — task 22)");
         assert!(
             data.channels.iter().filter(|c| c.private).count() == 1,
             "exactly one private channel",

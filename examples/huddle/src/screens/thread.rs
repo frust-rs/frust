@@ -45,8 +45,8 @@ use std::sync::Arc;
 
 use forgekit::{
     Align, Alignment, AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
-    Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar, elevated_card, icon,
-    icons, inflexible, keyed, outlined_card, scroll_view, text, text_input,
+    Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar, elevated_card, hero,
+    icon, icons, inflexible, keyed, outlined_card, scroll_view, text, text_input,
 };
 
 use crate::HuddleState;
@@ -54,6 +54,7 @@ use crate::features::messages::{FeedBody, FeedMessage, FeedReply, MessagesContro
 use crate::mock;
 use crate::screens::placeholder_body;
 use crate::ui::sheet::{action_menu, emoji_grid, sheet, sheet_action_row};
+use crate::ui::swipeable::press_pop;
 
 /// A quick, static header timestamp — mirrors `channel_feed`'s own
 /// placeholder ("real color-glyph rendering, verified in wave A"; there is no
@@ -72,10 +73,18 @@ fn composer_for(root_id: u32) -> RwSignal<String> {
             RefCell::new(HashMap::new());
     }
     COMPOSERS.with(|cell| {
-        *cell
-            .borrow_mut()
-            .entry(root_id)
-            .or_insert_with(|| RwSignal::new(String::new()))
+        // Self-heal (task 22 hardening): a signal disposed by a prior owner
+        // (reused test thread) returns `None` from `try_get_untracked` and is
+        // recreated rather than handed back to panic on the next get/set — the
+        // same fix `screens::channel_feed`/`screens::workspace_drawer` apply.
+        if let Some(sig) = cell.borrow().get(&root_id).copied()
+            && sig.try_get_untracked().is_some()
+        {
+            return sig;
+        }
+        let sig = RwSignal::new(String::new());
+        cell.borrow_mut().insert(root_id, sig);
+        sig
     })
 }
 
@@ -100,10 +109,15 @@ fn thread_sheet_for(root_id: u32) -> RwSignal<ThreadSheet> {
             RefCell::new(HashMap::new());
     }
     SHEETS.with(|cell| {
-        *cell
-            .borrow_mut()
-            .entry(root_id)
-            .or_insert_with(|| RwSignal::new(ThreadSheet::None))
+        // Same disposed-signal self-heal as `composer_for` above (task 22).
+        if let Some(sig) = cell.borrow().get(&root_id).copied()
+            && sig.try_get_untracked().is_some()
+        {
+            return sig;
+        }
+        let sig = RwSignal::new(ThreadSheet::None);
+        cell.borrow_mut().insert(root_id, sig);
+        sig
     })
 }
 
@@ -433,13 +447,22 @@ fn reaction_chips(
 /// A small avatar carrying the author's initials — duplicated locally rather
 /// than shared with `channel_feed`'s own copy (each Phase C screen owns its
 /// own visual helpers, keeping the two files disjoint per
-/// `src/README-phase-c.md`).
+/// `src/README-phase-c.md`). Wrapped in a `hero("avatar-{author_id}")` shared
+/// element + a tap opening the author's profile (`/user/:id`) — the same
+/// "avatar tap anywhere" contract the feed avatar now carries (task 22).
 fn avatar(author_id: u32) -> AnyView<HuddleState> {
     let initials = mock::user(author_id).map(|u| u.initials).unwrap_or("?");
-    any(forgekit::filled_card(Padding(
+    let tile = forgekit::filled_card(Padding(
         EdgeInsets::all(8.0),
         text(initials.to_string()).size(12.0),
-    )))
+    ));
+    any(
+        GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
+            move |st: &mut HuddleState| {
+                st.nav.router().push(&format!("/user/{author_id}"));
+            },
+        ),
+    )
 }
 
 /// The "N replies" divider row above the reply list.
@@ -514,12 +537,13 @@ fn composer_bar(
 
     let send_icon = icon(icons::SEND).size(24.0);
     let send_btn: AnyView<HuddleState> = if has_text {
-        any(
-            GestureDetector(send_icon).on_tap(move |_s: &mut HuddleState| {
+        // press_pop adds the pressed-state scale dip (task 22 micro-interaction).
+        any(press_pop(GestureDetector(send_icon).on_tap(
+            move |_s: &mut HuddleState| {
                 let text = composer.get_untracked();
                 submit_reply(&controller, root_id, composer, text);
-            }),
-        )
+            },
+        )))
     } else {
         any(send_icon)
     };

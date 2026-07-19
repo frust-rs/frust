@@ -54,7 +54,8 @@ use std::time::{Duration, Instant};
 
 use forgekit::{
     Align, Alignment, AnimationController, AnyView, Column, Curve, EdgeInsets, FrameTime,
-    GestureDetector, Get, Padding, Row, RwSignal, Set, SizedBox, Stack, any, filled_card, text,
+    GestureDetector, Get, GetUntracked, Padding, Row, RwSignal, Set, SizedBox, Stack, any,
+    filled_card, text,
 };
 
 use crate::HuddleState;
@@ -120,6 +121,15 @@ thread_local! {
     /// signal here is what lets repeated calls observe the same animating
     /// value instead of restarting it from zero every frame. `RwSignal` is a
     /// cheap `Copy` handle, so a `Cell` is enough (no `RefCell` needed).
+    ///
+    /// **Self-healing (task 22 hardening):** an `RwSignal` is owned by the
+    /// reactive `Owner` live when it was created; a headless test that disposes
+    /// its ambient owner and then re-enters (or a reused test thread) leaves this
+    /// cache holding a *disposed* signal whose next `get`/`set` panics. So
+    /// [`entrance_progress`] validates the cached handle with
+    /// `try_get_untracked()` and recreates it when disposal is detected, rather
+    /// than trusting the cache blindly. This is the flake task 21's report
+    /// flagged.
     static ENTRANCE: Cell<Option<RwSignal<f64>>> = const { Cell::new(None) };
 }
 
@@ -134,7 +144,11 @@ thread_local! {
 /// depend on (see this crate's `Cargo.toml`).
 fn entrance_progress() -> RwSignal<f64> {
     ENTRANCE.with(|cell| {
-        if let Some(sig) = cell.get() {
+        if let Some(sig) = cell.get()
+            && sig.try_get_untracked().is_some()
+        {
+            // A live, still-owned signal — reuse it. A disposed one (its Owner
+            // gone) returns `None` and falls through to be recreated below.
             return sig;
         }
         let sig = RwSignal::new(0.0);

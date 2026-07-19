@@ -387,8 +387,18 @@ impl MessagesController {
         }
         let channel_id = channel_id.into();
         REGISTRY.with(|cell| {
-            if let Some(existing) = cell.borrow().get(&channel_id) {
-                return Arc::clone(existing);
+            // Self-heal (task 22 hardening): a cached controller's signals are
+            // owned by the reactive `Owner` live when it was built; a headless
+            // test that disposes its owner and re-enters (or a reused test
+            // thread) leaves this registry holding a controller whose signals
+            // are disposed, so the next `loading`/`messages` read panics.
+            // Probing one signal with `try_get_untracked` detects that, and a
+            // disposed hit is rebuilt (and its load re-kicked) rather than
+            // handed back — the same guard the composer/sheet caches now carry.
+            if let Some(existing) = cell.borrow().get(&channel_id).cloned()
+                && existing.loading.try_get_untracked().is_some()
+            {
+                return existing;
             }
             let controller = Arc::new(MessagesController::new(channel_id.clone()));
             {

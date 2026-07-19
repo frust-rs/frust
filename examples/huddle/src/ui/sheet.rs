@@ -541,11 +541,15 @@ where
             // gives the cell a tight column width; `Padding` fills it and sizes
             // its height to the glyph, so each cell spans its whole column and
             // stays tappable end-to-end.
-            let cell = GestureDetector(Padding(
-                EdgeInsets::all(EMOJI_CELL_PAD),
-                text(emoji).size(EMOJI_SIZE),
-            ))
-            .on_tap(move |st: &mut State| pick(st, emoji));
+            // press_pop adds the pressed-state scale dip (task 22
+            // micro-interaction); it forwards every event so the tap still fires.
+            let cell = crate::ui::swipeable::press_pop(
+                GestureDetector(Padding(
+                    EdgeInsets::all(EMOJI_CELL_PAD),
+                    text(emoji).size(EMOJI_SIZE),
+                ))
+                .on_tap(move |st: &mut State| pick(st, emoji)),
+            );
             cells.push(flexible(1, any(cell)));
         }
         // Pad a short final row so its cells keep the same column width.

@@ -209,8 +209,15 @@ impl ActivityController {
                 const { RefCell::new(None) };
         }
         INSTANCE.with(|cell| {
-            if let Some(existing) = cell.borrow().as_ref() {
-                return Arc::clone(existing);
+            // Self-heal (task 22 hardening): a cached controller whose `rows`
+            // signal was disposed by a prior owner (reused test thread) returns
+            // `None` from `try_get_untracked` and is rebuilt (load re-kicked)
+            // rather than handed back to panic on the next read — the same guard
+            // `features::messages`'s registry and the screen composer caches carry.
+            if let Some(existing) = cell.borrow().as_ref().cloned()
+                && existing.rows.try_get_untracked().is_some()
+            {
+                return existing;
             }
             let controller = Arc::new(ActivityController::new(mock::activity()));
             {

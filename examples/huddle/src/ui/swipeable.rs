@@ -36,7 +36,7 @@ use forgekit_core::{
     InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase,
     SemanticsCtx, TOUCH_SLOP, View, Widget, any,
 };
-use kurbo::{Point, Size};
+use kurbo::{Affine, Point, Size};
 use peniko::Color;
 
 /// Fraction of the row width the drag must pass, on release, to commit the
@@ -60,6 +60,21 @@ const SETTLE_STOP_PX: f64 = 0.5;
 /// strip (a generic icon stand-in — a real vector glyph is a later polish).
 const MARKER_PX: f64 = 22.0;
 
+/// The affordance glyph painted in a revealed swipe strip. A real Material
+/// icon glyph (`icons::REPLY`) can't be shaped from this facade-only escape-hatch
+/// widget (glyph shaping lives in `forgekit-text`, unreachable from a raw
+/// `forgekit-core` `Widget` — see the module docs), so the reply affordance is a
+/// hand-drawn left-pointing arrow rendered with `stroke_line`, delivering the
+/// "later polish" the base marker's doc comment deferred.
+#[derive(Clone, Copy)]
+pub enum SwipeMarker {
+    /// A plain rounded-square marker — the generic archive/mute default
+    /// (unchanged from the original widget).
+    Square,
+    /// A left-pointing reply arrow — the swipe-to-reply affordance (task 22).
+    Reply,
+}
+
 /// A view-held action callback (erased on build).
 type Callback<State> = Rc<dyn Fn(&mut State)>;
 
@@ -71,6 +86,7 @@ type Erased = Box<dyn FnMut(&mut EventCtx)>;
 /// fired when the swipe commits.
 struct SwipeAction<State: 'static> {
     color: Color,
+    marker: SwipeMarker,
     on_commit: Callback<State>,
 }
 
@@ -97,26 +113,44 @@ pub fn swipeable_row<State: 'static, V: View<State>>(child: V) -> SwipeableRow<S
 impl<State: 'static> SwipeableRow<State> {
     /// Attach the swipe-*right* action (revealed on the left edge). `color` fills
     /// the revealed strip; `on_commit` fires on release past [`COMMIT_FRACTION`].
-    pub fn on_swipe_right<F: Fn(&mut State) + 'static>(
+    /// Uses the generic [`SwipeMarker::Square`] affordance.
+    pub fn on_swipe_right<F: Fn(&mut State) + 'static>(self, color: Color, on_commit: F) -> Self {
+        self.on_swipe_right_marked(color, SwipeMarker::Square, on_commit)
+    }
+
+    /// [`on_swipe_right`](Self::on_swipe_right) with an explicit
+    /// [`SwipeMarker`] — the swipe-to-reply feed rows pass
+    /// [`SwipeMarker::Reply`] (task 22).
+    pub fn on_swipe_right_marked<F: Fn(&mut State) + 'static>(
         mut self,
         color: Color,
+        marker: SwipeMarker,
         on_commit: F,
     ) -> Self {
         self.swipe_right = Some(SwipeAction {
             color,
+            marker,
             on_commit: Rc::new(on_commit),
         });
         self
     }
 
-    /// Attach the swipe-*left* action (revealed on the right edge).
-    pub fn on_swipe_left<F: Fn(&mut State) + 'static>(
+    /// Attach the swipe-*left* action (revealed on the right edge). Uses the
+    /// generic [`SwipeMarker::Square`] affordance.
+    pub fn on_swipe_left<F: Fn(&mut State) + 'static>(self, color: Color, on_commit: F) -> Self {
+        self.on_swipe_left_marked(color, SwipeMarker::Square, on_commit)
+    }
+
+    /// [`on_swipe_left`](Self::on_swipe_left) with an explicit [`SwipeMarker`].
+    pub fn on_swipe_left_marked<F: Fn(&mut State) + 'static>(
         mut self,
         color: Color,
+        marker: SwipeMarker,
         on_commit: F,
     ) -> Self {
         self.swipe_left = Some(SwipeAction {
             color,
+            marker,
             on_commit: Rc::new(on_commit),
         });
         self
@@ -187,9 +221,11 @@ pub struct SwipeableWidget {
     last_anim: Option<FrameTime>,
     /// Swipe-right (left-edge) action: fill color + erased commit callback.
     right_color: Option<Color>,
+    right_marker: SwipeMarker,
     on_swipe_right: Option<Erased>,
     /// Swipe-left (right-edge) action.
     left_color: Option<Color>,
+    left_marker: SwipeMarker,
     on_swipe_left: Option<Erased>,
 }
 
@@ -206,8 +242,10 @@ impl SwipeableWidget {
             settling: false,
             last_anim: None,
             right_color: None,
+            right_marker: SwipeMarker::Square,
             on_swipe_right: None,
             left_color: None,
+            left_marker: SwipeMarker::Square,
             on_swipe_left: None,
         }
     }
@@ -271,21 +309,46 @@ impl SwipeableWidget {
     }
 
     /// Paint one revealed action strip and a centered marker.
-    fn paint_action(scene: &mut dyn PaintScene, strip_origin: Point, strip: Size, color: Color) {
+    fn paint_action(
+        scene: &mut dyn PaintScene,
+        strip_origin: Point,
+        strip: Size,
+        color: Color,
+        marker: SwipeMarker,
+    ) {
         if strip.width <= 0.0 {
             return;
         }
         scene.fill_rect(strip_origin, strip, color);
-        // A generic white marker centered in the strip (a real vector icon is a
-        // later polish — see the module docs).
         let m = MARKER_PX.min(strip.width).min(strip.height);
-        if m > 0.0 {
-            let marker_origin = Point::new(
-                strip_origin.x + (strip.width - m) / 2.0,
-                strip_origin.y + (strip.height - m) / 2.0,
-            );
-            scene.fill_rounded_rect(marker_origin, Size::new(m, m), 4.0, Color::WHITE);
+        if m <= 0.0 {
+            return;
         }
+        let marker_origin = Point::new(
+            strip_origin.x + (strip.width - m) / 2.0,
+            strip_origin.y + (strip.height - m) / 2.0,
+        );
+        match marker {
+            SwipeMarker::Square => {
+                scene.fill_rounded_rect(marker_origin, Size::new(m, m), 4.0, Color::WHITE);
+            }
+            SwipeMarker::Reply => Self::paint_reply_arrow(scene, marker_origin, m),
+        }
+    }
+
+    /// A hand-drawn, left-pointing reply arrow inside the `m`×`m` marker box —
+    /// the swipe-to-reply affordance (a real `icons::REPLY` glyph can't be
+    /// shaped here, see [`SwipeMarker`]).
+    fn paint_reply_arrow(scene: &mut dyn PaintScene, o: Point, m: f64) {
+        let cy = o.y + m / 2.0;
+        let tip = Point::new(o.x + m * 0.22, cy);
+        let tail = Point::new(o.x + m * 0.82, cy);
+        let head = m * 0.24;
+        let w = (m * 0.09).max(1.5);
+        // Shaft, then the two arrowhead barbs meeting at the tip.
+        scene.stroke_line(tip, tail, w, Color::WHITE);
+        scene.stroke_line(tip, Point::new(tip.x + head, tip.y - head), w, Color::WHITE);
+        scene.stroke_line(tip, Point::new(tip.x + head, tip.y + head), w, Color::WHITE);
     }
 }
 
@@ -295,8 +358,16 @@ impl<State: 'static> View<State> for SwipeableRow<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> SwipeableWidget {
         let mut widget = SwipeableWidget::new(build_child(&self.child, ctx));
         widget.right_color = self.swipe_right.as_ref().map(|a| a.color);
+        widget.right_marker = self
+            .swipe_right
+            .as_ref()
+            .map_or(SwipeMarker::Square, |a| a.marker);
         widget.on_swipe_right = self.swipe_right.as_ref().map(|a| erase(&a.on_commit));
         widget.left_color = self.swipe_left.as_ref().map(|a| a.color);
+        widget.left_marker = self
+            .swipe_left
+            .as_ref()
+            .map_or(SwipeMarker::Square, |a| a.marker);
         widget.on_swipe_left = self.swipe_left.as_ref().map(|a| erase(&a.on_commit));
         widget
     }
@@ -309,8 +380,16 @@ impl<State: 'static> View<State> for SwipeableRow<State> {
     ) -> ChangeFlags {
         // Closures aren't comparable — reinstall the erased adapters and colors.
         element.right_color = self.swipe_right.as_ref().map(|a| a.color);
+        element.right_marker = self
+            .swipe_right
+            .as_ref()
+            .map_or(SwipeMarker::Square, |a| a.marker);
         element.on_swipe_right = self.swipe_right.as_ref().map(|a| erase(&a.on_commit));
         element.left_color = self.swipe_left.as_ref().map(|a| a.color);
+        element.left_marker = self
+            .swipe_left
+            .as_ref()
+            .map_or(SwipeMarker::Square, |a| a.marker);
         element.on_swipe_left = self.swipe_left.as_ref().map(|a| erase(&a.on_commit));
         rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
@@ -346,13 +425,19 @@ impl Widget for SwipeableWidget {
             && let Some(color) = self.right_color
         {
             let strip = Size::new(self.offset.min(size.width), size.height);
-            Self::paint_action(scene, origin, strip, color);
+            Self::paint_action(scene, origin, strip, color, self.right_marker);
         } else if self.offset < 0.0
             && let Some(color) = self.left_color
         {
             let w = (-self.offset).min(size.width);
             let strip_origin = Point::new(origin.x + size.width - w, origin.y);
-            Self::paint_action(scene, strip_origin, Size::new(w, size.height), color);
+            Self::paint_action(
+                scene,
+                strip_origin,
+                Size::new(w, size.height),
+                color,
+                self.left_marker,
+            );
         }
 
         self.sync_child_origin();
@@ -447,6 +532,127 @@ impl Widget for SwipeableWidget {
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         // Transparent container: contribute no node of its own, just recurse.
+        self.child.semantics_child(ctx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// press_pop — pressed-state scale-dip micro-interaction (task 22)
+// ---------------------------------------------------------------------------
+
+/// The scale a pressed child dips to — a subtle ~0.92 "pop" (spec-less tactile
+/// feedback value). **Community-approximate**: no published constant; the
+/// small-dip figure most Material/iOS button-press reimplementations converge on.
+const PRESS_SCALE: f64 = 0.92;
+
+/// A transparent wrapper that scales its child down to [`PRESS_SCALE`] about its
+/// center while the pointer is pressed on it, then springs back on release — the
+/// composer send button / emoji-cell micro-interaction (task 22).
+///
+/// It never captures the pointer or consumes an event: it forwards every phase
+/// to the child (so the wrapped [`GestureDetector`](forgekit::GestureDetector)'s
+/// own tap still fires, and its capture propagates up unchanged — see
+/// `docs/ARCHITECTURE.md`'s Event pipeline), reading the `Down`/`Up`/`Cancel`
+/// phases only to toggle the pressed visual. The dip is applied with
+/// `PaintScene::push_transform` (the one seam carrying scale, not just a
+/// translation), the same escape-hatch capability `hero` morphs paint through.
+pub struct PressPop<State: 'static> {
+    child: AnyView<State>,
+}
+
+/// Wrap `child` so a press scales it to [`PRESS_SCALE`] and a release restores it.
+pub fn press_pop<State: 'static, V: View<State>>(child: V) -> PressPop<State> {
+    PressPop { child: any(child) }
+}
+
+/// The retained widget for a [`PressPop`].
+pub struct PressPopWidget {
+    child: ChildPod,
+    size: Size,
+    pressed: bool,
+}
+
+impl PressPopWidget {
+    fn new(child: ChildPod) -> Self {
+        Self {
+            child,
+            size: Size::ZERO,
+            pressed: false,
+        }
+    }
+}
+
+impl<State: 'static> View<State> for PressPop<State> {
+    type Element = PressPopWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> PressPopWidget {
+        PressPopWidget::new(build_child(&self.child, ctx))
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut PressPopWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+    }
+
+    fn teardown(&self, element: &mut PressPopWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.child, &mut element.child, ctx);
+    }
+}
+
+impl Widget for PressPopWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.child.layout_child(ctx, bc);
+        self.size = size;
+        self.child.set_origin(Point::ZERO);
+        bc.constrain(size)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        if self.pressed {
+            let origin = ctx.origin();
+            let center = Point::new(
+                origin.x + self.size.width / 2.0,
+                origin.y + self.size.height / 2.0,
+            );
+            let transform = Affine::translate(center.to_vec2())
+                * Affine::scale(PRESS_SCALE)
+                * Affine::translate(-center.to_vec2());
+            scene.push_transform(transform);
+            self.child.paint_child(ctx, scene);
+            scene.pop_transform();
+        } else {
+            self.child.paint_child(ctx, scene);
+        }
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        if let InputEvent::Pointer(p) = event {
+            match p.phase {
+                PointerPhase::Down => {
+                    self.pressed = true;
+                    ctx.request_redraw();
+                }
+                // Cancel clears the flag only — never touches state (the
+                // Cancel-clears-flags-only contract, `docs/CODE_STANDARDS.md`).
+                PointerPhase::Up | PointerPhase::Cancel => {
+                    if self.pressed {
+                        self.pressed = false;
+                        ctx.request_redraw();
+                    }
+                }
+                PointerPhase::Move => {}
+            }
+        }
+        // Forward unconditionally so the child's tap fires and its capture
+        // propagates up (this wrapper never captures itself).
+        self.child.event_child(ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
         self.child.semantics_child(ctx);
     }
 }

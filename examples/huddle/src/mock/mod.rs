@@ -12,7 +12,11 @@
 //!
 //! - 10 [`users`] (name, initials, [`UserStatus`]).
 //! - 6 [`channels`], one of them [`Channel::private`].
-//! - 8 [`dms`] (each a 1:1 conversation with a [`User`]).
+//! - 9 [`dms`] (each a 1:1 conversation with a [`User`]) — one of them
+//!   (`dm-9`) deliberately carries no messages, so the channel feed's
+//!   empty-conversation state ("No messages yet — say hi") has a real
+//!   destination (task 22's empty-states audit; the frozen-hub rule is lifted
+//!   for this one addition).
 //! - ~40 [`messages`] spread across the channels (varied: text lengths, a
 //!   link, a file stub, reactions).
 //! - one 120-message channel ([`FIREHOSE_ID`], `#firehose`) for pagination,
@@ -253,7 +257,7 @@ const CHANNELS: [Channel; 6] = [
     },
 ];
 
-const DMS: [Dm; 8] = [
+const DMS: [Dm; 9] = [
     Dm {
         id: "dm-2",
         user_id: 2,
@@ -293,6 +297,13 @@ const DMS: [Dm; 8] = [
         id: "dm-10",
         user_id: 10,
         preview: "Routes converged.",
+    },
+    // An empty DM: no messages in `MESSAGES`, so `messages_for("dm-9")` is
+    // empty and the feed shows its empty-conversation state (task 22).
+    Dm {
+        id: "dm-9",
+        user_id: 9,
+        preview: "No messages yet",
     },
 ];
 
@@ -657,7 +668,7 @@ pub fn channel(id: &str) -> Option<Channel> {
     CHANNELS.iter().copied().find(|c| c.id == id)
 }
 
-/// All 8 direct-message conversations.
+/// All 9 direct-message conversations (one, `dm-9`, carries no messages).
 pub fn dms() -> Vec<Dm> {
     DMS.to_vec()
 }
@@ -733,8 +744,20 @@ mod tests {
             1,
             "exactly one private channel",
         );
-        assert_eq!(dms().len(), 8, "8 DMs");
+        assert_eq!(dms().len(), 9, "9 DMs (one an empty DM — task 22)");
         assert_eq!(messages().len(), 40, "~40 authored messages");
+    }
+
+    #[test]
+    fn dm_9_is_the_empty_conversation() {
+        assert!(
+            dms().iter().any(|d| d.id == "dm-9"),
+            "dm-9 is in the roster"
+        );
+        assert!(
+            messages_for("dm-9").is_empty(),
+            "dm-9 carries no messages (drives the empty-feed state — task 22)"
+        );
     }
 
     #[test]

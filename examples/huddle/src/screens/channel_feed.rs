@@ -61,21 +61,27 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use forgekit::{
-    AnyView, Axis, CrossAxisAlignment, DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get,
-    GetUntracked, MainAxisAlignment, NavigatorController, Padding, RwSignal, ScrollInfo, Set,
-    SizedBox, Stack, Theme, Update, any, app_bar, assist_chip, cupertino_activity_indicator,
-    elevated_card, filled_card, filter_chip, flexible, icon, icons, inflexible, keyed,
-    loading_indicator, outlined_card, scroll_view, text, text_input, use_context,
+    Align, Alignment, AnyView, Axis, CrossAxisAlignment, DesignLanguage, EdgeInsets, FlexView,
+    GestureDetector, Get, GetUntracked, MainAxisAlignment, NavigatorController, Padding, RwSignal,
+    ScrollInfo, Set, SizedBox, Stack, Theme, Update, any, app_bar, assist_chip,
+    cupertino_activity_indicator, elevated_card, filled_card, filter_chip, flexible, hero, icon,
+    icons, inflexible, keyed, loading_indicator, outlined_card, scroll_view, text, text_input,
+    use_context,
 };
+use peniko::Color;
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, MessagesController};
 use crate::mock;
 use crate::ui::sheet::{action_menu, emoji_grid, sheet, sheet_action_row};
+use crate::ui::swipeable::{SwipeMarker, press_pop, swipeable_row};
 
 /// Distance (logical px) from the top of the feed at which the near-start
 /// "load older" trigger fires — the infinite-scroll edge for `#firehose`.
 const NEAR_START_PX: f64 = 96.0;
+
+/// Swipe-to-reply strip accent — a Slack-familiar blue (task 22).
+const REPLY_COLOR: Color = Color::from_rgb8(0x1E, 0x88, 0xE5);
 
 /// Uniform row height for a loading skeleton bar.
 const SKELETON_HEIGHT: f64 = 44.0;
@@ -98,10 +104,19 @@ fn composer_for(channel_id: &str) -> RwSignal<String> {
             RefCell::new(HashMap::new());
     }
     COMPOSERS.with(|cell| {
-        *cell
-            .borrow_mut()
-            .entry(channel_id.to_string())
-            .or_insert_with(|| RwSignal::new(String::new()))
+        // Self-heal (task 22 hardening): the cached signal is owned by whatever
+        // reactive `Owner` was live when it was created; a headless test that
+        // disposes its owner and re-enters (or a reused test thread) leaves a
+        // *disposed* signal here whose next get/set panics. `try_get_untracked`
+        // returning `None` detects that, so we recreate rather than hand it back.
+        if let Some(sig) = cell.borrow().get(channel_id).copied()
+            && sig.try_get_untracked().is_some()
+        {
+            return sig;
+        }
+        let sig = RwSignal::new(String::new());
+        cell.borrow_mut().insert(channel_id.to_string(), sig);
+        sig
     })
 }
 
@@ -140,10 +155,15 @@ fn sheet_for(channel_id: &str) -> RwSignal<FeedSheet> {
             RefCell::new(HashMap::new());
     }
     SHEETS.with(|cell| {
-        *cell
-            .borrow_mut()
-            .entry(channel_id.to_string())
-            .or_insert_with(|| RwSignal::new(FeedSheet::None))
+        // Same disposed-signal self-heal as `composer_for` above (task 22).
+        if let Some(sig) = cell.borrow().get(channel_id).copied()
+            && sig.try_get_untracked().is_some()
+        {
+            return sig;
+        }
+        let sig = RwSignal::new(FeedSheet::None);
+        cell.borrow_mut().insert(channel_id.to_string(), sig);
+        sig
     })
 }
 
@@ -291,6 +311,12 @@ fn feed_body(
     let loading_older = controller.loading_older.get();
     let typing = controller.typing.get();
 
+    // Empty conversation (e.g. a DM with no messages): a real empty state
+    // rather than a blank scroll area (task 22's empty-states audit).
+    if messages.is_empty() && !loading_older && !typing {
+        return empty_feed_state();
+    }
+
     let mut children: Vec<forgekit::FlexChild<HuddleState>> = Vec::new();
 
     if loading_older {
@@ -328,31 +354,50 @@ fn feed_body(
 }
 
 /// One message row: the bubble, aligned right (own) or left (others, with an
-/// avatar), inside horizontal breathing room.
+/// avatar), inside horizontal breathing room. An other-user's row is wrapped in
+/// a swipe-to-reply [`swipeable_row`]: a swipe right reveals the reply
+/// affordance and, on commit, opens the message's thread (`/thread/:id`) —
+/// Slack-familiar (task 22). It composes with the bubble's own long-press + tap
+/// exactly as the Home rows compose swipe + long-press (see
+/// `screens::home`): the swipeable forwards every pointer event to its child
+/// until a horizontal drag crosses the slop, so the bubble's long-press menu and
+/// the avatar/chip taps inside it stay live.
 fn message_row(
     controller: &Arc<MessagesController>,
     msg: &FeedMessage,
     sheet_sig: RwSignal<FeedSheet>,
 ) -> AnyView<HuddleState> {
     let bubble = message_bubble(controller, msg, sheet_sig);
-    let row = if msg.is_own() {
-        FlexView::new(
+    if msg.is_own() {
+        let row = FlexView::new(
             Axis::Horizontal,
             vec![flexible(1, any(SizedBox(None, None))), inflexible(bubble)],
-        )
-    } else {
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(avatar(msg.author_id)),
-                inflexible(any(SizedBox(Some(8.0), None))),
-                inflexible(bubble),
-                flexible(1, any(SizedBox(None, None))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start)
-    };
-    any(Padding(EdgeInsets::symmetric(0.0, 4.0), row))
+        );
+        return any(Padding(EdgeInsets::symmetric(0.0, 4.0), row));
+    }
+
+    let row = FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(avatar(msg.author_id)),
+            inflexible(any(SizedBox(Some(8.0), None))),
+            inflexible(bubble),
+            flexible(1, any(SizedBox(None, None))),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Start);
+
+    // Swipe right → open the thread (starting it if the message has none yet —
+    // the thread screen already handles an empty thread).
+    let root_id = msg.id;
+    let reply = swipeable_row(row).on_swipe_right_marked(
+        REPLY_COLOR,
+        SwipeMarker::Reply,
+        move |st: &mut HuddleState| {
+            st.nav.router().push(&format!("/thread/{root_id}"));
+        },
+    );
+    any(Padding(EdgeInsets::symmetric(0.0, 4.0), reply))
 }
 
 /// The bubble card: author line (others only), body, reaction chips, and the
@@ -512,12 +557,34 @@ fn thread_affordance(msg: &FeedMessage) -> AnyView<HuddleState> {
 
 /// A small avatar carrying the author's initials (the facade exposes no
 /// circular clip to app code, so a `filled_card` stands in for the disc).
+/// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap that opens
+/// the author's profile (`/user/:id`) — completing the "avatar tap anywhere"
+/// matrix row alongside Home/Search/Activity (task 22).
 fn avatar(author_id: u32) -> AnyView<HuddleState> {
     let initials = mock::user(author_id).map(|u| u.initials).unwrap_or("?");
-    any(filled_card(Padding(
+    let tile = filled_card(Padding(
         EdgeInsets::all(8.0),
         text(initials.to_string()).size(12.0),
-    )))
+    ));
+    any(
+        GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
+            move |st: &mut HuddleState| {
+                st.nav.router().push(&format!("/user/{author_id}"));
+            },
+        ),
+    )
+}
+
+/// The empty-conversation state: shown when a channel/DM feed has loaded with no
+/// messages (a DM with no history) instead of a blank scroll area.
+fn empty_feed_state() -> AnyView<HuddleState> {
+    any(Padding(
+        EdgeInsets::all(24.0),
+        Align(
+            Alignment::CENTER,
+            text("No messages yet \u{2014} say hi \u{1F44B}").size(15.0),
+        ),
+    ))
 }
 
 /// The typing indicator row (a self-animating facade spinner + label).
@@ -616,12 +683,13 @@ fn composer_bar(
     let send_ctrl = Arc::clone(controller);
     let send_icon = icon(icons::SEND).size(24.0);
     let send_btn: AnyView<HuddleState> = if has_text {
-        any(
-            forgekit::GestureDetector(send_icon).on_tap(move |_st: &mut HuddleState| {
+        // press_pop adds the pressed-state scale dip (task 22 micro-interaction).
+        any(press_pop(forgekit::GestureDetector(send_icon).on_tap(
+            move |_st: &mut HuddleState| {
                 let text = composer.get_untracked();
                 submit(&send_ctrl, composer, text);
-            }),
-        )
+            },
+        )))
     } else {
         // Empty: the button is inert (no handler), just the glyph.
         any(send_icon)

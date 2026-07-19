@@ -45,7 +45,7 @@
 
 use std::cell::RefCell;
 
-use forgekit::{Get, Memo, RwSignal};
+use forgekit::{Get, GetUntracked, Memo, RwSignal};
 
 use crate::mock;
 
@@ -187,7 +187,25 @@ impl SearchController {
         thread_local! {
             static INSTANCE: RefCell<Option<SearchController>> = const { RefCell::new(None) };
         }
-        INSTANCE.with(|cell| *cell.borrow_mut().get_or_insert_with(SearchController::new))
+        INSTANCE.with(|cell| {
+            // Self-heal (task 22 hardening): the cached controller's `query`
+            // signal (and the `results` `Memo` derived from it) are owned by the
+            // reactive `Owner` live when `new` ran; a headless test that disposes
+            // its owner and re-enters (or a reused test thread) leaves a disposed
+            // controller here whose next `query.get()` panics. Probing `query`
+            // with `try_get_untracked` detects that and recreates — the same
+            // guard `features::messages`'s registry and the screen composer
+            // caches now carry.
+            let cached = *cell.borrow();
+            if let Some(existing) = cached
+                && existing.query.try_get_untracked().is_some()
+            {
+                return existing;
+            }
+            let fresh = SearchController::new();
+            *cell.borrow_mut() = Some(fresh);
+            fresh
+        })
     }
 }
 

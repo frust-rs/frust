@@ -18,16 +18,19 @@
 //! delay is configurable ([`ToastController::with_dismiss_after`]) so the
 //! headless suite can drive a short-lived toast deterministically.
 //!
-//! # Phase C seam
+//! # Entrance animation (task 22)
 //!
-//! The overlay renders each toast as a `filled_card` with its text and an
-//! optional action button (the undo affordance Phase C's swipe actions call
-//! [`show_with_action`](ToastController::show_with_action) for). A slide-in +
-//! spring entrance driven by an `AnimationController` is the intended visual
-//! polish (see the task's item 5); this skeleton ships the load-bearing
-//! controller/queue/overlay seam with a static card and a timer-driven
-//! dismiss, and Phase C layers the entrance animation on top without changing
-//! the [`ToastController`] contract.
+//! Each toast card is wrapped in [`toast_entrance`], a small paint-driven
+//! escape-hatch `View`/`Widget` (built directly on `forgekit-core`, the same
+//! precedent [`crate::ui::sheet`]/[`crate::ui::swipeable`] use) that slides the
+//! card up and fades it in via an [`AnimationController`] — the sheet's
+//! paint-driven-controller pattern, not the drawer's off-screen timer, since a
+//! retained `Widget` here *does* get a per-frame `PaintCtx`/`request_frame` hook.
+//! It changes neither the [`ToastController`] contract nor the auto-dismiss
+//! timer below. **Exit is instant** (a dismissed toast is simply dropped from
+//! the queue): a fade-out would need the overlay to retain a leaving card past
+//! its removal from the signal-backed queue, which the cheap
+//! `retain`-on-a-`Vec` model deliberately doesn't do.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,6 +40,11 @@ use forgekit::{
     Align, Alignment, AnyView, Column, EdgeInsets, Get, GetUntracked, Padding, RwSignal, SizedBox,
     Update, any, filled_card, text,
 };
+use forgekit_core::{
+    AnimationController, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
+};
+use kurbo::{Point, Size};
 
 /// The default auto-dismiss delay (Material snackbar-ish ~3s).
 pub const DEFAULT_DISMISS_AFTER: Duration = Duration::from_secs(3);
@@ -223,11 +231,236 @@ fn toast_card(entry: ToastEntry) -> AnyView<ToastOverlayState> {
         )));
     }
 
-    any(Padding(
+    any(toast_entrance(Padding(
         EdgeInsets::all(8.0),
         filled_card(Padding(
             EdgeInsets::symmetric(16.0, 12.0),
             forgekit::Row(row),
         )),
-    ))
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// Entrance animation (task 22) — a paint-driven slide-up + fade wrapper
+// ---------------------------------------------------------------------------
+
+/// Entrance duration (Material snackbar-ish quick slide).
+const ENTRANCE: Duration = Duration::from_millis(260);
+/// Distance (logical px) the card travels upward into place.
+const ENTRANCE_SLIDE: f64 = 28.0;
+
+/// Wrap `content` so it slides up [`ENTRANCE_SLIDE`] px and fades in over
+/// [`ENTRANCE`] on first appearance — see the [module docs](self)' entrance note.
+pub fn toast_entrance<State: 'static, V: View<State>>(content: V) -> ToastEntrance<State> {
+    ToastEntrance {
+        content: any(content),
+    }
+}
+
+/// A declarative toast entrance wrapper. See [`toast_entrance`].
+pub struct ToastEntrance<State: 'static> {
+    content: AnyView<State>,
+}
+
+/// The retained widget for a [`ToastEntrance`].
+pub struct ToastEntranceWidget {
+    content: ChildPod,
+    entrance: AnimationController,
+    size: Size,
+}
+
+impl ToastEntranceWidget {
+    fn new(content: ChildPod) -> Self {
+        let mut entrance = AnimationController::new(ENTRANCE).with_curve(Curve::EaseOut);
+        entrance.forward();
+        Self {
+            content,
+            entrance,
+            size: Size::ZERO,
+        }
+    }
+}
+
+/// Build a [`ChildPod`] wrapping an [`AnyView`]'s element (mirrors
+/// `crate::ui::sheet`'s crate-private helper, re-derived here).
+fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
+    let element: Box<dyn Widget> = view.build(ctx);
+    ChildPod::new(Box::new(element))
+}
+
+fn rebuild_child<State: 'static>(
+    prev: &AnyView<State>,
+    next: &AnyView<State>,
+    pod: &mut ChildPod,
+    ctx: &mut BuildCtx<'_>,
+) -> ChangeFlags {
+    let element = pod
+        .widget_mut()
+        .downcast_mut::<Box<dyn Widget>>()
+        .expect("toast entrance child element is a boxed AnyView widget");
+    next.rebuild(prev, element, ctx)
+}
+
+fn teardown_child<State: 'static>(
+    view: &AnyView<State>,
+    pod: &mut ChildPod,
+    ctx: &mut BuildCtx<'_>,
+) {
+    if let Some(element) = pod.widget_mut().downcast_mut::<Box<dyn Widget>>() {
+        view.teardown(element, ctx);
+    }
+}
+
+impl<State: 'static> View<State> for ToastEntrance<State> {
+    type Element = ToastEntranceWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> ToastEntranceWidget {
+        ToastEntranceWidget::new(build_child(&self.content, ctx))
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut ToastEntranceWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        rebuild_child(&prev.content, &self.content, &mut element.content, ctx)
+    }
+
+    fn teardown(&self, element: &mut ToastEntranceWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.content, &mut element.content, ctx);
+    }
+}
+
+impl Widget for ToastEntranceWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.content.layout_child(ctx, bc);
+        self.size = size;
+        // Layout size is the settled size; the entrance offset is a paint-time
+        // translation only (it never changes how the toast column stacks).
+        bc.constrain(size)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let animating = self.entrance.advance(ctx.frame_time());
+        let v = self.entrance.value().clamp(0.0, 1.0);
+        let slide = (1.0 - v) * ENTRANCE_SLIDE;
+        self.content.set_origin(Point::new(0.0, slide));
+
+        let origin = ctx.origin();
+        // Fade in with the entrance progress.
+        scene.push_layer(origin, self.size, v as f32);
+        self.content.paint_child(ctx, scene);
+        scene.pop_layer();
+
+        if animating {
+            ctx.request_frame();
+        }
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // Transparent wrapper: forward every event so the toast's own action
+        // button (the undo affordance) stays interactive.
+        self.content.event_child(ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        self.content.semantics_child(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forgekit_core::{FrameTime, RenderRoot};
+    use peniko::Color;
+
+    /// A leaf child painting a fill_rect at its own origin — so the recording
+    /// scene can read the entrance widget's live slide offset off its origin.y.
+    struct Probe;
+    struct ProbeW;
+    impl View<()> for Probe {
+        type Element = ProbeW;
+        fn build(&self, _c: &mut BuildCtx<'_>) -> ProbeW {
+            ProbeW
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut ProbeW, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for ProbeW {
+        fn layout(&mut self, _c: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(120.0, 40.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+    }
+
+    /// Records the child's painted origin.y (the live slide) and the entrance's
+    /// fade layer alpha.
+    #[derive(Default)]
+    struct RecScene {
+        last_fill_y: f64,
+        last_alpha: f32,
+    }
+    impl PaintScene for RecScene {
+        fn fill_rect(&mut self, origin: Point, _size: Size, _color: Color) {
+            self.last_fill_y = origin.y;
+        }
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_layer(&mut self, _origin: Point, _size: Size, alpha: f32) {
+            self.last_alpha = alpha;
+        }
+    }
+
+    /// The entrance slides the card up (its offset shrinks toward 0) and fades it
+    /// in (layer alpha grows toward 1) over [`ENTRANCE`], then settles and stops
+    /// asking for frames.
+    #[test]
+    fn toast_entrance_slides_up_and_fades_in_then_settles() {
+        let mut root: RenderRoot<(), ToastEntrance<()>> = RenderRoot::new();
+        let mut state = ();
+        let mut logic = |_s: &mut ()| toast_entrance(Probe);
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        // Seed the animation clock (first advance is a zero-delta reference).
+        let mut seed = RecScene::default();
+        root.paint(&mut seed, FrameTime::ZERO);
+
+        // Mid-entrance (~80ms of 260ms): still slid down and partially faded.
+        let mut mid = RecScene::default();
+        let mid_out = root.paint(&mut mid, FrameTime::from_nanos(80_000_000));
+        assert!(
+            mid_out.needs_frame,
+            "the entrance is still animating mid-flight"
+        );
+        assert!(
+            mid.last_fill_y > 0.5,
+            "the card is still slid down mid-entrance (offset {})",
+            mid.last_fill_y,
+        );
+        assert!(
+            mid.last_alpha > 0.0 && mid.last_alpha < 0.99,
+            "the card is partway through its fade (alpha {})",
+            mid.last_alpha,
+        );
+
+        // Past the entrance (400ms): settled at its final position, fully opaque,
+        // no longer requesting frames.
+        let mut done = RecScene::default();
+        let done_out = root.paint(&mut done, FrameTime::from_nanos(400_000_000));
+        assert!(!done_out.needs_frame, "the entrance completed");
+        assert!(
+            done.last_fill_y.abs() < 0.5,
+            "the card settled at its final position (offset {})",
+            done.last_fill_y,
+        );
+        assert!(
+            done.last_alpha > 0.99,
+            "the card is fully opaque once settled (alpha {})",
+            done.last_alpha,
+        );
+    }
 }
