@@ -26,6 +26,17 @@
 //! - on a **`Move`** (within slop) arriving after the threshold, so a context
 //!   menu can open the instant the finger jitters even before release.
 //!
+//! The paint timer only runs when an [`on_long_press`](GestureDetectorView::on_long_press)
+//! handler is wired: a **tap-only** detector never marks `elapsed`, so a press
+//! held past the threshold still resolves as an ordinary tap on an in-bounds
+//! release (the fire-on-up-inside contract is independent of hold duration when
+//! there is no long-press to promote it to). Not running the timer for a
+//! tap-only press also skips the pending-timer [`PaintCtx::request_frame`]
+//! calls — a small battery win, since a tap-only hold needs no clock. A
+//! held-past-threshold resolution falls through to `on_tap` whenever
+//! `on_long_press` is absent (e.g. unwired mid-gesture), so a held press never
+//! silently swallows its release.
+//!
 //! Honest limitation: a *true* timer-fires-while-held-perfectly-still gesture
 //! would need an event-pass clock the framework doesn't have. What this lands is
 //! hold-exceeds-threshold semantics, which feels native for context menus. Frame
@@ -163,11 +174,18 @@ impl Widget for GestureDetectorWidget {
         // hold exceeds the threshold, and — while the timer is still pending —
         // request another frame so the dirty-driven desktop shell keeps painting
         // with no input (mobile keeps the FrameGate alive via pointer capture).
-        if let Recognizer::Pressed {
-            press_start,
-            elapsed,
-            ..
-        } = &mut self.state
+        //
+        // Only run the timer when an `on_long_press` handler is wired: a
+        // tap-only detector has no long-press to mark, so it neither flips
+        // `elapsed` (which would otherwise swallow the release, since a held
+        // press resolves as a would-be long-press that fires nothing) nor
+        // request_frame's pointlessly during the hold — a small battery win.
+        if self.on_long_press.is_some()
+            && let Recognizer::Pressed {
+                press_start,
+                elapsed,
+                ..
+            } = &mut self.state
         {
             let start = *press_start.get_or_insert(ctx.frame_time());
             if !*elapsed {
@@ -205,10 +223,16 @@ impl Widget for GestureDetectorWidget {
                             self.state = Recognizer::Dragged; // became a drag; disarms both
                         } else if elapsed {
                             // Threshold already passed and a pointer event arrived:
-                            // fire the long-press now (fire-on-move-arrival).
+                            // fire the long-press now (fire-on-move-arrival). If the
+                            // handler was unwired mid-gesture (rebuild between the
+                            // marking paint and this Move), fall through to on_tap
+                            // so the press still resolves rather than silently dying.
                             self.state = Recognizer::Fired;
                             self.child.event_child(ctx, event);
                             if let Some(cb) = self.on_long_press.as_mut() {
+                                cb(ctx);
+                                ctx.request_redraw();
+                            } else if let Some(cb) = self.on_tap.as_mut() {
                                 cb(ctx);
                                 ctx.request_redraw();
                             }
@@ -227,10 +251,17 @@ impl Widget for GestureDetectorWidget {
                     self.state = Recognizer::Idle;
                     self.child.event_child(ctx, event);
                     self.child.set_active(false);
+                    // A held-past-threshold press prefers on_long_press, but falls
+                    // through to on_tap when no long-press handler is wired — a
+                    // tap-only detector must still fire the tap on an in-bounds
+                    // release (the paint timer never marks `elapsed` for it, but
+                    // stay robust to a handler unwired mid-gesture).
                     if fire_long && let Some(cb) = self.on_long_press.as_mut() {
                         cb(ctx);
                         ctx.request_redraw();
-                    } else if fire_tap && let Some(cb) = self.on_tap.as_mut() {
+                    } else if (fire_tap || fire_long)
+                        && let Some(cb) = self.on_tap.as_mut()
+                    {
                         cb(ctx);
                         ctx.request_redraw();
                     }
@@ -490,5 +521,93 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 12.0, 12.0));
         assert_eq!(state.taps, 1);
         assert_eq!(state.long_presses, 0);
+    }
+
+    // --- Tap-only held-press regression (review A1 / fix F1) -----------------
+    //
+    // The event-only `only_on_tap_still_behaves_as_before` above never paints,
+    // so it never advanced the clock past the threshold and missed the bug: a
+    // tap-only detector held past LONG_PRESS_MS used to mark `elapsed` in paint,
+    // resolve as a would-be long-press with no handler, and fire NOTHING. These
+    // drive the real paint path with an advancing clock (like the both-handlers
+    // tests above) but wire ONLY `on_tap`.
+
+    /// A `RenderRoot` over a `GestureDetector` wired with ONLY `on_tap`.
+    fn tap_only_root() -> RenderRoot<TapState, GestureDetectorView<TapState>> {
+        fn logic(_: &mut TapState) -> GestureDetectorView<TapState> {
+            GestureDetector::<TapState, _>(Blank).on_tap(|s: &mut TapState| s.taps += 1)
+        }
+        let mut root = RenderRoot::new();
+        let mut state = TapState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root
+    }
+
+    #[test]
+    fn tap_only_hold_past_threshold_then_up_still_fires_tap() {
+        // (a) hold past the threshold, release in-bounds → on_tap fires.
+        let mut root = tap_only_root();
+        let mut state = TapState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0)); // records press_start = 0
+        root.paint(&mut sink, ft(600.0)); // 600ms >= 500ms, but no long-press wired
+        root.event(&mut state, &ev(PointerPhase::Up, 11.0, 11.0));
+        assert_eq!(
+            state.taps, 1,
+            "a held press with no on_long_press still taps on release"
+        );
+        assert_eq!(state.long_presses, 0);
+    }
+
+    #[test]
+    fn tap_only_hold_then_within_slop_move_taps_on_release_not_on_move() {
+        // (b) hold past the threshold, a within-slop Move arrives after elapsed →
+        // nothing at the Move; on_tap still fires on release.
+        let mut root = tap_only_root();
+        let mut state = TapState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(600.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 12.0, 11.0));
+        assert_eq!(
+            state.taps, 0,
+            "a tap-only detector fires nothing on the move"
+        );
+        assert_eq!(state.long_presses, 0);
+        root.event(&mut state, &ev(PointerPhase::Up, 12.0, 11.0));
+        assert_eq!(state.taps, 1, "the tap fires on the in-bounds release");
+        assert_eq!(state.long_presses, 0);
+    }
+
+    #[test]
+    fn tap_only_press_requests_no_continuation_frames() {
+        // The battery win: a tap-only detector runs no long-press timer, so a
+        // pending press must not keep the dirty-driven shell painting.
+        let mut root = tap_only_root();
+        let mut state = TapState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert!(
+            !root.paint(&mut sink, ft(0.0)).needs_frame,
+            "a tap-only press has no timer, so it requests no continuation frames"
+        );
+    }
+
+    #[test]
+    fn both_handlers_long_press_behavior_unchanged() {
+        // (c) with both handlers wired, a held-past-threshold release is still a
+        // long-press and never also a tap — the fix must not regress this.
+        let mut root = root();
+        let mut state = TapState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(600.0));
+        root.event(&mut state, &ev(PointerPhase::Up, 11.0, 11.0));
+        assert_eq!(state.long_presses, 1, "both wired: hold still long-presses");
+        assert_eq!(state.taps, 0, "both wired: a long-press never also taps");
     }
 }
