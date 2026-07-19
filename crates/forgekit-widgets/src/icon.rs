@@ -496,6 +496,82 @@ mod tests {
 
     // -- semantics ----------------------------------------------------------
 
+    /// Slack allowed on either side of the `0..MATERIAL_DESIGN_BOX` design box
+    /// when checking a generated icon's parsed geometry (review followup,
+    /// huddle-showcase re-review R1's one remaining Major).
+    ///
+    /// `scripts/gen_icons.py`'s `normalize_path_d` renormalizes each glyph's
+    /// coordinates from its source SVG's `viewBox` into the `0..24` box via an
+    /// affine transform, but a handful of upstream Material Symbols exports
+    /// author raw path data that itself extends a little past their own
+    /// declared `viewBox` (optical overshoot at a glyph's rounded tips) — see
+    /// `workflow/plans/features/huddle-showcase/followups/phase-fix-1/TASKS.md`'s
+    /// F2 RESULT note, which independently verified via a Python bbox walker
+    /// that "for 4 icons, a few percent past" the box is genuine upstream
+    /// geometry, not a transform bug. A direct measurement of the 41 icons
+    /// currently vendored in `icons/mod.rs` (this test, run standalone) finds
+    /// zero icons actually bleeding past `0..24` today — every glyph's bbox
+    /// currently lands strictly inside — so this constant is pure headroom:
+    /// wide enough (a "few percent" of 24px is well under 1px) to tolerate a
+    /// future regeneration reintroducing that documented upstream overshoot
+    /// without needing a bump, while still tight enough to catch a real
+    /// transform regression (e.g. a wrong `viewBox` scale/offset putting a
+    /// whole glyph noticeably outside the box).
+    const BBOX_TOLERANCE: f64 = 2.0;
+
+    #[test]
+    fn every_generated_icon_bbox_lands_in_design_box() {
+        let mut max_bleed: f64 = f64::NEG_INFINITY;
+        let mut worst: Option<&str> = None;
+        for source in super::super::icons::ALL {
+            let path = BezPath::from_svg(source.d).unwrap_or_else(|e| {
+                panic!("icon SVG path failed to parse: {e} (d={:?})", source.d)
+            });
+            let bbox = path.bounding_box();
+            let design = source.design;
+            assert!(
+                bbox.x0 >= -BBOX_TOLERANCE
+                    && bbox.y0 >= -BBOX_TOLERANCE
+                    && bbox.x1 <= design + BBOX_TOLERANCE
+                    && bbox.y1 <= design + BBOX_TOLERANCE,
+                "icon `{}` bbox ({:.4},{:.4})-({:.4},{:.4}) lands outside the \
+                 {design}x{design} design box beyond the {BBOX_TOLERANCE}px \
+                 tolerance",
+                source.d,
+                bbox.x0,
+                bbox.y0,
+                bbox.x1,
+                bbox.y1
+            );
+            // Non-degenerate check: a zero (or near-zero) scale bug would
+            // collapse every glyph's bbox to a point/sliver.
+            assert!(
+                bbox.width() + bbox.height() > design / 4.0,
+                "icon `{}` bbox ({:.4},{:.4})-({:.4},{:.4}) is degenerately \
+                 small for a {design}x{design} design box — suspect a \
+                 zero-scale bug",
+                source.d,
+                bbox.x0,
+                bbox.y0,
+                bbox.x1,
+                bbox.y1
+            );
+            let bleed = [-bbox.x0, -bbox.y0, bbox.x1 - design, bbox.y1 - design, 0.0]
+                .into_iter()
+                .fold(f64::NEG_INFINITY, f64::max);
+            if bleed > max_bleed {
+                max_bleed = bleed;
+                worst = Some(source.d);
+            }
+        }
+        // Informational only (not asserted): surfaces the worst observed
+        // bleed when run with `-- --nocapture`, for eyeballing against
+        // BBOX_TOLERANCE's headroom.
+        if let Some(d) = worst {
+            println!("max bbox bleed observed: {max_bleed:.4}px (icon d={d:?})");
+        }
+    }
+
     #[test]
     fn rebuild_adopts_a_new_size_and_flags_layout() {
         let mut counter = 0u64;

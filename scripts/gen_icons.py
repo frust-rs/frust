@@ -396,11 +396,45 @@ def _fmt_f64(value: float) -> str:
     return f"{value:.1f}" if value == int(value) else repr(value)
 
 
+def self_test() -> None:
+    """Cheap, stdlib-only `assert`-based checks for `normalize_path_d`.
+
+    Covers the affine transform against a synthetic `viewBox="0 -960 960 960"`
+    (the current-generation Material Symbols grid this script's whole
+    "Coordinate normalization" docstring section exists for) with known
+    coordinates and hand-verified expected output, plus the SVG-spec
+    "a path's very first moveto is always absolute, even written lowercase"
+    exception `normalize_path_d` implements. Run via `--self-test`; exits
+    non-zero (via `AssertionError`, uncaught) on any failure, so it's a
+    tripwire in the same spirit as this repo's Rust test suite, without a
+    third-party test framework dependency.
+    """
+    vb = (0.0, -960.0, 960.0, 960.0)
+    design = 24.0
+
+    # Plain absolute M/L: scale = 24/960 = 0.025; off_x = 0, off_y = 24.
+    assert normalize_path_d("M0 -960L960 0", vb, design) == "M 0 0 L 24 24"
+
+    # Implicit-relative-first-m: a lowercase leading `m` is still treated as
+    # absolute for its one coordinate pair (no established current point to be
+    # relative to yet); a later relative `l` in the same path stays relative
+    # (scaled, no translation offset).
+    assert normalize_path_d("m480 -480l100 100", vb, design) == "m 12 12 l 2.5 2.5"
+
+    # Absolute H/V (x-only / y-only) plus a bare Z.
+    assert normalize_path_d("M100 -860H900V-100Z", vb, design) == "M 2.5 2.5 H 22.5 V 21.5 Z"
+
+    # No viewBox: passed through unchanged (an older-style export already
+    # authored directly against the design box).
+    assert normalize_path_d("M1 2L3 4", None, design) == "M1 2L3 4"
+
+    print("gen_icons.py self-test: all checks passed")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--src",
-        required=True,
         type=Path,
         help="directory of Material Symbols SVG files",
     )
@@ -421,8 +455,20 @@ def main() -> None:
         action="store_true",
         help="emit every *.svg under --src instead of the fixed starter set",
     )
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run normalize_path_d's built-in assert-based checks and exit "
+        "(no --src needed)",
+    )
     args = ap.parse_args()
 
+    if args.self_test:
+        self_test()
+        return
+
+    if args.src is None:
+        ap.error("--src is required (unless --self-test)")
     if not args.src.is_dir():
         sys.exit(f"error: --src {args.src} is not a directory")
 
