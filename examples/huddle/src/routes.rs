@@ -14,11 +14,15 @@
 use frust::{AnyView, NavigatorController, Route, RouteParams};
 
 use crate::HuddleState;
+use crate::features::channels::presentation::pages::{
+    home as channels_home, workspace_drawer as channels_workspace_drawer,
+};
 use crate::screens;
 
-/// The `/` route (and the navigator's initial page): the Home tab.
+/// The `/` route (and the navigator's initial page): the Home tab (now a
+/// channels-feature page — huddle clean-architecture refactor, task 02).
 pub fn home_page(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
-    screens::home::home_screen(controller)
+    channels_home::home_screen(controller)
 }
 
 /// Build the full route table. `controller` is created *before* this table (so
@@ -71,7 +75,7 @@ pub fn build_routes(controller: NavigatorController<HuddleState>) -> Vec<Route<H
         // Transparent push (top drawer) — see `workspace_drawer`'s transition
         // note; the skeleton routes it through the normal navigator transition.
         Route::new("/workspace-switcher", |_params: &RouteParams| {
-            screens::workspace_drawer::workspace_drawer_screen()
+            channels_workspace_drawer::workspace_drawer_screen()
         }),
     ]
 }

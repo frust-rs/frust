@@ -68,8 +68,9 @@ use clean_signals_frust::use_controller;
 
 use crate::HuddleState;
 use crate::failure::HuddleFailure;
+use crate::features::channels::domain::repositories::ChannelRepository;
 use crate::features::channels::{self, ChannelItem, ChannelsController, DmItem};
-use crate::mock::UserStatus;
+use crate::features::profile::domain::UserStatus;
 use crate::ui::fill_box::fill_box;
 use crate::ui::sheet::{action_menu, sheet, sheet_action_row};
 
@@ -260,8 +261,15 @@ impl frust::Component for HomeScreen {
 
     fn init(&self) -> HomeState {
         let toasts = use_context::<crate::ui::toast::ToastController>().unwrap_or_default();
-        let controller =
-            use_controller::<ChannelsController, HuddleFailure>(ChannelsController::new);
+        // Recover the repository the composition root published under the root
+        // Owner (see `crate::HuddleApp::init`) — the injection seam that reaches
+        // both this page's route-table construction and its in-screen
+        // `nav.push` re-construction (PLAN Design Decision 4).
+        let repo = use_context::<Arc<dyn ChannelRepository + Send + Sync>>()
+            .expect("the composition root provides a ChannelRepository");
+        let controller = use_controller::<ChannelsController, HuddleFailure>(move || {
+            ChannelsController::new(repo)
+        });
 
         // Kick off the initial load on the UI-thread task queue (the canonical
         // clean-signals-frust pattern — `use_interval` reloads the same way;
@@ -272,7 +280,7 @@ impl frust::Component for HomeScreen {
             handle.load().await;
         });
 
-        let logo = ImageSource::decode(include_bytes!("../../assets/logo.png")).ok();
+        let logo = ImageSource::decode(include_bytes!("../../../../../assets/logo.png")).ok();
 
         HomeState {
             controller,
@@ -355,7 +363,7 @@ fn workspace_tile(nav: &NavigatorController<HuddleState>) -> AnyView<HomeState> 
         ]),
     );
     any(GestureDetector(tile).on_tap(move |_s: &mut HomeState| {
-        nav.push(crate::screens::workspace_drawer::workspace_drawer_screen);
+        nav.push(crate::features::channels::presentation::pages::workspace_drawer::workspace_drawer_screen);
     }))
 }
 

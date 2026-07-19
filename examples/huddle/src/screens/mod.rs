@@ -12,7 +12,6 @@
 
 pub mod activity;
 pub mod channel_feed;
-pub mod home;
 pub mod profile;
 pub mod search;
 pub mod settings;
@@ -20,7 +19,6 @@ pub mod settings_about;
 pub mod settings_appearance;
 pub mod settings_notifications;
 pub mod thread;
-pub mod workspace_drawer;
 pub mod you;
 
 use frust::{

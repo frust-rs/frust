@@ -41,6 +41,7 @@ mod screens;
 mod shell;
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use frust::{
     AnyView, Axis, BackHandler, Component, CrossAxisAlignment, DesignLanguage, FlexView,
@@ -49,6 +50,8 @@ use frust::{
     router_with_deep_links, use_context,
 };
 
+use features::channels::data::repositories::StoreChannelRepository;
+use features::channels::domain::repositories::ChannelRepository;
 use shell::Tab;
 use ui::toast::{ToastController, toast_overlay};
 
@@ -88,6 +91,17 @@ impl Component for HuddleApp {
         // Provide the toast handle under the root owner so every screen can
         // raise a toast via `use_context::<ToastController>()` (Phase C seam).
         provide_context(toasts.clone());
+
+        // Composition root (huddle clean-architecture refactor, task 02 / PLAN
+        // Design Decision 4): construct each feature's repository ONCE and
+        // publish it under the root Owner via context — the same mechanism the
+        // `ToastController` above (and `Theme`) use. Pages/controllers recover
+        // it with `use_context` inside `use_controller`, so construction stays
+        // single-site while reaching every construction site of a page (the
+        // route table AND in-screen `nav.push` closures).
+        let channel_repo: Arc<dyn ChannelRepository + Send + Sync> =
+            Arc::new(StoreChannelRepository::new());
+        provide_context(channel_repo);
 
         // The controller is created *before* the route table (so every route's
         // page can push through the same controller the router drives).
