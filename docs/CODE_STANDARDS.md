@@ -329,8 +329,7 @@ Semantics pass):
   `ComponentWidget` retains across rebuilds — reach for an `RwSignal` field
   only when something outside the component's own `build` (a background
   task, a sibling, a nested component) needs to observe a write. Most
-  `Component::State` should be plain structs/enums, not signal-wrapped, the
-  same way `examples/counter`'s nested local-state component works.
+  `Component::State` should be plain structs/enums, not signal-wrapped.
 - **Teardown disposes the component's `Owner`; register cleanup via
   `on_cleanup`, not `Drop`.** `ComponentWidget::teardown` tears down the child
   element, then disposes the owner (running every `on_cleanup` registered
@@ -364,13 +363,14 @@ Semantics pass):
   `Cargo.toml`; every symbol an app needs is already flat-re-exported from
   `forgekit` (see `docs/ARCHITECTURE.md`'s Key Types). **This is the general
   rule for every `examples/*` crate, not just reactive types**: an example's
-  `Cargo.toml` should depend on `forgekit` alone (`examples/navdemo` is the
-  facade-only baseline this is checked against). `examples/gallery`'s
-  hand-rolled raw-`Spring` widget is the one documented exception — a
-  workaround predating `AnimationController`'s overshoot support, now
-  retirable but not yet removed, not a precedent to extend; a new example
-  missing something from the facade should get that gap filled in the
-  facade, not reach around it.
+  `Cargo.toml` should depend on `forgekit` alone. `examples/huddle` — the sole
+  example — mostly holds to this but carries a **documented**
+  `forgekit-core`/`kurbo`/`peniko` escape-hatch dependency (see its
+  `Cargo.toml`'s comment) for the handful of custom app widgets no facade
+  widget covers: `ui/swipeable`'s swipe-to-action row, `ui/sheet`'s modal
+  sheet, and `screens/home`'s avatar-fill/`Shimmer` loading effect. A new
+  example reaching for this escape hatch should first check whether the gap
+  belongs in the facade instead.
 
 ## Theming & Animation Conventions
 

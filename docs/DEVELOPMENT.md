@@ -24,9 +24,9 @@
   macOS hosts only.
 - **clean-signals-rs** cloned as a sibling directory (`../clean-signals-rs`
   next to this checkout), on branch `develop` — needed only to build/test
-  `examples/team-demo`; the root workspace and every other example never
-  need it. See *Version-Pin Policy* for why. Its own verify gate is a
-  conditional step in *Test* below, not part of the unconditional chain.
+  `examples/huddle`, the repo's sole example; the root workspace never needs
+  it. See *Version-Pin Policy* for why. Its own verify gate is a conditional
+  step in *Test* below, not part of the unconditional chain.
 - No Docker, CI config, or `.env` setup exists in this repo yet.
 
 ## Build
@@ -39,7 +39,7 @@ cargo build --workspace --locked
 manifest/lockfile drift is caught (see *Version-Pin Policy*).
 
 **Dev-profile shader-stack overrides.** The root `Cargo.toml`,
-`templates/app/Cargo.toml.tmpl`, and `examples/catalog/Cargo.toml` each carry
+`templates/app/Cargo.toml.tmpl`, and `examples/huddle/Cargo.toml` each carry
 a `[profile.dev.package.*]` override (`opt-level = 2`) for the shader/render
 crates (`vello`, `vello_shaders`, `vello_encoding`, `wgpu`, `wgpu-core`,
 `wgpu-hal`, `naga`). Debug-profile (`opt-level = 0`) shader
@@ -51,112 +51,60 @@ profile_sync` is the automated tripwire) — a project scaffolded by
 `forgekit create` inherits the overrides from the template. A separate
 `[profile.dev.package."*"]` wildcard (`opt-level = 1`) widens every other
 non-workspace-member dependency's debug optimization (a named override above
-still wins) and is hand-synced across five manifests: the three above plus
-`examples/team-demo/Cargo.toml` and `examples/inbox/Cargo.toml` (kept for
-consistency, though neither has a shader-stack list of its own).
+still wins) and is hand-synced across the same three manifests (root,
+template, `examples/huddle/Cargo.toml`).
 
-**Release-profile hardening.** `[profile.release]` (root, template, catalog,
-team-demo, inbox) sets `lto = "fat"`, `codegen-units = 1`, `strip =
-"symbols"`, `panic = "abort"`, at the default `opt-level = 3` — chosen over
-`"s"`/`"z"` because a smaller-opt-level win didn't clear a 5% bar once a
-render-stack carve-out protecting encode-path CPU perf was applied (measured
-via `scripts/size-report.sh`, below; see the root `Cargo.toml` comment and
+**Release-profile hardening.** `[profile.release]` (root, template, huddle)
+sets `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic =
+"abort"`, at the default `opt-level = 3` — chosen over `"s"`/`"z"` because a
+smaller-opt-level win didn't clear a 5% bar once a render-stack carve-out
+protecting encode-path CPU perf was applied (measured via
+`scripts/size-report.sh`, below; see the root `Cargo.toml` comment and
 `workflow/plans/features/forgekit-phase-7-performance/research/BASELINE.md`
 for the full A/B).
 
 ## Run
 
 ```bash
-# Desktop preview: opens the example app in a native window.
-cargo run -p hello
-
-# Interactive demo: counter with buttons, a checkbox, a slider, and a
-# scrolling list — exercises the full event pipeline (see
-# docs/ARCHITECTURE.md#data-flow).
-cargo run -p counter
-
-# Text-input/IME/image demo: a notes app (TextInput -> submit into a keyed
-# list, plus an Image) — exercises focus/keyboard/IME routing and keyed
-# reconciliation (see docs/ARCHITECTURE.md#data-flow).
-cargo run -p notes
-
-# Theme/animation demo: a gallery of themed widgets and motion — the manual
-# visual gate for theme-token and anim-controller changes (see
-# docs/ARCHITECTURE.md#data-flow's Theme delivery and Frame pipeline).
-cargo run -p gallery
-
-# Navigation demo: declarative routes, push/pop with results, M3 + iOS page
-# transitions, mouse-drag swipe-back, and a simulate-deep-link button —
-# exercises the nav module end-to-end (see docs/ARCHITECTURE.md#data-flow's
-# Navigation flow and Deep-link flow). The manual visual gate for
-# navigator/transition/router changes: check transition motion, swipe-back,
-# the pop result banner, and the deep-link jump to /item/7.
-cargo run -p navdemo
-
-# Widget catalog demo: the M3/Cupertino widget catalog (AppBar, Card, Chips,
-# Dialog, FAB, ListView/ListItem, NavigationBar, BottomSheet, Switch,
-# progress indicators, plus Cupertino counterparts), with a toolbar toggle
-# swapping design language live via set_app_theme (see
-# docs/ARCHITECTURE.md#data-flow's Theme delivery). Needs a display, like
-# every manual visual gate below — on a headless host, record "catalog
-# visual gate not run — no display" in your completion summary instead and
-# check both design languages on a host with one.
-# `examples/catalog` is a standalone package (its own [workspace] root, own
-# Cargo.lock — see Version-Pin Policy below), excluded from the root
-# workspace, so it is run and gated from its own directory rather than by
-# `-p` from the repo root.
-(cd examples/catalog && cargo run)
-
-# Async/signals demo: an inbox screen whose Component wires a clean-signals
-# ControllerCore (a real async UseCase, with retry) to an RwSignal it renders
-# — exercises the reactive substrate end-to-end (signal write -> wake ->
-# tracked rebuild, see docs/ARCHITECTURE.md#data-flow's Signal-driven wake).
-# `examples/inbox` is a standalone package (its own [workspace] root, own
-# Cargo.lock — see Version-Pin Policy below), excluded from the root
-# workspace, so it is run and gated from its own directory rather than by
-# `-p` from the repo root.
-(cd examples/inbox && cargo run)
-
-# Full-app demo: a team roster screen wiring a clean-signals ControllerCore
-# (load/retry/rename UseCases) to ForgeKit Components via the
-# clean-signals-forgekit glue crate — exercises the same reactive substrate
-# as `inbox` but as a complete app (search/filter, per-row rename, error
-# banner), with an Android build target below. Also a standalone package
-# (own [workspace]/Cargo.lock, excluded from the root workspace — see
-# Version-Pin Policy), so it's run and gated from its own directory. The
-# first live load intentionally fails once and retries (~200ms backoff)
-# before showing rows — expect "Loading team…" for about a second, not a
-# hang.
-(cd examples/team-demo && cargo run)
+# Huddle: the repo's sole example, a Slack-style showcase app (Component
+# tree wiring clean-signals ControllerCores to ForgeKit via the
+# clean-signals-forgekit glue crate) — exercises the framework surface
+# end-to-end. `examples/huddle` is a standalone package (its own
+# [workspace] root, own Cargo.lock — see Version-Pin Policy below),
+# excluded from the root workspace, so it is run and gated from its own
+# directory rather than by `-p` from the repo root.
+(cd examples/huddle && cargo run)
 ```
 
-`cargo run -p hello`/`cargo run -p counter`/`cargo run -p notes`/
-`cargo run -p gallery`/`cargo run -p navdemo`/
-`(cd examples/catalog && cargo run)`/`(cd examples/inbox && cargo run)`/
-`(cd examples/team-demo && cargo run)`
-are the manual visual gates for rendering, interaction, text-input,
-theme/animation, navigation, the M3/Cupertino widget catalog, and
-async/signals changes respectively — there is no automated pixel-diff test
-yet, so a person must look at the window (see *Run* above for `catalog`'s
-no-display fallback).
-`notes` is also the demo `forgekit create` scaffolds
-(`templates/app/src/lib.rs.tmpl`), so scaffold changes should be checked
-against it. `examples/catalog`'s, `examples/inbox`'s, and
-`examples/team-demo`'s own verify gates (`cargo test` plus their clippy
-lines, run from each example's own directory) are their regression proof:
-`catalog`'s and `inbox`'s are unconditional in the Standard verify gate
-below; `team-demo`'s is a separate conditional step gated on the
-clean-signals-rs sibling checkout — see Version-Pin Policy (which covers the
-sibling-checkout requirement) and *Test* below.
+`(cd examples/huddle && cargo run)` is the manual visual gate for
+rendering/interaction/theme/navigation/text-input changes — there is no
+automated pixel-diff test yet, so a person must look at the window. It
+exercises: 4-tab bottom navigation (Home/Search/Activity/You) with M3
+fade-through tab transitions; a channel list → message feed → thread flow
+with hero shared-element transitions, swipe-to-action rows, long-press
+message actions, and attachment/emoji sheets; pull-to-refresh and
+near-start pagination in scrolling lists; multiline composer text input;
+a settings stack with 3 accent themes and dynamic type scaling, each swap
+fading through a themed veil; and toast/undo feedback for destructive
+actions. `examples/huddle`'s own verify gate (`cargo test` plus its clippy
+line, run from its own directory) is a separate conditional step gated on
+the clean-signals-rs sibling checkout — see Version-Pin Policy and *Test*
+below.
 
-`examples/team-demo` additionally builds and runs on Android, from its own
-directory (its own `forgekit.toml`, package `it.f0x.team_demo`):
+`examples/huddle` additionally builds and runs on Android and iOS, from
+its own directory (its own `forgekit.toml`, package `it.f0x.huddle`):
 
 ```bash
-cd examples/team-demo
+cd examples/huddle
 /path/to/forgekit build apk --debug   # debug APK via Gradle + cargo-ndk
 forgekit run -d <device-id>           # build, install, launch, stream logcat
+                                       # (Android device/emulator or iOS Simulator/device)
 ```
+
+The template `forgekit create` scaffolds is its own demo (a notes app,
+`templates/app/src/lib.rs.tmpl`) with no example counterpart to run directly
+in this repo; check scaffold changes via *Template development* below or
+`cargo test -p forgekit-cli --test create_e2e -- --ignored`.
 
 In a generated project, `forgekit run [-d <device>] [--release|--profile]
 [--flavor <name>]` builds and launches on a connected Android
@@ -231,37 +179,28 @@ apk --debug` is unaffected. NDK r27+ already links `.so`s with 16KB-aligned
 cargo build --workspace --locked \
   && cargo test --workspace \
   && cargo clippy --workspace --all-targets -- -D warnings \
-  && cargo fmt --check \
-  && (cd examples/inbox && cargo test) \
-  && (cd examples/inbox && cargo clippy --all-targets -- -D warnings) \
-  && (cd examples/catalog && cargo test) \
-  && (cd examples/catalog && cargo clippy --all-targets -- -D warnings)
+  && cargo fmt --check
 ```
-
-`examples/inbox` and `examples/catalog` gate from their own directories
-rather than `-p` from the repo root because they're standalone workspaces
-excluded from the root one (see *Version-Pin Policy*). `inbox` needs GitHub
-reachability, a bar the unconditional chain can assume everyone satisfies;
-`catalog` needs no sibling checkout or network reachability at all — its
-only dependency is the path dep on `../../crates/forgekit`.
 
 If the clean-signals-rs sibling checkout exists at `../clean-signals-rs`
 (branch `develop` — see Prerequisites and *Version-Pin Policy*),
 additionally run:
 
 ```bash
-(cd examples/team-demo && cargo test) \
-  && (cd examples/team-demo && cargo clippy --all-targets -- -D warnings)
+(cd examples/huddle && cargo test) \
+  && (cd examples/huddle && cargo clippy --all-targets -- -D warnings)
 ```
 
-No sibling checkout? Do not run these two commands — record "team-demo gate
-not run — no clean-signals-rs sibling checkout" in your completion summary
-instead, and do not touch `examples/team-demo` without the sibling in place.
-There is no CI for this repo, so this doc is the only enforcement; if CI is
-ever introduced, whether it provisions the sibling must be decided
-explicitly. Neither example's gate is part of `forgekit build apk`/`run`'s
-Android pipeline gate, which is verified separately (see *Run*) rather than
-in this chain.
+`examples/huddle` gates from its own directory rather than `-p` from the
+repo root because it's a standalone workspace excluded from the root one
+(see *Version-Pin Policy*). No sibling checkout? Do not run these two
+commands — record "huddle gate not run — no clean-signals-rs sibling
+checkout" in your completion summary instead, and do not touch
+`examples/huddle` without the sibling in place. There is no CI for this
+repo, so this doc is the only enforcement; if CI is ever introduced,
+whether it provisions the sibling must be decided explicitly. This gate is
+not part of `forgekit build apk`/`run`'s Android/iOS pipeline gate, which is
+verified separately (see *Run*) rather than in this chain.
 
 The `cpu-tier` feature (experimental `vello_cpu` render backend, non-default
 — see *Version-Pin Policy*) is headless and needs no GPU, but isn't compiled
@@ -354,7 +293,9 @@ directly to change the scheme after the fact.
 `forgekit create` embeds `templates/app/` into the binary at compile time.
 To iterate on template files without rebuilding the embedded copy, pass the
 hidden, development-only `--template-dir <path>` flag to point at a
-filesystem copy of the template tree instead.
+filesystem copy of the template tree instead. Every scaffold also gets a
+default launcher icon set (Android mipmap densities, iOS `AppIcon.appiconset`)
+rendered from the template tree alongside the app code.
 
 ## Instrumentation
 
@@ -365,11 +306,11 @@ filesystem copy of the template tree instead.
 | `FORGEKIT_LOG` | Desktop-only stderr log level override (`forgekit-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. | `info` |
 | `FORGEKIT_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`) — see *Run* above. | adapter-probed |
 
-`FORGEKIT_TRACE=1 cargo run -p counter` prints one `forgekit-perf startup
-...` line, then periodic `forgekit-perf frame ...` summaries while
-interacting with the window.
+`FORGEKIT_TRACE=1 (cd examples/huddle && cargo run)` prints one
+`forgekit-perf startup ...` line, then periodic `forgekit-perf frame ...`
+summaries while interacting with the window.
 
-`scripts/size-report.sh [--app <dir>]` (default `examples/team-demo`) builds
+`scripts/size-report.sh [--app <dir>]` (default `examples/huddle`) builds
 the arm64-v8a release `.so` via `cargo ndk`, reports its unstripped/stripped
 size (auto-discovering the NDK's `llvm-strip`), an APK/AAB per-ABI `.so` +
 dex breakdown when Gradle output already exists (no Gradle build
@@ -412,41 +353,26 @@ deliberately, not floating:
   non-default `cpu-tier` feature) is pinned exact — pre-1.0 with an unstable
   API, isolated behind the `SceneSink` encode seam so a breaking bump never
   reaches the default GPU path. See *Test* below for its tripwire command.
-- `examples/inbox` is a **standalone package** (its own `[workspace]` root
+- `examples/huddle` is a **standalone package** (its own `[workspace]` root
   and `Cargo.lock`, `exclude`d from the root `[workspace]` in the root
-  `Cargo.toml`) specifically so its `git`+`rev`-pinned `clean-signals`
-  dependency never enters the root workspace graph/lockfile — the root
-  workspace stays registry-only, and the standard verify gate
-  (`cargo build --workspace --locked && ...`) never needs GitHub
-  reachability. `clean-signals` is never a framework-crate dependency, and
-  its rev pin is never floated to a branch/tag. Because it's outside the
-  root workspace, `examples/inbox/Cargo.toml` cannot use
-  `{ workspace = true }` — every dependency (including the pins shared with
-  the root workspace, like `reactive_graph`/`kurbo`/`peniko`) is a literal
-  spec kept in sync by hand with the root manifest's
-  `[workspace.dependencies]`. Gate it from its own directory:
-  `cd examples/inbox && cargo test` (2 async tests) and
-  `cd examples/inbox && cargo clippy --all-targets -- -D warnings`.
-- `examples/catalog` is also a standalone package (own `[workspace]`/
-  `Cargo.lock`, excluded from the root workspace), not for a git-pinned
-  dependency but because the `forgekit run`/`build` device pipeline needs a
-  project-local `target/` dir. Gate it from its own directory the same way
-  as `inbox`: `cd examples/catalog && cargo test` and
-  `cd examples/catalog && cargo clippy --all-targets -- -D warnings`.
-- `examples/team-demo` is the same standalone-package pattern as `inbox`,
-  but with a stricter dependency shape: `clean-signals` AND
-  `clean-signals-forgekit` are both path dependencies to a **sibling
-  checkout** at `../../../clean-signals-rs` (relative to the example, i.e.
-  next to the `forgekit` checkout) on its `develop` branch — neither crate
-  is git+rev-pinned yet. Both must resolve `clean-signals` the same way
-  (both by path); if one used `git`+`rev` while the other used `path`, Cargo
-  would build two distinct `clean-signals` crate identities and the
-  controller/glue types (`AsyncState`, `ControllerCore`, `use_controller`,
-  `async_view`) would fail to unify. Swap both to `git`+`rev` together, never
-  one at a time, once `clean-signals` gains a remote. Gate it from its own
-  directory the same way as `inbox`:
-  `cd examples/team-demo && cargo test` (headless UI tests + ported unit
-  tests) and `cd examples/team-demo && cargo clippy --all-targets -- -D
+  `Cargo.toml`) for two independent reasons: (1) its `clean-signals` and
+  `clean-signals-forgekit` dependencies are both path dependencies to a
+  **sibling checkout** at `../../../clean-signals-rs` (relative to the
+  example, i.e. next to the `forgekit` checkout) on its `develop` branch —
+  neither crate is git+rev-pinned yet, and both must resolve `clean-signals`
+  the same way (both by path); if one used `git`+`rev` while the other used
+  `path`, Cargo would build two distinct `clean-signals` crate identities and
+  the controller/glue types (`AsyncState`, `ControllerCore`, `use_controller`,
+  `async_view`) would fail to unify — swap both to `git`+`rev` together,
+  never one at a time, once `clean-signals` gains a remote; (2) its generated
+  Android and iOS projects (`forgekit run`/`build` install targets) need a
+  project-local `target/` dir. Because it's outside the root workspace,
+  `examples/huddle/Cargo.toml` cannot use `{ workspace = true }` — every
+  dependency (including the pins shared with the root workspace, like
+  `reactive_graph`/`kurbo`/`peniko`) is a literal spec kept in sync by hand
+  with the root manifest's `[workspace.dependencies]`. Gate it from its own
+  directory: `cd examples/huddle && cargo test` (headless UI tests + ported
+  unit tests) and `cd examples/huddle && cargo clippy --all-targets -- -D
   warnings`.
 - **Never run a blind `cargo update`.** If a manifest changes any pinned
   dependency, run `cargo generate-lockfile` and then confirm
