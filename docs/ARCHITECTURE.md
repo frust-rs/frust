@@ -26,6 +26,9 @@ consumed by app code via the `frust` facade crate, and example apps under
 | `frust-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `frust_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `frust-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. |
 | `frust` | Facade crate: the public app-author API — the canonical `Component`/`app!`/`run` entry surface (spec §5.5), plus `App`/`View`/the widget vocabulary as the lower-level layer `app!` desugars to — composing the crates above into the spec's declarative call shape. Depends on `frust-shell-android`, `frust-shell-ios`, and `frust-reactive` unconditionally, and on `frust-shell-desktop` only for non-Android targets; `run`/`App::run` (the desktop preview loop) are likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
 | `frust-cli` | Standalone `frust` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `frust run`/`build`/`clean` drive pipelines for both platforms (Android via Gradle/cargo-ndk, iOS via xcodebuild/devicectl). Depends on none of the framework crates above. |
+| `frust-plugin` | Leaf plugin substrate (like `frust-reactive`): publishes the Android `(JavaVM, application Context)` handles a plugin needs to reach the OS through FFI, stored in `ndk-context`'s process-wide slot — the shell writes them (`nativeInitPlatform`), a plugin reads them back via `android::with_jni_env` (a scoped JNI attach) — see Data Flow's Plugin flow. No `frust-*` dependencies; inert (a stub always reporting `NotInitialized`) on non-Android targets so it stays an unconditional plugin dependency. On Apple there is nothing to publish — the ObjC runtime is globally reachable via `objc2`. |
+| `frust-shared-preferences` (`plugins/shared-preferences`) | The first **platform plugin**: a synchronous, thread-safe key-value store (`bool`/`i64`/`f64`/`String`/`Vec<String>`) behind one `SharedPreferences` API, routed by `#[cfg(target_os)]` to three backends — `apple` (`NSUserDefaults` via `objc2`, also serving macOS desktop preview), `android` (`Context.getSharedPreferences` via `frust-plugin`), `file` (a JSON file on Linux/Windows). Depends on `frust-plugin` plus FFI crates only, never on a `frust-*` framework crate. |
+| `clean-signals-frust` (`plugins/clean-signals-frust`) | The first **facade-tier plugin**: a glue crate binding the (separately published) `clean-signals` clean-architecture core to Frust — nothing more than a crate depending on `frust`, sitting above the whole framework graph. A standalone workspace excluded from the root Cargo workspace (like `examples/huddle`), since its `clean-signals` dependency is a sibling-checkout path dep until `clean-signals` publishes to crates.io (see `docs/DEVELOPMENT.md`). |
 
 ## Layer Dependencies
 
@@ -44,7 +47,21 @@ frust-shell-ios     = core + scene + render + text + theme + reactive + shell-co
 frust  = core + widgets + reactive + shell-android (always) + shell-ios (always) + shell-desktop (non-Android only)
 
 frust-cli    (independent binary: clap/anyhow/serde/minijinja/include_dir/thiserror only)
+
+frust-plugin  (leaf: no frust-* deps; Android-only jni/ndk-context, target-gated; inert stub elsewhere)
+plugins/*     (beside the facade, never inside it — the facade never depends on or re-exports a plugin)
+    ├── frust-shared-preferences  = frust-plugin + FFI crates only   (platform plugin)
+    └── clean-signals-frust      = frust alone                      (facade plugin)
 ```
+
+**Plugins are a tier beside the facade, not inside it.** `frust-plugin` is
+a leaf by charter: the shell writes platform handles into it, a plugin only
+reads. A **platform plugin** depends on `frust-plugin` plus FFI crates and
+never on a `frust-*` framework crate (keeps it tiny and cycle-free); a
+**facade plugin** depends on `frust` alone and sits above the whole graph.
+Either way the facade never depends on or re-exports a plugin — an app adds
+one directly to its own `Cargo.toml`, the Flutter-pubspec model (see
+`docs/CODE_STANDARDS.md`'s Plugin Conventions).
 
 **`frust-reactive` is a leaf substrate**, consumed by the three shells and
 the `frust` facade — never by `frust-core`/`frust-scene`/
@@ -145,32 +162,22 @@ the catalog's five modal/menu widgets.
 
 **Signal-driven wake:** a write to a tracked signal fires the process-wide
 `FrameWaker` (`frust-reactive`; coalesced — N writes between tracked
-rebuilds produce one wake); every `spawn_local` task wake — including a
-re-wake arriving from a background thread, e.g. a tokio timer completing —
-fires the same `FrameWaker` through the executor's composite waker, so
-desktop's parked `Wait` loop is woken by timer-driven continuations too, not
-only by signal writes. On desktop the waker sends a
-`ShellUserEvent::SignalsDirty` through the winit `EventLoopProxy`, delivered
-to `ApplicationHandler::user_event`, which pumps the reactive runtime's
-UI-thread local task queue (`ReactiveRuntime::pump_local`, draining any
-`spawn_local` continuations) and requests a redraw if a window exists; the
-next `RedrawRequested` re-tracks from scratch. The mobile shells need no
-`FrameWaker` nudge step — Android's `Choreographer`/iOS's `CADisplayLink`
-already drive a continuous per-frame loop — but both pump local tasks once
-per frame *before* the surface-readiness gate (the
-`SurfacePhase::SurfaceReady` early-return), so work queued while the surface
-isn't ready still drains, and also pump at touch/IME entry points for
-freshness between frames. `ReactiveRuntime::init` is idempotent (a re-init
-swaps the waker, not the runtime) — desktop installs the real proxy waker,
-mobile a no-op waker (the continuous loop needs no nudge). **The set side of
-this contract is a persistent `TrackedScope` each mobile `AppHandle` wraps
-its per-frame rebuild in** (`scope.track(|| app.rebuild())`, mirroring the
-desktop `Frame pipeline` step above): only a rebuild that runs *inside* a
-`TrackedScope` subscribes its signal reads, so only then does a later write
-flip the process-wide `signals_dirty` flag the mobile shells drain once per
-frame as one of the frame gate's inputs (see Frame gate below); a bare
-`with_owner(|| rebuild())` with no scope never sets it, however consistently
-the drain side runs.
+rebuilds produce one wake); every `spawn_local` task wake, including one
+arriving from a background thread (e.g. a tokio timer), fires the same
+`FrameWaker` through the executor's composite waker. On desktop the waker
+sends a `ShellUserEvent::SignalsDirty` through the winit `EventLoopProxy`,
+which pumps the reactive runtime's UI-thread local task queue
+(`ReactiveRuntime::pump_local`) and requests a redraw; the next
+`RedrawRequested` re-tracks from scratch. The mobile shells need no nudge
+step — `Choreographer`/`CADisplayLink` already drive a continuous per-frame
+loop — but both pump local tasks once per frame before the
+surface-readiness gate, and again at touch/IME entry points.
+`ReactiveRuntime::init` is idempotent (a re-init swaps the waker, not the
+runtime). **The set side of this contract is a persistent `TrackedScope`
+each mobile `AppHandle` wraps its per-frame rebuild in**: only a rebuild
+run *inside* a `TrackedScope` subscribes its signal reads, so only then
+does a later write flip the process-wide `signals_dirty` flag the mobile
+shells drain once per frame as a frame-gate input (see Frame gate below).
 
 **Component state boundary:** a `Component` (`frust-core::component`) is a
 `StatefulWidget` analog — retained local state living in the widget tree
@@ -253,57 +260,35 @@ backdrop blur pending a future render-backend upgrade.
 a scroll delta — already translated into **logical**, density-independent
 coordinates by the shell before it crosses into `frust-core`) enters the
 tree through `RenderRoot::event`, which builds a root `EventCtx` over the
-type-erased app state and dispatches to the root widget. Containers
-(`Flex`/`Stack`/`Padding`/`Align`/`ScrollView`, and the interactive widgets'
-own label/track children) own their children directly as `ChildPod`s — a
-`Vec` or named fields, not arena nodes — and route an event down by
-translating it into each child's local space (`ChildPod::event_child`); this
-is a deliberate divergence from the arena-backed `WidgetTree`, which stays
-single-root (arena-backed children, for damage tracking or global a11y
-access, are deferred to a later phase). Capture is **by recorded path, not a
-global registry**: on `Down` a widget calls `EventCtx::capture_pointer`, and
-the enclosing `ChildPod`/`RenderRoot` records it as the active child so
-subsequent moves/releases route straight back, auto-releasing on
-`Up`/`Cancel`; outside this normal flow, a structural container rebuild
-force-releases capture (synthesizing a `Cancel` to a still-armed surviving
-widget) only where identity is actually lost — **preservation is
-stable-prefix/key-matched, not a blanket clear:** positional reconciliation
-clears a captured child's path only at/after the first index whose concrete
-type changed (an unchanged leading prefix keeps its path); keyed
-reconciliation (see Key Types' `ChildKey` row) clears it only for a removed
-or type-swapped child — a key-matched reorder relocates the widget, and its
-recorded path, intact (see `docs/CODE_STANDARDS.md`'s Interaction Semantics
-for the contract this relies on). **Focus is a second recorded path, mirroring capture:**
-`EventCtx::request_focus`/`release_focus` record/clear the focused child the
-same way `capture_pointer` records the active one, and `Key`/`Ime` events
-route down that recorded chain with no hit test — a container just forwards
-to its focused child. A pointer `Down` that lands on a child which doesn't
-(re)claim focus clears the chain (blur-on-outside-tap); a structural rebuild
-clears both the capture and focus paths only for a child whose identity was
-actually lost, per the same stable-prefix/key-matched rule capture uses
-above — a surviving or key-matched-relocated child keeps its recorded focus
-(and IME) path across the rebuild. `RenderRoot`'s cached
-`focus_active`/`ime_state` are not pushed at rebuild time — they self-correct
-on the next event pass instead, and a widget's own focus flag converges the
-same way one paint later via `PaintCtx::has_focus` (see the Frame pipeline). The focused widget's `ImeState` (its current
-`EditingState` plus caret rect) is published through `EventCtx`/`PaintCtx`'s
-`publish_ime_state` (see the Frame pipeline) and surfaced to shells as
+type-erased app state and dispatches to the root widget. Containers own
+their children directly as `ChildPod`s — a `Vec` or named fields, not arena
+nodes — and route an event down by translating it into each child's local
+space (`ChildPod::event_child`); a deliberate divergence from the
+arena-backed `WidgetTree`, which stays single-root. Pointer **capture** and
+**focus** are each a recorded path (not a global registry) that
+`EventCtx::capture_pointer`/`request_focus` set on `Down`/claim and that
+subsequent moves or `Key`/`Ime` events route straight back through with no
+hit test; a structural container rebuild force-releases a path (a
+synthetic `Cancel` for capture, dropped IME state for focus) only for a
+child whose identity was actually lost — a stable-prefix or key-matched
+survivor (see Key Types' `ChildKey` row) keeps its recorded path across the
+rebuild (see `docs/CODE_STANDARDS.md`'s Interaction Semantics). The focused
+widget's `ImeState` (current `EditingState` plus caret rect) is published
+via `EventCtx`/`PaintCtx::publish_ime_state` and surfaced to shells as
 `RenderRoot::ime_state()`/`AppTree::ime_state()`; a platform IME bridge
-pushes a reconciled `EditingState` back in via `AppTree::ime_apply` (see Key
-Types' `EditingState`/`ImeState` row). Interactive widgets hold their view-declared
-callback as an **erased closure** — an `Rc<dyn Fn(&mut State)>` boxed at
-build time into a `Box<dyn FnMut(&mut EventCtx)>` the widget invokes
-directly — mirroring the `&mut dyn Any` erasure `LayoutCtx`'s text context
-uses, so `frust-core` and `frust-widgets` carry no knowledge of the
-concrete app-state type. The pass never rebuilds or repaints: it returns an
-`EventOutcome { handled,
-needs_redraw }`, and the shell runs rebuild→layout→paint afterward only if
-warranted. The desktop shell is **dirty-driven** — `needs_redraw` becomes a
-single `window.request_redraw()`, and `winit`'s `ControlFlow::Wait` keeps
-idle CPU near zero with no pending input or animation — while the
-Android/iOS shells run a **continuous** per-frame loop
-(`Choreographer`/`CADisplayLink`) regardless of the outcome; same `event`
-call, different redraw scheduling.
+pushes a reconciled `EditingState` back via `AppTree::ime_apply` (see Key
+Types' `EditingState`/`ImeState` row). Interactive widgets hold their
+view-declared callback as an **erased closure** (`Rc<dyn Fn(&mut State)>`
+boxed into `Box<dyn FnMut(&mut EventCtx)>`), mirroring the `&mut dyn Any`
+erasure `LayoutCtx`'s text context uses, so `frust-core`/`frust-widgets`
+carry no knowledge of the concrete app-state type. The pass never rebuilds
+or repaints — it returns `EventOutcome { handled, needs_redraw }`, and the
+shell runs rebuild→layout→paint afterward only if warranted. The desktop
+shell is **dirty-driven** (`needs_redraw` becomes one
+`window.request_redraw()`, `winit`'s `ControlFlow::Wait` keeps idle CPU
+near zero) while Android/iOS run a **continuous** per-frame loop
+regardless of the outcome — same `event` call, different redraw
+scheduling.
 
 **Frame gate:** the mobile shells' Choreographer/`CADisplayLink` callbacks
 keep firing every tick; `frust-shell-common::frame_gate`'s `FrameGate`
@@ -332,36 +317,58 @@ the first frame never waits on disk.
 **Android frame pipeline:** the same rebuild/layout/paint pipeline runs
 inside JNI callbacks (`frust-shell-android`) driven by Kotlin's
 `Choreographer`/`SurfaceHolder.Callback` instead of a winit event loop: the
-frame callback consults the frame gate above and, on a `Run`, drives one
-rebuild → (layout iff dirty/first/resized) → paint → render pass per posted
+frame callback consults the frame gate above and, on a `Run`, drives
+rebuild → (layout iff dirty/first/resized) → paint → render per posted
 frame; a touch callback feeds one pointer contact into the same
 `RenderRoot::event` path between frames; surface-changed/destroyed callbacks
 drive the same `SurfaceRenderer` state machine as the desktop shell's
-resize/suspend events (rotation recreates the surface). Native-library load
-backgrounds wgpu instance/adapter/device creation to overlap GPU bring-up
-with the JVM's Activity/Surface setup, joined before creating the surface
-and vello renderer. The full JNI export surface (frame/touch/lifecycle/IME/
-theme/deep-link/accessibility/insets/back) is the `android_app!` row in Key
-Types.
+resize/suspend events (rotation recreates the surface). The full JNI export
+surface (frame/touch/lifecycle/IME/theme/deep-link/accessibility/insets/
+back, plus the plugin `nativeInitPlatform` export — see Plugin flow below)
+is the `android_app!` row in Key Types.
 
-**iOS frame pipeline:** `frust-shell-ios` is driven by the generated
-Swift app instead of an event loop: a UIKit `CADisplayLink` tick calls the
-render-frame export once per frame (the tick's timestamp, in nanoseconds, as
-the pass's `FrameTime`), consulting the same frame gate as Android above
-before running the rebuild→layout→paint→render pass; unlike Android, a `Run`
-still relayouts unconditionally (the intra-frame layout skip isn't wired
-here yet). A resize export (rotation/bounds changes) resizes the existing
-`SurfaceRenderer` surface in place rather than recreating it, since the
-`CAMetalLayer` Swift owns survives the app lifetime; a `SurfaceLost` surface
-recreates itself from the retained layer pointer on the next render/resize
-call. Pause/resume exports (UIKit resign/become-active) gate frame rendering
-into a no-op while backgrounded, since Metal submission from a suspended app
-can get the process killed; a touch-dispatch export feeds one touch contact
-into the same `RenderRoot::event` path. The full C-ABI export surface
-(init/resize/render/touch/lifecycle/IME/theme/deep-link/accessibility/insets)
-mirrors Android's shape and is the `IosAppHandle`/`ios_app!` row in Key
-Types (iOS gets no back export — back is a navigation-bar affordance there,
-see Back flow above).
+**iOS frame pipeline:** `frust-shell-ios` is driven by the generated Swift
+app instead of an event loop: a UIKit `CADisplayLink` tick calls the
+render-frame export once per frame (its timestamp, in nanoseconds, as
+`FrameTime`), consulting the same frame gate as Android before running
+rebuild→layout→paint→render; unlike Android, a `Run` still relayouts
+unconditionally (the intra-frame layout skip isn't wired here yet). A
+resize export resizes the existing `SurfaceRenderer` surface in place (the
+`CAMetalLayer` Swift owns survives the app lifetime); a lost surface
+recreates itself from the retained layer pointer on the next call.
+Pause/resume exports gate frame rendering into a no-op while backgrounded
+(Metal submission from a suspended app can get the process killed); a
+touch-dispatch export feeds the same `RenderRoot::event` path. The full
+C-ABI export surface (init/resize/render/touch/lifecycle/IME/theme/
+deep-link/accessibility/insets) mirrors Android's shape and is the
+`IosAppHandle`/`ios_app!` row in Key Types (iOS gets no back export — back
+is a navigation-bar affordance there, see Back flow below).
+
+**Plugin flow:** a plugin reaches the OS the way any in-process Rust code
+would — through FFI crates directly, with no per-plugin native wrapper and
+no message-channel bridge. On Android, `JNI_OnLoad` captures the process
+`JavaVM`, then the generated Kotlin `FrustSurfaceView` calls the fixed
+`nativeInitPlatform(applicationContext)` export once, `Once`-guarded,
+storing `(JavaVM, Context)` in `ndk-context`'s
+process-wide slot; a plugin later reads them back through
+`frust_plugin::android::with_jni_env`, which reconstructs the `JavaVM`,
+attaches the calling thread for the closure's scope only (detaching on
+return — Frust doesn't own the thread), and hands back a live JNI env plus
+the context. On Apple there is no init step: the ObjC runtime is globally
+reachable via `objc2`. A project scaffolded before this plumbing existed
+just gets `PlatformHandleError::NotInitialized` on first plugin call, never
+a panic (see `docs/DEVELOPMENT.md`'s manual gate).
+
+**Deferred: build-time contribution manifests.** A plugin needing an
+OS-side contribution (an Android manifest entry, a Gradle dependency, an
+Info.plist key) would declare it in a per-platform `frust-plugin.toml`;
+`frust-cli` would discover contributions via `cargo metadata` at
+`run`/`build` preflight and inject them into the generated project through
+anchored marker-comment merges — never a wholesale re-render, since
+generated projects are user-editable (the `local.properties` merge-write
+precedent). **Implemented: no** — deferred until the first plugin that
+actually needs a contribution; `frust-shared-preferences` needs none on any
+platform.
 
 **Navigation flow:** `nav::navigator()`'s retained page stack is driven by
 `NavigatorController`, a cloneable handle that only *records* requested ops
@@ -404,27 +411,20 @@ deep-link source together, keeping `frust-widgets` itself reactive-free)
 dedupes by the last-consumed link and calls `Router::handle_location` on a
 new one.
 
-**Back flow:** a hardware/gesture back press enters through the fixed FFI
-export each mobile shell defines (Android's `nativeOnBackPress`; iOS has no
-equivalent — back is a navigation-bar affordance there), which calls
-`frust_reactive::push_back_press` — the process-wide counter source
-`frust-reactive::back` owns, mirroring `deep_link`'s shape above but
-counting presses rather than carrying a payload. The facade's `BackHandler`
-dedupes by the last-consumed count and pops the attached
-`NavigatorController` when `can_pop()`; `handles_back()` is the second,
-independent answer the shell reads *before* deciding whether to consume a
-press itself (mirroring Flutter's `popRoute`/`setFrameworkHandlesBack`
-pre-registration contract). It has two sources: the polled
-`set_handles_back` flag `BackHandler::track()` refreshes from the navigator's
-stack depth each rebuild — stale by up to one frame, and the fallback — and a
-**live can-pop provider** the `BackHandler` registers (`set_can_pop_provider`,
-a UI-thread-affine slot reading `controller.can_pop()`, unregistered via
-`on_cleanup`), which `handles_back()` consults first. The provider reads the
-navigator's CURRENT depth at press time (after the rebuild's `apply_ops`
-published it), closing the stale-false window where a poppable-stack back
-press could otherwise fall through to activity-finish; the navigator's own
-`len > 1` guard keeps any residual mis-prediction a safe no-op pop rather than
-a wrong navigation.
+**Back flow:** a hardware/gesture back press enters through Android's
+`nativeOnBackPress` export (iOS has no equivalent — back is a
+navigation-bar affordance there) and calls `frust_reactive::push_back_press`,
+the process-wide counter source `frust-reactive::back` owns (mirrors
+`deep_link`'s shape above, counting presses instead of carrying a payload).
+The facade's `BackHandler` dedupes by the last-consumed count and pops the
+attached `NavigatorController` when `can_pop()`. `handles_back()` — read by
+the shell *before* it decides whether to consume a press itself, mirroring
+Flutter's `setFrameworkHandlesBack` pre-registration — prefers a **live
+can-pop provider** (`set_can_pop_provider`, reading the navigator's current
+depth at press time) over a once-per-rebuild `set_handles_back` flag,
+closing the stale-by-one-frame window where a poppable stack could
+otherwise fall through to activity-finish; the navigator's own `len > 1`
+guard makes any residual mis-prediction a safe no-op pop.
 
 **CLI flow:** `Cli` (clap) parses into a `Command`, dispatched to a
 `commands::*` handler. `create` renders the embedded `templates/app/` tree
