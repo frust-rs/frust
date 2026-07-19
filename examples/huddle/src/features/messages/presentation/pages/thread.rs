@@ -56,13 +56,13 @@ use std::sync::Arc;
 use frust::{
     Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView,
     GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar,
-    hero, icon, icons, inflexible, keyed, scroll_view, text, text_input,
+    hero, icon, icons, inflexible, keyed, scroll_view, text, text_input, use_context,
 };
 use kurbo::Size;
 
 use crate::HuddleState;
+use crate::features::messages::domain::repositories::MessageRepository;
 use crate::features::messages::{FeedBody, FeedMessage, FeedReply, MessagesController};
-use crate::mock;
 use crate::screens::placeholder_body;
 use crate::ui::fill_box::{fill_box, filled_box};
 use crate::ui::sheet::{action_menu, emoji_grid, sheet, sheet_action_row};
@@ -178,15 +178,18 @@ pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
     let Some(root_id) = thread_id.parse::<u32>().ok() else {
         return missing_thread_screen(&thread_id);
     };
-    let Some(root_msg) = mock::messages()
+    let repo = use_context::<Arc<dyn MessageRepository + Send + Sync>>()
+        .expect("MessageRepository provided by the composition root");
+    let Some(root_msg) = repo
+        .messages()
         .into_iter()
-        .chain(mock::firehose_messages())
+        .chain(repo.firehose_messages())
         .find(|m| m.id == root_id)
     else {
         return missing_thread_screen(&thread_id);
     };
 
-    let title = thread_title(root_msg.channel_id);
+    let title = thread_title(&repo, root_msg.channel_id);
     let controller = MessagesController::for_channel(root_msg.channel_id);
     let composer = composer_for(root_id);
     let sheet_sig = thread_sheet_for(root_id);
@@ -277,13 +280,14 @@ fn thread_menu_rows(
 
 /// "Thread" plus the channel/DM name, derived from the root message's channel
 /// (mirrors `channel_feed::feed_app_bar`'s channel-vs-DM title derivation).
-fn thread_title(channel_id: &str) -> String {
-    if let Some(ch) = mock::channel(channel_id) {
+fn thread_title(repo: &Arc<dyn MessageRepository + Send + Sync>, channel_id: &str) -> String {
+    if let Some(ch) = repo.channel(channel_id) {
         format!("Thread  \u{b7}  #{}", ch.name)
-    } else if let Some(peer) = mock::dms()
+    } else if let Some(peer) = repo
+        .dms()
         .iter()
         .find(|d| d.id == channel_id)
-        .and_then(|d| mock::user(d.user_id))
+        .and_then(|d| repo.user(d.user_id))
     {
         format!("Thread  \u{b7}  {}", peer.name)
     } else {
@@ -346,7 +350,7 @@ fn thread_content(
         children.push(inflexible(empty_replies_state()));
     } else {
         children.push(inflexible(divider_row(root.reply_count())));
-        children.push(inflexible(reply_list(&root.replies, sheet_sig)));
+        children.push(inflexible(reply_list(controller, &root.replies, sheet_sig)));
     }
 
     let column = FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch);
@@ -356,11 +360,15 @@ fn thread_content(
 /// The keyed reply list — every child keyed by its index (replies are only
 /// ever appended, never reordered/removed, so a stable index is a stable
 /// identity here).
-fn reply_list(replies: &[FeedReply], sheet_sig: RwSignal<ThreadSheet>) -> AnyView<HuddleState> {
+fn reply_list(
+    controller: &Arc<MessagesController>,
+    replies: &[FeedReply],
+    sheet_sig: RwSignal<ThreadSheet>,
+) -> AnyView<HuddleState> {
     let children: Vec<frust::FlexChild<HuddleState>> = replies
         .iter()
         .enumerate()
-        .map(|(idx, reply)| keyed(idx, reply_bubble(reply, sheet_sig)))
+        .map(|(idx, reply)| keyed(idx, reply_bubble(controller, reply, sheet_sig)))
         .collect();
     any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
 }
@@ -376,14 +384,15 @@ fn root_bubble(
     root: &FeedMessage,
     sheet_sig: RwSignal<ThreadSheet>,
 ) -> AnyView<HuddleState> {
-    let author = mock::user(root.author_id)
+    let author = controller
+        .user(root.author_id)
         .map(|u| u.name)
         .unwrap_or("Someone");
 
     let header = any(FlexView::new(
         Axis::Horizontal,
         vec![
-            inflexible(avatar(root.author_id)),
+            inflexible(avatar(controller, root.author_id)),
             inflexible(any(SizedBox(Some(8.0), None))),
             inflexible(any(
                 text(format!("{author}  \u{b7}  {PLACEHOLDER_TIME}")).size(13.0)
@@ -519,8 +528,11 @@ fn reaction_chips(
 /// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap opening
 /// the author's profile (`/user/:id`) — the same "avatar tap anywhere"
 /// contract the feed avatar carries (task 22).
-fn avatar(author_id: u32) -> AnyView<HuddleState> {
-    let initials = mock::user(author_id).map(|u| u.initials).unwrap_or("?");
+fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<HuddleState> {
+    let initials = controller
+        .user(author_id)
+        .map(|u| u.initials)
+        .unwrap_or("?");
     let tile = any(Stack(vec![
         any(fill_box(
             Size::new(AVATAR_SIZE, AVATAR_SIZE),
@@ -569,8 +581,13 @@ fn empty_replies_state() -> AnyView<HuddleState> {
 /// — no `outlined_card` wrapper; the row carries no rounded chrome of its own
 /// any more (a headless test locates a new reply by its glyph runs, not a
 /// rounded-rect count — see `tests/thread.rs`).
-fn reply_bubble(reply: &FeedReply, sheet_sig: RwSignal<ThreadSheet>) -> AnyView<HuddleState> {
-    let author = mock::user(reply.author_id)
+fn reply_bubble(
+    controller: &Arc<MessagesController>,
+    reply: &FeedReply,
+    sheet_sig: RwSignal<ThreadSheet>,
+) -> AnyView<HuddleState> {
+    let author = controller
+        .user(reply.author_id)
         .map(|u| u.name)
         .unwrap_or("Someone");
     let inner = Padding(

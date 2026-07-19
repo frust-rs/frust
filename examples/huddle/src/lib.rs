@@ -52,6 +52,8 @@ use frust::{
 
 use features::channels::data::repositories::StoreChannelRepository;
 use features::channels::domain::repositories::ChannelRepository;
+use features::messages::data::repositories::StoreMessageRepository;
+use features::messages::domain::repositories::MessageRepository;
 use shell::Tab;
 use ui::toast::{ToastController, toast_overlay};
 
@@ -102,6 +104,10 @@ impl Component for HuddleApp {
         let channel_repo: Arc<dyn ChannelRepository + Send + Sync> =
             Arc::new(StoreChannelRepository::new());
         provide_context(channel_repo);
+
+        let message_repo: Arc<dyn MessageRepository + Send + Sync> =
+            Arc::new(StoreMessageRepository::new());
+        provide_context(message_repo);
 
         // The controller is created *before* the route table (so every route's
         // page can push through the same controller the router drives).

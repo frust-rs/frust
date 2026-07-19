@@ -11,7 +11,7 @@
 //! plain not-found scaffold rather than panicking.
 //!
 //! Message pushes into the existing DM channel feed
-//! (`crate::screens::channel_feed`, routed through `/channel/:id`) when one
+//! (`crate::features::messages::presentation::pages::channel_feed`, routed through `/channel/:id`) when one
 //! exists in the mock dataset; Huddle call is deliberately inert (no huddle
 //! feature exists yet) but still shows `Button`'s native pressed feedback.
 //! Both act on `state.nav` directly — `HuddleState`'s own router handle —

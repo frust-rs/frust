@@ -11,14 +11,12 @@
 //! its own [`app_bar`](frust::app_bar) plus a centered body.
 
 pub mod activity;
-pub mod channel_feed;
 pub mod profile;
 pub mod search;
 pub mod settings;
 pub mod settings_about;
 pub mod settings_appearance;
 pub mod settings_notifications;
-pub mod thread;
 pub mod you;
 
 use frust::{

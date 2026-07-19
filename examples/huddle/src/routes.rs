@@ -17,6 +17,9 @@ use crate::HuddleState;
 use crate::features::channels::presentation::pages::{
     home as channels_home, workspace_drawer as channels_workspace_drawer,
 };
+use crate::features::messages::presentation::pages::{
+    channel_feed as messages_channel_feed, thread as messages_thread,
+};
 use crate::screens;
 
 /// The `/` route (and the navigator's initial page): the Home tab (now a
@@ -48,12 +51,12 @@ pub fn build_routes(controller: NavigatorController<HuddleState>) -> Vec<Route<H
             let controller = controller.clone();
             move |params: &RouteParams| {
                 let id = params.get("id").cloned().unwrap_or_default();
-                screens::channel_feed::channel_feed(controller.clone(), id)
+                messages_channel_feed::channel_feed(controller.clone(), id)
             }
         }),
         Route::new("/thread/:id", |params: &RouteParams| {
             let id = params.get("id").cloned().unwrap_or_default();
-            screens::thread::thread_screen(id)
+            messages_thread::thread_screen(id)
         }),
         Route::new("/user/:id", |params: &RouteParams| {
             let id = params.get("id").cloned().unwrap_or_default();

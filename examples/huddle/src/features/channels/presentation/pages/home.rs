@@ -499,7 +499,10 @@ fn channel_row(state: &HomeState, c: &ChannelItem) -> AnyView<HomeState> {
             let feed_nav = nav.clone();
             let feed_id = route_id.clone();
             nav.push(move || {
-                crate::screens::channel_feed::channel_feed(feed_nav.clone(), feed_id.clone())
+                crate::features::messages::presentation::pages::channel_feed::channel_feed(
+                    feed_nav.clone(),
+                    feed_id.clone(),
+                )
             });
         },
     );
@@ -525,7 +528,10 @@ fn dm_row(state: &HomeState, d: &DmItem) -> AnyView<HomeState> {
             let feed_nav = nav.clone();
             let feed_id = route_id.clone();
             nav.push(move || {
-                crate::screens::channel_feed::channel_feed(feed_nav.clone(), feed_id.clone())
+                crate::features::messages::presentation::pages::channel_feed::channel_feed(
+                    feed_nav.clone(),
+                    feed_id.clone(),
+                )
             });
         },
     );

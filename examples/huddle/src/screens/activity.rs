@@ -10,7 +10,7 @@
 //! a row tap needs to reach `state.nav.router().push(..)`
 //! (`docs/ARCHITECTURE.md`'s Component state boundary). Keeping this screen a
 //! **plain** function — the same shape [`crate::screens::search`] and
-//! [`crate::screens::thread`] use, and their documented reasoning — is what
+//! [`thread`](crate::features::messages::presentation::pages::thread) use, and their documented reasoning — is what
 //! lets a row tap push the real `/channel/:id` route directly, instead of
 //! task 14's local in-tab drill-down workaround this task replaces. See
 //! [`crate::features::activity`]'s module docs for the thread-local

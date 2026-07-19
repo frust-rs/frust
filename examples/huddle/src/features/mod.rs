@@ -25,7 +25,8 @@
 //! task per `src/README-phase-c.md`'s "new feature slice" rule):
 //! - [`messages`] — the channel/DM message-feed view model (load / send /
 //!   react / thread-reply / pagination), hosted by
-//!   [`crate::screens::channel_feed`] and consumed later by the thread screen.
+//!   [`channel_feed`](crate::features::messages::presentation::pages::channel_feed)
+//!   and consumed later by the thread screen.
 //! - [`activity`] (Phase C task 14) — the mentions feed's async load +
 //!   mark-all-read controller.
 

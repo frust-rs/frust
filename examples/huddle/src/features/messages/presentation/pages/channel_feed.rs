@@ -8,7 +8,7 @@
 //! screen sources via
 //! [`MessagesController::for_channel`](crate::features::messages::MessagesController::for_channel)
 //! — the shared per-channel-id registry (task 19) that lets a reply composed
-//! in an open [`crate::screens::thread`] update this same screen's rendered
+//! in an open [`thread`](super::thread) update this same screen's rendered
 //! reply count, and vice versa.
 //!
 //! # Why a plain function, not a `Component` (mirrors `screens::thread`)
@@ -73,7 +73,6 @@ use kurbo::Size;
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, MessagesController};
-use crate::mock;
 use crate::ui::fill_box::{fill_box, filled_box};
 use crate::ui::sheet::{action_menu, avoid_keyboard, emoji_grid, sheet, sheet_action_row};
 use crate::ui::swipeable::{SwipeMarker, press_pop, swipeable_row};
@@ -227,7 +226,7 @@ pub fn channel_feed(
         .map(|t| t.design_language)
         .unwrap_or(DesignLanguage::Material3);
 
-    let bar = feed_app_bar(&channel_id, navigator);
+    let bar = feed_app_bar(&controller, &channel_id, navigator);
     let body = feed_body(&controller, design, sheet_sig);
     let composer_row = composer_bar(&controller, composer, sheet_sig);
 
@@ -321,16 +320,18 @@ fn attachment_rows(sheet_sig: RwSignal<FeedSheet>) -> Vec<AnyView<HuddleState>> 
 /// The app bar: a back button, the channel/DM title, and a member-count
 /// subtitle folded into the title (the M3 app bar has one title slot).
 fn feed_app_bar(
+    controller: &Arc<MessagesController>,
     channel_id: &str,
     navigator: NavigatorController<HuddleState>,
 ) -> AnyView<HuddleState> {
-    let title = if let Some(ch) = mock::channel(channel_id) {
-        let members = mock::users().len();
+    let title = if let Some(ch) = controller.channel(channel_id) {
+        let members = controller.users().len();
         format!("#{}  ·  {members} members", ch.name)
-    } else if let Some(peer) = mock::dms()
+    } else if let Some(peer) = controller
+        .dms()
         .iter()
         .find(|d| d.id == channel_id)
-        .and_then(|d| mock::user(d.user_id))
+        .and_then(|d| controller.user(d.user_id))
     {
         format!("{}  ·  {}", peer.name, peer.status.label())
     } else {
@@ -435,7 +436,7 @@ fn message_row(
     let row = FlexView::new(
         Axis::Horizontal,
         vec![
-            inflexible(avatar(msg.author_id)),
+            inflexible(avatar(controller, msg.author_id)),
             inflexible(any(SizedBox(Some(8.0), None))),
             inflexible(bubble),
             flexible(1, any(SizedBox(None, None))),
@@ -469,7 +470,7 @@ fn message_bubble(
     let mut lines: Vec<AnyView<HuddleState>> = Vec::new();
 
     if !msg.is_own()
-        && let Some(user) = mock::user(msg.author_id)
+        && let Some(user) = controller.user(msg.author_id)
     {
         // Sender + timestamp on one line: 13 (a combined meta line between the
         // table's sender-15 and timestamp-12 roles — `Text` has no mixed-run
@@ -636,8 +637,11 @@ fn thread_affordance(msg: &FeedMessage) -> AnyView<HuddleState> {
 /// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap that opens
 /// the author's profile (`/user/:id`) — completing the "avatar tap anywhere"
 /// matrix row alongside Home/Search/Activity (task 22).
-fn avatar(author_id: u32) -> AnyView<HuddleState> {
-    let initials = mock::user(author_id).map(|u| u.initials).unwrap_or("?");
+fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<HuddleState> {
+    let initials = controller
+        .user(author_id)
+        .map(|u| u.initials)
+        .unwrap_or("?");
     let tile = any(Stack(vec![
         any(fill_box(
             Size::new(AVATAR_SIZE, AVATAR_SIZE),
