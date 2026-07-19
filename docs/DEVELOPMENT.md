@@ -23,10 +23,13 @@
   Security → Developer Mode). `frust doctor` checks the Rust targets on
   macOS hosts only.
 - **clean-signals-rs** cloned as a sibling directory (`../clean-signals-rs`
-  next to this checkout), on branch `develop` — needed only to build/test
-  `examples/huddle`, the repo's sole example; the root workspace never needs
-  it. See *Version-Pin Policy* for why. Its own verify gate is a conditional
-  step in *Test* below, not part of the unconditional chain.
+  next to this checkout), on branch `master` — needed only for the
+  `clean-signals` core crate itself, consumed by two in-repo dependents:
+  `examples/huddle` (the repo's sole example) and the `plugins/clean-signals-frust`
+  glue plugin (the glue code itself is in-repo, not sibling). The root
+  workspace never needs it. See *Version-Pin Policy* for why. Both
+  dependents' verify gates are conditional steps in *Test* below, not part
+  of the unconditional chain.
 - No Docker, CI config, or `.env` setup exists in this repo yet.
 
 ## Build
@@ -68,7 +71,7 @@ for the full A/B).
 ```bash
 # Huddle: the repo's sole example, a Slack-style showcase app (Component
 # tree wiring clean-signals ControllerCores to Frust via the
-# clean-signals-forgekit glue crate) — exercises the framework surface
+# clean-signals-frust glue plugin) — exercises the framework surface
 # end-to-end. `examples/huddle` is a standalone package (its own
 # [workspace] root, own Cargo.lock — see Version-Pin Policy below),
 # excluded from the root workspace, so it is run and gated from its own
@@ -79,20 +82,14 @@ for the full A/B).
 `(cd examples/huddle && cargo run)` is the manual visual gate for
 rendering/interaction/theme/navigation/text-input changes — there is no
 automated pixel-diff test yet, so a person must look at the window. It
-exercises: 4-tab bottom navigation (Home/Search/Activity/You) with M3
-fade-through tab transitions; a channel list → message feed → thread flow
-with hero shared-element transitions, swipe-to-action rows, long-press
-message actions, and attachment/emoji sheets; pull-to-refresh and
-near-start pagination in scrolling lists; multiline composer text input;
-a settings stack with 3 accent themes and dynamic type scaling, each swap
-fading through a themed veil; and toast/undo feedback for destructive
-actions. It also doubles as the manual check that a background-thread wake
-(e.g. a channel load's timer-driven completion) renders content with zero
-mouse movement, not only on an input-triggered redraw.
-`examples/huddle`'s own verify gate (`cargo test` plus its clippy
-line, run from its own directory) is a separate conditional step gated on
-the clean-signals-rs sibling checkout — see Version-Pin Policy and *Test*
-below.
+exercises tab navigation with M3 transitions, a channel/feed/thread flow
+with shared-element transitions and swipe/long-press actions,
+pull-to-refresh and pagination, multiline text input, themed settings, and
+toast/undo feedback — plus the check that a background-thread wake (e.g. a
+timer-driven completion) renders content with zero mouse movement, not
+only on an input-triggered redraw. `examples/huddle`'s own verify gate
+(`cargo test` plus clippy, from its own directory) is the conditional step
+in *Test* below, gated on the clean-signals-rs sibling checkout.
 
 `examples/huddle` additionally builds and runs on Android and iOS, from
 its own directory (its own `frust.toml`, package `it.f0x.huddle`):
@@ -186,24 +183,27 @@ cargo build --workspace --locked \
 ```
 
 If the clean-signals-rs sibling checkout exists at `../clean-signals-rs`
-(branch `develop` — see Prerequisites and *Version-Pin Policy*),
+(branch `master` — see Prerequisites and *Version-Pin Policy*),
 additionally run:
 
 ```bash
 (cd examples/huddle && cargo test) \
-  && (cd examples/huddle && cargo clippy --all-targets -- -D warnings)
+  && (cd examples/huddle && cargo clippy --all-targets -- -D warnings) \
+  && (cd plugins/clean-signals-frust && cargo test) \
+  && (cd plugins/clean-signals-frust && cargo clippy --all-targets -- -D warnings)
 ```
 
-`examples/huddle` gates from its own directory rather than `-p` from the
-repo root because it's a standalone workspace excluded from the root one
-(see *Version-Pin Policy*). No sibling checkout? Do not run these two
-commands — record "huddle gate not run — no clean-signals-rs sibling
-checkout" in your completion summary instead, and do not touch
-`examples/huddle` without the sibling in place. There is no CI for this
-repo, so this doc is the only enforcement; if CI is ever introduced,
-whether it provisions the sibling must be decided explicitly. This gate is
-not part of `frust build apk`/`run`'s Android/iOS pipeline gate, which is
-verified separately (see *Run*) rather than in this chain.
+`examples/huddle` and `plugins/clean-signals-frust` each gate from their own
+directory rather than `-p` from the repo root because both are standalone
+workspaces excluded from the root one (see *Version-Pin Policy*). No sibling
+checkout? Do not run these commands — record "huddle/clean-signals-frust
+gate not run — no clean-signals-rs sibling checkout" in your completion
+summary instead, and do not touch either directory without the sibling in
+place. There is no CI for this repo, so this doc is the only enforcement; if
+CI is ever introduced, whether it provisions the sibling must be decided
+explicitly. This gate is not part of `frust build apk`/`run`'s Android/iOS
+pipeline gate, which is verified separately (see *Run*) rather than in this
+chain.
 
 The `cpu-tier` feature (experimental `vello_cpu` render backend, non-default
 — see *Version-Pin Policy*) is headless and needs no GPU, but isn't compiled
@@ -239,10 +239,13 @@ cargo test -p frust-cli --test build_e2e -- --ignored
 # Android compile gate (no device needed): the whole facade graph must
 # compile for the Android target.
 cargo check --target aarch64-linux-android -p frust
+cargo check --target aarch64-linux-android -p frust-plugin
+cargo check --target aarch64-linux-android -p frust-shared-preferences
 
 # iOS compile gate (no device needed; macOS only): the whole facade graph
 # must compile for the iOS Simulator target.
 cargo check --target aarch64-apple-ios-sim -p frust
+cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences
 ```
 
 The iOS compile gate above is also the only check of the `accesskit_ios`
@@ -311,6 +314,29 @@ deep-link gate above, so each is a person-driven check:
 - **Density refresh:** move a running app between displays of different
   density (or a rescaled emulator window) and confirm inset/scale-dependent
   layout rescales rather than sticking to the launch-time density.
+
+### Shared-preferences manual test (desktop + Android + iOS)
+
+A kill-and-relaunch persistence gate for `frust-shared-preferences`
+(`plugins/shared-preferences`), against the scaffolded notes app template
+(`frust create`'s default `lib.rs.tmpl`, which persists its notes list +
+draft through the plugin):
+
+- **Persistence:** add a note (and/or edit the draft), kill the app, relaunch
+  it, and confirm the note/draft survived — on the desktop preview (`cargo
+  run` from a scaffolded project), an installed Android device, and an
+  installed iPhone.
+- **Old-scaffold graceful error:** a project scaffolded *before* the plugin
+  existed (no `nativeInitPlatform` call on Android) must still boot with
+  empty state rather than crash — `SharedPreferences::standard()` surfaces
+  a typed `PrefsError::PlatformNotInitialized` in that case, which the
+  template's load path catches and falls back to defaults for.
+- **macOS storage-location caveat:** the desktop preview is an unbundled
+  binary (no `CFBundleIdentifier`), so its `NSUserDefaults` writes land in
+  the global defaults domain rather than an app-specific plist — a
+  storage-location difference from a bundled iOS/macOS app, not a
+  behavioral one (the plugin's `frust.`-prefixed keys keep it isolated from
+  unrelated global defaults either way).
 
 ### Template development
 
@@ -385,27 +411,32 @@ deliberately, not floating:
   non-default `cpu-tier` feature) is pinned exact — pre-1.0 with an unstable
   API, isolated behind the `SceneSink` encode seam so a breaking bump never
   reaches the default GPU path. See *Test* below for its tripwire command.
-- `examples/huddle` is a **standalone package** (its own `[workspace]` root
-  and `Cargo.lock`, `exclude`d from the root `[workspace]` in the root
-  `Cargo.toml`) for two independent reasons: (1) its `clean-signals` and
-  `clean-signals-forgekit` dependencies are both path dependencies to a
-  **sibling checkout** at `../../../clean-signals-rs` (relative to the
-  example, i.e. next to the `frust` checkout) on its `develop` branch —
-  neither crate is git+rev-pinned yet, and both must resolve `clean-signals`
-  the same way (both by path); if one used `git`+`rev` while the other used
-  `path`, Cargo would build two distinct `clean-signals` crate identities and
-  the controller/glue types (`AsyncState`, `ControllerCore`, `use_controller`,
-  `async_view`) would fail to unify — swap both to `git`+`rev` together,
-  never one at a time, once `clean-signals` gains a remote; (2) its generated
-  Android and iOS projects (`frust run`/`build` install targets) need a
-  project-local `target/` dir. Because it's outside the root workspace,
-  `examples/huddle/Cargo.toml` cannot use `{ workspace = true }` — every
-  dependency (including the pins shared with the root workspace, like
-  `reactive_graph`/`kurbo`/`peniko`) is a literal spec kept in sync by hand
-  with the root manifest's `[workspace.dependencies]`. Gate it from its own
-  directory: `cd examples/huddle && cargo test` (headless UI tests + ported
-  unit tests) and `cd examples/huddle && cargo clippy --all-targets -- -D
-  warnings`.
+- `ndk-context = "0.1"` (`frust-plugin`'s Android platform-handle slot,
+  written by the Android shell's `nativeInitPlatform` and read by every
+  plugin) is pinned to minor; `cargo check --target aarch64-linux-android -p
+  frust-plugin` is the tripwire for a breaking bump. `objc2 = "0.6"` /
+  `objc2-foundation = "0.3"` (the Apple ObjC runtime bridge, consumed by
+  `frust-shared-preferences`'s `NSUserDefaults` backend) are pinned to
+  minor; `cargo check --target aarch64-apple-ios-sim -p
+  frust-shared-preferences` is the tripwire.
+- `examples/huddle` and `plugins/clean-signals-frust` are each a
+  **standalone package** (own `[workspace]` root and `Cargo.lock`,
+  `exclude`d from the root `[workspace]`). Both depend on the
+  `clean-signals` core crate as a path dependency to the same **sibling
+  checkout** at `../../../clean-signals-rs` (relative to each package) on
+  its `master` branch — `clean-signals` is not git+rev-pinned yet, and
+  every in-repo consumer must resolve it the same way (all by path); if one
+  used `git`+`rev` while another used `path`, Cargo would build two
+  distinct `clean-signals` crate identities and the controller/glue types
+  (`AsyncState`, `ControllerCore`, `use_controller`, `async_view`) would
+  fail to unify — swap every consumer to `git`+`rev` together, never one at
+  a time, once `clean-signals` gains a remote. `examples/huddle` is
+  additionally standalone because its generated Android/iOS projects need a
+  project-local `target/` dir. Neither manifest can use `{ workspace = true
+  }` (outside the root workspace) — every dependency, including pins shared
+  with the root workspace, is a literal spec kept in sync by hand. Gate
+  each from its own directory (`cargo test` + `cargo clippy --all-targets
+  -- -D warnings`).
 - **Never run a blind `cargo update`.** If a manifest changes any pinned
   dependency, run `cargo generate-lockfile` and then confirm
   `cargo build --workspace --locked` still succeeds before committing.
