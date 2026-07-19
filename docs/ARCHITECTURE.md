@@ -26,7 +26,7 @@ consumed by app code via the `frust` facade crate, and example apps under
 | `frust-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `frust_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `frust-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. |
 | `frust` | Facade crate: the public app-author API — the canonical `Component`/`app!`/`run` entry surface (spec §5.5), plus `App`/`View`/the widget vocabulary as the lower-level layer `app!` desugars to — composing the crates above into the spec's declarative call shape. Depends on `frust-shell-android`, `frust-shell-ios`, and `frust-reactive` unconditionally, and on `frust-shell-desktop` only for non-Android targets; `run`/`App::run` (the desktop preview loop) are likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
 | `frust-cli` | Standalone `frust` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `frust run`/`build`/`clean` drive pipelines for both platforms (Android via Gradle/cargo-ndk, iOS via xcodebuild/devicectl). Depends on none of the framework crates above. |
-| `frust-plugin` | Leaf plugin substrate (like `frust-reactive`): publishes the Android `(JavaVM, application Context)` handles a plugin needs to reach the OS through FFI, stored in `ndk-context`'s process-wide slot — the shell writes them (`nativeInitPlatform`), a plugin reads them back via `android::with_jni_env` (a scoped JNI attach) — see Data Flow's Plugin flow. No `frust-*` dependencies; inert (a stub always reporting `NotInitialized`) on non-Android targets so it stays an unconditional plugin dependency. On Apple there is nothing to publish — the ObjC runtime is globally reachable via `objc2`. |
+| `frust-plugin` | Leaf plugin substrate (like `frust-reactive`): owns the Android `(JavaVM, application Context)` platform-handle install a plugin needs to reach the OS through FFI — the shell's `nativeInitPlatform` calls `android::initialize` once, which writes the handles into `ndk-context`'s process-wide slot and sets an atomic ready flag; a plugin reads them back via `android::with_jni_env` (a scoped JNI attach), gated on that flag first — see Data Flow's Plugin flow. No `frust-*` dependencies; inert (the flag never sets, so calls always report `NotInitialized`) on non-Android targets so it stays an unconditional plugin dependency. On Apple there is nothing to publish — the ObjC runtime is globally reachable via `objc2`. |
 | `frust-shared-preferences` (`plugins/shared-preferences`) | The first **platform plugin**: a synchronous, thread-safe key-value store (`bool`/`i64`/`f64`/`String`/`Vec<String>`) behind one `SharedPreferences` API, routed by `#[cfg(target_os)]` to three backends — `apple` (`NSUserDefaults` via `objc2`, also serving macOS desktop preview), `android` (`Context.getSharedPreferences` via `frust-plugin`), `file` (a JSON file on Linux/Windows). Depends on `frust-plugin` plus FFI crates only, never on a `frust-*` framework crate. |
 | `clean-signals-frust` (`plugins/clean-signals-frust`) | The first **facade-tier plugin**: a glue crate binding the (separately published) `clean-signals` clean-architecture core to Frust — nothing more than a crate depending on `frust`, sitting above the whole framework graph. A standalone workspace excluded from the root Cargo workspace (like `examples/huddle`), since its `clean-signals` dependency is a sibling-checkout path dep until `clean-signals` publishes to crates.io (see `docs/DEVELOPMENT.md`). |
 
@@ -42,7 +42,7 @@ frust-theme          = peniko + frust-text (+ frust-core, a reverse edge for its
 frust-widgets       = core + scene + text + theme
 frust-shell-common  = core + scene + text + theme             (platform-agnostic; no jni/ndk/winit, no unsafe, reactive-free in shipped deps)
 frust-shell-desktop = core + scene + render + text + theme + winit + reactive    (non-Android integration point)
-frust-shell-android = core + scene + render + text + theme + reactive + shell-common + jni/ndk  (Android integration point; JNI FFI)
+frust-shell-android = core + scene + render + text + theme + reactive + shell-common + jni/ndk + frust-plugin (Android-gated)  (Android integration point; JNI FFI)
 frust-shell-ios     = core + scene + render + text + theme + reactive + shell-common           (iOS integration point; C-ABI FFI)
 frust  = core + widgets + reactive + shell-android (always) + shell-ios (always) + shell-desktop (non-Android only)
 
@@ -55,13 +55,15 @@ plugins/*     (beside the facade, never inside it — the facade never depends o
 ```
 
 **Plugins are a tier beside the facade, not inside it.** `frust-plugin` is
-a leaf by charter: the shell writes platform handles into it, a plugin only
-reads. A **platform plugin** depends on `frust-plugin` plus FFI crates and
-never on a `frust-*` framework crate (keeps it tiny and cycle-free); a
-**facade plugin** depends on `frust` alone and sits above the whole graph.
-Either way the facade never depends on or re-exports a plugin — an app adds
-one directly to its own `Cargo.toml`, the Flutter-pubspec model (see
-`docs/CODE_STANDARDS.md`'s Plugin Conventions).
+a leaf by charter — no outgoing `frust-*` edges — though `frust-shell-android`
+now depends on it (Android-gated) to install platform handles via its
+`initialize` entry; a plugin only reads them back. A **platform plugin**
+depends on `frust-plugin` plus FFI crates and never on a `frust-*` framework
+crate (keeps it tiny and cycle-free); a **facade plugin** depends on `frust`
+alone and sits above the whole graph. Either way the facade never depends on
+or re-exports a plugin — an app adds one directly to its own `Cargo.toml`,
+the Flutter-pubspec model (see `docs/CODE_STANDARDS.md`'s Plugin
+Conventions).
 
 **`frust-reactive` is a leaf substrate**, consumed by the three shells and
 the `frust` facade — never by `frust-core`/`frust-scene`/
@@ -348,10 +350,12 @@ is a navigation-bar affordance there, see Back flow below).
 would — through FFI crates directly, with no per-plugin native wrapper and
 no message-channel bridge. On Android, `JNI_OnLoad` captures the process
 `JavaVM`, then the generated Kotlin `FrustSurfaceView` calls the fixed
-`nativeInitPlatform(applicationContext)` export once, `Once`-guarded,
-storing `(JavaVM, Context)` in `ndk-context`'s
-process-wide slot; a plugin later reads them back through
-`frust_plugin::android::with_jni_env`, which reconstructs the `JavaVM`,
+`nativeInitPlatform(applicationContext)` export once, `Once`-guarded, which
+calls `frust_plugin::android::initialize(vm, ctx)` — frust-plugin writes
+`(JavaVM, Context)` into `ndk-context`'s process-wide slot, then sets an
+atomic ready flag that `with_jni_env` checks first, returning
+`PlatformHandleError::NotInitialized` (no panic machinery touched) before
+`ndk-context` is ever read; once ready it reconstructs the `JavaVM`,
 attaches the calling thread for the closure's scope only (detaching on
 return — Frust doesn't own the thread), and hands back a live JNI env plus
 the context. On Apple there is no init step: the ObjC runtime is globally
