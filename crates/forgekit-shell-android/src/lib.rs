@@ -76,7 +76,7 @@ pub mod __jni {
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (spec §10.1, Makepad `app_main!` precedent).
 ///
-/// Stamps out the fourteen `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
+/// Stamps out the sixteen `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols
 /// the Kotlin `ForgeKitSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
@@ -89,7 +89,11 @@ pub mod __jni {
 /// preference. `nativeOnDeepLink` (task 07) delivers a cold-start/running
 /// platform deep link into the process-wide deep-link source.
 /// `nativeInitAccessibility` (phase 6d, task 04) attaches the accesskit Android
-/// adapter to the host view. `nativeInit` also
+/// adapter to the host view. The two device-parity exports (task 06):
+/// `nativeOnInsetsChanged` delivers the platform window insets (SafeArea), and
+/// `nativeOnBackPress` routes a hardware/gesture back press through the framework
+/// (returning whether it consumed it). `nativeOnSurfaceChanged` also gained a
+/// trailing `density` argument in the same task. `nativeInit` also
 /// initializes the process-wide [`forgekit_reactive::ReactiveRuntime`] (see
 /// [`jni_glue::native_init`]) before the state factory runs, so a `State`'s own
 /// construction may already create signals/controllers.
@@ -143,6 +147,12 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeOnSurfaceChanged`: (re)create or resize the surface.
+        ///
+        /// `density` (task 06) is the display's `displayMetrics.density` for this
+        /// configuration — a **breaking** signature change from the pre-parity
+        /// export (the Kotlin `external` declaration gains the trailing argument
+        /// in the same phase, task 08) so a density-altering config change
+        /// re-sanitizes the stored scale used for layout/paint/insets.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeOnSurfaceChanged<
             'local,
@@ -153,8 +163,11 @@ macro_rules! android_app {
             surface: $crate::__jni::JObject<'local>,
             width: $crate::__jni::jint,
             height: $crate::__jni::jint,
+            density: $crate::__jni::jfloat,
         ) {
-            $crate::jni_glue::native_on_surface_changed(env, handle, surface, width, height)
+            $crate::jni_glue::native_on_surface_changed(
+                env, handle, surface, width, height, density,
+            )
         }
 
         /// JNI `nativeOnSurfaceDestroyed`: tear the surface down.
@@ -318,6 +331,51 @@ macro_rules! android_app {
             view: $crate::__jni::JObject<'local>,
         ) {
             $crate::jni_glue::native_init_accessibility(env, handle, view)
+        }
+
+        /// JNI `nativeOnInsetsChanged`: deliver the platform window insets
+        /// (device px, task 06 — RESEARCH.md "Insets / SafeArea").
+        ///
+        /// The eight `jfloat`s are `view_padding` (`vp_*`: system-bar/cutout
+        /// occlusion) then `view_insets` (`vi_*`: the IME area), each l/t/r/b.
+        /// Kotlin reads them from `WindowInsetsCompat` in a
+        /// `setOnApplyWindowInsetsListener` and forwards them here; the handle
+        /// converts device→logical px and pushes them onto the render root.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeOnInsetsChanged<
+            'local,
+        >(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            vp_l: $crate::__jni::jfloat,
+            vp_t: $crate::__jni::jfloat,
+            vp_r: $crate::__jni::jfloat,
+            vp_b: $crate::__jni::jfloat,
+            vi_l: $crate::__jni::jfloat,
+            vi_t: $crate::__jni::jfloat,
+            vi_r: $crate::__jni::jfloat,
+            vi_b: $crate::__jni::jfloat,
+        ) {
+            $crate::jni_glue::native_on_insets_changed(
+                handle, vp_l, vp_t, vp_r, vp_b, vi_l, vi_t, vi_r, vi_b,
+            )
+        }
+
+        /// JNI `nativeOnBackPress`: the Android back contract (task 06 —
+        /// RESEARCH.md "Android back"). Returns `JNI_TRUE` when the framework
+        /// consumed the press (it will pop on the next rebuild — Kotlin must not
+        /// finish the activity), `JNI_FALSE` when it should fall through to the
+        /// default `OnBackPressedDispatcher` (activity finish). Kotlin calls this
+        /// from an `OnBackPressedCallback` whose `isEnabled` it toggles off the
+        /// framework's advertised `handles_back` answer.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_forgekit_ForgeKitSurfaceView_nativeOnBackPress<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jboolean {
+            $crate::jni_glue::native_on_back_press(handle)
         }
     };
 }

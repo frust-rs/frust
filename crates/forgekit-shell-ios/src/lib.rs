@@ -65,14 +65,15 @@ pub use forgekit_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (spec §10.2, Makepad `app_main!` precedent).
 ///
-/// Stamps out the thirteen `forgekit_*` symbols the generated Swift app declares
+/// Stamps out the fourteen `forgekit_*` symbols the generated Swift app declares
 /// (the seven lifecycle/input exports, the three text-input exports —
 /// `forgekit_ime_apply`, `forgekit_ime_state_json`, `forgekit_string_free` —
 /// `forgekit_set_appearance` (task 08's dark-mode export),
 /// `forgekit_on_deep_link` (task 07's cold-start/running deep-link delivery),
-/// plus `forgekit_init_accessibility` (phase-6d task 05's accesskit adapter
+/// `forgekit_init_accessibility` (phase-6d task 05's accesskit adapter
 /// attach — the one export whose UIView pointer the CAMetalLayer-only
-/// `forgekit_init` cannot supply)), each delegating to the non-generic runtime in
+/// `forgekit_init` cannot supply), plus `forgekit_set_insets` (device-parity
+/// task 06's SafeArea inset delivery)), each delegating to the non-generic runtime in
 /// [`ffi_glue`]. `forgekit_init` constructs the app's erased view tree and returns
 /// an opaque handle; the rest operate on that handle. It also initializes the
 /// process-wide
@@ -247,6 +248,29 @@ macro_rules! ios_app {
         #[unsafe(no_mangle)]
         pub extern "C" fn forgekit_set_appearance(handle: *mut ::core::ffi::c_void, dark: u8) {
             $crate::ffi_glue::set_appearance(handle, dark)
+        }
+
+        /// `forgekit_set_insets`: deliver the platform window insets (task 06 —
+        /// SafeArea). The eight `f32`s are `view_padding` (`vp_*`: from
+        /// `safeAreaInsets`) then `view_insets` (`vi_*`: the keyboard frame),
+        /// each l/t/r/b, in **logical points** (no scale division — the same
+        /// asymmetry `forgekit_dispatch_touch` uses). Swift calls this from
+        /// `safeAreaInsetsDidChange` and the keyboard-frame notifications.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        #[allow(clippy::too_many_arguments)]
+        pub extern "C" fn forgekit_set_insets(
+            handle: *mut ::core::ffi::c_void,
+            vp_l: f32,
+            vp_t: f32,
+            vp_r: f32,
+            vp_b: f32,
+            vi_l: f32,
+            vi_t: f32,
+            vi_r: f32,
+            vi_b: f32,
+        ) {
+            $crate::ffi_glue::set_insets(handle, vp_l, vp_t, vp_r, vp_b, vi_l, vi_t, vi_r, vi_b)
         }
 
         /// `forgekit_on_deep_link`: deliver a platform deep link (cold-start

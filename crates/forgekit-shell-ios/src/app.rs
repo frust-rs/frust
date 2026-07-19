@@ -37,13 +37,14 @@ use forgekit_core::FrameTime;
 use forgekit_core::event::{
     EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerPhase,
 };
+use forgekit_core::insets::WindowInsets;
 use forgekit_reactive::{ReactiveRuntime, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
 use forgekit_shell_common::{
     AppTree, FrameGate, FrameInputs, ThemeOverrideWatcher,
-    effective_brightness_for_platform_change, logical_size, sanitize_scale,
+    effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
 };
 use forgekit_text::TextContext;
 use forgekit_theme::{Brightness, Theme};
@@ -112,6 +113,12 @@ pub struct IosAppHandle {
     /// *while* an override was active (during which `self.theme.brightness`
     /// itself does not move — see `effective_brightness_for_platform_change`).
     platform_brightness: Brightness,
+    /// The last window insets pushed to the render root (device-parity task 06),
+    /// in logical px. Retained so [`Self::set_insets`] skips a no-op push
+    /// (`WindowInsets` is `PartialEq`) — both the relayout and the app-side
+    /// `provide_context` re-provide only fire on a real change. Starts zero until
+    /// Swift's first `forgekit_set_insets` (safe-area / keyboard-frame report).
+    insets: WindowInsets,
     /// The accesskit adapter, attached lazily by `forgekit_init_accessibility`
     /// once Swift has a `ForgeKitView` (UIView) to hand over (phase-6d task 05).
     /// `None` until then — `forgekit_init` only receives the `CAMetalLayer`, which
@@ -211,6 +218,7 @@ impl IosAppHandle {
             theme_override: ThemeOverrideWatcher::new(),
             theme_override_active: false,
             platform_brightness: Brightness::Light,
+            insets: WindowInsets::default(),
             // Attached later, on the first layout, via `forgekit_init_accessibility`
             // once Swift can supply the UIView (see the field doc).
             a11y: None,
@@ -312,6 +320,46 @@ impl IosAppHandle {
         match ReactiveRuntime::get() {
             Some(rt) => rt.with_owner(|| provide_context(theme)),
             None => provide_context(theme),
+        }
+    }
+
+    /// `forgekit_set_insets`: push the platform's per-edge insets onto the render
+    /// root (device-parity task 06). Mirrors the Android shell's `set_insets` but
+    /// with an **identity scale**: UIKit's `safeAreaInsets` and keyboard frame are
+    /// already in **logical points** (the same space `dispatch_touch` passes
+    /// through with no scale division — the documented iOS/Android coordinate
+    /// asymmetry), so this uses `logical_insets(.., 1.0)` rather than dividing by
+    /// the display scale like Android's physical-px path.
+    ///
+    /// `logical` is the eight-value pack [`logical_insets`] expects (`view_padding`
+    /// then `view_insets`, each l/t/r/b — Swift assembles `view_padding` from
+    /// `safeAreaInsets` and `view_insets` from the keyboard frame). No-op-guarded
+    /// on `PartialEq`: a re-report of unchanged insets neither relayouts nor
+    /// re-provides. On a real change `RenderRoot::set_insets` marks `LAYOUT |
+    /// PAINT` pending (task 01), which the frame gate already treats as dirty —
+    /// no new gate input needed. The continuous `CADisplayLink` loop repaints the
+    /// next tick with no extra wake.
+    pub(crate) fn set_insets(&mut self, logical: [f64; 8]) {
+        // iOS insets are already logical points (see the method doc): identity
+        // scale, unlike Android's device-px `sanitize_scale(self.scale)` divisor.
+        let insets = logical_insets(logical, 1.0);
+        if insets == self.insets {
+            return; // no-op push — skip both the relayout and the re-provide
+        }
+        self.insets = insets;
+        self.push_insets(insets);
+    }
+
+    /// Push the current [`WindowInsets`] to both delivery paths — into the render
+    /// root ([`AppTree::set_insets`], the widget/layout path) and
+    /// re-`provide_context`ed under the process-wide root [`ReactiveRuntime`]'s
+    /// owner for app-side `use_context::<WindowInsets>()` reads. Mirrors
+    /// [`Self::push_theme`]'s shape exactly (the theme re-provide precedent).
+    fn push_insets(&mut self, insets: WindowInsets) {
+        self.app.set_insets(insets);
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(insets)),
+            None => provide_context(insets),
         }
     }
 

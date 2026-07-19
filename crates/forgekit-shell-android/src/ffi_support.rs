@@ -96,6 +96,24 @@ pub(crate) fn appearance_from_dark(dark: bool) -> Appearance {
     }
 }
 
+/// The back-press consume decision (device-parity task 06): given the
+/// framework's current [`handles_back`](forgekit_reactive::handles_back) answer,
+/// whether the native `nativeOnBackPress` callback should consume this press
+/// (routing it into the app via `push_back_press`) and, equivalently, what
+/// `jboolean` it returns to the Kotlin `OnBackPressedDispatcher`.
+///
+/// The mapping is intentionally identity — the framework consumes exactly when
+/// it has advertised (via `setFrameworkHandlesBack`) that it will — but it is
+/// named and host-tested here rather than inlined at the JNI boundary so the
+/// contract has a single documented, testable decision point (the same reason
+/// [`appearance_from_dark`]/[`touch_phase_from_action`] live here). `true` =
+/// consume + return `JNI_TRUE` (framework pops on next rebuild); `false` = let
+/// the default dispatcher finish the activity.
+#[inline]
+pub(crate) fn should_consume_back_press(handles_back: bool) -> bool {
+    handles_back
+}
+
 /// Normalise a raw JNI selection/composing index quintuple into the canonical
 /// [`forgekit_core::event::EditingState`] field form (the mobile IME seam).
 ///
@@ -400,6 +418,20 @@ mod tests {
         // init light -> set dark -> the transition Rust's brightness flip applies.
         assert_eq!(appearance_from_dark(false), Appearance::Light);
         assert_eq!(appearance_from_dark(true), Appearance::Dark);
+    }
+
+    #[test]
+    fn back_press_consume_mirrors_handles_back() {
+        // The framework consumes a back press exactly when it advertised it
+        // would (`handles_back`); otherwise the platform dispatcher exits.
+        assert!(
+            should_consume_back_press(true),
+            "handles_back=true -> consume + return JNI_TRUE (framework pops)"
+        );
+        assert!(
+            !should_consume_back_press(false),
+            "handles_back=false -> return JNI_FALSE (activity finishes)"
+        );
     }
 
     #[test]

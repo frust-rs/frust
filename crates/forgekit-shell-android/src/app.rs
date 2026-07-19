@@ -26,13 +26,14 @@ use forgekit_core::event::{
     EditingState, ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
     PointerEvent, PointerPhase,
 };
+use forgekit_core::insets::WindowInsets;
 use forgekit_reactive::{ReactiveRuntime, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
 use forgekit_shell_common::{
     AppTree, FrameGate, FrameInputs, ThemeOverrideWatcher,
-    effective_brightness_for_platform_change, logical_size, sanitize_scale,
+    effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
 };
 use forgekit_text::TextContext;
 use forgekit_theme::{Brightness, Theme};
@@ -71,6 +72,12 @@ pub struct AndroidAppHandle {
     /// `nativeInit` returns a handle — see `templates/app/android.tmpl`'s
     /// `ForgeKitSurfaceView.surfaceCreated`).
     theme: Theme,
+    /// The last window insets pushed to the render root (device-parity task 06),
+    /// in logical px. Retained so [`Self::set_insets`] can skip a no-op push
+    /// (`WindowInsets` is `PartialEq`) — both the `RenderRoot::set_insets` relayout
+    /// and the app-side `provide_context` re-provide only fire on a real change.
+    /// Starts zero (no occlusion) until Kotlin's first `nativeOnInsetsChanged`.
+    insets: WindowInsets,
     /// Polls the process-wide app-facing theme override slot
     /// (`forgekit::set_app_theme`/`clear_app_theme`, task 6c-04) once per
     /// frame (see [`Self::frame`]) — see
@@ -332,6 +339,7 @@ impl AndroidAppHandle {
             scale,
             window: Some(window),
             theme,
+            insets: WindowInsets::default(),
             theme_override: ThemeOverrideWatcher::new(),
             theme_override_active: false,
             platform_brightness: Brightness::Light,
@@ -495,8 +503,15 @@ impl AndroidAppHandle {
     /// Assigning `window` last drops the previous [`NativeWindow`] (releasing it)
     /// — safe here because the previous surface was already torn down inside the
     /// preceding `on_surface_created_from_android_window` (spec §8.1).
-    pub(crate) fn set_window(&mut self, window: NativeWindow, physical: (u32, u32)) {
+    ///
+    /// `density` is this configuration's `displayMetrics.density` (device-parity
+    /// task 06): stored raw and re-sanitized at every use (layout/paint/insets),
+    /// so a config change that alters the device pixel ratio takes effect on the
+    /// next frame. Stored raw for the same reason `nativeInit`'s `scale` is —
+    /// `sanitize_scale` runs once per frame at the point of use.
+    pub(crate) fn set_window(&mut self, window: NativeWindow, physical: (u32, u32), density: f32) {
         self.physical = physical;
+        self.scale = density;
         self.window = Some(window);
         // Surface (re)creation: force the next frame to run (and lay out at the
         // new dimensions) and open the gate's resume-warmup window — the first
@@ -507,15 +522,57 @@ impl AndroidAppHandle {
 
     /// Resize the live surface in place (same window, new dimensions). Safe: the
     /// renderer's resize path touches no raw pointers.
-    pub(crate) fn resize(&mut self, physical: (u32, u32)) {
+    ///
+    /// `density` re-sanitizes and stores the display's device pixel ratio for
+    /// this configuration (device-parity task 06 — see [`Self::set_window`]).
+    pub(crate) fn resize(&mut self, physical: (u32, u32), density: f32) {
         self.renderer
             .on_surface_changed(&self.render_cx, physical.0, physical.1);
         self.physical = physical;
+        self.scale = density;
         // In-place resize: force the next frame to run and relayout at the new
         // size, and open the warmup window (task 17) — same rationale as
         // `set_window`.
         self.surface_dirty = true;
         self.frame_gate.note_resumed();
+    }
+
+    /// `nativeOnInsetsChanged`: convert the platform's physical-px per-edge insets
+    /// to logical px with the stored scale and push them onto the render root
+    /// (device-parity task 06). Mirrors [`Self::set_appearance`]'s two-path
+    /// delivery shape but for insets: [`AppTree::set_insets`] threads them into
+    /// layout/paint (widget path — a `SafeArea`'s `LayoutCtx::window_insets`), and
+    /// [`Self::push_insets`] re-`provide_context`s them for app code
+    /// (`use_context::<WindowInsets>()` in `Component::build`).
+    ///
+    /// `physical` is the eight-value pack `logical_insets` expects (`view_padding`
+    /// then `view_insets`, each l/t/r/b — see [`logical_insets`]). No-op-guarded on
+    /// `PartialEq`: a shell that re-reports unchanged insets neither relayouts nor
+    /// re-provides. On a real change, `RenderRoot::set_insets` marks `LAYOUT |
+    /// PAINT` pending (task 01), which the frame gate already treats as
+    /// dirty (`change_flags_pending`) — no new gate input needed. The continuous
+    /// Choreographer loop repaints the next tick with no extra wake.
+    pub(crate) fn set_insets(&mut self, physical: [f64; 8]) {
+        let scale = sanitize_scale(self.scale);
+        let insets = logical_insets(physical, scale);
+        if insets == self.insets {
+            return; // no-op push — skip both the relayout and the re-provide
+        }
+        self.insets = insets;
+        self.push_insets(insets);
+    }
+
+    /// Push the current [`WindowInsets`] to both delivery paths — into the render
+    /// root ([`AppTree::set_insets`], the widget/layout path) and
+    /// re-`provide_context`ed under the process-wide root [`ReactiveRuntime`]'s
+    /// owner for app-side `use_context::<WindowInsets>()` reads. Mirrors
+    /// [`Self::push_theme`]'s shape exactly (the theme re-provide precedent).
+    fn push_insets(&mut self, insets: WindowInsets) {
+        self.app.set_insets(insets);
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(insets)),
+            None => provide_context(insets),
+        }
     }
 
     /// Tear the surface down (`surfaceDestroyed`): drop the renderer's surface

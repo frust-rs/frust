@@ -576,6 +576,47 @@ pub fn set_appearance(handle: *mut c_void, dark: u8) {
     });
 }
 
+/// `forgekit_set_insets`: deliver the platform's window insets (device-parity
+/// task 06 — RESEARCH.md "Insets / SafeArea"). The eight `f32`s are two per-edge
+/// sets in the order [`logical_insets`](forgekit_shell_common::logical_insets)
+/// expects — `view_padding` (`vp_*`: Swift assembles this from the view's
+/// `safeAreaInsets`) then `view_insets` (`vi_*`: the keyboard frame), each
+/// `left`/`top`/`right`/`bottom`.
+///
+/// Values are **logical points** (UIKit's coordinate space — no scale division,
+/// the same asymmetry `forgekit_dispatch_touch` follows), converted to the
+/// framework's logical `WindowInsets` by [`IosAppHandle::set_insets`] and pushed
+/// onto the render root (no-op-guarded, marks `LAYOUT | PAINT` on a real change).
+/// A missing handle is a no-op.
+#[allow(clippy::too_many_arguments)]
+pub fn set_insets(
+    handle: *mut c_void,
+    vp_l: f32,
+    vp_t: f32,
+    vp_r: f32,
+    vp_b: f32,
+    vi_l: f32,
+    vi_t: f32,
+    vi_r: f32,
+    vi_b: f32,
+) {
+    guard("forgekit_set_insets", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_insets([
+                vp_l as f64,
+                vp_t as f64,
+                vp_r as f64,
+                vp_b as f64,
+                vi_l as f64,
+                vi_t as f64,
+                vi_r as f64,
+                vi_b as f64,
+            ]);
+        }
+    });
+}
+
 /// `forgekit_on_deep_link`: deliver a platform deep link (cold-start, from
 /// `SceneDelegate.scene(_:willConnectTo:options:)`'s
 /// `connectionOptions.urlContexts`, or running, from

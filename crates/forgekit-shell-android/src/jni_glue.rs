@@ -29,7 +29,7 @@ use jni::sys::{JNI_VERSION_1_6, jboolean, jfloat, jint, jlong, jstring};
 use ndk::native_window::NativeWindow;
 
 use forgekit_core::event::{EditingState, ImeState};
-use forgekit_reactive::{ReactiveRuntime, push_deep_link};
+use forgekit_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_link};
 use forgekit_shell_common::perf::{self, StartupSpans};
 use forgekit_shell_common::{AppTree, guard};
 
@@ -452,12 +452,23 @@ fn persist_pipeline_cache_if_changed(
 
 /// `nativeOnSurfaceChanged`: recreate the surface against a new window, or resize
 /// it in place when the underlying window is unchanged.
+///
+/// `density` is the display's `resources.displayMetrics.density` for this
+/// configuration, forwarded so a config change that alters the device pixel
+/// ratio (a display move, a font-scale-driven density change) re-sanitizes the
+/// stored scale used for layout/paint/inset math. It arrives alongside the
+/// surface dimensions on the same `surfaceChanged` because a size change and a
+/// density change are delivered together by Android's `SurfaceHolder.Callback`.
+/// This is a **breaking** signature change from the pre-parity export: the
+/// Kotlin `external` declaration and `ForgeKitSurfaceView` call site gain the
+/// trailing `density` argument in the same phase (task 08).
 pub fn native_on_surface_changed(
     env: EnvUnowned,
     handle: jlong,
     surface: JObject,
     width: jint,
     height: jint,
+    density: jfloat,
 ) {
     guard("nativeOnSurfaceChanged", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -478,7 +489,7 @@ pub fn native_on_surface_changed(
             // Drop the extra reference `fromSurface` just acquired; the stored
             // window keeps the surface alive.
             drop(new_window);
-            app.resize(physical);
+            app.resize(physical, density);
             return;
         }
 
@@ -496,7 +507,7 @@ pub fn native_on_surface_changed(
             })
         };
         match result {
-            Ok(()) => app.set_window(new_window, physical),
+            Ok(()) => app.set_window(new_window, physical, density),
             Err(err) => {
                 log::error!("forgekit-shell-android: surfaceChanged recreate failed: {err:#}")
             }
@@ -707,6 +718,78 @@ pub fn native_on_deep_link(mut env: EnvUnowned, handle: jlong, url: JString) {
             push_deep_link(url);
         }
     });
+}
+
+/// `nativeOnInsetsChanged`: deliver the platform window insets (device px) into
+/// the retained tree (device-parity task 06, RESEARCH.md "Insets / SafeArea").
+///
+/// The eight `jfloat`s are two per-edge sets in the order `WindowInsets` /
+/// [`logical_insets`](forgekit_shell_common::logical_insets) expect —
+/// `view_padding` (`vp_*`: system-bar/cutout occlusion, from Android's
+/// `WindowInsetsCompat.Type.systemBars() | displayCutout()`) then `view_insets`
+/// (`vi_*`: the fully-obscured IME area, from `Type.ime()`), each `left`/`top`/
+/// `right`/`bottom`. Values are **physical px** (`Insets` are pixel-valued); the
+/// handle converts them to logical px with its stored scale and pushes them onto
+/// the render root ([`AndroidAppHandle::set_insets`]), which skips a no-op push
+/// (`WindowInsets` is `PartialEq`) and, on a real change, marks `LAYOUT | PAINT`
+/// pending so the next frame relayouts — the same dirtiness path a `set_theme`
+/// uses (task 01), so no new frame-gate input is needed. A missing handle is a
+/// no-op (Kotlin only pushes insets after `nativeInit` yields a live handle).
+#[allow(clippy::too_many_arguments)]
+pub fn native_on_insets_changed(
+    handle: jlong,
+    vp_l: jfloat,
+    vp_t: jfloat,
+    vp_r: jfloat,
+    vp_b: jfloat,
+    vi_l: jfloat,
+    vi_t: jfloat,
+    vi_r: jfloat,
+    vi_b: jfloat,
+) {
+    guard("nativeOnInsetsChanged", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_insets([
+                vp_l as f64,
+                vp_t as f64,
+                vp_r as f64,
+                vp_b as f64,
+                vi_l as f64,
+                vi_t as f64,
+                vi_r as f64,
+                vi_b as f64,
+            ]);
+        }
+    });
+}
+
+/// `nativeOnBackPress`: the Android hardware/gesture back contract (device-parity
+/// task 06, RESEARCH.md "Android back"). Returns whether the framework consumed
+/// the press: `JNI_TRUE` (this `jni`'s `jboolean` is a real `bool`) means Kotlin
+/// should NOT finish the activity — the framework will pop on its next rebuild;
+/// `JNI_FALSE` lets the default `OnBackPressedDispatcher` run (activity finish).
+///
+/// The read of [`handles_back`] is synchronous while the [`push_back_press`] pop
+/// is applied asynchronously on the next rebuild — the Flutter pre-registration
+/// contract (`setFrameworkHandlesBack`, RESEARCH.md): the shell already knows,
+/// from the previous frame's published answer, whether to route this press into
+/// the app. A mis-predicted root-level back is a no-op pop, never a wrong
+/// navigation. Pumps the reactive local-task queue first, like the other input
+/// entry points, so a just-drained task's state is observed before the decision.
+/// A missing handle returns `false` (no live app ⇒ let the platform exit).
+pub fn native_on_back_press(handle: jlong) -> jboolean {
+    guard("nativeOnBackPress", false, || {
+        pump_reactive_runtime();
+        if !crate::ffi_support::handle_is_live(handle) {
+            return false;
+        }
+        let consume = crate::ffi_support::should_consume_back_press(handles_back());
+        if consume {
+            push_back_press();
+        }
+        consume
+    })
 }
 
 /// `nativeInitAccessibility`: attach the accesskit Android adapter to the host
