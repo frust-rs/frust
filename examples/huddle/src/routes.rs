@@ -14,12 +14,14 @@
 use frust::{AnyView, NavigatorController, Route, RouteParams};
 
 use crate::HuddleState;
+use crate::features::activity::presentation::pages::activity as activity_activity;
 use crate::features::channels::presentation::pages::{
     home as channels_home, workspace_drawer as channels_workspace_drawer,
 };
 use crate::features::messages::presentation::pages::{
     channel_feed as messages_channel_feed, thread as messages_thread,
 };
+use crate::features::search::presentation::pages::search as search_search;
 use crate::screens;
 
 /// The `/` route (and the navigator's initial page): the Home tab (now a
@@ -38,10 +40,10 @@ pub fn build_routes(controller: NavigatorController<HuddleState>) -> Vec<Route<H
             move |_params: &RouteParams| home_page(controller.clone())
         }),
         Route::new("/search", |_params: &RouteParams| {
-            screens::search::search_screen()
+            search_search::search_screen()
         }),
         Route::new("/activity", |_params: &RouteParams| {
-            screens::activity::activity_screen()
+            activity_activity::activity_screen()
         }),
         Route::new("/you", {
             let controller = controller.clone();

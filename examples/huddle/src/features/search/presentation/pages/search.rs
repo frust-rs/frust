@@ -9,10 +9,12 @@
 //! avatar tagged `avatar-{user_id}` (the shared cross-screen hero-tag
 //! convention future roster/profile screens can reuse). An empty query shows
 //! a search hint; a non-empty, non-matching query shows a dedicated
-//! no-results view. See `crate::features::search`'s module docs for why the
-//! controller is a thread-local singleton rather than `Component`-hosted
-//! state (this screen needs `&mut HuddleState` in its row callbacks to
-//! navigate, which a `Component`'s inner state boundary would block).
+//! no-results view. See
+//! [`crate::features::search::presentation::controllers`]'s module docs for
+//! why the controller is a thread-local singleton rather than
+//! `Component`-hosted state (this screen needs `&mut HuddleState` in its row
+//! callbacks to navigate, which a `Component`'s inner state boundary would
+//! block).
 //!
 //! # Fixed outer shape, keyed inner content
 //!
@@ -42,15 +44,19 @@
 //! the field's recorded focus/IME path, silently swallowing the very next
 //! keystroke on the real per-frame pipeline.
 
+use std::sync::Arc;
+
 use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild,
     FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, filled_card, flexible,
-    hero, icon, icons, inflexible, keyed, list_item, scroll_view, text,
+    hero, icon, icons, inflexible, keyed, list_item, scroll_view, text, use_context,
 };
 
 use crate::HuddleState;
+use crate::features::channels::domain::Channel;
+use crate::features::profile::domain::User;
+use crate::features::search::domain::SearchRepository;
 use crate::features::search::{MessageHit, SearchController, SearchResults};
-use crate::mock;
 use crate::screens::scaffold;
 
 /// Forced height of the search field row: a `SizedBox`, not the field's own
@@ -67,12 +73,17 @@ const AVATAR_SIZE: f64 = 40.0;
 /// `results_container`, never the outer child count (see the module docs).
 pub fn search_screen() -> AnyView<HuddleState> {
     let controller = SearchController::instance();
+    // Recover the repository the composition root published under the root
+    // Owner (see `crate::HuddleApp::init`) — a message-hit row's author
+    // lookup needs it (`message_row` below).
+    let repo = use_context::<Arc<dyn SearchRepository + Send + Sync>>()
+        .expect("the composition root provides a SearchRepository");
     let query = controller.query.get();
     let results = controller.results.get();
 
     let children: Vec<AnyView<HuddleState>> = vec![
         search_field(controller, &query),
-        results_container(&query, results),
+        results_container(&query, results, &repo),
     ];
 
     scaffold("Search", any(scroll_view(Column(children))))
@@ -84,13 +95,17 @@ pub fn search_screen() -> AnyView<HuddleState> {
 /// docs). Every branch keys its child(ren) so a transition between branches
 /// never mixes keyed and unkeyed siblings in the same list (all-or-nothing
 /// per `docs/CODE_STANDARDS.md`'s keyed-list contract).
-fn results_container(query: &str, results: SearchResults) -> AnyView<HuddleState> {
+fn results_container(
+    query: &str,
+    results: SearchResults,
+    repo: &Arc<dyn SearchRepository + Send + Sync>,
+) -> AnyView<HuddleState> {
     let children: Vec<FlexChild<HuddleState>> = if query.trim().is_empty() {
         vec![keyed("hint", hint_view())]
     } else if results.is_empty() {
         vec![keyed("no-results", no_results_view(query))]
     } else {
-        keyed_section_views(results)
+        keyed_section_views(results, repo)
     };
 
     any(FlexView::new(Axis::Vertical, children))
@@ -181,7 +196,10 @@ fn no_results_view(query: &str) -> AnyView<HuddleState> {
 /// numeric id, a message hit's id) so a row's widget — and any internal state
 /// it holds — survives across query edits that reorder or partially overlap
 /// the result set, instead of being torn down and rebuilt positionally.
-fn keyed_section_views(results: SearchResults) -> Vec<FlexChild<HuddleState>> {
+fn keyed_section_views(
+    results: SearchResults,
+    repo: &Arc<dyn SearchRepository + Send + Sync>,
+) -> Vec<FlexChild<HuddleState>> {
     let mut views = Vec::new();
     if !results.channels.is_empty() {
         views.push(keyed("header-channels", section_header("Channels")));
@@ -203,12 +221,12 @@ fn keyed_section_views(results: SearchResults) -> Vec<FlexChild<HuddleState>> {
     }
     if !results.messages.is_empty() {
         views.push(keyed("header-messages", section_header("Messages")));
-        views.extend(
-            results
-                .messages
-                .into_iter()
-                .map(|hit| keyed(format!("message-{}", hit.message_id), message_row(hit))),
-        );
+        views.extend(results.messages.into_iter().map(|hit| {
+            keyed(
+                format!("message-{}", hit.message_id),
+                message_row(hit, repo),
+            )
+        }));
     }
     views
 }
@@ -223,7 +241,7 @@ fn section_header(label: &str) -> AnyView<HuddleState> {
 }
 
 /// A channel result row — navigates to its `/channel/:id` feed.
-fn channel_row(c: mock::Channel) -> AnyView<HuddleState> {
+fn channel_row(c: Channel) -> AnyView<HuddleState> {
     let id = c.id.to_string();
     any(list_item::<HuddleState>(format!("#{}", c.name))
         .supporting(c.topic.to_string())
@@ -235,7 +253,7 @@ fn channel_row(c: mock::Channel) -> AnyView<HuddleState> {
 
 /// A person result row — navigates to `/user/:id` through a hero-wrapped
 /// avatar tagged `avatar-{id}` (the shared cross-screen hero convention).
-fn user_row(u: mock::User) -> AnyView<HuddleState> {
+fn user_row(u: User) -> AnyView<HuddleState> {
     let id = u.id;
     any(list_item::<HuddleState>(u.name.to_string())
         .supporting(u.status.label().to_string())
@@ -246,9 +264,13 @@ fn user_row(u: mock::User) -> AnyView<HuddleState> {
 }
 
 /// A message result row — navigates to the message's own `/channel/:id`.
-fn message_row(hit: MessageHit) -> AnyView<HuddleState> {
+fn message_row(
+    hit: MessageHit,
+    repo: &Arc<dyn SearchRepository + Send + Sync>,
+) -> AnyView<HuddleState> {
     let channel_id = hit.channel_id.to_string();
-    let author = mock::user(hit.author_id)
+    let author = repo
+        .user(hit.author_id)
         .map(|u| u.name.to_string())
         .unwrap_or_else(|| "Someone".to_string());
     any(list_item::<HuddleState>(author)

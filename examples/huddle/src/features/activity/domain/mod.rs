@@ -1,7 +1,13 @@
-//! `activity` domain — entities (huddle clean-architecture refactor, task 01).
-//! Repository traits and use cases land in a later task
-//! (`workflow/plans/features/huddle-clean-architecture/`).
+//! `activity` domain — entities, the derived row model, the repository
+//! contract, and the use cases (huddle clean-architecture refactor: entities
+//! landed in task 01; models/repositories/use_cases in task 04).
 
 pub mod entities;
+pub mod models;
+pub mod repositories;
+pub mod use_cases;
 
 pub use entities::ActivityItem;
+pub use models::ActivityRow;
+pub use repositories::ActivityRepository;
+pub use use_cases::{LoadActivity, MarkAllRead, compose_mark_all_read};

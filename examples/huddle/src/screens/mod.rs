@@ -10,9 +10,7 @@
 //! Every screen renders and navigates TODAY via the shared [`scaffold`] helper:
 //! its own [`app_bar`](frust::app_bar) plus a centered body.
 
-pub mod activity;
 pub mod profile;
-pub mod search;
 pub mod settings;
 pub mod settings_about;
 pub mod settings_appearance;

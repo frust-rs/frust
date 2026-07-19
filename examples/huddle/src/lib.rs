@@ -50,10 +50,14 @@ use frust::{
     router_with_deep_links, use_context,
 };
 
+use features::activity::data::repositories::StoreActivityRepository;
+use features::activity::domain::repositories::ActivityRepository;
 use features::channels::data::repositories::StoreChannelRepository;
 use features::channels::domain::repositories::ChannelRepository;
 use features::messages::data::repositories::StoreMessageRepository;
 use features::messages::domain::repositories::MessageRepository;
+use features::search::data::repositories::StoreSearchRepository;
+use features::search::domain::repositories::SearchRepository;
 use shell::Tab;
 use ui::toast::{ToastController, toast_overlay};
 
@@ -108,6 +112,14 @@ impl Component for HuddleApp {
         let message_repo: Arc<dyn MessageRepository + Send + Sync> =
             Arc::new(StoreMessageRepository::new());
         provide_context(message_repo);
+
+        let activity_repo: Arc<dyn ActivityRepository + Send + Sync> =
+            Arc::new(StoreActivityRepository::new());
+        provide_context(activity_repo);
+
+        let search_repo: Arc<dyn SearchRepository + Send + Sync> =
+            Arc::new(StoreSearchRepository::new());
+        provide_context(search_repo);
 
         // The controller is created *before* the route table (so every route's
         // page can push through the same controller the router drives).

@@ -1,4 +1,5 @@
-//! Activity tab — the mentions feed derived from [`mock::activity`].
+//! Activity tab — the mentions feed derived from
+//! [`ActivityRepository::activity_items`](crate::features::activity::domain::ActivityRepository::activity_items).
 //!
 //! Reads a thread-local [`ActivityController`] instance
 //! ([`ActivityController::instance`]) rather than hosting one behind a
@@ -9,13 +10,13 @@
 //! ever see the component's own local `State`, never the outer `HuddleState`
 //! a row tap needs to reach `state.nav.router().push(..)`
 //! (`docs/ARCHITECTURE.md`'s Component state boundary). Keeping this screen a
-//! **plain** function — the same shape [`crate::screens::search`] and
-//! [`thread`](crate::features::messages::presentation::pages::thread) use, and their documented reasoning — is what
+//! **plain** function — the same shape [`crate::features::search::presentation::pages::search`]
+//! and [`thread`](crate::features::messages::presentation::pages::thread) use, and their documented reasoning — is what
 //! lets a row tap push the real `/channel/:id` route directly, instead of
 //! task 14's local in-tab drill-down workaround this task replaces. See
-//! [`crate::features::activity`]'s module docs for the thread-local
-//! instance's own "why" (mirroring
-//! [`crate::features::search::SearchController::instance`]).
+//! [`crate::features::activity::presentation::controllers`]'s module docs for
+//! the thread-local instance's own "why" (mirroring
+//! [`crate::features::search::presentation::SearchController::instance`]).
 
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ use clean_signals::async_state::AsyncState;
 use frust::{
     Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, GestureDetector, Get,
     SizedBox, any, app_bar, filled_card, filter_chip, flexible, hero, icon, icons, inflexible,
-    list_item, scroll_view, text,
+    list_item, scroll_view, text, use_context,
 };
 
 /// CircleAvatar diameter — radius 20 → 40 (RESEARCH.md "Material sizing
@@ -31,12 +32,17 @@ use frust::{
 const AVATAR_SIZE: f64 = 40.0;
 
 use crate::HuddleState;
+use crate::features::activity::domain::ActivityRepository;
 use crate::features::activity::{ActivityController, ActivityRow};
-use crate::mock;
 
 /// The Activity tab root.
 pub fn activity_screen() -> AnyView<HuddleState> {
     let controller = ActivityController::instance();
+    // Recover the repository the composition root published under the root
+    // Owner (see `crate::HuddleApp::init`) — a row's headline needs it for
+    // the actor/channel reference reads (`row_view` below).
+    let repo = use_context::<Arc<dyn ActivityRepository + Send + Sync>>()
+        .expect("the composition root provides an ActivityRepository");
 
     // Tracked read: `ActivityController::load`/`mark_all_read` write this
     // signal from a spawned task, waking the frame (see
@@ -48,7 +54,7 @@ pub fn activity_screen() -> AnyView<HuddleState> {
             if rows.is_empty() {
                 empty_body()
             } else {
-                list_body(rows)
+                list_body(rows, &repo)
             }
         }
         // `LoadActivity`/`MarkAllRead` never fail (see
@@ -97,16 +103,22 @@ fn empty_body() -> AnyView<HuddleState> {
 }
 
 /// The loaded feed: one row per [`ActivityRow`].
-fn list_body(rows: Vec<ActivityRow>) -> AnyView<HuddleState> {
-    any(Column(rows.into_iter().map(row_view).collect()))
+fn list_body(
+    rows: Vec<ActivityRow>,
+    repo: &Arc<dyn ActivityRepository + Send + Sync>,
+) -> AnyView<HuddleState> {
+    any(Column(
+        rows.into_iter().map(|row| row_view(row, repo)).collect(),
+    ))
 }
 
 /// A synthetic, presentation-only "relative time" label.
 ///
-/// `mock::ActivityItem` carries no real timestamp field (`src/mock/**` is a
-/// frozen hub file, and ships none — see `src/README-phase-c.md`), so this
-/// derives a stable, deterministic label from the item's `message_id` alone.
-/// A mock stand-in for a real elapsed-time computation, not one itself.
+/// [`ActivityItem`](crate::features::activity::domain::ActivityItem) carries
+/// no real timestamp field (the shared dataset — see
+/// [`crate::data::store`] — ships none), so this derives a stable,
+/// deterministic label from the item's `message_id` alone. A mock stand-in
+/// for a real elapsed-time computation, not one itself.
 fn relative_time(message_id: u32) -> String {
     let hours = (message_id % 23) + 1;
     format!("{hours}h ago")
@@ -116,13 +128,17 @@ fn relative_time(message_id: u32) -> String {
 /// actor + action text, message excerpt + relative time, and — while unread —
 /// an "Unread" indicator chip. Tapping the row navigates to the mentioned
 /// channel's real `/channel/:id` feed.
-fn row_view(row: ActivityRow) -> AnyView<HuddleState> {
+fn row_view(
+    row: ActivityRow,
+    repo: &Arc<dyn ActivityRepository + Send + Sync>,
+) -> AnyView<HuddleState> {
     let ActivityRow { item, unread } = row;
 
-    let actor = mock::user(item.author_id);
+    let actor = repo.user(item.author_id);
     let actor_name = actor.map(|u| u.name).unwrap_or("Someone");
     let initials = actor.map(|u| u.initials).unwrap_or("?");
-    let channel_name = mock::channel(item.channel_id)
+    let channel_name = repo
+        .channel(item.channel_id)
         .map(|c| c.name.to_string())
         .unwrap_or_else(|| item.channel_id.to_string());
 
