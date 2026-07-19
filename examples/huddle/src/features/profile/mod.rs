@@ -16,6 +16,8 @@
 
 use crate::mock::{self, User};
 
+pub mod domain;
+
 /// Rotating role/team flavor strings (mock — deterministic per user id, not
 /// part of the shared [`mock`] dataset, so re-rendering the same profile
 /// always shows the same values).

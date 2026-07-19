@@ -38,6 +38,8 @@ use frust::{RwSignal, Update};
 use crate::failure::HuddleFailure;
 use crate::mock::{self, UserStatus};
 
+pub mod domain;
+
 /// The mock load latency — long enough that the Home screen's loading skeletons
 /// are actually seen before the roster appears.
 pub const LOAD_LATENCY: Duration = Duration::from_millis(600);

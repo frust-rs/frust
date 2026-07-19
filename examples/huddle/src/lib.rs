@@ -30,6 +30,7 @@
 //! `/channel/:id` and `/user/:id`. Deep-link scheme stays `teamdemo`
 //! (the platform manifest scheme is a later platforms task).
 
+pub mod data;
 pub mod failure;
 pub mod features;
 pub mod mock;

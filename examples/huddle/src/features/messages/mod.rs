@@ -79,6 +79,8 @@ use frust::{Get, GetUntracked, RwSignal, Set, Update};
 use crate::failure::HuddleFailure;
 use crate::mock;
 
+pub mod domain;
+
 /// How many messages a page holds — the newest page loaded first, and the size
 /// of each older page [`load_older`](MessagesController::load_older) prepends.
 pub const PAGE_SIZE: usize = 30;

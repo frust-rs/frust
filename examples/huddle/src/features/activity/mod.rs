@@ -51,6 +51,8 @@ use frust::{GetUntracked, RwSignal};
 use crate::failure::HuddleFailure;
 use crate::mock::{self, ActivityItem};
 
+pub mod domain;
+
 /// Mock load latency ("~400ms → skeletons" per the task spec) — long enough
 /// that the screen's loading skeletons are actually visible before the feed
 /// resolves.
