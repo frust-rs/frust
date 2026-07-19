@@ -61,16 +61,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use forgekit::{
-    AnyView, Axis, CrossAxisAlignment, DesignLanguage, EdgeInsets, FlexView, Get, GetUntracked,
-    MainAxisAlignment, NavigatorController, Padding, RwSignal, ScrollInfo, Set, SizedBox, Theme,
-    any, app_bar, assist_chip, cupertino_activity_indicator, elevated_card, filled_card,
-    filter_chip, flexible, icon, icons, inflexible, keyed, loading_indicator, outlined_card,
-    scroll_view, text, text_input, use_context,
+    AnyView, Axis, CrossAxisAlignment, DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get,
+    GetUntracked, MainAxisAlignment, NavigatorController, Padding, RwSignal, ScrollInfo, Set,
+    SizedBox, Stack, Theme, Update, any, app_bar, assist_chip, cupertino_activity_indicator,
+    elevated_card, filled_card, filter_chip, flexible, icon, icons, inflexible, keyed,
+    loading_indicator, outlined_card, scroll_view, text, text_input, use_context,
 };
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, MessagesController};
 use crate::mock;
+use crate::ui::sheet::{action_menu, emoji_grid, sheet, sheet_action_row};
 
 /// Distance (logical px) from the top of the feed at which the near-start
 /// "load older" trigger fires — the infinite-scroll edge for `#firehose`.
@@ -104,6 +105,48 @@ fn composer_for(channel_id: &str) -> RwSignal<String> {
     })
 }
 
+/// Which message-action sheet (if any) is open over the feed — the Phase D
+/// long-press menu / emoji picker / attachment sheet (task 20). Screen-local
+/// state, cached across rebuilds behind [`sheet_for`] exactly like the composer
+/// text, since this screen is a plain function with no `Component` state.
+#[derive(Clone, PartialEq)]
+enum FeedSheet {
+    /// No sheet — the feed is interactive.
+    None,
+    /// The long-press context menu for message `id`.
+    Menu(u32),
+    /// The emoji reaction picker, targeting a message or the composer.
+    Emoji(EmojiTarget),
+    /// The mock attachment sheet (Photo / File / Poll).
+    Attach,
+}
+
+/// Where a picked emoji goes: onto a message's reactions, or inserted into the
+/// composer text.
+#[derive(Clone, Copy, PartialEq)]
+enum EmojiTarget {
+    /// Toggle the reaction on message `id`.
+    Message(u32),
+    /// Append the emoji to the composer field.
+    Composer,
+}
+
+/// Gets (or creates) the screen-local open-sheet signal for `channel_id` — the
+/// counterpart to [`composer_for`], keyed the same way so two channels never
+/// share one sheet.
+fn sheet_for(channel_id: &str) -> RwSignal<FeedSheet> {
+    thread_local! {
+        static SHEETS: RefCell<HashMap<String, RwSignal<FeedSheet>>> =
+            RefCell::new(HashMap::new());
+    }
+    SHEETS.with(|cell| {
+        *cell
+            .borrow_mut()
+            .entry(channel_id.to_string())
+            .or_insert_with(|| RwSignal::new(FeedSheet::None))
+    })
+}
+
 /// The channel/DM feed route entry point. `navigator` lets the screen pop back
 /// and push into a thread; `channel_id` selects the conversation.
 pub fn channel_feed(
@@ -112,19 +155,100 @@ pub fn channel_feed(
 ) -> AnyView<HuddleState> {
     let controller = MessagesController::for_channel(channel_id.clone());
     let composer = composer_for(&channel_id);
+    let sheet_sig = sheet_for(&channel_id);
     let design = use_context::<Theme>()
         .map(|t| t.design_language)
         .unwrap_or(DesignLanguage::Material3);
 
     let bar = feed_app_bar(&channel_id, navigator);
-    let body = feed_body(&controller, design);
-    let composer_row = composer_bar(&controller, composer);
+    let body = feed_body(&controller, design, sheet_sig);
+    let composer_row = composer_bar(&controller, composer, sheet_sig);
 
-    any(FlexView::new(
+    let screen = any(FlexView::new(
         Axis::Vertical,
         vec![inflexible(bar), flexible(1, body), inflexible(composer_row)],
     )
-    .cross_axis(CrossAxisAlignment::Stretch))
+    .cross_axis(CrossAxisAlignment::Stretch));
+
+    // The message-action sheet mounts in the screen's own `Stack` top layer
+    // (see `crate::ui::sheet`); when closed it is an inert zero-size box, so the
+    // feed stays interactive.
+    let overlay = feed_sheet(&controller, composer, sheet_sig);
+    any(Stack(vec![screen, overlay]))
+}
+
+/// The open message-action sheet as a `Stack` overlay layer, or an inert
+/// zero-size box when nothing is open. Reads the tracked [`FeedSheet`] signal so
+/// a menu/picker open (or a dismiss) wakes this rebuild.
+fn feed_sheet(
+    controller: &Arc<MessagesController>,
+    composer: RwSignal<String>,
+    sheet_sig: RwSignal<FeedSheet>,
+) -> AnyView<HuddleState> {
+    let dismiss = move |_st: &mut HuddleState| sheet_sig.set(FeedSheet::None);
+    match sheet_sig.get() {
+        FeedSheet::None => any(SizedBox(None, None)),
+        FeedSheet::Menu(id) => {
+            any(sheet(action_menu(feed_menu_rows(id, sheet_sig))).on_dismiss(dismiss))
+        }
+        FeedSheet::Emoji(target) => {
+            let ctrl = Arc::clone(controller);
+            let picker = emoji_grid(move |_st: &mut HuddleState, emoji: &'static str| {
+                match target {
+                    EmojiTarget::Message(id) => ctrl.toggle_reaction(id, emoji),
+                    EmojiTarget::Composer => composer.update(|s| s.push_str(emoji)),
+                }
+                sheet_sig.set(FeedSheet::None);
+            });
+            any(sheet(picker).on_dismiss(dismiss))
+        }
+        FeedSheet::Attach => {
+            any(sheet(action_menu(attachment_rows(sheet_sig))).on_dismiss(dismiss))
+        }
+    }
+}
+
+/// The long-press context-menu rows for message `id`: React (opens the picker),
+/// Reply in thread (pushes `/thread/:id`), Copy (mock toast), Delete (mock
+/// toast). Each closes the menu.
+fn feed_menu_rows(id: u32, sheet_sig: RwSignal<FeedSheet>) -> Vec<AnyView<HuddleState>> {
+    vec![
+        sheet_action_row(icons::MOOD, "React", move |_st: &mut HuddleState| {
+            sheet_sig.set(FeedSheet::Emoji(EmojiTarget::Message(id)));
+        }),
+        sheet_action_row(
+            icons::REPLY,
+            "Reply in thread",
+            move |st: &mut HuddleState| {
+                sheet_sig.set(FeedSheet::None);
+                st.nav.router().push(&format!("/thread/{id}"));
+            },
+        ),
+        sheet_action_row(icons::DESCRIPTION, "Copy", move |st: &mut HuddleState| {
+            sheet_sig.set(FeedSheet::None);
+            st.toasts.show("Copied");
+        }),
+        sheet_action_row(icons::DELETE, "Delete", move |st: &mut HuddleState| {
+            sheet_sig.set(FeedSheet::None);
+            st.toasts.show("Only admins can delete \u{2014} mock");
+        }),
+    ]
+}
+
+/// The mock attachment-sheet rows: Photo / File / Poll, each toasting and
+/// closing the sheet.
+fn attachment_rows(sheet_sig: RwSignal<FeedSheet>) -> Vec<AnyView<HuddleState>> {
+    let row = |leading, label: &'static str, kind: &'static str| {
+        sheet_action_row(leading, label, move |st: &mut HuddleState| {
+            sheet_sig.set(FeedSheet::None);
+            st.toasts.show(format!("Attached {kind} (mock)"));
+        })
+    };
+    vec![
+        row(icons::IMAGE, "Photo", "Photo"),
+        row(icons::ATTACH_FILE, "File", "File"),
+        row(icons::FORUM, "Poll", "Poll"),
+    ]
 }
 
 /// The app bar: a back button, the channel/DM title, and a member-count
@@ -154,7 +278,11 @@ fn feed_app_bar(
 
 /// The scrolling feed area: skeletons while loading, else the keyed message
 /// column with the near-start pagination trigger and a trailing typing row.
-fn feed_body(controller: &Arc<MessagesController>, design: DesignLanguage) -> AnyView<HuddleState> {
+fn feed_body(
+    controller: &Arc<MessagesController>,
+    design: DesignLanguage,
+    sheet_sig: RwSignal<FeedSheet>,
+) -> AnyView<HuddleState> {
     if controller.loading.get() {
         return skeletons();
     }
@@ -170,7 +298,7 @@ fn feed_body(controller: &Arc<MessagesController>, design: DesignLanguage) -> An
     }
 
     for msg in &messages {
-        children.push(keyed(msg.id, message_row(controller, msg)));
+        children.push(keyed(msg.id, message_row(controller, msg, sheet_sig)));
     }
 
     if typing {
@@ -201,8 +329,12 @@ fn feed_body(controller: &Arc<MessagesController>, design: DesignLanguage) -> An
 
 /// One message row: the bubble, aligned right (own) or left (others, with an
 /// avatar), inside horizontal breathing room.
-fn message_row(controller: &Arc<MessagesController>, msg: &FeedMessage) -> AnyView<HuddleState> {
-    let bubble = message_bubble(controller, msg);
+fn message_row(
+    controller: &Arc<MessagesController>,
+    msg: &FeedMessage,
+    sheet_sig: RwSignal<FeedSheet>,
+) -> AnyView<HuddleState> {
+    let bubble = message_bubble(controller, msg, sheet_sig);
     let row = if msg.is_own() {
         FlexView::new(
             Axis::Horizontal,
@@ -224,8 +356,14 @@ fn message_row(controller: &Arc<MessagesController>, msg: &FeedMessage) -> AnyVi
 }
 
 /// The bubble card: author line (others only), body, reaction chips, and the
-/// thread affordance.
-fn message_bubble(controller: &Arc<MessagesController>, msg: &FeedMessage) -> AnyView<HuddleState> {
+/// thread affordance. Wrapped in a [`GestureDetector`] whose long-press opens
+/// the message's context menu (task 20); the detector is transparent, so the
+/// reaction chips and thread affordance inside still tap through.
+fn message_bubble(
+    controller: &Arc<MessagesController>,
+    msg: &FeedMessage,
+    sheet_sig: RwSignal<FeedSheet>,
+) -> AnyView<HuddleState> {
     let mut lines: Vec<AnyView<HuddleState>> = Vec::new();
 
     if !msg.is_own()
@@ -254,11 +392,17 @@ fn message_bubble(controller: &Arc<MessagesController>, msg: &FeedMessage) -> An
         .cross_axis(CrossAxisAlignment::Start),
     );
 
-    if msg.is_own() {
+    let id = msg.id;
+    let card: AnyView<HuddleState> = if msg.is_own() {
         any(filled_card(inner))
     } else {
         any(elevated_card(inner))
-    }
+    };
+    any(
+        GestureDetector(card).on_long_press(move |_st: &mut HuddleState| {
+            sheet_sig.set(FeedSheet::Menu(id));
+        }),
+    )
 }
 
 /// The message body: plain text, a link-preview card, or a file-stub card.
@@ -443,15 +587,19 @@ fn skeletons() -> AnyView<HuddleState> {
 fn composer_bar(
     controller: &Arc<MessagesController>,
     composer: RwSignal<String>,
+    sheet_sig: RwSignal<FeedSheet>,
 ) -> AnyView<HuddleState> {
     let value = composer.get(); // tracked
     let has_text = !value.trim().is_empty();
 
-    let mut column: Vec<AnyView<HuddleState>> = Vec::new();
-
-    if has_text {
-        column.push(affordance_chips());
-    }
+    // Always-visible attach + emoji affordance buttons (task 20 wired them; they
+    // were inert placeholders in task 12). Each opens its Phase D sheet.
+    let attach_btn = affordance_button(icons::ATTACH_FILE, move |_st: &mut HuddleState| {
+        sheet_sig.set(FeedSheet::Attach);
+    });
+    let emoji_btn = affordance_button(icons::MOOD, move |_st: &mut HuddleState| {
+        sheet_sig.set(FeedSheet::Emoji(EmojiTarget::Composer));
+    });
 
     // The multiline field: Enter inserts a newline, the send button / Shift+Enter
     // submits (the multiline default — see `TextInput::multiline`).
@@ -479,49 +627,35 @@ fn composer_bar(
         any(send_icon)
     };
 
-    column.push(any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(1, any(field)),
-            inflexible(any(SizedBox(Some(8.0), None))),
-            inflexible(any(Padding(EdgeInsets::symmetric(0.0, 6.0), send_btn))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center)));
-
     any(Padding(
         EdgeInsets::all(8.0),
         FlexView::new(
-            Axis::Vertical,
-            column.into_iter().map(inflexible).collect::<Vec<_>>(),
-        )
-        .cross_axis(CrossAxisAlignment::Stretch),
-    ))
-}
-
-/// The attachment / emoji affordance chips above the field. Inert for now (the
-/// pickers are Phase D sheets); they carry only a pressed state.
-fn affordance_chips() -> AnyView<HuddleState> {
-    any(Padding(
-        EdgeInsets::symmetric(0.0, 6.0),
-        FlexView::new(
             Axis::Horizontal,
             vec![
-                inflexible(any(assist_chip::<HuddleState, _>(
-                    "Attach",
-                    |_st: &mut HuddleState| {},
-                )
-                .leading("\u{1F4CE}"))),
+                inflexible(attach_btn),
+                inflexible(any(SizedBox(Some(4.0), None))),
+                inflexible(emoji_btn),
+                inflexible(any(SizedBox(Some(6.0), None))),
+                flexible(1, any(field)),
                 inflexible(any(SizedBox(Some(8.0), None))),
-                inflexible(any(assist_chip::<HuddleState, _>(
-                    "Emoji",
-                    |_st: &mut HuddleState| {},
-                )
-                .leading("\u{1F642}"))),
+                inflexible(any(Padding(EdgeInsets::symmetric(0.0, 6.0), send_btn))),
             ],
         )
         .cross_axis(CrossAxisAlignment::Center),
     ))
+}
+
+/// One composer affordance icon button (attach / emoji): a `filled_card`-backed
+/// icon (so a headless test can locate its rounded chrome) firing `on_tap`.
+fn affordance_button<F>(leading: forgekit::IconSource, on_tap: F) -> AnyView<HuddleState>
+where
+    F: Fn(&mut HuddleState) + 'static,
+{
+    any(GestureDetector(filled_card(Padding(
+        EdgeInsets::all(8.0),
+        icon(leading).size(22.0),
+    )))
+    .on_tap(on_tap))
 }
 
 /// Send `text`: append it to the feed immediately, clear the composer, and

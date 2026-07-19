@@ -45,14 +45,15 @@ use std::sync::Arc;
 
 use forgekit::{
     Align, Alignment, AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
-    Get, GetUntracked, Padding, RwSignal, Set, SizedBox, any, app_bar, elevated_card, icon, icons,
-    inflexible, keyed, outlined_card, scroll_view, text, text_input,
+    Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar, elevated_card, icon,
+    icons, inflexible, keyed, outlined_card, scroll_view, text, text_input,
 };
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, FeedReply, MessagesController};
 use crate::mock;
 use crate::screens::placeholder_body;
+use crate::ui::sheet::{action_menu, emoji_grid, sheet, sheet_action_row};
 
 /// A quick, static header timestamp — mirrors `channel_feed`'s own
 /// placeholder ("real color-glyph rendering, verified in wave A"; there is no
@@ -78,6 +79,34 @@ fn composer_for(root_id: u32) -> RwSignal<String> {
     })
 }
 
+/// Which message-action sheet (if any) is open over the thread (task 20).
+/// Screen-local, cached behind [`thread_sheet_for`] like the composer text.
+#[derive(Clone, PartialEq)]
+enum ThreadSheet {
+    /// No sheet — the thread is interactive.
+    None,
+    /// The long-press context menu. `Some(id)` (the root message) offers React;
+    /// a reply bubble passes `None` (replies carry no reaction model).
+    Menu(Option<u32>),
+    /// The emoji picker, toggling a reaction on the root message `id`.
+    Emoji(u32),
+}
+
+/// Gets (or creates) the screen-local open-sheet signal for `root_id` — the
+/// counterpart to [`composer_for`], keyed the same way.
+fn thread_sheet_for(root_id: u32) -> RwSignal<ThreadSheet> {
+    thread_local! {
+        static SHEETS: RefCell<HashMap<u32, RwSignal<ThreadSheet>>> =
+            RefCell::new(HashMap::new());
+    }
+    SHEETS.with(|cell| {
+        *cell
+            .borrow_mut()
+            .entry(root_id)
+            .or_insert_with(|| RwSignal::new(ThreadSheet::None))
+    })
+}
+
 /// The thread view for `thread_id` — the route param, parsed as the root
 /// message's id.
 pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
@@ -95,6 +124,7 @@ pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
     let title = thread_title(root_msg.channel_id);
     let controller = MessagesController::for_channel(root_msg.channel_id);
     let composer = composer_for(root_id);
+    let sheet_sig = thread_sheet_for(root_id);
 
     if controller.loading.get() {
         return thread_page(title, placeholder_body("Loading thread\u{2026}"), None);
@@ -112,10 +142,72 @@ pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
         return missing_thread_screen(&thread_id);
     };
 
-    let content = thread_content(&controller, &root);
+    let content = thread_content(&controller, &root, sheet_sig);
     let composer_row = composer_bar(Arc::clone(&controller), root_id, composer);
 
-    thread_page(title, content, Some(composer_row))
+    let screen = thread_page(title, content, Some(composer_row));
+    // The message-action sheet mounts in the screen's own `Stack` top layer
+    // (see `crate::ui::sheet`); inert (zero-size) when nothing is open.
+    let overlay = thread_sheet(&controller, root_id, sheet_sig);
+    any(Stack(vec![screen, overlay]))
+}
+
+/// The open message-action sheet as a `Stack` overlay layer, or an inert
+/// zero-size box when nothing is open.
+fn thread_sheet(
+    controller: &Arc<MessagesController>,
+    root_id: u32,
+    sheet_sig: RwSignal<ThreadSheet>,
+) -> AnyView<HuddleState> {
+    let dismiss = move |_st: &mut HuddleState| sheet_sig.set(ThreadSheet::None);
+    match sheet_sig.get() {
+        ThreadSheet::None => any(SizedBox(None, None)),
+        ThreadSheet::Menu(react) => {
+            any(sheet(action_menu(thread_menu_rows(react, sheet_sig))).on_dismiss(dismiss))
+        }
+        ThreadSheet::Emoji(id) => {
+            let ctrl = Arc::clone(controller);
+            let picker = emoji_grid(move |_st: &mut HuddleState, emoji: &'static str| {
+                ctrl.toggle_reaction(id, emoji);
+                sheet_sig.set(ThreadSheet::None);
+            });
+            let _ = root_id;
+            any(sheet(picker).on_dismiss(dismiss))
+        }
+    }
+}
+
+/// The long-press context-menu rows. `react` is `Some(id)` for the root message
+/// (offering React → the picker) and `None` for a reply bubble.
+fn thread_menu_rows(
+    react: Option<u32>,
+    sheet_sig: RwSignal<ThreadSheet>,
+) -> Vec<AnyView<HuddleState>> {
+    let mut rows: Vec<AnyView<HuddleState>> = Vec::new();
+    if let Some(id) = react {
+        rows.push(sheet_action_row(
+            icons::MOOD,
+            "React",
+            move |_st: &mut HuddleState| sheet_sig.set(ThreadSheet::Emoji(id)),
+        ));
+    }
+    rows.push(sheet_action_row(
+        icons::DESCRIPTION,
+        "Copy",
+        move |st: &mut HuddleState| {
+            sheet_sig.set(ThreadSheet::None);
+            st.toasts.show("Copied");
+        },
+    ));
+    rows.push(sheet_action_row(
+        icons::DELETE,
+        "Delete",
+        move |st: &mut HuddleState| {
+            sheet_sig.set(ThreadSheet::None);
+            st.toasts.show("Only admins can delete \u{2014} mock");
+        },
+    ));
+    rows
 }
 
 /// "Thread" plus the channel/DM name, derived from the root message's channel
@@ -180,15 +272,16 @@ fn missing_thread_screen(thread_id: &str) -> AnyView<HuddleState> {
 fn thread_content(
     controller: &Arc<MessagesController>,
     root: &FeedMessage,
+    sheet_sig: RwSignal<ThreadSheet>,
 ) -> AnyView<HuddleState> {
     let mut children: Vec<forgekit::FlexChild<HuddleState>> =
-        vec![inflexible(root_bubble(controller, root))];
+        vec![inflexible(root_bubble(controller, root, sheet_sig))];
 
     if root.replies.is_empty() {
         children.push(inflexible(empty_replies_state()));
     } else {
         children.push(inflexible(divider_row(root.reply_count())));
-        children.push(inflexible(reply_list(&root.replies)));
+        children.push(inflexible(reply_list(&root.replies, sheet_sig)));
     }
 
     let column = FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch);
@@ -198,11 +291,11 @@ fn thread_content(
 /// The keyed reply list — every child keyed by its index (replies are only
 /// ever appended, never reordered/removed, so a stable index is a stable
 /// identity here).
-fn reply_list(replies: &[FeedReply]) -> AnyView<HuddleState> {
+fn reply_list(replies: &[FeedReply], sheet_sig: RwSignal<ThreadSheet>) -> AnyView<HuddleState> {
     let children: Vec<forgekit::FlexChild<HuddleState>> = replies
         .iter()
         .enumerate()
-        .map(|(idx, reply)| keyed(idx, reply_bubble(reply)))
+        .map(|(idx, reply)| keyed(idx, reply_bubble(reply, sheet_sig)))
         .collect();
     any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
 }
@@ -211,7 +304,11 @@ fn reply_list(replies: &[FeedReply]) -> AnyView<HuddleState> {
 /// body, and a reactions row — the same visual vocabulary as
 /// `channel_feed::message_bubble`, just a single elevated card rather than a
 /// left/right-aligned row (this is the thread's one parent, not a feed row).
-fn root_bubble(controller: &Arc<MessagesController>, root: &FeedMessage) -> AnyView<HuddleState> {
+fn root_bubble(
+    controller: &Arc<MessagesController>,
+    root: &FeedMessage,
+    sheet_sig: RwSignal<ThreadSheet>,
+) -> AnyView<HuddleState> {
     let author = mock::user(root.author_id)
         .map(|u| u.name)
         .unwrap_or("Someone");
@@ -248,7 +345,13 @@ fn root_bubble(controller: &Arc<MessagesController>, root: &FeedMessage) -> AnyV
         .cross_axis(CrossAxisAlignment::Start),
     );
 
-    any(elevated_card(inner))
+    // Long-press opens the root message's context menu (React/Copy/Delete).
+    let id = root.id;
+    any(
+        GestureDetector(elevated_card(inner)).on_long_press(move |_st: &mut HuddleState| {
+            sheet_sig.set(ThreadSheet::Menu(Some(id)));
+        }),
+    )
 }
 
 /// The root message's body — text, link preview, or file stub (mirrors
@@ -361,7 +464,7 @@ fn empty_replies_state() -> AnyView<HuddleState> {
 
 /// One compact reply bubble: author + text, no reactions/thread affordance
 /// (the spec's "compact bubbles" — this thread has no nested sub-threads).
-fn reply_bubble(reply: &FeedReply) -> AnyView<HuddleState> {
+fn reply_bubble(reply: &FeedReply, sheet_sig: RwSignal<ThreadSheet>) -> AnyView<HuddleState> {
     let author = mock::user(reply.author_id)
         .map(|u| u.name)
         .unwrap_or("Someone");
@@ -376,10 +479,15 @@ fn reply_bubble(reply: &FeedReply) -> AnyView<HuddleState> {
         )
         .cross_axis(CrossAxisAlignment::Start),
     );
-    any(Padding(
+    // Long-press opens a Copy/Delete menu (replies carry no reaction model, so
+    // no React row — `Menu(None)`).
+    any(GestureDetector(Padding(
         EdgeInsets::symmetric(0.0, 4.0),
         outlined_card(inner),
     ))
+    .on_long_press(move |_st: &mut HuddleState| {
+        sheet_sig.set(ThreadSheet::Menu(None));
+    }))
 }
 
 /// The reply composer: a `.multiline(5)` field plus a send (`icons::SEND`)

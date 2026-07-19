@@ -7,6 +7,10 @@
 //!
 //! - [`toast`] — the overlay toast/snackbar service ([`toast::ToastController`])
 //!   mounted in the shell's reserved overlay slot.
+//! - [`sheet`] — the in-screen bottom-sheet overlay (scrim + slide-in +
+//!   drag-to-dismiss) plus the emoji-picker / action-row content helpers Phase
+//!   D's message actions mount (task 20); the hub freeze is lifted for Phase D.
 
+pub mod sheet;
 pub mod swipeable;
 pub mod toast;
