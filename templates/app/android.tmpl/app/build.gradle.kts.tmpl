@@ -151,6 +151,19 @@ android {
     // }
 }
 
+// Device-parity task 08 (RESEARCH.md "Insets / SafeArea / SystemChrome",
+// "Android back"): `androidx.core` backs edge-to-edge
+// (`WindowCompat.setDecorFitsSystemWindows`), status/nav-bar icon contrast
+// (`WindowInsetsControllerCompat`), and per-edge inset merging
+// (`androidx.core.graphics.Insets.max`) in `ForgeKitSurfaceView`;
+// `androidx.activity` backs `MainActivity`'s `ComponentActivity` base class
+// and its `onBackPressedDispatcher` back-press callback. Neither dependency
+// existed in this template before task 08.
+dependencies {
+    implementation("androidx.core:core:1.13.1")
+    implementation("androidx.activity:activity:1.8.1")
+}
+
 // Per-ABI versionCode offsets, applied only when splits are enabled so each
 // split APK gets a distinct, monotonic versionCode. Mapping and formula are the
 // official Android docs' "Configure multiple APKs" example

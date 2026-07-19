@@ -37,6 +37,15 @@ final class ForgeKitViewController: UIViewController {
     /// `ForgeKitSurfaceView.pendingDeepLink`).
     private var pendingDeepLink: String?
 
+    /// The keyboard's current occlusion of this view's bottom edge, in
+    /// logical points (device-parity task 08 — RESEARCH.md "Insets /
+    /// SafeArea"; `FlutterViewController.mm:1593-1622` model). Computed as
+    /// the intersection of the keyboard's end frame with `view.bounds`, so
+    /// an undocked/split or off-screen keyboard doesn't over-report. Kept
+    /// separate from `view.safeAreaInsets` (which UIKit does not include the
+    /// keyboard in) so [pushInsets] can recombine both on every push.
+    private var keyboardViewInsetBottom: CGFloat = 0
+
     override func loadView() {
         view = ForgeKitView()
     }
@@ -91,11 +100,80 @@ final class ForgeKitViewController: UIViewController {
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
+
+        // Insets (device-parity task 08 — RESEARCH.md "Insets / SafeArea"):
+        // the keyboard's occlusion isn't part of `UIView.safeAreaInsets`, so
+        // it's tracked separately via these notifications and recombined
+        // with the current safe area on every `pushInsets()` call.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(keyboardWillChangeFrame(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(keyboardWillHide(_:)),
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateSurface()
+    }
+
+    /// SafeArea change (rotation, notch/Dynamic Island layout change, a
+    /// sibling view controller's chrome) — task 08. Pushed unconditionally;
+    /// `IosAppHandle::set_insets` (Rust side) no-op-guards an unchanged value.
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        pushInsets()
+    }
+
+    // MARK: - Insets (device-parity task 08 — RESEARCH.md "Insets / SafeArea")
+
+    @objc private func keyboardWillChangeFrame(_ notification: Notification) {
+        updateKeyboardInset(from: notification)
+    }
+
+    @objc private func keyboardWillHide(_ notification: Notification) {
+        keyboardViewInsetBottom = 0
+        pushInsets()
+    }
+
+    /// Computes the keyboard's occlusion of this view as the intersection of
+    /// its end frame (delivered in screen/window coordinates) with
+    /// `view.bounds`, converted into the view's coordinate space first
+    /// (`FlutterViewController.mm:1593-1622`'s model — no animation
+    /// interpolation in this v1 port).
+    private func updateKeyboardInset(from notification: Notification) {
+        guard
+            let endFrameValue = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                as? NSValue
+        else { return }
+        let localFrame = view.convert(endFrameValue.cgRectValue, from: nil)
+        let intersection = localFrame.intersection(view.bounds)
+        keyboardViewInsetBottom = intersection.isNull ? 0 : intersection.height
+        pushInsets()
+    }
+
+    /// Pushes the current `view_padding` (from `UIView.safeAreaInsets`) and
+    /// `view_insets` (the keyboard occlusion tracked above) to
+    /// `forgekit_set_insets`. Values are logical points — no scale
+    /// multiplication (`forgekit_set_insets`'s contract mirrors
+    /// `forgekit_dispatch_touch`'s no-scale asymmetry). A missing handle is
+    /// a no-op; the next call after `forgekit_init` succeeds (see
+    /// `updateSurface`) re-pushes the current state.
+    private func pushInsets() {
+        guard let handle else { return }
+        let insets = view.safeAreaInsets
+        forgekit_set_insets(
+            handle,
+            Float(insets.left), Float(insets.top), Float(insets.right), Float(insets.bottom),
+            0, 0, 0, Float(keyboardViewInsetBottom)
+        )
     }
 
     override func viewWillTransition(
@@ -155,6 +233,11 @@ final class ForgeKitViewController: UIViewController {
             // appearance before the first frame (task 08); live changes
             // arrive later via `traitCollectionDidChange`.
             forgekit_set_appearance(handle, traitCollection.userInterfaceStyle == .dark ? 1 : 0)
+            // Push the initial insets (task 08) — the first
+            // `viewSafeAreaInsetsDidChange` may have already fired before
+            // `handle` existed, so `pushInsets()`'s guard silently dropped
+            // it; push once explicitly now that a handle is live.
+            pushInsets()
             startDisplayLink()
             // Flush a deep link that arrived before this handle existed
             // (see `pendingDeepLink`'s doc comment) — a cold-start link

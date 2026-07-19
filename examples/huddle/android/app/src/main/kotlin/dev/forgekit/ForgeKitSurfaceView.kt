@@ -1,5 +1,6 @@
 package dev.forgekit
 
+import android.app.Activity
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Build
@@ -18,6 +19,10 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -33,8 +38,12 @@ import org.json.JSONObject
  * **state-sync** contract, not op-forwarding: [ForgeKitInputConnection] owns
  * composition mechanics against a mirror [Editable], pushes the whole editing
  * state into Rust via `nativeImeApply`, then pulls the reconciled state back via
- * `nativeImeState` to keep the `InputMethodManager` synchronised. No AndroidX
- * dependency is used.
+ * `nativeImeState` to keep the `InputMethodManager` synchronised.
+ *
+ * `androidx.core` (device-parity task 08) backs the inset listener
+ * ([dispatchInsets]) and status/nav-bar icon contrast
+ * ([updateSystemBarsAppearance]) below — the only AndroidX dependency this
+ * view uses.
  */
 class ForgeKitSurfaceView(context: Context) :
     SurfaceView(context),
@@ -65,11 +74,16 @@ class ForgeKitSurfaceView(context: Context) :
     // `native_init` gained the parameter together.
     private external fun nativeInit(surface: Surface, scaleFactor: Float, cacheDir: String): Long
 
+    // `density` (device-parity task 06/08) is `resources.displayMetrics.density`
+    // for the current configuration — a BREAKING signature change from the
+    // pre-parity three-arg form; the Rust `native_on_surface_changed` gained
+    // the same trailing parameter in the same phase (task 06).
     private external fun nativeOnSurfaceChanged(
         handle: Long,
         surface: Surface,
         width: Int,
         height: Int,
+        density: Float,
     )
 
     private external fun nativeOnSurfaceDestroyed(handle: Long)
@@ -130,6 +144,27 @@ class ForgeKitSurfaceView(context: Context) :
     // startup. Called once, right after `nativeInit` returns a live handle.
     private external fun nativeInitAccessibility(handle: Long, view: View)
 
+    // Insets (device-parity task 06/08 — RESEARCH.md "Insets / SafeArea").
+    // The eight floats are physical px: `viewPadding` (system-bar/cutout
+    // occlusion, vp*) then `viewInsets` (the IME area, vi*), each l/t/r/b —
+    // see [dispatchInsets].
+    private external fun nativeOnInsetsChanged(
+        handle: Long,
+        vpLeft: Float,
+        vpTop: Float,
+        vpRight: Float,
+        vpBottom: Float,
+        viLeft: Float,
+        viTop: Float,
+        viRight: Float,
+        viBottom: Float,
+    )
+
+    // Android back (device-parity task 06/08 — RESEARCH.md "Android back").
+    // Returns whether the framework consumed the press (it will pop on the
+    // next rebuild) — see [dispatchBackPress].
+    private external fun nativeOnBackPress(handle: Long): Boolean
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
@@ -175,6 +210,15 @@ class ForgeKitSurfaceView(context: Context) :
      */
     private var activeConnection: ForgeKitInputConnection? = null
 
+    /**
+     * The last `WindowInsetsCompat` this view received. Re-applied to
+     * [dispatchInsets] whenever a new native handle is created
+     * ([surfaceCreated]) so a recreated handle sees the current insets
+     * immediately instead of waiting on the next system dispatch (which may
+     * not come at all if nothing about the insets actually changed).
+     */
+    private var lastInsets: WindowInsetsCompat? = null
+
     private val imm: InputMethodManager
         get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
 
@@ -191,6 +235,80 @@ class ForgeKitSurfaceView(context: Context) :
         // Required for a custom editor view to receive IME focus + text input.
         isFocusable = true
         isFocusableInTouchMode = true
+        // Insets (device-parity task 08 — RESEARCH.md "Insets / SafeArea").
+        // Fires on attach and on every later system-bar/cutout/IME change;
+        // this view is the activity's entire content view (no siblings to
+        // propagate to), so the original `windowInsets` is returned unconsumed.
+        ViewCompat.setOnApplyWindowInsetsListener(this) { _, windowInsets ->
+            lastInsets = windowInsets
+            dispatchInsets(windowInsets)
+            windowInsets
+        }
+    }
+
+    /**
+     * Compute and forward the platform window insets to `nativeOnInsetsChanged`
+     * (physical px, task 06 signature): `viewPadding` is the system-bar +
+     * display-cutout occlusion, max-merged per edge (mirrors Flutter's
+     * `FlutterView.onApplyWindowInsets`, `FlutterView.java:751-793`);
+     * `viewInsets` is the IME area. A missing handle is a no-op — the insets
+     * are still cached in [lastInsets] and re-dispatched once one exists (see
+     * [surfaceCreated]).
+     *
+     * Pre-API-30 devices have no native `Type.ime()` insets; `WindowInsetsCompat`
+     * falls back to its own best-effort IME detection there — an accepted
+     * degradation, not a bug, per task 08's spec.
+     */
+    private fun dispatchInsets(windowInsets: WindowInsetsCompat) {
+        if (handle == 0L) return
+        val systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+        val cutout = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
+        val viewPadding = Insets.max(systemBars, cutout)
+        val viewInsets = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
+        nativeOnInsetsChanged(
+            handle,
+            viewPadding.left.toFloat(),
+            viewPadding.top.toFloat(),
+            viewPadding.right.toFloat(),
+            viewPadding.bottom.toFloat(),
+            viewInsets.left.toFloat(),
+            viewInsets.top.toFloat(),
+            viewInsets.right.toFloat(),
+            viewInsets.bottom.toFloat(),
+        )
+    }
+
+    /**
+     * Android back (device-parity task 08 — RESEARCH.md "Android back"),
+     * called by `MainActivity`'s `onBackPressedDispatcher` callback. Wraps
+     * `nativeOnBackPress`: `true` means the framework consumed the press
+     * (it will pop on the next rebuild); `false` means `MainActivity` should
+     * fall through to its default (finish) behavior. A missing handle
+     * (native side not up yet) never claims the press.
+     */
+    fun dispatchBackPress(): Boolean {
+        if (handle == 0L) return false
+        return nativeOnBackPress(handle)
+    }
+
+    /**
+     * Status/nav-bar icon contrast (task 08 — RESEARCH.md "Insets / SafeArea
+     * / SystemChrome"): light icons on a dark theme and vice versa, the one
+     * `WindowInsetsControllerCompat` use that's real in Flutter's embedder
+     * (`setSystemUIOverlayStyle` is not deprecated, but ForgeKit uses the
+     * AndroidX compat surface instead). `WindowCompat.getInsetsController`
+     * (not the deprecated `ViewCompat.getWindowInsetsController(View)`)
+     * needs the hosting `Activity`'s `Window` — always available here since
+     * `MainActivity` is this view's sole constructor caller (see
+     * `dev.forgekit.ForgeKitSurfaceView`'s class doc). Called alongside
+     * every `nativeSetAppearance` — see [surfaceCreated]/[onConfigurationChanged].
+     */
+    private fun updateSystemBarsAppearance(dark: Boolean) {
+        val window = (context as? Activity)?.window ?: return
+        WindowCompat.getInsetsController(window, this).apply {
+            isAppearanceLightStatusBars = !dark
+            isAppearanceLightNavigationBars = !dark
+        }
     }
 
     /**
@@ -227,11 +345,16 @@ class ForgeKitSurfaceView(context: Context) :
             handle = nativeInit(holder.surface, scaleFactor, context.cacheDir.absolutePath)
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
+                updateSystemBarsAppearance(isDarkMode)
                 // Attach the accesskit accessibility adapter to this view (spec
                 // §9, phase 6d). Best-effort: the native side isolates any
                 // failure in its own guard, so a missing delegate class or JNI
                 // hiccup degrades to "no a11y" rather than blocking startup.
                 nativeInitAccessibility(handle, this)
+                // Re-dispatch the last known insets (task 08): a recreated
+                // handle must not stay stale until the next system dispatch,
+                // which may never come if nothing about the insets changed.
+                lastInsets?.let { dispatchInsets(it) }
                 // Flush a deep link that arrived before this handle existed
                 // (see `pendingDeepLink`'s doc comment) — a cold-start link
                 // must not be silently dropped just because it raced ahead
@@ -242,7 +365,7 @@ class ForgeKitSurfaceView(context: Context) :
                 }
             }
         } else {
-            nativeOnSurfaceChanged(handle, holder.surface, width, height)
+            nativeOnSurfaceChanged(handle, holder.surface, width, height, scaleFactor)
         }
     }
 
@@ -265,7 +388,7 @@ class ForgeKitSurfaceView(context: Context) :
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         setFrameRateHint(holder)
         if (handle != 0L) {
-            nativeOnSurfaceChanged(handle, holder.surface, width, height)
+            nativeOnSurfaceChanged(handle, holder.surface, width, height, scaleFactor)
         }
     }
 
@@ -278,6 +401,7 @@ class ForgeKitSurfaceView(context: Context) :
         super.onConfigurationChanged(newConfig)
         if (handle != 0L) {
             nativeSetAppearance(handle, isDarkMode)
+            updateSystemBarsAppearance(isDarkMode)
         }
     }
 

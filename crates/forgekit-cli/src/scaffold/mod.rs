@@ -429,10 +429,22 @@ mod tests {
                 "expected `{needle}` in generated ForgeKitSurfaceView.kt:\n{surface_view_src}"
             );
         }
-        assert!(
-            !surface_view_src.contains("androidx"),
-            "IME transport must not introduce an AndroidX dependency:\n{surface_view_src}"
-        );
+        // IME transport itself still uses no AndroidX types (state-sync
+        // stays on `BaseInputConnection`/`InputMethodManager` above);
+        // `androidx.core` is now a real, intentional dependency of the
+        // *inset*/appearance-contrast path (device-parity task 08 —
+        // RESEARCH.md "Insets / SafeArea / SystemChrome"), not IME.
+        for needle in [
+            "external fun nativeOnInsetsChanged",
+            "external fun nativeOnBackPress",
+            "androidx.core.view.ViewCompat",
+            "fun dispatchBackPress(): Boolean",
+        ] {
+            assert!(
+                surface_view_src.contains(needle),
+                "expected `{needle}` in generated ForgeKitSurfaceView.kt:\n{surface_view_src}"
+            );
+        }
 
         let _ = fs::remove_dir_all(&dest);
     }
@@ -552,13 +564,14 @@ mod tests {
              \x20\x20\x20\x20\x20\x20\x20\x20android:icon=\"@mipmap/ic_launcher\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:label=\"{title}\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:roundIcon=\"@mipmap/ic_launcher_round\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar.Fullscreen\">\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar\">\n\
              \n\
              \x20\x20\x20\x20\x20\x20\x20\x20<activity\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:name=\".MainActivity\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:exported=\"true\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:configChanges=\"orientation|screenSize|keyboardHidden|uiMode\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar.Fullscreen\">\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:windowSoftInputMode=\"adjustResize\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar\">\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<intent-filter>\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<action android:name=\"android.intent.action.MAIN\" />\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20<category android:name=\"android.intent.category.LAUNCHER\" />\n\

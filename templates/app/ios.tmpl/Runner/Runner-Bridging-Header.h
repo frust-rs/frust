@@ -63,4 +63,16 @@ void  forgekit_set_appearance(void *handle, uint8_t dark);
 // forgekit_init has returned a handle — see ForgeKitViewController).
 void  forgekit_on_deep_link(void *handle, const char *url);
 
+// Insets (device-parity task 06/08 — RESEARCH.md "Insets / SafeArea"). The
+// eight floats are `view_padding` (vp_*: from the view's safeAreaInsets)
+// then `view_insets` (vi_*: the keyboard frame), each left/top/right/bottom,
+// in logical points (UIKit's coordinate space — no scale multiplication, the
+// same asymmetry forgekit_dispatch_touch uses). See ForgeKitViewController's
+// viewSafeAreaInsetsDidChange/keyboard-notification handlers.
+void  forgekit_set_insets(
+    void *handle,
+    float vp_l, float vp_t, float vp_r, float vp_b,
+    float vi_l, float vi_t, float vi_r, float vi_b
+);
+
 #endif /* Runner_Bridging_Header_h */

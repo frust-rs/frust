@@ -6,7 +6,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="{{ title_case_name }}"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        android:theme="@android:style/Theme.NoTitleBar">
 
         <activity
             android:name=".MainActivity"
@@ -15,7 +15,8 @@
             android:launchMode="singleTop"
 {%- endif %}
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
-            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@android:style/Theme.NoTitleBar">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
