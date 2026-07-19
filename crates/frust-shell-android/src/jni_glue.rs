@@ -12,9 +12,10 @@
 //! each with a safety comment: `ANativeWindow_fromSurface` (raw handle →
 //! `NativeWindow`), reconstituting the opaque `jlong` handle
 //! (`Box::from_raw`/`&mut *`), `Box::into_raw`/`from_raw` for the handle's
-//! lifetime, and `ndk_context::initialize_android_context` (handing the
-//! captured `JavaVM` + application-`Context` pointers to the plugin platform
-//! bridge — see [`native_init_platform`]).
+//! lifetime, and `frust_plugin::android::initialize` (handing the captured
+//! `JavaVM` + application-`Context` pointers to the plugin platform bridge,
+//! which forwards them to `ndk-context` and arms its pre-init flag — see
+//! [`native_init_platform`]).
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -89,9 +90,11 @@ static GPU_PREINIT: OnceLock<Mutex<Option<JoinHandle<PreInitResult>>>> = OnceLoc
 static JAVA_VM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 /// One-shot guard for the plugin platform-handle install ([`native_init_platform`]):
-/// `ndk_context::initialize_android_context` must run exactly once per process
-/// (it panics on a second call), but Kotlin re-invokes `nativeInitPlatform`
-/// after activity recreation — so the second and later calls are a no-op.
+/// [`frust_plugin::android::initialize`] must run exactly once per process (the
+/// `ndk_context::initialize_android_context` it wraps panics on a second call),
+/// but Kotlin re-invokes `nativeInitPlatform` after activity recreation — so
+/// the second and later calls are a no-op. This `Once` also owns the
+/// application-`Context` [`Global`]-ref idempotence ([`CONTEXT_GLOBAL`]).
 static PLATFORM_INIT: Once = Once::new();
 
 /// Holds the application-`Context` [`Global`] reference for the whole process,
@@ -143,9 +146,10 @@ pub extern "system" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> ji
 /// per-`AppHandle` state. Routed through [`guard`] like every export so a panic
 /// (e.g. a failed `new_global_ref`) can never unwind across the JNI boundary.
 ///
-/// Idempotent via [`PLATFORM_INIT`]: `ndk_context::initialize_android_context`
-/// panics if called twice, and Kotlin re-runs this after activity recreation,
-/// so only the first call installs the handles; the rest are no-ops.
+/// Idempotent via [`PLATFORM_INIT`]: [`frust_plugin::android::initialize`]
+/// (wrapping `ndk_context::initialize_android_context`) panics if called twice,
+/// and Kotlin re-runs this after activity recreation, so only the first call
+/// installs the handles; the rest are no-ops.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeInitPlatform<'local>(
     env: EnvUnowned<'local>,
@@ -190,9 +194,10 @@ fn native_init_platform(mut env: EnvUnowned, context: JObject) {
             // SAFETY: `vm_ptr` is the live process `JavaVM` captured in
             // `JNI_OnLoad`; `ctx_ptr` is the just-leaked, process-lifetime
             // application-context global ref. `PLATFORM_INIT.call_once` makes
-            // this the exactly-once call `initialize_android_context` requires.
+            // this the exactly-once call `frust_plugin::android::initialize`
+            // (and the `ndk-context` install it wraps) requires.
             unsafe {
-                ndk_context::initialize_android_context(vm_ptr, ctx_ptr.cast::<c_void>());
+                frust_plugin::android::initialize(vm_ptr, ctx_ptr.cast::<c_void>());
             }
             log::debug!("frust-shell-android: plugin platform handles installed");
         });
