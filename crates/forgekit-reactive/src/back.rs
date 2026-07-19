@@ -108,8 +108,47 @@ thread_local! {
     /// [`handles_back`] consults it in preference to the polled [`HANDLES_BACK`]
     /// flag, so a back press reads the navigator's CURRENT depth (post-
     /// `apply_ops`) rather than a stale rebuild-time snapshot.
-    static CAN_POP_PROVIDER: RefCell<Option<Box<dyn Fn() -> bool>>> =
+    static CAN_POP_PROVIDER: RefCell<Option<RegisteredProvider>> =
         const { RefCell::new(None) };
+
+    /// Monotonic id source for [`CanPopRegistration`] tokens (UI-thread-only,
+    /// like the slot itself), so a stale registration's cleanup can be told
+    /// apart from the live one's.
+    static CAN_POP_NEXT_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// A registered live provider: its registration id + the closure itself
+/// (see [`CanPopRegistration`] for the id's role).
+type RegisteredProvider = (u64, Box<dyn Fn() -> bool>);
+
+/// Proof-of-registration token returned by [`set_can_pop_provider`].
+///
+/// **The provider slot is single-registrant: at most one live provider exists
+/// at a time, and a later [`set_can_pop_provider`] call replaces the earlier
+/// registration without warning** (the facade's `BackHandler` is expected to be
+/// constructed once, at the app root). This token is what makes that
+/// replacement safe against out-of-order teardown: [`CanPopRegistration::unregister`]
+/// clears the slot **only if this registration is still the live one**, so a
+/// replaced (stale) handler's `on_cleanup` can never clear a newer handler's
+/// provider out from under it. A future multi-handler/intercept design must
+/// replace this slot with a stack — see the module docs.
+#[must_use = "dropping the registration token without storing it makes the provider impossible to unregister scoped-safely"]
+#[derive(Debug)]
+pub struct CanPopRegistration(u64);
+
+impl CanPopRegistration {
+    /// Unregister this provider **iff it is still the live registration**;
+    /// a stale token (already replaced by a newer [`set_can_pop_provider`]
+    /// call) is a harmless no-op, leaving the newer provider intact. Safe on
+    /// any thread (a non-UI thread's slot is empty, so it no-ops).
+    pub fn unregister(self) {
+        CAN_POP_PROVIDER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(id, _)| *id == self.0) {
+                *slot = None;
+            }
+        });
+    }
 }
 
 /// Returns the process-wide back-press counter signal, creating it (under the
@@ -192,7 +231,16 @@ pub fn set_handles_back(handles: bool) {
 /// depth but before the next rebuild refreshed the polled flag — is decided
 /// correctly instead of falling through to activity finish (see the module
 /// docs' timing section). A registered provider wins over
-/// [`set_handles_back`]'s flag; [`clear_can_pop_provider`] unregisters it.
+/// [`set_handles_back`]'s flag; the returned [`CanPopRegistration`] token
+/// unregisters it scoped-safely.
+///
+/// **Single-registrant invariant:** the slot holds at most ONE provider; a
+/// second call replaces the first silently (last-writer-wins). Constructing
+/// more than one live `BackHandler` is therefore unsupported today — the
+/// replaced handler stops influencing [`handles_back`] immediately, and its
+/// later cleanup no-ops (token-guarded) rather than clearing the newer
+/// registration. A future back-intercept/stacked design (ACTION_ITEMS A8)
+/// must widen this slot to a stack instead of registering a second provider.
 ///
 /// # Panics
 ///
@@ -200,7 +248,7 @@ pub fn set_handles_back(handles: bool) {
 /// `NavigatorController` (`!Send`) and lives in UI-thread `thread_local`
 /// storage, so registering it from another thread is a wiring bug — the same
 /// convention [`push_back_press`]/`Executor::spawn_local` enforce.
-pub fn set_can_pop_provider(provider: Box<dyn Fn() -> bool>) {
+pub fn set_can_pop_provider(provider: Box<dyn Fn() -> bool>) -> CanPopRegistration {
     if !is_ui_thread() {
         panic!(
             "forgekit-reactive: set_can_pop_provider was called off the UI thread. The can-pop \
@@ -210,15 +258,23 @@ pub fn set_can_pop_provider(provider: Box<dyn Fn() -> bool>) {
              `Executor::spawn_local` enforce."
         );
     }
-    CAN_POP_PROVIDER.with(|slot| *slot.borrow_mut() = Some(provider));
+    let id = CAN_POP_NEXT_ID.with(|next| {
+        let id = next.get();
+        next.set(id + 1);
+        id
+    });
+    CAN_POP_PROVIDER.with(|slot| *slot.borrow_mut() = Some((id, provider)));
+    CanPopRegistration(id)
 }
 
-/// Unregister the live can-pop provider (see [`set_can_pop_provider`]),
-/// restoring the polled [`handles_back`] fallback. The facade's `BackHandler`
-/// registers this via `on_cleanup` so a torn-down host component stops holding
-/// its controller alive here. Idempotent — safe to call with no provider
-/// registered, and it carries no thread constraint (clearing another thread's
-/// empty slot is a harmless no-op).
+/// **Force-clear** the live can-pop provider unconditionally, restoring the
+/// polled [`handles_back`] fallback — a teardown/test hammer, NOT the handler
+/// cleanup path. A handler's cleanup must go through its own
+/// [`CanPopRegistration::unregister`] so a stale registration can never clear
+/// a newer one (see the single-registrant invariant on
+/// [`set_can_pop_provider`]). Idempotent — safe with no provider registered,
+/// and it carries no thread constraint (clearing another thread's empty slot
+/// is a harmless no-op).
 pub fn clear_can_pop_provider() {
     CAN_POP_PROVIDER.with(|slot| *slot.borrow_mut() = None);
 }
@@ -237,7 +293,7 @@ pub fn handles_back() -> bool {
     // the whole point of the slot is to bypass the polled flag's one-frame lag.
     // The closure only reads the controller's depth cell (never re-enters this
     // module), so calling it under the borrow is safe.
-    if let Some(answer) = CAN_POP_PROVIDER.with(|slot| slot.borrow().as_ref().map(|f| f())) {
+    if let Some(answer) = CAN_POP_PROVIDER.with(|slot| slot.borrow().as_ref().map(|(_, f)| f())) {
         return answer;
     }
     HANDLES_BACK.load(Ordering::Relaxed)
@@ -357,7 +413,7 @@ mod tests {
         // the OPPOSITE way so the assertions can only pass if the provider wins.
         let live = Rc::new(Cell::new(true));
         let probe = live.clone();
-        set_can_pop_provider(Box::new(move || probe.get()));
+        let reg = set_can_pop_provider(Box::new(move || probe.get()));
 
         set_handles_back(false);
         assert!(
@@ -375,15 +431,49 @@ mod tests {
             "the provider is re-queried live, not cached, and still wins"
         );
 
-        // Unregistering restores the polled-flag fallback.
-        clear_can_pop_provider();
+        // Unregistering (token-scoped) restores the polled-flag fallback.
+        reg.unregister();
         assert!(handles_back(), "after clear, the flag (true) answers again");
         set_handles_back(false);
         assert!(!handles_back(), "fallback tracks the flag once more");
 
-        // Idempotent: a second clear with nothing registered is a safe no-op.
+        // Idempotent: a force-clear with nothing registered is a safe no-op.
         clear_can_pop_provider();
         assert!(!handles_back());
+    }
+
+    /// The single-registrant invariant's token guard: a REPLACED registration's
+    /// cleanup must never clear the newer provider out from under it — the
+    /// exact out-of-order-teardown hazard the round-1 review flagged (a stale
+    /// `on_cleanup` firing after a second `BackHandler` registered would
+    /// silently revert `handles_back` to the polled fallback).
+    #[test]
+    fn stale_unregister_never_clears_a_newer_registration() {
+        let _guard = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+
+        clear_can_pop_provider();
+        set_handles_back(false);
+
+        let reg1 = set_can_pop_provider(Box::new(|| false));
+        assert!(!handles_back(), "first provider answers false");
+
+        // A second registration replaces the first (last-writer-wins).
+        let reg2 = set_can_pop_provider(Box::new(|| true));
+        assert!(handles_back(), "second provider replaced the first");
+
+        // The STALE token's cleanup is a no-op — the live provider survives.
+        reg1.unregister();
+        assert!(
+            handles_back(),
+            "stale unregister must not clear the newer registration"
+        );
+
+        // The live token's cleanup clears for real, restoring the fallback.
+        reg2.unregister();
+        assert!(!handles_back(), "live unregister restores the polled flag");
     }
 
     /// The UI-thread contract is enforced (mirrors `push_deep_link`'s
@@ -414,8 +504,10 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let _rt = ReactiveRuntime::init(Arc::new(|| {}));
 
-        std::thread::spawn(|| set_can_pop_provider(Box::new(|| true)))
-            .join()
-            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+        std::thread::spawn(|| {
+            let _ = set_can_pop_provider(Box::new(|| true));
+        })
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
     }
 }

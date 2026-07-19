@@ -41,9 +41,7 @@
 //! tears down. See `forgekit_reactive::back`'s module docs for the source-side
 //! contract.
 
-use forgekit_reactive::{
-    back_presses, clear_can_pop_provider, on_cleanup, set_can_pop_provider, set_handles_back,
-};
+use forgekit_reactive::{back_presses, on_cleanup, set_can_pop_provider, set_handles_back};
 use forgekit_widgets::NavigatorController;
 use reactive_graph::traits::{Get, GetUntracked};
 use std::cell::Cell;
@@ -87,10 +85,13 @@ impl<State: 'static> BackHandler<State> {
         // Register the live provider (device-parity fix F2): `handles_back()`
         // consults this in preference to the polled flag, reading the CURRENT
         // stack depth at press time. Unregister it when the owning component
-        // tears down (a no-op outside an owner, e.g. in unit tests).
+        // tears down (a no-op outside an owner, e.g. in unit tests) — via the
+        // token-scoped `unregister`, so if a NEWER BackHandler ever replaced
+        // this registration (single-registrant slot, last-writer-wins), this
+        // stale cleanup no-ops instead of clearing the live provider.
         let provider_controller = controller.clone();
-        set_can_pop_provider(Box::new(move || provider_controller.can_pop()));
-        on_cleanup(clear_can_pop_provider);
+        let registration = set_can_pop_provider(Box::new(move || provider_controller.can_pop()));
+        on_cleanup(move || registration.unregister());
         Self {
             controller,
             consumed,
