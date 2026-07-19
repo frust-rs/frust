@@ -283,9 +283,9 @@ impl<State: 'static> View<State> for FlexView<State> {
         }
 
         // Reconcile the child pods through the shared helper (build/rebuild/
-        // teardown + the structural-change capture/focus cancellation). Keyed
-        // children (`|child| child.key`) opt the list into key-matched
-        // reconciliation; an all-unkeyed list stays positional.
+        // teardown + focus/capture retention for unchanged siblings across a
+        // structural change). Keyed children (`|child| child.key`) opt the list
+        // into key-matched reconciliation; an all-unkeyed list stays positional.
         flags |= crate::rebuild_children(
             &prev.children,
             &self.children,
@@ -620,7 +620,9 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use forgekit_core::{EventCtx, PointerButton, PointerEvent, PointerPhase, any};
+    use forgekit_core::{
+        EventCtx, Key, KeyEvent, Modifiers, PointerButton, PointerEvent, PointerPhase, any,
+    };
 
     const ROW_W: f64 = 50.0;
     const ROW_H: f64 = 20.0;
@@ -763,10 +765,12 @@ mod tests {
     }
 
     #[test]
-    fn structural_insert_cancels_inflight_drag_no_fire() {
-        // (Scenario 1) Drag armed in row 1; a rebuild inserts a row above
-        // (length grows). On Up: NO callback fires, and the original row's
-        // gesture state is cleared.
+    fn append_after_preserves_captured_drag_before_change() {
+        // (Task 02, capture side) An armed child BEFORE the change point survives
+        // an append-after: the appended tail is past the stable prefix, so the
+        // captured row keeps its `active` path and fires on Up as normal. This is
+        // Flutter's invariant — a sibling structural change must not break an
+        // unchanged child's in-flight gesture.
         let mut counter = 0u64;
         let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1), captor(2)]);
         let mut w = prev.build(&mut ctx(&mut counter));
@@ -776,20 +780,54 @@ mod tests {
         dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
         assert!(w.children[1].is_active(), "row 1 captured the pointer");
 
-        // Rebuild: insert a new row at the top → positions shift, length grows.
-        let inserted: FlexView<Vec<u32>> = Column(vec![captor(9), captor(0), captor(1), captor(2)]);
-        inserted.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        // Append a new row AFTER the captured one → length grows, no type swap.
+        let appended: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1), captor(2), captor(3)]);
+        appended.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert!(
-            w.children.iter().all(|p| !p.is_active()),
-            "structural change cleared every active path"
+            w.children[1].is_active(),
+            "append-after preserves the captured row's active path (stable prefix)"
         );
 
-        // Re-layout for the new row count, then release. Nothing is armed.
+        // The captured drag completes and fires on the still-armed row.
         layout_column(&mut w);
         dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(1)));
+        assert_eq!(log, vec![1], "captured row fires on Up as normal");
+    }
+
+    #[test]
+    fn type_swap_before_armed_index_cancels_with_synthetic_cancel() {
+        // (Task 02, capture side) An armed child at an index PAST the change point
+        // (a type swap at an earlier index drops the stable prefix to that swap, so
+        // the armed row sits in the cancelled tail) still receives a synthetic
+        // `Cancel` — it unwinds its state machine rather than being silently
+        // dropped or firing on a later hit-tested `Up`.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1), captor(2)]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(2)));
+        assert!(w.children[2].is_active(), "row 2 captured the pointer");
+
+        // Swap row 0 (before the armed index) to a different concrete type → the
+        // stable prefix ends at index 0, so the armed row 2 is in the cancelled
+        // tail. A CaptorWidget that received `Cancel` disarms (its Cancel arm sets
+        // `armed = false`); one that never received it would still fire on Up.
+        let seen = Rc::new(Cell::new(0u32));
+        let swapped: FlexView<Vec<u32>> =
+            Column(vec![any(Recorder { seen }), captor(1), captor(2)]);
+        swapped.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            w.children.iter().all(|p| !p.is_active()),
+            "swap before the armed index cancelled the tail's active path"
+        );
+
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(2)));
         assert!(
             log.is_empty(),
-            "no row fires on Up after an in-flight cancel"
+            "no fire on Up — the armed row was synthetically cancelled"
         );
     }
 
@@ -874,6 +912,110 @@ mod tests {
         // The captured drag completes and fires on the still-armed row.
         dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(1)));
         assert_eq!(log, vec![1], "captured row fires on Up as normal");
+    }
+
+    // --- Positional focus-retention fixtures (task 02) --------------------
+    //
+    // The focus analog of the capture tests above: a `FocusRow` requests focus on
+    // `Down` and records its id on a focus-routed `Key` event, so a test can prove
+    // both that the pod's `focused` flag survives a sibling structural change (the
+    // seed the next paint reads into `PaintCtx::has_focus`) and that the container
+    // still routes a `Key` event to the surviving focused row.
+
+    #[test]
+    fn focus_on_child_survives_append_after() {
+        // Focus on child 0 survives appending a row after it (a count change beyond
+        // the focused index): the focused pod stays in the stable prefix, so its
+        // `focused` flag — and thus the next paint's `PaintCtx::has_focus` and the
+        // published IME surface — stays live, and a Key event still reaches it.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> =
+            Column(vec![any(FocusRow { id: 0 }), any(FocusRow { id: 1 })]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        assert!(w.children[0].is_focused(), "child 0 took focus");
+
+        // Append a third row AFTER the focused one → length grows, no type swap.
+        let appended: FlexView<Vec<u32>> = Column(vec![
+            any(FocusRow { id: 0 }),
+            any(FocusRow { id: 1 }),
+            any(FocusRow { id: 2 }),
+        ]);
+        appended.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            w.children[0].is_focused(),
+            "append-after preserves the focused child's recorded path"
+        );
+
+        // A Key event still routes to the surviving focused child 0.
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &key_event());
+        assert_eq!(log, vec![0], "Key still routes to the focused row");
+    }
+
+    #[test]
+    fn focus_on_child_survives_remove_after() {
+        // Symmetric to the append case: removing a row AFTER the focused index
+        // (a shrink beyond it) leaves the focused pod in the stable prefix.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = Column(vec![
+            any(FocusRow { id: 0 }),
+            any(FocusRow { id: 1 }),
+            any(FocusRow { id: 2 }),
+        ]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
+        assert!(w.children[0].is_focused());
+
+        // Remove the last row → shrink beyond the focused index.
+        let removed: FlexView<Vec<u32>> =
+            Column(vec![any(FocusRow { id: 0 }), any(FocusRow { id: 1 })]);
+        removed.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            w.children[0].is_focused(),
+            "remove-after preserves the focused child's recorded path"
+        );
+
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &key_event());
+        assert_eq!(log, vec![0], "Key still routes to the focused row");
+    }
+
+    #[test]
+    fn focus_cleared_when_focused_index_type_swaps() {
+        // When the focused index itself type-swaps, its widget identity breaks →
+        // the focus path is cleared and a subsequent Key event reaches nobody.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> =
+            Column(vec![any(FocusRow { id: 0 }), any(FocusRow { id: 1 })]);
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert!(w.children[1].is_focused(), "child 1 took focus");
+
+        // Swap the focused index 1 to a different concrete type (a Captor).
+        let swapped: FlexView<Vec<u32>> = Column(vec![any(FocusRow { id: 0 }), captor(9)]);
+        swapped.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert!(
+            !w.children[1].is_focused(),
+            "a type swap at the focused index clears its focus path"
+        );
+
+        // No focused pod remains → the Key event is dropped.
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &key_event());
+        assert!(
+            log.is_empty(),
+            "Key reaches nobody after the focused index swaps"
+        );
     }
 
     // --- Keyed reconciliation fixtures (task 58) --------------------------
@@ -1071,9 +1213,10 @@ mod tests {
     }
 
     #[test]
-    fn keyed_reorder_cancels_inflight_gesture_no_fire() {
-        // An in-flight capture across a keyed reorder is cancelled (g5 pattern):
-        // no callback fires on the later Up.
+    fn keyed_reorder_preserves_captured_drag() {
+        // (Task 02) A key-matched row's identity is intact across a reorder, so its
+        // in-flight capture is CARRIED with the relocated pod — not cancelled. The
+        // captured drag completes and fires on the row at its new index.
         let mut counter = 0u64;
         let prev: FlexView<Vec<u32>> = FlexView::new(
             Axis::Vertical,
@@ -1087,20 +1230,22 @@ mod tests {
         dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
         assert!(w.children[0].is_active());
 
-        // Reorder → [key2, key1]. The reorder is structural → cancel.
+        // Reorder → [key2, key1]. The key-1 row relocates to index 1 with its
+        // `active` flag intact.
         let reordered: FlexView<Vec<u32>> = FlexView::new(
             Axis::Vertical,
             vec![keyed(2u64, Captor { id: 1 }), keyed(1u64, Captor { id: 0 })],
         );
         reordered.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert!(
-            w.children.iter().all(|p| !p.is_active()),
-            "keyed reorder cleared every active path"
+            w.children[1].is_active(),
+            "keyed reorder carries the captured row's active path to its new index"
         );
 
+        // The captured drag completes and fires on the relocated key-1 row (id 0).
         layout_column(&mut w);
         dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(1)));
-        assert!(log.is_empty(), "no row fires on Up after a reorder cancel");
+        assert_eq!(log, vec![0], "the relocated captured row fires on Up");
     }
 
     #[test]
@@ -1140,9 +1285,10 @@ mod tests {
     }
 
     #[test]
-    fn keyed_reorder_clears_focus() {
-        // Focus is the second recorded path: any keyed reorder clears it, exactly
-        // like the capture path (conservative v1 — see cancel_active_children).
+    fn keyed_reorder_preserves_focus_and_key_routing() {
+        // (Task 02) Focus is the second recorded path and rides along with the
+        // relocated pod: a key-matched focused row keeps its focus across a reorder,
+        // and the container routes a subsequent Key event to it at its new index.
         let mut counter = 0u64;
         let prev: FlexView<Vec<u32>> = FlexView::new(
             Axis::Vertical,
@@ -1159,7 +1305,8 @@ mod tests {
         dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(0)));
         assert!(w.children[0].is_focused());
 
-        // Reorder → [key2, key1]. Structural → focus chain cleared.
+        // Reorder → [key2, key1]. The key-1 row relocates to index 1, carrying its
+        // focus flag with it.
         let reordered: FlexView<Vec<u32>> = FlexView::new(
             Axis::Vertical,
             vec![
@@ -1169,12 +1316,57 @@ mod tests {
         );
         reordered.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert!(
+            w.children[1].is_focused(),
+            "the focused key-1 row keeps focus at its new index"
+        );
+        assert!(!w.children[0].is_focused());
+
+        // A Key event routes to the relocated focused row (id 1).
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &key_event());
+        assert_eq!(log, vec![1], "Key routes to the relocated focused row");
+    }
+
+    #[test]
+    fn keyed_removed_focused_key_clears_focus() {
+        // (Task 02) Removing the focused keyed row breaks its identity: the pod is
+        // torn down, so no focused pod remains and a subsequent Key reaches nobody.
+        let mut counter = 0u64;
+        let prev: FlexView<Vec<u32>> = FlexView::new(
+            Axis::Vertical,
+            vec![
+                keyed(1u64, FocusRow { id: 1 }),
+                keyed(2u64, FocusRow { id: 2 }),
+            ],
+        );
+        let mut w = prev.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        let mut log: Vec<u32> = Vec::new();
+        // Focus the key-2 row (index 1).
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(1)));
+        assert!(w.children[1].is_focused());
+
+        // Remove key 2 → only key 1 survives, and it never held focus.
+        let removed: FlexView<Vec<u32>> =
+            FlexView::new(Axis::Vertical, vec![keyed(1u64, FocusRow { id: 1 })]);
+        removed.rebuild(&prev, &mut w, &mut ctx(&mut counter));
+        assert_eq!(w.children.len(), 1);
+        assert!(
             w.children.iter().all(|p| !p.is_focused()),
-            "keyed reorder cleared the focus path"
+            "the removed focused row leaves no focus path behind"
+        );
+
+        layout_column(&mut w);
+        dispatch(&mut w, &mut log, &key_event());
+        assert!(
+            log.is_empty(),
+            "Key reaches nobody after the focused key is removed"
         );
     }
 
-    /// A focus-taking row: requests focus on `Down`, records `id` on a Key event.
+    /// A focus-taking row: requests focus on `Down`, records `id` on a Key event
+    /// (so a test can prove a focus-routed event reaches it at its current index).
     struct FocusRow {
         id: u32,
     }
@@ -1205,13 +1397,28 @@ mod tests {
         }
         fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
         fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-            if let InputEvent::Pointer(p) = event
-                && p.phase == PointerPhase::Down
-            {
-                ctx.request_focus();
-                return EventResult::Handled;
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    EventResult::Handled
+                }
+                // A focus-routed Key event records this row's id — how a test
+                // observes which row the container routes focus to.
+                InputEvent::Key(_) => {
+                    ctx.state_mut::<Vec<u32>>().push(self.id);
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
             }
-            EventResult::Ignored
         }
+    }
+
+    /// Build a focus-routed `Key` event (an "a" keypress).
+    fn key_event() -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key: Key::Character("a".to_string()),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
     }
 }

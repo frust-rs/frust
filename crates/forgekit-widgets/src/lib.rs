@@ -351,15 +351,22 @@ fn cancel_pod(pod: &mut ChildPod) {
     pod.event_child(&mut ctx, &cancel);
 }
 
-/// Cancel-and-clear every surviving child's recorded interaction paths after a
-/// structural change — both the capture (`active`) path and the focus
-/// (`focused`) path.
+/// Cancel-and-clear the recorded interaction paths of the pods handed to it —
+/// both the capture (`active`) path and the focus (`focused`) path — after a
+/// structural change.
 ///
-/// Called by [`rebuild_children`]'s positional and keyed reconcilers once a
-/// structural change is detected: the recorded paths can no longer be trusted
-/// (a length shift, type swap, or keyed reorder moves widgets under the paths),
-/// so any surviving armed widget is unwound via [`cancel_pod`] and its `active`
-/// flag dropped, and any focused child has its `focused` flag dropped.
+/// Called by [`rebuild_children_positional`] on the **tail past the stable
+/// prefix** (indices `≥ k`, whose widget identity may have changed): a swapped
+/// slot, a shifted pod, or the grown tail. The stable prefix (indices `< k`)
+/// keeps the same live widget across the rebuild, so its recorded paths stay
+/// valid and are *not* passed here — that is Flutter's focus/IME retention
+/// invariant (see [`rebuild_children_positional`]). The keyed reconciler does not
+/// call this at all: a key-matched pod relocates with its flags intact, and only
+/// a torn-down or type-swapped pod (identity broken) is cleared inline there.
+///
+/// For each pod handed in, any surviving armed widget is unwound via [`cancel_pod`]
+/// and its `active` flag dropped, and any focused child has its `focused` flag
+/// dropped.
 ///
 /// # Focus vs. capture: why one synthesizes a `Cancel` and the other does not
 ///
@@ -406,12 +413,16 @@ fn cancel_active_children(pods: &mut [ChildPod]) {
 /// mixes keyed and unkeyed children, or repeats a key, trips a `debug_assert`
 /// and falls back to the positional path (correct, just identity-blind).
 ///
-/// **Structural change cancels in-flight interaction.** Either path treats a
-/// child-count change, an in-place type swap, or (keyed only) a reorder as a
-/// structural edit that invalidates the recorded capture/focus paths, unwinding
-/// them via [`cancel_active_children`]; a structural-change-free rebuild leaves
-/// the recorded paths untouched, so an ordinary every-frame rebuild never breaks
-/// a captured drag or dismisses the keyboard.
+/// **A structural change preserves focus/capture for unchanged siblings
+/// (Flutter's invariant).** A structural edit among siblings only cancels the
+/// recorded capture/focus paths of children whose own identity actually changed:
+/// the positional path preserves its stable prefix and cancels only the tail past
+/// the first type swap (see [`rebuild_children_positional`]); the keyed path
+/// relocates a key-matched child's paths intact and cancels only a torn-down or
+/// type-swapped child (see [`rebuild_children_keyed`]). A structural-change-free
+/// rebuild leaves every recorded path untouched, so an ordinary every-frame
+/// rebuild never breaks a captured drag or dismisses the keyboard for an
+/// unchanged child.
 pub(crate) fn rebuild_children<State: 'static, C>(
     prev: &[C],
     next: &[C],
@@ -443,17 +454,29 @@ pub(crate) fn rebuild_children<State: 'static, C>(
 /// built, a shrunk tail is torn down and dropped. Length changes signal
 /// `LAYOUT | PAINT`.
 ///
-/// **Structural change cancels in-flight gestures.** Positional reconciliation
-/// misroutes a captured gesture across a structural edit: a length shift moves
-/// the armed widget to a different logical index, and a type swap replaces the
-/// widget under a still-recorded path. On any child-count change *or* in-place
-/// type swap, every surviving captured/focused child is
-/// [cleared](cancel_active_children) so it unwinds rather than firing on a
-/// hit-tested `Up`; a swapped-in fresh widget (which never saw `Down`) just has
-/// its stale path dropped; and a truncated active pod is cancelled in
-/// [`teardown_child`]. A structural-change-free rebuild leaves the recorded
-/// paths untouched, so an ordinary every-frame rebuild never breaks a captured
-/// drag.
+/// **Focus/capture survive a sibling structural change (Flutter's invariant).**
+/// A structural edit among SIBLINGS must not clear focus/IME (or an in-flight
+/// capture) for a child whose own identity is unchanged. Positional matching
+/// rebuilds each common index `i` in place against the *same* live widget, so a
+/// recorded focus/capture path to it stays valid as long as that slot was not an
+/// in-place type swap. We therefore compute the **stable prefix** `k` — the
+/// largest `k ≤ min(prev.len, next.len)` such that no index `< k` type-swapped
+/// (the first swap index, or `common` if none) — and preserve focus AND capture
+/// for pods `< k`. Only the tail from `k` onward has its recorded paths
+/// cancelled/cleared via [`cancel_active_children`]: a swapped slot (fresh widget
+/// that never saw `Down`), a shifted pod that may now hold different logical
+/// content, and the grown tail (fresh pods, nothing to unwind). A truncated
+/// active pod is cancelled earlier in [`teardown_child`]. A structural-change-free
+/// rebuild (same length, no swap) leaves every path untouched, so an ordinary
+/// every-frame rebuild never breaks a captured drag *or* dismisses the keyboard
+/// for an unchanged sibling (the huddle search-field bug this fixes).
+///
+/// This is Flutter's focus/IME retention behavior (see the feature's
+/// RESEARCH.md): only a child whose identity actually changes loses focus.
+/// Positional matching cannot distinguish a same-typed prepend from a
+/// content-change-plus-append — an index `< k` that positionally kept its widget
+/// but semantically moved keeps its recorded path (the documented positional
+/// limitation; a caller wanting identity across reorders uses `keyed`).
 fn rebuild_children_positional<State: 'static, C>(
     prev: &[C],
     next: &[C],
@@ -463,7 +486,10 @@ fn rebuild_children_positional<State: 'static, C>(
 ) -> ChangeFlags {
     let mut flags = ChangeFlags::NONE;
     let common = prev.len().min(next.len());
-    let mut swapped = false;
+    // The stable prefix ends at the first in-place type swap (or at `common` if
+    // there is none): every index before it keeps the same live widget across
+    // the rebuild, so a recorded focus/capture path to it stays valid.
+    let mut first_swap: Option<usize> = None;
     for i in 0..common {
         let (child_flags, child_swapped) =
             rebuild_child_tracked(view_of(&prev[i]), view_of(&next[i]), &mut pods[i], ctx);
@@ -471,7 +497,9 @@ fn rebuild_children_positional<State: 'static, C>(
         if child_swapped {
             // Fresh widget at this slot: drop the stale capture, nothing to cancel.
             pods[i].set_active(false);
-            swapped = true;
+            if first_swap.is_none() {
+                first_swap = Some(i);
+            }
         }
     }
     if next.len() > prev.len() {
@@ -486,11 +514,15 @@ fn rebuild_children_positional<State: 'static, C>(
         pods.truncate(next.len());
         flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
     }
-    // A structural change — child-count shift or an in-place type swap —
-    // invalidates any surviving in-flight capture (truncated active pods were
-    // already cancelled in teardown; swapped slots were cleared above).
-    if prev.len() != next.len() || swapped {
-        cancel_active_children(pods);
+    // On a structural change (length shift or in-place type swap), preserve the
+    // stable prefix (`< k`, same widget identity) and cancel/clear only the tail
+    // from `k` onward. On a pure length change with no swap, `k == common`, so the
+    // prefix (every surviving common pod) is preserved and only the grown tail —
+    // fresh pods with no recorded path — is "cancelled" (a no-op); a truncated
+    // active pod was already cancelled in `teardown_child`.
+    if prev.len() != next.len() || first_swap.is_some() {
+        let k = first_swap.unwrap_or(common);
+        cancel_active_children(&mut pods[k..]);
     }
     flags
 }
@@ -505,14 +537,18 @@ fn rebuild_children_positional<State: 'static, C>(
 /// (with [`teardown_child`]'s cancel-if-active). A duplicate key (old or new)
 /// trips a `debug_assert` and falls back to the positional path.
 ///
-/// **Any move is a structural change.** A reorder, insert, or removal
-/// invalidates the recorded capture/focus paths (v1 is conservative: it does not
-/// try to carry an in-flight gesture or the keyboard across a moved row), so on
-/// any such edit every surviving child's paths are cleared via
-/// [`cancel_active_children`]. A same-keys, same-order rebuild is *not*
-/// structural: the recorded paths survive, exactly mirroring the positional
-/// path's content-only rebuild. A future surgical-preserve option could relocate
-/// the `active`/`focused` flag with its pod instead of clearing it.
+/// **A key-matched child keeps its focus/capture across a move (Flutter's
+/// invariant).** A reorder or insert relocates a matched child's whole
+/// `ChildPod` — including its `focused`/`active` bookkeeping — so its recorded
+/// path stays valid: focus/capture routing scans for the pod by its flag
+/// ([`ChildPod::is_focused`]/[`is_active`](ChildPod::is_active)), so a `Key`/`Ime`
+/// event (or a captured `Move`/`Up`) still reaches the relocated child at its new
+/// index with nothing to update in a parent index. Only a child whose identity
+/// actually breaks loses its path: a torn-down (removed) key is cancelled in
+/// [`teardown_child`], and a key reused for a different concrete type is a swap
+/// (the old widget died inside `AnyView::rebuild`) whose stale `active`/`focused`
+/// flags are dropped inline below. A same-keys, same-order rebuild is likewise a
+/// content-only rebuild that leaves every path untouched.
 fn rebuild_children_keyed<State: 'static, C>(
     prev: &[C],
     next: &[C],
@@ -550,20 +586,10 @@ fn rebuild_children_keyed<State: 'static, C>(
     let mut old_pods: Vec<Option<ChildPod>> = pods.drain(..).map(Some).collect();
     let mut new_pods: Vec<ChildPod> = Vec::with_capacity(next.len());
     let mut flags = ChangeFlags::NONE;
-    let mut structural = false;
-    // The old index of the previously-matched child: if a later match resolves to
-    // an *earlier* old index, the relative order changed → a reorder.
-    let mut last_matched_old: Option<usize> = None;
 
     for child in next {
         let key = key_of(child).expect("all-keyed list checked by caller");
         if let Some(&old_index) = old_by_key.get(&key) {
-            if let Some(prev_old) = last_matched_old
-                && old_index < prev_old
-            {
-                structural = true;
-            }
-            last_matched_old = Some(old_index);
             let mut pod = old_pods[old_index]
                 .take()
                 .expect("each old key matches at most one new child (no duplicates)");
@@ -572,35 +598,31 @@ fn rebuild_children_keyed<State: 'static, C>(
             flags |= child_flags;
             if child_swapped {
                 // A key reused for a different concrete type: the old widget was
-                // torn down inside AnyView::rebuild; drop the stale paths.
+                // torn down inside AnyView::rebuild, so its identity broke — drop
+                // the stale capture/focus paths (nothing armed to unwind). A
+                // key-matched non-swap relocates its pod (and thus its recorded
+                // focus/capture flags) intact, so no clearing happens there.
                 pod.set_active(false);
                 pod.set_focused(false);
-                structural = true;
             }
             new_pods.push(pod);
         } else {
             // A brand-new key: build a fresh child.
             new_pods.push(build_child(view_of(child), ctx));
-            structural = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
     }
 
     // Any old pod never taken is a removed key: tear it down (cancelling first if
-    // it held an in-flight capture).
+    // it held an in-flight capture, and dropping its focus flag with it).
     for (old_index, slot) in old_pods.iter_mut().enumerate() {
         if let Some(mut pod) = slot.take() {
             teardown_child(view_of(&prev[old_index]), &mut pod, ctx);
-            structural = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
     }
 
     *pods = new_pods;
-
-    if structural {
-        cancel_active_children(pods);
-    }
     flags
 }
 
