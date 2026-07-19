@@ -1,0 +1,62 @@
+# Standalone package: excluded from the root workspace (see the root
+# Cargo.toml's `[workspace] exclude` and docs/DEVELOPMENT.md) — the same
+# huddle pattern (`examples/huddle/Cargo.toml`). This `[workspace]` table
+# makes this directory its own workspace root with its own Cargo.lock; every
+# dependency below is therefore a literal spec rather than
+# `{ workspace = true }` (workspace inheritance isn't available outside the
+# root workspace), so the version/edition/license/repository fields are
+# duplicated from the root's `[workspace.package]` verbatim.
+#
+# Facade tier: this plugin is deliberately nothing more than a crate
+# depending on `frust` (+ `clean-signals`) — the first facade-tier plugin
+# migrated into this repo (plugin-system-shared-preferences plan, task 03),
+# renamed and adopted from the sibling `clean-signals-rs` checkout's
+# pre-migration Frust glue crate. `frust*` deps below resolve in-repo (this
+# plugin lives inside the `frust` checkout, unlike huddle's example); only
+# `clean-signals` stays a sibling-checkout path dep, matching huddle's own
+# `clean-signals` path so the two resolve the identical crate identity
+# (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy).
+[workspace]
+
+[package]
+name = "clean-signals-frust"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/f0x-it-llc/clean-signals-rs"
+description = "Frust integration for clean-signals: component-scoped controllers and failure listeners"
+publish = false
+
+[dependencies]
+# Sibling checkout path — same canonical path huddle's own `clean-signals`
+# dependency resolves (`../../../clean-signals-rs/crates/clean-signals`
+# relative to this plugin, i.e. next to the `frust` checkout), so both
+# consumers build one `clean-signals` crate identity (type-identity rule).
+clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
+# In-repo path: this plugin lives inside the `frust` checkout itself
+# (`plugins/clean-signals-frust`), so `frust` collapses to a relative
+# in-repo path rather than the sibling-checkout path the pre-migration
+# glue crate used.
+frust = { path = "../../crates/frust" }
+
+# Dev-only: the headless glue tests drive Frust's `RenderRoot` directly (the
+# desktop shell's own rebuild/layout/paint seam) and pump the reactive runtime's
+# UI-thread local task queue frame by frame — no GPU, no window. `test-fixtures`
+# pulls in clean-signals' shared fake failures/use cases (never duplicated here,
+# per CODE_STANDARDS). kurbo/peniko are pinned to Frust's rendering-stack
+# versions so the geometry/color types unify.
+[dev-dependencies]
+clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals", features = ["test-fixtures"] }
+frust-core = { path = "../../crates/frust-core" }
+frust-reactive = { path = "../../crates/frust-reactive" }
+frust-scene = { path = "../../crates/frust-scene" }
+frust-text = { path = "../../crates/frust-text" }
+reactive_graph = "0.2"
+kurbo = "0.13.1"
+peniko = "0.6.1"
+# Dev-only, for interval.rs's lifted `run_interval` unit test (`#[tokio::test]`
+# — the loop's `clean_signals::time::sleep` needs a tokio runtime with the
+# time driver enabled). Not a lib dependency: the crate's own production code
+# never spawns a tokio runtime directly (see docs/CODE_STANDARDS.md's "No
+# sleeps outside time::sleep").
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
