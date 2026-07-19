@@ -344,16 +344,17 @@ draft through the plugin):
 To iterate on template files without rebuilding the embedded copy, pass the
 hidden, development-only `--template-dir <path>` flag to point at a
 filesystem copy of the template tree instead. Every scaffold also gets a
-default launcher icon set (Android mipmap densities, iOS `AppIcon.appiconset`)
-rendered from the template tree alongside the app code.
+default launcher icon set and the platform-specific edge-to-edge/safe-area/
+keyboard-inset and back-navigation glue the generated app needs — see
+`docs/ARCHITECTURE.md`'s Inset delivery and Back flow for the Rust-side
+contract this glue calls into.
 
-The Android template wires edge-to-edge (`Theme.NoTitleBar`,
-`WindowCompat.setDecorFitsSystemWindows(false)`),
-`android:windowSoftInputMode="adjustResize"`, and the `androidx.core`/
-`androidx.activity` Gradle dependencies the generated Kotlin insets/back
-glue needs; the iOS template's view controller registers matching
-safe-area/keyboard observers — see `docs/ARCHITECTURE.md`'s Inset delivery
-and Back flow for the Rust-side contract this glue calls into.
+`--arch clean-signals` scaffolds a clean-architecture variant (controller +
+use-case + `async_view` over `clean-signals-frust`) instead of the default
+notes-app template. Dev-machine-only while `clean-signals` is unpublished:
+the generated project path-depends into this checkout and the sibling
+`../clean-signals-rs` checkout (see *Version-Pin Policy*), so it only
+builds where both are present; `--help` carries this caveat.
 
 ## Instrumentation
 
