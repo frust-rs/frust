@@ -52,9 +52,11 @@
 //!   the "being typed" affordance uses the facade's self-animating
 //!   [`loading_indicator`](forgekit::loading_indicator) /
 //!   [`cupertino_activity_indicator`](forgekit::cupertino_activity_indicator)
-//!   as a live animation. Bubble backgrounds use `Card` variants (own =
-//!   `filled_card`) rather than a `primary_container` tint, since the facade
-//!   exposes no color-scheme roles or explicit fill color to app code.
+//!   as a live animation. Message rows are FLAT (no `Card` wrapper) as of
+//!   device-parity-round2 task R2 — the `filled_card`/`elevated_card` bubble
+//!   backgrounds were removed because the card's hardcoded 16px inset inflated
+//!   the whole feed (BUG.md B2); own-vs-others is carried by row layout (own
+//!   right-aligned, others left with an avatar), not a background tint.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -64,14 +66,15 @@ use forgekit::{
     Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, DesignLanguage, EdgeInsets,
     FlexView, GestureDetector, Get, GetUntracked, MainAxisAlignment, NavigatorController, Padding,
     RwSignal, ScrollInfo, Set, SizedBox, Stack, Theme, Update, any, app_bar, assist_chip,
-    cupertino_activity_indicator, elevated_card, filled_card, filter_chip, flexible, hero, icon,
-    icons, inflexible, keyed, loading_indicator, outlined_card, safe_area, scroll_view, text,
-    text_input, use_context,
+    cupertino_activity_indicator, filter_chip, flexible, hero, icon, icons, inflexible, keyed,
+    loading_indicator, safe_area, scroll_view, text, text_input, use_context,
 };
+use kurbo::Size;
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, MessagesController};
 use crate::mock;
+use crate::ui::fill_box::{fill_box, filled_box};
 use crate::ui::sheet::{action_menu, avoid_keyboard, emoji_grid, sheet, sheet_action_row};
 use crate::ui::swipeable::{SwipeMarker, press_pop, swipeable_row};
 
@@ -82,8 +85,53 @@ const NEAR_START_PX: f64 = 96.0;
 /// Swipe-to-reply strip accent — a Slack-familiar blue (task 22).
 const REPLY_COLOR: Color = Color::from_rgb8(0x1E, 0x88, 0xE5);
 
-/// Uniform row height for a loading skeleton bar.
-const SKELETON_HEIGHT: f64 = 44.0;
+// ---------------------------------------------------------------------------
+// Flat-row metrics (device-parity-round2 task R2 / BUG.md B2) — the numeric
+// contract that de-cards the feed off `filled_card`'s 16px inset driver.
+// ---------------------------------------------------------------------------
+
+/// Chat-row avatar tile side length (36–40 per RESEARCH.md's chat-row table);
+/// a full circle at [`AVATAR_RADIUS`]. Replaces the old ~62px `filled_card`
+/// avatar (BUG.md B2: 40 total).
+const AVATAR_SIZE: f64 = 40.0;
+/// Avatar corner radius: a full circle at [`AVATAR_SIZE`].
+const AVATAR_RADIUS: f64 = AVATAR_SIZE / 2.0;
+/// The initials monogram inside an avatar circle (a bodyLarge-ish glyph).
+const AVATAR_MONOGRAM_SIZE: f32 = 15.0;
+
+/// Composer attach/emoji tap-tile side length (24 glyph in a 44 tile — the
+/// Material min-touch target). Replaces the old ~72px `filled_card` button
+/// (BUG.md B2: 44 total, 24 glyph).
+const COMPOSER_TILE: f64 = 44.0;
+/// Composer tile corner radius — a rounded square, not the avatar's full circle.
+const COMPOSER_TILE_RADIUS: f64 = 12.0;
+
+/// Composer tile / attachment-card fill — the M3 `surface_container_highest`
+/// value `filled_card` resolved to as its unthemed fallback, reused here as a
+/// bare constant since the facade exposes no color-scheme role to app code.
+const TILE_FILL: Color = Color::from_rgb8(0xE6, 0xE0, 0xE9);
+
+/// The initials-avatar background palette, indexed by user id (mirrors
+/// `screens::home`'s palette so the same author reads the same color).
+const AVATAR_PALETTE: [Color; 6] = [
+    Color::from_rgb8(0x1E, 0x88, 0xE5),
+    Color::from_rgb8(0x8E, 0x24, 0xAA),
+    Color::from_rgb8(0x00, 0x89, 0x7B),
+    Color::from_rgb8(0xF4, 0x51, 0x1E),
+    Color::from_rgb8(0x39, 0x49, 0xAB),
+    Color::from_rgb8(0x6D, 0x4C, 0x41),
+];
+
+/// Avatar background for a user id.
+fn avatar_color(user_id: u32) -> Color {
+    AVATAR_PALETTE[(user_id as usize) % AVATAR_PALETTE.len()]
+}
+
+/// Skeleton placeholder-bar fill (a neutral grey).
+const SKELETON_FILL: Color = Color::from_rgb8(0xE0, 0xE0, 0xE0);
+/// Skeleton placeholder-bar height; wrapped in 6px vertical padding it makes a
+/// ~52px flat row (BUG.md B2: skeleton ~52, down from the old 92px card row).
+const SKELETON_HEIGHT: f64 = 40.0;
 /// How many skeleton bars the loading state shows.
 const SKELETON_COUNT: usize = 6;
 
@@ -342,7 +390,10 @@ fn feed_body(
 
     let pager = Arc::clone(controller);
     any(
-        scroll_view(Padding(EdgeInsets::all(12.0), column)).on_scroll(
+        // Flat-row outer HORIZONTAL padding is 8px (BUG.md B2), down from the
+        // old 12 — the message rows themselves add no card inset any more; the
+        // vertical scroll inset stays 12.
+        scroll_view(Padding(EdgeInsets::symmetric(8.0, 12.0), column)).on_scroll(
             move |_st: &mut HuddleState, info: ScrollInfo| {
                 if info.offset <= NEAR_START_PX
                     && pager.has_more.get_untracked()
@@ -405,10 +456,11 @@ fn message_row(
     any(Padding(EdgeInsets::symmetric(0.0, 4.0), reply))
 }
 
-/// The bubble card: author line (others only), body, reaction chips, and the
-/// thread affordance. Wrapped in a [`GestureDetector`] whose long-press opens
-/// the message's context menu (task 20); the detector is transparent, so the
-/// reaction chips and thread affordance inside still tap through.
+/// The flat message content: author line (others only), body, reaction chips,
+/// and the thread affordance, in a plain padded column (no card — task R2).
+/// Wrapped in a [`GestureDetector`] whose long-press opens the message's
+/// context menu (task 20); the detector is transparent, so the reaction chips
+/// and thread affordance inside still tap through.
 fn message_bubble(
     controller: &Arc<MessagesController>,
     msg: &FeedMessage,
@@ -436,8 +488,15 @@ fn message_bubble(
         lines.push(thread_affordance(msg));
     }
 
+    // FLAT ROW (device-parity-round2 task R2 / BUG.md B2): no `filled_card`/
+    // `elevated_card` wrapper — that card's hardcoded 16px inset was the size
+    // driver the previous restyle failed to escape. A message is now a plain
+    // padded content column (12h / 6v), Slack-flat. Own-vs-others is carried by
+    // the row layout (own right-aligned, others left with an avatar — see
+    // `message_row`), NOT a per-bubble background tint (see RESULT: dropped as
+    // not trivially expressible full-width behind variable-height content).
     let inner = Padding(
-        EdgeInsets::symmetric(12.0, 8.0),
+        EdgeInsets::symmetric(12.0, 6.0),
         FlexView::new(
             Axis::Vertical,
             lines.into_iter().map(inflexible).collect::<Vec<_>>(),
@@ -446,13 +505,8 @@ fn message_bubble(
     );
 
     let id = msg.id;
-    let card: AnyView<HuddleState> = if msg.is_own() {
-        any(filled_card(inner))
-    } else {
-        any(elevated_card(inner))
-    };
     any(
-        GestureDetector(card).on_long_press(move |_st: &mut HuddleState| {
+        GestureDetector(inner).on_long_press(move |_st: &mut HuddleState| {
             sheet_sig.set(FeedSheet::Menu(id));
         }),
     )
@@ -462,43 +516,55 @@ fn message_bubble(
 fn message_body(msg: &FeedMessage) -> AnyView<HuddleState> {
     match &msg.body {
         FeedBody::Text(t) => any(text(t.clone()).size(15.0)),
-        FeedBody::Link { url, title } => any(outlined_card(Padding(
-            EdgeInsets::all(8.0),
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(any(FlexView::new(
-                        Axis::Horizontal,
-                        vec![
-                            inflexible(any(icon(icons::LINK).size(16.0))),
-                            inflexible(any(SizedBox(Some(6.0), None))),
-                            inflexible(any(text(title.clone()).size(14.0))),
-                        ],
-                    ))),
-                    inflexible(any(text(url.clone()).size(12.0))),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Start),
-        ))),
-        FeedBody::File { name, size } => any(outlined_card(Padding(
-            EdgeInsets::all(8.0),
-            FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(any(icon(icons::DESCRIPTION).size(24.0))),
-                    inflexible(any(SizedBox(Some(8.0), None))),
-                    inflexible(any(FlexView::new(
-                        Axis::Vertical,
-                        vec![
-                            inflexible(any(text(name.clone()).size(14.0))),
-                            inflexible(any(text(size.clone()).size(12.0))),
-                        ],
-                    )
-                    .cross_axis(CrossAxisAlignment::Start))),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
-        ))),
+        // Attachment tiles keep a boxed look but COMPACT (task R2 item 5):
+        // `filled_box(radius 8) + Padding(10)`, not a `filled_card`/
+        // `outlined_card` (whose 16px inset would balloon the tile like it did
+        // the whole feed — BUG.md B2).
+        FeedBody::Link { url, title } => any(filled_box(
+            Padding(
+                EdgeInsets::all(10.0),
+                FlexView::new(
+                    Axis::Vertical,
+                    vec![
+                        inflexible(any(FlexView::new(
+                            Axis::Horizontal,
+                            vec![
+                                inflexible(any(icon(icons::LINK).size(16.0))),
+                                inflexible(any(SizedBox(Some(6.0), None))),
+                                inflexible(any(text(title.clone()).size(14.0))),
+                            ],
+                        ))),
+                        inflexible(any(text(url.clone()).size(12.0))),
+                    ],
+                )
+                .cross_axis(CrossAxisAlignment::Start),
+            ),
+            TILE_FILL,
+            8.0,
+        )),
+        FeedBody::File { name, size } => any(filled_box(
+            Padding(
+                EdgeInsets::all(10.0),
+                FlexView::new(
+                    Axis::Horizontal,
+                    vec![
+                        inflexible(any(icon(icons::DESCRIPTION).size(24.0))),
+                        inflexible(any(SizedBox(Some(8.0), None))),
+                        inflexible(any(FlexView::new(
+                            Axis::Vertical,
+                            vec![
+                                inflexible(any(text(name.clone()).size(14.0))),
+                                inflexible(any(text(size.clone()).size(12.0))),
+                            ],
+                        )
+                        .cross_axis(CrossAxisAlignment::Start))),
+                    ],
+                )
+                .cross_axis(CrossAxisAlignment::Center),
+            ),
+            TILE_FILL,
+            8.0,
+        )),
     }
 }
 
@@ -563,20 +629,28 @@ fn thread_affordance(msg: &FeedMessage) -> AnyView<HuddleState> {
     ))
 }
 
-/// A small avatar carrying the author's initials (the facade exposes no
-/// circular clip to app code, so a `filled_card` stands in for the disc).
+/// A 40px circular initials avatar (chat-row avatar 36–40, RESEARCH.md table),
+/// built off the direct-sized [`fill_box`] disc + the `SizedBox+Align` monogram
+/// idiom (`screens::home::channel_circle` / `profile.rs`) rather than a
+/// `filled_card`, whose 16px inset ballooned the old tile to ~62px (BUG.md B2).
 /// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap that opens
 /// the author's profile (`/user/:id`) — completing the "avatar tap anywhere"
 /// matrix row alongside Home/Search/Activity (task 22).
 fn avatar(author_id: u32) -> AnyView<HuddleState> {
-    // A ~40px card-backed avatar (chat-row avatar 36–40, RESEARCH.md table):
-    // 14px initials in an 8px inset ≈ a 40px tile (the facade exposes no true
-    // circular clip to app code, so a `filled_card` stands in for the disc).
     let initials = mock::user(author_id).map(|u| u.initials).unwrap_or("?");
-    let tile = filled_card(Padding(
-        EdgeInsets::all(8.0),
-        text(initials.to_string()).size(14.0),
-    ));
+    let tile = any(Stack(vec![
+        any(fill_box(
+            Size::new(AVATAR_SIZE, AVATAR_SIZE),
+            avatar_color(author_id),
+            AVATAR_RADIUS,
+        )),
+        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+            Alignment::CENTER,
+            text(initials.to_string())
+                .size(AVATAR_MONOGRAM_SIZE)
+                .color(Color::WHITE),
+        ))),
+    ]));
     any(
         GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
             move |st: &mut HuddleState| {
@@ -641,17 +715,22 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
     ))
 }
 
-/// The loading skeleton: a column of grey placeholder bars.
+/// The loading skeleton: a column of flat grey placeholder bars. Each bar is a
+/// stretched [`fill_box`] (full row width, [`SKELETON_HEIGHT`] tall) in 6px
+/// vertical padding — a ~52px flat row, down from the old 92px `filled_card`
+/// row whose 16px inset was the size driver (device-parity-round2 task R2 /
+/// BUG.md B2). Under `CrossAxisAlignment::Stretch` the fill_box's nominal width
+/// is overridden by the tight cross-axis constraint, so it fills the row.
 fn skeletons() -> AnyView<HuddleState> {
     let mut rows: Vec<AnyView<HuddleState>> = Vec::new();
     for _ in 0..SKELETON_COUNT {
         rows.push(any(Padding(
-            EdgeInsets::all(8.0),
-            filled_card(SizedBox(None, Some(SKELETON_HEIGHT))),
+            EdgeInsets::symmetric(0.0, 6.0),
+            fill_box(Size::new(0.0, SKELETON_HEIGHT), SKELETON_FILL, 8.0),
         )));
     }
     any(Padding(
-        EdgeInsets::all(12.0),
+        EdgeInsets::all(8.0),
         FlexView::new(
             Axis::Vertical,
             rows.into_iter().map(inflexible).collect::<Vec<_>>(),
@@ -731,18 +810,25 @@ fn composer_bar(
     )))
 }
 
-/// One composer affordance icon button (attach / emoji): a `filled_card`-backed
-/// icon (so a headless test can locate its rounded chrome) firing `on_tap`.
+/// One composer affordance icon button (attach / emoji): a 44×44 [`fill_box`]
+/// tile with a centered 24px icon (device-parity-round2 task R2 / BUG.md B2:
+/// 44 total, 24 glyph — down from the old ~72px `filled_card` button). Uses the
+/// Home tile idiom (`fill_box` disc + `SizedBox+Align` centered glyph) so the
+/// tile is exactly [`COMPOSER_TILE`] rather than the card's 24-inset-driven
+/// size; a headless test still locates its rounded chrome (the fill_box).
 fn affordance_button<F>(leading: forgekit::IconSource, on_tap: F) -> AnyView<HuddleState>
 where
     F: Fn(&mut HuddleState) + 'static,
 {
-    // Icon default 24 in a ~40px hit area (24 glyph + 8 padding either side) —
-    // RESEARCH.md "Material sizing reference" (icon default 24, min touch 48).
-    any(GestureDetector(filled_card(Padding(
-        EdgeInsets::all(8.0),
-        icon(leading).size(24.0),
-    )))
+    any(GestureDetector(Stack(vec![
+        any(fill_box(
+            Size::new(COMPOSER_TILE, COMPOSER_TILE),
+            TILE_FILL,
+            COMPOSER_TILE_RADIUS,
+        )),
+        any(SizedBox(Some(COMPOSER_TILE), Some(COMPOSER_TILE))
+            .child(Align(Alignment::CENTER, icon(leading).size(24.0)))),
+    ]))
     .on_tap(on_tap))
 }
 

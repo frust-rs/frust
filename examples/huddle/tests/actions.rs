@@ -229,17 +229,27 @@ fn emoji_button(scene: &RecScene) -> Point {
     composer_buttons(scene).1
 }
 
-/// The topmost message bubble in the feed's content region (the oldest message,
-/// at scroll offset 0). Its center is a safe long-press target.
-fn first_bubble(scene: &RecScene) -> Point {
-    let (o, s) = scene
+/// The topmost (other-user) message row's leading avatar tile — the leftmost
+/// small rounded rect in the feed content region. As of device-parity-round2
+/// task R2 the feed rows are FLAT (no `filled_card`/`elevated_card` bubble
+/// background), so the row's only recorded rounded chrome is its 40px avatar
+/// disc; it is the row anchor a long-press target is derived from.
+fn first_avatar_rect(scene: &RecScene) -> (Point, Size) {
+    scene
         .rounded
         .iter()
         .copied()
-        .filter(|(o, s)| o.y > 70.0 && o.y < 420.0 && s.width > 150.0)
-        .min_by(|a, b| a.0.y.partial_cmp(&b.0.y).unwrap())
-        .expect("the loaded feed paints message bubbles");
-    center((o, s))
+        .filter(|(o, s)| o.y > 70.0 && o.y < 420.0 && s.width < 80.0)
+        .min_by(|a, b| a.0.x.partial_cmp(&b.0.x).unwrap())
+        .expect("the loaded feed paints a leading avatar on the topmost row")
+}
+
+/// A safe long-press target inside the topmost message's flat content column —
+/// to the right of its avatar (task R2 rows are flat, so this is anchored off
+/// the avatar rather than a bubble card that no longer paints).
+fn first_bubble(scene: &RecScene) -> Point {
+    let (o, s) = first_avatar_rect(scene);
+    Point::new(o.x + s.width + 40.0, o.y + s.height / 2.0)
 }
 
 // --- Tests -----------------------------------------------------------------

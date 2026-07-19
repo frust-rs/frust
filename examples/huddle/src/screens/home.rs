@@ -13,8 +13,10 @@
 //! # Why the escape hatch
 //!
 //! No facade widget paints an arbitrary-color filled circle or an animated
-//! shimmer, so [`FillBox`] and [`Shimmer`] below are small hand-rolled
-//! `View`/`Widget` pairs built directly against `forgekit-core` — the same
+//! shimmer, so [`fill_box`](crate::ui::fill_box) (promoted to `crate::ui` in
+//! device-parity-round2 task R2 so the feed can share it) and [`Shimmer`] below
+//! are small hand-rolled `View`/`Widget` pairs built directly against
+//! `forgekit-core` — the same
 //! precedent the pre-skeleton theme screen used for its `ColorBoxView`
 //! (`docs/ARCHITECTURE.md`'s "low-level escape hatch"). Everything else goes
 //! through the `forgekit` facade.
@@ -70,6 +72,7 @@ use crate::HuddleState;
 use crate::failure::HuddleFailure;
 use crate::features::channels::{self, ChannelItem, ChannelsController, DmItem};
 use crate::mock::UserStatus;
+use crate::ui::fill_box::fill_box;
 use crate::ui::sheet::{action_menu, sheet, sheet_action_row};
 
 // ---------------------------------------------------------------------------
@@ -136,64 +139,9 @@ const BADGE_TEXT_SIZE: f32 = 11.0;
 // Escape-hatch leaf widgets
 // ---------------------------------------------------------------------------
 
-/// A filled rounded rect of an arbitrary color — the avatar/status-dot/badge
-/// primitive no facade widget paints. A circle is a `FillBox` with
-/// `radius == size / 2`.
-struct FillBox {
-    size: Size,
-    color: Color,
-    radius: f64,
-}
-
-/// The retained widget for a [`FillBox`].
-struct FillBoxWidget {
-    size: Size,
-    color: Color,
-    radius: f64,
-}
-
-/// Construct a [`FillBox`].
-fn fill_box(size: Size, color: Color, radius: f64) -> FillBox {
-    FillBox {
-        size,
-        color,
-        radius,
-    }
-}
-
-impl<State: 'static> View<State> for FillBox {
-    type Element = FillBoxWidget;
-
-    fn build(&self, _ctx: &mut BuildCtx<'_>) -> FillBoxWidget {
-        FillBoxWidget {
-            size: self.size,
-            color: self.color,
-            radius: self.radius,
-        }
-    }
-
-    fn rebuild(
-        &self,
-        _prev: &Self,
-        element: &mut FillBoxWidget,
-        _ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        element.size = self.size;
-        element.color = self.color;
-        element.radius = self.radius;
-        ChangeFlags::PAINT
-    }
-}
-
-impl Widget for FillBoxWidget {
-    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        bc.constrain(self.size)
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        scene.fill_rounded_rect(ctx.origin(), ctx.size(), self.radius, self.color);
-    }
-}
+// `FillBox`/`fill_box` were promoted to `crate::ui::fill_box`
+// (device-parity-round2 task R2) so the feed restyle can share the avatar/
+// status-dot/badge/composer-tile primitive; imported at the top of this module.
 
 /// A skeleton shimmer bar: a gray rounded rect whose alpha pulses via an
 /// [`AnimationController`] (spec §8's paint-driven animation contract).

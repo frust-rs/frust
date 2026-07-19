@@ -119,43 +119,36 @@ fn mount_feed(
     (root, state, logic, tcx, t_ms, scene)
 }
 
-/// The topmost message bubble (oldest, at scroll offset 0): the widest rounded
-/// rect in the content region above the composer (mirrors
-/// `tests/actions.rs::first_bubble`). Its `y` is a safe row target.
+/// The topmost (other-user) message row anchor. As of device-parity-round2 task
+/// R2 the feed rows are FLAT (no `filled_card`/`elevated_card` bubble
+/// background), so the row's only recorded rounded chrome is its leading 40px
+/// avatar disc — the leftmost small rounded rect in the content region. Its `y`
+/// is the row's top, a safe row target.
 fn first_bubble(scene: &RecScene) -> (Point, Size) {
     scene
         .rounded
         .iter()
         .copied()
-        .filter(|(o, s)| o.y > 70.0 && o.y < 300.0 && s.width > 150.0)
-        .min_by(|a, b| a.0.y.partial_cmp(&b.0.y).unwrap())
-        .expect("the loaded feed paints message bubbles")
-}
-
-/// The leading avatar of the topmost (other-user) message row: the leftmost
-/// small rounded rect in that row's `y` band. The avatar is `filled_card`-backed
-/// (a recorded rounded rect) and sits at the row's left edge, before its bubble.
-fn first_avatar(scene: &RecScene) -> Point {
-    let (bubble_o, _) = first_bubble(scene);
-    let band_lo = bubble_o.y - 24.0;
-    let band_hi = bubble_o.y + 60.0;
-    let (o, s) = scene
-        .rounded
-        .iter()
-        .copied()
-        .filter(|(o, s)| o.y > band_lo && o.y < band_hi && s.width < 80.0)
+        .filter(|(o, s)| o.y > 70.0 && o.y < 300.0 && s.width < 80.0)
         .min_by(|a, b| a.0.x.partial_cmp(&b.0.x).unwrap())
-        .expect("the message row paints a leading avatar tile");
-    center((o, s))
+        .expect("the loaded feed paints a leading avatar on the topmost row")
 }
 
-/// Whether any message bubble is painted in the content region — false for an
-/// empty conversation's empty state.
+/// The leading avatar of the topmost (other-user) message row — its center is a
+/// tap target opening the author's profile. Same rect [`first_bubble`] anchors
+/// on (the flat row's avatar disc).
+fn first_avatar(scene: &RecScene) -> Point {
+    center(first_bubble(scene))
+}
+
+/// Whether a message row is painted in the content region — false for an empty
+/// conversation's empty state. A loaded feed paints a leading avatar disc
+/// (small rounded rect) per other-user row; the empty state paints none.
 fn has_message_bubble(scene: &RecScene) -> bool {
     scene
         .rounded
         .iter()
-        .any(|(o, s)| o.y > 70.0 && o.y < 300.0 && s.width > 150.0)
+        .any(|(o, s)| o.y > 70.0 && o.y < 300.0 && s.width < 80.0)
 }
 
 // --- Tests -----------------------------------------------------------------

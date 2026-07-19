@@ -44,9 +44,12 @@ clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signal
 # reintroduces the facade's documented "low-level escape hatch" (see
 # `docs/ARCHITECTURE.md`) for the small hand-rolled `View`/`Widget` pairs no
 # facade widget covers — `ui/swipeable.rs`'s horizontal swipe-to-action row,
-# `ui/sheet.rs`'s modal sheet, `screens/home.rs`'s arbitrary-color avatar/badge
-# fill (`FillBox`) and animated loading `Shimmer`, and `ui/toast.rs`'s
-# paint-driven `toast_entrance` slide/fade wrapper. This is the same production
+# `ui/sheet.rs`'s modal sheet, `ui/fill_box.rs`'s arbitrary-color rounded-rect
+# `fill_box` leaf (avatar/badge/status-dot/composer-tile fill) and `filled_box`
+# single-child container (compact attachment tiles — the card-inset-free box the
+# feed restyle uses; device-parity-round2 task R2 promoted these out of
+# `screens/home.rs`), `screens/home.rs`'s animated loading `Shimmer`, and
+# `ui/toast.rs`'s paint-driven `toast_entrance` slide/fade wrapper. This is the same production
 # escape-hatch dependency the pre-skeleton theme/motion screens carried (`git
 # show d02ad77~1:examples/huddle/Cargo.toml`); everything else in this crate
 # still depends on the `forgekit` facade alone, per `docs/CODE_STANDARDS.md`'s
