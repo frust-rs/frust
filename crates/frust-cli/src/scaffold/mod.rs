@@ -28,6 +28,30 @@ static EMBEDDED_APP_TEMPLATE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../
 /// generated project.
 const MANIFEST_FILE: &str = "template_manifest.json";
 
+/// `frust create --arch` tags recognized by [`generate`] (task 09). A
+/// manifest entry whose mode-stripped logical path ends in `.<tag>` (e.g.
+/// `src/lib.rs.clean-signals.tmpl`, logical `src/lib.rs.clean-signals`) is
+/// an **arch-scoped variant**: rendered in place of (or, for a filename
+/// with no base counterpart, in addition to) the default template's output
+/// only when that tag is the selected `arch`, at the un-tagged logical path
+/// (`src/lib.rs.clean-signals.tmpl` → `src/lib.rs`). Every other entry is
+/// the default template and is skipped only if a same-arch-tagged variant
+/// overrides its exact logical path — see [`generate`]'s manifest loop.
+/// Only one tag exists today; a future variant adds another entry here plus
+/// a matching `crate::cli::ArchArg` arm and template files.
+const KNOWN_ARCHES: &[&str] = &["clean-signals"];
+
+/// Splits a mode-stripped logical path into `(base, tag)` if it carries a
+/// recognized [`KNOWN_ARCHES`] suffix (see that const's doc for the
+/// convention). `None` for a default-template entry.
+fn split_arch_tag(logical: &str) -> Option<(&str, &str)> {
+    KNOWN_ARCHES.iter().find_map(|tag| {
+        logical
+            .strip_suffix(&format!(".{tag}"))
+            .map(|base| (base, *tag))
+    })
+}
+
 /// How a manifest entry's content should be handled (spec §12.3 extension
 /// conventions).
 enum FileMode {
@@ -90,13 +114,29 @@ impl Source<'_> {
 /// `template_dir_override`, for development). Returns the relative paths
 /// written, in manifest order. Refuses a non-empty `dest` unless
 /// `overwrite` is set.
+///
+/// `arch` selects an opt-in template variant (task 09; `None` for the
+/// default template, provably untouched by this parameter — see
+/// [`KNOWN_ARCHES`]'s doc for the manifest convention an arch-scoped entry
+/// follows). `Some` value not in [`KNOWN_ARCHES`] is rejected before any
+/// file is written.
 pub fn generate(
     dest: &Path,
     ctx: &TemplateContext,
     template_dir_override: Option<&Path>,
     overwrite: bool,
+    arch: Option<&str>,
 ) -> Result<Vec<PathBuf>> {
     check_destination(dest, overwrite)?;
+
+    if let Some(tag) = arch
+        && !KNOWN_ARCHES.contains(&tag)
+    {
+        bail!(
+            "unknown --arch `{tag}` (expected one of: {})",
+            KNOWN_ARCHES.join(", ")
+        );
+    }
 
     // Fail fast (spec Phase 3 task 34): a grammatically invalid derived iOS
     // bundle identifier is rejected before any file is written, rather than
@@ -116,12 +156,38 @@ pub fn generate(
     let mut written = Vec::with_capacity(manifest.len());
     for entry in &manifest {
         let (mode, logical) = classify(entry);
+
+        // Arch-tag resolution (task 09): an entry whose logical path carries
+        // a recognized `.{arch}` suffix only renders when that tag is the
+        // selected `arch` (skipped entirely otherwise), landing at the
+        // un-tagged logical path; an untagged (default) entry is skipped
+        // only when a same-arch-tagged variant overrides its exact logical
+        // path — see `KNOWN_ARCHES`'s doc. `arch == None` never skips an
+        // untagged entry and never matches a tagged one, so the default
+        // render path (this whole branch) is unchanged from before task 09.
+        let target_logical: String = if let Some((base, tag)) = split_arch_tag(logical) {
+            if Some(tag) != arch {
+                continue;
+            }
+            base.to_string()
+        } else if let Some(tag) = arch {
+            let overridden = manifest
+                .iter()
+                .any(|other| split_arch_tag(classify(other).1) == Some((logical, tag)));
+            if overridden {
+                continue;
+            }
+            logical.to_string()
+        } else {
+            logical.to_string()
+        };
+
         // A source-tree directory (e.g. `android.tmpl/`) may itself carry
         // a `.tmpl` suffix as a purely organizational marker; strip it
         // before path-placeholder expansion so it doesn't leak into the
         // generated project (`android.tmpl/` → `android/`).
-        let logical = renderer::strip_tmpl_dir_suffixes(Path::new(logical));
-        let out_relative = renderer::expand_path(&logical, &path_vars);
+        let target_logical = renderer::strip_tmpl_dir_suffixes(Path::new(&target_logical));
+        let out_relative = renderer::expand_path(&target_logical, &path_vars);
         let out_path = dest.join(&out_relative);
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent)
@@ -236,7 +302,7 @@ mod tests {
         let dest = unique_temp_dir("manifest-set");
         let ctx = test_context();
 
-        let written = generate(&dest, &ctx, None, false).unwrap();
+        let written = generate(&dest, &ctx, None, false, None).unwrap();
         assert!(!written.is_empty());
 
         let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
@@ -308,7 +374,7 @@ mod tests {
         fs::write(dest.join("existing.txt"), b"x").unwrap();
 
         let ctx = test_context();
-        let err = generate(&dest, &ctx, None, false).unwrap_err();
+        let err = generate(&dest, &ctx, None, false, None).unwrap_err();
         assert!(err.to_string().contains("existing.txt"), "{err}");
 
         let _ = fs::remove_dir_all(&dest);
@@ -321,7 +387,7 @@ mod tests {
         fs::write(dest.join("existing.txt"), b"x").unwrap();
 
         let ctx = test_context();
-        assert!(generate(&dest, &ctx, None, true).is_ok());
+        assert!(generate(&dest, &ctx, None, true, None).is_ok());
         assert!(dest.join("existing.txt").exists());
 
         let _ = fs::remove_dir_all(&dest);
@@ -333,7 +399,7 @@ mod tests {
         fs::create_dir_all(&dest).unwrap();
 
         let ctx = test_context();
-        assert!(generate(&dest, &ctx, None, false).is_ok());
+        assert!(generate(&dest, &ctx, None, false, None).is_ok());
 
         let _ = fs::remove_dir_all(&dest);
     }
@@ -343,7 +409,7 @@ mod tests {
         let dest = unique_temp_dir("android-tree");
         let ctx = test_context();
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         // `android.tmpl/` → `android/`: the marker suffix on the source
         // directory doesn't leak into the generated project.
@@ -451,7 +517,7 @@ mod tests {
         let dest = unique_temp_dir("ios-tree");
         let ctx = test_context();
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         // `ios.tmpl/` → `ios/`: the marker suffix on the source directory
         // doesn't leak into the generated project, and `Runner.xcodeproj`
@@ -545,7 +611,7 @@ mod tests {
         let ctx = test_context();
         assert!(ctx.deeplink_scheme.is_none());
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         let manifest =
             fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
@@ -591,7 +657,7 @@ mod tests {
         ctx.deeplink_scheme = Some("myapp".into());
         ctx.deeplink_host = Some("open".into());
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         let manifest =
             fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
@@ -632,7 +698,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.deeplink_scheme = Some("myapp".into());
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         let manifest =
             fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
@@ -654,7 +720,7 @@ mod tests {
         let ctx = test_context();
         assert!(ctx.deeplink_scheme.is_none());
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         let plist = fs::read_to_string(dest.join("ios/Runner/Info.plist")).unwrap();
         assert!(!plist.contains("CFBundleURLTypes"), "{plist}");
@@ -691,7 +757,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.deeplink_scheme = Some("myapp".into());
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         let plist = fs::read_to_string(dest.join("ios/Runner/Info.plist")).unwrap();
         assert!(plist.contains("<key>CFBundleURLTypes</key>"), "{plist}");
@@ -715,7 +781,7 @@ mod tests {
         ctx.deeplink_scheme = Some("myapp".into());
         ctx.deeplink_host = Some("open".into());
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         let toml = fs::read_to_string(dest.join("frust.toml")).unwrap();
         assert!(toml.contains("[deeplink]"), "{toml}");
@@ -730,7 +796,7 @@ mod tests {
         let dest = unique_temp_dir("toml-no-deeplink");
         let ctx = test_context();
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         let toml = fs::read_to_string(dest.join("frust.toml")).unwrap();
         assert!(!toml.contains("[deeplink]"), "{toml}");
@@ -745,7 +811,7 @@ mod tests {
         // Whitespace in `org` derives a bundle id with an invalid segment.
         ctx.org = "dev f0x".into();
 
-        let err = generate(&dest, &ctx, None, false).unwrap_err();
+        let err = generate(&dest, &ctx, None, false, None).unwrap_err();
         assert!(err.to_string().contains("iOS bundle identifier"), "{err}");
         // Fail-fast: nothing was written.
         assert!(!dest.join("Cargo.toml").exists());
@@ -761,7 +827,7 @@ mod tests {
         let dest = unique_temp_dir("gradlew-exec");
         let ctx = test_context();
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         let gradlew = dest.join("android/gradlew");
         let mode = fs::metadata(&gradlew).unwrap().permissions().mode();
@@ -783,12 +849,129 @@ mod tests {
         let dest = unique_temp_dir("wrapper-jar");
         let ctx = test_context();
 
-        generate(&dest, &ctx, None, false).unwrap();
+        generate(&dest, &ctx, None, false, None).unwrap();
 
         let jar_bytes = fs::read(dest.join("android/gradle/wrapper/gradle-wrapper.jar")).unwrap();
         // Zip local file header magic — confirms the binary content
         // survived the embed → generate round-trip byte-for-byte.
         assert_eq!(&jar_bytes[0..4], b"PK\x03\x04", "not a valid zip/jar");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Task 09 acceptance criterion 2: `arch = None` must render `Cargo.toml`
+    /// and `src/lib.rs` byte-identically to rendering the default template
+    /// files directly — proof the arch-tag machinery (`split_arch_tag`, the
+    /// manifest-loop override check) never engages on the default path,
+    /// independent of any test that merely spot-checks substrings.
+    #[test]
+    fn generate_with_no_arch_renders_default_template_files_byte_identically() {
+        let dest = unique_temp_dir("no-arch-byte-identical");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let repo_templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/app");
+        for (raw_name, out_name) in [
+            ("Cargo.toml.tmpl", "Cargo.toml"),
+            ("src/lib.rs.tmpl", "src/lib.rs"),
+        ] {
+            let raw = fs::read_to_string(repo_templates.join(raw_name))
+                .unwrap_or_else(|e| panic!("reading {raw_name}: {e}"));
+            let expected = renderer::render(&raw, &ctx.render_vars()).unwrap();
+            let actual = fs::read_to_string(dest.join(out_name))
+                .unwrap_or_else(|e| panic!("reading generated {out_name}: {e}"));
+            assert_eq!(
+                actual, expected,
+                "generate(arch=None) must render `{out_name}` byte-identically to the \
+                 default `{raw_name}` template"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Task 09: an unrecognized `--arch` value is rejected before any file
+    /// is written.
+    #[test]
+    fn generate_rejects_unknown_arch_before_writing_any_file() {
+        let dest = unique_temp_dir("unknown-arch");
+        let ctx = test_context();
+
+        let err = generate(&dest, &ctx, None, false, Some("not-a-real-arch")).unwrap_err();
+        assert!(err.to_string().contains("not-a-real-arch"), "{err}");
+        assert!(!dest.join("Cargo.toml").exists());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Task 09: `--arch clean-signals` renders the variant `Cargo.toml`/
+    /// `src/lib.rs` content in place of the default notes-app demo, while
+    /// every arch-agnostic file (frust.toml, assets, android/ios trees)
+    /// still lands exactly once.
+    #[test]
+    fn generate_with_clean_signals_arch_renders_variant_content_in_place_of_defaults() {
+        let dest = unique_temp_dir("clean-signals-arch");
+        let ctx = test_context();
+
+        let written = generate(&dest, &ctx, None, false, Some("clean-signals")).unwrap();
+
+        // Exactly one `Cargo.toml`/`src/lib.rs` entry each — the base and
+        // variant manifest entries never both land.
+        assert_eq!(
+            written
+                .iter()
+                .filter(|p| p == &Path::new("Cargo.toml"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            written
+                .iter()
+                .filter(|p| p == &Path::new("src/lib.rs"))
+                .count(),
+            1
+        );
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(cargo_toml.contains(&ctx.project_name), "{cargo_toml}");
+        assert!(
+            cargo_toml.contains("clean-signals-frust = { path ="),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains(
+                "clean-signals = { path = \"/path/to/frust/../../../clean-signals-rs/crates/clean-signals\" }"
+            ),
+            "{cargo_toml}"
+        );
+        // The notes-app demo's plugin dependency doesn't apply to this
+        // variant.
+        assert!(
+            !cargo_toml.contains("frust-shared-preferences = {"),
+            "{cargo_toml}"
+        );
+
+        let lib_rs = fs::read_to_string(dest.join("src/lib.rs")).unwrap();
+        assert!(lib_rs.contains("GreetingController"), "{lib_rs}");
+        assert!(lib_rs.contains("use_controller"), "{lib_rs}");
+        assert!(lib_rs.contains("async_view"), "{lib_rs}");
+        assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
+        assert!(lib_rs.contains("frust::app!(MyAppApp)"), "{lib_rs}");
+        // The notes-app demo's own shape doesn't leak into this variant.
+        assert!(!lib_rs.contains("SharedPreferences"), "{lib_rs}");
+        assert!(!lib_rs.contains("text_input("), "{lib_rs}");
+
+        // No `.clean-signals.` leftover in any written path, and no stray
+        // `Cargo.toml.clean-signals`/`src/lib.rs.clean-signals` files.
+        assert!(!dest.join("Cargo.toml.clean-signals").exists());
+        assert!(!dest.join("src/lib.rs.clean-signals").exists());
+
+        // Arch-agnostic files still land untouched.
+        assert!(dest.join("frust.toml").exists());
+        assert!(dest.join("assets/logo.png").exists());
+        assert!(dest.join("android").is_dir());
+        assert!(dest.join("ios").is_dir());
 
         let _ = fs::remove_dir_all(&dest);
     }

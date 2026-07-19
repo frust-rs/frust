@@ -66,6 +66,17 @@ pub enum Command {
         /// iOS's `CFBundleURLTypes` has no host concept.
         #[arg(long = "deeplink-host", value_name = "HOST")]
         deeplink_host: Option<String>,
+
+        /// Opt-in clean-architecture variant: scaffolds a controller +
+        /// use-case + `async_view` screen wired to `clean-signals-frust`
+        /// instead of the default notes-app demo (plugin-system spec, task
+        /// 09). **Dev-machine-only while `clean-signals` is unpublished**:
+        /// the generated `Cargo.toml` path-deps into this Frust checkout
+        /// plus a sibling `clean-signals-rs` checkout (see
+        /// `docs/DEVELOPMENT.md`'s Prerequisites/Version-Pin Policy) — the
+        /// project won't build without both present.
+        #[arg(long = "arch", value_name = "ARCH")]
+        arch: Option<ArchArg>,
     },
     /// Validate the Frust toolchain (Rust targets, NDK, Android SDK, Xcode).
     Doctor,
@@ -174,6 +185,29 @@ impl RenderTierArg {
         match self {
             RenderTierArg::Gpu => "gpu",
             RenderTierArg::Cpu => "cpu",
+        }
+    }
+}
+
+/// `frust create --arch` value (see `Command::Create`'s doc comment).
+/// Deliberately independent of `crate::scaffold`'s own arch-tag vocabulary
+/// (`scaffold::KNOWN_ARCHES`) — `frust-cli`'s `commands::create` module
+/// converts one to the other via [`ArchArg::as_str`], mirroring how
+/// `CreateArgs` stays decoupled from `clap` types generally. Only one
+/// variant today (`clean-signals`); a future variant adds another arm here
+/// plus a matching `scaffold::KNOWN_ARCHES` entry and template files.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "kebab-case")]
+pub enum ArchArg {
+    CleanSignals,
+}
+
+impl ArchArg {
+    /// The `scaffold::generate` arch-tag string this variant corresponds
+    /// to.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArchArg::CleanSignals => "clean-signals",
         }
     }
 }
@@ -289,6 +323,41 @@ mod tests {
             }
             other => panic!("expected Create, got {other:?}"),
         }
+    }
+
+    /// Task 09: `--arch clean-signals` parses to `ArchArg::CleanSignals`.
+    #[test]
+    fn parses_create_with_arch_clean_signals() {
+        let cli = Cli::parse_from(["frust", "create", "myapp", "--arch", "clean-signals"]);
+        match cli.command {
+            Command::Create { arch, .. } => {
+                assert_eq!(arch, Some(ArchArg::CleanSignals));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    /// Task 09: omitting `--arch` defaults to `None` (the default template).
+    #[test]
+    fn parses_create_without_arch_defaults_to_none() {
+        let cli = Cli::parse_from(["frust", "create", "myapp"]);
+        match cli.command {
+            Command::Create { arch, .. } => assert_eq!(arch, None),
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    /// Task 09: an unrecognized `--arch` value is rejected by clap itself
+    /// (only `clean-signals` is a valid `ArchArg` variant today).
+    #[test]
+    fn rejects_invalid_arch_value() {
+        let result = Cli::try_parse_from(["frust", "create", "myapp", "--arch", "bogus"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn arch_arg_as_str_matches_scaffold_known_arch_tag() {
+        assert_eq!(ArchArg::CleanSignals.as_str(), "clean-signals");
     }
 
     #[test]

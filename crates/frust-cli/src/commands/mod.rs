@@ -26,6 +26,7 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             frust_path,
             deeplink_scheme,
             deeplink_host,
+            arch,
         } => create::run(create::CreateArgs {
             dir,
             org,
@@ -36,6 +37,7 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             frust_path,
             deeplink_scheme,
             deeplink_host,
+            arch: arch.map(|a| a.as_str().to_string()),
         }),
         Command::Clean => clean::run(),
         Command::Run { build, render_tier } => run::run(build, cli.device_id, render_tier, verbose),

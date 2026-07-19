@@ -23,6 +23,11 @@ pub struct CreateArgs {
     pub deeplink_scheme: Option<String>,
     /// `--deeplink-host` (task 07).
     pub deeplink_host: Option<String>,
+    /// `--arch` (task 09): a `scaffold::KNOWN_ARCHES` tag string (e.g.
+    /// `"clean-signals"`), or `None` for the default template. Kept a plain
+    /// `String` rather than `crate::cli::ArchArg` so `scaffold` stays
+    /// decoupled from `clap` (mirrors every other field here).
+    pub arch: Option<String>,
 }
 
 pub fn run(args: CreateArgs) -> Result<u8> {
@@ -54,7 +59,13 @@ pub fn run(args: CreateArgs) -> Result<u8> {
     };
 
     let template_dir_override = args.template_dir.as_deref().map(Path::new);
-    let written = scaffold::generate(&dest, &ctx, template_dir_override, args.overwrite)?;
+    let written = scaffold::generate(
+        &dest,
+        &ctx,
+        template_dir_override,
+        args.overwrite,
+        args.arch.as_deref(),
+    )?;
 
     println!("Created {} file(s) in {}", written.len(), dest.display());
     println!();
@@ -170,6 +181,7 @@ mod tests {
             frust_path: None,
             deeplink_scheme: None,
             deeplink_host: None,
+            arch: None,
         }
     }
 

@@ -79,3 +79,72 @@ fn scaffolded_project_builds_against_the_real_facade() {
 
     let _ = std::fs::remove_dir_all(&dest);
 }
+
+/// Task 09 acceptance criterion 1: `frust create --arch clean-signals`
+/// renders a project whose source actually compiles, on a dev machine with
+/// this checkout plus the sibling `clean-signals-rs` checkout present.
+///
+/// Ignored for the same reason as the default-template e2e test above (full
+/// dependency graph compile from a cold target dir), **and** additionally
+/// needs the sibling `../clean-signals-rs` checkout the generated
+/// `Cargo.toml` path-deps into (see `docs/DEVELOPMENT.md`'s Prerequisites) —
+/// skipped automatically (not just via `--ignored`) when that sibling isn't
+/// present, so this never fails on a host without it. Run explicitly:
+/// `cargo test -p frust-cli --test create_e2e -- --ignored --nocapture`
+#[test]
+#[ignore = "compiles the generated project's full dependency graph (winit/vello/wgpu/clean-signals); run explicitly with `--ignored`, and needs a `../clean-signals-rs` sibling checkout"]
+fn scaffolded_clean_signals_project_builds_against_the_real_facade_and_plugin() {
+    let sibling_clean_signals = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../clean-signals-rs/crates/clean-signals");
+    if !sibling_clean_signals.exists() {
+        eprintln!(
+            "skipping: no `../clean-signals-rs` sibling checkout at {}",
+            sibling_clean_signals.display()
+        );
+        return;
+    }
+
+    let dest = unique_dest();
+    let _ = std::fs::remove_dir_all(&dest);
+
+    let frust_exe = env!("CARGO_BIN_EXE_frust");
+    let frust_path = workspace_frust_path();
+
+    let create_status = Command::new(frust_exe)
+        .args([
+            "create",
+            dest.to_str().expect("dest path is valid UTF-8"),
+            "--project-name",
+            "fk_e2e_clean_signals_app",
+            "--frust-path",
+            frust_path.to_str().expect("frust_path is valid UTF-8"),
+            "--arch",
+            "clean-signals",
+        ])
+        .status()
+        .expect("failed to spawn `frust create --arch clean-signals`");
+    assert!(
+        create_status.success(),
+        "`frust create --arch clean-signals` exited non-zero"
+    );
+
+    assert!(dest.join("Cargo.toml").exists());
+    assert!(dest.join("src/lib.rs").exists());
+    let cargo_toml = std::fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+    assert!(cargo_toml.contains("clean-signals-frust"), "{cargo_toml}");
+    let lib_rs = std::fs::read_to_string(dest.join("src/lib.rs")).unwrap();
+    assert!(lib_rs.contains("GreetingController"), "{lib_rs}");
+
+    let build_status = Command::new("cargo")
+        .arg("build")
+        .current_dir(&dest)
+        .status()
+        .expect("failed to spawn `cargo build` in the generated clean-signals project");
+    assert!(
+        build_status.success(),
+        "generated clean-signals project at {} failed to `cargo build`",
+        dest.display()
+    );
+
+    let _ = std::fs::remove_dir_all(&dest);
+}

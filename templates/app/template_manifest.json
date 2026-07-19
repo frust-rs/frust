@@ -1,10 +1,12 @@
 [
   "Cargo.toml.tmpl",
+  "Cargo.toml.clean-signals.tmpl",
   "frust.toml.tmpl",
   ".gitignore",
   "assets/.gitkeep",
   "assets/logo.png",
   "src/lib.rs.tmpl",
+  "src/lib.rs.clean-signals.tmpl",
   "src/main.rs.tmpl",
   "android.tmpl/settings.gradle.kts.tmpl",
   "android.tmpl/build.gradle.kts",
