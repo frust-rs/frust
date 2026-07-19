@@ -13,11 +13,28 @@
 //! controller is a thread-local singleton rather than `Component`-hosted
 //! state (this screen needs `&mut HuddleState` in its row callbacks to
 //! navigate, which a `Component`'s inner state boundary would block).
+//!
+//! # Fixed outer shape, keyed inner content
+//!
+//! The outer tree is a fixed two-child `Column` — `[search_field,
+//! results_container]` — instead of one `Column` whose child count changes
+//! per keystroke. This is defense-in-depth for the focus-preservation
+//! reconciler fix (`docs/ARCHITECTURE.md`'s Event pipeline / the
+//! `12-huddle-search-structure` task): even though the framework now
+//! preserves an unchanged sibling's focus/IME state across a structural
+//! rebuild, the search field never needs that fallback here because its
+//! slot's own child count is invariant. [`results_container`] is the single
+//! stable slot at index 1 whose content swaps internally (hint / no-results /
+//! result rows) as the query changes; every child inside it — including the
+//! single hint/no-results placeholder — carries a stable key via
+//! [`keyed`], so a query transition never mixes keyed and unkeyed siblings
+//! in the same list (see `docs/CODE_STANDARDS.md`'s keyed-list contract:
+//! keys are all-or-nothing per list).
 
 use forgekit::{
-    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView,
+    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
     GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, filled_card, flexible, hero,
-    icon, icons, inflexible, list_item, scroll_view, text,
+    icon, icons, inflexible, keyed, list_item, scroll_view, text,
 };
 
 use crate::HuddleState;
@@ -34,23 +51,38 @@ const SECTION_HEADER_HEIGHT: f64 = 32.0;
 /// Fixed avatar badge size (leading slot of a person row).
 const AVATAR_SIZE: f64 = 40.0;
 
-/// The Search tab root.
+/// The Search tab root: a fixed two-child outer `Column` — `[search_field,
+/// results_container]` — so a query edit only ever changes content INSIDE
+/// `results_container`, never the outer child count (see the module docs).
 pub fn search_screen() -> AnyView<HuddleState> {
     let controller = SearchController::instance();
     let query = controller.query.get();
     let results = controller.results.get();
 
-    let mut children: Vec<AnyView<HuddleState>> = vec![search_field(controller, &query)];
-
-    if query.trim().is_empty() {
-        children.push(hint_view());
-    } else if results.is_empty() {
-        children.push(no_results_view(&query));
-    } else {
-        children.extend(section_views(results));
-    }
+    let children: Vec<AnyView<HuddleState>> = vec![
+        search_field(controller, &query),
+        results_container(&query, results),
+    ];
 
     scaffold("Search", any(scroll_view(Column(children))))
+}
+
+/// The single stable child of the outer `Column` (always index 1): its own
+/// content swaps internally between the empty-query hint, the no-results
+/// view, and the keyed section rows as the query changes (see the module
+/// docs). Every branch keys its child(ren) so a transition between branches
+/// never mixes keyed and unkeyed siblings in the same list (all-or-nothing
+/// per `docs/CODE_STANDARDS.md`'s keyed-list contract).
+fn results_container(query: &str, results: SearchResults) -> AnyView<HuddleState> {
+    let children: Vec<FlexChild<HuddleState>> = if query.trim().is_empty() {
+        vec![keyed("hint", hint_view())]
+    } else if results.is_empty() {
+        vec![keyed("no-results", no_results_view(query))]
+    } else {
+        keyed_section_views(results)
+    };
+
+    any(FlexView::new(Axis::Vertical, children))
 }
 
 /// The search field row: a controlled [`TextInput`] filtering as-you-type,
@@ -104,20 +136,39 @@ fn no_results_view(query: &str) -> AnyView<HuddleState> {
 }
 
 /// The three result sections, in Channels / People / Messages order, each
-/// preceded by a header — only sections with at least one hit render.
-fn section_views(results: SearchResults) -> Vec<AnyView<HuddleState>> {
+/// preceded by a header — only sections with at least one hit render. Every
+/// header and row is keyed by a stable id (a channel's string id, a user's
+/// numeric id, a message hit's id) so a row's widget — and any internal state
+/// it holds — survives across query edits that reorder or partially overlap
+/// the result set, instead of being torn down and rebuilt positionally.
+fn keyed_section_views(results: SearchResults) -> Vec<FlexChild<HuddleState>> {
     let mut views = Vec::new();
     if !results.channels.is_empty() {
-        views.push(section_header("Channels"));
-        views.extend(results.channels.into_iter().map(channel_row));
+        views.push(keyed("header-channels", section_header("Channels")));
+        views.extend(
+            results
+                .channels
+                .into_iter()
+                .map(|c| keyed(format!("channel-{}", c.id), channel_row(c))),
+        );
     }
     if !results.users.is_empty() {
-        views.push(section_header("People"));
-        views.extend(results.users.into_iter().map(user_row));
+        views.push(keyed("header-people", section_header("People")));
+        views.extend(
+            results
+                .users
+                .into_iter()
+                .map(|u| keyed(format!("user-{}", u.id), user_row(u))),
+        );
     }
     if !results.messages.is_empty() {
-        views.push(section_header("Messages"));
-        views.extend(results.messages.into_iter().map(message_row));
+        views.push(keyed("header-messages", section_header("Messages")));
+        views.extend(
+            results
+                .messages
+                .into_iter()
+                .map(|hit| keyed(format!("message-{}", hit.message_id), message_row(hit))),
+        );
     }
     views
 }

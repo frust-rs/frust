@@ -34,7 +34,7 @@
 
 use std::any::Any;
 
-use forgekit::{AnyView, Component, GetUntracked};
+use forgekit::{AnyView, Component, GetUntracked, Set};
 use forgekit_core::{FrameTime, RenderRoot};
 use forgekit_text::TextContext;
 use kurbo::{Point, Size};
@@ -295,4 +295,116 @@ fn a_channel_result_row_navigates_to_its_channel_feed() {
         restored.glyph_runs, before.glyph_runs,
         "popping back returns to the same Search render"
     );
+}
+
+/// Regression for the `12-huddle-search-structure` restructuring (and an
+/// app-tree integration check for task 02's sibling focus-preservation fix):
+/// typing a second character — which narrows/changes the matched result set
+/// and therefore `results_container`'s internal content — must not disturb
+/// the search field's own focus/IME state.
+///
+/// The query is seeded to one character directly (rather than via a first
+/// real keystroke) and settled with its own rebuild *before* this test's
+/// typing begins: unlike the mobile shells' continuous per-frame loop, this
+/// harness only rebuilds when explicitly told to, and a real per-keystroke
+/// rebuild cadence would otherwise also exercise the search field's own
+/// separate empty-query/non-empty-query row swap (the clear button
+/// appearing swaps `search_field`'s row from a bare `TextInput` to a
+/// `FlexView` wrapping one — a genuine `AnyView` type change at that single
+/// child, correctly focus-clearing by the same identity-change contract
+/// `forgekit-widgets`' `rebuild_child_clears_active_on_type_swap` unit test
+/// documents at the widget level). That transition is orthogonal to (and out
+/// of scope for) this task, which is scoped to `results_container`; seeding
+/// the query already non-empty isolates the scenario this task actually
+/// fixes — a query edit changing `results_container`'s content while the
+/// field itself never changes concrete type.
+#[test]
+fn typing_a_second_character_keeps_the_field_focused() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (mut root, mut state, mut tcx) = boot_to_search();
+
+    let controller = SearchController::instance();
+    controller.query.set("a".to_string());
+    let _ = rebuild(&mut root, &mut state, &mut tcx);
+
+    tap(&mut root, &mut state, field_point());
+    assert!(root.is_focus_active(), "tapping the field claims focus");
+    assert!(
+        root.ime_state().is_some(),
+        "a focused TextInput publishes an IME surface"
+    );
+
+    // Typing a second character narrows the matched result set, changing
+    // results_container's internal content (e.g. fewer/different rows, or a
+    // transition into the no-results view) — a structural change confined to
+    // index 1 of the outer Column that must leave the field at index 0 (and
+    // its recorded focus/IME path) untouched.
+    type_text(&mut root, &mut state, "d");
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+
+    assert_eq!(
+        controller.query.get_untracked(),
+        "ad",
+        "the second keystroke reached the still-focused field"
+    );
+    assert!(
+        root.is_focus_active(),
+        "the field stays focused after typing a second character"
+    );
+    assert!(
+        root.ime_state().is_some(),
+        "the field's IME surface stays published after typing a second character \
+         (across the results-list change)"
+    );
+    assert!(scene.glyph_runs > 0);
+}
+
+/// Results render/clear correctly across every query transition
+/// (empty hint -> hits -> no-results -> back to the empty hint), each
+/// swapping `results_container`'s internal content while the outer Column
+/// stays a fixed two children.
+#[test]
+fn results_render_and_clear_across_query_transitions() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (mut root, mut state, mut tcx) = boot_to_search();
+    let controller = SearchController::instance();
+
+    // Empty query: the hint view.
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+    assert!(scene.glyph_runs > 0, "the empty-query hint renders");
+    assert!(controller.results.get_untracked().is_empty());
+
+    // Non-empty, matching query: hit rows render. (Driven directly through
+    // the controller signal, not a real keystroke: the point of this test is
+    // `results_container`'s content across transitions, not per-keystroke
+    // field focus, which `typing_a_second_character_keeps_the_field_focused`
+    // above already covers.)
+    controller.query.set("leadership".to_string());
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+    let results = controller.results.get_untracked();
+    assert_eq!(
+        results.channels.len(),
+        1,
+        "the \"leadership\" channel matches"
+    );
+    assert!(scene.glyph_runs > 0, "the matched channel row renders");
+
+    // Non-empty, non-matching query: the no-results view replaces the rows.
+    controller.query.set("zzznotarealquery".to_string());
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+    assert!(
+        controller.results.get_untracked().is_empty(),
+        "a non-matching query yields no results"
+    );
+    assert!(scene.glyph_runs > 0, "the no-results message renders");
+
+    // Clearing the query returns to the hint view.
+    controller.query.set(String::new());
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+    assert!(controller.results.get_untracked().is_empty());
+    assert!(scene.glyph_runs > 0, "the hint view renders again");
 }
