@@ -97,9 +97,12 @@ pub fn about_screen() -> AnyView<HuddleState> {
 fn initials_block(initial: &str, fill: Color, on_fill: Color) -> AnyView<HuddleState> {
     let tile =
         any(SizedBox(Some(72.0), Some(72.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
-    let label = any(Align(
+    // Center the monogram with the SizedBox+Align idiom (a bare `Align` under a
+    // `Stack` shrink-wraps to the origin — RESEARCH.md issue 1;
+    // `screens::profile`'s `initials_tile` is the precedent).
+    let label = any(SizedBox(Some(72.0), Some(72.0)).child(Align(
         Alignment::CENTER,
         text(initial.to_string()).size(32.0).color(on_fill),
-    ));
+    )));
     any(Stack(vec![tile, label]))
 }

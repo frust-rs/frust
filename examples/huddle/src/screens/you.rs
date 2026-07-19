@@ -103,10 +103,13 @@ pub fn you_screen(controller: NavigatorController<HuddleState>) -> AnyView<Huddl
 fn avatar_block(initials: String, fill: Color, on_fill: Color) -> AnyView<HuddleState> {
     let tile =
         any(SizedBox(Some(56.0), Some(56.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
-    let label = any(Align(
+    // Center the monogram with the SizedBox+Align idiom (a bare `Align` under a
+    // `Stack` shrink-wraps to the origin — RESEARCH.md issue 1;
+    // `screens::profile`'s `initials_tile` is the precedent).
+    let label = any(SizedBox(Some(56.0), Some(56.0)).child(Align(
         Alignment::CENTER,
         text(initials).size(20.0).color(on_fill),
-    ));
+    )));
     any(Stack(vec![tile, label]))
 }
 

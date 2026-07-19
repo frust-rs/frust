@@ -413,7 +413,10 @@ fn message_bubble(
     if !msg.is_own()
         && let Some(user) = mock::user(msg.author_id)
     {
-        lines.push(any(text(format!("{}  ·  9:41 AM", user.name)).size(12.0)));
+        // Sender + timestamp on one line: 13 (a combined meta line between the
+        // table's sender-15 and timestamp-12 roles — `Text` has no mixed-run
+        // weight/size, so it's one size, per RESEARCH.md's chat-row conventions).
+        lines.push(any(text(format!("{}  ·  9:41 AM", user.name)).size(13.0)));
     }
 
     lines.push(message_body(msg));
@@ -560,10 +563,13 @@ fn thread_affordance(msg: &FeedMessage) -> AnyView<HuddleState> {
 /// the author's profile (`/user/:id`) — completing the "avatar tap anywhere"
 /// matrix row alongside Home/Search/Activity (task 22).
 fn avatar(author_id: u32) -> AnyView<HuddleState> {
+    // A ~40px card-backed avatar (chat-row avatar 36–40, RESEARCH.md table):
+    // 14px initials in an 8px inset ≈ a 40px tile (the facade exposes no true
+    // circular clip to app code, so a `filled_card` stands in for the disc).
     let initials = mock::user(author_id).map(|u| u.initials).unwrap_or("?");
     let tile = filled_card(Padding(
         EdgeInsets::all(8.0),
-        text(initials.to_string()).size(12.0),
+        text(initials.to_string()).size(14.0),
     ));
     any(
         GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
@@ -718,9 +724,11 @@ fn affordance_button<F>(leading: forgekit::IconSource, on_tap: F) -> AnyView<Hud
 where
     F: Fn(&mut HuddleState) + 'static,
 {
+    // Icon default 24 in a ~40px hit area (24 glyph + 8 padding either side) —
+    // RESEARCH.md "Material sizing reference" (icon default 24, min touch 48).
     any(GestureDetector(filled_card(Padding(
         EdgeInsets::all(8.0),
-        icon(leading).size(22.0),
+        icon(leading).size(24.0),
     )))
     .on_tap(on_tap))
 }

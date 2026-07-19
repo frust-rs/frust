@@ -110,6 +110,29 @@ fn status_color(status: UserStatus) -> Color {
 }
 
 // ---------------------------------------------------------------------------
+// Material list metrics (RESEARCH.md "Material sizing reference")
+// ---------------------------------------------------------------------------
+
+/// CircleAvatar diameter — radius 20 → 40 (`circle_avatar.dart:136-138`).
+const AVATAR_SIZE: f64 = 40.0;
+/// Avatar corner radius: a full circle at [`AVATAR_SIZE`].
+const AVATAR_RADIUS: f64 = AVATAR_SIZE / 2.0;
+/// The `#`/initials monogram inside an avatar circle (a bodyLarge-ish glyph).
+const MONOGRAM_SIZE: f32 = 16.0;
+/// List title role — M3 `titleMedium` (w500), 16 (`typography.dart:2097-2111`).
+const LIST_TITLE_SIZE: f32 = 16.0;
+/// List subtitle / preview role — M3 `bodyMedium`, 14 (same table).
+const LIST_SUBTITLE_SIZE: f32 = 14.0;
+/// Section-header label — M3 `labelLarge`-ish (13).
+const SECTION_LABEL_SIZE: f32 = 13.0;
+/// Unread-badge pill — a compact 18px-tall counter (Material badge convention).
+const BADGE_W: f64 = 22.0;
+const BADGE_H: f64 = 18.0;
+const BADGE_RADIUS: f64 = BADGE_H / 2.0;
+/// Unread-badge count text — M3 `labelSmall` (11).
+const BADGE_TEXT_SIZE: f32 = 11.0;
+
+// ---------------------------------------------------------------------------
 // Escape-hatch leaf widgets
 // ---------------------------------------------------------------------------
 
@@ -365,12 +388,17 @@ fn workspace_tile(nav: &NavigatorController<HuddleState>) -> AnyView<HomeState> 
     let nav = nav.clone();
     let tile = Padding(
         EdgeInsets::symmetric(6.0, 12.0),
+        // SizedBox+Align monogram idiom — see `channel_circle`.
         Stack(vec![
-            any(fill_box(Size::new(40.0, 40.0), CHANNEL_TINT, 12.0)),
-            any(Align(
+            any(fill_box(
+                Size::new(AVATAR_SIZE, AVATAR_SIZE),
+                CHANNEL_TINT,
+                12.0,
+            )),
+            any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
                 Alignment::CENTER,
                 text("HQ").size(12.0).color(Color::WHITE),
-            )),
+            ))),
         ]),
     );
     any(GestureDetector(tile).on_tap(move |_s: &mut HomeState| {
@@ -412,7 +440,10 @@ fn skeleton_row() -> AnyView<HomeState> {
         FlexView::new(
             Axis::Horizontal,
             vec![
-                inflexible(any(shimmer(Size::new(40.0, 40.0), 20.0))),
+                inflexible(any(shimmer(
+                    Size::new(AVATAR_SIZE, AVATAR_SIZE),
+                    AVATAR_RADIUS,
+                ))),
                 inflexible(any(SizedBox(Some(12.0), None))),
                 flexible(
                     1,
@@ -475,8 +506,9 @@ fn roster_list(
 /// A section header row.
 fn section_header(title: &str) -> AnyView<HomeState> {
     any(Padding(
+        // Start margin 16 (8 outer scroll pad + 8 here) — Material side margin.
         EdgeInsets::symmetric(8.0, 12.0),
-        text(title.to_string()).size(13.0),
+        text(title.to_string()).size(SECTION_LABEL_SIZE),
     ))
 }
 
@@ -488,12 +520,12 @@ fn channel_row(state: &HomeState, c: &ChannelItem) -> AnyView<HomeState> {
     // Title row: the name, plus a lock icon for a private channel.
     let title: AnyView<HomeState> = if c.private {
         any(Row(vec![
-            any(text(c.name.clone()).size(15.0)),
+            any(text(c.name.clone()).size(LIST_TITLE_SIZE)),
             any(SizedBox(Some(6.0), None)),
-            any(icon(icons::LOCK).size(14.0)),
+            any(icon(icons::LOCK).size(16.0)),
         ]))
     } else {
-        any(text(c.name.clone()).size(15.0))
+        any(text(c.name.clone()).size(LIST_TITLE_SIZE))
     };
 
     let nav = state.nav.clone();
@@ -521,7 +553,7 @@ fn channel_row(state: &HomeState, c: &ChannelItem) -> AnyView<HomeState> {
 fn dm_row(state: &HomeState, d: &DmItem) -> AnyView<HomeState> {
     let leading = dm_avatar(state, d);
 
-    let title = any(text(d.name.clone()).size(15.0));
+    let title = any(text(d.name.clone()).size(LIST_TITLE_SIZE));
     let nav = state.nav.clone();
     let route_id = d.id.clone();
     let content = tappable_content(
@@ -565,13 +597,23 @@ fn row_with_long_press_menu(
 }
 
 /// The leading `#` circle for a channel row.
+///
+/// The monogram layers over the circle as a `SizedBox(n,n).child(Align(CENTER,
+/// …))` (the `profile.rs` idiom) — a bare `Align` directly under the `Stack`
+/// shrink-wraps to the glyph and lands at the stack origin (top-left), so the
+/// tight-sized box is what gives `Align` the bounded constraints it centers
+/// within (RESEARCH.md issue 1).
 fn channel_circle() -> AnyView<HomeState> {
     any(Stack(vec![
-        any(fill_box(Size::new(40.0, 40.0), CHANNEL_TINT, 20.0)),
-        any(Align(
-            Alignment::CENTER,
-            text("#").size(18.0).color(Color::WHITE),
+        any(fill_box(
+            Size::new(AVATAR_SIZE, AVATAR_SIZE),
+            CHANNEL_TINT,
+            AVATAR_RADIUS,
         )),
+        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+            Alignment::CENTER,
+            text("#").size(MONOGRAM_SIZE).color(Color::WHITE),
+        ))),
     ]))
 }
 
@@ -582,18 +624,21 @@ fn dm_avatar(state: &HomeState, d: &DmItem) -> AnyView<HomeState> {
     let use_image = matches!(d.user_id, 2 | 5) && state.logo.is_some();
     let base: AnyView<HomeState> = if use_image {
         let src = state.logo.clone().expect("guarded by use_image");
-        any(SizedBox(Some(40.0), Some(40.0)).child(Image(src).fit(ImageFit::Cover)))
+        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Image(src).fit(ImageFit::Cover)))
     } else {
+        // SizedBox+Align monogram idiom — see `channel_circle`.
         any(Stack(vec![
             any(fill_box(
-                Size::new(40.0, 40.0),
+                Size::new(AVATAR_SIZE, AVATAR_SIZE),
                 avatar_color(d.user_id),
-                20.0,
+                AVATAR_RADIUS,
             )),
-            any(Align(
+            any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
                 Alignment::CENTER,
-                text(d.initials.clone()).size(14.0).color(Color::WHITE),
-            )),
+                text(d.initials.clone())
+                    .size(MONOGRAM_SIZE)
+                    .color(Color::WHITE),
+            ))),
         ]))
     };
 
@@ -626,7 +671,7 @@ fn tappable_content<F: Fn(&mut HomeState) + 'static>(
     let column = any(Column(vec![
         title,
         any(SizedBox(None, Some(4.0))),
-        any(text(preview).size(12.0)),
+        any(text(preview).size(LIST_SUBTITLE_SIZE)),
     ]));
     any(GestureDetector(
         FlexView::new(
@@ -650,12 +695,17 @@ fn unread_badge(count: u32) -> AnyView<HomeState> {
     };
     any(Padding(
         EdgeInsets::symmetric(4.0, 0.0),
+        // SizedBox+Align monogram idiom — see `channel_circle`.
         Stack(vec![
-            any(fill_box(Size::new(22.0, 18.0), BADGE_COLOR, 9.0)),
-            any(Align(
-                Alignment::CENTER,
-                text(label).size(11.0).color(Color::WHITE),
+            any(fill_box(
+                Size::new(BADGE_W, BADGE_H),
+                BADGE_COLOR,
+                BADGE_RADIUS,
             )),
+            any(SizedBox(Some(BADGE_W), Some(BADGE_H)).child(Align(
+                Alignment::CENTER,
+                text(label).size(BADGE_TEXT_SIZE).color(Color::WHITE),
+            ))),
         ]),
     ))
 }

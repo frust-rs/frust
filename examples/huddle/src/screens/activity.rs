@@ -21,10 +21,14 @@ use std::sync::Arc;
 
 use clean_signals::async_state::AsyncState;
 use forgekit::{
-    AnyView, Axis, Column, CrossAxisAlignment, FlexView, GestureDetector, Get, any, app_bar,
-    filled_card, filter_chip, flexible, hero, icon, icons, inflexible, list_item, scroll_view,
-    text,
+    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, GestureDetector, Get,
+    SizedBox, any, app_bar, filled_card, filter_chip, flexible, hero, icon, icons, inflexible,
+    list_item, scroll_view, text,
 };
+
+/// CircleAvatar diameter — radius 20 → 40 (RESEARCH.md "Material sizing
+/// reference"), matching the roster's leading avatars.
+const AVATAR_SIZE: f64 = 40.0;
 
 use crate::HuddleState;
 use crate::features::activity::{ActivityController, ActivityRow};
@@ -129,9 +133,14 @@ fn row_view(row: ActivityRow) -> AnyView<HuddleState> {
     let headline = format!("{actor_name} mentioned you in #{channel_name}");
     let supporting = format!("{} · {}", item.text, relative_time(item.message_id));
 
+    // A 40px card-backed avatar (the roster metric), initials centered with the
+    // SizedBox+Align idiom — the same shape `screens::search::avatar_badge` uses.
     let avatar = hero(
         format!("avatar-{}", item.author_id),
-        filled_card(text(initials.to_string()).size(14.0)),
+        SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(filled_card(Align(
+            Alignment::CENTER,
+            any(text(initials.to_string()).size(14.0)),
+        ))),
     );
 
     let mut list_row = list_item::<HuddleState>(headline)

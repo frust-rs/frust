@@ -542,11 +542,14 @@ where
     State: 'static,
     F: Fn(&mut State) + 'static,
 {
+    // Icon default 24, label bodyLarge 16 — RESEARCH.md "Material sizing
+    // reference"; the 16/14 row insets keep the row's touch height in the
+    // 48–56 band.
     let row = FlexView::new(
         Axis::Horizontal,
         vec![
-            inflexible(any(icon(leading).size(22.0))),
-            inflexible(any(SizedBox(Some(14.0), None))),
+            inflexible(any(icon(leading).size(24.0))),
+            inflexible(any(SizedBox(Some(16.0), None))),
             inflexible(any(text(label.into()).size(16.0))),
         ],
     )
