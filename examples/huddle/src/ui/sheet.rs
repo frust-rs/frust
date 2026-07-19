@@ -903,18 +903,26 @@ mod tests {
         let scrim_r = (scrim.2.components[0] * 255.0) as u8;
         let scrim_g = (scrim.2.components[1] * 255.0) as u8;
         let scrim_b = (scrim.2.components[2] * 255.0) as u8;
-        assert_eq!((scrim_r, scrim_g, scrim_b), (0, 0, 0), "scrim uses fallback black");
+        assert_eq!(
+            (scrim_r, scrim_g, scrim_b),
+            (0, 0, 0),
+            "scrim uses fallback black"
+        );
 
         // Panel should be the fallback light color (PANEL_FILL).
-        let panel = rec.rrects.iter().find(|(_, s, _, _)| s.width == 400.0).expect(
-            "panel is painted as a rounded rect",
-        );
+        let panel = rec
+            .rrects
+            .iter()
+            .find(|(_, s, _, _)| s.width == 400.0)
+            .expect("panel is painted as a rounded rect");
         assert_eq!(panel.3, PANEL_FILL, "unthemed panel uses fallback color");
 
         // Grab pill should be the fallback light gray.
-        let pill = rec.rrects.iter().find(|(_, s, _, _)| s.width == GRAB_PILL_W).expect(
-            "grab pill is painted",
-        );
+        let pill = rec
+            .rrects
+            .iter()
+            .find(|(_, s, _, _)| s.width == GRAB_PILL_W)
+            .expect("grab pill is painted");
         assert_eq!(pill.3, GRAB_PILL, "unthemed grab pill uses fallback color");
     }
 
@@ -937,18 +945,22 @@ mod tests {
         widget.paint(&mut pctx, &mut rec);
 
         // Panel should be theme-resolved (surface_container_low).
-        let panel = rec.rrects.iter().find(|(_, s, _, _)| s.width == 400.0).expect(
-            "panel is painted as a rounded rect",
-        );
+        let panel = rec
+            .rrects
+            .iter()
+            .find(|(_, s, _, _)| s.width == 400.0)
+            .expect("panel is painted as a rounded rect");
         assert_eq!(
             panel.3, scheme.surface_container_low,
             "themed panel uses surface_container_low"
         );
 
         // Grab pill should be theme-resolved (on_surface_variant).
-        let pill = rec.rrects.iter().find(|(_, s, _, _)| s.width == GRAB_PILL_W).expect(
-            "grab pill is painted",
-        );
+        let pill = rec
+            .rrects
+            .iter()
+            .find(|(_, s, _, _)| s.width == GRAB_PILL_W)
+            .expect("grab pill is painted");
         assert_eq!(
             pill.3, scheme.on_surface_variant,
             "themed grab pill uses on_surface_variant"
