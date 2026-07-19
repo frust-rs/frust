@@ -165,6 +165,12 @@ class FrustSurfaceView(context: Context) :
     // next rebuild) — see [dispatchBackPress].
     private external fun nativeOnBackPress(handle: Long): Boolean
 
+    // Plugin platform initialization: deliver the
+    // application Context to the native side so `frust-plugin`'s handles
+    // can be initialized. Called once from [surfaceCreated] with the
+    // application context (never the Activity), strictly before `nativeInit`.
+    private external fun nativeInitPlatform(context: Context)
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
@@ -342,6 +348,10 @@ class FrustSurfaceView(context: Context) :
     override fun surfaceCreated(holder: SurfaceHolder) {
         setFrameRateHint(holder)
         if (handle == 0L) {
+            // Initialize plugin platform handles before native init.
+            // The application context is stable across activity recreation and is the
+            // only context-like parameter plugins need.
+            nativeInitPlatform(context.applicationContext)
             handle = nativeInit(holder.surface, scaleFactor, context.cacheDir.absolutePath)
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
