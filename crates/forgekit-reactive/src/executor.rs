@@ -111,6 +111,14 @@ impl CompositeWaker {
     /// runtime, and `ReactiveRuntime::wake` re-reads the live waker under its
     /// lock — so a re-wake always nudges the shell that currently owns wake-up
     /// (the same path spawn-time firing uses).
+    ///
+    /// **Shell-waker contract note:** this composite makes the [`FrameWaker`]
+    /// fire from arbitrary threads (e.g. the background tokio TIMER thread
+    /// completing a `sleep` a `spawn_local` future awaits) — a newly-reachable
+    /// call site beyond the UI-thread spawn/signal paths. A shell's waker was
+    /// always required to be `Send + Sync` and callable from any thread; it
+    /// must also be panic-free off the UI thread, or the panic unwinds into
+    /// the tokio timer driver.
     fn wake_shell() {
         if let Some(rt) = crate::ReactiveRuntime::get() {
             rt.wake();
