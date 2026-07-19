@@ -36,6 +36,7 @@ use forgekit_core::{
     InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase,
     SemanticsCtx, TOUCH_SLOP, View, Widget, any,
 };
+use forgekit_theme::Theme;
 use kurbo::{Affine, Point, Size};
 use peniko::Color;
 
@@ -59,6 +60,18 @@ const SETTLE_STOP_PX: f64 = 0.5;
 /// Side length (logical px) of the white action-marker painted in the revealed
 /// strip (a generic icon stand-in — a real vector glyph is a later polish).
 const MARKER_PX: f64 = 22.0;
+
+/// Unthemed-fallback marker color (a theme resolves this from `colors.on_surface`,
+/// providing contrast on the swipe action strips).
+const MARKER_COLOR: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
+
+/// Resolve the marker color from the theme (defaults to [`MARKER_COLOR`] if unthemed).
+fn resolve_marker_color(theme: Option<&Theme>) -> Color {
+    match theme {
+        Some(theme) => theme.scheme().on_surface,
+        None => MARKER_COLOR,
+    }
+}
 
 /// The affordance glyph painted in a revealed swipe strip. A real Material
 /// icon glyph (`icons::REPLY`) can't be shaped from this facade-only escape-hatch
@@ -315,6 +328,7 @@ impl SwipeableWidget {
         strip: Size,
         color: Color,
         marker: SwipeMarker,
+        marker_color: Color,
     ) {
         if strip.width <= 0.0 {
             return;
@@ -330,25 +344,25 @@ impl SwipeableWidget {
         );
         match marker {
             SwipeMarker::Square => {
-                scene.fill_rounded_rect(marker_origin, Size::new(m, m), 4.0, Color::WHITE);
+                scene.fill_rounded_rect(marker_origin, Size::new(m, m), 4.0, marker_color);
             }
-            SwipeMarker::Reply => Self::paint_reply_arrow(scene, marker_origin, m),
+            SwipeMarker::Reply => Self::paint_reply_arrow(scene, marker_origin, m, marker_color),
         }
     }
 
     /// A hand-drawn, left-pointing reply arrow inside the `m`×`m` marker box —
     /// the swipe-to-reply affordance (a real `icons::REPLY` glyph can't be
     /// shaped here, see [`SwipeMarker`]).
-    fn paint_reply_arrow(scene: &mut dyn PaintScene, o: Point, m: f64) {
+    fn paint_reply_arrow(scene: &mut dyn PaintScene, o: Point, m: f64, color: Color) {
         let cy = o.y + m / 2.0;
         let tip = Point::new(o.x + m * 0.22, cy);
         let tail = Point::new(o.x + m * 0.82, cy);
         let head = m * 0.24;
         let w = (m * 0.09).max(1.5);
         // Shaft, then the two arrowhead barbs meeting at the tip.
-        scene.stroke_line(tip, tail, w, Color::WHITE);
-        scene.stroke_line(tip, Point::new(tip.x + head, tip.y - head), w, Color::WHITE);
-        scene.stroke_line(tip, Point::new(tip.x + head, tip.y + head), w, Color::WHITE);
+        scene.stroke_line(tip, tail, w, color);
+        scene.stroke_line(tip, Point::new(tip.x + head, tip.y - head), w, color);
+        scene.stroke_line(tip, Point::new(tip.x + head, tip.y + head), w, color);
     }
 }
 
@@ -418,6 +432,8 @@ impl Widget for SwipeableWidget {
         self.pump_settle(ctx);
         let origin = ctx.origin();
         let size = ctx.size();
+        let theme = Theme::from_paint_ctx(ctx);
+        let marker_color = resolve_marker_color(theme);
         scene.push_clip(origin, size);
 
         // Reveal the matching action strip behind the (about-to-be-offset) child.
@@ -425,7 +441,7 @@ impl Widget for SwipeableWidget {
             && let Some(color) = self.right_color
         {
             let strip = Size::new(self.offset.min(size.width), size.height);
-            Self::paint_action(scene, origin, strip, color, self.right_marker);
+            Self::paint_action(scene, origin, strip, color, self.right_marker, marker_color);
         } else if self.offset < 0.0
             && let Some(color) = self.left_color
         {
@@ -437,6 +453,7 @@ impl Widget for SwipeableWidget {
                 Size::new(w, size.height),
                 color,
                 self.left_marker,
+                marker_color,
             );
         }
 

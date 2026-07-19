@@ -53,6 +53,7 @@ use forgekit_core::{
     EventResult, FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton,
     PointerEvent, PointerPhase, SemanticsCtx, TOUCH_SLOP, View, Widget, any,
 };
+use forgekit_theme::Theme;
 use kurbo::{Point, Size};
 use peniko::Color;
 use std::time::Duration;
@@ -117,6 +118,41 @@ const GRAB_PILL_H: f64 = 4.0;
 const GRAB_PILL: Color = Color::from_rgb8(0xC2, 0xC0, 0xCC);
 /// Scrim fill at full open (alpha scales with the entrance progress).
 const SCRIM_MAX_ALPHA: f64 = 0.45;
+/// Unthemed-fallback scrim base color (a theme resolves this from `colors.scrim`);
+/// applied at [`SCRIM_MAX_ALPHA`].
+const SCRIM_COLOR: Color = Color::from_rgb8(0x00, 0x00, 0x00);
+
+/// Resolve the panel fill from the theme (defaults to [`PANEL_FILL`] if unthemed).
+fn resolve_panel_fill(theme: Option<&Theme>) -> Color {
+    match theme {
+        Some(theme) => theme.scheme().surface_container_low,
+        None => PANEL_FILL,
+    }
+}
+
+/// Resolve the grab-handle pill color from the theme (defaults to [`GRAB_PILL`]
+/// if unthemed).
+fn resolve_grab_pill(theme: Option<&Theme>) -> Color {
+    match theme {
+        Some(theme) => theme.scheme().on_surface_variant,
+        None => GRAB_PILL,
+    }
+}
+
+/// Resolve the scrim base color from the theme (defaults to [`SCRIM_COLOR`]
+/// if unthemed), then apply alpha.
+fn resolve_scrim_color(theme: Option<&Theme>, alpha: f64) -> Color {
+    let base = match theme {
+        Some(theme) => theme.scheme().scrim,
+        None => SCRIM_COLOR,
+    };
+    Color::from_rgba8(
+        (base.components[0] * 255.0) as u8,
+        (base.components[1] * 255.0) as u8,
+        (base.components[2] * 255.0) as u8,
+        (alpha * 255.0) as u8,
+    )
+}
 
 /// Entrance slide-up duration.
 const ENTRANCE: Duration = Duration::from_millis(240);
@@ -362,15 +398,16 @@ impl Widget for SheetWidget {
 
         let origin = ctx.origin();
         let size = ctx.size();
+        let theme = Theme::from_paint_ctx(ctx);
 
         // Scrim: fades in with the entrance progress.
-        let scrim_a = (SCRIM_MAX_ALPHA * self.entrance.value().clamp(0.0, 1.0) * 255.0) as u8;
-        scene.fill_rect(origin, size, Color::from_rgba8(0, 0, 0, scrim_a));
+        let scrim_a = SCRIM_MAX_ALPHA * self.entrance.value().clamp(0.0, 1.0);
+        scene.fill_rect(origin, size, resolve_scrim_color(theme, scrim_a));
 
         // Panel background (the full-width rect a test anchors on).
         let panel_o = Point::new(origin.x, origin.y + self.panel_visual_top());
         let panel_s = Size::new(size.width, self.panel_height);
-        scene.fill_rounded_rect(panel_o, panel_s, PANEL_RADIUS, PANEL_FILL);
+        scene.fill_rounded_rect(panel_o, panel_s, PANEL_RADIUS, resolve_panel_fill(theme));
 
         // Grab-handle pill, centered near the panel's top.
         let pill_o = Point::new(
@@ -381,7 +418,7 @@ impl Widget for SheetWidget {
             pill_o,
             Size::new(GRAB_PILL_W, GRAB_PILL_H),
             GRAB_PILL_H / 2.0,
-            GRAB_PILL,
+            resolve_grab_pill(theme),
         );
 
         self.content.paint_child(ctx, scene);
@@ -815,4 +852,112 @@ pub fn action_menu<State: 'static>(rows: Vec<AnyView<State>>) -> AnyView<State> 
         )
         .cross_axis(CrossAxisAlignment::Stretch),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forgekit_core::{BuildCtx, LayoutCtx, PaintCtx};
+    use kurbo::Size;
+
+    /// A recording paint scene that captures filled rects for color inspection.
+    #[derive(Default)]
+    struct ColorRecorder {
+        rects: Vec<(Point, Size, Color)>,
+        rrects: Vec<(Point, Size, f64, Color)>,
+    }
+
+    impl PaintScene for ColorRecorder {
+        fn fill_rect(&mut self, o: Point, s: Size, c: Color) {
+            self.rects.push((o, s, c));
+        }
+
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+
+        fn fill_rounded_rect(&mut self, o: Point, s: Size, r: f64, c: Color) {
+            self.rrects.push((o, s, r, c));
+        }
+
+        fn fill_path(&mut self, _origin: Point, _path: &kurbo::BezPath, _brush: &peniko::Brush) {}
+    }
+
+    #[test]
+    fn unthemed_paint_uses_fallback_colors() {
+        let view: SheetView<()> = sheet(SizedBox(Some(300.0), Some(100.0)));
+        let mut counter = 0u64;
+        let mut widget = view.build(&mut BuildCtx::new(&mut counter));
+
+        let mut lctx = LayoutCtx::new();
+        widget.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 600.0)));
+
+        let mut rec = ColorRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 600.0));
+        widget.paint(&mut pctx, &mut rec);
+
+        // Scrim should be painted at the full area (alpha may be 0 if the entrance
+        // hasn't animated yet, which is fine).
+        assert!(!rec.rects.is_empty(), "scrim rect is painted");
+        let scrim = &rec.rects[0];
+        assert_eq!(scrim.1, Size::new(400.0, 600.0), "scrim fills the area");
+        // Scrim color should be black with the applied alpha (even if 0 at entrance start).
+        let scrim_r = (scrim.2.components[0] * 255.0) as u8;
+        let scrim_g = (scrim.2.components[1] * 255.0) as u8;
+        let scrim_b = (scrim.2.components[2] * 255.0) as u8;
+        assert_eq!((scrim_r, scrim_g, scrim_b), (0, 0, 0), "scrim uses fallback black");
+
+        // Panel should be the fallback light color (PANEL_FILL).
+        let panel = rec.rrects.iter().find(|(_, s, _, _)| s.width == 400.0).expect(
+            "panel is painted as a rounded rect",
+        );
+        assert_eq!(panel.3, PANEL_FILL, "unthemed panel uses fallback color");
+
+        // Grab pill should be the fallback light gray.
+        let pill = rec.rrects.iter().find(|(_, s, _, _)| s.width == GRAB_PILL_W).expect(
+            "grab pill is painted",
+        );
+        assert_eq!(pill.3, GRAB_PILL, "unthemed grab pill uses fallback color");
+    }
+
+    #[test]
+    fn dark_theme_paint_resolves_surface_colors() {
+        let view: SheetView<()> = sheet(SizedBox(Some(300.0), Some(100.0)));
+        let mut counter = 0u64;
+        let mut widget = view.build(&mut BuildCtx::new(&mut counter));
+
+        let mut lctx = LayoutCtx::new();
+        widget.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 600.0)));
+
+        // Build a dark theme (M3 baseline is light; we'd need a dark variant, but
+        // for now we verify that a theme is applied by checking the colors differ).
+        let dark_theme = Theme::m3_baseline();
+        let scheme = dark_theme.scheme();
+
+        let mut rec = ColorRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 600.0)).with_theme(&dark_theme);
+        widget.paint(&mut pctx, &mut rec);
+
+        // Panel should be theme-resolved (surface_container_low).
+        let panel = rec.rrects.iter().find(|(_, s, _, _)| s.width == 400.0).expect(
+            "panel is painted as a rounded rect",
+        );
+        assert_eq!(
+            panel.3, scheme.surface_container_low,
+            "themed panel uses surface_container_low"
+        );
+
+        // Grab pill should be theme-resolved (on_surface_variant).
+        let pill = rec.rrects.iter().find(|(_, s, _, _)| s.width == GRAB_PILL_W).expect(
+            "grab pill is painted",
+        );
+        assert_eq!(
+            pill.3, scheme.on_surface_variant,
+            "themed grab pill uses on_surface_variant"
+        );
+
+        // Verify these differ from the fallback constants.
+        assert_ne!(
+            scheme.surface_container_low, PANEL_FILL,
+            "theme surface differs from fallback"
+        );
+    }
 }
