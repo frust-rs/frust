@@ -1,39 +1,39 @@
-# ForgeKit - Code Standards
+# Frust - Code Standards
 
 ## Language Idioms
 
 - **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.**
-  Every other crate (`forgekit-core`, `forgekit-scene`, `forgekit-text`,
-  `forgekit-widgets`, `forgekit-shell-common`, `forgekit-shell-desktop`,
-  `forgekit`) stays `unsafe`-free — where Masonry/xilem-style code would
+  Every other crate (`frust-core`, `frust-scene`, `frust-text`,
+  `frust-widgets`, `frust-shell-common`, `frust-shell-desktop`,
+  `frust`) stays `unsafe`-free — where Masonry/xilem-style code would
   reach for `unsafe` downcasting, use trait upcasting instead: bound a trait
   on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`. The
   sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot
   avoid, each isolated in one function/module with a `# Safety` doc comment
   stating the caller contract:
-  - `forgekit-render`'s `create_android_surface`/`create_metal_surface`
+  - `frust-render`'s `create_android_surface`/`create_metal_surface`
     (`lifecycle.rs`) and the `on_surface_created_from_android_window`/
     `on_surface_created_from_metal_layer` renderer methods (`renderer.rs`)
     — turn a caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a
     `wgpu::Surface`.
-  - `forgekit-shell-android`'s `jni_glue` module — the JNI FFI boundary
+  - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary
     (`extern "system"` exports, `Box::into_raw`/`from_raw` for the opaque
     native handle, `ANativeWindow_fromSurface`) — plus the
     `#[unsafe(no_mangle)]` attributes the `android_app!` macro emits on its
     generated exports.
-  - `forgekit-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary
+  - `frust-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary
     (`extern "C"` exports, `Box::into_raw`/`from_raw` for the opaque native
     handle, the call into `on_surface_created_from_metal_layer`) — plus the
     `#[unsafe(no_mangle)]` attributes the `ios_app!` macro emits on its
     generated exports.
-  - `forgekit-render`'s `context.rs::RenderContext::create_pipeline_cache`
+  - `frust-render`'s `context.rs::RenderContext::create_pipeline_cache`
     — one `unsafe { device.create_pipeline_cache(..) }` call building a
     `wgpu::PipelineCache` from a shell-persisted blob. The blob is
     `unframe`d and adapter-fingerprint-validated (`pipeline_cache::unframe`)
     before this call, and wgpu's own `fallback: true` backstops any
     residual mismatch — see `docs/ARCHITECTURE.md`'s GPU pipeline cache.
 - **No unwind across FFI.** Every platform export both shells define routes
-  through `forgekit-shell-common`'s `guard` helper, which `catch_unwind`s and
+  through `frust-shell-common`'s `guard` helper, which `catch_unwind`s and
   logs, returning a benign default instead of unwinding into JVM- or
   Swift-owned stack frames — a panic crossing the FFI boundary is undefined
   behavior, not just a bug.
@@ -42,8 +42,8 @@
   boundary — the platform owns composition (Gboard, CJK marked text) against
   a local mirror (Kotlin `Editable`/Swift `NSMutableString`), then hands the
   framework a whole reconciled `EditingState` (`nativeImeApply`/
-  `forgekit_ime_apply`) and reads a reconciled state back
-  (`nativeImeState`/`forgekit_ime_state_json`) to keep its own IME machinery
+  `frust_ime_apply`) and reads a reconciled state back
+  (`nativeImeState`/`frust_ime_state_json`) to keep its own IME machinery
   (`InputConnection`/`UITextInput`) synchronized. Do not add a per-keystroke
   op-forwarding path for mobile text input — it fights the platform's own
   composition state machine.
@@ -51,18 +51,18 @@
   `selection_*`/`composing_*` indices are UTF-16 code-unit indexed
   everywhere they cross a shell boundary (JNI, C-ABI, `AppTree`) — the
   platform's native string type. Convert to/from byte offsets only inside
-  `forgekit-text`'s `TextEditor` (`byte_to_utf16`/`utf16_to_byte`); a
+  `frust-text`'s `TextEditor` (`byte_to_utf16`/`utf16_to_byte`); a
   shell/glue module passes indices through opaquely and never does this
   conversion itself.
 - **Hand-roll JSON at the mobile FFI boundary — no `serde` in shell crates.**
-  `forgekit-shell-android`/`forgekit-shell-ios` serialize `ImeState` with a
+  `frust-shell-android`/`frust-shell-ios` serialize `ImeState` with a
   small hand-written escaper/builder, not a `serde_json` dependency, keeping
   the always-host-testable half of each shell crate free of a codegen
   dependency for a handful of fixed fields.
 - **Type-erase to avoid a downstream crate dependency**, not to avoid writing
   a type. When a lower layer needs to thread a resource owned by a higher
-  layer (e.g. `forgekit-core`'s `LayoutCtx` carrying the shell's
-  `forgekit-text::TextContext`), pass it as `&mut dyn Any` rather than adding
+  layer (e.g. `frust-core`'s `LayoutCtx` carrying the shell's
+  `frust-text::TextContext`), pass it as `&mut dyn Any` rather than adding
   the dependency, and recover it at the one call site that knows the
   concrete type with a documented, panic-on-mismatch `downcast_mut::<T>()`
   — the panic message should say this is a wiring bug, not a runtime-data
@@ -73,8 +73,8 @@
   View<State>`, where views are `'static`), opt out explicitly:
 
   ```rust
-  fn app_logic(state: &mut AppState) -> impl forgekit::View<AppState> + use<> {
-      forgekit::text(state.greeting.clone()).size(32.0)
+  fn app_logic(state: &mut AppState) -> impl frust::View<AppState> + use<> {
+      frust::text(state.greeting.clone()).size(32.0)
   }
   ```
 
@@ -105,8 +105,8 @@
 ## Error Handling
 
 - **`anyhow::Result` in binaries and integration-facing library code**
-  (`forgekit-cli` commands, `forgekit-render`'s public API,
-  `forgekit-shell-desktop`/`forgekit`'s `run`), with `.context()` /
+  (`frust-cli` commands, `frust-render`'s public API,
+  `frust-shell-desktop`/`frust`'s `run`), with `.context()` /
   `.with_context()` at each fallible step so the error chain names what was
   being attempted (e.g. `"failed to spawn `{cmd}`"`, `"reading `{path}`"`).
 - **`thiserror`-derived enums for errors callers match on**, i.e. where the
@@ -127,13 +127,13 @@
 
 | Element | Convention | Example |
 |---|---|---|
-| Crate names | `forgekit-<layer>` | `forgekit-scene`, `forgekit-shell-desktop` |
+| Crate names | `frust-<layer>` | `frust-scene`, `frust-shell-desktop` |
 | Fallible constructor errors | `<Type>Error` enum, `thiserror`-derived | `BuildInfoError`, `NameError` |
 | Test-only fakes | `Fake<Trait>` | `FakeProcessRunner`, `FakeEnv` |
 | Widget pairs | `<Name>View` (declarative) / `<Name>Widget` (retained) | `TextView` / `TextWidget` |
-| JNI exports | `Java_<fixed_package>_<FixedClass>_native<Name>` | `Java_dev_forgekit_ForgeKitSurfaceView_nativeOnFrame` |
+| JNI exports | `Java_<fixed_package>_<FixedClass>_native<Name>` | `Java_dev_frust_FrustSurfaceView_nativeOnFrame` |
 
-JNI export names are LAW: the package/class (`dev.forgekit.ForgeKitSurfaceView`)
+JNI export names are LAW: the package/class (`dev.frust.FrustSurfaceView`)
 is fixed across every generated app, not app-specific, so the mangled symbol
 stays stable regardless of the app's own package.
 
@@ -159,19 +159,19 @@ through the `ProcessRunner` trait, so `doctor`/`devices` logic is exercised
 in `cargo test` with `FakeProcessRunner` and never shells out during a test
 run.
 
-### Leaking `vello`/`wgpu` types outside `forgekit-render`
+### Leaking `vello`/`wgpu` types outside `frust-render`
 
-**BAD:** a `forgekit-scene` or `forgekit-text` public function taking or
+**BAD:** a `frust-scene` or `frust-text` public function taking or
 returning a `vello::*`/`wgpu::*` type.
 
-**GOOD:** public APIs above `forgekit-render` speak only `kurbo`/`peniko`;
+**GOOD:** public APIs above `frust-render` speak only `kurbo`/`peniko`;
 this is what lets the GPU backend be swapped later without touching widget
 or text code.
 
 ## Interaction Semantics
 
 Conventions for `Widget::event` implementations (spec §9), followed by every
-interactive widget in `forgekit-widgets`:
+interactive widget in `frust-widgets`:
 
 - **Fire on up-inside, not down.** A press captures the pointer on `Down` and
   tracks a `pressed` visual on `Move`, but the callback fires only on `Up`
@@ -225,11 +225,11 @@ interactive widget in `forgekit-widgets`:
 - **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`,
   `MOUSE_SLOP`), scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`,
   `FLING_STOP`, `VELOCITY_WINDOW_MS`), and `VelocityTracker` live in
-  `forgekit-core::input`; widgets import them rather than hardcoding a local
+  `frust-core::input`; widgets import them rather than hardcoding a local
   threshold, so tuning changes in one place and stays consistent everywhere.
 
 - **Events are logical-coordinate by the time they cross `AppTree`.** Every
-  platform boundary (winit, JNI `nativeOnTouch`, the C `forgekit_dispatch_touch`)
+  platform boundary (winit, JNI `nativeOnTouch`, the C `frust_dispatch_touch`)
   converts to density-independent logical pixels before building an
   `InputEvent` — widget/container code never divides by scale factor; only
   the shell's FFI-boundary helpers do.
@@ -304,7 +304,7 @@ Semantics pass):
   `accesskit_ios` — see `docs/ARCHITECTURE.md`'s Semantics pass) just enough
   to build on — no live-region announcements, no custom actions, and no
   adapter wiring belong here; that integration lives in a shell, not
-  `forgekit-core`.
+  `frust-core`.
 - **A platform adapter gates its pushes on `semantics_generation`/
   `semantics_if_changed`, not on pushing every frame unconditionally.** All
   three shipping adapters (desktop, Android, iOS) compare the last-seen
@@ -317,7 +317,7 @@ Semantics pass):
 ## Instrumentation & Frame-Gate Conventions
 
 - **Perf recording is always gated behind `perf::enabled()`, never
-  unconditional.** `forgekit-shell-common::perf`'s `FrameStats`/
+  unconditional.** `frust-shell-common::perf`'s `FrameStats`/
   `StartupSpans` no-op internally when disabled, but a shell should still
   read `perf::enabled()` once per frame into a local bool and gate every
   `Instant::now()` read behind it (`bool::then(Instant::now)`) on
@@ -332,8 +332,8 @@ Semantics pass):
   field a shell doesn't have a precise signal for should stay `true`/be
   fed conservatively rather than guessed `false` — over-running costs a
   wasted frame, over-skipping drops real work (see
-  `docs/ARCHITECTURE.md`'s Frame gate). `FORGEKIT_NO_FRAME_GATE=1` (parsed
-  the same compile-time-or-runtime way as `FORGEKIT_TRACE`) forces every
+  `docs/ARCHITECTURE.md`'s Frame gate). `FRUST_NO_FRAME_GATE=1` (parsed
+  the same compile-time-or-runtime way as `FRUST_TRACE`) forces every
   tick to `Run`; reach for it first when diagnosing a suspected stuck-UI
   report before assuming a widget bug.
 
@@ -359,28 +359,28 @@ Semantics pass):
   throwaway `()` at the root), but the contract not to reach for it is
   identical.
 - **`spawn` is for `Send` background work; `spawn_local` only ever runs on
-  the UI thread.** `forgekit::spawn` hands a `Send` future to the background
-  tokio runtime; `forgekit::spawn_local` queues a `!Send` future the shell
+  the UI thread.** `frust::spawn` hands a `Send` future to the background
+  tokio runtime; `frust::spawn_local` queues a `!Send` future the shell
   drains via `ReactiveRuntime::pump_local` once per frame. Calling
   `spawn_local` off the UI thread is a wiring bug, not a runtime-data
   condition, and panics with a message saying so (the same convention as the
   `downcast_mut` panic message above). On iOS, a backgrounded app pauses
   `CADisplayLink`, so nothing pumps and any timer-driven local task (e.g. an
-  in-flight `tokio::time::sleep`) stalls until `forgekit_resume` fires the
+  in-flight `tokio::time::sleep`) stalls until `frust_resume` fires the
   next pump on foreground — don't assume a `spawn_local` timer completes
   promptly while backgrounded.
 - **`Component::State` holds `RwSignal`s directly; app code depends on the
-  `forgekit` facade only, never `reactive_graph`/`any_spawner`/
-  `forgekit-reactive` directly.** A state field that needs reactive
+  `frust` facade only, never `reactive_graph`/`any_spawner`/
+  `frust-reactive` directly.** A state field that needs reactive
   read-tracking is typed `RwSignal<T>` and read/written through the
   `Get`/`Set`/`Update` traits the facade re-exports — an app crate should
-  never add `reactive_graph`/`any_spawner`/`forgekit-reactive` to its own
+  never add `reactive_graph`/`any_spawner`/`frust-reactive` to its own
   `Cargo.toml`; every symbol an app needs is already flat-re-exported from
-  `forgekit` (see `docs/ARCHITECTURE.md`'s Key Types). **This is the general
+  `frust` (see `docs/ARCHITECTURE.md`'s Key Types). **This is the general
   rule for every `examples/*` crate, not just reactive types**: an example's
-  `Cargo.toml` should depend on `forgekit` alone. `examples/huddle` — the sole
+  `Cargo.toml` should depend on `frust` alone. `examples/huddle` — the sole
   example — mostly holds to this but carries a **documented**
-  `forgekit-core`/`kurbo`/`peniko` escape-hatch dependency
+  `frust-core`/`kurbo`/`peniko` escape-hatch dependency
   (see its `Cargo.toml`'s comment) for the handful of custom app widgets no
   facade widget covers: `ui/swipeable`'s swipe-to-action row, `ui/sheet`'s
   modal sheet (both theme-aware, resolving fill/marker colors with a
@@ -428,7 +428,7 @@ Semantics pass):
   `ColorScheme`/`ShapeScale`/`Elevation`/`GlassScale`/`MotionScheme` field
   exists (see `docs/ARCHITECTURE.md`'s Key Types) — resolve it through
   `Theme::from_paint_ctx`/`from_layout_ctx` per the fallback bullet above.
-  Only a genuine token-scale gap earns a hand-tuned constant (`forgekit-theme`
+  Only a genuine token-scale gap earns a hand-tuned constant (`frust-theme`
   ships no spacing scale and no fixed-dimension scale for switch-track/button-
   padding metrics), and that constant stays named, doc-commented, and states
   *why* no token applies (`button.rs`'s `PAD_X`/`PAD_Y`, `switch.rs`'s
@@ -447,7 +447,7 @@ Semantics pass):
   (hit-test padding, caret geometry) stays a plain constant read from both
   passes — the precedent is `TextInput`'s `PAD_X`/`PAD_Y`/`CARET_W`,
   deliberately never resolved from theme.
-- **No `Instant::now()` in `forgekit-core`/`forgekit-widgets`.** Time enters
+- **No `Instant::now()` in `frust-core`/`frust-widgets`.** Time enters
   the framework only from a shell, as the `FrameTime` passed into
   `RenderRoot::paint` and threaded via `PaintCtx::frame_time` — desktop reads
   its own `Instant` epoch; Android/iOS pass through the platform's own frame
@@ -472,17 +472,17 @@ Semantics pass):
   `ProcessRunner`/`EnvLookup` responses (`FakeProcessRunner::with(...)`,
   `.missing(...)`, `FakeEnv::set(...)`) keyed by the exact invocation, then
   assert the resulting `Status`/`Validation`. This is the pattern used
-  throughout `forgekit-cli`'s `doctor`/`devices` validators.
+  throughout `frust-cli`'s `doctor`/`devices` validators.
 - **`#[ignore = "<reason>"]` for GPU-dependent or slow end-to-end tests.**
   The reason string must say how to run it (`cargo test -p ... --
   --ignored`) and why it's excluded by default (needs a real GPU; compiles a
   full generated dependency graph; etc.) — see
-  `forgekit-render/tests/gpu_smoke.rs` and
-  `forgekit-cli/tests/create_e2e.rs`.
+  `frust-render/tests/gpu_smoke.rs` and
+  `frust-cli/tests/create_e2e.rs`.
 - **Recording fakes for paint assertions**: a minimal `PaintScene`
   implementation that pushes `(origin, size)`/`(origin, text)` tuples into
   `Vec`s lets widget `layout`/`paint` behavior be asserted without any GPU
-  or `forgekit-render` dependency (see `forgekit-core::widget` and `app`
+  or `frust-render` dependency (see `frust-core::widget` and `app`
   unit tests).
 - **Template rendering uses `minijinja::UndefinedBehavior::Strict`**: an
   unresolved `{{ placeholder }}` is a hard render-time error rather than a

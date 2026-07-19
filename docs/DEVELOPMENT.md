@@ -1,26 +1,26 @@
-# ForgeKit - Development Guide
+# Frust - Development Guide
 
 ## Prerequisites
 
 - Rust 1.88+ (workspace `rust-version`), edition 2024.
-- macOS with Metal for the GPU smoke gate (`forgekit-render`'s `--ignored`
+- macOS with Metal for the GPU smoke gate (`frust-render`'s `--ignored`
   test); other platforms can build and run the non-GPU suite.
-- **Android** (only needed for `forgekit run`/`build`/`create`'s Android output):
+- **Android** (only needed for `frust run`/`build`/`create`'s Android output):
   `rustup target add aarch64-linux-android`; `cargo install cargo-ndk`
   (tested with 4.x); JDK 17+ on `JAVA_HOME` (Android Studio's bundled JBR is
   auto-detected as a fallback on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`
-  and `ANDROID_NDK_HOME` set. `forgekit doctor` checks all of these.
-- **iOS** (only needed for `forgekit run`/`build`/`create`'s iOS output;
+  and `ANDROID_NDK_HOME` set. `frust doctor` checks all of these.
+- **iOS** (only needed for `frust run`/`build`/`create`'s iOS output;
   macOS host only): Xcode 26+ with `xcode-select -p` resolving to it;
   `rustup target add aarch64-apple-ios-sim aarch64-apple-ios`. A booted
-  Simulator is enough for a debug `forgekit run`. A signed build
-  (`forgekit build ios`/`ipa`, `forgekit run --release`, or any physical-device
-  run) needs a codesigning identity — `forgekit` auto-detects the
+  Simulator is enough for a debug `frust run`. A signed build
+  (`frust build ios`/`ipa`, `frust run --release`, or any physical-device
+  run) needs a codesigning identity — `frust` auto-detects the
   `DEVELOPMENT_TEAM` from `security find-identity`, or it can be set via
-  `FORGEKIT_IOS_TEAM` or `[ios] team` in `forgekit.toml`. A physical iPhone
+  `FRUST_IOS_TEAM` or `[ios] team` in `frust.toml`. A physical iPhone
   run additionally needs iOS 17+ (driven via `devicectl`), the device
   unlocked/paired/trusted, and Developer Mode enabled (Settings → Privacy &
-  Security → Developer Mode). `forgekit doctor` checks the Rust targets on
+  Security → Developer Mode). `frust doctor` checks the Rust targets on
   macOS hosts only.
 - **clean-signals-rs** cloned as a sibling directory (`../clean-signals-rs`
   next to this checkout), on branch `develop` — needed only to build/test
@@ -46,9 +46,9 @@ crates (`vello`, `vello_shaders`, `vello_encoding`, `wgpu`, `wgpu-core`,
 compilation/translation on app launch is slow enough on mobile-class CPUs to
 trip the iOS launch watchdog; optimizing just this stack keeps the rest of a
 debug build fast while making dev-mode launches survive. These three
-manifests must be kept in sync by hand (`cargo test -p forgekit-cli --test
+manifests must be kept in sync by hand (`cargo test -p frust-cli --test
 profile_sync` is the automated tripwire) — a project scaffolded by
-`forgekit create` inherits the overrides from the template. A separate
+`frust create` inherits the overrides from the template. A separate
 `[profile.dev.package."*"]` wildcard (`opt-level = 1`) widens every other
 non-workspace-member dependency's debug optimization (a named override above
 still wins) and is hand-synced across the same three manifests (root,
@@ -60,14 +60,14 @@ sets `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic =
 smaller-opt-level win didn't clear a 5% bar once a render-stack carve-out
 protecting encode-path CPU perf was applied (measured via
 `scripts/size-report.sh`, below; see the root `Cargo.toml` comment and
-`workflow/plans/features/forgekit-phase-7-performance/research/BASELINE.md`
+`workflow/plans/features/frust-phase-7-performance/research/BASELINE.md`
 for the full A/B).
 
 ## Run
 
 ```bash
 # Huddle: the repo's sole example, a Slack-style showcase app (Component
-# tree wiring clean-signals ControllerCores to ForgeKit via the
+# tree wiring clean-signals ControllerCores to Frust via the
 # clean-signals-forgekit glue crate) — exercises the framework surface
 # end-to-end. `examples/huddle` is a standalone package (its own
 # [workspace] root, own Cargo.lock — see Version-Pin Policy below),
@@ -95,21 +95,21 @@ the clean-signals-rs sibling checkout — see Version-Pin Policy and *Test*
 below.
 
 `examples/huddle` additionally builds and runs on Android and iOS, from
-its own directory (its own `forgekit.toml`, package `it.f0x.huddle`):
+its own directory (its own `frust.toml`, package `it.f0x.huddle`):
 
 ```bash
 cd examples/huddle
-/path/to/forgekit build apk --debug   # debug APK via Gradle + cargo-ndk
-forgekit run -d <device-id>           # build, install, launch, stream logcat
+/path/to/frust build apk --debug   # debug APK via Gradle + cargo-ndk
+frust run -d <device-id>           # build, install, launch, stream logcat
                                        # (Android device/emulator or iOS Simulator/device)
 ```
 
-The template `forgekit create` scaffolds is its own demo (a notes app,
+The template `frust create` scaffolds is its own demo (a notes app,
 `templates/app/src/lib.rs.tmpl`) with no example counterpart to run directly
 in this repo; check scaffold changes via *Template development* below or
-`cargo test -p forgekit-cli --test create_e2e -- --ignored`.
+`cargo test -p frust-cli --test create_e2e -- --ignored`.
 
-In a generated project, `forgekit run [-d <device>] [--release|--profile]
+In a generated project, `frust run [-d <device>] [--release|--profile]
 [--flavor <name>]` builds and launches on a connected Android
 device/emulator (preflight → variant-aware `gradlew assemble<Flavor><Mode>`
 (cargo-ndk builds the Rust `.so` for the device's detected ABI) →
@@ -121,14 +121,14 @@ Ctrl-C), or a physical iPhone (iOS 17+ only: a signed device build →
 `xcrun devicectl device install app` → `xcrun devicectl device process
 launch --console --terminate-existing`, streamed, until Ctrl-C — failures
 hint at unlocking/pairing/Developer Mode). `run` defaults to debug mode
-(`forgekit build` defaults to release — see *Release Builds* below). With no
+(`frust build` defaults to release — see *Release Builds* below). With no
 device selected, it falls back to a streamed `cargo run` (desktop preview).
 The first Android build downloads Gradle 9.5.x, and the first iOS build
 compiles the whole Rust dependency graph for the simulator target — expect
 either to take a few minutes.
 
-`forgekit run --render-tier <gpu|cpu>` forces the render tier
-(`FORGEKIT_RENDER_TIER`, the same variable a manual `cargo run` can set
+`frust run --render-tier <gpu|cpu>` forces the render tier
+(`FRUST_RENDER_TIER`, the same variable a manual `cargo run` can set
 directly) for the desktop preview; an explicit choice wins among tiers the
 adapter supports — forcing `gpu` on an incapable adapter fails fast with the
 probe's diagnosis, while `cpu` can always be forced. It is desktop-preview-only today — passed for an Android/iOS device
@@ -147,21 +147,21 @@ or on most Android emulators (which typically report only 60Hz).
 
 ```bash
 # Android: signed release APK (needs android/key.properties — see Prerequisites)
-forgekit build apk --release
+frust build apk --release
 
 # Other Android artifact shapes
-forgekit build apk --debug
-forgekit build apk --profile
-forgekit build apk --release --split-per-abi --target-platform android-arm64,android-x64
-forgekit build appbundle --release --build-name 1.2.3 --build-number 7
+frust build apk --debug
+frust build apk --profile
+frust build apk --release --split-per-abi --target-platform android-arm64,android-x64
+frust build appbundle --release --build-name 1.2.3 --build-number 7
 
 # iOS: signed device build, unsigned device build, App Store archive
-forgekit build ios
-forgekit build ios --no-codesign
-forgekit build ipa --export-method app-store-connect
+frust build ios
+frust build ios --no-codesign
+frust build ipa --export-method app-store-connect
 
 # Remove build output (cargo clean + the Android build/.gradle directories)
-forgekit clean
+frust clean
 ```
 
 `--flavor <name>` needs a matching Gradle product flavor / Xcode
@@ -169,8 +169,8 @@ scheme+configuration already declared in the generated project.
 
 **Android release minification.** A generated app's `release` (and
 `profile`) Gradle build type runs R8 (`isMinifyEnabled`/`isShrinkResources
-= true`) against `proguard-rules.pro` (ships two keep rules: the ForgeKit
-JNI surface and the vendored `accesskit_android` delegate); `forgekit build
+= true`) against `proguard-rules.pro` (ships two keep rules: the Frust
+JNI surface and the vendored `accesskit_android` delegate); `frust build
 apk --debug` is unaffected. NDK r27+ already links `.so`s with 16KB-aligned
 `LOAD` segments by default, so no linker-flag change was needed for Android
 15's page-size requirement.
@@ -202,16 +202,16 @@ checkout" in your completion summary instead, and do not touch
 `examples/huddle` without the sibling in place. There is no CI for this
 repo, so this doc is the only enforcement; if CI is ever introduced,
 whether it provisions the sibling must be decided explicitly. This gate is
-not part of `forgekit build apk`/`run`'s Android/iOS pipeline gate, which is
+not part of `frust build apk`/`run`'s Android/iOS pipeline gate, which is
 verified separately (see *Run*) rather than in this chain.
 
 The `cpu-tier` feature (experimental `vello_cpu` render backend, non-default
 — see *Version-Pin Policy*) is headless and needs no GPU, but isn't compiled
 by the standard chain above since the feature is off by default; run it
-directly when touching `forgekit-render`:
+directly when touching `frust-render`:
 
 ```bash
-cargo test -p forgekit-render --features cpu-tier
+cargo test -p frust-render --features cpu-tier
 ```
 
 **Manual/gated tests** (not part of the default `cargo test --workspace`
@@ -219,30 +219,30 @@ run — each requires local hardware or is slow, and is marked `#[ignore]`
 with a reason):
 
 ```bash
-# GPU smoke test (forgekit-render): needs a real Metal/Vulkan device.
-cargo test -p forgekit-render -- --ignored
+# GPU smoke test (frust-render): needs a real Metal/Vulkan device.
+cargo test -p frust-render -- --ignored
 
-# Scaffold end-to-end test (forgekit-cli): compiles a freshly generated
+# Scaffold end-to-end test (frust-cli): compiles a freshly generated
 # project's full dependency graph (winit/vello/wgpu) — ~30s cold.
-cargo test -p forgekit-cli --test create_e2e -- --ignored
+cargo test -p frust-cli --test create_e2e -- --ignored
 
-# iOS scaffold test (forgekit-cli): scaffolds a project and runs
+# iOS scaffold test (frust-cli): scaffolds a project and runs
 # `xcodebuild -list` + `plutil -lint` against the generated Xcode project
 # (parse-only, no build; needs Xcode on macOS).
-cargo test -p forgekit-cli --test create_ios -- --ignored
+cargo test -p frust-cli --test create_ios -- --ignored
 
-# Build pipeline end-to-end test (forgekit-cli): scaffolds a project,
+# Build pipeline end-to-end test (frust-cli): scaffolds a project,
 # generates a throwaway keystore, and runs `build apk --release` through a
 # real Gradle build — needs Android SDK/NDK; ~1 minute.
-cargo test -p forgekit-cli --test build_e2e -- --ignored
+cargo test -p frust-cli --test build_e2e -- --ignored
 
 # Android compile gate (no device needed): the whole facade graph must
 # compile for the Android target.
-cargo check --target aarch64-linux-android -p forgekit
+cargo check --target aarch64-linux-android -p frust
 
 # iOS compile gate (no device needed; macOS only): the whole facade graph
 # must compile for the iOS Simulator target.
-cargo check --target aarch64-apple-ios-sim -p forgekit
+cargo check --target aarch64-apple-ios-sim -p frust
 ```
 
 The iOS compile gate above is also the only check of the `accesskit_ios`
@@ -257,8 +257,8 @@ cannot provide.
 
 A device/emulator gate for `nativeOnDeepLink` (see
 `docs/ARCHITECTURE.md#data-flow`'s Deep-link flow), against a project
-scaffolded with `forgekit create --deeplink-scheme <scheme>
-[--deeplink-host <host>]` and installed (`forgekit run -d <device>`):
+scaffolded with `frust create --deeplink-scheme <scheme>
+[--deeplink-host <host>]` and installed (`frust run -d <device>`):
 
 ```bash
 # Cold start: app not running — the link launches it and the deep link
@@ -274,7 +274,7 @@ adb shell am start -a android.intent.action.VIEW \
 ```
 
 Confirm the app navigates to the linked route both times. The iOS
-equivalent (`forgekit_on_deep_link`, delivered via `SceneDelegate`'s
+equivalent (`frust_on_deep_link`, delivered via `SceneDelegate`'s
 `scene(_:openURLContexts:)`) has a Simulator-only CLI trigger:
 
 ```bash
@@ -284,8 +284,8 @@ xcrun simctl openurl booted "<scheme>://<path>"
 A physical device has no CLI trigger — test by tapping a link to the
 registered `CFBundleURLSchemes` scheme (e.g. from Notes) instead.
 
-`forgekit.toml`'s `[deeplink]` section (`scheme`/`host`, written by
-`forgekit create`'s `--deeplink-scheme`/`--deeplink-host` flags) is
+`frust.toml`'s `[deeplink]` section (`scheme`/`host`, written by
+`frust create`'s `--deeplink-scheme`/`--deeplink-host` flags) is
 informational only — it documents what's already baked into the generated
 Android manifest intent filter / iOS `Info.plist`; editing it does not
 re-render either, so re-scaffold (`--overwrite`) or edit the platform files
@@ -295,7 +295,7 @@ directly to change the scheme after the fact.
 
 A device/emulator gate for the inset and back contracts (see
 `docs/ARCHITECTURE.md`'s Inset delivery / Back flow), against an installed
-app (`forgekit run -d <device>`) — none of these has a CLI trigger like the
+app (`frust run -d <device>`) — none of these has a CLI trigger like the
 deep-link gate above, so each is a person-driven check:
 
 - **Safe-area:** rotate the device and confirm top/bottom-anchored content
@@ -314,7 +314,7 @@ deep-link gate above, so each is a person-driven check:
 
 ### Template development
 
-`forgekit create` embeds `templates/app/` into the binary at compile time.
+`frust create` embeds `templates/app/` into the binary at compile time.
 To iterate on template files without rebuilding the embedded copy, pass the
 hidden, development-only `--template-dir <path>` flag to point at a
 filesystem copy of the template tree instead. Every scaffold also gets a
@@ -333,13 +333,13 @@ and Back flow for the Rust-side contract this glue calls into.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `FORGEKIT_TRACE` | Enables `forgekit-perf` frame/startup logging (`forgekit-shell-common::perf`). Runtime env var on any build; `forgekit run --profile`/`forgekit build --profile` auto-inject `--define FORGEKIT_TRACE=1` unless already set — opt out of that default with `--define FORGEKIT_TRACE=0`. | off |
-| `FORGEKIT_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/ARCHITECTURE.md`'s Frame gate) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FORGEKIT_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
-| `FORGEKIT_LOG` | Desktop-only stderr log level override (`forgekit-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger suppresses only known-noisy vello Error/Warn messages below `debug` (see *Known Issues*' vello bitmap-emoji note); unknown vello errors still surface at the default level. Pass `FORGEKIT_LOG=debug` to see all vello log lines when debugging the render stack. | `info` |
-| `FORGEKIT_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`) — see *Run* above. | adapter-probed |
+| `FRUST_TRACE` | Enables `frust-perf` frame/startup logging (`frust-shell-common::perf`). Runtime env var on any build; `frust run --profile`/`frust build --profile` auto-inject `--define FRUST_TRACE=1` unless already set — opt out of that default with `--define FRUST_TRACE=0`. | off |
+| `FRUST_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/ARCHITECTURE.md`'s Frame gate) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
+| `FRUST_LOG` | Desktop-only stderr log level override (`frust-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger suppresses only known-noisy vello Error/Warn messages below `debug` (see *Known Issues*' vello bitmap-emoji note); unknown vello errors still surface at the default level. Pass `FRUST_LOG=debug` to see all vello log lines when debugging the render stack. | `info` |
+| `FRUST_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`) — see *Run* above. | adapter-probed |
 
-`FORGEKIT_TRACE=1 (cd examples/huddle && cargo run)` prints one
-`forgekit-perf startup ...` line, then periodic `forgekit-perf frame ...`
+`FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints one
+`frust-perf startup ...` line, then periodic `frust-perf frame ...`
 summaries while interacting with the window.
 
 `scripts/size-report.sh [--app <dir>]` (default `examples/huddle`) builds
@@ -349,7 +349,7 @@ dex breakdown when Gradle output already exists (no Gradle build
 triggered), and a desktop `cargo bloat --release -n 20` breakdown when
 `cargo-bloat` is installed — every missing-tool/artifact path degrades to a
 printed note rather than failing; only a build failure exits non-zero. See
-`workflow/plans/features/forgekit-phase-7-performance/research/BASELINE.md`
+`workflow/plans/features/frust-phase-7-performance/research/BASELINE.md`
 for recorded baselines.
 
 ## Version-Pin Policy
@@ -368,20 +368,20 @@ deliberately, not floating:
   workspace's `rust-version` (1.88), not lower — bumping it needs a fresh
   MSRV check, not just `cargo update`.
 - `reactive_graph = "0.2"` / `any_spawner = "0.3"` / `tokio = { version = "1",
-  default-features = false }` (the `forgekit-reactive` substrate, spec §5.5)
+  default-features = false }` (the `frust-reactive` substrate, spec §5.5)
   are pinned to minor, not exact — a pre-1.0 Leptos-ecosystem stack expected
-  to churn; `cargo test -p forgekit-reactive` is the tripwire for a breaking
+  to churn; `cargo test -p frust-reactive` is the tripwire for a breaking
   bump. Never enable `reactive_graph`'s `effects` feature (the frame path is
   a custom subscriber, not `RenderEffect` — see `docs/ARCHITECTURE.md`'s Key
   Types).
-- `accesskit = "0.24"` (`forgekit-core`'s semantics-pass vocabulary, spec §9)
-  is pinned to minor; `cargo test -p forgekit-core semantics` is the tripwire
+- `accesskit = "0.24"` (`frust-core`'s semantics-pass vocabulary, spec §9)
+  is pinned to minor; `cargo test -p frust-core semantics` is the tripwire
   for a breaking bump. The three per-shell platform adapters unify on this
   pin: `accesskit_winit = "0.33"` (desktop) and `accesskit_android = "0.7"`
   are pinned to minor; `accesskit_ios = "=0.1.2"` is pinned exact (its 0.1.x
   line is younger/less proven — see *Test* below for its compile-gate
   status).
-- `vello_cpu = "=0.0.9"` (the experimental CPU render tier, `forgekit-render`'s
+- `vello_cpu = "=0.0.9"` (the experimental CPU render tier, `frust-render`'s
   non-default `cpu-tier` feature) is pinned exact — pre-1.0 with an unstable
   API, isolated behind the `SceneSink` encode seam so a breaking bump never
   reaches the default GPU path. See *Test* below for its tripwire command.
@@ -390,14 +390,14 @@ deliberately, not floating:
   `Cargo.toml`) for two independent reasons: (1) its `clean-signals` and
   `clean-signals-forgekit` dependencies are both path dependencies to a
   **sibling checkout** at `../../../clean-signals-rs` (relative to the
-  example, i.e. next to the `forgekit` checkout) on its `develop` branch —
+  example, i.e. next to the `frust` checkout) on its `develop` branch —
   neither crate is git+rev-pinned yet, and both must resolve `clean-signals`
   the same way (both by path); if one used `git`+`rev` while the other used
   `path`, Cargo would build two distinct `clean-signals` crate identities and
   the controller/glue types (`AsyncState`, `ControllerCore`, `use_controller`,
   `async_view`) would fail to unify — swap both to `git`+`rev` together,
   never one at a time, once `clean-signals` gains a remote; (2) its generated
-  Android and iOS projects (`forgekit run`/`build` install targets) need a
+  Android and iOS projects (`frust run`/`build` install targets) need a
   project-local `target/` dir. Because it's outside the root workspace,
   `examples/huddle/Cargo.toml` cannot use `{ workspace = true }` — every
   dependency (including the pins shared with the root workspace, like
@@ -426,7 +426,7 @@ The codebase is formatted with `rustfmt` using default settings (no
 
 An Apple-Silicon Android emulator's default (hardware) GPU path segfaults on
 `vkQueueSubmit` inside the emulator's gfxstream/MoltenVK Vulkan driver — an
-emulator/driver limitation, not a ForgeKit bug. Use a physical device, or
+emulator/driver limitation, not a Frust bug. Use a physical device, or
 boot the emulator with `-gpu swiftshader_indirect` (software Vulkan; slower
 but correct).
 
@@ -436,9 +436,9 @@ The iOS Simulator's GPU only exposes the Apple2 Metal feature family, which
 lacks `wgpu::DownlevelFlags::INDIRECT_EXECUTION` — a flag vello 0.9's
 renderer unconditionally requires for its working buffers. This is a
 wgpu-hal-29/vello-0.9 limitation, not fixable under the workspace's version
-pin (see *Version-Pin Policy*). `forgekit-render` detects the missing flag
+pin (see *Version-Pin Policy*). `frust-render` detects the missing flag
 up front and fails fast with a clear diagnostic instead of letting vello
-panic every frame; `forgekit run` on a simulator still builds, installs, and
+panic every frame; `frust run` on a simulator still builds, installs, and
 launches, but the app window stays black and the console logs the adapter
 diagnostic. **Physical iOS devices are unaffected** (Apple7+ GPUs expose the
 flag; verified rendering on an iPhone 13 mini) — this is a simulator-only
@@ -454,13 +454,13 @@ open as of 2026-07-16; not addressable under the Version-Pin Policy without
 vendoring). Confirmed **safe** for huddle's current desktop emoji set: every
 reaction-emoji glyph's Apple Color Emoji `sbix` strike is uniformly RGBA8 at
 every size. The one **unverified, at-risk** path is Android's CBDT bitmap
-strikes (see `docs/ARCHITECTURE.md`'s `forgekit-text` row) — legacy Noto
+strikes (see `docs/ARCHITECTURE.md`'s `frust-text` row) — legacy Noto
 Color Emoji CBDT strikes are known in the wild to use palette-indexed PNGs
 at smaller sizes, which would trigger this defect; no Android
 device/emulator has confirmed either way. If an on-device check finds a
 broken glyph, revisit vendoring the one-line `Transformations::EXPAND` fix
 before taking a future vello major-version bump. The desktop logger suppresses
 known-noisy vello `Error`/`Warn` messages (e.g. "Unsupported `output_color_type`",
-"Invalid PNG in font") below `debug` (see *Instrumentation*'s `FORGEKIT_LOG` row),
+"Invalid PNG in font") below `debug` (see *Instrumentation*'s `FRUST_LOG` row),
 so a triggered glyph can't spam stderr; other vello errors still surface at the
 default level to catch unexpected render issues.

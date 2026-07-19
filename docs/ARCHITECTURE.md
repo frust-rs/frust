@@ -1,75 +1,75 @@
-# ForgeKit - Architecture
+# Frust - Architecture
 
 ## Overview
 
-ForgeKit is a Rust UI framework: a declarative `View` API over a retained
+Frust is a Rust UI framework: a declarative `View` API over a retained
 widget tree, rendered through a renderer-agnostic vector scene into a GPU
-backend (Vello/wgpu), plus a `forgekit-cli` tool that scaffolds and drives
+backend (Vello/wgpu), plus a `frust-cli` tool that scaffolds and drives
 apps. The workspace is a Cargo workspace of framework crates (`crates/*`)
-consumed by app code via the `forgekit` facade crate, and example apps under
+consumed by app code via the `frust` facade crate, and example apps under
 `examples/*`. See `docs/spec.md` for the full design rationale.
 
 ## Module Structure
 
 | Crate | Responsibility |
 |---|---|
-| `forgekit-core` | Layers 1+2: the declarative `View` trait, the retained `Widget` trait, box-constraint layout, the `tree_arena`-backed widget tree, and `RenderRoot` (rebuild/layout/paint/event pass driver). Its `input` module carries the pointer/scroll event types (`InputEvent`/`PointerEvent`/`EventCtx`/`EventOutcome`) and gesture-math constants (slop, fling decay) the interactive widgets build on. Its `component` module adds `Component` — a `StatefulWidget` analog with retained local state and a per-component reactive `Owner` (see Key Types and Data Flow's Component state boundary); this is the crate's sole, deliberate `reactive_graph` dependency (see Layer Dependencies) — no executor, no tokio. Its `anim` module is the animation vocabulary (`FrameTime`, `Curve`, `Tween`, `SpringDesc`, `AnimationController` — see Key Types): plain data/math, no clock, no scheduler. Its `semantics` module (spec §9) is a pull-based accessibility pass — `Widget::semantics` defaults to a no-op so existing widgets are unaffected, and `RenderRoot::semantics` collects it post-layout into a flat `SemanticsUpdate` (see Key Types, Data Flow's Semantics pass); its `accesskit` dependency (re-exported as `forgekit_core::accesskit` so `forgekit-widgets` needs no direct dependency) is a second deliberate, narrow exception joining the `reactive_graph` one above. Its `insets` module carries `WindowInsets`/`EdgeInsets` (see Key Types) — `RenderRoot::set_insets` stores and threads them through `LayoutCtx`/`PaintCtx` exactly like `set_theme` (see Data Flow's Inset delivery). Its `widget` module also carries `PaintCtx::report_hero`/`HeroFrames`/`HeroDirective`, a tagged-rect vocabulary for shared-element ("hero") transitions threaded through paint like the semantics pass above (see Key Types, Data Flow's Navigation flow), and `PaintScene::push_transform`/`pop_transform` (default no-ops; `SceneBuilder` forwards them to its own transform stack). |
-| `forgekit-scene` | Layer 3: the renderer-agnostic vector scene / display list (`Scene`, `SceneBuilder`, `Command`, `GlyphRun`) — the stable seam between widgets and the GPU backend. |
-| `forgekit-render` | Layer 4: the wgpu + Vello GPU backend. Encodes a `Scene` into a `vello::Scene` and presents it to a window surface; an experimental, feature-gated (`cpu-tier`, non-default) `vello_cpu` CPU tier is a selectable fallback via the same `SceneSink` encode seam (see Key Types' `RenderTier`). Its `pipeline_cache` module frames/validates an opaque, adapter-fingerprinted `wgpu::PipelineCache` blob a shell can persist and replay across launches (Vulkan-only — see Data Flow's GPU pipeline cache). |
-| `forgekit-text` | Text shaping: wraps Parley font matching/layout into `TextContext`/`TextStyle`/`TextLayout`, converting shaped text into `forgekit-scene::GlyphRun`s. Also home to `TextEditor`, the Parley-`PlainEditor`-based editing engine `TextInput` and the platform IME bridges drive (see Key Types). Color emoji renders through the same `GlyphRun`/`draw_glyphs` path with no render-path change (vello 0.9's COLR+CPAL and sbix bitmap-strike glyph support, Parley's `GenericFamily::Emoji` fallback); CBDT (the bitmap table Android system fonts typically use) is unverified pending on-device testing. |
-| `forgekit-theme` | Design-token crate (spec §17): the Material 3 baseline value tables — `ColorScheme` (light/dark role pairs), `TypeScale`, `ShapeScale`, `Elevation`, `MotionScheme` (named springs) — bundled into a `Theme` aggregate, plus the `Theme::from_paint_ctx`/`from_layout_ctx` accessors widgets use to recover a threaded theme (see Key Types, Data Flow's theme delivery). A `DesignLanguage` tag (`Material3`/`Cupertino`) selects which baseline a `Theme` targets, filled by `ColorScheme::cupertino_light`/`cupertino_dark` and `Theme::cupertino_baseline`/`m3_baseline`. A `GlassScale` (spec 6f) — `chrome`/`bar`/`control` tiers, each a `GlassMaterial` recipe of per-brightness `GlassFill` wash stacks, a specular hairline alpha, a drop shadow, and a `blur_radius_intent` future-backend contract — ships as `Theme.glass`, populated by `GlassScale::ios27`/`opaque_material` per baseline (see Data Flow's Glass material tokens). Pure data + constructors: no scene/reactive dependency. |
-| `forgekit-widgets` | The baseline widget set (spec §6.4): `Text`, `Button`, `Checkbox`, `Radio`, `Slider`, `TextInput`, `Image`, `Icon`, `Row`/`Column` (`Flex`), `Stack`, `Padding`, `Align`, `SizedBox`, `ScrollView`, `GestureDetector`, `SafeArea` — each a `View`/`Widget` pair over `forgekit-core` + `forgekit-text` + `forgekit-theme`. Widgets resolve theme tokens at paint/layout time with an unthemed-fallback constant per resolved value (see `docs/CODE_STANDARDS.md`); `TextInput` joins `Text` in resolving its glyph color layout-time-baked (see Data Flow's Theme delivery). `SafeArea` is the v1 consumer of the inset channel (see Key Types, Data Flow's Inset delivery). Any `Flex` child list can be reconciled by explicit identity via `keyed`/`ChildKey` instead of position (see Key Types). `Icon` paints a `kurbo::BezPath` from an `IconData` source, either a user-built path or a generated `icons` module entry (41 Material Symbols vendored as SVG-path `IconSource` consts, Apache-2.0, regenerated from a real Material Symbols checkout by `scripts/gen_icons.py`). `GestureDetector` adds a paint-clock-timed long-press (fires on release or on the first post-threshold move once a press has been held past the threshold). `ScrollView` supports iOS-style drag overscroll with rubber-band resistance, observable via `on_scroll`'s `ScrollInfo` snapshot and triggerable via `on_refresh_release` (pull-to-refresh). `ListView` adds `on_near_start` for near-start-edge pagination. `TextInput` adds a `.multiline(max_visible_lines)` wrap-width mode over its `TextEditor`, with `.submit_on_enter` controlling Enter-key behavior. Its `nav` module (spec §19) adds an imperative page-stack `Navigator` + page transitions, a declarative go_router-subset `Router`, and a `hero(tag, child)` shared-element wrapper morphing a tagged child between two pages during a transition (see Data Flow's Navigation flow) — kept in-crate (not a separate crate) because these need the same crate-private container plumbing (`ChildPod`, `build_child`/`teardown_child`, `cancel_pod`) every other container widget uses; `forgekit-widgets` itself stays reactive-free, so the router's deep-link signal glue lives in the `forgekit` facade (see Data Flow's Navigation/Deep-link flow). A `material`/`cupertino` widget catalog (AppBar, Card, Chips, Dialog, FAB, ListView/ListItem, NavigationBar, BottomSheet, Switch, progress indicators, plus Cupertino counterparts for the subset with an iOS equivalent) shares the `material::state_layer` interaction-overlay helper — same `View`/`Widget` pattern as the baseline set, still reactive-free. The `material` catalog's M3-Expressive layer (spec 6f) adds a `shape_morph` primitive (`RoundedPolygon`/`morph_path`, radial-function corner rounding) driving `LoadingIndicator`'s shape-cycling spinner and `ButtonGroup`'s press-emphasis overlay, plus `SplitButton`, `FabMenu`, floating/docked `Toolbar`, and a wavy variant of the progress indicators. The `cupertino` catalog's chrome (`navbar`, `tabbar`, capsule `button`, `switch`, `slider`'s Cupertino branch, `alert_dialog`, `action_sheet`) paints from `Theme.glass` on the Cupertino baseline, degrading to an opaque Material surface fill when `GlassMaterial::is_opaque()` (see Data Flow's Glass material tokens); `tabbar` is the first `GlassScale` consumer and drives a minimize-on-scroll state machine (the event pass sets a target off scroll-delta sign, paint drives the theme's motion spring toward it). |
-| `forgekit-reactive` | Leaf reactive substrate: the process-wide `ReactiveRuntime` (a background tokio runtime, a custom `any_spawner` executor routing `spawn`/`spawn_local`, a UI-thread local task pump, and the root reactive `Owner`) plus `TrackedScope`, the rebuild-dependency-tracking bridge that wakes a shell when a tracked signal changes (see Key Types, Data Flow's Signal-driven wake). Its `deep_link` module is a process-wide deep-link source (spec §19): a shell delivers a platform link via `push_deep_link`, app code reads it via `deep_links()`/`DeepLinks` (facade re-exports) — see Data Flow's Deep-link flow. Its `back` module is the process-wide back-press source, mirroring `deep_link`'s shape: `push_back_press`/`back_presses()` plus a `set_handles_back`/`handles_back` flag — see Data Flow's Back flow. Depends only on `reactive_graph`/`any_spawner`/`tokio` — no `forgekit-core`, no `winit`/`vello`/`wgpu`; consumed by the three shells and the `forgekit` facade (see Layer Dependencies). |
-| `forgekit-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root, GPU surface, and text context for `cargo run`-based development. Compiled only for non-Android targets. |
-| `forgekit-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. |
-| `forgekit-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size`/`logical_insets` FFI-boundary helpers. Depends on `forgekit-core`/`forgekit-scene`/`forgekit-text`/`forgekit-theme` (its `theme_override` module is the app-facing `set_app_theme`/`clear_app_theme` seam — see Data Flow's Theme delivery; stays reactive-free in its shipped graph, see Layer Dependencies) — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. Its `frame_gate` module is the whole-frame skip gate both mobile shells consult before rebuilding (see Data Flow's Frame gate). |
-| `forgekit-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `forgekit_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `forgekit-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. |
-| `forgekit` | Facade crate: the public app-author API — the canonical `Component`/`app!`/`run` entry surface (spec §5.5), plus `App`/`View`/the widget vocabulary as the lower-level layer `app!` desugars to — composing the crates above into the spec's declarative call shape. Depends on `forgekit-shell-android`, `forgekit-shell-ios`, and `forgekit-reactive` unconditionally, and on `forgekit-shell-desktop` only for non-Android targets; `run`/`App::run` (the desktop preview loop) are likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
-| `forgekit-cli` | Standalone `forgekit` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `forgekit run`/`build`/`clean` drive pipelines for both platforms (Android via Gradle/cargo-ndk, iOS via xcodebuild/devicectl). Depends on none of the framework crates above. |
+| `frust-core` | Layers 1+2: the declarative `View` trait, the retained `Widget` trait, box-constraint layout, the `tree_arena`-backed widget tree, and `RenderRoot` (rebuild/layout/paint/event pass driver). Its `input` module carries the pointer/scroll event types (`InputEvent`/`PointerEvent`/`EventCtx`/`EventOutcome`) and gesture-math constants (slop, fling decay) the interactive widgets build on. Its `component` module adds `Component` — a `StatefulWidget` analog with retained local state and a per-component reactive `Owner` (see Key Types and Data Flow's Component state boundary); this is the crate's sole, deliberate `reactive_graph` dependency (see Layer Dependencies) — no executor, no tokio. Its `anim` module is the animation vocabulary (`FrameTime`, `Curve`, `Tween`, `SpringDesc`, `AnimationController` — see Key Types): plain data/math, no clock, no scheduler. Its `semantics` module (spec §9) is a pull-based accessibility pass — `Widget::semantics` defaults to a no-op so existing widgets are unaffected, and `RenderRoot::semantics` collects it post-layout into a flat `SemanticsUpdate` (see Key Types, Data Flow's Semantics pass); its `accesskit` dependency (re-exported as `frust_core::accesskit` so `frust-widgets` needs no direct dependency) is a second deliberate, narrow exception joining the `reactive_graph` one above. Its `insets` module carries `WindowInsets`/`EdgeInsets` (see Key Types) — `RenderRoot::set_insets` stores and threads them through `LayoutCtx`/`PaintCtx` exactly like `set_theme` (see Data Flow's Inset delivery). Its `widget` module also carries `PaintCtx::report_hero`/`HeroFrames`/`HeroDirective`, a tagged-rect vocabulary for shared-element ("hero") transitions threaded through paint like the semantics pass above (see Key Types, Data Flow's Navigation flow), and `PaintScene::push_transform`/`pop_transform` (default no-ops; `SceneBuilder` forwards them to its own transform stack). |
+| `frust-scene` | Layer 3: the renderer-agnostic vector scene / display list (`Scene`, `SceneBuilder`, `Command`, `GlyphRun`) — the stable seam between widgets and the GPU backend. |
+| `frust-render` | Layer 4: the wgpu + Vello GPU backend. Encodes a `Scene` into a `vello::Scene` and presents it to a window surface; an experimental, feature-gated (`cpu-tier`, non-default) `vello_cpu` CPU tier is a selectable fallback via the same `SceneSink` encode seam (see Key Types' `RenderTier`). Its `pipeline_cache` module frames/validates an opaque, adapter-fingerprinted `wgpu::PipelineCache` blob a shell can persist and replay across launches (Vulkan-only — see Data Flow's GPU pipeline cache). |
+| `frust-text` | Text shaping: wraps Parley font matching/layout into `TextContext`/`TextStyle`/`TextLayout`, converting shaped text into `frust-scene::GlyphRun`s. Also home to `TextEditor`, the Parley-`PlainEditor`-based editing engine `TextInput` and the platform IME bridges drive (see Key Types). Color emoji renders through the same `GlyphRun`/`draw_glyphs` path with no render-path change (vello 0.9's COLR+CPAL and sbix bitmap-strike glyph support, Parley's `GenericFamily::Emoji` fallback); CBDT (the bitmap table Android system fonts typically use) is unverified pending on-device testing. |
+| `frust-theme` | Design-token crate (spec §17): the Material 3 baseline value tables — `ColorScheme` (light/dark role pairs), `TypeScale`, `ShapeScale`, `Elevation`, `MotionScheme` (named springs) — bundled into a `Theme` aggregate, plus the `Theme::from_paint_ctx`/`from_layout_ctx` accessors widgets use to recover a threaded theme (see Key Types, Data Flow's theme delivery). A `DesignLanguage` tag (`Material3`/`Cupertino`) selects which baseline a `Theme` targets, filled by `ColorScheme::cupertino_light`/`cupertino_dark` and `Theme::cupertino_baseline`/`m3_baseline`. A `GlassScale` (spec 6f) — `chrome`/`bar`/`control` tiers, each a `GlassMaterial` recipe of per-brightness `GlassFill` wash stacks, a specular hairline alpha, a drop shadow, and a `blur_radius_intent` future-backend contract — ships as `Theme.glass`, populated by `GlassScale::ios27`/`opaque_material` per baseline (see Data Flow's Glass material tokens). Pure data + constructors: no scene/reactive dependency. |
+| `frust-widgets` | The baseline widget set (spec §6.4): `Text`, `Button`, `Checkbox`, `Radio`, `Slider`, `TextInput`, `Image`, `Icon`, `Row`/`Column` (`Flex`), `Stack`, `Padding`, `Align`, `SizedBox`, `ScrollView`, `GestureDetector`, `SafeArea` — each a `View`/`Widget` pair over `frust-core` + `frust-text` + `frust-theme`. Widgets resolve theme tokens at paint/layout time with an unthemed-fallback constant per resolved value (see `docs/CODE_STANDARDS.md`); `TextInput` joins `Text` in resolving its glyph color layout-time-baked (see Data Flow's Theme delivery). `SafeArea` is the v1 consumer of the inset channel (see Key Types, Data Flow's Inset delivery). Any `Flex` child list can be reconciled by explicit identity via `keyed`/`ChildKey` instead of position (see Key Types). `Icon` paints a `kurbo::BezPath` from an `IconData` source, either a user-built path or a generated `icons` module entry (41 Material Symbols vendored as SVG-path `IconSource` consts, Apache-2.0, regenerated from a real Material Symbols checkout by `scripts/gen_icons.py`). `GestureDetector` adds a paint-clock-timed long-press (fires on release or on the first post-threshold move once a press has been held past the threshold). `ScrollView` supports iOS-style drag overscroll with rubber-band resistance, observable via `on_scroll`'s `ScrollInfo` snapshot and triggerable via `on_refresh_release` (pull-to-refresh). `ListView` adds `on_near_start` for near-start-edge pagination. `TextInput` adds a `.multiline(max_visible_lines)` wrap-width mode over its `TextEditor`, with `.submit_on_enter` controlling Enter-key behavior. Its `nav` module (spec §19) adds an imperative page-stack `Navigator` + page transitions, a declarative go_router-subset `Router`, and a `hero(tag, child)` shared-element wrapper morphing a tagged child between two pages during a transition (see Data Flow's Navigation flow) — kept in-crate (not a separate crate) because these need the same crate-private container plumbing (`ChildPod`, `build_child`/`teardown_child`, `cancel_pod`) every other container widget uses; `frust-widgets` itself stays reactive-free, so the router's deep-link signal glue lives in the `frust` facade (see Data Flow's Navigation/Deep-link flow). A `material`/`cupertino` widget catalog (AppBar, Card, Chips, Dialog, FAB, ListView/ListItem, NavigationBar, BottomSheet, Switch, progress indicators, plus Cupertino counterparts for the subset with an iOS equivalent) shares the `material::state_layer` interaction-overlay helper — same `View`/`Widget` pattern as the baseline set, still reactive-free. The `material` catalog's M3-Expressive layer (spec 6f) adds a `shape_morph` primitive (`RoundedPolygon`/`morph_path`, radial-function corner rounding) driving `LoadingIndicator`'s shape-cycling spinner and `ButtonGroup`'s press-emphasis overlay, plus `SplitButton`, `FabMenu`, floating/docked `Toolbar`, and a wavy variant of the progress indicators. The `cupertino` catalog's chrome (`navbar`, `tabbar`, capsule `button`, `switch`, `slider`'s Cupertino branch, `alert_dialog`, `action_sheet`) paints from `Theme.glass` on the Cupertino baseline, degrading to an opaque Material surface fill when `GlassMaterial::is_opaque()` (see Data Flow's Glass material tokens); `tabbar` is the first `GlassScale` consumer and drives a minimize-on-scroll state machine (the event pass sets a target off scroll-delta sign, paint drives the theme's motion spring toward it). |
+| `frust-reactive` | Leaf reactive substrate: the process-wide `ReactiveRuntime` (a background tokio runtime, a custom `any_spawner` executor routing `spawn`/`spawn_local`, a UI-thread local task pump, and the root reactive `Owner`) plus `TrackedScope`, the rebuild-dependency-tracking bridge that wakes a shell when a tracked signal changes (see Key Types, Data Flow's Signal-driven wake). Its `deep_link` module is a process-wide deep-link source (spec §19): a shell delivers a platform link via `push_deep_link`, app code reads it via `deep_links()`/`DeepLinks` (facade re-exports) — see Data Flow's Deep-link flow. Its `back` module is the process-wide back-press source, mirroring `deep_link`'s shape: `push_back_press`/`back_presses()` plus a `set_handles_back`/`handles_back` flag — see Data Flow's Back flow. Depends only on `reactive_graph`/`any_spawner`/`tokio` — no `frust-core`, no `winit`/`vello`/`wgpu`; consumed by the three shells and the `frust` facade (see Layer Dependencies). |
+| `frust-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root, GPU surface, and text context for `cargo run`-based development. Compiled only for non-Android targets. |
+| `frust-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_frust_FrustSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. |
+| `frust-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size`/`logical_insets` FFI-boundary helpers. Depends on `frust-core`/`frust-scene`/`frust-text`/`frust-theme` (its `theme_override` module is the app-facing `set_app_theme`/`clear_app_theme` seam — see Data Flow's Theme delivery; stays reactive-free in its shipped graph, see Layer Dependencies) — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. Its `frame_gate` module is the whole-frame skip gate both mobile shells consult before rebuilding (see Data Flow's Frame gate). |
+| `frust-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `frust_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `frust-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. |
+| `frust` | Facade crate: the public app-author API — the canonical `Component`/`app!`/`run` entry surface (spec §5.5), plus `App`/`View`/the widget vocabulary as the lower-level layer `app!` desugars to — composing the crates above into the spec's declarative call shape. Depends on `frust-shell-android`, `frust-shell-ios`, and `frust-reactive` unconditionally, and on `frust-shell-desktop` only for non-Android targets; `run`/`App::run` (the desktop preview loop) are likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
+| `frust-cli` | Standalone `frust` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `frust run`/`build`/`clean` drive pipelines for both platforms (Android via Gradle/cargo-ndk, iOS via xcodebuild/devicectl). Depends on none of the framework crates above. |
 
 ## Layer Dependencies
 
 ```
-forgekit-scene  (no vello/wgpu — kurbo + peniko only)
-    ├── forgekit-core          (view/widget/layout; depends on scene for the PaintScene bridge, and on reactive_graph for Component's per-instance Owner)
-    ├── forgekit-render        (vello/wgpu — consumes Scene)
-    └── forgekit-text          (parley — consumes/produces GlyphRun, no vello/wgpu)
-forgekit-reactive       (leaf: reactive_graph + any_spawner + tokio only — no core/scene/render/text/winit)
-forgekit-theme          = peniko + forgekit-text (+ forgekit-core, a reverse edge for its from_paint_ctx/from_layout_ctx accessors only — core never depends on theme, so no cycle)
-forgekit-widgets       = core + scene + text + theme
-forgekit-shell-common  = core + scene + text + theme             (platform-agnostic; no jni/ndk/winit, no unsafe, reactive-free in shipped deps)
-forgekit-shell-desktop = core + scene + render + text + theme + winit + reactive    (non-Android integration point)
-forgekit-shell-android = core + scene + render + text + theme + reactive + shell-common + jni/ndk  (Android integration point; JNI FFI)
-forgekit-shell-ios     = core + scene + render + text + theme + reactive + shell-common           (iOS integration point; C-ABI FFI)
-forgekit  = core + widgets + reactive + shell-android (always) + shell-ios (always) + shell-desktop (non-Android only)
+frust-scene  (no vello/wgpu — kurbo + peniko only)
+    ├── frust-core          (view/widget/layout; depends on scene for the PaintScene bridge, and on reactive_graph for Component's per-instance Owner)
+    ├── frust-render        (vello/wgpu — consumes Scene)
+    └── frust-text          (parley — consumes/produces GlyphRun, no vello/wgpu)
+frust-reactive       (leaf: reactive_graph + any_spawner + tokio only — no core/scene/render/text/winit)
+frust-theme          = peniko + frust-text (+ frust-core, a reverse edge for its from_paint_ctx/from_layout_ctx accessors only — core never depends on theme, so no cycle)
+frust-widgets       = core + scene + text + theme
+frust-shell-common  = core + scene + text + theme             (platform-agnostic; no jni/ndk/winit, no unsafe, reactive-free in shipped deps)
+frust-shell-desktop = core + scene + render + text + theme + winit + reactive    (non-Android integration point)
+frust-shell-android = core + scene + render + text + theme + reactive + shell-common + jni/ndk  (Android integration point; JNI FFI)
+frust-shell-ios     = core + scene + render + text + theme + reactive + shell-common           (iOS integration point; C-ABI FFI)
+frust  = core + widgets + reactive + shell-android (always) + shell-ios (always) + shell-desktop (non-Android only)
 
-forgekit-cli    (independent binary: clap/anyhow/serde/minijinja/include_dir/thiserror only)
+frust-cli    (independent binary: clap/anyhow/serde/minijinja/include_dir/thiserror only)
 ```
 
-**`forgekit-reactive` is a leaf substrate**, consumed by the three shells and
-the `forgekit` facade — never by `forgekit-core`/`forgekit-scene`/
-`forgekit-widgets`. **`forgekit-core` depends on `reactive_graph` directly**
-(not on `forgekit-reactive`) for exactly one purpose — `Component`'s
+**`frust-reactive` is a leaf substrate**, consumed by the three shells and
+the `frust` facade — never by `frust-core`/`frust-scene`/
+`frust-widgets`. **`frust-core` depends on `reactive_graph` directly**
+(not on `frust-reactive`) for exactly one purpose — `Component`'s
 per-instance `Owner` — a deliberate, narrow layering exception rather than a
-general reactive dependency: `forgekit-core` has no runtime, executor, or
-tokio dependency. **`forgekit-shell-common` stays reactive-free in its
+general reactive dependency: `frust-core` has no runtime, executor, or
+tokio dependency. **`frust-shell-common` stays reactive-free in its
 shipped dependency graph** (core + scene + text + theme; a test-only
 `reactive_graph` dev-dependency backs the root-owner regression test and
 never reaches consumers); the mobile shells own their own reactive
 wiring directly (`ReactiveRuntime::init`/`pump_local` called from
-`forgekit-shell-android`/`-ios`), keeping shell-common's zero-`unsafe`,
+`frust-shell-android`/`-ios`), keeping shell-common's zero-`unsafe`,
 compiles-everywhere charter intact.
 
-**Scene-layer purity rule:** `forgekit-scene`'s and `forgekit-text`'s public
+**Scene-layer purity rule:** `frust-scene`'s and `frust-text`'s public
 APIs expose only `kurbo` (geometry) and `peniko` (brushes/fonts) types —
 `vello`/`wgpu` types are forbidden there so the GPU backend stays swappable.
-`vello`/`wgpu` types are confined to `forgekit-render`, surfacing at the
+`vello`/`wgpu` types are confined to `frust-render`, surfacing at the
 seams `SurfaceRenderer::on_surface_created`/`on_surface_created_from_android_window`/
 `on_surface_created_from_metal_layer` (surface creation) and `encode_scene`
 (returns a `vello::Scene` for shells that drive their own renderer).
 
-`forgekit-cli` has no compile-time dependency on the rendering stack; it is a
-separate tool that generates and inspects ForgeKit projects, not a consumer
+`frust-cli` has no compile-time dependency on the rendering stack; it is a
+separate tool that generates and inspects Frust projects, not a consumer
 of the framework.
 
 ## Data Flow
@@ -90,16 +90,16 @@ of the framework.
 3. `RenderRoot::layout` hands the root widget window-sized `BoxConstraints`
    (constraints flow down, chosen `Size` flows up). When the tree contains
    text, the shell calls `layout_with_text`, which threads the shell-owned
-   `forgekit_text::TextContext` through `LayoutCtx` as `&mut dyn Any` — kept
-   type-erased so `forgekit-core` has no dependency on `forgekit-text`; text
+   `frust_text::TextContext` through `LayoutCtx` as `&mut dyn Any` — kept
+   type-erased so `frust-core` has no dependency on `frust-text`; text
    widgets recover it via `LayoutCtx::text_context::<TextContext>()`.
 4. `RenderRoot::paint(scene, frame_time)` calls each widget's `paint`, which
-   emits draw commands into `&mut dyn PaintScene`; `forgekit-scene::SceneBuilder`
+   emits draw commands into `&mut dyn PaintScene`; `frust-scene::SceneBuilder`
    implements `PaintScene` (fills, rounded rects, strokes, clip/transform
    push/pop, glyph runs) as real `Command`s in the `Scene`. The `frame_time`
    (a shell-supplied `FrameTime` — desktop's `Instant`-since-epoch, Android's
    `Choreographer` tick, iOS's `CADisplayLink` timestamp; never
-   `Instant::now()` inside `forgekit-core`/widgets, see `docs/CODE_STANDARDS.md`)
+   `Instant::now()` inside `frust-core`/widgets, see `docs/CODE_STANDARDS.md`)
    and the render root's stored theme (see Theme delivery below) thread down
    through `PaintCtx` unchanged to every descendant, letting a widget advance
    an `anim::AnimationController` (or fling spring) and call
@@ -116,7 +116,7 @@ of the framework.
    this republish on it, and `RenderRoot::paint` only accepts a bubbled
    `ime_state` while `focus_active` — a guard against resurrecting a surface
    a blur already cleared.
-5. The finished `Scene` is encoded (`forgekit_render::encode_scene`) into a
+5. The finished `Scene` is encoded (`frust_render::encode_scene`) into a
    `vello::Scene` and presented to the window surface by `SurfaceRenderer`,
    which is the spec §8.1 surface lifecycle state machine
    (`SurfacePhase::NoSurface/SurfaceReady/SurfaceLost`,
@@ -144,7 +144,7 @@ interaction, dismiss on a focus-routed `Key(Escape)`, desktop only) cover
 the catalog's five modal/menu widgets.
 
 **Signal-driven wake:** a write to a tracked signal fires the process-wide
-`FrameWaker` (`forgekit-reactive`; coalesced — N writes between tracked
+`FrameWaker` (`frust-reactive`; coalesced — N writes between tracked
 rebuilds produce one wake); every `spawn_local` task wake — including a
 re-wake arriving from a background thread, e.g. a tokio timer completing —
 fires the same `FrameWaker` through the executor's composite waker, so
@@ -172,7 +172,7 @@ frame as one of the frame gate's inputs (see Frame gate below); a bare
 `with_owner(|| rebuild())` with no scope never sets it, however consistently
 the drain side runs.
 
-**Component state boundary:** a `Component` (`forgekit-core::component`) is a
+**Component state boundary:** a `Component` (`frust-core::component`) is a
 `StatefulWidget` analog — retained local state living in the widget tree
 behind a `ComponentView<C>` that implements `View<Outer>` for any outer
 state, so the hosted subtree diffs against the component's own `C::State`
@@ -190,18 +190,18 @@ value — and reconciles the result exactly like `RenderRoot::rebuild_view`;
 teardown tears down the child element, disposes the owner (running its
 `on_cleanup`s), and drops the state.
 
-**Theme delivery:** a shell owns the active `forgekit_theme::Theme` and
+**Theme delivery:** a shell owns the active `frust_theme::Theme` and
 delivers it two ways, mirroring the text-context pattern above. To widgets:
 boxed type-erased (`RenderRoot::set_theme(Box<dyn Any>)`) and lent as
 `Option<&dyn Any>` into every `LayoutCtx`/`PaintCtx`; a themed widget recovers
 it with `theme_as::<Theme>()` (or the `Theme::from_paint_ctx`/`from_layout_ctx`
-wrappers) — `forgekit-core` never depends on `forgekit-theme`. To app code: the
+wrappers) — `frust-core` never depends on `frust-theme`. To app code: the
 shell `provide_context`s a cloned `Theme` under the reactive root `Owner`, read
 reactively via `use_context::<Theme>()` in `Component::build`. A shell
 re-pushes both paths together on a brightness change (desktop's
 `WindowEvent::ThemeChanged`, or the mobile appearance exports below). An
 app can also force the active `Theme` directly via
-`forgekit::set_app_theme`/`clear_app_theme` (`forgekit-shell-common::theme_override`)
+`frust::set_app_theme`/`clear_app_theme` (`frust-shell-common::theme_override`)
 — a process-global override slot each shell polls once per frame
 and pushes through both delivery paths; the override wins over the
 platform's own light/dark preference until `clear_app_theme` runs, letting
@@ -235,7 +235,7 @@ mobile frame-gate `Skip` decision still relayout the one time an inset
 genuinely moves. `SafeArea` (see Key Types) is the sole widget consumer of
 `padding()` in v1.
 
-**Glass material tokens:** `forgekit-theme::glass` (spec 6f) is pure data — no
+**Glass material tokens:** `frust-theme::glass` (spec 6f) is pure data — no
 scene/reactive dependency, and no blur is rendered here. `GlassScale` bundles
 three tiers (`chrome`/`bar`/`control`), each a `GlassMaterial` recipe of a
 `blur_radius_intent` (a **future-backend contract**, not a rendered pixel
@@ -251,7 +251,7 @@ backdrop blur pending a future render-backend upgrade.
 
 **Event pipeline:** an `InputEvent` (a `PointerEvent` down/move/up/cancel, or
 a scroll delta — already translated into **logical**, density-independent
-coordinates by the shell before it crosses into `forgekit-core`) enters the
+coordinates by the shell before it crosses into `frust-core`) enters the
 tree through `RenderRoot::event`, which builds a root `EventCtx` over the
 type-erased app state and dispatches to the root widget. Containers
 (`Flex`/`Stack`/`Padding`/`Align`/`ScrollView`, and the interactive widgets'
@@ -294,7 +294,7 @@ Types' `EditingState`/`ImeState` row). Interactive widgets hold their view-decla
 callback as an **erased closure** — an `Rc<dyn Fn(&mut State)>` boxed at
 build time into a `Box<dyn FnMut(&mut EventCtx)>` the widget invokes
 directly — mirroring the `&mut dyn Any` erasure `LayoutCtx`'s text context
-uses, so `forgekit-core` and `forgekit-widgets` carry no knowledge of the
+uses, so `frust-core` and `frust-widgets` carry no knowledge of the
 concrete app-state type. The pass never rebuilds or repaints: it returns an
 `EventOutcome { handled,
 needs_redraw }`, and the shell runs rebuild→layout→paint afterward only if
@@ -306,21 +306,21 @@ Android/iOS shells run a **continuous** per-frame loop
 call, different redraw scheduling.
 
 **Frame gate:** the mobile shells' Choreographer/`CADisplayLink` callbacks
-keep firing every tick; `forgekit-shell-common::frame_gate`'s `FrameGate`
+keep firing every tick; `frust-shell-common::frame_gate`'s `FrameGate`
 decides whether one actually reproduces a frame, from a small OR-list of
 dirtiness signals (pending input, pending `ChangeFlags`, an in-flight
 `PaintOutcome::needs_frame`, a theme/appearance change, the reactive
 `signals_dirty` flag above, pointer capture/focus, an accessibility action,
 or post-resume warmup) bundled into `FrameInputs`; any true signal forces
 `Run`, else `Skip` — a `Skip` does no rebuild/layout/paint/present work but
-still counts as a skipped frame in `FrameStats`. `FORGEKIT_NO_FRAME_GATE=1`
+still counts as a skipped frame in `FrameStats`. `FRUST_NO_FRAME_GATE=1`
 (see `docs/DEVELOPMENT.md`) forces every tick to `Run`. On a `Run`, Android
 also skips layout unless `AppTree::take_change_flags` reports
 `needs_layout()`, first frame, or resize (the theme-swap contract is Theme
 delivery's, above); iOS still relayouts every `Run`, the finer skip not yet
 wired there.
 
-**GPU pipeline cache:** `forgekit-render::pipeline_cache` frames an opaque
+**GPU pipeline cache:** `frust-render::pipeline_cache` frames an opaque
 `wgpu::PipelineCache` blob behind an adapter-fingerprint header, so a
 foreign or driver-updated blob is rejected as a cache miss before it reaches
 the sanctioned-`unsafe` pipeline-cache creation call (Vulkan-only — a silent
@@ -330,7 +330,7 @@ after compiling its pipelines, both atomically on a background thread so
 the first frame never waits on disk.
 
 **Android frame pipeline:** the same rebuild/layout/paint pipeline runs
-inside JNI callbacks (`forgekit-shell-android`) driven by Kotlin's
+inside JNI callbacks (`frust-shell-android`) driven by Kotlin's
 `Choreographer`/`SurfaceHolder.Callback` instead of a winit event loop: the
 frame callback consults the frame gate above and, on a `Run`, drives one
 rebuild → (layout iff dirty/first/resized) → paint → render pass per posted
@@ -344,7 +344,7 @@ and vello renderer. The full JNI export surface (frame/touch/lifecycle/IME/
 theme/deep-link/accessibility/insets/back) is the `android_app!` row in Key
 Types.
 
-**iOS frame pipeline:** `forgekit-shell-ios` is driven by the generated
+**iOS frame pipeline:** `frust-shell-ios` is driven by the generated
 Swift app instead of an event loop: a UIKit `CADisplayLink` tick calls the
 render-frame export once per frame (the tick's timestamp, in nanoseconds, as
 the pass's `FrameTime`), consulting the same frame gate as Android above
@@ -392,23 +392,23 @@ driven transition or an interactive edge-swipe pop.
 
 **Deep-link flow:** a platform delivers a link (cold-start intent data, or
 a running app's warm re-delivery) through the fixed FFI export each mobile
-shell defines (Android's `nativeOnDeepLink`, iOS's `forgekit_on_deep_link`,
-both above), which calls `forgekit_reactive::push_deep_link` — the
-process-wide source `forgekit-reactive::deep_link` owns (an
+shell defines (Android's `nativeOnDeepLink`, iOS's `frust_on_deep_link`,
+both above), which calls `frust_reactive::push_deep_link` — the
+process-wide source `frust-reactive::deep_link` owns (an
 `RwSignal<Option<DeepLink>>` plus a set-once `initial` snapshot, uniform
 cold-start/warm delivery through the same signal). App code reads it via
 `deep_links()`, tracking `DeepLinks::latest` from `Component::build` like
 any other signal (see Signal-driven wake above). The facade's
 `RouterDeepLinks` glue (the one seam allowed to see both `Router` and the
-deep-link source together, keeping `forgekit-widgets` itself reactive-free)
+deep-link source together, keeping `frust-widgets` itself reactive-free)
 dedupes by the last-consumed link and calls `Router::handle_location` on a
 new one.
 
 **Back flow:** a hardware/gesture back press enters through the fixed FFI
 export each mobile shell defines (Android's `nativeOnBackPress`; iOS has no
 equivalent — back is a navigation-bar affordance there), which calls
-`forgekit_reactive::push_back_press` — the process-wide counter source
-`forgekit-reactive::back` owns, mirroring `deep_link`'s shape above but
+`frust_reactive::push_back_press` — the process-wide counter source
+`frust-reactive::back` owns, mirroring `deep_link`'s shape above but
 counting presses rather than carrying a payload. The facade's `BackHandler`
 dedupes by the last-consumed count and pops the attached
 `NavigatorController` when `can_pop()`; `handles_back()` is the second,
@@ -449,41 +449,41 @@ row). `clean` removes Cargo and Gradle build output.
 |---|---|
 | `View<State>` | Declarative, cheap UI descriptor with a `build`/`rebuild` lifecycle; produced fresh by `app_logic` each frame. |
 | `Widget` | Retained tree element (`Any`-bounded for downcast-on-rebuild); implements `layout`/`paint`. |
-| `Component` / `ComponentView` / `ComponentWidget` | `forgekit-core::component`'s `StatefulWidget` analog: `Component` declares retained `State` (`init`/`build`); `ComponentView<C>` is the `View<Outer>` adapter usable under any outer state; `ComponentWidget` is the retained element owning `State` + a per-component `Owner` and routing events across the state boundary — see Data Flow's Component state boundary. |
-| `ReactiveRuntime` / `TrackedScope` / `FrameWaker` | `forgekit-reactive`'s process-wide substrate: `ReactiveRuntime` owns the background tokio runtime, the custom `any_spawner` executor, and the root `Owner`; `TrackedScope` runs a rebuild with dependency tracking and fires the swappable `FrameWaker` (coalesced) when a tracked signal later changes — see Data Flow's Signal-driven wake. |
+| `Component` / `ComponentView` / `ComponentWidget` | `frust-core::component`'s `StatefulWidget` analog: `Component` declares retained `State` (`init`/`build`); `ComponentView<C>` is the `View<Outer>` adapter usable under any outer state; `ComponentWidget` is the retained element owning `State` + a per-component `Owner` and routing events across the state boundary — see Data Flow's Component state boundary. |
+| `ReactiveRuntime` / `TrackedScope` / `FrameWaker` | `frust-reactive`'s process-wide substrate: `ReactiveRuntime` owns the background tokio runtime, the custom `any_spawner` executor, and the root `Owner`; `TrackedScope` runs a rebuild with dependency tracking and fires the swappable `FrameWaker` (coalesced) when a tracked signal later changes — see Data Flow's Signal-driven wake. |
 | `RenderRoot<State, V>` | Owns the `WidgetTree`, previous `View`, and the boxed active theme (`set_theme`); drives rebuild → layout → paint for a single-root app, and routes an `InputEvent` to it via `event`. |
-| `Theme` / `ColorScheme` / `TypeScale` / `ShapeScale` / `Elevation` / `MotionScheme` | `forgekit-theme`'s design-token bundle (spec §17): `Theme` pairs a light/dark `ColorScheme` (M3 color roles) with a `TypeScale` (`forgekit_text::TextStyle` per M3 type role), `ShapeScale` (corner-radius tokens), `Elevation` (shadow specs per level), and `MotionScheme` (named M3 spring presets) — see Data Flow's Theme delivery. A `DesignLanguage` tag (`Material3`/`Cupertino`) selects `Theme::m3_baseline`/`cupertino_baseline`; `set_app_theme`/`clear_app_theme` force the active `Theme` app-side, overriding the platform's own preference until cleared. |
-| `WindowInsets` / `EdgeInsets` | `forgekit-core::insets`'s platform-occlusion model (Flutter `ViewPadding`/`ViewInsets` provenance): `WindowInsets` carries `view_padding`/`view_insets` per edge (`EdgeInsets`, re-exported as `WindowEdgeInsets` to avoid a name clash with `forgekit-widgets`' `Padding`-family `EdgeInsets`); `padding()` derives `max(0, view_padding − view_insets)` per edge — see Data Flow's Inset delivery. |
-| `GlassFill` / `GlassMaterial` / `GlassScale` | `forgekit-theme::glass`'s translucent-material tokens (spec 6f): `GlassFill` is one alpha-washed color; `GlassMaterial` pairs a `blur_radius_intent` (future-backend blur contract, `0.0` = opaque) with light/dark fill-wash stacks, a specular `hairline_alpha`, and a `ShadowSpec`; `GlassScale` bundles the `chrome`/`bar`/`control` tiers `Theme.glass` carries on both baselines — see Data Flow's Glass material tokens. |
-| `FrameTime` / `Curve` / `Tween<T>` / `SpringDesc` / `AnimationController` | `forgekit-core::anim`'s animation vocabulary: `FrameTime` is an opaque shell-supplied clock reading (difference-only, never absolute); `Curve` is a named/cubic-Bézier easing function; `Tween<T>` interpolates a `Lerp` value type; `SpringDesc` parameterizes a damped spring; `AnimationController` drives a `0.0..=1.0` value by duration+curve or by a spring fling, advanced during paint via `PaintCtx::frame_time` — see Data Flow's Frame pipeline. |
+| `Theme` / `ColorScheme` / `TypeScale` / `ShapeScale` / `Elevation` / `MotionScheme` | `frust-theme`'s design-token bundle (spec §17): `Theme` pairs a light/dark `ColorScheme` (M3 color roles) with a `TypeScale` (`frust_text::TextStyle` per M3 type role), `ShapeScale` (corner-radius tokens), `Elevation` (shadow specs per level), and `MotionScheme` (named M3 spring presets) — see Data Flow's Theme delivery. A `DesignLanguage` tag (`Material3`/`Cupertino`) selects `Theme::m3_baseline`/`cupertino_baseline`; `set_app_theme`/`clear_app_theme` force the active `Theme` app-side, overriding the platform's own preference until cleared. |
+| `WindowInsets` / `EdgeInsets` | `frust-core::insets`'s platform-occlusion model (Flutter `ViewPadding`/`ViewInsets` provenance): `WindowInsets` carries `view_padding`/`view_insets` per edge (`EdgeInsets`, re-exported as `WindowEdgeInsets` to avoid a name clash with `frust-widgets`' `Padding`-family `EdgeInsets`); `padding()` derives `max(0, view_padding − view_insets)` per edge — see Data Flow's Inset delivery. |
+| `GlassFill` / `GlassMaterial` / `GlassScale` | `frust-theme::glass`'s translucent-material tokens (spec 6f): `GlassFill` is one alpha-washed color; `GlassMaterial` pairs a `blur_radius_intent` (future-backend blur contract, `0.0` = opaque) with light/dark fill-wash stacks, a specular `hairline_alpha`, and a `ShadowSpec`; `GlassScale` bundles the `chrome`/`bar`/`control` tiers `Theme.glass` carries on both baselines — see Data Flow's Glass material tokens. |
+| `FrameTime` / `Curve` / `Tween<T>` / `SpringDesc` / `AnimationController` | `frust-core::anim`'s animation vocabulary: `FrameTime` is an opaque shell-supplied clock reading (difference-only, never absolute); `Curve` is a named/cubic-Bézier easing function; `Tween<T>` interpolates a `Lerp` value type; `SpringDesc` parameterizes a damped spring; `AnimationController` drives a `0.0..=1.0` value by duration+curve or by a spring fling, advanced during paint via `PaintCtx::frame_time` — see Data Flow's Frame pipeline. |
 | `InputEvent` / `PointerEvent` / `KeyEvent` / `ImeEvent` / `EventCtx` / `EventOutcome` | Layer 2 input (spec §9): `InputEvent` is a `PointerEvent`, a scroll delta, `Key(KeyEvent)`, or `Ime(ImeEvent)` — `Clone` but not `Copy` (`Key`/`Ime` carry owned `String` payloads) — entering at `RenderRoot::event`; `EventCtx` is the erased-state context a handler mutates (capture pointer, request/release focus, publish IME state, request redraw); `EventOutcome` is the pass's `handled`/`needs_redraw` summary — see Data Flow's Event pipeline. |
-| `EditingState` / `ImeState` | The IME state-sync contract at the shell seam (see Data Flow's Event pipeline). `EditingState` is text plus selection/composing indices, UTF-16 code-unit indexed at this boundary (`forgekit-text`'s `TextEditor` owns byte conversion); a platform bridge pushes one in via `AppTree::ime_apply`/`Ime(ApplyEditingState)` and reads a reconciled one back via `RenderRoot::ime_state`/`AppTree::ime_state`, which returns the focused widget's published `ImeState` (`EditingState` + caret rect). |
-| `SemanticsCtx` / `SemanticsUpdate` | `forgekit-core::semantics`'s pull-based accessibility pass (spec §9): `SemanticsCtx` collects `accesskit::Node`s during `RenderRoot::semantics`, assigning each a stable per-pod id; `SemanticsUpdate` is the resulting flat node map plus root/focus ids, pushed each frame by a per-shell platform adapter — see Data Flow's Semantics pass. |
-| `RenderTier` / `TierCaps` / `TierSelection` / `TierOutcome` | `forgekit-render::tier`'s render-backend selection vocabulary: `RenderTier` is `Gpu` (default, vello 0.9) or `Cpu` (experimental `vello_cpu` fallback, only selectable behind the non-default `cpu-tier` feature); `select_render_tier` picks one from probed `TierCaps` plus an optional override (`FORGEKIT_RENDER_TIER` / `forgekit run --render-tier`, which always wins), returning a `TierSelection` (`TierOutcome::Available`/`Unavailable` plus a diagnosis string) that `RenderContext` consults at device-init time. |
-| `ChildPod` | A container's owned child: boxed widget + layout geometry + capture-active/focused bookkeeping — how `forgekit-widgets`' containers and interactive widgets own children without the arena (single-root-arena divergence; see Data Flow). |
+| `EditingState` / `ImeState` | The IME state-sync contract at the shell seam (see Data Flow's Event pipeline). `EditingState` is text plus selection/composing indices, UTF-16 code-unit indexed at this boundary (`frust-text`'s `TextEditor` owns byte conversion); a platform bridge pushes one in via `AppTree::ime_apply`/`Ime(ApplyEditingState)` and reads a reconciled one back via `RenderRoot::ime_state`/`AppTree::ime_state`, which returns the focused widget's published `ImeState` (`EditingState` + caret rect). |
+| `SemanticsCtx` / `SemanticsUpdate` | `frust-core::semantics`'s pull-based accessibility pass (spec §9): `SemanticsCtx` collects `accesskit::Node`s during `RenderRoot::semantics`, assigning each a stable per-pod id; `SemanticsUpdate` is the resulting flat node map plus root/focus ids, pushed each frame by a per-shell platform adapter — see Data Flow's Semantics pass. |
+| `RenderTier` / `TierCaps` / `TierSelection` / `TierOutcome` | `frust-render::tier`'s render-backend selection vocabulary: `RenderTier` is `Gpu` (default, vello 0.9) or `Cpu` (experimental `vello_cpu` fallback, only selectable behind the non-default `cpu-tier` feature); `select_render_tier` picks one from probed `TierCaps` plus an optional override (`FRUST_RENDER_TIER` / `frust run --render-tier`, which always wins), returning a `TierSelection` (`TierOutcome::Available`/`Unavailable` plus a diagnosis string) that `RenderContext` consults at device-init time. |
+| `ChildPod` | A container's owned child: boxed widget + layout geometry + capture-active/focused bookkeeping — how `frust-widgets`' containers and interactive widgets own children without the arena (single-root-arena divergence; see Data Flow). |
 | `AnyView<State>` | Type-erased `View` (element `Box<dyn Widget>`) used wherever children are heterogeneous (a container's child list); mirrors the xilem `AnyView` pattern. |
 | `ChildKey` / `keyed` | Explicit child identity for a `Flex` child list (spec §6.3): `keyed(key, view)` attaches a `ChildKey` the reconciler matches old↔new children by, relocating a matched child's widget (preserving its internal state) across a reorder/insert/remove instead of rebuilding it. Keys are all-or-nothing and unique per list; a mixed or duplicate key set falls back to positional matching. A keyed reorder is a structural change like any other (see Data Flow's Event pipeline). |
-| `Text` / `Button` / `Checkbox` / `Radio` / `Slider` / `TextInput` / `Image` / `Icon` / `Flex` (`Row`/`Column`) / `Stack` / `Padding` / `Align` / `SizedBox` / `ScrollView` / `GestureDetector` / `SafeArea` | `forgekit-widgets`' baseline vocabulary — each a `View`/`Widget` pair over the `AnyView`/`ChildPod` substrate; the interactive ones are controlled components (see `docs/CODE_STANDARDS.md`). `TextInput` owns a `TextEditor` and drives it from focus-routed `Key`/`Ime` events; `Image` wraps a decode-once `ImageSource` (an `Arc`-backed `peniko::ImageData` handle) and a fit mode (`ImageFit::Fill`/`Contain`/`Cover`), painted via the new `Command::Image` scene command; `Radio` reports a requested selection via `on_select` but never self-owns it, the same controlled-component contract as `Checkbox`; `Align` fills a bounded axis and shrink-wraps an unbounded one, per axis independently (Flutter `RenderPositionedBox`/`RenderAligningShiftedBox` parity); `SafeArea` (`.left`/`.top`/`.right`/`.bottom(bool)`, `.minimum(EdgeInsets)`) deflates by `WindowInsets::padding()` per enabled edge, floored by `.minimum` even on a disabled edge (Flutter parity — see Data Flow's Inset delivery). |
+| `Text` / `Button` / `Checkbox` / `Radio` / `Slider` / `TextInput` / `Image` / `Icon` / `Flex` (`Row`/`Column`) / `Stack` / `Padding` / `Align` / `SizedBox` / `ScrollView` / `GestureDetector` / `SafeArea` | `frust-widgets`' baseline vocabulary — each a `View`/`Widget` pair over the `AnyView`/`ChildPod` substrate; the interactive ones are controlled components (see `docs/CODE_STANDARDS.md`). `TextInput` owns a `TextEditor` and drives it from focus-routed `Key`/`Ime` events; `Image` wraps a decode-once `ImageSource` (an `Arc`-backed `peniko::ImageData` handle) and a fit mode (`ImageFit::Fill`/`Contain`/`Cover`), painted via the new `Command::Image` scene command; `Radio` reports a requested selection via `on_select` but never self-owns it, the same controlled-component contract as `Checkbox`; `Align` fills a bounded axis and shrink-wraps an unbounded one, per axis independently (Flutter `RenderPositionedBox`/`RenderAligningShiftedBox` parity); `SafeArea` (`.left`/`.top`/`.right`/`.bottom(bool)`, `.minimum(EdgeInsets)`) deflates by `WindowInsets::padding()` per enabled edge, floored by `.minimum` even on a disabled edge (Flutter parity — see Data Flow's Inset delivery). |
 | `IconData` / `IconSource` | `Icon`'s vector-path source: `IconSource` is a generated `crate::icons` const (an SVG path `d` string plus its design-box size); `IconData::from_path` accepts a user-built `kurbo::BezPath` instead. Parsed to a `BezPath` and cached on the widget at build/rebuild. |
 | `NavigatorController<State>` / `NavigatorView` / `PopResult` | `nav::navigator`'s app-facing handle for the retained page stack — an op queue (`push`/`pop`/`replace`) drained at rebuild, never self-mutating (see Data Flow's Navigation flow); `PopResult` is a type-erased pop payload a pusher's `on_result` callback receives. |
 | `HeroFrames` / `HeroDirective` | The shared-element ("hero") transition vocabulary a navigator installs over `PaintCtx` during a page transition: a `hero(tag, child)` wrapper reports its bounds via `PaintCtx::report_hero`, getting back `HeroDirective::Normal` (no transition in flight), `Morph` (repaint under a rect→rect transform to the interpolated position, on the topmost page), or `Suppress` (skip painting, on the counterpart) — see Data Flow's Navigation flow. |
 | `Route<State>` / `Router<State>` / `Resolution` | `nav::router`'s go_router-subset declarative layer over the navigator: `Route` pairs a path pattern with a page builder, optional redirect, and nested children; `Router::resolve` is pure location-matching (param capture, redirects under a loop guard) into a `Resolution`; `go`/`push`/`pop` drive the owned `NavigatorController`. |
 | `PageTransition` / `TransitionSpec` / `TransitionDriver` | `nav::transition`'s page-transition vocabulary: named presets (M3 shared-axis/fade-through, `SlideUp`, iOS push/modal) plus the progress driver the navigator advances during paint (see Data Flow's Navigation flow). |
-| `DeepLink` / `DeepLinks` / `deep_links()` | `forgekit-reactive::deep_link`'s process-wide deep-link source (facade: `forgekit::deep_links()`); `DeepLinks::latest` is a trackable signal, `initial` a set-once cold-start snapshot — see Data Flow's Deep-link flow. |
+| `DeepLink` / `DeepLinks` / `deep_links()` | `frust-reactive::deep_link`'s process-wide deep-link source (facade: `frust::deep_links()`); `DeepLinks::latest` is a trackable signal, `initial` a set-once cold-start snapshot — see Data Flow's Deep-link flow. |
 | `PaintScene` | Renderer-agnostic paint target widgets draw into; bridged onto `SceneBuilder`. `fill_path`/`stroke_path` and `push_transform`/`pop_transform` (default no-ops, overridden by `SceneBuilder`) paint arbitrary filled/stroked `kurbo::BezPath` shapes and push/pop an `Affine` onto the scene's transform stack, respectively. |
 | `PaintCtx` / `PaintOutcome` | Paint-pass context and result: `PaintCtx::frame_time` is the shell-fed clock reading a widget advances animation state with; `PaintCtx::theme_as::<T>()` recovers the type-erased threaded theme (`None` if none was set — see Data Flow's Theme delivery); `PaintCtx::request_frame`/`needs_frame` let a widget ask to be re-invoked without external input; `PaintCtx::has_focus`, seeded from the pod's recorded focus path, lets a focused editable gate its focus chrome and IME republish on it, mirroring `EventCtx::has_focus`; `PaintOutcome::needs_frame` surfaces the former through `RenderRoot::paint`/`AppTree::paint` — see Data Flow's Frame pipeline. |
 | `Scene` / `SceneBuilder` / `Command` | Layer 3 vector display list — the widget/GPU seam. `Command::Path` carries a `BezPath` plus a fill-or-stroke `PathStyle`. |
-| `GlyphRun` | Shaped-glyph carrier from `forgekit-text` into the scene. |
+| `GlyphRun` | Shaped-glyph carrier from `frust-text` into the scene. |
 | `TextContext` / `TextStyle` / `TextLayout` | Parley-backed text shaping surface. |
 | `RenderContext` / `SurfaceRenderer` | `RenderContext` owns the wgpu `Instance` and lazily creates/holds the logical `wgpu::Device` itself (adapter-derived limits, not a thin `vello::util` wrapper) so it can request the real adapter limits vello's own device pool cannot; `ensure_device_headless` creates the device with no surface, the Android pre-init entry (see Data Flow's Android frame pipeline). `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation, plus the persisted-pipeline-cache seam (`set_initial_pipeline_cache_data`/`pipeline_cache_data` — see Data Flow's GPU pipeline cache). |
-| `FrameGate` / `FrameInputs` / `FrameDecision` | `forgekit-shell-common::frame_gate`'s whole-frame skip gate a mobile shell consults every tick: `FrameInputs` bundles the dirtiness signals, `FrameGate::decide` returns `Run`/`Skip`, gated by a `FORGEKIT_NO_FRAME_GATE` kill switch — see Data Flow's Frame gate. |
-| `FrameStats` / `StartupSpans` | `forgekit-shell-common::perf`'s instrumentation: `FrameStats` records a ring buffer + running counters of per-pass frame timings and emits a rate-limited summary; `StartupSpans` records named cold-start milestones and emits once on first frame presented. Both gated behind `perf::enabled()`/`FORGEKIT_TRACE` — see `docs/DEVELOPMENT.md`. |
+| `FrameGate` / `FrameInputs` / `FrameDecision` | `frust-shell-common::frame_gate`'s whole-frame skip gate a mobile shell consults every tick: `FrameInputs` bundles the dirtiness signals, `FrameGate::decide` returns `Run`/`Skip`, gated by a `FRUST_NO_FRAME_GATE` kill switch — see Data Flow's Frame gate. |
+| `FrameStats` / `StartupSpans` | `frust-shell-common::perf`'s instrumentation: `FrameStats` records a ring buffer + running counters of per-pass frame timings and emits a rate-limited summary; `StartupSpans` records named cold-start milestones and emits once on first frame presented. Both gated behind `perf::enabled()`/`FRUST_TRACE` — see `docs/DEVELOPMENT.md`. |
 | `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed, sixteen-export Android JNI surface (init/frame/touch/resume/pause/destroy/surface-changed/surface-destroyed, the `nativeImeApply`/`nativeImeState`/`nativeImeAction` IME state-sync trio, `nativeSetAppearance`, `nativeOnDeepLink`, `nativeInitAccessibility`, `nativeOnInsetsChanged`, and `nativeOnBackPress`); the sole Android app entry point. `nativeInit` additionally carries a `cacheDir` string (pipeline-cache seam, see Data Flow); a process-wide `JNI_OnLoad` (native-library load, not macro-generated) starts the GPU pre-init thread `nativeInit` joins — see Data Flow's Android frame pipeline. A 2-arg (`State: Default`) and a 3-arg state-factory arm both funnel through `new_boxed_app_with`. |
-| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`forgekit-shell-ios`) is the opaque native handle behind the fourteen `forgekit_*` C exports (init/resize/render-frame/dispatch-touch/pause/resume/destroy, the `forgekit_ime_apply`/`forgekit_ime_state_json`/`forgekit_string_free` IME state-sync trio, `forgekit_set_appearance`, `forgekit_on_deep_link`, `forgekit_init_accessibility`, and `forgekit_set_insets`), mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `forgekit_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports, mirroring `android_app!`'s 2-/3-arg arms; the sole iOS app entry point. |
-| `app!` | The canonical facade entry macro (spec §5.5): binds a `Component + Default` root to all three platforms in one call — `android_app!`/`ios_app!` under the hood, plus a hidden desktop `__forgekit_main` calling `forgekit::run`. A generated `lib.rs` calls it once; `main.rs` calls the generated `__forgekit_main`; `forgekit::run(root)` is the same desktop path called directly, for apps with no mobile target. |
-| `new_boxed_app_with` | `forgekit-shell-common`'s app-construction seam: builds an `AppTree` from a state *factory* closure (`FnOnce() -> State`) rather than a pre-built value, letting the entry macros bind `Component::init`; `new_boxed_app` (`State: Default`) is the convenience wrapper over it. |
+| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`frust-shell-ios`) is the opaque native handle behind the fourteen `frust_*` C exports (init/resize/render-frame/dispatch-touch/pause/resume/destroy, the `frust_ime_apply`/`frust_ime_state_json`/`frust_string_free` IME state-sync trio, `frust_set_appearance`, `frust_on_deep_link`, `frust_init_accessibility`, and `frust_set_insets`), mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `frust_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports, mirroring `android_app!`'s 2-/3-arg arms; the sole iOS app entry point. |
+| `app!` | The canonical facade entry macro (spec §5.5): binds a `Component + Default` root to all three platforms in one call — `android_app!`/`ios_app!` under the hood, plus a hidden desktop `__frust_main` calling `frust::run`. A generated `lib.rs` calls it once; `main.rs` calls the generated `__frust_main`; `frust::run(root)` is the same desktop path called directly, for apps with no mobile target. |
+| `new_boxed_app_with` | `frust-shell-common`'s app-construction seam: builds an `AppTree` from a state *factory* closure (`FnOnce() -> State`) rather than a pre-built value, letting the entry macros bind `Component::init`; `new_boxed_app` (`State: Default`) is the convenience wrapper over it. |
 | `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines, build name/number); drives both the `build` command (release-default) and `run`'s Android/iOS pipelines (debug-default). |
 | `AndroidArtifact` / `IosArtifact` / `BuiltArtifacts` | Artifact-selection targets for the `build` command (Android APK with optional ABI splits, or an appbundle; iOS an `.app`, optionally unsigned, or an archived `.ipa` with an export method) and the resulting built-artifact path list `android_build`/`ios_build` hand back. |
 | `ProcessRunner` | Seam for every external tool invocation in the CLI, including streaming invocations (`run_streaming`) for long-running processes like `gradlew`/`logcat`; fakeable in tests. |
 | `Validator` / `DeviceDiscovery` | Pluggable `doctor`/`devices` checks, each independent and non-fatal on failure. |
-| `TemplateContext` | Render/path substitution variables for `forgekit create`'s scaffold. |
+| `TemplateContext` | Render/path substitution variables for `frust create`'s scaffold. |
