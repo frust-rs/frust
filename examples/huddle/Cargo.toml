@@ -13,19 +13,19 @@ publish = false
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `forgekit_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
+# `frust_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
 # library for the desktop `main.rs` preview binary (spec §12.9).
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# NOTE: temporary path dependency pointing at the ForgeKit repo checkout
-# that generated this project (spec §12.3: "forgekit_path" mechanism is
-# explicitly temporary). Once ForgeKit crates are published, `forgekit
+# NOTE: temporary path dependency pointing at the Frust repo checkout
+# that generated this project (spec §12.3: "frust_path" mechanism is
+# explicitly temporary). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead.
-forgekit = { path = "../../crates/forgekit" }
+frust = { path = "../../crates/frust" }
 
-# clean-signals (the async/use-case/controller/retry substrate) and its ForgeKit
+# clean-signals (the async/use-case/controller/retry substrate) and its Frust
 # bridge, BOTH by relative path to the sibling `clean-signals-rs` checkout — a
 # hard requirement, not a convenience. If `clean-signals` came in by `git`+`rev`
 # while `clean-signals-forgekit` resolved `clean-signals` by path, Cargo would
@@ -34,13 +34,13 @@ forgekit = { path = "../../crates/forgekit" }
 # crate's `use_controller`/`async_view`/`use_failure_listener` bounds
 # (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy and
 # workflow/plans/features/team-demo-android/research/RESEARCH.md §3). Requires the
-# sibling checkout at `../../../clean-signals-rs` (i.e. next to `../forgekit`) on
+# sibling checkout at `../../../clean-signals-rs` (i.e. next to `../frust`) on
 # its `develop` branch. Swap both to a git+rev spec together, never one at a time,
 # once clean-signals gains a remote.
 clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
 clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signals-forgekit" }
 
-# `forgekit-core` + `kurbo` + `peniko`: the Home screen (Phase C, task 11)
+# `frust-core` + `kurbo` + `peniko`: the Home screen (Phase C, task 11)
 # reintroduces the facade's documented "low-level escape hatch" (see
 # `docs/ARCHITECTURE.md`) for the small hand-rolled `View`/`Widget` pairs no
 # facade widget covers — `ui/swipeable.rs`'s horizontal swipe-to-action row,
@@ -52,13 +52,13 @@ clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signal
 # `ui/toast.rs`'s paint-driven `toast_entrance` slide/fade wrapper. This is the same production
 # escape-hatch dependency the pre-skeleton theme/motion screens carried (`git
 # show d02ad77~1:examples/huddle/Cargo.toml`); everything else in this crate
-# still depends on the `forgekit` facade alone, per `docs/CODE_STANDARDS.md`'s
+# still depends on the `frust` facade alone, per `docs/CODE_STANDARDS.md`'s
 # State & Reactivity Conventions.
-forgekit-core = { path = "../../crates/forgekit-core" }
+frust-core = { path = "../../crates/frust-core" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
 
-# Dev-only: the headless screen tests drive ForgeKit's `RenderRoot` directly
+# Dev-only: the headless screen tests drive Frust's `RenderRoot` directly
 # (the desktop shell's own rebuild/layout/paint seam) and pump the reactive
 # runtime's UI-thread local task queue frame by frame — no GPU, no window. The
 # harness (`tests/support/mod.rs`) is lifted from clean-signals-forgekit's own
@@ -67,11 +67,11 @@ peniko = "0.6.1"
 # `#[tokio::test]`-style controller/use-case unit tests (its time driver backs
 # `clean_signals::time::sleep`); the crate's own production code never spawns a
 # tokio runtime itself — the toast auto-dismiss timer runs on the reactive
-# runtime's background executor via `forgekit::spawn`.
+# runtime's background executor via `frust::spawn`.
 [dev-dependencies]
-forgekit-reactive = { path = "../../crates/forgekit-reactive" }
-forgekit-scene = { path = "../../crates/forgekit-scene" }
-forgekit-text = { path = "../../crates/forgekit-text" }
+frust-reactive = { path = "../../crates/frust-reactive" }
+frust-scene = { path = "../../crates/frust-scene" }
+frust-text = { path = "../../crates/frust-text" }
 reactive_graph = "0.2"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
 
@@ -79,7 +79,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 # store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
 # (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
 # example's release arm64-v8a `.so` via `scripts/size-report.sh` — see
-# `workflow/plans/features/forgekit-phase-7-performance/research/
+# `workflow/plans/features/frust-phase-7-performance/research/
 # BASELINE.md`; this package's own arm64 `.so` could not be measured
 # directly in the worktree that ran this task, since the sibling
 # `clean-signals-rs` checkout `examples/huddle` requires wasn't present —
@@ -120,10 +120,10 @@ strip = "none"
 # (6e Finding 5 / 6e-fix-1 task 03, task 08 of the examples-convergence plan):
 # vello/wgpu/naga's shader-pipeline translation runs at `opt-level = 0` by
 # default, which is slow enough on a physical iOS device that the OS SIGKILLs
-# a debug `forgekit run` before the synchronous, main-thread launch-time
+# a debug `frust run` before the synchronous, main-thread launch-time
 # shader compile finishes — huddle is now the iOS device vehicle (task 08),
 # so it needs this fix too. Identical values to the root `Cargo.toml`/
-# `templates/app/Cargo.toml.tmpl` — hand-synced, `cargo test -p forgekit-cli
+# `templates/app/Cargo.toml.tmpl` — hand-synced, `cargo test -p frust-cli
 # --test profile_sync` is the automated tripwire (task 09 rewires that test
 # to include this manifest).
 [profile.dev.package.vello]

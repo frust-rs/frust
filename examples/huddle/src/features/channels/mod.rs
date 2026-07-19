@@ -33,7 +33,7 @@ use std::time::Duration;
 use clean_signals::{
     AsyncState, ControllerCore, NoParams, RunOptions, UseCase, async_state_signal,
 };
-use forgekit::{RwSignal, Update};
+use frust::{RwSignal, Update};
 
 use crate::failure::HuddleFailure;
 use crate::mock::{self, UserStatus};
@@ -354,7 +354,7 @@ impl AsRef<ControllerCore<HuddleFailure>> for ChannelsController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgekit::GetUntracked;
+    use frust::GetUntracked;
 
     #[tokio::test]
     async fn load_populates_channels_and_dms_cleanly() {

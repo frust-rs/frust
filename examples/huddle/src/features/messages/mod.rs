@@ -27,7 +27,7 @@
 //! go through `for_channel`.
 //!
 //! `for_channel` kicks its one-time initial load via
-//! [`forgekit::spawn_local`] rather than [`forgekit::spawn`] (the
+//! [`frust::spawn_local`] rather than [`frust::spawn`] (the
 //! `Send`-background executor [`load`](MessagesController::load) itself is
 //! written against, and still uses for a later user-triggered op like `send`'s
 //! canned reply or `#firehose`'s pagination): a construct-then-immediately-
@@ -62,10 +62,10 @@
 //!
 //! Every mutable field is an `RwSignal`/atomic so a background op (a mock load,
 //! a canned-reply timer) can write it and wake the shell — the app depends on
-//! the `forgekit` facade alone and never on `reactive_graph` directly (see
+//! the `frust` facade alone and never on `reactive_graph` directly (see
 //! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions). The async ops
 //! sleep via `clean_signals::time::sleep` (the one sanctioned timer) and are
-//! driven off the screen through `forgekit::spawn`.
+//! driven off the screen through `frust::spawn`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -74,7 +74,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use clean_signals::{ControllerCore, RunOptions, UseCase};
-use forgekit::{Get, GetUntracked, RwSignal, Set, Update};
+use frust::{Get, GetUntracked, RwSignal, Set, Update};
 
 use crate::failure::HuddleFailure;
 use crate::mock;
@@ -403,7 +403,7 @@ impl MessagesController {
             let controller = Arc::new(MessagesController::new(channel_id.clone()));
             {
                 let handle = Arc::clone(&controller);
-                forgekit::spawn_local(async move {
+                frust::spawn_local(async move {
                     handle.load().await;
                 });
             }
@@ -489,7 +489,7 @@ impl MessagesController {
 
     /// After a send, drive the canned reply: wait the reply delay, show the
     /// typing indicator for its duration, then append the reply. Spawned off
-    /// the screen via `forgekit::spawn`.
+    /// the screen via `frust::spawn`.
     pub async fn deliver_reply(&self) {
         clean_signals::time::sleep(self.reply_delay).await;
         self.typing.set(true);

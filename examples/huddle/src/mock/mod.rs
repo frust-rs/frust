@@ -353,8 +353,8 @@ const MESSAGES: [Message; 40] = [
         channel_id: "general",
         author_id: 7,
         body: MessageBody::Link {
-            url: "https://forgekit.dev/blog",
-            title: "ForgeKit 1.0 is here",
+            url: "https://frust.dev/blog",
+            title: "Frust 1.0 is here",
         },
         reactions: PARTY,
     },
@@ -432,8 +432,8 @@ const MESSAGES: [Message; 40] = [
         channel_id: "engineering",
         author_id: 3,
         body: MessageBody::Link {
-            url: "https://forgekit.dev/spec",
-            title: "The ForgeKit spec",
+            url: "https://frust.dev/spec",
+            title: "The Frust spec",
         },
         reactions: NO_REACTIONS,
     },
@@ -549,7 +549,7 @@ const MESSAGES: [Message; 40] = [
         channel_id: "leadership",
         author_id: 4,
         body: MessageBody::Link {
-            url: "https://forgekit.dev/roadmap",
+            url: "https://frust.dev/roadmap",
             title: "Roadmap Q3",
         },
         reactions: NO_REACTIONS,

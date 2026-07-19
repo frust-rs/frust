@@ -6,14 +6,14 @@
 //! notifications screen's `Component` via `clean_signals_forgekit::use_controller`
 //! (the same seam [`super::SettingsController`] uses). Unlike the theming
 //! controller, nothing here is applied to the running app — these are pure
-//! preference values the screen's [`radio`](forgekit::radio) group and
-//! [`Switch`](forgekit::Switch)es read and write. It embeds a
+//! preference values the screen's [`radio`](frust::radio) group and
+//! [`Switch`](frust::Switch)es read and write. It embeds a
 //! [`ControllerCore`] by composition purely to satisfy the `use_controller`
 //! `AsRef<ControllerCore>` bound and keep the clean-architecture spine visible;
 //! it runs no use case.
 
 use clean_signals::ControllerCore;
-use forgekit::RwSignal;
+use frust::RwSignal;
 
 use crate::failure::HuddleFailure;
 

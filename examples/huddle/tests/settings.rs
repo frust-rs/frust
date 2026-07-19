@@ -7,7 +7,7 @@
 //! No render harness is needed: the theming decision is a pure function of the
 //! four selections against the ambient theme.
 
-use forgekit::{Brightness, Theme};
+use frust::{Brightness, Theme};
 use huddle::features::settings::{
     AccentChoice, BrightnessChoice, DesignChoice, NotifFrequency, TYPE_SCALE_DEFAULT,
     TYPE_SCALE_MAX, ThemeDecision, compose, slider_to_type_factor, type_factor_to_slider,

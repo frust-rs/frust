@@ -1,4 +1,4 @@
-//! `huddle` — ForgeKit's single showcase app (a Slack-style mock team chat).
+//! `huddle` — Frust's single showcase app (a Slack-style mock team chat).
 //!
 //! A 4-tab, [`Router`]-driven app: Home (channels + DMs) · Search · Activity ·
 //! You (settings). Channel → message feed → thread flow, a settings stack, and
@@ -41,7 +41,7 @@ mod shell;
 
 use std::rc::Rc;
 
-use forgekit::{
+use frust::{
     AnyView, Axis, BackHandler, Component, CrossAxisAlignment, DesignLanguage, FlexView,
     NavigatorController, PageTransition, Router, RouterDeepLinks, RwSignal, Stack, Theme,
     TransitionSpec, any, attach_back_handler, flexible, inflexible, navigator, provide_context,
@@ -63,7 +63,7 @@ pub struct HuddleState {
     /// wired to the *same* [`NavigatorController`] as [`nav`](Self::nav) (a
     /// clone sharing the same `Rc`-backed depth — see [`BackHandler`]'s docs),
     /// so a platform back press pops whatever page the router pushed and
-    /// `forgekit::handles_back` mirrors the live stack depth. [`track`](BackHandler::track)
+    /// `frust::handles_back` mirrors the live stack depth. [`track`](BackHandler::track)
     /// is called every `build`, alongside `nav.track()`.
     pub back: BackHandler<HuddleState>,
     /// The bottom navigation's selected destination (see [`shell::Tab`]).
@@ -73,7 +73,7 @@ pub struct HuddleState {
     pub toasts: ToastController,
 }
 
-/// The Huddle app's root [`Component`] (`Default`, as [`forgekit::app!`]
+/// The Huddle app's root [`Component`] (`Default`, as [`frust::app!`]
 /// requires): stateless configuration wiring the router + tab shell + overlay
 /// together.
 #[derive(Default)]
@@ -156,4 +156,4 @@ impl Component for HuddleApp {
 
 // The showcase's sole entry point (spec §5.5/§10): one line binds `HuddleApp`
 // to all three platforms.
-forgekit::app!(HuddleApp);
+frust::app!(HuddleApp);

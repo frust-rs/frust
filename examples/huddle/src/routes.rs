@@ -8,10 +8,10 @@
 //! `/you/settings/appearance`, `/you/settings/about`, and
 //! `/workspace-switcher`. Each page builder is a plain
 //! `Fn(&RouteParams) -> AnyView<HuddleState>` captured once; the navigator
-//! [`controller`](forgekit::NavigatorController) is cloned into every builder
+//! [`controller`](frust::NavigatorController) is cloned into every builder
 //! that pushes a nested page.
 
-use forgekit::{AnyView, NavigatorController, Route, RouteParams};
+use frust::{AnyView, NavigatorController, Route, RouteParams};
 
 use crate::HuddleState;
 use crate::screens;
@@ -22,7 +22,7 @@ pub fn home_page(controller: NavigatorController<HuddleState>) -> AnyView<Huddle
 }
 
 /// Build the full route table. `controller` is created *before* this table (so
-/// there is no circularity with the [`Router`](forgekit::Router) it attaches
+/// there is no circularity with the [`Router`](frust::Router) it attaches
 /// to) and cloned into every builder that pushes a nested page.
 pub fn build_routes(controller: NavigatorController<HuddleState>) -> Vec<Route<HuddleState>> {
     vec![

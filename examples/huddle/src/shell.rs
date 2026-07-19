@@ -4,8 +4,8 @@
 //!
 //! This is a **hub file finalized in the skeleton (task 10)** — Phase C screen
 //! tasks never edit it (see `src/README-phase-c.md`). The shell is the app's
-//! first real [`icon`](forgekit::icon) consumer: each tab carries an
-//! [`icons`](forgekit::icons) glyph. The bottom bar branches its
+//! first real [`icon`](frust::icon) consumer: each tab carries an
+//! [`icons`](frust::icons) glyph. The bottom bar branches its
 //! Material/Cupertino chrome on the active [`DesignLanguage`] (the settings
 //! appearance screen swaps it live).
 //!
@@ -16,7 +16,7 @@
 
 use std::rc::Rc;
 
-use forgekit::{
+use frust::{
     AnyView, DesignLanguage, Get, RouterDeepLinks, RwSignal, Set, any, cupertino_tab_bar, icon,
     icons, nav_item, navigation_bar, safe_area, tab_item,
 };
@@ -63,7 +63,7 @@ impl Tab {
     }
 
     /// The Material Symbols glyph for this tab's nav-bar icon.
-    pub fn icon(self) -> forgekit::IconSource {
+    pub fn icon(self) -> frust::IconSource {
         match self {
             Tab::Home => icons::HOME,
             Tab::Search => icons::SEARCH,
@@ -96,7 +96,7 @@ impl Tab {
 /// bottom edge clears the system gesture/nav bar — `top` stays unpadded (the
 /// bar already sits directly under the tab-shell's own content) while
 /// `left`/`right` stay enabled for a landscape display cutout. This is a
-/// huddle-side composition, not a `forgekit-widgets` change: the bar's own
+/// huddle-side composition, not a `frust-widgets` change: the bar's own
 /// background still only fills its un-padded content height (it does not
 /// extend a themed fill under the inset the way a native edge-to-edge bar
 /// would) — a known v1 gap, see this task's completion summary.

@@ -13,10 +13,10 @@
 //!
 //! # Scrim (widget-owned, per the `Dialog`/`BottomSheet` precedent)
 //!
-//! `forgekit-widgets`' `Dialog`/`BottomSheet` each paint their own scrim
+//! `frust-widgets`' `Dialog`/`BottomSheet` each paint their own scrim
 //! directly in their retained `Widget::paint` (the navigator itself paints
 //! no scrim — see `dialog.rs`'s module docs) — a capability this file, built
-//! only from the public `forgekit` facade (no `forgekit-core`/`-widgets`
+//! only from the public `frust` facade (no `frust-core`/`-widgets`
 //! dependency, no raw `PaintScene`/`Widget` access — see this crate's
 //! `Cargo.toml`), cannot replicate exactly. The nearest equivalent
 //! composable from existing widgets is a full-bleed, interactive
@@ -31,7 +31,7 @@
 //!
 //! # Drag-up-to-dismiss (task 21)
 //!
-//! Since Home's task 21 already re-added a `forgekit-core` production
+//! Since Home's task 21 already re-added a `frust-core` production
 //! dependency to this crate (`ui/swipeable.rs`, `screens/home.rs`'s escape
 //! hatches, and `ui/sheet.rs`'s bottom sheet — see this crate's `Cargo.toml`),
 //! the panel now also wraps in [`crate::ui::sheet::drag_up_dismiss`]: a
@@ -52,7 +52,7 @@
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnimationController, AnyView, Column, Curve, EdgeInsets, FrameTime,
     GestureDetector, Get, GetUntracked, Padding, Row, RwSignal, Set, SizedBox, Stack, any,
     filled_card, text,
@@ -104,7 +104,7 @@ const FILL: f64 = 10_000.0;
 
 /// The panel's slide-in travel distance, in logical px — a fixed demo value,
 /// not measured from the panel's real laid-out height (app-level view code,
-/// built only from the `forgekit` facade, has no read-back-after-layout
+/// built only from the `frust` facade, has no read-back-after-layout
 /// hook). Chosen comfortably smaller than the panel's expected content
 /// height so the animated top inset (see [`workspace_drawer_screen`]) never
 /// goes negative.
@@ -117,7 +117,7 @@ thread_local! {
     /// The entrance-progress signal, created once per process (see
     /// [`entrance_progress`]). `workspace_drawer_screen` is a plain page
     /// builder re-invoked by the navigator on *every* rebuild (see
-    /// `forgekit_widgets::nav::navigator`'s `PageBuilder` doc) — caching the
+    /// `frust_widgets::nav::navigator`'s `PageBuilder` doc) — caching the
     /// signal here is what lets repeated calls observe the same animating
     /// value instead of restarting it from zero every frame. `RwSignal` is a
     /// cheap `Copy` handle, so a `Cell` is enough (no `RefCell` needed).
@@ -134,13 +134,13 @@ thread_local! {
 }
 
 /// The `0.0..=1.0` entrance progress, animated once per process by a
-/// background timer loop — the same `forgekit::spawn` + sleep + signal-write
+/// background timer loop — the same `frust::spawn` + sleep + signal-write
 /// pattern `crate::ui::toast`'s auto-dismiss timer already uses (see its
 /// module docs), reused here because a plain page-builder function (this
 /// one) has no per-frame `PaintCtx`/`request_frame` hook to drive an
 /// [`AnimationController`] the way a retained framework `Widget` would (see
 /// `docs/ARCHITECTURE.md`'s Frame pipeline) — that hook only exists inside
-/// `forgekit-core`/`-widgets`, which this crate's production code doesn't
+/// `frust-core`/`-widgets`, which this crate's production code doesn't
 /// depend on (see this crate's `Cargo.toml`).
 fn entrance_progress() -> RwSignal<f64> {
     ENTRANCE.with(|cell| {
@@ -154,7 +154,7 @@ fn entrance_progress() -> RwSignal<f64> {
         let sig = RwSignal::new(0.0);
         cell.set(Some(sig));
 
-        forgekit::spawn(async move {
+        frust::spawn(async move {
             let mut controller =
                 AnimationController::new(ENTRANCE_DURATION).with_curve(Curve::EaseOut);
             controller.animate_to(1.0);

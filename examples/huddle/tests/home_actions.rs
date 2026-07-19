@@ -14,10 +14,10 @@
 use std::any::Any;
 use std::time::{Duration, Instant};
 
-use forgekit::{AnyView, Component};
-use forgekit_core::{FrameTime, PointerPhase, RenderRoot};
-use forgekit_reactive::ReactiveRuntime;
-use forgekit_text::TextContext;
+use frust::{AnyView, Component};
+use frust_core::{FrameTime, PointerPhase, RenderRoot};
+use frust_reactive::ReactiveRuntime;
+use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use huddle::{HuddleApp, HuddleState};
@@ -504,7 +504,7 @@ fn invite_people_confirms_and_toasts() {
     let _ = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
     // The pop applied above is queued into the navigator's pending-results
     // list at that rebuild; the `on_result` callback only flushes on the
-    // *next* event pass (forgekit-widgets' `NavigatorWidget::event` doc
+    // *next* event pass (frust-widgets' `NavigatorWidget::event` doc
     // comment) — a harmless synthetic `Move` reaches it.
     root.event(&mut state, &pointer(PointerPhase::Move, send));
 

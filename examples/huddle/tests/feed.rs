@@ -17,10 +17,10 @@
 
 use std::time::{Duration, Instant};
 
-use forgekit::{AnyView, Component, FrameTime, GetUntracked, Set, TextInputView, text_input};
-use forgekit_core::{NamedKey, RenderRoot};
-use forgekit_reactive::ReactiveRuntime;
-use forgekit_text::TextContext;
+use frust::{AnyView, Component, FrameTime, GetUntracked, Set, TextInputView, text_input};
+use frust_core::{NamedKey, RenderRoot};
+use frust_reactive::ReactiveRuntime;
+use frust_text::TextContext;
 use kurbo::Size;
 
 use huddle::features::messages::{MessagesController, PAGE_SIZE};
@@ -169,7 +169,7 @@ fn feed_screen_loads_and_renders_bubbles() {
     let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
     let mut tcx = TextContext::new();
 
-    forgekit::provide_context(forgekit::Theme::m3_baseline());
+    frust::provide_context(frust::Theme::m3_baseline());
     state.nav.router().push("/channel/general");
 
     // The first frame paints the loading state (app bar + composer, few glyphs).
@@ -251,7 +251,7 @@ fn keyed_feed_list_with_loading_and_typing_indicators() {
     let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
     let mut tcx = TextContext::new();
 
-    forgekit::provide_context(forgekit::Theme::m3_baseline());
+    frust::provide_context(frust::Theme::m3_baseline());
     state.nav.router().push("/channel/general");
 
     // Load the feed (the first frame is the loading state).

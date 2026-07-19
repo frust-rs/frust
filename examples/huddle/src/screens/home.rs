@@ -7,7 +7,7 @@
 //! is a [`swipeable_row`](crate::ui::swipeable::swipeable_row): swipe right to
 //! archive, left to mute, each raising an undo toast. A status-dot avatar (two
 //! rendered with [`Image`], the rest an initials circle painted via the
-//! `forgekit-core` escape hatch), an unread badge, and a lock icon for private
+//! `frust-core` escape hatch), an unread badge, and a lock icon for private
 //! channels complete each row. Pull-to-refresh re-runs the loader.
 //!
 //! # Why the escape hatch
@@ -16,10 +16,10 @@
 //! shimmer, so [`fill_box`](crate::ui::fill_box) (promoted to `crate::ui` in
 //! device-parity-round2 task R2 so the feed can share it) and [`Shimmer`] below
 //! are small hand-rolled `View`/`Widget` pairs built directly against
-//! `forgekit-core` — the same
+//! `frust-core` — the same
 //! precedent the pre-skeleton theme screen used for its `ColorBoxView`
 //! (`docs/ARCHITECTURE.md`'s "low-level escape hatch"). Everything else goes
-//! through the `forgekit` facade.
+//! through the `frust` facade.
 //!
 //! # ListView vs. ScrollView
 //!
@@ -52,7 +52,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnimationController, AnyView, Axis, Column, CrossAxisAlignment,
     DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get, Image, ImageFit, ImageSource,
     NavigatorController, Padding, PopResult, ProgressValue, Row, SizedBox, Stack, Theme, View,
@@ -60,9 +60,7 @@ use forgekit::{
     icons, inflexible, safe_area, scroll_view, show_cupertino_alert, show_dialog, switch, text,
     text_input, use_context,
 };
-use forgekit_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget,
-};
+use frust_core::{BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget};
 use kurbo::Size;
 use peniko::Color;
 
@@ -257,7 +255,7 @@ enum HomeSheet {
     },
 }
 
-impl forgekit::Component for HomeScreen {
+impl frust::Component for HomeScreen {
     type State = HomeState;
 
     fn init(&self) -> HomeState {
@@ -270,7 +268,7 @@ impl forgekit::Component for HomeScreen {
         // the ~600ms timer resolves via the reactive runtime's tokio context,
         // which `pump_local` enters). The latency makes the skeletons visible.
         let handle = controller.clone();
-        forgekit::spawn_local(async move {
+        frust::spawn_local(async move {
             handle.load().await;
         });
 
@@ -450,7 +448,7 @@ fn roster_list(
         scroll_view(Padding(EdgeInsets::all(8.0), Column(children))).on_refresh_release(
             move |s: &mut HomeState| {
                 let handle = s.controller.clone();
-                forgekit::spawn_local(async move {
+                frust::spawn_local(async move {
                     handle.load().await;
                 });
             },
@@ -696,7 +694,7 @@ fn swipe_wrap(
     let archive_cb = move |s: &mut HomeState| {
         let handle = s.controller.clone();
         let op_id = archive_id.clone();
-        forgekit::spawn_local(async move {
+        frust::spawn_local(async move {
             handle.set_archived(op_id, true).await;
         });
         let undo_id = archive_id.clone();
@@ -711,7 +709,7 @@ fn swipe_wrap(
     let mute_cb = move |s: &mut HomeState| {
         let handle = s.controller.clone();
         let op_id = mute_id.clone();
-        forgekit::spawn_local(async move {
+        frust::spawn_local(async move {
             handle.set_muted(op_id, true).await;
         });
         let undo_id = mute_id.clone();
@@ -846,7 +844,7 @@ fn row_action_rows(
         let next = !muted;
         let handle = s.controller.clone();
         let op_id = mute_id.clone();
-        forgekit::spawn_local(async move {
+        frust::spawn_local(async move {
             handle.set_muted(op_id, next).await;
         });
         let undo_id = mute_id.clone();
@@ -863,7 +861,7 @@ fn row_action_rows(
         s.sheet = HomeSheet::None;
         let handle = s.controller.clone();
         let op_id = archive_id.clone();
-        forgekit::spawn_local(async move {
+        frust::spawn_local(async move {
             handle.set_archived(op_id, true).await;
         });
         let undo_id = archive_id.clone();

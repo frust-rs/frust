@@ -4,7 +4,7 @@
 //! declares `mod screens;`, not `pub mod screens;` (see
 //! `src/README-phase-c.md`'s hub-file contract) — so, mirroring
 //! `tests/shell.rs`, these tests drive the whole mounted [`HuddleApp`] and
-//! navigate to `/activity` through its real [`forgekit::NavigatorController`],
+//! navigate to `/activity` through its real [`frust::NavigatorController`],
 //! rather than constructing the screen's `Component` directly. Paint output is
 //! asserted the same black-box way `tests/shell.rs` does (`RecScene`'s glyph
 //! and rounded-rect geometry — no GPU, no window).
@@ -21,7 +21,7 @@
 //!
 //! The shell's navigator runs an `M3FadeThrough` cross-fade at boot and again
 //! when `/activity` is pushed. The shared [`support::frame`] helper paints at
-//! [`forgekit_core::FrameTime::ZERO`], which freezes that transition forever —
+//! [`frust_core::FrameTime::ZERO`], which freezes that transition forever —
 //! and while a transition is in flight the navigator suppresses ALL page
 //! input, so an app-bar or row tap dispatched mid-transition never reaches the
 //! Activity screen. [`mount_loaded_activity_tab`] therefore advances the paint
@@ -42,17 +42,17 @@
 //! than a hand-computed offset. The app-bar actions are icons that paint only
 //! glyph runs (no locatable rect), so [`MARK_ALL_READ`] and [`BACK_ACTION`]
 //! are derived from `AppBarView::layout`'s fixed geometry
-//! (`crates/forgekit-widgets/src/material/appbar.rs`: 64dp bar, 4px edge
+//! (`crates/frust-widgets/src/material/appbar.rs`: 64dp bar, 4px edge
 //! inset, a 24dp icon flush to the leading/trailing edge → a center 16px in
 //! from that edge, at the bar's 32px vertical middle).
 
 use std::any::Any;
 use std::time::{Duration, Instant};
 
-use forgekit::{AnyView, Component};
-use forgekit_core::{FrameTime, RenderRoot};
-use forgekit_reactive::ReactiveRuntime;
-use forgekit_text::TextContext;
+use frust::{AnyView, Component};
+use frust_core::{FrameTime, RenderRoot};
+use frust_reactive::ReactiveRuntime;
+use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use huddle::{HuddleApp, HuddleState};

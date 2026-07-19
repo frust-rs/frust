@@ -11,7 +11,7 @@
 //! `SECTION_HEADER_HEIGHT` constants, mirrored here as the same magic numbers
 //! since `screens` is a private module unreachable from this integration-test
 //! crate), and a two-line result row's `TWO_LINE_HEIGHT` (72px, re-exported
-//! from `forgekit-widgets`) is a fixed, non-font-metric-dependent constant —
+//! from `frust-widgets`) is a fixed, non-font-metric-dependent constant —
 //! so `AppBar(64) + field(56) + header(32) + half-row(36) = 188` is fully
 //! deterministic, the same style of hand-computed offset `tests/shell.rs`'s
 //! bottom-bar test (`bar_y = 568.0`) already relies on. The one exception is
@@ -34,9 +34,9 @@
 
 use std::any::Any;
 
-use forgekit::{AnyView, Component, GetUntracked, Set};
-use forgekit_core::{FrameTime, NamedKey, RenderRoot};
-use forgekit_text::TextContext;
+use frust::{AnyView, Component, GetUntracked, Set};
+use frust_core::{FrameTime, NamedKey, RenderRoot};
+use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use huddle::features::search::{MAX_MESSAGE_HITS, SearchController};
@@ -47,16 +47,16 @@ use support::{H, RecScene, W, char_key, frame, named_key, serial, setup, tap};
 
 type Root = RenderRoot<HuddleState, AnyView<HuddleState>>;
 
-/// AppBar height (a private const in `forgekit-widgets::material::appbar`,
+/// AppBar height (a private const in `frust-widgets::material::appbar`,
 /// mirrored here — the same precedent `tests/shell.rs`'s `bar_y` uses).
 const APP_BAR_HEIGHT: f64 = 64.0;
 /// Mirrors `screens/search.rs`'s private `FIELD_HEIGHT`.
 const FIELD_HEIGHT: f64 = 56.0;
 /// Mirrors `screens/search.rs`'s private `SECTION_HEADER_HEIGHT`.
 const SECTION_HEADER_HEIGHT: f64 = 32.0;
-/// Half of `forgekit::TWO_LINE_HEIGHT` (a two-line row's supporting text
+/// Half of `frust::TWO_LINE_HEIGHT` (a two-line row's supporting text
 /// promotes every search result row to that height).
-const HALF_TWO_LINE_ROW: f64 = forgekit::TWO_LINE_HEIGHT / 2.0;
+const HALF_TWO_LINE_ROW: f64 = frust::TWO_LINE_HEIGHT / 2.0;
 
 /// The bottom navigation bar's Search tab slot (see `tests/shell.rs`'s own
 /// `slot_centers`/`bar_y`): tapping here switches the active tab to Search.
@@ -312,7 +312,7 @@ fn a_channel_result_row_navigates_to_its_channel_feed() {
 /// appearing swaps `search_field`'s row from a bare `TextInput` to a
 /// `FlexView` wrapping one — a genuine `AnyView` type change at that single
 /// child, correctly focus-clearing by the same identity-change contract
-/// `forgekit-widgets`' `rebuild_child_clears_active_on_type_swap` unit test
+/// `frust-widgets`' `rebuild_child_clears_active_on_type_swap` unit test
 /// documents at the widget level). That transition is orthogonal to (and out
 /// of scope for) this task, which is scoped to `results_container`; seeding
 /// the query already non-empty isolates the scenario this task actually
@@ -427,7 +427,7 @@ fn typing_across_the_empty_to_nonempty_query_boundary_keeps_the_field_focused() 
 /// tapping the clear-button icon: tapping ANY sibling within `search_field`'s
 /// multi-child `FlexView` row always blurs the field via the unrelated
 /// (and correct) blur-on-outside-tap convention (`route_event`'s
-/// `kept_focus` bookkeeping in `forgekit-widgets::lib`) — true both before
+/// `kept_focus` bookkeeping in `frust-widgets::lib`) — true both before
 /// and after this fix, since the row was already this same `FlexView` shape
 /// once non-empty even pre-fix. Driving the clear via `Backspace` instead
 /// isolates the row-type-stability mechanism this task actually fixes from

@@ -9,7 +9,7 @@
 //! The shell's navigator runs an `M3FadeThrough` cross-fade at boot (two Home
 //! pages — the seeded root and the pushed `"/"` route) and again when a detail
 //! route (`/user/:id`, `/workspace-switcher`) is pushed. The shared
-//! [`support::frame`] helper paints at [`forgekit_core::FrameTime::ZERO`],
+//! [`support::frame`] helper paints at [`frust_core::FrameTime::ZERO`],
 //! which freezes that transition forever — so the *leaving* Home page keeps
 //! painting alongside the entering page, and every rounded-rect count (and the
 //! `rounded[2]` empirical index the drawer taps rely on) is contaminated by
@@ -23,9 +23,9 @@
 
 use std::any::Any;
 
-use forgekit::{AnyView, Component};
-use forgekit_core::{FrameTime, RenderRoot};
-use forgekit_text::TextContext;
+use frust::{AnyView, Component};
+use frust_core::{FrameTime, RenderRoot};
+use frust_text::TextContext;
 use kurbo::Size;
 
 use huddle::{HuddleApp, HuddleState};
@@ -129,7 +129,7 @@ fn push_and_settle(route: &str) -> (Root, HuddleState, TextContext, RecScene) {
 /// local time/role·team) and its avatar tile.
 ///
 /// Hero paints transparently outside a page transition (see
-/// `forgekit_widgets::nav::hero`'s module docs) — there is no distinct "hero
+/// `frust_widgets::nav::hero`'s module docs) — there is no distinct "hero
 /// frame" the paint-recording harness can observe on a page with no
 /// transition in flight, so per this task's spec this asserts the wrapped
 /// avatar's own rounded-rect chrome renders in the expected structural
@@ -155,7 +155,7 @@ fn profile_renders_known_mock_user_fields() {
     // Message and Huddle-call buttons), and the persistent shell's bottom
     // navigation bar paints its active-tab selection pill (one
     // `fill_rounded_rect`, appended after the navigator's page content — see
-    // `forgekit-widgets`' `navbar.rs`), for 4 total.
+    // `frust-widgets`' `navbar.rs`), for 4 total.
     assert_eq!(
         scene.rounded.len(),
         4,
@@ -195,7 +195,7 @@ fn drawer_renders_three_workspaces() {
     // The drawer paints 4 rounded rects (1 panel background + 1 initials tile
     // per workspace, 3 workspaces), and the persistent bottom navigation bar
     // paints its active-tab selection pill (one `fill_rounded_rect`, appended
-    // after the navigator's page content — see `forgekit-widgets`' `navbar.rs`),
+    // after the navigator's page content — see `frust-widgets`' `navbar.rs`),
     // for 5 total.
     assert_eq!(
         scene.rounded.len(),

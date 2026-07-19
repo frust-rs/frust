@@ -4,7 +4,7 @@
 // the LICENSE-MIT file), at your option.
 //
 // Vendored verbatim from accesskit_android 0.7.5's `java/` directory. The
-// `forgekit-shell-android` crate's `InjectingAdapter` (phase 6d) locates this
+// `frust-shell-android` crate's `InjectingAdapter` (phase 6d) locates this
 // class at runtime via `env.find_class("dev/accesskit/android/Delegate")` and
 // registers its native methods dynamically, so the package and class name
 // (`dev.accesskit.android.Delegate`) are load-bearing — do not rename or move.

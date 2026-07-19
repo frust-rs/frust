@@ -5,14 +5,14 @@
 //! Hosts a [`NotificationsController`] via
 //! [`use_controller`](clean_signals_forgekit::use_controller) — the same
 //! component-scoped seam the appearance screen uses. The frequency
-//! [`radio`](forgekit::radio) group and the [`Switch`](forgekit::Switch)es are
+//! [`radio`](frust::radio) group and the [`Switch`](frust::Switch)es are
 //! controlled components: each reports its requested value into a controller
 //! signal, and the next rebuild reflects the stored value back (no theme is
 //! applied — these are pure preference data).
 
 use std::sync::Arc;
 
-use forgekit::{
+use frust::{
     AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, Get, Padding, Row, Set,
     SizedBox, Switch, any, app_bar, component, flexible, inflexible, radio, scroll_view, text,
 };
@@ -36,7 +36,7 @@ struct NotificationsState {
     controller: Arc<NotificationsController>,
 }
 
-impl forgekit::Component for NotificationsScreen {
+impl frust::Component for NotificationsScreen {
     type State = NotificationsState;
 
     fn init(&self) -> NotificationsState {

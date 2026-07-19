@@ -1,13 +1,13 @@
 //! Shared headless-test harness for the huddle integration tests: a GPU-free
 //! paint target, a one-frame helper, a recording waker, an ambient-owner setup,
 //! and an async pump-poll loop — lifted from `clean-signals-forgekit`'s own
-//! `tests/support/mod.rs` (itself the ForgeKit `examples/inbox` recipe), factored
+//! `tests/support/mod.rs` (itself the Frust `examples/inbox` recipe), factored
 //! so every `tests/*.rs` file (each its own crate root) can share it. Over the
 //! copied base this module additionally carries [`RecScene`] recording
 //! rounded-rect geometry (field/button chrome) so a test can locate and tap a
 //! button, plus generic [`pointer`]/[`tap`]/[`center`] pointer-event helpers and
 //! [`char_key`]/[`named_key`] keyboard-event helpers (lifted from `tests/team.rs`'s
-//! original per-file copies and `forgekit-widgets::textinput`'s own test harness)
+//! original per-file copies and `frust-widgets::textinput`'s own test harness)
 //! so every `tests/*.rs` file can drive a real synthetic tap or keystroke without
 //! re-deriving the event shapes.
 //!
@@ -19,13 +19,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use forgekit_core::{
+use frust_core::{
     FrameTime, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene, PointerButton,
     PointerEvent, PointerPhase, RenderRoot, View,
 };
-use forgekit_reactive::{FrameWaker, ReactiveRuntime};
-use forgekit_scene::GlyphRun;
-use forgekit_text::TextContext;
+use frust_reactive::{FrameWaker, ReactiveRuntime};
+use frust_scene::GlyphRun;
+use frust_text::TextContext;
 use kurbo::{Point, Rect, Size};
 use peniko::Color;
 use reactive_graph::owner::Owner;
@@ -182,7 +182,7 @@ pub fn center((origin, size): (Point, Size)) -> Point {
 }
 
 /// A typed-character key event (already-resolved text, mirroring a platform's
-/// `KeyEvent.text` — see `forgekit_core::event::Key::Character`'s doc).
+/// `KeyEvent.text` — see `frust_core::event::Key::Character`'s doc).
 pub fn char_key(c: &str) -> InputEvent {
     InputEvent::Key(KeyEvent {
         key: Key::Character(c.to_string()),

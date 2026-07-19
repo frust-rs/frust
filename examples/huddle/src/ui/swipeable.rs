@@ -1,8 +1,8 @@
 //! `swipeable_row` — a reusable horizontal swipe-to-action row (Phase C, task 11).
 //!
 //! A small hand-rolled [`View`]/[`Widget`] pair built directly against
-//! `forgekit-core` — the facade's documented "low-level escape hatch" pattern
-//! (`forgekit::App::new`, see `crates/forgekit/src/lib.rs`) applied one layer
+//! `frust-core` — the facade's documented "low-level escape hatch" pattern
+//! (`frust::App::new`, see `crates/frust/src/lib.rs`) applied one layer
 //! down, the same precedent the pre-skeleton theme/motion screens used for
 //! their `ColorBoxView` (`git show d02ad77~1:examples/huddle/src/screens/theme.rs`).
 //! No facade widget reveals action areas under a horizontally dragged child, so
@@ -31,8 +31,8 @@
 
 use std::rc::Rc;
 
-use forgekit::Theme;
-use forgekit_core::{
+use frust::Theme;
+use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FrameTime,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase,
     SemanticsCtx, TOUCH_SLOP, View, Widget, any,
@@ -75,8 +75,8 @@ fn resolve_marker_color(theme: Option<&Theme>) -> Color {
 
 /// The affordance glyph painted in a revealed swipe strip. A real Material
 /// icon glyph (`icons::REPLY`) can't be shaped from this facade-only escape-hatch
-/// widget (glyph shaping lives in `forgekit-text`, unreachable from a raw
-/// `forgekit-core` `Widget` — see the module docs), so the reply affordance is a
+/// widget (glyph shaping lives in `frust-text`, unreachable from a raw
+/// `frust-core` `Widget` — see the module docs), so the reply affordance is a
 /// hand-drawn left-pointing arrow rendered with `stroke_line`, delivering the
 /// "later polish" the base marker's doc comment deferred.
 #[derive(Clone, Copy)]
@@ -92,7 +92,7 @@ pub enum SwipeMarker {
 type Callback<State> = Rc<dyn Fn(&mut State)>;
 
 /// The erased callback shape the widget invokes on commit (mirrors
-/// `forgekit-widgets`' own `ErasedCallback`).
+/// `frust-widgets`' own `ErasedCallback`).
 type Erased = Box<dyn FnMut(&mut EventCtx)>;
 
 /// One swipe action: an accent color for the revealed strip plus the callback
@@ -171,7 +171,7 @@ impl<State: 'static> SwipeableRow<State> {
 }
 
 /// Erase a typed action callback into the `EventCtx`-driven shape (mirrors
-/// `forgekit-widgets::erase_callback`).
+/// `frust-widgets::erase_callback`).
 fn erase<State: 'static>(cb: &Callback<State>) -> Erased {
     let cb = cb.clone();
     Box::new(move |ctx: &mut EventCtx| {
@@ -181,7 +181,7 @@ fn erase<State: 'static>(cb: &Callback<State>) -> Erased {
 }
 
 /// Build a [`ChildPod`] wrapping an [`AnyView`]'s (double-boxed) element —
-/// the same shape `forgekit-widgets::build_child` produces, re-derived here
+/// the same shape `frust-widgets::build_child` produces, re-derived here
 /// because that helper is crate-private.
 fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
     let element: Box<dyn Widget> = view.build(ctx);
@@ -189,7 +189,7 @@ fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) ->
 }
 
 /// Reconcile the child through its `ChildPod` (mirrors
-/// `forgekit-widgets::rebuild_child`).
+/// `frust-widgets::rebuild_child`).
 fn rebuild_child<State: 'static>(
     prev: &AnyView<State>,
     next: &AnyView<State>,
@@ -203,7 +203,7 @@ fn rebuild_child<State: 'static>(
     next.rebuild(prev, element, ctx)
 }
 
-/// Tear the child down (mirrors `forgekit-widgets::teardown_child`).
+/// Tear the child down (mirrors `frust-widgets::teardown_child`).
 fn teardown_child<State: 'static>(
     view: &AnyView<State>,
     pod: &mut ChildPod,
@@ -567,7 +567,7 @@ const PRESS_SCALE: f64 = 0.92;
 /// composer send button / emoji-cell micro-interaction (task 22).
 ///
 /// It never captures the pointer or consumes an event: it forwards every phase
-/// to the child (so the wrapped [`GestureDetector`](forgekit::GestureDetector)'s
+/// to the child (so the wrapped [`GestureDetector`](frust::GestureDetector)'s
 /// own tap still fires, and its capture propagates up unchanged — see
 /// `docs/ARCHITECTURE.md`'s Event pipeline), reading the `Down`/`Up`/`Cancel`
 /// phases only to toggle the pressed visual. The dip is applied with

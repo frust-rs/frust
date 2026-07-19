@@ -4,7 +4,7 @@
 //! `src/README-phase-c.md`'s hub-file contract), so — mirroring
 //! `tests/activity.rs`/`tests/search.rs` — these tests drive the whole
 //! mounted [`HuddleApp`] and navigate through its real
-//! [`forgekit::NavigatorController`] rather than constructing the screen's
+//! [`frust::NavigatorController`] rather than constructing the screen's
 //! view function directly. Paint output is asserted the same black-box way
 //! every other Phase C screen test does (`RecScene`'s glyph and rounded-rect
 //! geometry — no GPU, no window).
@@ -44,10 +44,10 @@
 use std::any::Any;
 use std::time::{Duration, Instant};
 
-use forgekit::{AnyView, Component};
-use forgekit_core::{FrameTime, InputEvent, Key, KeyEvent, Modifiers, NamedKey, RenderRoot};
-use forgekit_reactive::ReactiveRuntime;
-use forgekit_text::TextContext;
+use frust::{AnyView, Component};
+use frust_core::{FrameTime, InputEvent, Key, KeyEvent, Modifiers, NamedKey, RenderRoot};
+use frust_reactive::ReactiveRuntime;
+use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use huddle::features::messages::MessagesController;
@@ -71,7 +71,7 @@ const BACK_ACTION: Point = Point::new(16.0, 32.0);
 
 /// A synthetic Shift+Enter — the multiline composer's submit chord (`Enter`
 /// alone inserts a newline in multiline mode; see `screens::channel_feed`'s
-/// composer doc and `forgekit-widgets::textinput`'s `submit_on_enter ^
+/// composer doc and `frust-widgets::textinput`'s `submit_on_enter ^
 /// modifiers.shift` contract).
 fn shift_enter() -> InputEvent {
     InputEvent::Key(KeyEvent {
@@ -240,7 +240,7 @@ fn mount_thread(
 /// disc (1 — the root/reply rows themselves are FLAT as of
 /// device-parity-round2 task R2b, painting no card chrome of their own), the
 /// composer's `TextInput` chrome (2 — a border rect plus a slightly inset
-/// fill rect, see `forgekit-widgets::textinput`'s paint impl), and the
+/// fill rect, see `frust-widgets::textinput`'s paint impl), and the
 /// persistent bottom navigation bar's own selection-indicator pill (1) — plus
 /// real text glyphs for every header/body line. (Pre-R2b this was 7: the
 /// root's `elevated_card` + avatar + one `outlined_card` per reply — task R2b

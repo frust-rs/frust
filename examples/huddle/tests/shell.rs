@@ -14,12 +14,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use forgekit::{
+use frust::{
     AnyView, Component, GetUntracked, PopResult, Theme, TransitionSpec, handles_back,
     push_back_press,
 };
-use forgekit_core::RenderRoot;
-use forgekit_text::TextContext;
+use frust_core::RenderRoot;
+use frust_text::TextContext;
 use kurbo::Point;
 
 use huddle::ui::toast::ToastController;
@@ -114,7 +114,7 @@ fn routes_push_and_pop_without_panicking() {
 }
 
 /// The Android/gesture back contract (device-parity task 14, item 3): a back
-/// press pops the mounted navigator, and `forgekit::handles_back` mirrors
+/// press pops the mounted navigator, and `frust::handles_back` mirrors
 /// whether the framework will consume the *next* press (a single-page stack
 /// bubbles to the platform instead). `state.back.track()` runs every
 /// `HuddleApp::build` (see `lib.rs`), so a plain `rebuild()` — no layout/paint
@@ -124,7 +124,7 @@ fn routes_push_and_pop_without_panicking() {
 /// `handles_back` refreshes one rebuild *after* the stack change that would
 /// flip it (`BackHandler::track`'s documented timing-lag contract); every
 /// assertion on the flag below settles with one extra `rebuild()` first,
-/// mirroring `forgekit`'s own `back_glue` test.
+/// mirroring `frust`'s own `back_glue` test.
 #[test]
 fn back_press_pops_the_navigator_and_root_bubbles_to_the_platform() {
     let _g = serial();
@@ -185,14 +185,14 @@ fn modal_round_trip_delivers_its_result() {
     let mut state = HuddleApp.init();
     let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
 
-    forgekit::provide_context(Theme::m3_baseline());
+    frust::provide_context(Theme::m3_baseline());
     root.rebuild(&mut logic, &mut state);
 
     let delivered: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let sink = Arc::clone(&delivered);
     let controller = state.nav.router().controller().clone();
     controller.push_transparent_for_result(
-        || forgekit::any(forgekit::text("probe dialog")),
+        || frust::any(frust::text("probe dialog")),
         TransitionSpec::NONE,
         move |_s: &mut HuddleState, result: PopResult| {
             *sink.lock().unwrap() = result.take::<String>();
@@ -214,10 +214,7 @@ fn modal_round_trip_delivers_its_result() {
     // content area (window center) — chrome must not swallow it first.
     root.event(
         &mut state,
-        &support::pointer(
-            forgekit_core::PointerPhase::Move,
-            Point::new(W / 2.0, 300.0),
-        ),
+        &support::pointer(frust_core::PointerPhase::Move, Point::new(W / 2.0, 300.0)),
     );
     assert_eq!(
         delivered.lock().unwrap().clone(),

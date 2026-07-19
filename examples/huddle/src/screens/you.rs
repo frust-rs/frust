@@ -7,7 +7,7 @@
 //! inert-but-styled account rows (Saved items, Preferences) — each a
 //! [`list_item`] with a leading glyph and a trailing [`icons::CHEVRON_RIGHT`].
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView,
     Image, ImageFit, NavigatorController, Padding, SizedBox, Stack, Theme, any, app_bar, flexible,
     hero, icon, icons, inflexible, list_item, scroll_view, text, use_context,

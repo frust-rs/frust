@@ -6,7 +6,7 @@
 //! [`HuddleApp`] through its real navigator and assert black-box against
 //! [`RecScene`]'s recorded rounded-rect geometry plus the shared
 //! [`MessagesController`] signals — no GPU, no window. The long-press timer is
-//! measured across paints (see `forgekit-widgets`'s `gesture.rs`), so a press is
+//! measured across paints (see `frust-widgets`'s `gesture.rs`), so a press is
 //! simulated by advancing the paint clock between `Down` and `Up`.
 //!
 //! # Locating sheet chrome
@@ -20,10 +20,10 @@
 use std::any::Any;
 use std::time::{Duration, Instant};
 
-use forgekit::{AnyView, Component};
-use forgekit_core::{FrameTime, RenderRoot};
-use forgekit_reactive::ReactiveRuntime;
-use forgekit_text::TextContext;
+use frust::{AnyView, Component};
+use frust_core::{FrameTime, RenderRoot};
+use frust_reactive::ReactiveRuntime;
+use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use huddle::features::messages::MessagesController;
@@ -33,7 +33,7 @@ use huddle::{HuddleApp, HuddleState};
 mod support;
 use support::{RecScene, W, center, pointer, serial, setup, tap};
 
-use forgekit_core::PointerPhase;
+use frust_core::PointerPhase;
 
 type Root = RenderRoot<HuddleState, AnyView<HuddleState>>;
 
@@ -478,9 +478,9 @@ fn reaction_count(controller: &MessagesController, id: u32, emoji: &str) -> u32 
 }
 
 /// A synthetic Shift+Enter — the multiline composer's submit chord.
-fn shift_enter() -> forgekit_core::InputEvent {
-    use forgekit_core::{Key, KeyEvent, Modifiers, NamedKey};
-    forgekit_core::InputEvent::Key(KeyEvent {
+fn shift_enter() -> frust_core::InputEvent {
+    use frust_core::{Key, KeyEvent, Modifiers, NamedKey};
+    frust_core::InputEvent::Key(KeyEvent {
         key: Key::Named(NamedKey::Enter),
         modifiers: Modifiers {
             shift: true,

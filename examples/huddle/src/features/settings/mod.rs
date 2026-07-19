@@ -3,7 +3,7 @@
 //! [`SettingsController`] owns the two selection signals ([`DesignChoice`] and
 //! [`BrightnessChoice`]) and drives the [`SetTheme`] use case, which is the
 //! **one and only** place the whole app forces its active [`Theme`] via
-//! `forgekit::set_app_theme`/`clear_app_theme`. Every other screen just reads
+//! `frust::set_app_theme`/`clear_app_theme`. Every other screen just reads
 //! the ambient theme (`use_context::<Theme>()` / `PaintCtx::theme_as`), so a
 //! change here live-swaps all four tabs at once and, because the override is a
 //! process-global (`docs/ARCHITECTURE.md`'s Theme delivery), survives navigation.
@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use clean_signals::{ControllerCore, RunOptions, UseCase};
-use forgekit::{
+use frust::{
     AnimationController, Brightness, Color, Curve, DesignLanguage, FrameTime, GetUntracked,
     ImageSource, RwSignal, Set, Theme, TypeScale, clear_app_theme, set_app_theme,
 };
@@ -52,7 +52,7 @@ const VEIL_STEP: Duration = Duration::from_millis(16);
 
 /// A 1×1 solid-color image source — the facade-only way to paint an arbitrary
 /// (possibly translucent) filled rectangle: stretch it to fill with
-/// [`ImageFit::Fill`](forgekit::ImageFit). Used for accent swatches, the current
+/// [`ImageFit::Fill`](frust::ImageFit). Used for accent swatches, the current
 /// user's avatar block, and the theme-swap fade veil, none of which map onto a
 /// themed widget's own surface fill.
 pub fn solid_source(color: Color) -> ImageSource {
@@ -419,7 +419,7 @@ impl SettingsController {
     /// which the appearance screen reads and paints over its own subtree.
     pub fn trigger_veil(&self) {
         let veil = self.veil;
-        forgekit::spawn(async move {
+        frust::spawn(async move {
             let mut ctrl = AnimationController::new(VEIL_FADE).with_curve(Curve::EaseInOut);
             ctrl.forward();
             let mut clock_nanos: u64 = 0;

@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use clean_signals::async_state::AsyncState;
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, GestureDetector, Get,
     SizedBox, any, app_bar, filled_card, filter_chip, flexible, hero, icon, icons, inflexible,
     list_item, scroll_view, text,
@@ -64,7 +64,7 @@ pub fn activity_screen() -> AnyView<HuddleState> {
     )
     .on_tap(move |_s: &mut HuddleState| {
         let handle = Arc::clone(&mark_all_read_ctrl);
-        forgekit::spawn_local(async move {
+        frust::spawn_local(async move {
             handle.mark_all_read().await;
         });
     }))]);
@@ -151,8 +151,8 @@ fn row_view(row: ActivityRow) -> AnyView<HuddleState> {
     if unread {
         // A static "Unread" indicator (the dot/tint the spec calls for) — a
         // real `filter_chip` rather than a hand-rolled fill, since production
-        // Huddle code depends on the `forgekit` facade alone, not
-        // `forgekit-core` directly (see `examples/huddle/Cargo.toml`'s
+        // Huddle code depends on the `frust` facade alone, not
+        // `frust-core` directly (see `examples/huddle/Cargo.toml`'s
         // dependency notes), which rules out a custom leaf `Widget` here. The
         // chip's own toggle callback is a deliberate no-op: it is a passive
         // per-row marker, not itself interactive (the app bar's "mark all

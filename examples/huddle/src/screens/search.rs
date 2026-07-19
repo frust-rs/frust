@@ -1,6 +1,6 @@
 //! Search tab — live filter across channels, messages, and people.
 //!
-//! The search field ([`forgekit::TextInput`], filtering as-you-type via
+//! The search field ([`frust::TextInput`], filtering as-you-type via
 //! `on_change`) drives
 //! [`SearchController`](crate::features::search::SearchController)'s query
 //! signal; its `Memo`-derived results render as three sections (Channels /
@@ -42,7 +42,7 @@
 //! the field's recorded focus/IME path, silently swallowing the very next
 //! keystroke on the real per-frame pipeline.
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild,
     FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, filled_card, flexible,
     hero, icon, icons, inflexible, keyed, list_item, scroll_view, text,
@@ -105,7 +105,7 @@ fn results_container(query: &str, results: SearchResults) -> AnyView<HuddleState
 /// The clear-button slot's own concrete type never changes either: rather
 /// than being present only once the query is non-empty (the pre-fix
 /// behavior), it always renders the identical `GestureDetector`-wrapped
-/// [`IconView`](forgekit::IconView), painted fully transparent
+/// [`IconView`](frust::IconView), painted fully transparent
 /// ([`Color::TRANSPARENT`]) and wired to a no-op tap while the query is
 /// empty — an inert placeholder of the SAME widget, not a swapped-in
 /// different one. Before this fix, `row`'s own concrete type flipped between
@@ -263,7 +263,7 @@ fn message_row(hit: MessageHit) -> AnyView<HuddleState> {
 /// "initials-circle escape-hatch" `PLAN.md` names, approximated here with a
 /// filled card (no dedicated circular-avatar primitive exists yet in the
 /// widget catalog).
-fn avatar_badge(initials: &str) -> impl forgekit::View<HuddleState> {
+fn avatar_badge(initials: &str) -> impl frust::View<HuddleState> {
     SizedBox::<HuddleState>(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(filled_card(Align(
         Alignment::CENTER,
         any(text(initials.to_string()).size(14.0)),

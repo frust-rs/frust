@@ -53,7 +53,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView,
     GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar,
     hero, icon, icons, inflexible, keyed, scroll_view, text, text_input,
@@ -306,9 +306,9 @@ fn thread_page(
     content: AnyView<HuddleState>,
     composer: Option<AnyView<HuddleState>>,
 ) -> AnyView<HuddleState> {
-    let mut children: Vec<forgekit::FlexChild<HuddleState>> = vec![
+    let mut children: Vec<frust::FlexChild<HuddleState>> = vec![
         inflexible(thread_app_bar(title)),
-        forgekit::flexible(1, content),
+        frust::flexible(1, content),
     ];
     if let Some(composer) = composer {
         children.push(inflexible(composer));
@@ -339,7 +339,7 @@ fn thread_content(
     root: &FeedMessage,
     sheet_sig: RwSignal<ThreadSheet>,
 ) -> AnyView<HuddleState> {
-    let mut children: Vec<forgekit::FlexChild<HuddleState>> =
+    let mut children: Vec<frust::FlexChild<HuddleState>> =
         vec![inflexible(root_bubble(controller, root, sheet_sig))];
 
     if root.replies.is_empty() {
@@ -357,7 +357,7 @@ fn thread_content(
 /// ever appended, never reordered/removed, so a stable index is a stable
 /// identity here).
 fn reply_list(replies: &[FeedReply], sheet_sig: RwSignal<ThreadSheet>) -> AnyView<HuddleState> {
-    let children: Vec<forgekit::FlexChild<HuddleState>> = replies
+    let children: Vec<frust::FlexChild<HuddleState>> = replies
         .iter()
         .enumerate()
         .map(|(idx, reply)| keyed(idx, reply_bubble(reply, sheet_sig)))
@@ -488,13 +488,13 @@ fn reaction_chips(
     controller: &Arc<MessagesController>,
     root: &FeedMessage,
 ) -> Option<AnyView<HuddleState>> {
-    let mut chips: Vec<forgekit::FlexChild<HuddleState>> = Vec::new();
+    let mut chips: Vec<frust::FlexChild<HuddleState>> = Vec::new();
     for reaction in &root.reactions {
         let label = format!("{} {}", reaction.emoji, reaction.count);
         let emoji = reaction.emoji.clone();
         let ctrl = Arc::clone(controller);
         let id = root.id;
-        chips.push(inflexible(any(forgekit::filter_chip::<HuddleState, _>(
+        chips.push(inflexible(any(frust::filter_chip::<HuddleState, _>(
             label,
             reaction.mine,
             move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
@@ -635,7 +635,7 @@ fn composer_bar(
         FlexView::new(
             Axis::Horizontal,
             vec![
-                forgekit::flexible(1, any(field)),
+                frust::flexible(1, any(field)),
                 inflexible(any(SizedBox(Some(8.0), None))),
                 inflexible(any(Padding(EdgeInsets::symmetric(0.0, 6.0), send_btn))),
             ],

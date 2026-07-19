@@ -4,7 +4,7 @@
 //! # Why hand-derived, not HCT-computed
 //!
 //! Material 3's real dynamic color derives a full tonal palette from a single
-//! seed via the HCT color space. ForgeKit ships no HCT engine (a non-goal for
+//! seed via the HCT color space. Frust ships no HCT engine (a non-goal for
 //! the showcase), so each accent here is a **hand-authored role table**: a
 //! small set of the M3 color roles ([`primary`](ColorScheme::primary),
 //! `on_primary`, `primary_container`, `on_primary_container`, `secondary`,
@@ -22,7 +22,7 @@
 //! primary/secondary/tertiary spine and lets the surface neutrals ride along,
 //! which is enough for the swatch + live-swap demo.
 
-use forgekit::{Brightness, Color, ColorScheme, Theme};
+use frust::{Brightness, Color, ColorScheme, Theme};
 
 /// The selected accent palette. [`AccentChoice::Default`] is the seed state on a
 /// fresh appearance screen: no accent override, so the active baseline's own

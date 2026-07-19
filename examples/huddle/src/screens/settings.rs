@@ -5,7 +5,7 @@
 //! leading glyph and a trailing [`icons::CHEVRON_RIGHT`], pushing its nested page
 //! through the shared [`NavigatorController`].
 
-use forgekit::{
+use frust::{
     AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, NavigatorController, Padding,
     any, app_bar, flexible, icon, icons, inflexible, list_item, scroll_view,
 };

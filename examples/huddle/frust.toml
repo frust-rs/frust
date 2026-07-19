@@ -1,15 +1,15 @@
 [app]
 name = "huddle"
 org = "it.f0x"
-description = "A new ForgeKit application."
+description = "A new Frust application."
 
 # Deep-link scheme registered in the generated Android manifest / iOS
 # Info.plist (task 08 — task 02 wired the app-side `router_with_deep_links`
 # but deferred the platform manifest scheme to this task). Informational
-# here — ForgeKit tooling doesn't parse this section; it documents what
-# `forgekit create --deeplink-scheme` baked into the platform templates.
+# here — Frust tooling doesn't parse this section; it documents what
+# `frust create --deeplink-scheme` baked into the platform templates.
 # Editing it does NOT re-render the manifest/Info.plist — re-run
-# `forgekit create --overwrite` (or edit the platform files directly) to
+# `frust create --overwrite` (or edit the platform files directly) to
 # change it after scaffolding.
 [deeplink]
 scheme = "teamdemo"
@@ -19,7 +19,7 @@ scheme = "teamdemo"
 # prod = {}
 
 # Android release signing is driven by `android/key.properties`, a Java
-# properties file the Gradle build reads (this file is NOT parsed by ForgeKit).
+# properties file the Gradle build reads (this file is NOT parsed by Frust).
 # It must be gitignored (the generated .gitignore already excludes
 # `key.properties` and `*.jks`) so the keystore/passwords never enter version
 # control. Keys:
@@ -31,7 +31,7 @@ scheme = "teamdemo"
 #   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
 #     -storetype JKS -keysize 2048 -validity 10000 -alias upload
 # Without key.properties, release builds fall back to debug signing (a Gradle
-# warning is logged); `forgekit build` makes a missing keystore a hard error.
+# warning is logged); `frust build` makes a missing keystore a hard error.
 # [signing]
 # keystore = "android/key.properties"
 

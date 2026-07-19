@@ -30,7 +30,7 @@
 //!
 //! # Two deliberate adaptations to the facade-only widget set
 //!
-//! This example crate depends on the `forgekit` facade **alone** (see
+//! This example crate depends on the `frust` facade **alone** (see
 //! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions), so a couple of
 //! the task's visual items are expressed with the widgets the facade ships
 //! rather than a bespoke `Widget`:
@@ -40,18 +40,18 @@
 //!   layout is deferred" — its own module docs) and reconciles by raw index,
 //!   which cannot render variable-height chat bubbles nor preserve the keyed
 //!   identity the entrance item asks for. The feed is instead a
-//!   [`scroll_view`](forgekit::scroll_view) over a [`keyed`](forgekit::keyed)
-//!   [`Column`](forgekit::Column) — variable heights + stable per-message keys
+//!   [`scroll_view`](frust::scroll_view) over a [`keyed`](frust::keyed)
+//!   [`Column`](frust::Column) — variable heights + stable per-message keys
 //!   — with the same near-start "load older" trigger driven off
-//!   [`ScrollView::on_scroll`](forgekit::ScrollView) instead of
+//!   [`ScrollView::on_scroll`](frust::ScrollView) instead of
 //!   `on_near_start`.
 //! - **Per-message entrance + typing indicator.** A per-item slide/fade
 //!   `AnimationController` needs a custom painting `Widget`, which a facade-only
 //!   crate cannot author (the same limitation the `ui::toast` module already
 //!   notes). The keyed list gives newly-appended messages stable identity, and
 //!   the "being typed" affordance uses the facade's self-animating
-//!   [`loading_indicator`](forgekit::loading_indicator) /
-//!   [`cupertino_activity_indicator`](forgekit::cupertino_activity_indicator)
+//!   [`loading_indicator`](frust::loading_indicator) /
+//!   [`cupertino_activity_indicator`](frust::cupertino_activity_indicator)
 //!   as a live animation. Message rows are FLAT (no `Card` wrapper) as of
 //!   device-parity-round2 task R2 — the `filled_card`/`elevated_card` bubble
 //!   backgrounds were removed because the card's hardcoded 16px inset inflated
@@ -62,7 +62,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, DesignLanguage, EdgeInsets,
     FlexView, GestureDetector, Get, GetUntracked, MainAxisAlignment, NavigatorController, Padding,
     RwSignal, ScrollInfo, Set, SizedBox, Stack, Theme, Update, any, app_bar, assist_chip,
@@ -337,7 +337,7 @@ fn feed_app_bar(
         channel_id.to_string()
     };
 
-    let back = forgekit::GestureDetector(icon(icons::ARROW_BACK).size(24.0))
+    let back = frust::GestureDetector(icon(icons::ARROW_BACK).size(24.0))
         .on_tap(move |_st: &mut HuddleState| navigator.pop());
 
     // Clears the top status-bar/cutout inset (device-parity task 14, item 1)
@@ -370,7 +370,7 @@ fn feed_body(
         return empty_feed_state();
     }
 
-    let mut children: Vec<forgekit::FlexChild<HuddleState>> = Vec::new();
+    let mut children: Vec<frust::FlexChild<HuddleState>> = Vec::new();
 
     if loading_older {
         children.push(keyed("loading_older", loading_older_row(design)));
@@ -400,7 +400,7 @@ fn feed_body(
                     && !pager.loading_older.get_untracked()
                 {
                     let pager = Arc::clone(&pager);
-                    forgekit::spawn(async move {
+                    frust::spawn(async move {
                         pager.load_older().await;
                     });
                 }
@@ -580,7 +580,7 @@ fn reaction_chips(
         return None;
     }
 
-    let mut chips: Vec<forgekit::FlexChild<HuddleState>> = Vec::new();
+    let mut chips: Vec<frust::FlexChild<HuddleState>> = Vec::new();
     for reaction in &msg.reactions {
         let label = format!("{} {}", reaction.emoji, reaction.count);
         let emoji = reaction.emoji.clone();
@@ -700,8 +700,8 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
     };
     any(Padding(
         EdgeInsets::all(8.0),
-        forgekit::Align(
-            forgekit::Alignment::CENTER,
+        frust::Align(
+            frust::Alignment::CENTER,
             FlexView::new(
                 Axis::Horizontal,
                 vec![
@@ -774,7 +774,7 @@ fn composer_bar(
     let send_icon = icon(icons::SEND).size(24.0);
     let send_btn: AnyView<HuddleState> = if has_text {
         // press_pop adds the pressed-state scale dip (task 22 micro-interaction).
-        any(press_pop(forgekit::GestureDetector(send_icon).on_tap(
+        any(press_pop(frust::GestureDetector(send_icon).on_tap(
             move |_st: &mut HuddleState| {
                 let text = composer.get_untracked();
                 submit(&send_ctrl, composer, text);
@@ -816,7 +816,7 @@ fn composer_bar(
 /// Home tile idiom (`fill_box` disc + `SizedBox+Align` centered glyph) so the
 /// tile is exactly [`COMPOSER_TILE`] rather than the card's 24-inset-driven
 /// size; a headless test still locates its rounded chrome (the fill_box).
-fn affordance_button<F>(leading: forgekit::IconSource, on_tap: F) -> AnyView<HuddleState>
+fn affordance_button<F>(leading: frust::IconSource, on_tap: F) -> AnyView<HuddleState>
 where
     F: Fn(&mut HuddleState) + 'static,
 {
@@ -843,7 +843,7 @@ fn submit(controller: &Arc<MessagesController>, composer: RwSignal<String>, text
     controller.send_now(text);
     composer.set(String::new());
     let controller = Arc::clone(controller);
-    forgekit::spawn(async move {
+    frust::spawn(async move {
         controller.deliver_reply().await;
     });
 }

@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Axis, Brightness, Button, CardVariant, Color, Column,
     CrossAxisAlignment, DesignLanguage, EdgeInsets, FlexView, Get, Image, ImageFit, Padding, Row,
     Set, SizedBox, Stack, Switch, Theme, any, app_bar, button_group, card, component,
@@ -55,7 +55,7 @@ struct AppearanceState {
     controller: Arc<SettingsController>,
 }
 
-impl forgekit::Component for AppearanceScreen {
+impl frust::Component for AppearanceScreen {
     type State = AppearanceState;
 
     fn init(&self) -> AppearanceState {
@@ -320,7 +320,7 @@ fn veil_layer(opacity: f64, surface: Color) -> AnyView<AppearanceState> {
 fn spawn_apply(controller: &Arc<SettingsController>, current: Theme) {
     controller.trigger_veil();
     let handle = Arc::clone(controller);
-    forgekit::spawn_local(async move {
+    frust::spawn_local(async move {
         handle.apply(current).await;
     });
 }

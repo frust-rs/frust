@@ -4,10 +4,10 @@
 //! The app icon is painted from `assets/logo.png` via [`Image`] when the bytes
 //! decode, degrading to an initials block (the same solid-tile escape hatch the
 //! You tab's avatar uses) otherwise. Below it: the app name + version, a
-//! [`filled_card`] Licenses row (inert), and an [`outlined_card`] "ForgeKit"
+//! [`filled_card`] Licenses row (inert), and an [`outlined_card`] "Frust"
 //! link-style row that raises a toast (no real browser — a showcase non-goal).
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView,
     Image, ImageFit, ImageSource, Padding, SizedBox, Stack, Theme, any, app_bar, filled_card,
     flexible, inflexible, outlined_card, scroll_view, text, use_context,
@@ -42,7 +42,7 @@ pub fn about_screen() -> AnyView<HuddleState> {
         )),
         any(Align(
             Alignment::CENTER,
-            text("The ForgeKit showcase app").size(13.0),
+            text("The Frust showcase app").size(13.0),
         )),
     ]));
 
@@ -58,17 +58,17 @@ pub fn about_screen() -> AnyView<HuddleState> {
     ));
 
     // A link-style card (outlined variant) that raises a toast on tap.
-    let forgekit_link = any(Padding(
+    let frust_link = any(Padding(
         EdgeInsets::symmetric(0.0, 6.0),
         outlined_card(Padding(
             EdgeInsets::all(16.0),
             Column(vec![
-                any(text("ForgeKit").size(15.0)),
-                any(text("forgekit.dev").size(12.0)),
+                any(text("Frust").size(15.0)),
+                any(text("frust.dev").size(12.0)),
             ]),
         ))
         .on_press(|s: &mut HuddleState| {
-            s.toasts.show("Opens forgekit.dev");
+            s.toasts.show("Opens frust.dev");
         }),
     ));
 
@@ -78,7 +78,7 @@ pub fn about_screen() -> AnyView<HuddleState> {
             header,
             any(SizedBox(None, Some(24.0))),
             licenses,
-            forgekit_link,
+            frust_link,
         ]),
     )));
 

@@ -46,7 +46,7 @@ use std::time::Duration;
 
 use clean_signals::async_state::{AsyncState, async_state_signal};
 use clean_signals::{ControllerCore, RunOptions, UseCase};
-use forgekit::{GetUntracked, RwSignal};
+use frust::{GetUntracked, RwSignal};
 
 use crate::failure::HuddleFailure;
 use crate::mock::{self, ActivityItem};
@@ -222,7 +222,7 @@ impl ActivityController {
             let controller = Arc::new(ActivityController::new(mock::activity()));
             {
                 let handle = Arc::clone(&controller);
-                forgekit::spawn_local(async move {
+                frust::spawn_local(async move {
                     handle.load().await;
                 });
             }

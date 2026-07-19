@@ -3,7 +3,7 @@
 //! device-parity-round2 task R2, so the feed restyle can share them).
 //!
 //! Two small hand-rolled [`View`]/[`Widget`] pairs built directly against
-//! `forgekit-core` — the facade's documented "low-level escape hatch" pattern
+//! `frust-core` — the facade's documented "low-level escape hatch" pattern
 //! (`docs/ARCHITECTURE.md`), the same precedent `ui::swipeable`/`ui::toast`
 //! already use:
 //!
@@ -20,7 +20,7 @@
 //!   (`filled_box(Padding(10‥12, …), color, 8)`) without the card inset that
 //!   ballooned the whole feed (device-parity-round2 BUG.md B2).
 
-use forgekit_core::{
+use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
 };
@@ -125,7 +125,7 @@ pub struct FilledBoxWidget {
 }
 
 /// Build a [`ChildPod`] wrapping an [`AnyView`]'s element (mirrors
-/// `forgekit-widgets::build_child`, re-derived because that helper is
+/// `frust-widgets::build_child`, re-derived because that helper is
 /// crate-private — same shape `ui::swipeable` re-derives).
 fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
     let element: Box<dyn Widget> = view.build(ctx);
@@ -133,7 +133,7 @@ fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) ->
 }
 
 /// Reconcile the child through its `ChildPod` (mirrors
-/// `forgekit-widgets::rebuild_child`).
+/// `frust-widgets::rebuild_child`).
 fn rebuild_child<State: 'static>(
     prev: &AnyView<State>,
     next: &AnyView<State>,
@@ -147,7 +147,7 @@ fn rebuild_child<State: 'static>(
     next.rebuild(prev, element, ctx)
 }
 
-/// Tear the child down (mirrors `forgekit-widgets::teardown_child`).
+/// Tear the child down (mirrors `frust-widgets::teardown_child`).
 fn teardown_child<State: 'static>(
     view: &AnyView<State>,
     pod: &mut ChildPod,

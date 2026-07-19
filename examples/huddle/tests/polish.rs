@@ -13,10 +13,10 @@
 use std::any::Any;
 use std::time::{Duration, Instant};
 
-use forgekit::{AnyView, Component, GetUntracked};
-use forgekit_core::{FrameTime, PointerPhase, RenderRoot};
-use forgekit_reactive::ReactiveRuntime;
-use forgekit_text::TextContext;
+use frust::{AnyView, Component, GetUntracked};
+use frust_core::{FrameTime, PointerPhase, RenderRoot};
+use frust_reactive::ReactiveRuntime;
+use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use huddle::features::messages::MessagesController;

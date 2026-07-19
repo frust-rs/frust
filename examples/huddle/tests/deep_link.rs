@@ -5,8 +5,8 @@
 //! single-test-per-binary convention) — it can't race a sibling test over that
 //! shared state.
 
-use forgekit::{AnyView, Component};
-use forgekit_core::RenderRoot;
+use frust::{AnyView, Component};
+use frust_core::RenderRoot;
 
 use huddle::{HuddleApp, HuddleState};
 
@@ -29,7 +29,7 @@ fn warm_deep_link_to_a_parameterized_route_resolves_and_builds() {
 
     // A warm deep link (the desktop dev seam) reaches a user id no visible list
     // button leads to, exercising `/user/:id` param capture end-to-end.
-    forgekit::push_deep_link("/user/7");
+    frust::push_deep_link("/user/7");
     root.rebuild(&mut logic, &mut state);
     assert!(
         root.root_id().is_some(),

@@ -8,7 +8,7 @@
 //! [`settings_appearance`], which already hosts the live theme-swap mechanism.
 //!
 //! Every screen renders and navigates TODAY via the shared [`scaffold`] helper:
-//! its own [`app_bar`](forgekit::app_bar) plus a centered body.
+//! its own [`app_bar`](frust::app_bar) plus a centered body.
 
 pub mod activity;
 pub mod channel_feed;
@@ -23,14 +23,14 @@ pub mod thread;
 pub mod workspace_drawer;
 pub mod you;
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, any, app_bar, flexible,
     inflexible, text,
 };
 
 use crate::HuddleState;
 
-/// A titled screen scaffold: the screen's own [`app_bar`](forgekit::app_bar) at
+/// A titled screen scaffold: the screen's own [`app_bar`](frust::app_bar) at
 /// the top and a centered `body` filling the rest. The shared shape every
 /// placeholder screen (and many Phase C screens) is built from.
 pub fn scaffold(title: &str, body: AnyView<HuddleState>) -> AnyView<HuddleState> {

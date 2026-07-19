@@ -45,7 +45,7 @@
 
 use std::cell::RefCell;
 
-use forgekit::{Get, GetUntracked, Memo, RwSignal};
+use frust::{Get, GetUntracked, Memo, RwSignal};
 
 use crate::mock;
 

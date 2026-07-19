@@ -18,7 +18,7 @@
 //! since this route (`src/routes.rs`, a frozen hub file) calls this function
 //! with no `NavigatorController` argument, unlike `channel_feed`/`settings`.
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Button, Column, CrossAxisAlignment, Row, SizedBox, Theme, any,
     filled_card, hero, text, use_context,
 };
@@ -107,7 +107,7 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
 /// this screen and `crate::screens::workspace_drawer` both use.
 ///
 /// There is no perfect-circle or per-corner-radius primitive in the public
-/// `forgekit` widget vocabulary (only [`filled_card`]'s uniform corner
+/// `frust` widget vocabulary (only [`filled_card`]'s uniform corner
 /// radius), so this is a uniformly-rounded square tile rather than a true
 /// circular avatar — a documented simplification, not an oversight.
 fn initials_tile<State: 'static>(initials: &str, tile_size: f64, font_size: f32) -> AnyView<State> {

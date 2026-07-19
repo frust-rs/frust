@@ -9,9 +9,9 @@
 /* Begin PBXBuildFile section */
 		ABCDABCDABCDABCDABCD0020 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0010 /* AppDelegate.swift */; };
 		ABCDABCDABCDABCDABCD0021 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */; };
-		ABCDABCDABCDABCDABCD0022 /* ForgeKitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0012 /* ForgeKitView.swift */; };
-		ABCDABCDABCDABCDABCD0023 /* ForgeKitViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0013 /* ForgeKitViewController.swift */; };
-		ABCDABCDABCDABCDABCD0024 /* ForgeKitTextInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0016 /* ForgeKitTextInput.swift */; };
+		ABCDABCDABCDABCDABCD0022 /* FrustView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0012 /* FrustView.swift */; };
+		ABCDABCDABCDABCDABCD0023 /* FrustViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0013 /* FrustViewController.swift */; };
+		ABCDABCDABCDABCDABCD0024 /* FrustTextInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0016 /* FrustTextInput.swift */; };
 		ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -19,11 +19,11 @@
 		ABCDABCDABCDABCDABCD0003 /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ABCDABCDABCDABCDABCD0010 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
-		ABCDABCDABCDABCDABCD0012 /* ForgeKitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForgeKitView.swift; sourceTree = "<group>"; };
-		ABCDABCDABCDABCDABCD0013 /* ForgeKitViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForgeKitViewController.swift; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD0012 /* FrustView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustView.swift; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD0013 /* FrustViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustViewController.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0015 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
-		ABCDABCDABCDABCDABCD0016 /* ForgeKitTextInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForgeKitTextInput.swift; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD0016 /* FrustTextInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustTextInput.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -70,9 +70,9 @@
 			children = (
 				ABCDABCDABCDABCDABCD0010 /* AppDelegate.swift */,
 				ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */,
-				ABCDABCDABCDABCDABCD0012 /* ForgeKitView.swift */,
-				ABCDABCDABCDABCDABCD0013 /* ForgeKitViewController.swift */,
-				ABCDABCDABCDABCDABCD0016 /* ForgeKitTextInput.swift */,
+				ABCDABCDABCDABCDABCD0012 /* FrustView.swift */,
+				ABCDABCDABCDABCDABCD0013 /* FrustViewController.swift */,
+				ABCDABCDABCDABCDABCD0016 /* FrustTextInput.swift */,
 				ABCDABCDABCDABCDABCD0015 /* Runner-Bridging-Header.h */,
 				ABCDABCDABCDABCDABCD0014 /* Info.plist */,
 				ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */,
@@ -147,7 +147,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\ncase \"$PLATFORM_NAME\" in\niphonesimulator)\nif [ \"$ARCHS\" = \"x86_64\" ]; then TRIPLE=\"x86_64-apple-ios\"; else TRIPLE=\"aarch64-apple-ios-sim\"; fi\n;;\n*)\nTRIPLE=\"aarch64-apple-ios\"\n;;\nesac\ncase \"$CONFIGURATION\" in\nRelease*)\nPROFILE_DIR=\"release\"\nCARGO_FLAGS=\"--release\"\n;;\nProfile*)\nPROFILE_DIR=\"profile\"\nCARGO_FLAGS=\"--profile profile\"\n;;\n*)\nPROFILE_DIR=\"debug\"\nCARGO_FLAGS=\"\"\n;;\nesac\nif [ -n \"${FORGEKIT_DEFINES:-}\" ]; then\nfor kv in $(echo \"$FORGEKIT_DEFINES\" | base64 -d | tr ';' ' '); do export \"$kv\"; done\nfi\nexport IPHONEOS_DEPLOYMENT_TARGET\ncd \"$SRCROOT/..\"\ncargo build --target \"$TRIPLE\" $CARGO_FLAGS\ncp \"target/$TRIPLE/$PROFILE_DIR/libhuddle.a\" \"$BUILT_PRODUCTS_DIR/\"\n";
+			shellScript = "set -e\ncase \"$PLATFORM_NAME\" in\niphonesimulator)\nif [ \"$ARCHS\" = \"x86_64\" ]; then TRIPLE=\"x86_64-apple-ios\"; else TRIPLE=\"aarch64-apple-ios-sim\"; fi\n;;\n*)\nTRIPLE=\"aarch64-apple-ios\"\n;;\nesac\ncase \"$CONFIGURATION\" in\nRelease*)\nPROFILE_DIR=\"release\"\nCARGO_FLAGS=\"--release\"\n;;\nProfile*)\nPROFILE_DIR=\"profile\"\nCARGO_FLAGS=\"--profile profile\"\n;;\n*)\nPROFILE_DIR=\"debug\"\nCARGO_FLAGS=\"\"\n;;\nesac\nif [ -n \"${FRUST_DEFINES:-}\" ]; then\nfor kv in $(echo \"$FRUST_DEFINES\" | base64 -d | tr ';' ' '); do export \"$kv\"; done\nfi\nexport IPHONEOS_DEPLOYMENT_TARGET\ncd \"$SRCROOT/..\"\ncargo build --target \"$TRIPLE\" $CARGO_FLAGS\ncp \"target/$TRIPLE/$PROFILE_DIR/libhuddle.a\" \"$BUILT_PRODUCTS_DIR/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -158,9 +158,9 @@
 			files = (
 				ABCDABCDABCDABCDABCD0020 /* AppDelegate.swift in Sources */,
 				ABCDABCDABCDABCDABCD0021 /* SceneDelegate.swift in Sources */,
-				ABCDABCDABCDABCDABCD0022 /* ForgeKitView.swift in Sources */,
-				ABCDABCDABCDABCDABCD0023 /* ForgeKitViewController.swift in Sources */,
-				ABCDABCDABCDABCDABCD0024 /* ForgeKitTextInput.swift in Sources */,
+				ABCDABCDABCDABCDABCD0022 /* FrustView.swift in Sources */,
+				ABCDABCDABCDABCDABCD0023 /* FrustViewController.swift in Sources */,
+				ABCDABCDABCDABCDABCD0024 /* FrustTextInput.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -241,7 +241,7 @@
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
-				FORGEKIT_DEFINES = "";
+				FRUST_DEFINES = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -279,7 +279,7 @@
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
-				FORGEKIT_DEFINES = "";
+				FRUST_DEFINES = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -317,8 +317,8 @@
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
-				FORGEKIT_DEFINES = "";
-				FORGEKIT_PROFILE = 1;
+				FRUST_DEFINES = "";
+				FRUST_PROFILE = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

@@ -1,7 +1,7 @@
 //! `sheet` — a reusable bottom-sheet overlay (Phase D, task 20).
 //!
 //! A hand-rolled [`View`]/[`Widget`] pair built directly against
-//! `forgekit-core` — the same "low-level escape hatch" precedent
+//! `frust-core` — the same "low-level escape hatch" precedent
 //! [`crate::ui::swipeable`] uses (`SwipeableRow`), rotated from the horizontal
 //! swipe axis to a vertical bottom sheet. No facade widget mounts an in-screen
 //! sheet with a scrim + slide-in + drag-to-dismiss that a *plain* screen
@@ -12,7 +12,7 @@
 //!
 //! The facade's `show_bottom_sheet`/`show_action_sheet` helpers push a
 //! transparent modal *page* over a mounted [`NavigatorController`]
-//! (`forgekit`'s catalog `widgets_modals` screen is the reference). Huddle's
+//! (`frust`'s catalog `widgets_modals` screen is the reference). Huddle's
 //! feed/thread screens are plain functions that only reach the shell's router
 //! through `&mut HuddleState`, with no per-screen navigator to push over, and
 //! wiring one in would churn the frozen `routes.rs`. This overlay instead mounts
@@ -46,7 +46,7 @@
 //!
 //! [`SheetWidget::layout`] rides the panel above the on-screen keyboard: it
 //! reads the *raw* `WindowInsets::view_insets.bottom` off `LayoutCtx` (not the
-//! derived, safe-area `padding()` `forgekit_widgets::safe_area` consumes —
+//! derived, safe-area `padding()` `frust_widgets::safe_area` consumes —
 //! that formula intentionally clamps to zero under an IME overlap, backwards
 //! for a widget that must proactively avoid it) and shrinks the height
 //! available to the panel by that amount, since the shell never resizes the
@@ -57,11 +57,11 @@
 
 use std::rc::Rc;
 
-use forgekit::{
+use frust::{
     Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector, IconSource, Padding, SizedBox,
     Theme, filled_card, flexible, icon, inflexible, text,
 };
-use forgekit_core::{
+use frust_core::{
     AnimationController, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx,
     EventResult, FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton,
     PointerEvent, PointerPhase, SemanticsCtx, TOUCH_SLOP, View, Widget, any,
@@ -600,9 +600,9 @@ where
     State: 'static,
     F: Fn(&mut State, &'static str) + Clone + 'static,
 {
-    let mut rows: Vec<forgekit::FlexChild<State>> = Vec::new();
+    let mut rows: Vec<frust::FlexChild<State>> = Vec::new();
     for chunk in REACTION_EMOJI.chunks(EMOJI_COLS) {
-        let mut cells: Vec<forgekit::FlexChild<State>> = Vec::new();
+        let mut cells: Vec<frust::FlexChild<State>> = Vec::new();
         for &emoji in chunk {
             let pick = on_pick.clone();
             // No `Align` here: under a flex row's loose cross constraint it would
@@ -895,7 +895,7 @@ pub fn action_menu<State: 'static>(rows: Vec<AnyView<State>>) -> AnyView<State> 
 /// consumes for its own panel (see the [module docs](self)'s Keyboard
 /// avoidance section), exposed standalone for bottom-anchored content that
 /// isn't a [`sheet`] overlay (`channel_feed`'s composer bar). Unlike
-/// `forgekit_widgets::safe_area`, this reads the *raw* inset, not the derived
+/// `frust_widgets::safe_area`, this reads the *raw* inset, not the derived
 /// safe-area `padding()` (which intentionally clamps to zero under an IME
 /// overlap — the wrong direction for proactive keyboard avoidance).
 pub struct KeyboardAvoidView<State: 'static> {
@@ -940,7 +940,7 @@ impl Widget for KeyboardAvoidWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         // Dynamic, like `SheetWidget::layout` above: the inset arrives via
         // `ctx` fresh every pass rather than being a view-declared constant
-        // (mirrors `forgekit_widgets::safe_area`'s rationale for not wrapping
+        // (mirrors `frust_widgets::safe_area`'s rationale for not wrapping
         // a `Padding`).
         let bottom = ctx.window_insets().view_insets.bottom.max(0.0);
         let child_bc = BoxConstraints::new(
@@ -969,9 +969,7 @@ impl Widget for KeyboardAvoidWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgekit_core::{
-        BuildCtx, LayoutCtx, PaintCtx, RenderRoot, WindowEdgeInsets, WindowInsets,
-    };
+    use frust_core::{BuildCtx, LayoutCtx, PaintCtx, RenderRoot, WindowEdgeInsets, WindowInsets};
     use kurbo::Size;
     use std::any::Any;
 
@@ -1097,7 +1095,7 @@ mod tests {
 
     /// A pushed IME inset (device-parity task 14, item 2) lifts the panel's
     /// settled top edge above the simulated keyboard — driven via
-    /// `RenderRoot::set_insets` (mirrors `forgekit-widgets::safe_area`'s test
+    /// `RenderRoot::set_insets` (mirrors `frust-widgets::safe_area`'s test
     /// harness pattern).
     #[test]
     fn ime_inset_lifts_the_panel_above_the_keyboard() {

@@ -13,7 +13,7 @@
 //! # Auto-dismiss
 //!
 //! Each queued toast schedules its own removal on the background reactive
-//! runtime ([`forgekit::spawn`] + `clean_signals::time::sleep`), writing the
+//! runtime ([`frust::spawn`] + `clean_signals::time::sleep`), writing the
 //! removal back through the queue signal, which wakes the shell. The dismiss
 //! delay is configurable ([`ToastController::with_dismiss_after`]) so the
 //! headless suite can drive a short-lived toast deterministically.
@@ -21,7 +21,7 @@
 //! # Entrance animation (task 22)
 //!
 //! Each toast card is wrapped in [`toast_entrance`], a small paint-driven
-//! escape-hatch `View`/`Widget` (built directly on `forgekit-core`, the same
+//! escape-hatch `View`/`Widget` (built directly on `frust-core`, the same
 //! precedent [`crate::ui::sheet`]/[`crate::ui::swipeable`] use) that slides the
 //! card up and fades it in via an [`AnimationController`] — the sheet's
 //! paint-driven-controller pattern, not the drawer's off-screen timer, since a
@@ -36,11 +36,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use forgekit::{
+use frust::{
     Align, Alignment, AnyView, Column, EdgeInsets, Get, GetUntracked, Padding, RwSignal, SizedBox,
     Update, any, filled_card, text,
 };
-use forgekit_core::{
+use frust_core::{
     AnimationController, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
 };
@@ -160,7 +160,7 @@ impl ToastController {
         // wakes the shell (and the headless pump loop) when it fires.
         let entries = self.inner.entries;
         let after = self.inner.dismiss_after;
-        forgekit::spawn(async move {
+        frust::spawn(async move {
             clean_signals::time::sleep(after).await;
             entries.update(|v| v.retain(|e| e.id != id));
         });
@@ -173,7 +173,7 @@ impl ToastController {
 /// [`ToastController`] queue and paints each toast bottom-anchored above every
 /// screen.
 pub fn toast_overlay(controller: ToastController) -> AnyView<crate::HuddleState> {
-    any(forgekit::component(ToastOverlay { controller }))
+    any(frust::component(ToastOverlay { controller }))
 }
 
 /// The toast overlay component (see [`toast_overlay`]).
@@ -187,7 +187,7 @@ pub struct ToastOverlayState {
     controller: ToastController,
 }
 
-impl forgekit::Component for ToastOverlay {
+impl frust::Component for ToastOverlay {
     type State = ToastOverlayState;
 
     fn init(&self) -> ToastOverlayState {
@@ -222,7 +222,7 @@ fn toast_card(entry: ToastEntry) -> AnyView<ToastOverlayState> {
     if let Some(action) = entry.action {
         row.push(any(SizedBox(Some(12.0), None)));
         let callback = action.callback.clone();
-        row.push(any(forgekit::Button(
+        row.push(any(frust::Button(
             action.label,
             move |st: &mut ToastOverlayState| {
                 (callback)();
@@ -233,10 +233,7 @@ fn toast_card(entry: ToastEntry) -> AnyView<ToastOverlayState> {
 
     any(toast_entrance(Padding(
         EdgeInsets::all(8.0),
-        filled_card(Padding(
-            EdgeInsets::symmetric(16.0, 12.0),
-            forgekit::Row(row),
-        )),
+        filled_card(Padding(EdgeInsets::symmetric(16.0, 12.0), frust::Row(row))),
     )))
 }
 
@@ -372,7 +369,7 @@ impl Widget for ToastEntranceWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgekit_core::{FrameTime, RenderRoot};
+    use frust_core::{FrameTime, RenderRoot};
     use peniko::Color;
 
     /// A leaf child painting a fill_rect at its own origin — so the recording

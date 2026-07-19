@@ -2,14 +2,14 @@
 //! design languages and both brightness states.
 //!
 //! Deliberately one `#[test]` iterating the whole matrix, rather than one test
-//! per combination: `forgekit::provide_context` writes to the ambient reactive
+//! per combination: `frust::provide_context` writes to the ambient reactive
 //! `Owner`'s context map, so keeping the whole sweep in one test avoids any
 //! ordering assumption between parallel `#[test]` threads over that state.
 //!
 //! Rebuild only — no layout/paint, so no `TextContext` is needed.
 
-use forgekit::{AnyView, Brightness, Component, DesignLanguage, Theme};
-use forgekit_core::RenderRoot;
+use frust::{AnyView, Brightness, Component, DesignLanguage, Theme};
+use frust_core::RenderRoot;
 
 use huddle::{HuddleApp, HuddleState};
 
@@ -55,7 +55,7 @@ fn every_route_builds_under_both_design_languages_and_brightness_states() {
             DesignLanguage::Cupertino => Theme::cupertino_baseline(),
         }
         .with_brightness(brightness);
-        forgekit::provide_context(theme);
+        frust::provide_context(theme);
 
         // A fresh mount per combo keeps the navigator's page stack from
         // compounding across routes × combos.
