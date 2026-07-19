@@ -37,6 +37,12 @@ pub struct Device {
     /// parsed by `ios_run::run_physical`'s iOS-17+ gate — task 67). `None`
     /// when the discoverer doesn't surface one (Android, iOS Simulator).
     pub os_version: Option<String>,
+    /// The discoverer's raw connection-state string, surfaced in the
+    /// `forgekit devices` listing (e.g. devicectl's `tunnelState`:
+    /// "connected"/"disconnected" — the latter is a paired, targetable
+    /// device whose CoreDevice tunnel comes up lazily on install/launch).
+    /// `None` where the discoverer has no such notion (Android, Simulator).
+    pub connection_state: Option<String>,
 }
 
 /// Result of a single discoverer's run: devices found, plus human-readable

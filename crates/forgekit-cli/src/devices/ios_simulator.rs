@@ -57,6 +57,7 @@ fn parse_simctl_list(stdout: &str) -> Result<DiscoveryResult> {
                     platform: Platform::Ios,
                     kind: Kind::Simulator,
                     os_version: None,
+                    connection_state: None,
                 });
             }
         }

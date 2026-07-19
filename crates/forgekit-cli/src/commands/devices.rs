@@ -24,6 +24,14 @@ pub fn run(verbose: bool) -> Result<u8> {
         for note in &notes {
             println!("[note] {note}");
         }
+    } else if !notes.is_empty() {
+        // A device skipped by discovery (unpaired, unreachable, missing
+        // tool) must never be a silent absence — point at the details.
+        println!();
+        println!(
+            "{} discovery note(s) — rerun with -v for details",
+            notes.len()
+        );
     }
 
     Ok(0)
@@ -38,12 +46,21 @@ fn print_table(devices: &[Device]) {
         .max(4);
     let id_width = devices.iter().map(|d| d.id.len()).max().unwrap_or(2).max(2);
     for device in devices {
+        // e.g. devicectl's tunnelState — "disconnected" is still a
+        // targetable paired device (the tunnel comes up lazily on
+        // install/launch), so it's informational, not an availability flag.
+        let connection = device
+            .connection_state
+            .as_deref()
+            .map(|state| format!("  [{state}]"))
+            .unwrap_or_default();
         println!(
-            "{:name_width$}  {:id_width$}  {:8}  {}",
+            "{:name_width$}  {:id_width$}  {:8}  {}{}",
             device.name,
             device.id,
             platform_label(device.platform),
             kind_label(device.kind),
+            connection,
         );
     }
 }

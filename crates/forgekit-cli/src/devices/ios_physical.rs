@@ -55,7 +55,7 @@ fn tmp_json_path() -> PathBuf {
 }
 
 /// `xcrun devicectl list devices --json-output <file>` JSON structure:
-/// `{"result": {"devices": [{identifier, deviceProperties: {name, osVersionNumber}, connectionProperties: {tunnelState}}]}}`.
+/// `{"result": {"devices": [{identifier, deviceProperties: {name, osVersionNumber}, connectionProperties: {tunnelState, pairingState}}]}}`.
 #[derive(Debug, Deserialize)]
 struct DevicectlOutput {
     result: DevicectlResult,
@@ -85,10 +85,15 @@ struct DevicectlDeviceProperties {
     os_version_number: Option<String>,
 }
 
+/// Both connection fields are `Option` with lenient defaults: devicectl's
+/// JSON schema is undocumented and field presence varies across Xcode
+/// releases (the same tolerance `osVersionNumber` above already has).
 #[derive(Debug, Deserialize)]
 struct DevicectlConnectionProperties {
-    #[serde(rename = "tunnelState")]
-    tunnel_state: String,
+    #[serde(rename = "tunnelState", default)]
+    tunnel_state: Option<String>,
+    #[serde(rename = "pairingState", default)]
+    pairing_state: Option<String>,
 }
 
 fn parse_devicectl_output(content: &str) -> Result<DiscoveryResult> {
@@ -97,12 +102,28 @@ fn parse_devicectl_output(content: &str) -> Result<DiscoveryResult> {
     let mut notes = Vec::new();
 
     for device in parsed.result.devices {
-        if device.connection_properties.tunnel_state != "connected" {
+        let conn = &device.connection_properties;
+        // Include paired (or pairing-unknown) devices whose tunnel is
+        // "connected" OR "disconnected": CoreDevice establishes the tunnel
+        // LAZILY on the first install/launch, so a paired, USB-plugged,
+        // idle iPhone normally lists as "disconnected" and is fully
+        // targetable (verified on-device — see
+        // workflow/plans/bugs/ios-device-discovery-tunnelstate/BUG.md).
+        // Only "unavailable" (known to CoreDevice but not currently
+        // reachable) and explicitly non-paired devices are skipped.
+        if let Some(pairing) = conn.pairing_state.as_deref()
+            && pairing != "paired"
+        {
             notes.push(format!(
-                "skipping {} ({}): {}",
-                device.device_properties.name,
-                device.identifier,
-                device.connection_properties.tunnel_state
+                "skipping {} ({}): pairingState {pairing} — pair and trust this computer",
+                device.device_properties.name, device.identifier,
+            ));
+            continue;
+        }
+        if conn.tunnel_state.as_deref() == Some("unavailable") {
+            notes.push(format!(
+                "skipping {} ({}): tunnelState unavailable (device not currently reachable)",
+                device.device_properties.name, device.identifier,
             ));
             continue;
         }
@@ -112,6 +133,7 @@ fn parse_devicectl_output(content: &str) -> Result<DiscoveryResult> {
             platform: Platform::Ios,
             kind: Kind::PhysicalDevice,
             os_version: device.device_properties.os_version_number,
+            connection_state: conn.tunnel_state.clone(),
         });
     }
 
@@ -128,12 +150,22 @@ mod tests {
                 {
                     "identifier": "00008110-000A2D3A3C68801E",
                     "deviceProperties": { "name": "Ed's iPhone" },
-                    "connectionProperties": { "tunnelState": "connected" }
+                    "connectionProperties": { "tunnelState": "connected", "pairingState": "paired" }
                 },
                 {
                     "identifier": "00008120-001A2D3A3C68802F",
-                    "deviceProperties": { "name": "Old iPad" },
-                    "connectionProperties": { "tunnelState": "disconnected" }
+                    "deviceProperties": { "name": "Idle iPhone" },
+                    "connectionProperties": { "tunnelState": "disconnected", "pairingState": "paired" }
+                },
+                {
+                    "identifier": "00008130-002A2D3A3C68803A",
+                    "deviceProperties": { "name": "Wifi iPad" },
+                    "connectionProperties": { "tunnelState": "unavailable", "pairingState": "paired" }
+                },
+                {
+                    "identifier": "00008140-003A2D3A3C68804B",
+                    "deviceProperties": { "name": "Strange iPhone" },
+                    "connectionProperties": { "tunnelState": "disconnected", "pairingState": "unpaired" }
                 }
             ]
         }
@@ -152,14 +184,63 @@ mod tests {
     }"#;
 
     #[test]
-    fn parses_only_connected_devices() {
+    fn includes_paired_disconnected_excludes_unavailable_and_unpaired() {
         let result = parse_devicectl_output(FIXTURE).unwrap();
-        assert_eq!(result.devices.len(), 1);
+        // "connected" AND paired-"disconnected" are both targetable — the
+        // tunnel is established lazily by install/launch (the bug this
+        // module's old `== "connected"` filter caused: a paired USB iPhone
+        // was invisible to `forgekit devices` and unselectable by `-d`).
+        assert_eq!(result.devices.len(), 2);
         assert_eq!(result.devices[0].name, "Ed's iPhone");
         assert_eq!(result.devices[0].kind, Kind::PhysicalDevice);
         assert_eq!(result.devices[0].platform, Platform::Ios);
         assert_eq!(result.devices[0].os_version, None);
-        assert!(result.notes.iter().any(|n| n.contains("Old iPad")));
+        assert_eq!(
+            result.devices[0].connection_state.as_deref(),
+            Some("connected")
+        );
+        assert_eq!(result.devices[1].name, "Idle iPhone");
+        assert_eq!(
+            result.devices[1].connection_state.as_deref(),
+            Some("disconnected")
+        );
+        // "unavailable" (unreachable) and non-paired devices stay out, each
+        // with a diagnosable note.
+        assert!(
+            result
+                .notes
+                .iter()
+                .any(|n| n.contains("Wifi iPad") && n.contains("unavailable"))
+        );
+        assert!(
+            result
+                .notes
+                .iter()
+                .any(|n| n.contains("Strange iPhone") && n.contains("unpaired"))
+        );
+        assert_eq!(result.notes.len(), 2);
+    }
+
+    #[test]
+    fn missing_connection_fields_are_tolerated() {
+        // Older devicectl output shapes omit fields — a device with no
+        // pairingState/tunnelState still lists (lenient like osVersionNumber).
+        let json = r#"{
+            "result": {
+                "devices": [
+                    {
+                        "identifier": "00008150-004A2D3A3C68805C",
+                        "deviceProperties": { "name": "Bare iPhone" },
+                        "connectionProperties": {}
+                    }
+                ]
+            }
+        }"#;
+        let result = parse_devicectl_output(json).unwrap();
+        assert_eq!(result.devices.len(), 1);
+        assert_eq!(result.devices[0].name, "Bare iPhone");
+        assert_eq!(result.devices[0].connection_state, None);
+        assert!(result.notes.is_empty());
     }
 
     #[test]

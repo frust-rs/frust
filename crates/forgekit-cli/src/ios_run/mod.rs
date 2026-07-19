@@ -268,6 +268,7 @@ mod tests {
             platform: Platform::Ios,
             kind: Kind::Simulator,
             os_version: None,
+            connection_state: None,
         }
     }
 
@@ -460,6 +461,7 @@ mod tests {
             platform: Platform::Ios,
             kind: crate::devices::Kind::PhysicalDevice,
             os_version: Some("17.5.1".to_string()),
+            connection_state: None,
         }
     }
 

@@ -165,6 +165,7 @@ mod tests {
             platform: Platform::Ios,
             kind: Kind::PhysicalDevice,
             os_version: Some("17.5.1".to_string()),
+            connection_state: None,
         }
     }
 

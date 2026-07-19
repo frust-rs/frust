@@ -239,6 +239,7 @@ mod tests {
             platform: Platform::Android,
             kind: Kind::Emulator,
             os_version: None,
+            connection_state: None,
         }
     }
 
@@ -249,6 +250,7 @@ mod tests {
             platform: Platform::Ios,
             kind: Kind::Simulator,
             os_version: None,
+            connection_state: None,
         }
     }
 
@@ -420,6 +422,7 @@ mod tests {
                 platform: Platform::Android,
                 kind: Kind::Emulator,
                 os_version: None,
+                connection_state: None,
             }
         }
 
