@@ -18,7 +18,8 @@
     `wgpu::Surface`.
   - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary
     (`extern "system"` exports, `Box::into_raw`/`from_raw` for the opaque
-    native handle, `ANativeWindow_fromSurface`) — plus the
+    native handle, `ANativeWindow_fromSurface`, the `nativeInitPlatform`
+    export's `JavaVM`-pointer stash and `Global` context ref) — plus the
     `#[unsafe(no_mangle)]` attributes the `android_app!` macro emits on its
     generated exports.
   - `frust-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary
@@ -26,6 +27,14 @@
     handle, the call into `on_surface_created_from_metal_layer`) — plus the
     `#[unsafe(no_mangle)]` attributes the `ios_app!` macro emits on its
     generated exports.
+  - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/
+    `jobject` plugins need from `ndk-context`-stored handles
+    (`with_jni_env`), one sanctioned-`unsafe` module, scoped `AttachGuard`
+    per call.
+  - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:`
+    calls (`objc2` marks the untyped Foundation setter unsafe;
+    `NSString`/`NSArray` are property-list-safe values), each
+    `# Safety`-noted.
   - `frust-render`'s `context.rs::RenderContext::create_pipeline_cache`
     — one `unsafe { device.create_pipeline_cache(..) }` call building a
     `wgpu::PipelineCache` from a shell-persisted blob. The blob is
@@ -97,10 +106,8 @@
   ```
   This keeps the tunable visible and re-tunable in one place instead of
   buried inline, and tells a future reader whether "fixing" a value means
-  matching a spec or just adjusting a guess. The `cupertino::*` widget catalog
-  applies this to every iOS-tunable it introduces (alert/action-sheet
-  dimensions, switch geometry, spinner spoke layout, hairline widths) — grep
-  for `Community-approximate` to find them all.
+  matching a spec or just adjusting a guess — grep for
+  `Community-approximate` to find every instance.
 
 ## Error Handling
 
@@ -136,6 +143,29 @@
 JNI export names are LAW: the package/class (`dev.frust.FrustSurfaceView`)
 is fixed across every generated app, not app-specific, so the mangled symbol
 stays stable regardless of the app's own package.
+
+## Plugin Conventions
+
+Both plugin tiers under `plugins/` (see `docs/ARCHITECTURE.md`'s Module
+Structure) follow these conventions:
+
+- **Backends are `#[cfg]`-gated modules** (`apple`/`android`/`file`) behind
+  one platform-independent public API; FFI deps are target-gated in the
+  crate's `Cargo.toml`, never unconditional.
+- **Errors are `thiserror` enums callers match on** (`PrefsError`,
+  `PlatformHandleError`), per the Error Handling rule above.
+- **A JNI attach is scoped per call, never permanent** — threads don't
+  auto-detach on exit, so `attach_permanently` leaks the attachment; use
+  `frust-plugin::android::with_jni_env`'s scoped `AttachGuard`.
+- **No panics/unwinds near an FFI boundary**, the same rule as shell
+  exports (Language Idioms, above).
+- **Platform plugins never depend on `frust-*` framework crates**
+  (`frust-plugin` + FFI crates only); **facade plugins depend on `frust`
+  alone**. A plugin needing both splits into a platform-core crate plus a
+  facade-glue crate.
+- **A store shared with the OS namespaces its keys `frust.`**
+  (NSUserDefaults, Android SharedPreferences) so plugin keys can't collide
+  with other libraries'.
 
 ## Anti-patterns
 
@@ -211,8 +241,7 @@ interactive widget in `frust-widgets`:
   path); keyed reconciliation clears it only for a removed or type-swapped
   child — a key-matched reorder relocates the widget, and its recorded
   path, intact. `RenderRoot`'s cached `focus_active`/`ime_state` are not
-  pushed at rebuild time and self-correct on the next event pass, the same
-  convergence contract the capture-cancel case below already uses.
+  pushed at rebuild time and self-correct on the next event pass.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key,
   view)` marks a `Flex` child list for identity-based reconciliation; once
@@ -240,9 +269,8 @@ interactive widget in `frust-widgets`:
   FFI-boundary `logical_insets` helper (mirroring `logical_size`) is the one
   place that reconciles it — widget code only ever sees a resolved
   `WindowInsets` in logical px (see `docs/ARCHITECTURE.md`'s Inset
-  delivery). An inset change needs no new frame-gate input: `set_insets`
-  rides the existing `ChangeFlags::LAYOUT | PAINT` pending path, the same
-  contract a theme swap uses.
+  delivery). An inset change rides the existing `ChangeFlags::LAYOUT |
+  PAINT` pending path, needing no new frame-gate input.
 
 - **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear
   internal flags (`self.pressed`/`self.captured`/`self.armed`) and request a
@@ -311,8 +339,7 @@ Semantics pass):
   generation before rebuilding a `TreeUpdate`; the iOS adapter additionally
   serves a cached tree snapshot to a newly-activated screen reader so
   gating never starves a VoiceOver connect against an already-settled
-  screen — the reference pattern a new adapter's activation handling
-  should follow.
+  screen.
 
 ## Instrumentation & Frame-Gate Conventions
 
@@ -324,10 +351,8 @@ Semantics pass):
   FFI-sensitive paths (Android/iOS) so a disabled build takes zero clock
   reads, not just zero recording; desktop's frame budget is generous enough
   to skip this extra branch. Span names are `perf::SPAN_*` consts, not
-  string literals, so every shell logs the same names; a shell-local
-  milestone `perf.rs` has no const for (e.g. Android's on-disk cache-load
-  checkpoint) may still pass a `&'static str` literal straight to
-  `StartupSpans::record` rather than editing `perf.rs`.
+  string literals, so every shell logs the same names; a milestone with no
+  `perf::SPAN_*` const may pass a `&'static str` literal directly.
 - **Frame-gate inputs default to must-run, never to skip.** A `FrameInputs`
   field a shell doesn't have a precise signal for should stay `true`/be
   fed conservatively rather than guessed `false` — over-running costs a
@@ -365,29 +390,22 @@ Semantics pass):
   `spawn_local` off the UI thread is a wiring bug, not a runtime-data
   condition, and panics with a message saying so (the same convention as the
   `downcast_mut` panic message above). On iOS, a backgrounded app pauses
-  `CADisplayLink`, so nothing pumps and any timer-driven local task (e.g. an
-  in-flight `tokio::time::sleep`) stalls until `frust_resume` fires the
-  next pump on foreground — don't assume a `spawn_local` timer completes
-  promptly while backgrounded.
+  `CADisplayLink`, so a timer-driven local task stalls until
+  `frust_resume` fires the next pump — don't assume a `spawn_local` timer
+  completes promptly while backgrounded.
 - **`Component::State` holds `RwSignal`s directly; app code depends on the
   `frust` facade only, never `reactive_graph`/`any_spawner`/
-  `frust-reactive` directly.** A state field that needs reactive
-  read-tracking is typed `RwSignal<T>` and read/written through the
-  `Get`/`Set`/`Update` traits the facade re-exports — an app crate should
-  never add `reactive_graph`/`any_spawner`/`frust-reactive` to its own
-  `Cargo.toml`; every symbol an app needs is already flat-re-exported from
-  `frust` (see `docs/ARCHITECTURE.md`'s Key Types). **This is the general
-  rule for every `examples/*` crate, not just reactive types**: an example's
-  `Cargo.toml` should depend on `frust` alone. `examples/huddle` — the sole
-  example — mostly holds to this but carries a **documented**
-  `frust-core`/`kurbo`/`peniko` escape-hatch dependency
-  (see its `Cargo.toml`'s comment) for the handful of custom app widgets no
-  facade widget covers: `ui/swipeable`'s swipe-to-action row, `ui/sheet`'s
-  modal sheet (both theme-aware, resolving fill/marker colors with a
-  hardcoded fallback per the Theming conventions above), `ui/fill_box`'s
-  avatar/tile fill (`FillBox`/`filled_box`), `screens/home`'s `Shimmer`
-  loading effect, and `ui/toast`'s `toast_entrance` slide-up/fade entrance
-  widget. A new example reaching for this escape hatch should first check
+  `frust-reactive` directly.** A state field needing reactive read-tracking
+  is typed `RwSignal<T>`, read/written through the `Get`/`Set`/`Update`
+  traits the facade re-exports (see `docs/ARCHITECTURE.md`'s Key Types) —
+  an app crate never adds `reactive_graph`/`any_spawner`/`frust-reactive`
+  directly. **An `examples/*` or app crate's `Cargo.toml` depends on
+  `frust` plus plugin crates (`plugins/*`) only** — the facade never
+  re-exports plugins, an app adds them directly (Flutter's pubspec
+  pattern; see Plugin Conventions below). `examples/huddle` additionally
+  carries a **documented** `frust-core`/`kurbo`/`peniko` escape hatch (see
+  its `Cargo.toml` comment) for a handful of custom widgets no facade
+  widget covers yet — a new example reaching for it should first check
   whether the gap belongs in the facade instead.
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it
   later — an untracked read is a silent wake hazard, not a stale value.**
@@ -431,17 +449,13 @@ Semantics pass):
   Only a genuine token-scale gap earns a hand-tuned constant (`frust-theme`
   ships no spacing scale and no fixed-dimension scale for switch-track/button-
   padding metrics), and that constant stays named, doc-commented, and states
-  *why* no token applies (`button.rs`'s `PAD_X`/`PAD_Y`, `switch.rs`'s
-  `TRACK_W`/`TRACK_H` are the reference cases) rather than being left as a
-  silent magic number.
+  *why* no token applies rather than being left as a silent magic number.
 - **A contested or unsourced design fact is resolved against a primary
   source and cited with a retrieval date, not left as a guess.** When a
   research doc's claim lacks (or conflicts with) a citable primary source,
   fetch the primary source and record `<source>, retrieved <date>` in the
   module doc, alongside the existing **Community-approximate** marker
-  (above) for values that stay genuinely unsourced (e.g. `align.rs`'s
-  Flutter-parity citation of `shifted_box.dart`, or `typography.rs`'s
-  M3-Expressive role count against `TypeScaleTokens.kt`).
+  (above) for values that stay genuinely unsourced.
 - **Event-pass code never reads a theme — `EventCtx` carries none.** Only
   `LayoutCtx`/`PaintCtx` thread a theme; a metric an event handler also needs
   (hit-test padding, caret geometry) stays a plain constant read from both
@@ -463,28 +477,23 @@ Semantics pass):
   `StateTokens`) live in that one module; a catalog widget imports them
   rather than hardcoding its own overlay opacity, and takes the **maximum**
   of concurrently-active states' opacity, never their sum. Only `pressed`
-  is currently wired by any shipping widget; see `material/state_layer.rs`'s
-  "Live vs. aspirational states" module doc for the rest.
+  is currently wired by any shipping widget.
 
 ## Testing Patterns
 
 - **Fixture-driven tests for parsers/validators**: register canned
-  `ProcessRunner`/`EnvLookup` responses (`FakeProcessRunner::with(...)`,
-  `.missing(...)`, `FakeEnv::set(...)`) keyed by the exact invocation, then
-  assert the resulting `Status`/`Validation`. This is the pattern used
-  throughout `frust-cli`'s `doctor`/`devices` validators.
+  `ProcessRunner`/`EnvLookup` responses keyed by the exact invocation, then
+  assert the resulting `Status`/`Validation` (`frust-cli`'s `doctor`/
+  `devices` validators).
 - **`#[ignore = "<reason>"]` for GPU-dependent or slow end-to-end tests.**
   The reason string must say how to run it (`cargo test -p ... --
   --ignored`) and why it's excluded by default (needs a real GPU; compiles a
   full generated dependency graph; etc.) — see
-  `frust-render/tests/gpu_smoke.rs` and
-  `frust-cli/tests/create_e2e.rs`.
+  `frust-render/tests/gpu_smoke.rs`, `frust-cli/tests/create_e2e.rs`.
 - **Recording fakes for paint assertions**: a minimal `PaintScene`
   implementation that pushes `(origin, size)`/`(origin, text)` tuples into
   `Vec`s lets widget `layout`/`paint` behavior be asserted without any GPU
-  or `frust-render` dependency (see `frust-core::widget` and `app`
-  unit tests).
+  or `frust-render` dependency (`frust-core::widget` unit tests).
 - **Template rendering uses `minijinja::UndefinedBehavior::Strict`**: an
-  unresolved `{{ placeholder }}` is a hard render-time error rather than a
-  silently emitted `undefined`, so template/context drift is caught by the
-  test suite instead of shipping into a generated project.
+  unresolved `{{ placeholder }}` is a hard render-time error, catching
+  template/context drift in tests instead of a generated project.
