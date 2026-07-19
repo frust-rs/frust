@@ -88,7 +88,8 @@ impl ActivityController {
     /// Runs [`LoadActivity`] into [`Self::rows`]. Call once from the hosting
     /// component's `init` via `spawn_local` (the
     /// `SettingsController::apply`/`spawn_apply` pattern
-    /// [`crate::screens::settings_appearance`] establishes).
+    /// [`crate::features::settings::presentation::pages::settings_appearance`]
+    /// establishes).
     pub async fn load(&self) {
         let _ = self
             .core

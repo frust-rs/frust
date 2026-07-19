@@ -7,6 +7,8 @@
 //! inert-but-styled account rows (Saved items, Preferences) — each a
 //! [`list_item`] with a leading glyph and a trailing [`icons::CHEVRON_RIGHT`].
 
+use std::sync::Arc;
+
 use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView,
     Image, ImageFit, NavigatorController, Padding, SizedBox, Stack, Theme, any, app_bar, flexible,
@@ -14,16 +16,21 @@ use frust::{
 };
 
 use crate::HuddleState;
-use crate::features::settings::solid_source;
-use crate::mock;
-use crate::screens::{profile, settings};
+use crate::features::profile::domain::CURRENT_USER_ID;
+use crate::features::profile::domain::repositories::ProfileRepository;
+use crate::features::settings::presentation::pages::settings::settings_screen;
+use crate::ui::solid_source::solid_source;
+
+use super::profile;
 
 /// The You tab root. `controller` pushes the settings stack and the profile page.
 pub fn you_screen(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
     let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
     let scheme = theme.scheme();
 
-    let me = mock::user(mock::CURRENT_USER_ID);
+    let repo = use_context::<Arc<dyn ProfileRepository + Send + Sync>>()
+        .expect("ProfileRepository is provided by lib.rs's composition root");
+    let me = repo.user(CURRENT_USER_ID);
     let (name, initials, handle, status) = match me {
         Some(u) => (
             u.name.to_string(),
@@ -46,7 +53,7 @@ pub fn you_screen(controller: NavigatorController<HuddleState>) -> AnyView<Huddl
     ));
 
     let profile_controller = controller.clone();
-    let user_id = me.map(|u| u.id).unwrap_or(mock::CURRENT_USER_ID);
+    let user_id = me.map(|u| u.id).unwrap_or(CURRENT_USER_ID);
     let user_card = list_item(name)
         .supporting(format!("{handle} · {status}"))
         .leading(avatar)
@@ -63,7 +70,7 @@ pub fn you_screen(controller: NavigatorController<HuddleState>) -> AnyView<Huddl
         .trailing(icon(icons::CHEVRON_RIGHT))
         .on_press(move |_s: &mut HuddleState| {
             let c = settings_controller.clone();
-            settings_controller.push(move || settings::settings_screen(c.clone()));
+            settings_controller.push(move || settings_screen(c.clone()));
         });
 
     // Inert-but-styled account rows (no `on_press`): the showcase renders the
@@ -105,7 +112,8 @@ fn avatar_block(initials: String, fill: Color, on_fill: Color) -> AnyView<Huddle
         any(SizedBox(Some(56.0), Some(56.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
     // Center the monogram with the SizedBox+Align idiom (a bare `Align` under a
     // `Stack` shrink-wraps to the origin — RESEARCH.md issue 1;
-    // `screens::profile`'s `initials_tile` is the precedent).
+    // `profile::presentation::pages::profile`'s `initials_tile` is the
+    // precedent).
     let label = any(SizedBox(Some(56.0), Some(56.0)).child(Align(
         Alignment::CENTER,
         text(initials).size(20.0).color(on_fill),

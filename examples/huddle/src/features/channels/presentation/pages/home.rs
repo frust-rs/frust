@@ -621,7 +621,11 @@ fn dm_avatar(state: &HomeState, d: &DmItem) -> AnyView<HomeState> {
         GestureDetector(hero(format!("avatar-{user_id}"), avatar)).on_tap(
             move |_s: &mut HomeState| {
                 let id = user_id.to_string();
-                nav.push(move || crate::screens::profile::profile_screen(id.clone()));
+                nav.push(move || {
+                    crate::features::profile::presentation::pages::profile::profile_screen(
+                        id.clone(),
+                    )
+                });
             },
         ),
     )

@@ -57,7 +57,7 @@ use crate::features::channels::domain::Channel;
 use crate::features::profile::domain::User;
 use crate::features::search::domain::SearchRepository;
 use crate::features::search::{MessageHit, SearchController, SearchResults};
-use crate::screens::scaffold;
+use crate::ui::scaffold::scaffold;
 
 /// Forced height of the search field row: a `SizedBox`, not the field's own
 /// font-metric-dependent natural height, so the layout (and anything

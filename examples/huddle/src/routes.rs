@@ -21,8 +21,15 @@ use crate::features::channels::presentation::pages::{
 use crate::features::messages::presentation::pages::{
     channel_feed as messages_channel_feed, thread as messages_thread,
 };
+use crate::features::profile::presentation::pages::{
+    profile as profile_profile, you as profile_you,
+};
 use crate::features::search::presentation::pages::search as search_search;
-use crate::screens;
+use crate::features::settings::presentation::pages::{
+    settings as settings_settings, settings_about as settings_settings_about,
+    settings_appearance as settings_settings_appearance,
+    settings_notifications as settings_settings_notifications,
+};
 
 /// The `/` route (and the navigator's initial page): the Home tab (now a
 /// channels-feature page — huddle clean-architecture refactor, task 02).
@@ -47,7 +54,7 @@ pub fn build_routes(controller: NavigatorController<HuddleState>) -> Vec<Route<H
         }),
         Route::new("/you", {
             let controller = controller.clone();
-            move |_params: &RouteParams| screens::you::you_screen(controller.clone())
+            move |_params: &RouteParams| profile_you::you_screen(controller.clone())
         }),
         Route::new("/channel/:id", {
             let controller = controller.clone();
@@ -62,20 +69,20 @@ pub fn build_routes(controller: NavigatorController<HuddleState>) -> Vec<Route<H
         }),
         Route::new("/user/:id", |params: &RouteParams| {
             let id = params.get("id").cloned().unwrap_or_default();
-            screens::profile::profile_screen(id)
+            profile_profile::profile_screen(id)
         }),
         Route::new("/you/settings", {
             let controller = controller.clone();
-            move |_params: &RouteParams| screens::settings::settings_screen(controller.clone())
+            move |_params: &RouteParams| settings_settings::settings_screen(controller.clone())
         }),
         Route::new("/you/settings/notifications", |_params: &RouteParams| {
-            screens::settings_notifications::notifications_screen()
+            settings_settings_notifications::notifications_screen()
         }),
         Route::new("/you/settings/appearance", |_params: &RouteParams| {
-            screens::settings_appearance::appearance_screen()
+            settings_settings_appearance::appearance_screen()
         }),
         Route::new("/you/settings/about", |_params: &RouteParams| {
-            screens::settings_about::about_screen()
+            settings_settings_about::about_screen()
         }),
         // Transparent push (top drawer) — see `workspace_drawer`'s transition
         // note; the skeleton routes it through the normal navigator transition.

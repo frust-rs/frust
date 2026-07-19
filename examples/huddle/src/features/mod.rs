@@ -18,8 +18,8 @@
 //! - [`search`] — the live channel/people/message filter (`SearchController`,
 //!   `signals + Memo`, no `ControllerCore`/`UseCase` — search is synchronous).
 //! - [`profile`] (task 16) — the synchronous mock-dataset lookup behind
-//!   `screens::profile` (no controller/use-case spine needed — see its
-//!   module docs).
+//!   `profile::presentation::pages::profile` (no controller/use-case spine
+//!   needed — see its module docs).
 //!
 //! Phase C additions (each a new feature slice registered by its own screen
 //! task per `src/README-phase-c.md`'s "new feature slice" rule):

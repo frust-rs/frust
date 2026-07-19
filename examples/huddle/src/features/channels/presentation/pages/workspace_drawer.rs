@@ -246,11 +246,12 @@ fn workspace_row(ws: &Workspace) -> AnyView<HuddleState> {
     ))
 }
 
-/// A rounded initials tile — see `crate::screens::profile`'s copy of this
+/// A rounded initials tile — see
+/// `crate::features::profile::presentation::pages::profile`'s copy of this
 /// helper for why it's a uniformly-rounded square rather than a true circle.
 /// Kept as a small, separately-owned duplicate rather than a shared import so
-/// this screen and `screens::profile` stay disjoint files per
-/// `src/README-phase-c.md`'s Phase C contract.
+/// this screen and `profile::presentation::pages::profile` stay disjoint
+/// files per `src/README-phase-c.md`'s Phase C contract.
 fn initials_tile<State: 'static>(initials: &str, tile_size: f64, font_size: f32) -> AnyView<State> {
     any(filled_card(
         SizedBox(Some(tile_size), Some(tile_size))

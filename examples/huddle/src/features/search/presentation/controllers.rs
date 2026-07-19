@@ -28,7 +28,8 @@
 //!
 //! Wrapping the screen in a `Component` would fix *that* (a `Component`'s
 //! `State` is retained across rebuilds — the pattern
-//! `screens::settings_appearance` already uses) — but it isn't usable here:
+//! `settings::presentation::pages::settings_appearance` already uses) — but
+//! it isn't usable here:
 //! a `Component`'s inner event handlers only ever see the component's own
 //! local `State`, never the outer `HuddleState`
 //! (`docs/ARCHITECTURE.md`'s Component state boundary — a deliberate
@@ -39,7 +40,7 @@
 //! and nothing provides one via `use_context` either). Keeping
 //! `search_screen` a **plain** (non-`Component`) function is what lets its
 //! row callbacks close over `&mut HuddleState` directly, exactly like
-//! `screens::home`/`screens::you`/`screens::channel_feed`'s `Button`
+//! `screens::home`/`profile::presentation::pages::you`/`screens::channel_feed`'s `Button`
 //! callbacks do — so the query/results state instead lives behind
 //! [`SearchController::instance`], a lazily-created, thread-local singleton.
 //! This is correctly scoped: this app's `RenderRoot`/reactive runtime pump

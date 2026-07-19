@@ -34,8 +34,9 @@ use crate::HuddleState;
 use crate::failure::HuddleFailure;
 use crate::features::settings::{
     AccentChoice, BrightnessChoice, DesignChoice, SettingsController, slider_to_type_factor,
-    solid_source, solid_source_alpha, type_factor_to_slider,
+    type_factor_to_slider,
 };
+use crate::ui::solid_source::{solid_source, solid_source_alpha};
 use clean_signals_frust::use_controller;
 
 /// The appearance screen's route entry point: a `Component` under the outer

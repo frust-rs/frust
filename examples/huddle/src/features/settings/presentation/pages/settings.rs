@@ -11,7 +11,8 @@ use frust::{
 };
 
 use crate::HuddleState;
-use crate::screens::{settings_about, settings_appearance, settings_notifications};
+
+use super::{settings_about, settings_appearance, settings_notifications};
 
 /// The settings menu. `controller` pushes each nested page.
 pub fn settings_screen(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {

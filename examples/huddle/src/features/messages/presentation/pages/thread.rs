@@ -17,13 +17,14 @@
 //! Attachment tiles use [`crate::ui::fill_box::filled_box`] (`filled_card`
 //! minus its 16px inset) exactly like `channel_feed::message_body`.
 //!
-//! # Why a thread-local composer, not a `Component` (mirrors `screens::search`)
+//! # Why a thread-local composer, not a `Component` (mirrors `search`)
 //!
 //! `src/routes.rs`'s `/thread/:id` entry (a frozen hub file, see
 //! `src/README-phase-c.md`) calls [`thread_screen`] with only the route
 //! param, no `NavigatorController` — unlike `/channel/:id`, which gets one
 //! (see `src/routes.rs`) — so, exactly like
-//! [`screens::search`](crate::screens::search)'s own documented reasoning,
+//! [`search::presentation::pages::search`](crate::features::search::presentation::pages::search)'s
+//! own documented reasoning,
 //! wrapping this screen in a `Component` would trap its event handlers behind
 //! the component-state boundary (`docs/ARCHITECTURE.md`'s Component state
 //! boundary), unable to reach `state.nav.router()` for the back action and
@@ -63,8 +64,8 @@ use kurbo::Size;
 use crate::HuddleState;
 use crate::features::messages::domain::repositories::MessageRepository;
 use crate::features::messages::{FeedBody, FeedMessage, FeedReply, MessagesController};
-use crate::screens::placeholder_body;
 use crate::ui::fill_box::{fill_box, filled_box};
+use crate::ui::scaffold::placeholder_body;
 use crate::ui::sheet::{action_menu, emoji_grid, sheet, sheet_action_row};
 use crate::ui::swipeable::press_pop;
 
@@ -321,8 +322,8 @@ fn thread_page(
 }
 
 /// The fallback for an unresolvable route param (not a number, or no such
-/// message id in the mock dataset) — mirrors `screens::profile`'s
-/// `unknown_user_screen` fallback.
+/// message id in the mock dataset) — mirrors
+/// `profile::presentation::pages::profile`'s `unknown_user_screen` fallback.
 fn missing_thread_screen(thread_id: &str) -> AnyView<HuddleState> {
     thread_page(
         "Thread".to_string(),

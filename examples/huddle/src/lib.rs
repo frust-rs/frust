@@ -37,7 +37,6 @@ pub mod mock;
 pub mod ui;
 
 mod routes;
-mod screens;
 mod shell;
 
 use std::rc::Rc;
@@ -56,6 +55,8 @@ use features::channels::data::repositories::StoreChannelRepository;
 use features::channels::domain::repositories::ChannelRepository;
 use features::messages::data::repositories::StoreMessageRepository;
 use features::messages::domain::repositories::MessageRepository;
+use features::profile::data::repositories::StoreProfileRepository;
+use features::profile::domain::repositories::ProfileRepository;
 use features::search::data::repositories::StoreSearchRepository;
 use features::search::domain::repositories::SearchRepository;
 use shell::Tab;
@@ -120,6 +121,10 @@ impl Component for HuddleApp {
         let search_repo: Arc<dyn SearchRepository + Send + Sync> =
             Arc::new(StoreSearchRepository::new());
         provide_context(search_repo);
+
+        let profile_repo: Arc<dyn ProfileRepository + Send + Sync> =
+            Arc::new(StoreProfileRepository::new());
+        provide_context(profile_repo);
 
         // The controller is created *before* the route table (so every route's
         // page can push through the same controller the router drives).

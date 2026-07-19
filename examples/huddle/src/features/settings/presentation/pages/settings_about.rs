@@ -14,10 +14,10 @@ use frust::{
 };
 
 use crate::HuddleState;
-use crate::features::settings::solid_source;
+use crate::ui::solid_source::solid_source;
 
 /// The bundled app-icon bytes (the anvil logo), decoded once per build.
-const LOGO_PNG: &[u8] = include_bytes!("../../assets/logo.png");
+const LOGO_PNG: &[u8] = include_bytes!("../../../../../assets/logo.png");
 
 /// The about page.
 pub fn about_screen() -> AnyView<HuddleState> {
@@ -99,7 +99,8 @@ fn initials_block(initial: &str, fill: Color, on_fill: Color) -> AnyView<HuddleS
         any(SizedBox(Some(72.0), Some(72.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
     // Center the monogram with the SizedBox+Align idiom (a bare `Align` under a
     // `Stack` shrink-wraps to the origin — RESEARCH.md issue 1;
-    // `screens::profile`'s `initials_tile` is the precedent).
+    // `profile::presentation::pages::profile`'s `initials_tile` is the
+    // precedent).
     let label = any(SizedBox(Some(72.0), Some(72.0)).child(Align(
         Alignment::CENTER,
         text(initial.to_string()).size(32.0).color(on_fill),

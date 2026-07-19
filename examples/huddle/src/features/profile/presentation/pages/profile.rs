@@ -18,6 +18,8 @@
 //! since this route (`src/routes.rs`, a frozen hub file) calls this function
 //! with no `NavigatorController` argument, unlike `channel_feed`/`settings`.
 
+use std::sync::Arc;
+
 use frust::{
     Align, Alignment, AnyView, Button, Column, CrossAxisAlignment, Row, SizedBox, Theme, any,
     filled_card, hero, text, use_context,
@@ -25,8 +27,9 @@ use frust::{
 
 use crate::HuddleState;
 use crate::features::profile::ProfileController;
-use crate::mock;
-use crate::screens::{placeholder_body, scaffold};
+use crate::features::profile::domain::UserStatus;
+use crate::features::profile::domain::repositories::ProfileRepository;
+use crate::ui::scaffold::{placeholder_body, scaffold};
 
 /// Overall avatar tile side length (the [`filled_card`] wrapper adds its own
 /// padding on top — see [`initials_tile`]).
@@ -40,7 +43,9 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
     let Some(id) = user_id.parse::<u32>().ok() else {
         return unknown_user_screen(&user_id);
     };
-    let Some(profile) = ProfileController::load(id) else {
+    let repo = use_context::<Arc<dyn ProfileRepository + Send + Sync>>()
+        .expect("ProfileRepository is provided by lib.rs's composition root");
+    let Some(profile) = ProfileController::load(repo.as_ref(), id) else {
         return unknown_user_screen(&user_id);
     };
 
@@ -50,9 +55,9 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
     let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
     let scheme = theme.scheme();
     let status_color = match profile.user.status {
-        mock::UserStatus::Online => scheme.tertiary,
-        mock::UserStatus::Away => scheme.secondary,
-        mock::UserStatus::Dnd => scheme.error,
+        UserStatus::Online => scheme.tertiary,
+        UserStatus::Away => scheme.secondary,
+        UserStatus::Dnd => scheme.error,
     };
 
     let dm_channel_id = profile.dm_channel_id.clone();
@@ -104,7 +109,9 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
 }
 
 /// A rounded, theme-colored initials tile — the avatar/workspace-tile visual
-/// this screen and `crate::screens::workspace_drawer` both use.
+/// this screen and
+/// `crate::features::channels::presentation::pages::workspace_drawer` both
+/// use.
 ///
 /// There is no perfect-circle or per-corner-radius primitive in the public
 /// `frust` widget vocabulary (only [`filled_card`]'s uniform corner
