@@ -79,10 +79,10 @@ pub use forgekit_widgets::{
     GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView, IconWidget, Image,
     ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment, NavigatorController,
     NavigatorView, Padding, PaddingView, PageBuilder, PageTransition, PopResult, Radio, RadioView,
-    RadioWidget, ResultCallback, Row, ScrollInfo, ScrollView, SizedBox, SizedBoxView, Slider,
-    SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing, TransitionSpec,
-    button, checkbox, flexible, hero, icon, inflexible, keyed, navigator, radio, scroll_view,
-    slider, text, text_input,
+    RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView,
+    Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
+    TransitionSpec, button, checkbox, flexible, hero, icon, inflexible, keyed, navigator, radio,
+    safe_area, scroll_view, slider, text, text_input,
 };
 
 /// The vendored Material Symbols starter icon set (Huddle showcase, Phase A),

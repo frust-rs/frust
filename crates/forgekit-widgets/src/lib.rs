@@ -32,6 +32,7 @@ pub mod material;
 pub mod nav;
 mod padding;
 mod radio;
+mod safe_area;
 mod scroll;
 mod sized;
 mod slider;
@@ -73,6 +74,7 @@ pub use nav::router::{
 pub use nav::transition::{PageTransition, Timing, TransitionSpec};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
 pub use radio::{Radio, RadioView, RadioWidget, radio};
+pub use safe_area::{SafeAreaView, SafeAreaWidget, safe_area};
 pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
