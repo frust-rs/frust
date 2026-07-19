@@ -22,7 +22,7 @@ consumed by app code via the `forgekit` facade crate, and example apps under
 | `forgekit-reactive` | Leaf reactive substrate: the process-wide `ReactiveRuntime` (a background tokio runtime, a custom `any_spawner` executor routing `spawn`/`spawn_local`, a UI-thread local task pump, and the root reactive `Owner`) plus `TrackedScope`, the rebuild-dependency-tracking bridge that wakes a shell when a tracked signal changes (see Key Types, Data Flow's Signal-driven wake). Its `deep_link` module is a process-wide deep-link source (spec §19): a shell delivers a platform link via `push_deep_link`, app code reads it via `deep_links()`/`DeepLinks` (facade re-exports) — see Data Flow's Deep-link flow. Its `back` module is the process-wide back-press source, mirroring `deep_link`'s shape: `push_back_press`/`back_presses()` plus a `set_handles_back`/`handles_back` flag — see Data Flow's Back flow. Depends only on `reactive_graph`/`any_spawner`/`tokio` — no `forgekit-core`, no `winit`/`vello`/`wgpu`; consumed by the three shells and the `forgekit` facade (see Layer Dependencies). |
 | `forgekit-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root, GPU surface, and text context for `cargo run`-based development. Compiled only for non-Android targets. |
 | `forgekit-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_forgekit_ForgeKitSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. |
-| `forgekit-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size`/`logical_insets` FFI-boundary helpers. Depends on `forgekit-core`/`forgekit-scene`/`forgekit-text`/`forgekit-theme` (its `theme_override` module is the app-facing `set_app_theme`/`clear_app_theme` seam — see Data Flow's Theme delivery; a test-only `reactive_graph` dev-dependency backs a root-owner regression test but never reaches consumers) — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. Its `frame_gate` module is the whole-frame skip gate both mobile shells consult before rebuilding (see Data Flow's Frame gate). |
+| `forgekit-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size`/`logical_insets` FFI-boundary helpers. Depends on `forgekit-core`/`forgekit-scene`/`forgekit-text`/`forgekit-theme` (its `theme_override` module is the app-facing `set_app_theme`/`clear_app_theme` seam — see Data Flow's Theme delivery; stays reactive-free in its shipped graph, see Layer Dependencies) — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. Its `frame_gate` module is the whole-frame skip gate both mobile shells consult before rebuilding (see Data Flow's Frame gate). |
 | `forgekit-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `forgekit_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `forgekit-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. |
 | `forgekit` | Facade crate: the public app-author API — the canonical `Component`/`app!`/`run` entry surface (spec §5.5), plus `App`/`View`/the widget vocabulary as the lower-level layer `app!` desugars to — composing the crates above into the spec's declarative call shape. Depends on `forgekit-shell-android`, `forgekit-shell-ios`, and `forgekit-reactive` unconditionally, and on `forgekit-shell-desktop` only for non-Android targets; `run`/`App::run` (the desktop preview loop) are likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
 | `forgekit-cli` | Standalone `forgekit` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `forgekit run`/`build`/`clean` drive pipelines for both platforms (Android via Gradle/cargo-ndk, iOS via xcodebuild/devicectl). Depends on none of the framework crates above. |
@@ -145,7 +145,11 @@ the catalog's five modal/menu widgets.
 
 **Signal-driven wake:** a write to a tracked signal fires the process-wide
 `FrameWaker` (`forgekit-reactive`; coalesced — N writes between tracked
-rebuilds produce one wake). On desktop the waker sends a
+rebuilds produce one wake); every `spawn_local` task wake — including a
+re-wake arriving from a background thread, e.g. a tokio timer completing —
+fires the same `FrameWaker` through the executor's composite waker, so
+desktop's parked `Wait` loop is woken by timer-driven continuations too, not
+only by signal writes. On desktop the waker sends a
 `ShellUserEvent::SignalsDirty` through the winit `EventLoopProxy`, delivered
 to `ApplicationHandler::user_event`, which pumps the reactive runtime's
 UI-thread local task queue (`ReactiveRuntime::pump_local`, draining any
@@ -163,13 +167,10 @@ this contract is a persistent `TrackedScope` each mobile `AppHandle` wraps
 its per-frame rebuild in** (`scope.track(|| app.rebuild())`, mirroring the
 desktop `Frame pipeline` step above): only a rebuild that runs *inside* a
 `TrackedScope` subscribes its signal reads, so only then does a later write
-flip the process-wide `signals_dirty` flag
-(`ReactiveRuntime::mark_signals_dirty`/`take_signals_dirty`) the mobile
-shells drain once per frame as one of the frame gate's inputs (see Frame
-gate below); a bare `with_owner(|| rebuild())` with no scope never sets it,
-however consistently the drain side runs. A `forgekit-shell-common` host
-test (`scope_tracked_rebuild_trips_signals_dirty_but_bare_rebuild_does_not`)
-guards both halves of this contract over the shared `AppTree` seam.
+flip the process-wide `signals_dirty` flag the mobile shells drain once per
+frame as one of the frame gate's inputs (see Frame gate below); a bare
+`with_owner(|| rebuild())` with no scope never sets it, however consistently
+the drain side runs.
 
 **Component state boundary:** a `Component` (`forgekit-core::component`) is a
 `StatefulWidget` analog — retained local state living in the widget tree
@@ -330,52 +331,37 @@ the first frame never waits on disk.
 
 **Android frame pipeline:** the same rebuild/layout/paint pipeline runs
 inside JNI callbacks (`forgekit-shell-android`) driven by Kotlin's
-`Choreographer`/`SurfaceHolder.Callback` instead of a winit event loop —
-`nativeOnFrame` consults the frame gate above and, on a `Run`, drives one
+`Choreographer`/`SurfaceHolder.Callback` instead of a winit event loop: the
+frame callback consults the frame gate above and, on a `Run`, drives one
 rebuild → (layout iff dirty/first/resized) → paint → render pass per posted
-frame, passing Choreographer's `frameTimeNanos` through as the pass's
-`FrameTime`; `nativeOnTouch` feeds one pointer contact into the same
-`RenderRoot::event` path between frames; `nativeOnSurfaceChanged` (also
-carrying the display density, forwarded to `resize`/`set_window` for the
-inset/scale conversions below) and `nativeOnSurfaceDestroyed` drive the same
-`SurfaceRenderer` state machine as the desktop shell's resize/suspend events
-(rotation recreates the surface via `on_surface_created_from_android_window`).
-`JNI_OnLoad` backgrounds wgpu instance/adapter/device creation to overlap
-GPU bring-up with the JVM's Activity/Surface setup; `nativeInit` (also
-carrying the app's `cacheDir` for the pipeline-cache seam above) joins that
-thread before creating the surface and vello renderer. Sixteen per-app JNI
-exports in total cover the frame/touch/surface-lifecycle calls above, plus
-init/resume/pause/destroy, an IME state-sync trio (see Key Types'
-`EditingState`/`ImeState` row and `docs/CODE_STANDARDS.md`'s state-sync
-convention), theme delivery (`nativeSetAppearance`), the deep-link entry
-(`nativeOnDeepLink`, below), accessibility init (`nativeInitAccessibility`,
-attaches the `accesskit_android` adapter — see the Semantics pass above),
-`nativeOnInsetsChanged` (see Data Flow's Inset delivery), and
-`nativeOnBackPress` (see Data Flow's Back flow).
+frame; a touch callback feeds one pointer contact into the same
+`RenderRoot::event` path between frames; surface-changed/destroyed callbacks
+drive the same `SurfaceRenderer` state machine as the desktop shell's
+resize/suspend events (rotation recreates the surface). Native-library load
+backgrounds wgpu instance/adapter/device creation to overlap GPU bring-up
+with the JVM's Activity/Surface setup, joined before creating the surface
+and vello renderer. The full JNI export surface (frame/touch/lifecycle/IME/
+theme/deep-link/accessibility/insets/back) is the `android_app!` row in Key
+Types.
 
 **iOS frame pipeline:** `forgekit-shell-ios` is driven by the generated
-Swift app instead of an event loop: a UIKit `CADisplayLink` tick calls
-`forgekit_render_frame` once per frame (the tick's timestamp, in nanoseconds,
-as the pass's `FrameTime`), consulting the same frame gate as Android above
+Swift app instead of an event loop: a UIKit `CADisplayLink` tick calls the
+render-frame export once per frame (the tick's timestamp, in nanoseconds, as
+the pass's `FrameTime`), consulting the same frame gate as Android above
 before running the rebuild→layout→paint→render pass; unlike Android, a `Run`
 still relayouts unconditionally (the intra-frame layout skip isn't wired
-here yet). `forgekit_resize` (rotation/bounds changes) resizes the existing
+here yet). A resize export (rotation/bounds changes) resizes the existing
 `SurfaceRenderer` surface in place rather than recreating it, since the
 `CAMetalLayer` Swift owns survives the app lifetime; a `SurfaceLost` surface
 recreates itself from the retained layer pointer on the next render/resize
-call. `forgekit_pause`/`forgekit_resume` (UIKit resign/become-active) gate
-`forgekit_render_frame` into a no-op while backgrounded, since Metal
-submission from a suspended app can get the process killed.
-`forgekit_dispatch_touch` feeds one touch contact into the same
-`RenderRoot::event` path. Fourteen `forgekit_*` C exports in total mirror
-Android's shape: the above, plus init/resize/pause/resume/destroy, an IME
-state-sync trio (driving `UITextInput` conformance, see Key Types'
-`EditingState`/`ImeState` row), theme delivery (`forgekit_set_appearance`),
-the deep-link entry (`forgekit_on_deep_link`, below), accessibility init
-(`forgekit_init_accessibility`, attaches the `accesskit_ios` adapter — not
-yet compiled on this host), and `forgekit_set_insets` (see Data Flow's Inset
-delivery; iOS gets no back export — back is a navigation-bar affordance, see
-Back flow above).
+call. Pause/resume exports (UIKit resign/become-active) gate frame rendering
+into a no-op while backgrounded, since Metal submission from a suspended app
+can get the process killed; a touch-dispatch export feeds one touch contact
+into the same `RenderRoot::event` path. The full C-ABI export surface
+(init/resize/render/touch/lifecycle/IME/theme/deep-link/accessibility/insets)
+mirrors Android's shape and is the `IosAppHandle`/`ios_app!` row in Key
+Types (iOS gets no back export — back is a navigation-bar affordance there,
+see Back flow above).
 
 **Navigation flow:** `nav::navigator()`'s retained page stack is driven by
 `NavigatorController`, a cloneable handle that only *records* requested ops

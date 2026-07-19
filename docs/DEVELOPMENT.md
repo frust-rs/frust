@@ -86,7 +86,10 @@ message actions, and attachment/emoji sheets; pull-to-refresh and
 near-start pagination in scrolling lists; multiline composer text input;
 a settings stack with 3 accent themes and dynamic type scaling, each swap
 fading through a themed veil; and toast/undo feedback for destructive
-actions. `examples/huddle`'s own verify gate (`cargo test` plus its clippy
+actions. It also doubles as the manual check that a background-thread wake
+(e.g. a channel load's timer-driven completion) renders content with zero
+mouse movement, not only on an input-triggered redraw.
+`examples/huddle`'s own verify gate (`cargo test` plus its clippy
 line, run from its own directory) is a separate conditional step gated on
 the clean-signals-rs sibling checkout — see Version-Pin Policy and *Test*
 below.

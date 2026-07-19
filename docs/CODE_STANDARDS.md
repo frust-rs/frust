@@ -384,10 +384,11 @@ Semantics pass):
   (see its `Cargo.toml`'s comment) for the handful of custom app widgets no
   facade widget covers: `ui/swipeable`'s swipe-to-action row, `ui/sheet`'s
   modal sheet (both theme-aware, resolving fill/marker colors with a
-  hardcoded fallback per the Theming conventions above), `screens/home`'s
-  avatar-fill/`Shimmer` loading effect, and `ui/toast`'s `toast_entrance`
-  slide-up/fade entrance widget. A new example reaching for this escape
-  hatch should first check whether the gap belongs in the facade instead.
+  hardcoded fallback per the Theming conventions above), `ui/fill_box`'s
+  avatar/tile fill (`FillBox`/`filled_box`), `screens/home`'s `Shimmer`
+  loading effect, and `ui/toast`'s `toast_entrance` slide-up/fade entrance
+  widget. A new example reaching for this escape hatch should first check
+  whether the gap belongs in the facade instead.
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it
   later — an untracked read is a silent wake hazard, not a stale value.**
   `.get()` subscribes only when called from *inside* a live
