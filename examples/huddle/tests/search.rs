@@ -35,7 +35,7 @@
 use std::any::Any;
 
 use forgekit::{AnyView, Component, GetUntracked, Set};
-use forgekit_core::{FrameTime, RenderRoot};
+use forgekit_core::{FrameTime, NamedKey, RenderRoot};
 use forgekit_text::TextContext;
 use kurbo::{Point, Size};
 
@@ -43,7 +43,7 @@ use huddle::features::search::{MAX_MESSAGE_HITS, SearchController};
 use huddle::{HuddleApp, HuddleState};
 
 mod support;
-use support::{H, RecScene, W, char_key, frame, serial, setup, tap};
+use support::{H, RecScene, W, char_key, frame, named_key, serial, setup, tap};
 
 type Root = RenderRoot<HuddleState, AnyView<HuddleState>>;
 
@@ -359,6 +359,155 @@ fn typing_a_second_character_keeps_the_field_focused() {
          (across the results-list change)"
     );
     assert!(scene.glyph_runs > 0);
+}
+
+/// Regression for `12b-search-field-stable-row`: `search_field`'s own row —
+/// not `results_container` — must never itself change concrete type across
+/// the empty/non-empty query boundary (see that task's file, and
+/// `12-huddle-search-structure`'s completion summary, Risks item 1, which
+/// first surfaced this defect). Unlike
+/// [`typing_a_second_character_keeps_the_field_focused`] above (which
+/// deliberately seeds the query non-empty first, precisely to dodge this
+/// exact bug), this test drives the FIRST keystroke from an actually empty
+/// query and settles a rebuild immediately afterward — the real per-frame
+/// mobile/desktop pipeline's cadence that exposed the defect — before typing
+/// a second character. Before the fix, that intervening rebuild would swap
+/// `search_field`'s row from a bare `TextInput` to a `FlexView` wrapper (a
+/// genuine `AnyView` concrete-type change at `Padding`'s single `ChildPod`),
+/// tearing the field down and dropping its recorded focus/IME path — silently
+/// swallowing this test's second keystroke.
+#[test]
+fn typing_across_the_empty_to_nonempty_query_boundary_keeps_the_field_focused() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (mut root, mut state, mut tcx) = boot_to_search();
+    let controller = SearchController::instance();
+    assert_eq!(controller.query.get_untracked(), "");
+
+    tap(&mut root, &mut state, field_point());
+    assert!(root.is_focus_active(), "tapping the field claims focus");
+
+    // First keystroke: the empty -> non-empty crossing, immediately settled
+    // with a rebuild (the cadence that exposes the pre-fix defect).
+    type_text(&mut root, &mut state, "a");
+    let _ = rebuild(&mut root, &mut state, &mut tcx);
+    assert_eq!(controller.query.get_untracked(), "a");
+    assert!(
+        root.is_focus_active(),
+        "the field stays focused across the empty->non-empty boundary crossing"
+    );
+    assert!(
+        root.ime_state().is_some(),
+        "the field's IME surface stays published across the boundary crossing"
+    );
+
+    // Second keystroke only lands if the field is still the same focused
+    // widget after the boundary-crossing rebuild above.
+    type_text(&mut root, &mut state, "d");
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+    assert_eq!(
+        controller.query.get_untracked(),
+        "ad",
+        "the second keystroke reached the still-focused field"
+    );
+    assert!(
+        root.is_focus_active(),
+        "the field is still focused after the second keystroke"
+    );
+    assert!(root.ime_state().is_some());
+    assert!(scene.glyph_runs > 0);
+}
+
+/// Regression for `12b-search-field-stable-row`'s reverse crossing: clearing
+/// a non-empty query back to empty must not drop the field's focus/IME state
+/// either, the same `search_field`-row-stability mechanism working backwards.
+///
+/// The reverse crossing is driven by a real `Backspace` key event, not by
+/// tapping the clear-button icon: tapping ANY sibling within `search_field`'s
+/// multi-child `FlexView` row always blurs the field via the unrelated
+/// (and correct) blur-on-outside-tap convention (`route_event`'s
+/// `kept_focus` bookkeeping in `forgekit-widgets::lib`) — true both before
+/// and after this fix, since the row was already this same `FlexView` shape
+/// once non-empty even pre-fix. Driving the clear via `Backspace` instead
+/// isolates the row-type-stability mechanism this task actually fixes from
+/// that unrelated, expected blur. The clear-button TAP path itself is
+/// checked separately below, for its own (focus-independent) behavior:
+/// tapping it still resets the query.
+#[test]
+fn backspacing_across_the_nonempty_to_empty_query_boundary_keeps_the_field_focused() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (mut root, mut state, mut tcx) = boot_to_search();
+    let controller = SearchController::instance();
+
+    tap(&mut root, &mut state, field_point());
+    type_text(&mut root, &mut state, "z");
+    let _ = rebuild(&mut root, &mut state, &mut tcx);
+    assert_eq!(controller.query.get_untracked(), "z");
+    assert!(root.is_focus_active());
+
+    // Backspace deletes the sole character, crossing non-empty -> empty.
+    // Before the fix this swapped search_field's row from the FlexView
+    // wrapper back to a bare TextInput -- the same AnyView type change as the
+    // forward direction, in reverse.
+    root.event(&mut state, &named_key(NamedKey::Backspace));
+    let _ = rebuild(&mut root, &mut state, &mut tcx);
+    assert_eq!(
+        controller.query.get_untracked(),
+        "",
+        "backspace clears the last character back to an empty query"
+    );
+    assert!(
+        root.is_focus_active(),
+        "the field stays focused across the non-empty->empty boundary crossing"
+    );
+    assert!(
+        root.ime_state().is_some(),
+        "the field's IME surface stays published across the reverse boundary crossing"
+    );
+
+    // A further keystroke lands: focus truly held through the reverse crossing.
+    type_text(&mut root, &mut state, "q");
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+    assert_eq!(controller.query.get_untracked(), "q");
+    assert!(root.is_focus_active());
+    assert!(scene.glyph_runs > 0);
+}
+
+/// The clear button (tap, not `Backspace`) still resets the query and
+/// results after `search_field`'s row became a permanently-present `FlexView`
+/// (see `12b-search-field-stable-row`) — a basic regression check that the
+/// always-rendered (rather than conditionally-rendered) clear-button slot
+/// still wires its tap through correctly. Focus is deliberately not asserted
+/// here (see `backspacing_across_the_nonempty_to_empty_query_boundary_keeps_the_field_focused`'s
+/// doc comment for why a tap on this sibling always blurs the field,
+/// independent of this fix).
+#[test]
+fn the_clear_button_still_resets_the_query_after_the_row_stability_fix() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (mut root, mut state, mut tcx) = boot_to_search();
+    let controller = SearchController::instance();
+
+    tap(&mut root, &mut state, field_point());
+    type_text(&mut root, &mut state, "leadership");
+    assert_eq!(controller.query.get_untracked(), "leadership");
+
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+    tap(&mut root, &mut state, clear_button_point(&scene));
+
+    assert_eq!(
+        controller.query.get_untracked(),
+        "",
+        "tapping the clear button still resets the query"
+    );
+    assert!(controller.results.get_untracked().is_empty());
+
+    let scene = rebuild(&mut root, &mut state, &mut tcx);
+    assert!(scene.glyph_runs > 0, "the empty-query hint renders");
 }
 
 /// Results render/clear correctly across every query transition

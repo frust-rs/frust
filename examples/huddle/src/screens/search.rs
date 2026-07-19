@@ -30,11 +30,22 @@
 //! [`keyed`], so a query transition never mixes keyed and unkeyed siblings
 //! in the same list (see `docs/CODE_STANDARDS.md`'s keyed-list contract:
 //! keys are all-or-nothing per list).
+//!
+//! [`search_field`] applies the identical "stable shape, swap content
+//! internally" pattern to itself, one level down (`12b-search-field-stable-row`):
+//! its own row is always the same `FlexView` wrapping the field plus a clear
+//! button, rather than being a bare `TextInput` while the query is empty and
+//! swapping to the `FlexView` wrapper the moment it isn't — a fix for a
+//! sibling defect the `12-huddle-search-structure` task's own completion
+//! summary first surfaced (see that task's Risks item 1): a genuine `AnyView`
+//! type change at `Padding`'s single `ChildPod` on that transition dropped
+//! the field's recorded focus/IME path, silently swallowing the very next
+//! keystroke on the real per-frame pipeline.
 
 use forgekit::{
-    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
-    GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, filled_card, flexible, hero,
-    icon, icons, inflexible, keyed, list_item, scroll_view, text,
+    Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild,
+    FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, filled_card, flexible,
+    hero, icon, icons, inflexible, keyed, list_item, scroll_view, text,
 };
 
 use crate::HuddleState;
@@ -86,7 +97,26 @@ fn results_container(query: &str, results: SearchResults) -> AnyView<HuddleState
 }
 
 /// The search field row: a controlled [`TextInput`] filtering as-you-type,
-/// plus a clear (`icons::CLOSE`) button once the query is non-empty.
+/// plus a clear (`icons::CLOSE`) button, ALWAYS rendered as the same
+/// `FlexView(Horizontal, [flexible(field), inflexible(clear_icon)])` shape —
+/// stable shape, swap content internally, the same pattern
+/// [`results_container`] applies to its own content (see the module docs).
+///
+/// The clear-button slot's own concrete type never changes either: rather
+/// than being present only once the query is non-empty (the pre-fix
+/// behavior), it always renders the identical `GestureDetector`-wrapped
+/// [`IconView`](forgekit::IconView), painted fully transparent
+/// ([`Color::TRANSPARENT`]) and wired to a no-op tap while the query is
+/// empty — an inert placeholder of the SAME widget, not a swapped-in
+/// different one. Before this fix, `row`'s own concrete type flipped between
+/// a bare `TextInput` (empty query) and this `FlexView` wrapper (non-empty)
+/// — a genuine `AnyView` type change at `Padding`'s single `ChildPod`, which
+/// tears down and rebuilds the child, dropping the `TextInput`'s recorded
+/// focus/IME path the instant the query crossed the empty/non-empty boundary
+/// (silently swallowing the very next keystroke on the real per-frame
+/// mobile/desktop pipeline — see `12b-search-field-stable-row`'s task file
+/// for the full mechanism, first surfaced as a Risk in
+/// `12-huddle-search-structure`'s completion summary).
 fn search_field(controller: SearchController, query: &str) -> AnyView<HuddleState> {
     let field = TextInput::<HuddleState, _>(
         query.to_string(),
@@ -96,20 +126,30 @@ fn search_field(controller: SearchController, query: &str) -> AnyView<HuddleStat
     )
     .placeholder("Search channels, people, messages");
 
-    let row: AnyView<HuddleState> = if query.is_empty() {
-        any(field)
-    } else {
-        any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                flexible(1, any(field)),
-                inflexible(any(GestureDetector(icon(icons::CLOSE).size(20.0)).on_tap(
-                    move |_s: &mut HuddleState| controller.query.set(String::new()),
-                ))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center))
-    };
+    let has_query = !query.is_empty();
+    let mut clear_icon = icon(icons::CLOSE).size(20.0);
+    if !has_query {
+        // Invisible placeholder: same `IconView`, painted transparent instead
+        // of resolving the theme's default icon color.
+        clear_icon = clear_icon.color(Color::TRANSPARENT);
+    }
+
+    let row: AnyView<HuddleState> = any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            flexible(1, any(field)),
+            inflexible(any(GestureDetector(clear_icon).on_tap(
+                move |_s: &mut HuddleState| {
+                    // No-op while the query is already empty — the placeholder
+                    // is inert, not just invisible.
+                    if has_query {
+                        controller.query.set(String::new());
+                    }
+                },
+            ))),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center));
 
     any(SizedBox::<HuddleState>(None, Some(FIELD_HEIGHT))
         .child(Padding(EdgeInsets::symmetric(16.0, 0.0), row)))
