@@ -4,6 +4,28 @@
 //! [`AlignView`]/[`AlignWidget`] loosen the incoming constraints for the child
 //! (so it takes its natural size), grow to fill the available (max) space when it
 //! is bounded, and position the child within that box per an [`Alignment`].
+//!
+//! # Flutter-parity contract
+//!
+//! Sizing matches Flutter's `RenderPositionedBox`/`RenderAligningShiftedBox`
+//! (`packages/flutter/lib/src/rendering/shifted_box.dart`, retrieved
+//! 2026-07-19): with no width/height *factor* (ForgeKit does not expose one —
+//! do not add it), the align sizes **per axis** to `constraints.biggest` on a
+//! **bounded** axis (fill) and to the **child's** extent on an **unbounded**
+//! axis (shrink-wrap). This is decided independently on each axis, so a
+//! bounded-width / unbounded-height constraint fills horizontally and
+//! shrink-wraps vertically. The child is then positioned in the free space per
+//! the [`Alignment`] fractions.
+//!
+//! The practical consequence (the huddle avatar bug shape): centering a small
+//! child over a fixed box — `Stack`/`SizedBox` bounding the align, then
+//! `Align(CENTER, child)` — centers only because the incoming constraint is
+//! *bounded* (the bounding parent supplies the max). Under an *unbounded*
+//! constraint the align shrink-wraps to the child and there is no free space to
+//! center within, so the child lands at the origin. Give the align a bounded
+//! box (e.g. wrap in [`crate::SizedBox`]) when centered content over a larger
+//! region is the intent — matching Flutter, where an unbounded `Align` is
+//! likewise a no-op for positioning.
 
 use forgekit_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
@@ -100,8 +122,9 @@ impl Widget for AlignWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         // The child takes its natural size under loosened constraints.
         let child_size = self.child.layout_child(ctx, &bc.loosen());
-        // Fill the available space on each bounded axis; shrink-wrap an unbounded
-        // one to the child.
+        // Flutter parity (shifted_box.dart's RenderPositionedBox, retrieved
+        // 2026-07-19; see module docs): fill the available space on each bounded
+        // axis, shrink-wrap an unbounded one to the child — decided per axis.
         let width = if bc.max().width.is_finite() {
             bc.max().width
         } else {
@@ -137,7 +160,7 @@ impl Widget for AlignWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::leaf;
+    use crate::test_support::{RecordingScene, leaf, leaf_any};
     use forgekit_core::{BuildCtx, PointerButton, PointerEvent, PointerPhase};
     use std::any::Any;
 
@@ -169,6 +192,102 @@ mod tests {
         assert_eq!(placed(Alignment::TOP_RIGHT).1, Point::new(80.0, 0.0));
         assert_eq!(placed(Alignment::BOTTOM_LEFT).1, Point::new(0.0, 80.0));
         assert_eq!(placed(Alignment::BOTTOM_RIGHT).1, Point::new(80.0, 80.0));
+    }
+
+    // -- Flutter-parity sizing (shifted_box.dart's RenderPositionedBox): fill a
+    // bounded axis, shrink-wrap an unbounded one, per axis. --
+
+    /// Lay a 20x20 child inside an align under arbitrary `bc` and report the
+    /// align's chosen size and the child's origin within it.
+    fn placed_bc(alignment: Alignment, bc: &BoxConstraints) -> (Size, Point) {
+        let view: AlignView<()> = Align(alignment, leaf(20.0, 20.0));
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let size = w.layout(&mut lctx, bc);
+        (size, w.child.origin())
+    }
+
+    #[test]
+    fn bounded_loose_fills_and_centers_child() {
+        // A *loose* (min 0) but bounded constraint must fill to the max on both
+        // axes and center the child — the case that bit the huddle avatars.
+        let (size, origin) = placed_bc(
+            Alignment::CENTER,
+            &BoxConstraints::loose(Size::new(100.0, 100.0)),
+        );
+        assert_eq!(size, Size::new(100.0, 100.0), "bounded axes fill to max");
+        assert_eq!(origin, Point::new(40.0, 40.0), "(100-20)*0.5 on each axis");
+    }
+
+    #[test]
+    fn unbounded_shrink_wraps_to_child() {
+        // Both axes unbounded: the align shrink-wraps to the child, leaving no
+        // free space, so the child sits at the origin regardless of alignment.
+        let bc = BoxConstraints::loose(Size::new(f64::INFINITY, f64::INFINITY));
+        let (size, origin) = placed_bc(Alignment::CENTER, &bc);
+        assert_eq!(
+            size,
+            Size::new(20.0, 20.0),
+            "unbounded axes shrink to child"
+        );
+        assert_eq!(origin, Point::ZERO, "no free space to align within");
+    }
+
+    #[test]
+    fn mixed_axis_fills_bounded_shrinks_unbounded() {
+        // Bounded width, unbounded height: fill horizontally (100), shrink-wrap
+        // vertically (20). The decision is independent per axis.
+        let bc = BoxConstraints::new(Size::ZERO, Size::new(100.0, f64::INFINITY));
+        let (size, origin) = placed_bc(Alignment::CENTER, &bc);
+        assert_eq!(size, Size::new(100.0, 20.0));
+        // x centered over the 100px width; y has no slack to center within.
+        assert_eq!(origin, Point::new(40.0, 0.0));
+    }
+
+    #[test]
+    fn tight_passes_through() {
+        // A tight constraint forces the align's size exactly, both axes bounded.
+        let (size, origin) = placed_bc(
+            Alignment::CENTER,
+            &BoxConstraints::tight(Size::new(60.0, 60.0)),
+        );
+        assert_eq!(size, Size::new(60.0, 60.0));
+        assert_eq!(origin, Point::new(20.0, 20.0), "(60-20)*0.5");
+    }
+
+    #[test]
+    fn stack_align_center_positions_small_child_over_larger_sibling() {
+        // Regression for the huddle avatar bug shape: a Stack bounded to the
+        // "circle" size (40x40, as a SizedBox parent would supply) overlays a
+        // 40x40 sibling with `Align(CENTER, <20x20 child>)`. Because the Stack
+        // hands its children a *bounded* loose constraint, the align fills 40x40
+        // and centers the child at (10,10) — not shrink-wrapped to the origin,
+        // which is what pinned the avatar initials to the corner.
+        let view: crate::StackView<()> = crate::Stack(vec![
+            leaf_any(40.0, 40.0),
+            any(Align(Alignment::CENTER, leaf(20.0, 20.0))),
+        ]);
+        let mut counter = 0u64;
+        let mut w = view.build(&mut BuildCtx::new(&mut counter));
+        let mut lctx = LayoutCtx::new();
+        let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(40.0, 40.0)));
+        assert_eq!(size, Size::new(40.0, 40.0));
+
+        // Paint into a recording scene: each leaf fills a rect at its absolute
+        // origin, so the child's centered placement is observable end-to-end
+        // through the real Stack -> Align -> child origin threading.
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, size);
+        w.paint(&mut pctx, &mut scene);
+
+        assert!(
+            scene
+                .rects
+                .contains(&(Point::new(10.0, 10.0), Size::new(20.0, 20.0))),
+            "the 20x20 child must center at (10,10) over the 40x40 box, not sit \
+             at the origin; recorded rects: {:?}",
+            scene.rects,
+        );
     }
 
     // -- Capture routing (review R1: a captured child must keep receiving
