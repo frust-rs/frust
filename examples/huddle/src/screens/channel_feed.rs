@@ -319,7 +319,7 @@ fn feed_body(
     let mut children: Vec<forgekit::FlexChild<HuddleState>> = Vec::new();
 
     if loading_older {
-        children.push(inflexible(loading_older_row(design)));
+        children.push(keyed("loading_older", loading_older_row(design)));
     }
 
     for msg in &messages {
@@ -327,7 +327,7 @@ fn feed_body(
     }
 
     if typing {
-        children.push(inflexible(typing_row(design)));
+        children.push(keyed("typing", typing_row(design)));
     }
 
     let column = FlexView::new(Axis::Vertical, children)

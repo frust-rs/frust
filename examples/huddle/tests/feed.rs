@@ -17,10 +17,11 @@
 
 use std::time::{Duration, Instant};
 
-use forgekit::{AnyView, Component, GetUntracked, TextInputView, text_input};
+use forgekit::{AnyView, Component, FrameTime, GetUntracked, Set, TextInputView, text_input};
 use forgekit_core::{NamedKey, RenderRoot};
 use forgekit_reactive::ReactiveRuntime;
 use forgekit_text::TextContext;
+use kurbo::Size;
 
 use huddle::features::messages::{MessagesController, PAGE_SIZE};
 use huddle::{HuddleApp, HuddleState, mock};
@@ -233,4 +234,76 @@ fn multiline_composer_grows_with_newlines() {
     // The submitted point is well within the window (guards against the field
     // being pushed off-screen by unbounded growth past the 5-line cap).
     assert!(h2 < W, "the field stays a sane height");
+}
+
+/// The keyed feed list with loading_older and typing singleton rows alongside
+/// keyed message rows should not panic about mixed keyed/unkeyed children. The
+/// singleton rows use collision-proof string keys ("loading_older", "typing")
+/// distinct from message ids (u32), so all children are keyed (the list opts
+/// into keyed reconciliation).
+#[test]
+fn keyed_feed_list_with_loading_and_typing_indicators() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut root: AppRoot = RenderRoot::new();
+    let mut state = HuddleApp.init();
+    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut tcx = TextContext::new();
+
+    forgekit::provide_context(forgekit::Theme::m3_baseline());
+    state.nav.router().push("/channel/general");
+
+    // Load the feed (the first frame is the loading state).
+    let mut t_ms = 0u64;
+    let (_scene, mut needs_frame) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
+
+    // Pump frames until the background load populates the feed.
+    let runtime = ReactiveRuntime::get().expect("runtime installed by setup()");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while needs_frame && Instant::now() < deadline {
+        runtime.pump_local();
+        std::thread::sleep(Duration::from_millis(1));
+        t_ms += 16;
+        let result = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
+        needs_frame = result.1;
+        if !result.1 {
+            break;
+        }
+    }
+
+    // Set loading_older and typing to true to trigger the singleton rows
+    // alongside the keyed message rows. This would panic if the rows were
+    // unkeyed (the keyed reconciler requires all or nothing).
+    let controller = MessagesController::for_channel("general");
+    controller.loading_older.set(true);
+    controller.typing.set(true);
+
+    // Render a frame with both indicators and messages present.
+    // This tests that the keyed list handles the mixed singleton/keyed children correctly.
+    let (scene, _) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
+
+    // The feed should still render (at least the composed UI elements are laid out).
+    assert!(
+        scene.glyph_runs > 0,
+        "feed with loading+typing indicators renders without panic"
+    );
+}
+
+/// Local frame_at helper — paint at a specific clock time (in milliseconds)
+/// to test settled-clock rendering. This is a minimal version of the pattern
+/// in `tests/thread.rs` / `tests/activity.rs`.
+fn frame_at(
+    root: &mut AppRoot,
+    logic: &mut impl FnMut(&mut HuddleState) -> AnyView<HuddleState>,
+    state: &mut HuddleState,
+    tcx: &mut TextContext,
+    t_ms: u64,
+) -> (support::RecScene, bool) {
+    root.rebuild(logic, state);
+    let tcx_any: &mut dyn std::any::Any = tcx;
+    root.layout_with_text(Size::new(support::W, support::H), tcx_any);
+    let mut scene = support::RecScene::default();
+    let outcome = root.paint(&mut scene, FrameTime::from_nanos(t_ms * 1_000_000));
+    (scene, outcome.needs_frame)
 }
