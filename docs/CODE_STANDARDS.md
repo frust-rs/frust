@@ -368,9 +368,10 @@ Semantics pass):
   `forgekit-core`/`kurbo`/`peniko` escape-hatch dependency (see its
   `Cargo.toml`'s comment) for the handful of custom app widgets no facade
   widget covers: `ui/swipeable`'s swipe-to-action row, `ui/sheet`'s modal
-  sheet, and `screens/home`'s avatar-fill/`Shimmer` loading effect. A new
-  example reaching for this escape hatch should first check whether the gap
-  belongs in the facade instead.
+  sheet, `screens/home`'s avatar-fill/`Shimmer` loading effect, and
+  `ui/toast`'s `toast_entrance` slide-up/fade entrance widget. A new example
+  reaching for this escape hatch should first check whether the gap belongs
+  in the facade instead.
 
 ## Theming & Animation Conventions
 
