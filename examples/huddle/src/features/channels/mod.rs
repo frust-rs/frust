@@ -18,7 +18,16 @@
 //! - Undo is the same state patch in reverse: the swipe's undo toast captures
 //!   the [`RwSignal`] (cheap, `Send + Sync`) and calls
 //!   [`set_archived_flag`]/[`set_muted_flag`] with the prior value.
+//! - [`ChannelsController::create_channel`] (task 21's home app-bar
+//!   create-channel sheet) is a plain synchronous method, not an async
+//!   [`UseCase`] — it mirrors
+//!   [`crate::features::messages::MessagesController::send_now`]'s shape
+//!   rather than [`ArchiveChannel`]/[`MuteChannel`]'s: the new row is a
+//!   controller-level op with no mock-layer counterpart to echo through a
+//!   round trip, so a caller sees it in the roster on the very next rebuild
+//!   with no `spawn_local` involved.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use clean_signals::{
@@ -240,6 +249,9 @@ pub struct ChannelsController {
     mute: MuteChannel,
     /// The roster through its load lifecycle (loading / data / reloading).
     pub data: RwSignal<AsyncState<ChannelsData, HuddleFailure>>,
+    /// Mints a unique id for a channel created via [`Self::create_channel`],
+    /// mirroring `MessagesController::next_id`/`mint_id`'s shape.
+    next_id: AtomicU32,
 }
 
 impl ChannelsController {
@@ -251,6 +263,7 @@ impl ChannelsController {
             archive: ArchiveChannel,
             mute: MuteChannel,
             data: async_state_signal(),
+            next_id: AtomicU32::new(1),
         }
     }
 
@@ -294,6 +307,35 @@ impl ChannelsController {
         {
             set_muted_flag(self.data, &flag.id, flag.value);
         }
+    }
+
+    /// Append a new channel to the live roster — the Home screen's
+    /// create-channel sheet (task 21). A controller-level op: the immutable
+    /// [`crate::mock`] layer is never touched, so the row exists only for this
+    /// controller's lifetime (matching every other roster mutation in this
+    /// module). Synchronous and immediate (see the module docs' note on why
+    /// this isn't an async [`UseCase`] like [`ArchiveChannel`]/[`MuteChannel`]).
+    /// A no-op (returns `None`) while the roster hasn't loaded yet (`Loading`/
+    /// `Error` with no stale value) — there is no list to append to.
+    pub fn create_channel(&self, name: String, private: bool) -> Option<String> {
+        let id = format!("c-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let item = ChannelItem {
+            id: id.clone(),
+            name,
+            private,
+            preview: "No messages yet".to_string(),
+            unread: 0,
+            archived: false,
+            muted: false,
+        };
+        let mut appended = false;
+        self.data.try_update(|state| {
+            if let Some(d) = data_mut(state) {
+                d.channels.push(item);
+                appended = true;
+            }
+        });
+        appended.then_some(id)
     }
 }
 
@@ -366,6 +408,49 @@ mod tests {
         set_muted_flag(controller.data, "dm-2", false);
         assert!(!dm_muted(&controller, "dm-2"), "restore clears the DM flag");
 
+        controller.core.dispose();
+    }
+
+    #[tokio::test]
+    async fn create_channel_appends_a_live_row_immediately() {
+        let controller = ChannelsController::new();
+        controller.load().await;
+
+        let before = controller
+            .data
+            .get_untracked()
+            .value()
+            .expect("loaded")
+            .channels
+            .len();
+        let id = controller
+            .create_channel("launch-planning".to_string(), true)
+            .expect("the roster is loaded, so the append succeeds");
+
+        let state = controller.data.get_untracked();
+        let data = state.value().expect("loaded");
+        assert_eq!(data.channels.len(), before + 1, "the new row is appended");
+        let created = data
+            .channels
+            .iter()
+            .find(|c| c.id == id)
+            .expect("the minted id is in the roster");
+        assert_eq!(created.name, "launch-planning");
+        assert!(created.private, "the private flag carries through");
+        assert_eq!(created.unread, 0, "a brand-new channel starts read");
+
+        controller.core.dispose();
+    }
+
+    #[test]
+    fn create_channel_before_load_is_a_no_op() {
+        let controller = ChannelsController::new();
+        // No `load().await` — the signal is still `Loading`, so there is no
+        // roster to append to.
+        assert_eq!(
+            controller.create_channel("too-early".to_string(), false),
+            None
+        );
         controller.core.dispose();
     }
 

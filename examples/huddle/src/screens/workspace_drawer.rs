@@ -29,6 +29,17 @@
 //! rather than staying perfectly square at the window edge — both accepted,
 //! documented simplifications of the real thing.
 //!
+//! # Drag-up-to-dismiss (task 21)
+//!
+//! Since Home's task 21 already re-added a `forgekit-core` production
+//! dependency to this crate (`ui/swipeable.rs`, `screens/home.rs`'s escape
+//! hatches, and `ui/sheet.rs`'s bottom sheet — see this crate's `Cargo.toml`),
+//! the panel now also wraps in [`crate::ui::sheet::drag_up_dismiss`]: a
+//! vertical drag upward past a threshold pops the route, mirroring
+//! [`SheetView`](crate::ui::sheet::SheetView)'s downward drag-dismiss with the
+//! direction inverted. The scrim tap below still pops too — the two dismiss
+//! paths are independent and don't interact.
+//!
 //! # Rounded bottom corners
 //!
 //! The spec calls for a panel with rounded *bottom* corners only. The public
@@ -47,6 +58,7 @@ use forgekit::{
 };
 
 use crate::HuddleState;
+use crate::ui::sheet::drag_up_dismiss;
 
 /// One row in the switcher: an initials tile, a name, and an unread/active
 /// hint. Mock data local to this screen — there is no "workspace" concept in
@@ -165,7 +177,13 @@ pub fn workspace_drawer_screen() -> AnyView<HuddleState> {
         }));
 
     let rows: Vec<AnyView<HuddleState>> = WORKSPACES.iter().map(workspace_row).collect();
-    let panel_content = SizedBox(Some(FILL), None).child(filled_card(Column(rows)));
+    // Drag-up-to-dismiss (task 21): a vertical drag upward on the panel past
+    // its own threshold pops the route, mirroring the scrim tap below —
+    // `ui::sheet::drag_up_dismiss` is the sheet's downward drag-dismiss
+    // mechanics inverted (see its doc comment).
+    let card = drag_up_dismiss(filled_card(Column(rows)))
+        .on_dismiss(|s: &mut HuddleState| s.nav.router().pop());
+    let panel_content = SizedBox(Some(FILL), None).child(card);
     let panel_slid = Padding(
         EdgeInsets {
             left: 0.0,

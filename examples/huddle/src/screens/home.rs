@@ -24,15 +24,39 @@
 //! The roster uses [`scroll_view`] wrapping a [`Column`], not the Material
 //! `ListView`: `ScrollView` is the only facade widget exposing
 //! `on_refresh_release` (pull-to-refresh), which this screen needs.
+//!
+//! # Home actions (task 21)
+//!
+//! The app bar's leading "HQ" tile is the workspace-switcher's first real
+//! entry point (`/workspace-switcher` existed since the skeleton but nothing
+//! pushed it — see `screens::workspace_drawer`'s module docs); the trailing
+//! `icons::ADD` action opens a create-channel bottom sheet (reusing
+//! [`crate::ui::sheet`], task 20's primitive) that appends straight to
+//! [`ChannelsController`]'s live list via
+//! [`ChannelsController::create_channel`]. Long-pressing a row (channel or
+//! DM — [`GestureDetector::on_long_press`]) opens a Mute/Unmute · Archive ·
+//! Invite people · Cancel action-sheet menu; Mute/Archive reuse the exact
+//! controller ops + undo toast [`swipe_wrap`] already wires (swipe parity).
+//! **"Invite people" is this task's one chosen entry point into the invite
+//! modal** (the task spec offered a second option — a row on the
+//! create-channel sheet's success toast — but a toast action is a
+//! `ToastController` affordance meant for *undo*, not for opening a second
+//! modal on top of a just-dismissed one, so the long-press menu is the
+//! cleaner single seam): it pushes a `dialog`/`cupertino_alert` (picked by
+//! the live [`DesignLanguage`]) confirm/cancel modal onto the app's outer
+//! navigator, and confirming toasts "Invites sent (mock)" — see
+//! [`show_invite_modal`].
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use forgekit::{
-    Align, Alignment, AnimationController, AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets,
-    FlexView, GestureDetector, Get, Image, ImageFit, ImageSource, NavigatorController, Padding,
-    ProgressValue, Row, SizedBox, Stack, View, any, app_bar, circular_progress, component,
-    flexible, hero, icon, icons, inflexible, scroll_view, text, use_context,
+    Align, Alignment, AnimationController, AnyView, Axis, Column, CrossAxisAlignment,
+    DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get, Image, ImageFit, ImageSource,
+    NavigatorController, Padding, PopResult, ProgressValue, Row, SizedBox, Stack, Theme, View,
+    action, any, app_bar, button, circular_progress, component, dialog, flexible, hero, icon,
+    icons, inflexible, scroll_view, show_cupertino_alert, show_dialog, switch, text, text_input,
+    use_context,
 };
 use forgekit_core::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget,
@@ -46,6 +70,7 @@ use crate::HuddleState;
 use crate::failure::HuddleFailure;
 use crate::features::channels::{self, ChannelItem, ChannelsController, DmItem};
 use crate::mock::UserStatus;
+use crate::ui::sheet::{action_menu, sheet, sheet_action_row};
 
 // ---------------------------------------------------------------------------
 // Palette / tunables
@@ -232,6 +257,33 @@ struct HomeState {
     toasts: crate::ui::toast::ToastController,
     /// A decoded image used for a couple of DM avatars (`None` if decode fails).
     logo: Option<ImageSource>,
+    /// Which Home overlay sheet (if any) is open (task 21) — plain retained
+    /// `Component` state, not an `RwSignal`: a tap/long-press callback mutates
+    /// it directly via `EventCtx::state_mut::<HomeState>()`, and the change is
+    /// picked up on the very next rebuild like any other retained field (see
+    /// `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions).
+    sheet: HomeSheet,
+    /// The create-channel sheet's draft name field.
+    create_name: String,
+    /// The create-channel sheet's draft private toggle.
+    create_private: bool,
+}
+
+/// Which Home-screen overlay sheet (if any) is open — see the [module
+/// docs](self)' "Home actions" section.
+#[derive(Clone)]
+enum HomeSheet {
+    /// No sheet — the roster is fully interactive.
+    None,
+    /// The app-bar ADD action's create-channel sheet.
+    Create,
+    /// The long-press action menu for row `id` (`label` for the toast text,
+    /// `muted` for the Mute/Unmute row's current-state label).
+    RowActions {
+        id: String,
+        label: String,
+        muted: bool,
+    },
 }
 
 impl forgekit::Component for HomeScreen {
@@ -258,6 +310,9 @@ impl forgekit::Component for HomeScreen {
             nav: self.nav.clone(),
             toasts,
             logo,
+            sheet: HomeSheet::None,
+            create_name: String::new(),
+            create_private: false,
         }
     }
 
@@ -275,15 +330,66 @@ impl forgekit::Component for HomeScreen {
             ))
         };
 
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(app_bar::<HomeState>("Huddle"))),
-                flexible(1, body),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch))
+        let design = use_context::<Theme>()
+            .map(|t| t.design_language)
+            .unwrap_or(DesignLanguage::Material3);
+
+        let bar = any(app_bar::<HomeState>("Huddle")
+            .leading(workspace_tile(&state.nav))
+            .actions(vec![create_channel_action()]));
+
+        let screen = any(
+            FlexView::new(Axis::Vertical, vec![inflexible(bar), flexible(1, body)])
+                .cross_axis(CrossAxisAlignment::Stretch),
+        );
+
+        // The open Home overlay sheet mounts in the screen's own `Stack` top
+        // layer (mirrors `screens::channel_feed`'s `feed_sheet`, task 20); when
+        // closed it is an inert zero-size box, so the roster stays interactive.
+        let overlay = home_sheet_overlay(state, design);
+        any(Stack(vec![screen, overlay]))
     }
+}
+
+// ---------------------------------------------------------------------------
+// App-bar actions (task 21)
+// ---------------------------------------------------------------------------
+
+/// The app bar's leading "HQ" initials tile — the same [`fill_box`] +
+/// centered-label escape-hatch shape [`channel_circle`] already uses (rather
+/// than `filled_card`, whose 16px content inset would balloon a 40px tile
+/// past the 64dp bar's own height). Tapping it pushes `/workspace-switcher`
+/// onto the outer app navigator (see the [module docs](self)' "Home actions"
+/// section) — the entry point the drawer never had before this task.
+fn workspace_tile(nav: &NavigatorController<HuddleState>) -> AnyView<HomeState> {
+    let nav = nav.clone();
+    let tile = Padding(
+        EdgeInsets::symmetric(6.0, 12.0),
+        Stack(vec![
+            any(fill_box(Size::new(40.0, 40.0), CHANNEL_TINT, 12.0)),
+            any(Align(
+                Alignment::CENTER,
+                text("HQ").size(12.0).color(Color::WHITE),
+            )),
+        ]),
+    );
+    any(GestureDetector(tile).on_tap(move |_s: &mut HomeState| {
+        nav.push(crate::screens::workspace_drawer::workspace_drawer_screen);
+    }))
+}
+
+/// The app bar's trailing `icons::ADD` action — opens the create-channel
+/// sheet with a fresh (empty, public) draft.
+fn create_channel_action() -> AnyView<HomeState> {
+    any(
+        GestureDetector(icon(icons::ADD).size(24.0).label("Create a channel")).on_tap(
+            |s: &mut HomeState| {
+                s.sheet = HomeSheet::Create;
+                s.create_name.clear();
+                s.create_private = false;
+            },
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +512,8 @@ fn channel_row(state: &HomeState, c: &ChannelItem) -> AnyView<HomeState> {
     );
 
     let row = row_layout(leading, content);
-    swipe_wrap(row, c.id.clone(), format!("#{}", c.name), state)
+    let menu_row = row_with_long_press_menu(row, c.id.clone(), format!("#{}", c.name), c.muted);
+    swipe_wrap(menu_row, c.id.clone(), format!("#{}", c.name), state)
 }
 
 /// A DM roster row (user avatar + name + preview + badge), wrapped in a
@@ -431,7 +538,30 @@ fn dm_row(state: &HomeState, d: &DmItem) -> AnyView<HomeState> {
     );
 
     let row = row_layout(leading, content);
-    swipe_wrap(row, d.id.clone(), d.name.clone(), state)
+    let menu_row = row_with_long_press_menu(row, d.id.clone(), d.name.clone(), d.muted);
+    swipe_wrap(menu_row, d.id.clone(), d.name.clone(), state)
+}
+
+/// Wrap a row (leading + tappable content, pre-swipe) so a long-press opens
+/// its [`HomeSheet::RowActions`] menu. [`GestureDetector`] is a transparent
+/// wrapper (every event still forwards to the child — see its module docs),
+/// so this composes cleanly with the row's own tap navigation and the
+/// [`swipe_wrap`] that wraps it next.
+fn row_with_long_press_menu(
+    row: AnyView<HomeState>,
+    id: String,
+    label: String,
+    muted: bool,
+) -> AnyView<HomeState> {
+    any(
+        GestureDetector(row).on_long_press(move |s: &mut HomeState| {
+            s.sheet = HomeSheet::RowActions {
+                id: id.clone(),
+                label: label.clone(),
+                muted,
+            };
+        }),
+    )
 }
 
 /// The leading `#` circle for a channel row.
@@ -589,4 +719,213 @@ fn swipe_wrap(
     any(crate::ui::swipeable::swipeable_row(row)
         .on_swipe_right(ARCHIVE_COLOR, archive_cb)
         .on_swipe_left(MUTE_COLOR, mute_cb))
+}
+
+// ---------------------------------------------------------------------------
+// Home overlay sheets (task 21)
+// ---------------------------------------------------------------------------
+
+/// The open Home overlay sheet, or an inert zero-size box when nothing is
+/// open. `design` (resolved once, at build time, from the live
+/// [`use_context::<Theme>`]) picks the invite modal's widget family — see
+/// [`show_invite_modal`].
+fn home_sheet_overlay(state: &HomeState, design: DesignLanguage) -> AnyView<HomeState> {
+    let dismiss = |s: &mut HomeState| s.sheet = HomeSheet::None;
+    match state.sheet.clone() {
+        HomeSheet::None => any(SizedBox(None, None)),
+        HomeSheet::Create => any(sheet(create_channel_form(state)).on_dismiss(dismiss)),
+        HomeSheet::RowActions { id, label, muted } => any(sheet(action_menu(row_action_rows(
+            state, id, label, muted, design,
+        )))
+        .on_dismiss(dismiss)),
+    }
+}
+
+/// The create-channel sheet content: a name field, a private [`switch`]
+/// (`icons::LOCK`), and Cancel/Create actions. Create appends the channel to
+/// [`ChannelsController`]'s live list (a no-op on an empty/whitespace-only
+/// name) and raises a "Created #name" toast; Cancel (and the sheet's own
+/// scrim/drag dismiss) discards the draft without touching the roster.
+fn create_channel_form(state: &HomeState) -> AnyView<HomeState> {
+    let name_field = any(text_input(
+        state.create_name.clone(),
+        |s: &mut HomeState, next: String| {
+            s.create_name = next;
+        },
+    )
+    .placeholder("Channel name"));
+
+    let private_row = any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(any(icon(icons::LOCK).size(18.0))),
+            inflexible(any(SizedBox(Some(8.0), None))),
+            flexible(1, any(text("Private"))),
+            inflexible(any(switch(
+                state.create_private,
+                |s: &mut HomeState, checked: bool| {
+                    s.create_private = checked;
+                },
+            ))),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center));
+
+    let cancel_btn = any(button("Cancel", |s: &mut HomeState| {
+        s.sheet = HomeSheet::None;
+    }));
+    let create_btn = any(button("Create", |s: &mut HomeState| {
+        let trimmed = s.create_name.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        s.controller
+            .create_channel(trimmed.clone(), s.create_private);
+        s.toasts.show(format!("Created #{trimmed}"));
+        s.sheet = HomeSheet::None;
+    }));
+    let actions_row = any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            flexible(1, any(SizedBox(None, None))),
+            inflexible(cancel_btn),
+            inflexible(any(SizedBox(Some(8.0), None))),
+            inflexible(create_btn),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center));
+
+    any(Padding(
+        EdgeInsets::all(16.0),
+        FlexView::new(
+            Axis::Vertical,
+            vec![
+                inflexible(any(text("Create a channel").size(18.0))),
+                inflexible(any(SizedBox(None, Some(16.0)))),
+                inflexible(name_field),
+                inflexible(any(SizedBox(None, Some(16.0)))),
+                inflexible(private_row),
+                inflexible(any(SizedBox(None, Some(20.0)))),
+                inflexible(actions_row),
+            ],
+        )
+        .cross_axis(CrossAxisAlignment::Stretch),
+    ))
+}
+
+/// The row long-press menu: Mute/Unmute, Archive, Invite people, Cancel.
+/// Mute/Archive reuse [`ChannelsController`]'s existing `set_muted`/
+/// `set_archived` ops + an undo toast — the exact [`swipe_wrap`] shape, so a
+/// long-press and a swipe converge on the same controller call. "Invite
+/// people" is this task's one entry point into [`show_invite_modal`] (see
+/// the [module docs](self)).
+fn row_action_rows(
+    state: &HomeState,
+    id: String,
+    label: String,
+    muted: bool,
+    design: DesignLanguage,
+) -> Vec<AnyView<HomeState>> {
+    let data = state.controller.data;
+
+    let mute_id = id.clone();
+    let mute_label = label.clone();
+    let mute_icon = if muted {
+        icons::NOTIFICATIONS
+    } else {
+        icons::VOLUME_OFF
+    };
+    let mute_text = if muted { "Unmute" } else { "Mute" };
+    let mute_row = sheet_action_row(mute_icon, mute_text, move |s: &mut HomeState| {
+        s.sheet = HomeSheet::None;
+        let next = !muted;
+        let handle = s.controller.clone();
+        let op_id = mute_id.clone();
+        forgekit::spawn_local(async move {
+            handle.set_muted(op_id, next).await;
+        });
+        let undo_id = mute_id.clone();
+        let verb = if next { "Muted" } else { "Unmuted" };
+        s.toasts
+            .show_with_action(format!("{verb} {mute_label}"), "Undo", move || {
+                channels::set_muted_flag(data, &undo_id, !next)
+            });
+    });
+
+    let archive_id = id.clone();
+    let archive_label = label.clone();
+    let archive_row = sheet_action_row(icons::ARCHIVE, "Archive", move |s: &mut HomeState| {
+        s.sheet = HomeSheet::None;
+        let handle = s.controller.clone();
+        let op_id = archive_id.clone();
+        forgekit::spawn_local(async move {
+            handle.set_archived(op_id, true).await;
+        });
+        let undo_id = archive_id.clone();
+        let undo_label = archive_label.clone();
+        s.toasts
+            .show_with_action(format!("Archived {undo_label}"), "Undo", move || {
+                channels::set_archived_flag(data, &undo_id, false)
+            });
+    });
+
+    let nav = state.nav.clone();
+    let invite_row = sheet_action_row(icons::GROUP, "Invite people", move |s: &mut HomeState| {
+        s.sheet = HomeSheet::None;
+        show_invite_modal(&nav, design);
+    });
+
+    let cancel_row = sheet_action_row(icons::CLOSE, "Cancel", |s: &mut HomeState| {
+        s.sheet = HomeSheet::None;
+    });
+
+    vec![mute_row, archive_row, invite_row, cancel_row]
+}
+
+/// Push the invite confirmation modal onto the outer app navigator: `dialog`
+/// on Material 3, `cupertino_alert` on Cupertino — this task's exercise of
+/// the modal widget the matrix promises (see the [module docs](self)).
+///
+/// Neither builds an explicit Cancel action: both `show_dialog` and
+/// `show_cupertino_alert` already auto-wire a scrim tap to a plain dismiss (an
+/// empty [`PopResult`], per each widget's own doc comment) — tapping outside
+/// the panel *is* the cancel affordance, so a second, redundant Cancel button
+/// would just duplicate it. Confirming with the one "Send" action toasts
+/// "Invites sent (mock)"; a scrim-tap cancel does nothing.
+fn show_invite_modal(nav: &NavigatorController<HuddleState>, design: DesignLanguage) {
+    match design {
+        DesignLanguage::Material3 => {
+            let confirm_nav = nav.clone();
+            show_dialog(
+                nav,
+                move || {
+                    let confirm = confirm_nav.clone();
+                    dialog()
+                        .title("Invite people")
+                        .body("Send invites to this workspace? (mock)")
+                        .action(any(button("Send", move |_s: &mut HuddleState| {
+                            confirm.pop_with_result(PopResult::of(true));
+                        })))
+                },
+                |s: &mut HuddleState, result: PopResult| {
+                    if result.take::<bool>() == Some(true) {
+                        s.toasts.show("Invites sent (mock)");
+                    }
+                },
+            );
+        }
+        DesignLanguage::Cupertino => {
+            show_cupertino_alert(
+                nav,
+                "Invite people",
+                Some("Send invites to this workspace? (mock)".to_string()),
+                vec![action("Send")],
+                |s: &mut HuddleState, result: PopResult| {
+                    if result.take::<usize>() == Some(0) {
+                        s.toasts.show("Invites sent (mock)");
+                    }
+                },
+            );
+        }
+    }
 }

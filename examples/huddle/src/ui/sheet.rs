@@ -562,6 +562,243 @@ where
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Drag-up-to-dismiss (task 21: the workspace-switcher top drawer)
+// ---------------------------------------------------------------------------
+
+/// A vertical drag-*up*-to-dismiss wrapper — [`SheetWidget`]'s downward
+/// drag-dismiss mechanics mirrored to the opposite direction, for a
+/// top-anchored panel that dismisses on an upward drag instead of a downward
+/// one (`screens::workspace_drawer`'s drawer, task 21). Unlike [`sheet`] this
+/// wraps a natural-sized child in place — no full-bleed scrim of its own; the
+/// drawer already paints a separate scrim layer alongside it in its own
+/// `Stack` — and tracks the drag as an upward `lift` added to the content's
+/// own paint origin. Reuses [`DISMISS_FRACTION`]/[`SETTLE_DECAY`]/
+/// [`SETTLE_STOP_PX`] and the [`Callback`]/[`Erased`] plumbing [`SheetView`]
+/// already defines above.
+pub struct DragUpDismissView<State: 'static> {
+    content: AnyView<State>,
+    on_dismiss: Option<Callback<State>>,
+}
+
+/// Wrap `content` so an upward drag past [`DISMISS_FRACTION`] of its own
+/// height, then released, fires `on_dismiss` (attach with
+/// [`DragUpDismissView::on_dismiss`]); short of that, the content springs back
+/// into place exactly like [`sheet`]'s downward release-below-threshold case.
+/// Every event is otherwise forwarded through untouched, so a tap on the
+/// wrapped content (e.g. a workspace row) still fires normally.
+pub fn drag_up_dismiss<State: 'static, V: View<State>>(content: V) -> DragUpDismissView<State> {
+    DragUpDismissView {
+        content: any(content),
+        on_dismiss: None,
+    }
+}
+
+impl<State: 'static> DragUpDismissView<State> {
+    /// Fire `on_dismiss` when the content is dragged upward past
+    /// [`DISMISS_FRACTION`] of its own height and released.
+    pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
+        self.on_dismiss = Some(Rc::new(on_dismiss));
+        self
+    }
+}
+
+/// The retained widget for a [`DragUpDismissView`].
+pub struct DragUpDismissWidget {
+    content: ChildPod,
+    /// The content's own natural (unlifted) height, measured at layout — the
+    /// basis for [`DragUpDismissWidget::dismiss_px`].
+    content_height: f64,
+    /// Current upward drag offset (px, `>= 0`) applied to the content's paint
+    /// origin.
+    lift: f64,
+    down_start: Point,
+    last: Point,
+    /// We took the gesture over as a vertical (upward) drag.
+    dragging: bool,
+    /// A spring-back-down settle is returning `lift` to 0 (driven at paint).
+    settling: bool,
+    last_anim: Option<FrameTime>,
+    on_dismiss: Option<Erased>,
+}
+
+impl DragUpDismissWidget {
+    fn new(content: ChildPod) -> Self {
+        Self {
+            content,
+            content_height: 0.0,
+            lift: 0.0,
+            down_start: Point::ZERO,
+            last: Point::ZERO,
+            dragging: false,
+            settling: false,
+            last_anim: None,
+            on_dismiss: None,
+        }
+    }
+
+    fn sync_content_origin(&mut self) {
+        self.content.set_origin(Point::new(0.0, -self.lift));
+    }
+
+    /// The distance an upward drag must exceed, on release, to dismiss.
+    fn dismiss_px(&self) -> f64 {
+        self.content_height * DISMISS_FRACTION
+    }
+
+    fn send_content_cancel(&mut self, ctx: &mut EventCtx, pos: Point) {
+        let cancel = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Cancel,
+            position: pos,
+            button: PointerButton::Primary,
+        });
+        self.content.event_child(ctx, &cancel);
+    }
+
+    /// Advance the spring-back-down settle by the delta since the last paint
+    /// (mirrors [`SheetWidget::pump_settle`]).
+    fn pump_settle(&mut self, ctx: &mut PaintCtx) {
+        if !self.settling {
+            self.last_anim = None;
+            return;
+        }
+        let now = ctx.frame_time();
+        let dt = match self.last_anim {
+            Some(t) => now.saturating_sub(t).as_secs_f64() * 1000.0,
+            None => 0.0,
+        };
+        self.last_anim = Some(now);
+        if dt > 0.0 {
+            if self.lift.abs() <= SETTLE_STOP_PX {
+                self.lift = 0.0;
+                self.settling = false;
+            } else {
+                self.lift *= SETTLE_DECAY.powf(dt);
+            }
+        }
+        if self.settling {
+            ctx.request_frame();
+        }
+    }
+}
+
+impl<State: 'static> View<State> for DragUpDismissView<State> {
+    type Element = DragUpDismissWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> DragUpDismissWidget {
+        let mut widget = DragUpDismissWidget::new(build_child(&self.content, ctx));
+        widget.on_dismiss = self.on_dismiss.as_ref().map(erase);
+        widget
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut DragUpDismissWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        element.on_dismiss = self.on_dismiss.as_ref().map(erase);
+        rebuild_child(&prev.content, &self.content, &mut element.content, ctx)
+    }
+
+    fn teardown(&self, element: &mut DragUpDismissWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.content, &mut element.content, ctx);
+    }
+}
+
+impl Widget for DragUpDismissWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.content.layout_child(ctx, bc);
+        self.content_height = size.height;
+        self.sync_content_origin();
+        bc.constrain(size)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.pump_settle(ctx);
+        self.sync_content_origin();
+        self.content.paint_child(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let InputEvent::Pointer(p) = event else {
+            return self.content.event_child(ctx, event);
+        };
+        match p.phase {
+            PointerPhase::Down => {
+                self.dragging = false;
+                self.settling = false;
+                self.last_anim = None;
+                self.down_start = p.position;
+                self.last = p.position;
+                ctx.capture_pointer();
+                self.content.event_child(ctx, event);
+                EventResult::Handled
+            }
+            PointerPhase::Move => {
+                if self.dragging {
+                    let dy = p.position.y - self.last.y;
+                    self.last = p.position;
+                    // Dragging upward (dy negative) grows the lift.
+                    self.lift = (self.lift - dy).max(0.0);
+                    self.sync_content_origin();
+                    ctx.request_redraw();
+                } else {
+                    let dx = p.position.x - self.down_start.x;
+                    let dy = p.position.y - self.down_start.y;
+                    if dy < -TOUCH_SLOP && dy.abs() > dx.abs() {
+                        // Upward takeover: cancel the content, drag the panel.
+                        self.dragging = true;
+                        self.last = p.position;
+                        self.send_content_cancel(ctx, p.position);
+                        self.content.set_active(false);
+                        ctx.request_redraw();
+                    } else {
+                        self.content.event_child(ctx, event);
+                    }
+                }
+                EventResult::Handled
+            }
+            PointerPhase::Up => {
+                if self.dragging {
+                    if self.lift > self.dismiss_px() {
+                        if let Some(cb) = self.on_dismiss.as_mut() {
+                            cb(ctx);
+                        }
+                    } else {
+                        // Below threshold: spring the content back down.
+                        self.settling = true;
+                        self.last_anim = None;
+                    }
+                } else {
+                    // A tap on the content: let it fire normally.
+                    self.content.event_child(ctx, event);
+                }
+                self.content.set_active(false);
+                self.dragging = false;
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            PointerPhase::Cancel => {
+                self.content.event_child(ctx, event);
+                self.content.set_active(false);
+                self.dragging = false;
+                self.settling = false;
+                self.last_anim = None;
+                self.lift = 0.0;
+                self.sync_content_origin();
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+        }
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent wrapper: contribute no node of its own.
+        self.content.semantics_child(ctx);
+    }
+}
+
 /// Assemble sheet rows into the stretched column the [`sheet`] panel expects
 /// (each row fills the panel width). A small convenience over building the
 /// [`FlexView`] inline at every call site.
