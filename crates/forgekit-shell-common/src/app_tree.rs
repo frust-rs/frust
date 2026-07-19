@@ -691,4 +691,84 @@ mod tests {
              resolves to None (the F1 bug this task closes)"
         );
     }
+
+    // --- Mobile tracked-rebuild regression test (device-parity task 09b) ----
+    //
+    // The mobile shells (`forgekit-shell-android`/`-ios`) now wrap their
+    // per-frame rebuild as `rt.with_owner(|| scope.track(|| app.rebuild()))` —
+    // the exact shape this test drives over the shared `AppTree` seam (the
+    // shells' own `app` modules are target-gated and never host-compiled, so this
+    // is where the wrap gets host coverage). It proves the wake mechanism device
+    // screens depend on: a signal read during a `scope.track`-wrapped rebuild
+    // subscribes the frame scope, so a later write trips the process-wide
+    // `signals_dirty` flag the mobile frame gate drains (`take_signals_dirty` →
+    // `FrameInputs::signals_dirty`). The negative control is the exact bug task 09
+    // diagnosed: a bare `with_owner(|| app.rebuild())` (no `scope.track`) installs
+    // the reactive Owner but NOT the Observer, so the same post-rebuild write
+    // subscribes nothing and trips nothing — the gate then skips the frame that
+    // would paint the loaded content until a touch forces a Run. Both halves run
+    // in ONE `#[test]` because `signals_dirty` is process-global: no other
+    // shell-common test touches it, so a single serial test needs no cross-test
+    // lock.
+
+    use forgekit_reactive::{ReactiveRuntime, TrackedScope};
+    use reactive_graph::signal::RwSignal;
+    use reactive_graph::traits::{Get, Set};
+
+    #[test]
+    fn scope_tracked_rebuild_trips_signals_dirty_but_bare_rebuild_does_not() {
+        // A no-op waker: this test asserts on the drained `signals_dirty` flag
+        // (which `TrackedScope::notify_dirty` sets on every tracked write), not
+        // on wake calls, so the waker itself need do nothing.
+        let rt = ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+
+        // --- Positive: the shells' new wrap subscribes the scope. ---
+        let tracked_signal = rt.with_owner(|| RwSignal::new(0u32));
+        let mut tracked_app: Box<dyn AppTree> = new_boxed_app_with(
+            || (),
+            move |_s: &mut ()| {
+                // A tracked read during rebuild — under `scope.track` it
+                // subscribes the scope, exactly as a real screen's
+                // `controller.loading.get()` does inside a mobile rebuild.
+                let _ = tracked_signal.get();
+                StubLeaf
+            },
+        );
+        let scope = TrackedScope::new();
+        {
+            // Disjoint borrows, mirroring the shells' `scope.track(|| app.rebuild())`.
+            let s = &scope;
+            let a = &mut tracked_app;
+            rt.with_owner(|| s.track(|| a.rebuild()));
+        }
+        // Drain anything construction/rebuild left set so the assertion observes
+        // only the post-rebuild write below.
+        rt.take_signals_dirty();
+        tracked_signal.set(1);
+        assert!(
+            rt.take_signals_dirty(),
+            "a write to a signal read inside the scope-tracked rebuild must trip \
+             signals_dirty — the wake the mobile frame gate drains"
+        );
+
+        // --- Negative control (the task-09 bug): a bare, untracked rebuild. ---
+        let untracked_signal = rt.with_owner(|| RwSignal::new(0u32));
+        let mut untracked_app: Box<dyn AppTree> = new_boxed_app_with(
+            || (),
+            move |_s: &mut ()| {
+                let _ = untracked_signal.get();
+                StubLeaf
+            },
+        );
+        // The pre-fix mobile shape: `with_owner` installs the Owner but NOT the
+        // reactive Observer, so the read subscribes nothing.
+        rt.with_owner(|| untracked_app.rebuild());
+        rt.take_signals_dirty();
+        untracked_signal.set(1);
+        assert!(
+            !rt.take_signals_dirty(),
+            "without the scope.track wrap the read subscribes nothing, so the \
+             write trips no signals_dirty — the device-only stuck-on-loading stall"
+        );
+    }
 }

@@ -38,7 +38,7 @@ use forgekit_core::event::{
     EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerPhase,
 };
 use forgekit_core::insets::WindowInsets;
-use forgekit_reactive::{ReactiveRuntime, provide_context};
+use forgekit_reactive::{ReactiveRuntime, TrackedScope, provide_context};
 use forgekit_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use forgekit_scene::{Scene, SceneBuilder};
 use forgekit_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
@@ -66,6 +66,19 @@ pub struct IosAppHandle {
     /// Reused across frames; `reset()` each frame rather than reallocated.
     scene: Scene,
     app: Box<dyn AppTree>,
+    /// Records which signals the last per-frame rebuild read, so a later write
+    /// to any of them trips the process-wide signals-dirty flag
+    /// ([`TrackedScope::notify_dirty`] → `ReactiveRuntime::mark_signals_dirty`)
+    /// that [`Self::frame`] drains via `take_signals_dirty` into
+    /// [`FrameInputs::signals_dirty`]. Without this wrap a completed async load's
+    /// signal write notifies no subscriber, so `signals_dirty` never trips and
+    /// the frame gate skips the frame that would paint the loaded content until a
+    /// touch forces a `Run` — the device-only "channel stuck on loading" stall
+    /// (see device-parity task 09's root-cause). Mirrors the desktop shell's
+    /// `ShellHandler::scope` (`forgekit-shell-desktop/src/app_handler.rs`):
+    /// persistent across frames (not per-frame constructed) and re-tracked from
+    /// scratch each `track`, so the sources frame N subscribes wake frame N+1.
+    scope: TrackedScope,
     /// The Swift-owned `CAMetalLayer*` this handle's surface was built from,
     /// retained so the shell can recreate the surface after a `SurfaceLost` (iOS
     /// keeps the same layer for the app's whole lifetime). Read-only from Rust's
@@ -209,6 +222,7 @@ impl IosAppHandle {
             text_ctx: TextContext::new(),
             scene: Scene::new(),
             app,
+            scope: TrackedScope::new(),
             metal_layer,
             physical,
             scale,
@@ -705,15 +719,26 @@ impl IosAppHandle {
         // out).
         let perf_on = perf::enabled();
 
-        // Rebuild under the root `Owner` so any signal read/`provide_context`
-        // during a per-frame rebuild is tracked/scoped correctly, mirroring the
-        // desktop shell (`runtime.with_owner(|| ...)`) and `create_handle`'s
-        // initial construction. Degrade gracefully to an unwrapped rebuild if
-        // the runtime is somehow absent — the frame path must never panic
-        // across the C-ABI boundary.
+        // Rebuild under the root `Owner` AND inside the persistent
+        // [`TrackedScope`] so every signal read this frame subscribes the scope:
+        // a later write to any of them trips `signals_dirty` (drained above into
+        // `FrameInputs::signals_dirty`), so the frame gate runs the frame that
+        // paints the change. Without the `scope.track` wrap a completed async
+        // load's write would notify no subscriber and the gate would skip until a
+        // touch forced a `Run` (device-parity task 09's device-only "stuck on
+        // loading" stall). Mirrors the desktop shell
+        // (`app_handler.rs` `scope.track` site) and `create_handle`'s initial
+        // construction; fields are borrowed disjointly so the tracking closure
+        // captures only what the rebuild needs, not all of `self`. Degrade
+        // gracefully to an unwrapped rebuild if the runtime is somehow absent —
+        // the frame path must never panic across the C-ABI boundary.
         let rebuild_start = perf_on.then(Instant::now);
         match ReactiveRuntime::get() {
-            Some(rt) => rt.with_owner(|| self.app.rebuild()),
+            Some(rt) => {
+                let scope = &self.scope;
+                let app = &mut self.app;
+                rt.with_owner(|| scope.track(|| app.rebuild()));
+            }
             None => self.app.rebuild(),
         }
         let rebuild = rebuild_start.map(|t| t.elapsed()).unwrap_or_default();

@@ -1178,6 +1178,7 @@ name = "forgekit-shell-common"
 version = "0.1.0"
 dependencies = [
  "forgekit-core",
+ "forgekit-reactive",
  "forgekit-scene",
  "forgekit-text",
  "forgekit-theme",
