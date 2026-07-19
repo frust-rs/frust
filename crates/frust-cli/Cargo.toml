@@ -1,0 +1,25 @@
+[package]
+name = "frust-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "frust"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+minijinja.workspace = true
+include_dir.workspace = true
+# `frust run`'s Android log-streaming path needs a clean Ctrl-C → exit-0
+# hook (default SIGINT disposition exits 130, spec §12.4 wants 0). `ctrlc`
+# is a tiny, dependency-light wrapper over signal-hook; nothing else in the
+# CLI needs process-signal handling.
+ctrlc.workspace = true

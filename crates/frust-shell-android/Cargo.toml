@@ -1,0 +1,48 @@
+[package]
+name = "frust-shell-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Unconditional: the `android_app!` macro is defined on every target (it only
+# *expands* to real code where its call site is `#[cfg(target_os = "android")]`),
+# and the panic-guard helper is host-testable, so `log` builds everywhere.
+log = { workspace = true }
+
+# The JNI runtime and the whole render/text stack are only ever compiled for an
+# Android target; on the host this crate is (almost) empty but the macro and the
+# pure helpers still compile so `cargo test --workspace` stays green.
+[target.'cfg(target_os = "android")'.dependencies]
+# Platform-agnostic shell plumbing (AppTree erasure + guard/sanitize_scale/
+# logical_size). Android-gated because nothing off-Android references it: the
+# `android_app!` re-exports and the FFI runtime that consume it are all
+# `#[cfg(target_os = "android")]`.
+frust-shell-common = { workspace = true }
+frust-core = { workspace = true }
+frust-scene = { workspace = true }
+frust-render = { workspace = true }
+frust-text = { workspace = true }
+frust-reactive = { workspace = true }
+# Load-bearing: `nativeSetAppearance` boxes the platform light/dark preference
+# into a Theme and pushes it through both delivery paths — see
+# docs/ARCHITECTURE.md's Android frame pipeline / Theme delivery.
+frust-theme = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+pollster = { workspace = true }
+anyhow = { workspace = true }
+jni = { workspace = true }
+ndk = { workspace = true }
+ndk-sys = { workspace = true }
+android_logger = { workspace = true }
+# Android accesskit adapter (phase 6d D3, wired in task 04) — target-gated
+# like the JNI deps above; nothing off-Android references it.
+accesskit_android = { workspace = true }
+
+# Only the macro-expansion smoke test (`jni_glue::macro_expansion`) needs a
+# concrete `View` to feed `android_app!`; the runtime itself stays widget-agnostic
+# (apps bring their own view types through the macro's generics).
+[target.'cfg(target_os = "android")'.dev-dependencies]
+frust-widgets = { workspace = true }

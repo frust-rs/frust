@@ -1,0 +1,64 @@
+[package]
+name = "frust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+frust-core = { workspace = true }
+frust-widgets = { workspace = true }
+frust-reactive = { workspace = true }
+# Load-bearing: re-exported flat (Theme, ColorScheme, TypeScale, ShapeScale,
+# Elevation, MotionScheme, ...) as the facade's design-token vocabulary — see
+# lib.rs's re-exports and docs/ARCHITECTURE.md's Theme delivery.
+frust-theme = { workspace = true }
+# Load-bearing: `peniko::Color` is re-exported flat (see lib.rs) so app code can
+# author its own color values (e.g. a custom accent palette composing onto a
+# baseline `ColorScheme`) without naming `peniko` directly. Already in the graph
+# transitively via frust-theme/-widgets; named here so the re-export resolves
+# in the library (not just the dev-dependency copy below).
+peniko = { workspace = true }
+# Named directly (not just through frust-reactive) for the facade's flat
+# re-export surface (`Memo`, `signal`, `spawn`/`spawn_local`) — see
+# `frust::run`/the reactive re-exports in `lib.rs`.
+reactive_graph = { workspace = true }
+any_spawner = { workspace = true }
+# Load-bearing (task 6c-04): the app-facing theme override seam
+# (`set_app_theme`/`clear_app_theme`) re-exported flat below — see
+# `frust_shell_common::theme_override`'s module docs for the layering
+# rationale. Every shell already depends on this crate; the facade depends on
+# it directly (not just transitively) so the re-export doesn't rely on which
+# platform-shell dependency happens to be active.
+frust-shell-common = { workspace = true }
+# Depended on unconditionally so the re-exported `android_app!` macro is always
+# available; the crate compiles to (almost) nothing off-Android.
+frust-shell-android = { workspace = true }
+# Likewise unconditional so the re-exported `ios_app!` macro is always available;
+# the crate compiles to (almost) nothing off-iOS.
+frust-shell-ios = { workspace = true }
+anyhow = { workspace = true }
+
+# The desktop preview shell pulls in winit → android-activity, which does not
+# compile for an Android target (and is dead weight there anyway); the Android
+# app is driven by `android_app!`/JNI instead. Gate it off Android so
+# `cargo check --target *-linux-android -p frust` builds the whole graph.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+frust-shell-desktop = { workspace = true }
+
+[dev-dependencies]
+# Test-only: `router_glue`'s unit tests build GPU-free fixture widgets
+# (mirroring `frust-widgets::nav::router`'s own test fixtures) that
+# implement `frust_core::PaintScene`/`Widget` directly, whose signatures
+# name these geometry/brush types. Also used by the ported facade integration
+# tests below (`tests/interaction_basics.rs`/`tests/interaction_text_input.rs`).
+kurbo = { workspace = true }
+peniko = { workspace = true }
+# Test-only: the ported counter/notes headless interaction tests
+# (`tests/interaction_basics.rs`/`tests/interaction_text_input.rs`) drive the
+# framework's `RenderRoot` directly with synthetic `InputEvent`s — the same
+# event seam the desktop shell's `dispatch` uses — shaping text through a real
+# `TextContext` (no GPU, no window) and recording paint output.
+frust-core = { workspace = true }
+frust-scene = { workspace = true }
+frust-text = { workspace = true }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate crates/forgekit-widgets/src/icons/mod.rs from Material Symbols SVGs.
+"""Generate crates/frust-widgets/src/icons/mod.rs from Material Symbols SVGs.
 
 This is a **checked-in, run-manually** codegen tool (NOT a build.rs): a
 maintainer points `--src` at a directory of Material Symbols SVG files (e.g. a
@@ -14,13 +14,13 @@ per glyph plus an `ALL` slice.
 Standard library only — no third-party dependencies.
 
 Material Symbols is Apache-2.0 (see
-crates/forgekit-widgets/src/icons/LICENSE-material-symbols); the emitted path
+crates/frust-widgets/src/icons/LICENSE-material-symbols); the emitted path
 data is safe to vendor.
 
 Usage:
 
     python3 scripts/gen_icons.py --src <svg-dir> \\
-        [--out crates/forgekit-widgets/src/icons/mod.rs] \\
+        [--out crates/frust-widgets/src/icons/mod.rs] \\
         [--design 24.0]
 
 `--src` expects one `<stem>.svg` file per `STARTER_SET` entry below, where
@@ -48,7 +48,7 @@ grid rather than the `<design>×<design>` box directly — a `<path>` in that
 family has raw coordinates in `x: 0..960`, `y: -960..0`, scaled down to the
 `width`/`height` (typically 24) attributes only by the browser/renderer
 honoring the `viewBox`. `IconSource::d` must already be in the `0..design`
-(y-down) space `forgekit-widgets::icon` expects (see its module docs) with no
+(y-down) space `frust-widgets::icon` expects (see its module docs) with no
 implicit viewBox scaling, so this script detects a source SVG's `viewBox` and
 applies the equivalent affine transform (`normalize_path_d`) directly to each
 `d` string's coordinates before emitting it: `new = (old - view_box_origin) *
@@ -147,7 +147,7 @@ MODULE_HEADER = '''\
 //!
 //! ```text
 //! python3 scripts/gen_icons.py --src <material-symbols-svg-dir> \\
-//!     --out crates/forgekit-widgets/src/icons/mod.rs
+//!     --out crates/frust-widgets/src/icons/mod.rs
 //! ```
 //!
 //! The script reads each `<name>.svg`, extracts and renormalizes its
@@ -441,7 +441,7 @@ def main() -> None:
     ap.add_argument(
         "--out",
         type=Path,
-        default=Path("crates/forgekit-widgets/src/icons/mod.rs"),
+        default=Path("crates/frust-widgets/src/icons/mod.rs"),
         help="output Rust module path",
     )
     ap.add_argument(

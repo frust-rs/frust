@@ -1,0 +1,18 @@
+[package]
+name = "frust-widgets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+frust-core = { workspace = true }
+frust-scene = { workspace = true }
+frust-text = { workspace = true }
+# Load-bearing: widgets resolve theme tokens (default colors/type/shape) at
+# layout/paint time via Theme::from_layout_ctx/from_paint_ctx — see
+# docs/CODE_STANDARDS.md's Theming & Animation Conventions.
+frust-theme = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+image = { workspace = true }

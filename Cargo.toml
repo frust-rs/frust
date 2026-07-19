@@ -8,14 +8,14 @@ members = ["crates/*", "examples/*"]
 # `clean-signals`/`clean-signals-forgekit` path deps point at a sibling
 # `clean-signals-rs` checkout, which must never enter the root workspace
 # graph (see docs/DEVELOPMENT.md's Version-Pin Policy); (2) its generated
-# Android AND iOS projects (`forgekit run`/`build` install targets, gained in
+# Android AND iOS projects (`frust run`/`build` install targets, gained in
 # phase 8) need a project-local `target/` dir — the generated iOS Xcode
 # build phase resolves `target/<triple>/<profile>/libhuddle.a` relative to
 # the project directory, which a root-workspace member's shared `target/`
 # would break (the same rationale the now-deleted `catalog` example carried).
 # examples/bubblebench (the Flutter-Impeller-issue-#180958 bubble-physics
 # benchmark port) is standalone for huddle's reason (2) alone: it is a full
-# `forgekit create` scaffold whose generated Android/iOS projects need a
+# `frust create` scaffold whose generated Android/iOS projects need a
 # project-local `target/` dir, and its generated Cargo.toml carries its own
 # `[profile.*]` blocks, which only take effect in a workspace root.
 exclude = ["examples/huddle", "examples/bubblebench"]
@@ -33,7 +33,7 @@ license = "MIT OR Apache-2.0"
 # through wgpu (no CPU-side vello-only build), so `default-features = false`
 # + explicit `features = ["wgpu"]` drops vello's `wgpu_default` default
 # feature, which otherwise pulls in plain `wgpu/default` below it. `wgpu`
-# itself is trimmed to the backends ForgeKit's three shells can actually
+# itself is trimmed to the backends Frust's three shells can actually
 # reach: `wgsl` is vello's own shader frontend (its `wgpu` feature already
 # requires it); `vulkan` + `metal` + `dx12` are the per-OS GPU backends,
 # unioned additively across every target this workspace builds for (Android:
@@ -43,7 +43,7 @@ license = "MIT OR Apache-2.0"
 # shaders GLES can't provide, so a GLES fallback was never a real path; the
 # `cpu-tier` `vello_cpu` feature is the documented CPU fallback story
 # instead, see `docs/ARCHITECTURE.md`'s `RenderTier` row) and `webgpu` (wasm
-# target only, ForgeKit ships no wasm shell). See task 15's completion
+# target only, Frust ships no wasm shell). See task 15's completion
 # summary for the `cargo tree -e features` proof these two (and their naga
 # frontends/backends) are absent from every target's dependency graph.
 vello = { version = "0.9.0", default-features = false, features = ["wgpu"] }
@@ -61,7 +61,7 @@ peniko = "0.6.1"
 kurbo = "0.13.1"
 tree_arena = "0.2.0"
 pollster = "0.4"
-# image decoding (forgekit-widgets' Image widget) — pinned exactly: 0.25.10 is
+# image decoding (frust-widgets' Image widget) — pinned exactly: 0.25.10 is
 # the only 0.25.x release whose MSRV is exactly the workspace's (1.88), not
 # lower (see workflow/plans/.../research/RESEARCH.md §Image); like the
 # rendering-stack pins in docs/DEVELOPMENT.md's Version-Pin Policy, do not
@@ -79,16 +79,16 @@ thiserror = "2"
 ctrlc = "3"
 log = "0.4"
 # android shell (JNI bridge) — target-gated; land in Cargo.lock but only
-# compile for `--target *-linux-android` (see forgekit-shell-android/Cargo.toml)
+# compile for `--target *-linux-android` (see frust-shell-android/Cargo.toml)
 jni = "0.22"
 ndk = "0.9"
 ndk-sys = "0.6"
 android_logger = "0.15"
-# android emulator detection (forgekit-render) — target-gated; already a
+# android emulator detection (frust-render) — target-gated; already a
 # transitive dep of wgpu-hal on Android, so promoting it to direct adds no
-# new crates/size (see forgekit-render/Cargo.toml)
+# new crates/size (see frust-render/Cargo.toml)
 android_system_properties = "0.1"
-# accessibility (forgekit-core's semantics seam, spec §9 / phase-6c D1) —
+# accessibility (frust-core's semantics seam, spec §9 / phase-6c D1) —
 # core data crate ONLY (no accesskit_* platform adapters; those are phase 6d).
 # Pinned to minor per the Version-Pin Policy (a pure-data, MSRV-compatible,
 # Android-compiling vocabulary crate); do not float to a new minor without a
@@ -106,33 +106,33 @@ accesskit_winit = "0.33"
 accesskit_android = "0.7"
 accesskit_ios = "=0.1.2"
 # experimental CPU render-tier fallback (phase 6d D4) — optional, feature-gated
-# (`cpu-tier` on forgekit-render, NOT default), exact-pinned: pre-1.0 with an
+# (`cpu-tier` on frust-render, NOT default), exact-pinned: pre-1.0 with an
 # unstable API, isolated behind the encode adapter so a breaking bump never
 # reaches the default GPU path.
 vello_cpu = "=0.0.9"
-# reactive stack (forgekit-reactive) — do not add reactive_graph's `effects`
+# reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md / phase-5.5 research doc)
 reactive_graph = "0.2"
 any_spawner = "0.3"
 tokio = { version = "1", default-features = false }
 # intra-workspace
-forgekit-core = { path = "crates/forgekit-core" }
-forgekit-scene = { path = "crates/forgekit-scene" }
-forgekit-render = { path = "crates/forgekit-render" }
-forgekit-text = { path = "crates/forgekit-text" }
-forgekit-theme = { path = "crates/forgekit-theme" }
-forgekit-widgets = { path = "crates/forgekit-widgets" }
-forgekit-reactive = { path = "crates/forgekit-reactive" }
-forgekit-shell-desktop = { path = "crates/forgekit-shell-desktop" }
-forgekit-shell-common = { path = "crates/forgekit-shell-common" }
-forgekit-shell-android = { path = "crates/forgekit-shell-android" }
-forgekit-shell-ios = { path = "crates/forgekit-shell-ios" }
-forgekit = { path = "crates/forgekit" }
+frust-core = { path = "crates/frust-core" }
+frust-scene = { path = "crates/frust-scene" }
+frust-render = { path = "crates/frust-render" }
+frust-text = { path = "crates/frust-text" }
+frust-theme = { path = "crates/frust-theme" }
+frust-widgets = { path = "crates/frust-widgets" }
+frust-reactive = { path = "crates/frust-reactive" }
+frust-shell-desktop = { path = "crates/frust-shell-desktop" }
+frust-shell-common = { path = "crates/frust-shell-common" }
+frust-shell-android = { path = "crates/frust-shell-android" }
+frust-shell-ios = { path = "crates/frust-shell-ios" }
+frust = { path = "crates/frust" }
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack
 # (6e Finding 5 / 6e-fix-1 task 03): vello/wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
-# physical iOS device that the OS SIGKILLs a debug `forgekit run` before the
+# physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes. The app's own
 # code stays at the default dev opt-level (fast incremental rebuilds) — only
 # these dependencies are bumped. `docs/spec.md` §12.9 documents
@@ -142,7 +142,7 @@ forgekit = { path = "crates/forgekit" }
 # extra shader-compile speed only costs incremental-build time on these few
 # packages, not the whole dependency graph (`opt-level = 3`'s further gain
 # over 2 is marginal for straight-line shader-translation code and not worth
-# its added compile-time cost). This is forgekit's own workspace dev
+# its added compile-time cost). This is frust's own workspace dev
 # workflow (building/testing the crates in this workspace directly); the
 # same override lands in `templates/app/Cargo.toml.tmpl` (every generated
 # app) and `examples/huddle/Cargo.toml` (the 6e repro vehicle, formerly
@@ -191,7 +191,7 @@ opt-level = 1
 # opt-level 3, no strip/abort). `lto = "fat"` + `codegen-units = 1`
 # (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
 # example's release arm64-v8a `.so` via `scripts/size-report.sh` — see
-# `workflow/plans/features/forgekit-phase-7-performance/research/BASELINE.md`):
+# `workflow/plans/features/frust-phase-7-performance/research/BASELINE.md`):
 # fat LTO + cgu=1 alone (opt-level 3, the default — no override needed) shrank the
 # prior baseline (lto="thin", no cgu override) from 8.46MB to 7.52MB
 # unstripped, an 11.1% win taken unconditionally. `opt-level` "s"/"z" were

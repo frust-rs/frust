@@ -1,0 +1,14 @@
+[package]
+name = "frust-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tree_arena = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+frust-scene = { workspace = true }
+accesskit = { workspace = true }
+reactive_graph = { workspace = true }

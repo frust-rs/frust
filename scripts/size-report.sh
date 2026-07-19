@@ -2,7 +2,7 @@
 # scripts/size-report.sh — repeatable release-binary size report.
 #
 # Measures the numbers every phase-7 size-affecting task (see
-# workflow/plans/features/forgekit-phase-7-performance/tasks/11 and 15)
+# workflow/plans/features/frust-phase-7-performance/tasks/11 and 15)
 # measures against: the release arm64-v8a `.so` (unstripped/stripped), any
 # already-built APK/AAB's per-ABI `.so` + dex sizes, and (best-effort) a
 # desktop cargo-bloat top-20 crate breakdown as a host-proxy for the
@@ -56,7 +56,7 @@ if [ ! -f "${APP_DIR}/Cargo.toml" ]; then
   exit 2
 fi
 
-echo "== ForgeKit size report =="
+echo "== Frust size report =="
 echo "App: ${APP_DIR}"
 echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 echo
@@ -117,7 +117,7 @@ echo
 # --- Step 2: unstripped / stripped .so size ---------------------------------
 
 # The lib target's file stem is the package name with '-' replaced by '_'
-# (Cargo's own convention); most ForgeKit example apps set no explicit `[lib]
+# (Cargo's own convention); most Frust example apps set no explicit `[lib]
 # name`, so this recovers the built file name without a `cargo metadata` call.
 PKG_NAME="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "${APP_DIR}/Cargo.toml" | head -n1)"
 if [ -z "${PKG_NAME}" ]; then
@@ -163,7 +163,7 @@ echo
 echo "-- APK/AAB report (existing build outputs only; no Gradle build run) --"
 OUTPUTS_DIR="${APP_DIR}/android/app/build/outputs"
 if [ ! -d "${OUTPUTS_DIR}" ]; then
-  echo "note: no ${OUTPUTS_DIR} — run \`forgekit build apk\`/\`appbundle\` first for this section"
+  echo "note: no ${OUTPUTS_DIR} — run \`frust build apk\`/\`appbundle\` first for this section"
 else
   FOUND_ARTIFACT=0
 
@@ -197,7 +197,7 @@ else
   done
 
   if [ "${FOUND_ARTIFACT}" -eq 0 ]; then
-    echo "note: ${OUTPUTS_DIR} exists but no .apk/.aab found — run \`forgekit build apk\`/\`appbundle\` first"
+    echo "note: ${OUTPUTS_DIR} exists but no .apk/.aab found — run \`frust build apk\`/\`appbundle\` first"
   fi
 fi
 echo

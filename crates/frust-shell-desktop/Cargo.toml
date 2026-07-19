@@ -1,0 +1,39 @@
+[package]
+name = "frust-shell-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+frust-core = { workspace = true }
+frust-scene = { workspace = true }
+frust-render = { workspace = true }
+frust-text = { workspace = true }
+frust-reactive = { workspace = true }
+# Load-bearing: the shell owns the active Theme, boxes it into RenderRoot's
+# type-erased slot, and re-pushes it on WindowEvent::ThemeChanged — see
+# docs/ARCHITECTURE.md's Theme delivery.
+frust-theme = { workspace = true }
+# Load-bearing (task 6c-04): the app-facing theme override watcher
+# (`ThemeOverrideWatcher`/`effective_brightness_for_platform_change`) this
+# shell polls once per frame — see `frust_shell_common::theme_override`'s
+# module docs.
+frust-shell-common = { workspace = true }
+winit = { workspace = true }
+# Desktop accesskit adapter (phase 6d D3, wired in task 03) — winit
+# event-loop integration for the semantics tree; compiles unconditionally
+# like `winit` above (this crate is only ever included in the dependency
+# graph for non-Android builds, via `frust`'s
+# `cfg(not(target_os = "android"))` gate — see docs/ARCHITECTURE.md).
+accesskit_winit = { workspace = true }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+pollster = { workspace = true }
+anyhow = { workspace = true }
+# Perf instrumentation (task 10): the desktop shell installs its own stderr
+# `log::Log` sink (see `logger.rs`) so `frust-shell-common::perf`'s
+# `log::info!` startup-span/frame-stats lines are actually visible — mirrors
+# `frust-shell-ios`'s own `StderrLogger` (zero new transitive deps, `log`
+# is already pulled in via `frust-shell-common`).
+log = { workspace = true }
