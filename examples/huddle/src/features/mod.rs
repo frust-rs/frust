@@ -2,7 +2,7 @@
 //! into (PLAN.md's "Clean-signals spine").
 //!
 //! Each feature owns its own controller + use cases, hosted inside its own
-//! `screens/<screen>.rs` `Component` via `clean_signals_forgekit::use_controller`
+//! `screens/<screen>.rs` `Component` via `clean_signals_frust::use_controller`
 //! (the same seam the old team roster used). A Phase C screen task edits ONLY
 //! its own `screens/<name>.rs` + `features/<name>/**`, never the hub files
 //! (`lib.rs`, `shell.rs`, `routes.rs`, `mock/`, `ui/`, this `mod.rs`) — see

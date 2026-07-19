@@ -3,7 +3,7 @@
 //! 15).
 //!
 //! Hosts a [`NotificationsController`] via
-//! [`use_controller`](clean_signals_forgekit::use_controller) — the same
+//! [`use_controller`](clean_signals_frust::use_controller) — the same
 //! component-scoped seam the appearance screen uses. The frequency
 //! [`radio`](frust::radio) group and the [`Switch`](frust::Switch)es are
 //! controlled components: each reports its requested value into a controller
@@ -20,7 +20,7 @@ use frust::{
 use crate::HuddleState;
 use crate::failure::HuddleFailure;
 use crate::features::settings::{NotifFrequency, NotificationsController};
-use clean_signals_forgekit::use_controller;
+use clean_signals_frust::use_controller;
 
 /// The notification-settings route entry point.
 pub fn notifications_screen() -> AnyView<HuddleState> {

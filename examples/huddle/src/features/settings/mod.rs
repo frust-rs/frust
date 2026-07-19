@@ -9,7 +9,7 @@
 //! process-global (`docs/ARCHITECTURE.md`'s Theme delivery), survives navigation.
 //!
 //! The controller is hosted inside [`crate::screens::settings_appearance`]'s
-//! `Component` via `clean_signals_forgekit::use_controller`. The *effect* is
+//! `Component` via `clean_signals_frust::use_controller`. The *effect* is
 //! app-global (the theme override is process-wide); the controller instance
 //! itself is component-scoped and disposed on teardown.
 //!

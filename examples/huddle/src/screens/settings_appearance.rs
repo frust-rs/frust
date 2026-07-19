@@ -36,7 +36,7 @@ use crate::features::settings::{
     AccentChoice, BrightnessChoice, DesignChoice, SettingsController, slider_to_type_factor,
     solid_source, solid_source_alpha, type_factor_to_slider,
 };
-use clean_signals_forgekit::use_controller;
+use clean_signals_frust::use_controller;
 
 /// The appearance screen's route entry point: a `Component` under the outer
 /// [`HuddleState`], so its `init` runs under a real reactive `Owner` that

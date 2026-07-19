@@ -25,20 +25,24 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # create` will emit a version dependency here instead.
 frust = { path = "../../crates/frust" }
 
-# clean-signals (the async/use-case/controller/retry substrate) and its Frust
-# bridge, BOTH by relative path to the sibling `clean-signals-rs` checkout — a
-# hard requirement, not a convenience. If `clean-signals` came in by `git`+`rev`
-# while `clean-signals-forgekit` resolved `clean-signals` by path, Cargo would
-# build TWO distinct crate identities for `clean-signals`, and the controller's
-# `AsyncState`/`ControllerCore`/`Failure` types would NOT unify with the glue
-# crate's `use_controller`/`async_view`/`use_failure_listener` bounds
-# (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy and
-# workflow/plans/features/team-demo-android/research/RESEARCH.md §3). Requires the
-# sibling checkout at `../../../clean-signals-rs` (i.e. next to `../frust`) on
-# its `develop` branch. Swap both to a git+rev spec together, never one at a time,
-# once clean-signals gains a remote.
+# clean-signals (the async/use-case/controller/retry substrate) stays a path
+# dependency to the sibling `clean-signals-rs` checkout; its Frust glue now
+# lives in-repo as `plugins/clean-signals-frust` (plugin-system-shared-
+# preferences plan, task 05 — repointed from the sibling checkout's
+# pre-migration glue crate). Both this crate and the
+# in-repo glue plugin resolve `clean-signals` by the SAME canonical sibling
+# path — a hard requirement, not a convenience. If `clean-signals` came in by
+# `git`+`rev` while the glue plugin resolved `clean-signals` by path, Cargo
+# would build TWO distinct crate identities for `clean-signals`, and the
+# controller's `AsyncState`/`ControllerCore`/`Failure` types would NOT unify
+# with the glue crate's `use_controller`/`async_view`/`use_failure_listener`
+# bounds (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy
+# and workflow/plans/features/team-demo-android/research/RESEARCH.md §3).
+# Requires the sibling checkout at `../../../clean-signals-rs` (i.e. next to
+# `../frust`) on its `develop` branch. Swap both to a git+rev spec together,
+# never one at a time, once clean-signals gains a remote.
 clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
-clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signals-forgekit" }
+clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
 # `frust-core` + `kurbo` + `peniko`: the Home screen (Phase C, task 11)
 # reintroduces the facade's documented "low-level escape hatch" (see
@@ -61,7 +65,7 @@ peniko = "0.6.1"
 # Dev-only: the headless screen tests drive Frust's `RenderRoot` directly
 # (the desktop shell's own rebuild/layout/paint seam) and pump the reactive
 # runtime's UI-thread local task queue frame by frame — no GPU, no window. The
-# harness (`tests/support/mod.rs`) is lifted from clean-signals-forgekit's own
+# harness (`tests/support/mod.rs`) is lifted from `clean-signals-frust`'s own
 # integration-test support module; these deps mirror that crate's dev-deps so the
 # geometry/color/signal/runtime types unify. `tokio` is kept available for
 # `#[tokio::test]`-style controller/use-case unit tests (its time driver backs

@@ -1,6 +1,6 @@
 //! Shared headless-test harness for the huddle integration tests: a GPU-free
 //! paint target, a one-frame helper, a recording waker, an ambient-owner setup,
-//! and an async pump-poll loop — lifted from `clean-signals-forgekit`'s own
+//! and an async pump-poll loop — lifted from `clean-signals-frust`'s own
 //! `tests/support/mod.rs` (itself the Frust `examples/inbox` recipe), factored
 //! so every `tests/*.rs` file (each its own crate root) can share it. Over the
 //! copied base this module additionally carries [`RecScene`] recording

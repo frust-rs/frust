@@ -14,7 +14,7 @@
 //! # Why a plain function, not a `Component` (mirrors `screens::thread`)
 //!
 //! An earlier version of this screen hosted its controller behind a
-//! `Component`'s retained state (via `clean_signals_forgekit::use_controller`).
+//! `Component`'s retained state (via `clean_signals_frust::use_controller`).
 //! That fights the shared registry: a `Component`'s local state lives behind
 //! its own nested reactive `Owner`
 //! (`docs/ARCHITECTURE.md`'s Component state boundary), disposed when the

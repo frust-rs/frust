@@ -3,7 +3,7 @@
 //!
 //! [`NotificationsController`] owns the notification-frequency selection plus a
 //! handful of per-type toggle booleans as [`RwSignal`]s, hosted by the
-//! notifications screen's `Component` via `clean_signals_forgekit::use_controller`
+//! notifications screen's `Component` via `clean_signals_frust::use_controller`
 //! (the same seam [`super::SettingsController`] uses). Unlike the theming
 //! controller, nothing here is applied to the running app — these are pure
 //! preference values the screen's [`radio`](frust::radio) group and

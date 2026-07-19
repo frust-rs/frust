@@ -1,7 +1,7 @@
 //! Home tab — channels + DMs (Phase C, task 11).
 //!
 //! A [`Component`] hosting a [`ChannelsController`](crate::features::channels)
-//! (via `clean_signals_forgekit::use_controller`, the same seam
+//! (via `clean_signals_frust::use_controller`, the same seam
 //! `settings_appearance` uses) that loads a channel + DM roster with a
 //! deliberate mock latency so the loading **skeletons** are visible. Each row
 //! is a [`swipeable_row`](crate::ui::swipeable::swipeable_row): swipe right to
@@ -64,7 +64,7 @@ use frust_core::{BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, Pai
 use kurbo::Size;
 use peniko::Color;
 
-use clean_signals_forgekit::use_controller;
+use clean_signals_frust::use_controller;
 
 use crate::HuddleState;
 use crate::failure::HuddleFailure;
@@ -264,7 +264,7 @@ impl frust::Component for HomeScreen {
             use_controller::<ChannelsController, HuddleFailure>(ChannelsController::new);
 
         // Kick off the initial load on the UI-thread task queue (the canonical
-        // clean-signals-forgekit pattern — `use_interval` reloads the same way;
+        // clean-signals-frust pattern — `use_interval` reloads the same way;
         // the ~600ms timer resolves via the reactive runtime's tokio context,
         // which `pump_local` enters). The latency makes the skeletons visible.
         let handle = controller.clone();
