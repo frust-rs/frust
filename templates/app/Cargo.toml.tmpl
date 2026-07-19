@@ -20,22 +20,24 @@ forgekit = { path = "{{ forgekit_path }}" }
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
 # store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
-# (phase 7 task 11, measured 2026-07-18 against `examples/catalog`'s release
-# arm64-v8a `.so` via `scripts/size-report.sh` in the ForgeKit repo — see
-# `workflow/plans/features/forgekit-phase-7-performance/research/
-# BASELINE.md`): fat LTO + cgu=1 alone (opt-level 3, the default — no
-# override needed) shrank the prior baseline (lto="thin", no cgu override)
-# from 8.46MB to 7.52MB unstripped, an 11.1% win taken unconditionally.
-# `opt-level` "s"/"z" were also measured, but only *with* a shader/
-# render-stack (vello/wgpu*/naga) carve-out back to `opt-level = 3` — the
-# config that would actually ship, since sacrificing encode-path CPU perf
-# isn't acceptable — and under that carve-out "s" measured 7.36MB (-2.1% vs
-# the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%): neither clears
-# the task's ">5% meaningfully wins" bar once the carve-out that protects
-# render-path perf is in place, so `opt-level` stays at its default (3) and
-# no carve-out is needed. This block and its `[profile.profile]` counterpart
-# are hand-synced with ForgeKit's own root `Cargo.toml`, `examples/catalog/
-# Cargo.toml`, and `examples/huddle/Cargo.toml`.
+# (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
+# example's release arm64-v8a `.so` via `scripts/size-report.sh` in the
+# ForgeKit repo — see `workflow/plans/features/forgekit-phase-7-performance/
+# research/BASELINE.md`): fat LTO + cgu=1 alone (opt-level 3, the default —
+# no override needed) shrank the prior baseline (lto="thin", no cgu
+# override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
+# unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
+# shader/render-stack (vello/wgpu*/naga) carve-out back to `opt-level = 3` —
+# the config that would actually ship, since sacrificing encode-path CPU
+# perf isn't acceptable — and under that carve-out "s" measured 7.36MB
+# (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
+# neither clears the task's ">5% meaningfully wins" bar once the carve-out
+# that protects render-path perf is in place, so `opt-level` stays at its
+# default (3) and no carve-out is needed. This block and its
+# `[profile.profile]` counterpart are hand-synced with ForgeKit's own root
+# `Cargo.toml` and `examples/huddle/Cargo.toml` (phase 8's
+# examples-convergence deleted the `catalog` and `inbox` examples this used
+# to be hand-synced against, along with the examples themselves).
 [profile.release]
 lto = "fat"
 codegen-units = 1
@@ -89,7 +91,8 @@ opt-level = 2
 # win over this wildcard since a named package override takes precedence
 # over `"*"`. Targets emulator/debug first-frame cost — parley/swash/image/
 # kurbo compiled at `opt-level = 0` are part of that cost. Hand-synced with
-# ForgeKit's own root `Cargo.toml` and `examples/catalog`/`examples/
-# huddle`/`examples/inbox` `Cargo.toml`s.
+# ForgeKit's own root `Cargo.toml` and `examples/huddle/Cargo.toml` (phase
+# 8's examples-convergence deleted the `catalog` and `inbox` examples this
+# used to be hand-synced against, along with the examples themselves).
 [profile.dev.package."*"]
 opt-level = 1

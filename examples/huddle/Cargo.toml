@@ -1,8 +1,8 @@
 # Standalone package: excluded from the root workspace (see root Cargo.toml's
 # `[workspace] exclude` and docs/DEVELOPMENT.md's Version-Pin Policy) so the
 # generated debug APK pipeline (task 01) can be gated on its own, and this
-# example's own [workspace] root gets its own Cargo.lock (the same
-# `examples/inbox` pattern) rather than joining the root workspace's.
+# example's own [workspace] root gets its own Cargo.lock rather than joining
+# the root workspace's.
 [workspace]
 
 [package]
@@ -42,14 +42,15 @@ clean-signals-forgekit = { path = "../../../clean-signals-rs/crates/clean-signal
 
 # `forgekit-core` + `kurbo` + `peniko`: the Home screen (Phase C, task 11)
 # reintroduces the facade's documented "low-level escape hatch" (see
-# `docs/ARCHITECTURE.md`) for the two small hand-rolled `View`/`Widget` pairs no
-# facade widget covers — `ui/swipeable.rs`'s horizontal swipe-to-action row, and
-# `screens/home.rs`'s arbitrary-color avatar/badge fill (`FillBox`) and animated
-# loading `Shimmer`. This is the same production escape-hatch dependency the
-# pre-skeleton theme/motion screens carried (`git show
-# d02ad77~1:examples/huddle/Cargo.toml`); everything else in this crate still
-# depends on the `forgekit` facade alone, per `docs/CODE_STANDARDS.md`'s State &
-# Reactivity Conventions.
+# `docs/ARCHITECTURE.md`) for the small hand-rolled `View`/`Widget` pairs no
+# facade widget covers — `ui/swipeable.rs`'s horizontal swipe-to-action row,
+# `ui/sheet.rs`'s modal sheet, `screens/home.rs`'s arbitrary-color avatar/badge
+# fill (`FillBox`) and animated loading `Shimmer`, and `ui/toast.rs`'s
+# paint-driven `toast_entrance` slide/fade wrapper. This is the same production
+# escape-hatch dependency the pre-skeleton theme/motion screens carried (`git
+# show d02ad77~1:examples/huddle/Cargo.toml`); everything else in this crate
+# still depends on the `forgekit` facade alone, per `docs/CODE_STANDARDS.md`'s
+# State & Reactivity Conventions.
 forgekit-core = { path = "../../crates/forgekit-core" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
@@ -73,28 +74,31 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
 # store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
-# (phase 7 task 11, measured 2026-07-18 against `examples/catalog`'s release
-# arm64-v8a `.so` via `scripts/size-report.sh` — see `workflow/plans/
-# features/forgekit-phase-7-performance/research/BASELINE.md`; this
-# package's own arm64 `.so` could not be measured directly in the worktree
-# that ran this task, since the sibling `clean-signals-rs` checkout
-# `examples/huddle` requires wasn't present — see BASELINE.md's
-# `scripts/size-report.sh` first-run note for the structural reason and the
-# `examples/catalog` stand-in this task's measurement reused): fat LTO +
-# cgu=1 alone (opt-level 3, the default — no override needed) shrank the
-# prior baseline (lto="thin", no cgu override) from 8.46MB to 7.52MB
-# unstripped, an 11.1% win taken unconditionally. `opt-level` "s"/"z" were
-# also measured, but only *with* a shader/render-stack (vello/wgpu*/naga)
-# carve-out back to `opt-level = 3` — the config that would actually ship,
-# since sacrificing encode-path CPU perf isn't acceptable — and under that
-# carve-out "s" measured 7.36MB (-2.1% vs the 7.52MB opt-3 config) and "z"
-# measured 7.28MB (-3.2%): neither clears the task's ">5% meaningfully wins"
-# bar once the carve-out that protects render-path perf is in place, so
-# `opt-level` stays at its default (3) and no carve-out is needed. This
-# block, its `[profile.profile]` counterpart, and the
-# `[profile.dev.package."*"]` wildcard below are hand-synced across the root
-# `Cargo.toml`, `templates/app/Cargo.toml.tmpl`, and `examples/catalog/
-# Cargo.toml` (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule).
+# (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
+# example's release arm64-v8a `.so` via `scripts/size-report.sh` — see
+# `workflow/plans/features/forgekit-phase-7-performance/research/
+# BASELINE.md`; this package's own arm64 `.so` could not be measured
+# directly in the worktree that ran this task, since the sibling
+# `clean-signals-rs` checkout `examples/huddle` requires wasn't present —
+# see BASELINE.md's `scripts/size-report.sh` first-run note for the
+# structural reason and the now-deleted `catalog` example's stand-in this
+# task's measurement reused): fat LTO + cgu=1 alone (opt-level 3, the
+# default — no override needed) shrank the prior baseline (lto="thin", no
+# cgu override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
+# unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
+# shader/render-stack (vello/wgpu*/naga) carve-out back to `opt-level = 3`
+# — the config that would actually ship, since sacrificing encode-path CPU
+# perf isn't acceptable — and under that carve-out "s" measured 7.36MB
+# (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
+# neither clears the task's ">5% meaningfully wins" bar once the carve-out
+# that protects render-path perf is in place, so `opt-level` stays at its
+# default (3) and no carve-out is needed. This block, its `[profile.profile]`
+# counterpart, and the `[profile.dev.package."*"]` wildcard below are
+# hand-synced across the root `Cargo.toml` and `templates/app/
+# Cargo.toml.tmpl` (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule;
+# phase 8's examples-convergence dropped the other two manifests this used
+# to be hand-synced against — the now-deleted `catalog` and `inbox`
+# examples' own `Cargo.toml`s — along with the examples themselves).
 [profile.release]
 lto = "fat"
 codegen-units = 1
@@ -116,9 +120,9 @@ strip = "none"
 # a debug `forgekit run` before the synchronous, main-thread launch-time
 # shader compile finishes — huddle is now the iOS device vehicle (task 08),
 # so it needs this fix too. Identical values to the root `Cargo.toml`/
-# `templates/app/Cargo.toml.tmpl`/`examples/catalog/Cargo.toml` — hand-synced,
-# `cargo test -p forgekit-cli --test profile_sync` is the automated tripwire
-# (task 09 rewires that test to include this manifest).
+# `templates/app/Cargo.toml.tmpl` — hand-synced, `cargo test -p forgekit-cli
+# --test profile_sync` is the automated tripwire (task 09 rewires that test
+# to include this manifest).
 [profile.dev.package.vello]
 opt-level = 2
 
@@ -146,9 +150,10 @@ opt-level = 2
 # profile-override docs); this app's own code stays at the fast default dev
 # opt-level, and the named shader-stack overrides above (opt-level 2) still
 # win over this wildcard since a named package override takes precedence over
-# `"*"`. Hand-synced across the root `Cargo.toml`, `templates/app/
-# Cargo.toml.tmpl`, `examples/catalog/Cargo.toml`, and `examples/inbox/
-# Cargo.toml` (the last for consistency, though it has no shader-stack list
-# of its own).
+# `"*"`. Hand-synced across the root `Cargo.toml` and `templates/app/
+# Cargo.toml.tmpl` (phase 8's examples-convergence dropped the other two
+# manifests this used to be hand-synced against — the now-deleted `catalog`
+# and `inbox` examples' own `Cargo.toml`s — along with the examples
+# themselves).
 [profile.dev.package."*"]
 opt-level = 1
