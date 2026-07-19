@@ -12,6 +12,7 @@ use std::any::Any;
 use forgekit_core::accesskit;
 use forgekit_core::anim::FrameTime;
 use forgekit_core::event::{EditingState, EventOutcome, ImeEvent, ImeState, InputEvent};
+use forgekit_core::insets::WindowInsets;
 use forgekit_core::view::{ChangeFlags, View};
 use forgekit_core::{PaintOutcome, PaintScene, RenderRoot, SemanticsUpdate};
 use kurbo::Size;
@@ -120,6 +121,25 @@ pub trait AppTree {
     /// replaces the stored theme.
     fn set_theme(&mut self, theme: Box<dyn Any>);
 
+    /// Store the window's insets ([`WindowInsets`]), threaded into every
+    /// subsequent layout/paint pass (delegates to [`RenderRoot::set_insets`]).
+    ///
+    /// A shell reads the platform's per-edge occlusion (Android `WindowInsets`,
+    /// iOS `safeAreaInsets` + keyboard frame), converts device px to **logical**
+    /// px at the FFI boundary (see
+    /// [`crate::ffi_support::logical_insets`](crate::logical_insets)), and pushes
+    /// the result here; a `SafeArea` widget then insets by
+    /// [`WindowInsets::padding`]. `WindowInsets` is a concrete core-owned type
+    /// (only `f64` scalars), so this needs no `Box<dyn Any>` erasure — unlike
+    /// [`AppTree::set_theme`].
+    ///
+    /// Defaulted to a **no-op** so existing [`AppTree`] impls compile unchanged;
+    /// the concrete tree overrides it to forward to [`RenderRoot::set_insets`].
+    /// The `set_insets ⇒ LAYOUT | PAINT` dirty contract keeps a `SafeArea`'s
+    /// layout-time inset resolution correct under the mobile layout-skip gate,
+    /// exactly like `set_theme` (see [`crate::frame_gate`]'s module docs).
+    fn set_insets(&mut self, _insets: WindowInsets) {}
+
     /// Collect the accessibility tree for the current frame (spec §9, phase-6d),
     /// for a shell to push into its platform `accesskit_*` adapter. Delegates to
     /// [`RenderRoot::semantics`]; must run **after** [`AppTree::layout`] so node
@@ -214,6 +234,10 @@ where
 
     fn set_theme(&mut self, theme: Box<dyn Any>) {
         self.root.set_theme(theme);
+    }
+
+    fn set_insets(&mut self, insets: WindowInsets) {
+        self.root.set_insets(insets);
     }
 
     fn semantics(&mut self) -> SemanticsUpdate {
@@ -313,6 +337,78 @@ mod tests {
         ) -> ChangeFlags {
             ChangeFlags::NONE
         }
+    }
+
+    /// A minimal [`AppTree`] that overrides *nothing* optional — used to prove
+    /// [`AppTree::set_insets`]'s default no-op lets a pre-insets impl compile and
+    /// be driven without panicking. Every other method is unreachable in the test
+    /// (only `set_insets`, the defaulted method, is called), so they're stubbed
+    /// with `unimplemented!()`.
+    struct MinimalTree;
+    impl AppTree for MinimalTree {
+        fn rebuild(&mut self) {
+            unimplemented!()
+        }
+        fn take_change_flags(&mut self) -> ChangeFlags {
+            unimplemented!()
+        }
+        fn has_pending_change_flags(&self) -> bool {
+            unimplemented!()
+        }
+        fn is_pointer_captured(&self) -> bool {
+            unimplemented!()
+        }
+        fn is_focus_active(&self) -> bool {
+            unimplemented!()
+        }
+        fn layout(&mut self, _logical: Size, _text_ctx: &mut dyn Any) {
+            unimplemented!()
+        }
+        fn paint(&mut self, _scene: &mut dyn PaintScene, _frame_time: FrameTime) -> PaintOutcome {
+            unimplemented!()
+        }
+        fn event(&mut self, _event: &InputEvent) -> EventOutcome {
+            unimplemented!()
+        }
+        fn ime_apply(&mut self, _state: EditingState) -> EventOutcome {
+            unimplemented!()
+        }
+        fn ime_state(&self) -> Option<ImeState> {
+            unimplemented!()
+        }
+        fn set_theme(&mut self, _theme: Box<dyn Any>) {
+            unimplemented!()
+        }
+        fn semantics(&mut self) -> SemanticsUpdate {
+            unimplemented!()
+        }
+        fn semantics_generation(&self) -> u64 {
+            unimplemented!()
+        }
+        fn semantics_if_changed(&mut self, _last_seen: u64) -> Option<SemanticsUpdate> {
+            unimplemented!()
+        }
+        fn perform_accessibility_action(
+            &mut self,
+            _node_id: u64,
+            _action: accesskit::Action,
+        ) -> EventOutcome {
+            unimplemented!()
+        }
+        // set_insets deliberately NOT overridden — exercises the default no-op.
+    }
+
+    #[test]
+    fn app_tree_set_insets_defaults_to_no_op() {
+        use forgekit_core::insets::EdgeInsets;
+        let mut tree = MinimalTree;
+        // Compiles (the default impl exists) and is a benign no-op — a pre-insets
+        // `AppTree` impl is unaffected.
+        tree.set_insets(WindowInsets::default());
+        tree.set_insets(WindowInsets::new(
+            EdgeInsets::new(0.0, 24.0, 0.0, 34.0),
+            EdgeInsets::ZERO,
+        ));
     }
 
     #[test]

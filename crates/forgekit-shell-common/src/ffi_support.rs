@@ -6,6 +6,8 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use forgekit_core::insets::{EdgeInsets, WindowInsets};
+
 /// Sanitize a raw density (e.g. a JNI `jfloat`) into a scale safe to divide or
 /// multiply by: finite and strictly positive, else the `1.0` fallback.
 ///
@@ -35,6 +37,51 @@ pub fn logical_size(physical_width: u32, physical_height: u32, scale: f64) -> (f
     (
         physical_width as f64 / scale,
         physical_height as f64 / scale,
+    )
+}
+
+/// Build a logical (density-independent) [`WindowInsets`] from the platform's
+/// raw **physical**-px per-edge inset values and an already-[`sanitize_scale`]d
+/// scale factor.
+///
+/// `physical` packs the two per-edge sets a shell reads from the platform, in
+/// device px, in this fixed order:
+///
+/// ```text
+/// [0] view_padding.left    [4] view_insets.left
+/// [1] view_padding.top     [5] view_insets.top
+/// [2] view_padding.right   [6] view_insets.right
+/// [3] view_padding.bottom  [7] view_insets.bottom
+/// ```
+///
+/// where `view_padding` is the system-UI occlusion (status/navigation bars,
+/// cutout) and `view_insets` the fully-obscured area (the IME) — see
+/// [`WindowInsets`]. Each value is divided by `scale` to convert device px to
+/// logical px, mirroring [`logical_size`]'s HiDPI math, so the framework
+/// receives insets in the same logical space it lays out in (spec §10.3's
+/// logical-coordinate contract — the same discipline pointer events follow).
+///
+/// `scale` must already have passed through [`sanitize_scale`] (finite,
+/// strictly positive); a shell's per-frame driver sanitizes the platform
+/// density exactly once and reuses the identical result here and for
+/// [`logical_size`] so the two never disagree on scale — this function trusts
+/// that contract exactly as [`logical_size`] does.
+#[inline]
+pub fn logical_insets(physical: [f64; 8], scale: f64) -> WindowInsets {
+    let to_logical = |px: f64| px / scale;
+    WindowInsets::new(
+        EdgeInsets::new(
+            to_logical(physical[0]),
+            to_logical(physical[1]),
+            to_logical(physical[2]),
+            to_logical(physical[3]),
+        ),
+        EdgeInsets::new(
+            to_logical(physical[4]),
+            to_logical(physical[5]),
+            to_logical(physical[6]),
+            to_logical(physical[7]),
+        ),
     )
 }
 
@@ -102,6 +149,40 @@ mod tests {
                 "scale {bad} should fall back to 1.0"
             );
         }
+    }
+
+    #[test]
+    fn logical_insets_divides_each_edge_by_scale() {
+        // A @2x display: a 48px status bar + 68px home-indicator padding, IME up.
+        let insets = logical_insets(
+            [0.0, 48.0, 0.0, 68.0, 0.0, 0.0, 0.0, 680.0],
+            2.0,
+        );
+        assert_eq!(
+            insets,
+            WindowInsets::new(
+                EdgeInsets::new(0.0, 24.0, 0.0, 34.0),
+                EdgeInsets::new(0.0, 0.0, 0.0, 340.0),
+            )
+        );
+        // The derived safe-area padding collapses the bottom while the IME is up.
+        assert_eq!(insets.padding(), EdgeInsets::new(0.0, 24.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn logical_insets_identity_at_scale_one() {
+        let physical = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let insets = logical_insets(physical, 1.0);
+        assert_eq!(insets.view_padding, EdgeInsets::new(1.0, 2.0, 3.0, 4.0));
+        assert_eq!(insets.view_insets, EdgeInsets::new(5.0, 6.0, 7.0, 8.0));
+    }
+
+    #[test]
+    fn logical_insets_uses_sanitized_scale_from_caller() {
+        // Mirrors `logical_size`: the helper trusts an already-sanitized scale.
+        let scale = sanitize_scale(f32::NAN); // -> 1.0
+        let insets = logical_insets([0.0, 44.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], scale);
+        assert_eq!(insets.view_padding, EdgeInsets::new(0.0, 44.0, 0.0, 0.0));
     }
 
     #[test]

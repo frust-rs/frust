@@ -35,6 +35,7 @@ pub mod app;
 pub mod component;
 pub mod event;
 pub mod input;
+pub mod insets;
 pub mod layout;
 pub mod semantics;
 pub mod tree;
@@ -61,6 +62,7 @@ pub use input::{
     FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,
     WHEEL_LINE_PX, fling_decay, fling_displacement,
 };
+pub use insets::{EdgeInsets as WindowEdgeInsets, WindowInsets};
 pub use layout::BoxConstraints;
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
 pub use tree::{WidgetPod, WidgetTree};

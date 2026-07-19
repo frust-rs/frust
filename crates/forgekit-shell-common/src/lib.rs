@@ -4,7 +4,9 @@
 //! non-FFI machinery: the [`AppTree`] type-erasure that lets a non-generic
 //! native handle drive any app's `State`/`app_logic`, a handful of pure
 //! helpers for crossing an FFI boundary safely ([`guard`]) and turning an
-//! untrusted density into HiDPI layout math ([`sanitize_scale`]/[`logical_size`]),
+//! untrusted density into HiDPI layout math ([`sanitize_scale`]/[`logical_size`]/
+//! [`logical_insets`], the last converting platform per-edge insets into a
+//! logical [`WindowInsets`](forgekit_core::insets::WindowInsets)),
 //! the app-facing theme override slot ([`set_app_theme`]/[`clear_app_theme`]/
 //! [`ThemeOverrideWatcher`] — see [`theme_override`]'s module docs for the
 //! layering rationale), the [`perf`] module's frame-timing/startup-span
@@ -28,7 +30,7 @@ pub mod perf;
 mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
-pub use ffi_support::{guard, logical_size, sanitize_scale};
+pub use ffi_support::{guard, logical_insets, logical_size, sanitize_scale};
 pub use frame_gate::{FrameDecision, FrameGate, FrameInputs};
 pub use theme_override::{
     ThemeOverrideWatcher, clear_app_theme, effective_brightness_for_platform_change, set_app_theme,

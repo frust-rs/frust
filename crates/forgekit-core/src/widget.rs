@@ -19,6 +19,7 @@ use peniko::{Brush, Color};
 
 use crate::anim::FrameTime;
 use crate::event::{EventCtx, EventResult, ImeState, InputEvent};
+use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
 use crate::semantics::SemanticsCtx;
 
@@ -310,6 +311,13 @@ pub struct LayoutCtx<'a> {
     /// whose absence at a text widget is a wiring bug), so [`LayoutCtx::theme_as`]
     /// returns `Option` rather than panicking.
     theme: Option<&'a dyn Any>,
+    /// The window's insets ([`WindowInsets`]), threaded down by the render root
+    /// (see [`crate::app::RenderRoot::set_insets`]). Unlike the theme this is a
+    /// concrete core-owned type carried by copy — global (origin-independent,
+    /// see the [`crate::insets`] module docs), so the single layout context the
+    /// render root threads down carries it unchanged to every widget in the
+    /// tree. Defaults to the zero inset in bare-core tests and pre-insets apps.
+    window_insets: WindowInsets,
 }
 
 impl<'a> LayoutCtx<'a> {
@@ -320,6 +328,7 @@ impl<'a> LayoutCtx<'a> {
         LayoutCtx {
             text_ctx: None,
             theme: None,
+            window_insets: WindowInsets::default(),
         }
     }
 
@@ -332,6 +341,7 @@ impl<'a> LayoutCtx<'a> {
         LayoutCtx {
             text_ctx: Some(text_ctx),
             theme: None,
+            window_insets: WindowInsets::default(),
         }
     }
 
@@ -341,7 +351,11 @@ impl<'a> LayoutCtx<'a> {
     /// The render root uses this to thread both resources it owns into the
     /// layout pass in one shot (see [`crate::app::RenderRoot::layout`]).
     pub fn with_resources(text_ctx: Option<&'a mut dyn Any>, theme: Option<&'a dyn Any>) -> Self {
-        LayoutCtx { text_ctx, theme }
+        LayoutCtx {
+            text_ctx,
+            theme,
+            window_insets: WindowInsets::default(),
+        }
     }
 
     /// Attach the app's active theme, type-erased. Chainable builder used by the
@@ -374,6 +388,23 @@ impl<'a> LayoutCtx<'a> {
     /// this (or the `Theme::from_layout_ctx` convenience wrapper).
     pub fn theme_as<T: Any>(&self) -> Option<&T> {
         self.theme?.downcast_ref::<T>()
+    }
+
+    /// The window's insets ([`WindowInsets`]) for this layout pass (a cheap
+    /// copy). Global and origin-independent (see the [`crate::insets`] module
+    /// docs), so every widget in the tree reads the same value regardless of its
+    /// position; defaults to the zero inset when no shell pushed one. A
+    /// `SafeArea` widget insets by [`WindowInsets::padding`].
+    pub fn window_insets(&self) -> WindowInsets {
+        self.window_insets
+    }
+
+    /// Seed the window insets lent by the render root
+    /// ([`crate::app::RenderRoot::layout`]). One layout context is threaded down
+    /// the whole tree, so this is set once at the root; the insets are global,
+    /// so no per-child adjustment is needed.
+    pub(crate) fn set_window_insets(&mut self, insets: WindowInsets) {
+        self.window_insets = insets;
     }
 }
 
@@ -421,6 +452,13 @@ pub struct PaintCtx<'a> {
     /// `None` in bare-core tests and pre-theme apps — a supported state, so
     /// [`PaintCtx::theme_as`] returns `Option` rather than panicking.
     theme: Option<&'a dyn Any>,
+    /// The window's insets ([`WindowInsets`]), threaded down by the render root
+    /// ([`crate::app::RenderRoot::paint`]) and seeded into each child by
+    /// [`ChildPod::paint_child`], mirroring how `frame_time`/`theme` flow. A
+    /// concrete core-owned type carried by copy; global/origin-independent (see
+    /// the [`crate::insets`] module docs). Defaults to the zero inset in
+    /// bare-core tests and pre-insets apps.
+    window_insets: WindowInsets,
     /// A tagged-rect ("hero") reporter a container installs over a subtree via
     /// [`PaintCtx::with_hero_registry`], threaded to descendants by
     /// [`ChildPod::paint_child`] like the theme/clock. `None` in the normal
@@ -446,6 +484,7 @@ impl<'a> PaintCtx<'a> {
             has_focus: false,
             frame_time: FrameTime::ZERO,
             theme: None,
+            window_insets: WindowInsets::default(),
             hero: None,
         }
     }
@@ -483,6 +522,28 @@ impl<'a> PaintCtx<'a> {
     /// child context (copied, so it does not hold a borrow of `self`).
     pub(crate) fn theme_ref(&self) -> Option<&'a dyn Any> {
         self.theme
+    }
+
+    /// The window's insets ([`WindowInsets`]) for this paint pass (a cheap
+    /// copy). The paint-pass mirror of [`LayoutCtx::window_insets`]:
+    /// global/origin-independent, so every widget reads the same value; defaults
+    /// to the zero inset when no shell pushed one.
+    pub fn window_insets(&self) -> WindowInsets {
+        self.window_insets
+    }
+
+    /// Seed the window insets lent by the render root. Called by
+    /// [`crate::app::RenderRoot::paint`] at the root and by
+    /// [`ChildPod::paint_child`] for each child, mirroring how `theme`/
+    /// `frame_time` are threaded (copied down unchanged).
+    pub(crate) fn set_window_insets(&mut self, insets: WindowInsets) {
+        self.window_insets = insets;
+    }
+
+    /// The window insets this context carries, for re-lending to a child context
+    /// (copied, so it holds no borrow of `self`).
+    pub(crate) fn window_insets_ref(&self) -> WindowInsets {
+        self.window_insets
     }
 
     /// The widget's origin in its parent's coordinate space.
@@ -627,6 +688,7 @@ impl<'a> PaintCtx<'a> {
             has_focus: self.has_focus,
             frame_time: self.frame_time,
             theme: self.theme,
+            window_insets: self.window_insets,
             hero: Some(registry),
         };
         f(&mut child);
@@ -942,6 +1004,9 @@ impl ChildPod {
         // Thread the app's active theme down unchanged (copied ref, so the child
         // context holds no borrow of the parent), mirroring the clock.
         child_ctx.set_theme(ctx.theme_ref());
+        // Thread the window insets down unchanged (copied — global and
+        // origin-independent), mirroring the theme.
+        child_ctx.set_window_insets(ctx.window_insets_ref());
         // Thread the tagged-rect ("hero") reporter down the same way, so a hero
         // wrapper nested arbitrarily deep under an installer sees it. `None` in
         // the normal case (no shared-element transition in flight).

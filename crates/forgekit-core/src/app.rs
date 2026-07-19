@@ -24,6 +24,7 @@ use crate::event::{
     EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerButton, PointerEvent,
     PointerPhase,
 };
+use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
 use crate::tree::{WidgetPod, WidgetTree};
@@ -67,6 +68,15 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// [`LayoutCtx`]/[`PaintCtx`]; `None` until a shell sets one (a supported
     /// state — bare-core tests and pre-theme apps run without a theme).
     theme: Option<Box<dyn Any>>,
+    /// The window's insets ([`WindowInsets`]), delivered by the shell via
+    /// [`RenderRoot::set_insets`] and threaded into every subsequent
+    /// layout/paint pass (recovered by widgets through
+    /// [`crate::widget::LayoutCtx::window_insets`]/
+    /// [`crate::widget::PaintCtx::window_insets`]). Unlike the theme this is a
+    /// concrete core-owned type (only `f64` scalars), stored by value — no
+    /// `Box<dyn Any>` erasure needed. Defaults to the zero inset until a shell
+    /// pushes one (a supported state — bare-core tests and pre-insets apps).
+    insets: WindowInsets,
     /// The persistent, never-reused per-pod semantics base-id allocator's next
     /// value (phase-6d D1). Seeded at `2` (ids `0`/`1` reserved: `0` keeps
     /// `NonZeroU64` valid, `1` is the [`ROOT_NODE_ID`] window node), advanced as
@@ -102,6 +112,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ime_state: None,
             pending: ChangeFlags::NONE,
             theme: None,
+            insets: WindowInsets::default(),
             // Ids 0 and 1 are reserved (see the field doc); pods start at 2.
             semantics_alloc: Cell::new(2),
             root_semantics_id: Cell::new(None),
@@ -132,6 +143,42 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // A theme swap can change semantics-visible state (e.g. a relabelled or
         // re-bounded node once layout re-runs); treat it as semantics-dirty too.
         self.semantics_gen = self.semantics_gen.wrapping_add(1);
+    }
+
+    /// Store the window's insets ([`WindowInsets`]), threaded into every
+    /// subsequent layout/paint pass and recovered by widgets via
+    /// [`crate::widget::LayoutCtx::window_insets`]/
+    /// [`crate::widget::PaintCtx::window_insets`].
+    ///
+    /// Mirrors [`RenderRoot::set_theme`]'s dirty-tracking contract: a change
+    /// marks `LAYOUT | PAINT` pending (drained by
+    /// [`RenderRoot::take_change_flags`]) so a shell gating layout/paint on that
+    /// seam still relayouts when the insets move — a `SafeArea` widget resolves
+    /// its inset at layout time, so the mobile layout-skip gate must see a bare
+    /// `set_insets` as dirty even though no view changed (the same reasoning as
+    /// the theme swap — see `docs/ARCHITECTURE.md`'s Theme delivery and Frame
+    /// gate). A change also bumps the semantics generation, since a moved inset
+    /// shifts laid-out node bounds.
+    ///
+    /// No-op guarded by [`WindowInsets`]'s `PartialEq`: pushing the current
+    /// value marks nothing dirty, so a shell that polls the platform insets
+    /// every frame and forwards unconditionally never forces a needless
+    /// relayout. (A shell may also skip the call itself by comparing first —
+    /// this is the same guard, held on the core side.)
+    pub fn set_insets(&mut self, insets: WindowInsets) {
+        if self.insets == insets {
+            return;
+        }
+        self.insets = insets;
+        self.pending |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        // A moved inset shifts laid-out node bounds once layout re-runs; treat
+        // it as semantics-dirty too (mirrors `set_theme`).
+        self.semantics_gen = self.semantics_gen.wrapping_add(1);
+    }
+
+    /// The window's insets currently threaded into the layout/paint passes.
+    pub fn insets(&self) -> WindowInsets {
+        self.insets
     }
 
     /// Whether a captured pointer gesture is currently in flight.
@@ -287,10 +334,16 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Disjoint field borrows: the theme (immut) and the tree (mut) are
         // different fields of `self`, so both borrows coexist through the layout.
         let theme = self.theme.as_deref();
+        // Copied out before the `&mut self.tree` borrow below (a disjoint,
+        // `Copy` field read).
+        let insets = self.insets;
         let Some(pod) = self.tree.pod_mut(root_id) else {
             return Size::ZERO;
         };
         let mut ctx = LayoutCtx::with_resources(text_ctx, theme);
+        // Thread the window insets down; one layout context reaches the whole
+        // tree, so the global insets are set once here (see `crate::insets`).
+        ctx.set_window_insets(insets);
         let size = pod.widget_mut().layout(&mut ctx, &bc);
         pod.set_layout(Point::ZERO, size);
         size
@@ -317,6 +370,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         };
         // Disjoint field borrows: the theme (immut) vs the tree (mut).
         let theme = self.theme.as_deref();
+        // Copied out before the `&mut self.tree` borrow (a disjoint `Copy` read).
+        let insets = self.insets;
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             // Seed the shared shell clock so the whole paint pass sees one time.
@@ -324,6 +379,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // Lend the stored theme (type-erased) into the paint pass; widgets
             // recover it via `PaintCtx::theme_as`.
             ctx.set_theme(theme);
+            // Thread the window insets down (global — see `crate::insets`).
+            ctx.set_window_insets(insets);
             // Seed the root widget's paint-time focus from the cached focus path
             // so a leaf-root editable observes its own focus; deeper focus is
             // threaded per-pod by `ChildPod::paint_child`.
@@ -1150,6 +1207,125 @@ mod tests {
         let flags = root.take_change_flags();
         assert!(flags.needs_layout());
         assert!(flags.needs_paint());
+    }
+
+    // --- Window insets: pushed value reaches layout/paint contexts. ---
+
+    use crate::insets::{EdgeInsets, WindowInsets};
+
+    /// A root widget recording the `WindowInsets` it observed during layout and
+    /// paint, proving the shell-pushed value threads through both contexts.
+    struct InsetsWidget {
+        seen_layout: std::rc::Rc<std::cell::Cell<Option<WindowInsets>>>,
+        seen_paint: std::rc::Rc<std::cell::Cell<Option<WindowInsets>>>,
+    }
+    impl crate::widget::Widget for InsetsWidget {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.seen_layout.set(Some(ctx.window_insets()));
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.seen_paint.set(Some(ctx.window_insets()));
+        }
+    }
+
+    struct InsetsView {
+        seen_layout: std::rc::Rc<std::cell::Cell<Option<WindowInsets>>>,
+        seen_paint: std::rc::Rc<std::cell::Cell<Option<WindowInsets>>>,
+    }
+    impl View<AppState> for InsetsView {
+        type Element = InsetsWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> InsetsWidget {
+            InsetsWidget {
+                seen_layout: self.seen_layout.clone(),
+                seen_paint: self.seen_paint.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut InsetsWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn drive_insets_root(
+        insets: Option<WindowInsets>,
+    ) -> (Option<WindowInsets>, Option<WindowInsets>) {
+        let seen_layout = std::rc::Rc::new(std::cell::Cell::new(None));
+        let seen_paint = std::rc::Rc::new(std::cell::Cell::new(None));
+        let mut root: RenderRoot<AppState, InsetsView> = RenderRoot::new();
+        if let Some(insets) = insets {
+            root.set_insets(insets);
+        }
+        let mut state = AppState::default();
+        let sl = seen_layout.clone();
+        let sp = seen_paint.clone();
+        root.rebuild(
+            &mut move |_s: &mut AppState| InsetsView {
+                seen_layout: sl.clone(),
+                seen_paint: sp.clone(),
+            },
+            &mut state,
+        );
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        (seen_layout.get(), seen_paint.get())
+    }
+
+    #[test]
+    fn set_insets_threads_into_layout_and_paint() {
+        let insets = WindowInsets::new(
+            EdgeInsets::new(0.0, 24.0, 0.0, 34.0),
+            EdgeInsets::new(0.0, 0.0, 0.0, 0.0),
+        );
+        let (layout, paint) = drive_insets_root(Some(insets));
+        assert_eq!(layout, Some(insets));
+        assert_eq!(paint, Some(insets));
+    }
+
+    #[test]
+    fn no_insets_yields_zero_in_layout_and_paint() {
+        let (layout, paint) = drive_insets_root(None);
+        assert_eq!(layout, Some(WindowInsets::default()));
+        assert_eq!(paint, Some(WindowInsets::default()));
+    }
+
+    #[test]
+    fn set_insets_marks_layout_and_paint_pending() {
+        // Mirrors `set_theme_marks_layout_and_paint_pending`: a bare inset push
+        // (no rebuild) must dirty layout/paint so a shell gating on
+        // `take_change_flags` relayouts a `SafeArea` when the insets move.
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        root.set_insets(WindowInsets::new(
+            EdgeInsets::new(0.0, 24.0, 0.0, 0.0),
+            EdgeInsets::ZERO,
+        ));
+        let flags = root.take_change_flags();
+        assert!(flags.needs_layout());
+        assert!(flags.needs_paint());
+        // Drained until the next change.
+        assert!(root.take_change_flags().is_empty());
+    }
+
+    #[test]
+    fn set_insets_no_op_when_unchanged_marks_nothing() {
+        // The `PartialEq` no-op guard: re-pushing the current insets dirties
+        // nothing, so a shell that forwards the platform insets every frame
+        // never forces a needless relayout.
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        let insets = WindowInsets::new(EdgeInsets::new(0.0, 24.0, 0.0, 34.0), EdgeInsets::ZERO);
+        root.set_insets(insets);
+        assert!(!root.take_change_flags().is_empty());
+        // Same value again: no dirtiness.
+        root.set_insets(insets);
+        assert!(root.take_change_flags().is_empty());
+        // A different value dirties again.
+        root.set_insets(WindowInsets::default());
+        assert!(!root.take_change_flags().is_empty());
     }
 
     // Small test helper: does the boxed widget downcast to `W`?
