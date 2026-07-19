@@ -8,15 +8,18 @@
 //! attribute). Every entry point here is wrapped in
 //! [`guard`](frust_shell_common::guard) so a panic is caught and turned into a
 //! benign default instead of unwinding across the JNI boundary (undefined
-//! behaviour). The `unsafe` *code* in this module is confined to three things,
+//! behaviour). The `unsafe` *code* in this module is confined to four things,
 //! each with a safety comment: `ANativeWindow_fromSurface` (raw handle →
 //! `NativeWindow`), reconstituting the opaque `jlong` handle
-//! (`Box::from_raw`/`&mut *`), and `Box::into_raw`/`from_raw` for the handle's
-//! lifetime.
+//! (`Box::from_raw`/`&mut *`), `Box::into_raw`/`from_raw` for the handle's
+//! lifetime, and `ndk_context::initialize_android_context` (handing the
+//! captured `JavaVM` + application-`Context` pointers to the plugin platform
+//! bridge — see [`native_init_platform`]).
 
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 use std::thread::JoinHandle;
 
@@ -24,7 +27,8 @@ use accesskit_android::jni as ak_jni;
 use anyhow::{Context, Result};
 use jni::EnvUnowned;
 use jni::errors::LogErrorAndDefault;
-use jni::objects::{JObject, JString};
+use jni::objects::{JClass, JObject, JString};
+use jni::refs::Global;
 use jni::sys::{JNI_VERSION_1_6, jboolean, jfloat, jint, jlong, jstring};
 use ndk::native_window::NativeWindow;
 
@@ -75,26 +79,124 @@ const SPAN_PREINIT_JOINED: &str = "preinit_joined";
 type PreInitResult = Option<frust_render::RenderContext>;
 static GPU_PREINIT: OnceLock<Mutex<Option<JoinHandle<PreInitResult>>>> = OnceLock::new();
 
+/// The process [`JavaVM`](jni::JavaVM) pointer, captured at [`JNI_OnLoad`]
+/// (task 01, plugin system). The JVM hands `JNI_OnLoad` the `JavaVM` before any
+/// `nativeInit`, but the plugin platform bridge needs it later, at
+/// [`native_init_platform`] — so stash the raw pointer here rather than
+/// discarding it. `AtomicPtr` because `JNI_OnLoad` (library-load thread) writes
+/// it and `nativeInitPlatform` (UI thread) reads it; the `JavaVM` itself is
+/// process-lifetime and thread-safe. Null until `JNI_OnLoad` has run.
+static JAVA_VM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// One-shot guard for the plugin platform-handle install ([`native_init_platform`]):
+/// `ndk_context::initialize_android_context` must run exactly once per process
+/// (it panics on a second call), but Kotlin re-invokes `nativeInitPlatform`
+/// after activity recreation — so the second and later calls are a no-op.
+static PLATFORM_INIT: Once = Once::new();
+
+/// Holds the application-`Context` [`Global`] reference for the whole process,
+/// so the raw jobject pointer handed to `ndk-context` at [`native_init_platform`]
+/// stays valid for the process lifetime (a dropped `Global` would invalidate
+/// it). Set exactly once, under [`PLATFORM_INIT`]; never taken out or dropped.
+static CONTEXT_GLOBAL: OnceLock<Global<JObject<'static>>> = OnceLock::new();
+
 /// `JNI_OnLoad`: the JVM calls this once when the native library is loaded, well
-/// before the first `nativeInit` (task 19, spec §14 phase 7.E). Its only job is
-/// to kick off the background GPU pre-init so wgpu adapter/device creation
-/// overlaps the JVM's own Activity/Surface bring-up.
+/// before the first `nativeInit` (task 19, spec §14 phase 7.E). It captures the
+/// [`JavaVM`](jni::JavaVM) pointer for the plugin platform bridge (task 01 —
+/// stashed in [`JAVA_VM`] for [`native_init_platform`]) and kicks off the
+/// background GPU pre-init so wgpu adapter/device creation overlaps the JVM's
+/// own Activity/Surface bring-up.
 ///
 /// Defined here in the shell crate (not in the [`crate::android_app!`] macro)
 /// deliberately: `JNI_OnLoad` is a single, process-wide symbol — a per-app
 /// macro-emitted copy would collide. The macro-generated `nativeInit` references
 /// [`native_init`] in this module, so this object is already pulled into the
-/// generated `cdylib` link, carrying this export with it.
+/// generated `cdylib` link, carrying this export (and the sibling
+/// [`native_init_platform`] one) with it.
 ///
 /// Returns [`JNI_VERSION_1_6`] unconditionally: the JVM refuses to load a library
 /// whose `JNI_OnLoad` reports an unsupported version, so even a panic inside the
 /// (guarded) spawn must not change the returned value. The spawn does nothing
 /// else blocking.
 #[unsafe(no_mangle)]
-pub extern "system" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> jint {
+pub extern "system" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> jint {
     init_logger_once();
+    // Retain the VM pointer for `nativeInitPlatform`; a plain pointer store,
+    // never dereferenced here. `Release` pairs with the `Acquire` load there.
+    JAVA_VM.store(vm, Ordering::Release);
     guard("JNI_OnLoad", (), spawn_gpu_preinit);
     JNI_VERSION_1_6
+}
+
+/// `nativeInitPlatform`: install the `(JavaVM, application Context)` pair into
+/// `ndk-context`'s process-wide slot so any Rust code — most importantly
+/// `frust-plugin`-backed platform plugins — can make JNI calls with zero
+/// per-plugin native code (task 01, plugin system Phase 1).
+///
+/// Kotlin's generated `FrustSurfaceView` calls this with
+/// `context.applicationContext` right before `nativeInit`. The **application**
+/// context (not the Activity) is stored deliberately: it is stable across
+/// activity recreation, so retaining it can't leak an Activity.
+///
+/// A hand-written, process-wide export (like [`JNI_OnLoad`]) rather than a
+/// per-app `android_app!`-generated one — the handles are process state, not
+/// per-`AppHandle` state. Routed through [`guard`] like every export so a panic
+/// (e.g. a failed `new_global_ref`) can never unwind across the JNI boundary.
+///
+/// Idempotent via [`PLATFORM_INIT`]: `ndk_context::initialize_android_context`
+/// panics if called twice, and Kotlin re-runs this after activity recreation,
+/// so only the first call installs the handles; the rest are no-ops.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeInitPlatform<'local>(
+    env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    context: JObject<'local>,
+) {
+    native_init_platform(env, context)
+}
+
+/// Body of [`Java_dev_frust_FrustSurfaceView_nativeInitPlatform`], split out so
+/// the export stays a thin `extern "system"` shim.
+fn native_init_platform(mut env: EnvUnowned, context: JObject) {
+    guard("nativeInitPlatform", (), || {
+        PLATFORM_INIT.call_once(|| {
+            let vm_ptr = JAVA_VM.load(Ordering::Acquire);
+            if vm_ptr.is_null() {
+                log::error!(
+                    "frust-shell-android: nativeInitPlatform ran before JNI_OnLoad captured the \
+                     JavaVM; platform plugins will report NotInitialized"
+                );
+                return;
+            }
+
+            // Promote the (application) context local ref to a process-lifetime
+            // global ref so the pointer handed to `ndk-context` below stays
+            // valid forever; a failed `new_global_ref` yields a null `Global`
+            // and skips the install (plugins then see NotInitialized).
+            let global = env
+                .with_env(|env| env.new_global_ref(&context))
+                .resolve::<LogErrorAndDefault>();
+            let ctx_ptr = global.as_obj().as_raw();
+            if ctx_ptr.is_null() {
+                log::error!(
+                    "frust-shell-android: nativeInitPlatform could not create a global ref for the \
+                     application Context; platform plugins will report NotInitialized"
+                );
+                return;
+            }
+            // Hold the global for the process lifetime (never dropped).
+            let _ = CONTEXT_GLOBAL.set(global);
+
+            // SAFETY: `vm_ptr` is the live process `JavaVM` captured in
+            // `JNI_OnLoad`; `ctx_ptr` is the just-leaked, process-lifetime
+            // application-context global ref. `PLATFORM_INIT.call_once` makes
+            // this the exactly-once call `initialize_android_context` requires.
+            unsafe {
+                ndk_context::initialize_android_context(vm_ptr, ctx_ptr.cast::<c_void>());
+            }
+            log::debug!("frust-shell-android: plugin platform handles installed");
+        });
+    });
 }
 
 /// Spawn the single background GPU pre-init thread (task 19), best-effort and

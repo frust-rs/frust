@@ -1116,6 +1116,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-plugin"
+version = "0.1.0"
+dependencies = [
+ "jni 0.22.4",
+ "ndk-context",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "frust-reactive"
 version = "0.1.0"
 dependencies = [
@@ -1168,6 +1177,7 @@ dependencies = [
  "kurbo",
  "log",
  "ndk",
+ "ndk-context",
  "ndk-sys",
  "peniko",
  "pollster",

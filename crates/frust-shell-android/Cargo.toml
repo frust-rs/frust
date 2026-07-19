@@ -36,6 +36,11 @@ anyhow = { workspace = true }
 jni = { workspace = true }
 ndk = { workspace = true }
 ndk-sys = { workspace = true }
+# Plugin platform-handle storage slot (task 01 / Design Decision 2): the shell
+# *writes* the captured `(JavaVM, application Context)` here at
+# `nativeInitPlatform` so `frust-plugin` (a leaf crate the shell does not
+# depend on) can *read* them back. Target-gated like the JNI deps above.
+ndk-context = { workspace = true }
 android_logger = { workspace = true }
 # Android accesskit adapter (phase 6d D3, wired in task 04) — target-gated
 # like the JNI deps above; nothing off-Android references it.
