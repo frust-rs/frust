@@ -29,17 +29,28 @@
 //! `use_preference`-style wrapper is a future facade-glue addition, not
 //! part of this crate.
 //!
-//! # Backend routing (this task)
+//! # Backend routing
 //!
 //! [`SharedPreferences::standard`] dispatches by `#[cfg(target_os = ...)]`
-//! to one of three backend modules: [`file`] (Linux/Windows — the only real
-//! implementation as of this task), [`android`], and [`apple`]. The
-//! Android/Apple modules are **stubs** for now (every operation returns
-//! [`PrefsError::Storage`]) — their real `SharedPreferences`/
-//! `NSUserDefaults` implementations land in a later task; see each module's
-//! doc comment. This crate still compiles (and its file-backend tests still
-//! run) on every host, including this repo's macOS dev machines, where
-//! `target_os = "macos"` routes through the (stub) `apple` module.
+//! to one of three backend modules: [`file`] (Linux/Windows — a JSON map
+//! file), [`android`] (`Context.getSharedPreferences`, through
+//! `frust_plugin::android::with_jni_env`), and [`apple`] (`NSUserDefaults`
+//! via `objc2`). All three are real implementations; each module's doc
+//! comment describes its storage encoding. This crate compiles on every
+//! host, including this repo's macOS dev machines, where `target_os =
+//! "macos"` routes through the native `apple` backend against the host's
+//! own `NSUserDefaults` (the storage-location difference for an unbundled
+//! `cargo run` binary is documented behavior, not hidden).
+//!
+//! # OS-shared-store key namespace
+//!
+//! On the two OS-shared stores (`NSUserDefaults`, Android
+//! `SharedPreferences`) every key this crate writes is prefixed with
+//! [`KEY_PREFIX`] (`"frust."`) so a plugin key can never collide with —
+//! nor [`SharedPreferences::clear`] ever remove — another app/library's
+//! entry sharing the same store (Design Decision 4). [`SharedPreferences::keys`]
+//! strips the prefix on return. The file backend owns its file exclusively
+//! and needs no such prefix.
 
 // `file` backs `standard()`'s dispatch on every target except
 // Android/iOS/macOS (see below), but is also compiled under `cfg(test)` on
@@ -65,6 +76,14 @@ mod apple;
 mod conformance;
 
 use std::sync::Arc;
+
+/// The namespace every key gets on the two OS-shared stores
+/// (`NSUserDefaults`, Android `SharedPreferences`) — see the module doc's
+/// *OS-shared-store key namespace* section. Shared by the [`apple`] and
+/// [`android`] backends; the [`file`] backend owns its file and does not
+/// use it.
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+pub(crate) const KEY_PREFIX: &str = "frust.";
 
 /// Errors from a [`SharedPreferences`] operation.
 ///
@@ -152,10 +171,10 @@ impl SharedPreferences {
     ///
     /// # Errors
     /// [`PrefsError::Storage`] if the store's location can't be resolved
-    /// (file backend, no usable data directory) or the backend isn't
-    /// implemented yet (Android/Apple stubs — this task); a future Android
-    /// backend can additionally return
-    /// [`PrefsError::PlatformNotInitialized`].
+    /// (file backend, no usable data directory). On Android,
+    /// [`PrefsError::PlatformNotInitialized`] if the host shell never
+    /// installed the `(JavaVM, Context)` platform handles this backend
+    /// needs (an old scaffold that predates `nativeInitPlatform`).
     pub fn standard() -> Result<Self, PrefsError> {
         #[cfg(target_os = "android")]
         let backend: Arc<dyn Backend> = Arc::new(android::AndroidStore::standard()?);

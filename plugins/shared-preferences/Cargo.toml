@@ -28,15 +28,16 @@ jni = { workspace = true }
 # set. Declared now (Phase 2 step 2 of the plugin-system plan) so task 06
 # only has to write source, not chase feature-resolution errors.
 #
-# `NSNumber` is deliberately NOT in this list: verified against the vendored
-# objc2-foundation 0.3.2 source (`src/number.rs`'s `mod number;` is
-# unconditional in `lib.rs`, no `#[cfg(feature = ...)]` gate) that NSNumber
-# has no feature flag at all — it is always compiled, unlike every other type
-# below. `std` is included because it is NOT itself a default-off feature
-# that these types need; it gates `alloc`-backed conversions (e.g. `NSString`
-# `Display`/`ToString`) this backend needs and must be requested explicitly
-# once `default-features = false` turns objc2-foundation's (huge) default
-# list off.
+# `NSValue` gates `NSNumber` (the type lives in the generated `NSValue.rs`,
+# and `src/number.rs`'s safe helpers — `NSNumber::encoding`/`as_bool`/
+# `as_i64`/`as_f64` — are themselves `#[cfg(feature = "NSValue")]` in the
+# vendored objc2-foundation 0.3.2 source, contrary to an earlier note here).
+# The Apple backend reads `NSNumber::encoding()` to recover `bool`/`i64`/`f64`
+# from a stored number, so `NSValue` is required, not optional. `std` gates
+# the `alloc`-backed conversions (`NSString` `Display`/`ToString`) this
+# backend needs, and must be requested explicitly once `default-features =
+# false` turns objc2-foundation's (huge) default list off. `NSEnumerator`
+# backs `NSArray::iter`/`NSDictionary::keys` (element + key enumeration).
 [target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
 objc2 = { workspace = true }
 # Not `{ workspace = true }`: Cargo's workspace-dependency inheritance
@@ -52,4 +53,5 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
     "NSDictionary",
     "NSEnumerator",
+    "NSValue",
 ] }
