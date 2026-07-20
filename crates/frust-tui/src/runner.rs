@@ -200,6 +200,8 @@ fn apply_effect(
             launch_bootstrap_fix_session(program, args, label, id, tx.clone());
         }
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
+        Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
+        Some(Effect::SaveFollowTailDefault(on)) => crate::engine::save_follow_tail_default(on),
         None => {}
     }
 }
@@ -216,6 +218,11 @@ fn set_mouse_capture(on: bool) {
     if let Err(e) = result {
         eprintln!("frust-tui: toggling mouse capture failed: {e}");
     }
+    // T05 settings persistence: the terminal-level toggle and the persisted
+    // preference always travel together (this effect only ever fires from
+    // `Message::ToggleMouseCapture`) — best-effort, like every other
+    // settings write.
+    crate::engine::save_mouse_capture(on);
 }
 
 /// Mint an id for an ad-hoc (build/clean) session — see `run_loop`'s
@@ -809,6 +816,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             ActiveModal::DoctorPanel => translate_doctor_key(code),
             ActiveModal::BuildLauncher(launcher) => translate_build_key(code, mods, launcher),
             ActiveModal::CleanConfirm(_) => translate_clean_confirm_key(code),
+            ActiveModal::HelpOverlay => translate_help_key(code),
         };
     }
 
@@ -821,6 +829,14 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             KeyCode::Char(c) if !ctrl => vec![Message::SearchInput(c)],
             _ => vec![],
         };
+    }
+
+    // `?` opens the keyboard/help overlay from either top-level screen (T05 /
+    // D5) — checked here, after the modal/search-capture blocks above (so it
+    // never fires while typing `?` into a text field) and before every other
+    // key below.
+    if !ctrl && !alt && matches!(code, KeyCode::Char('?')) {
+        return vec![Message::OpenHelpOverlay];
     }
 
     let has_active_session = state.active_session().is_some();
@@ -900,8 +916,19 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('c') if has_active_session => vec![Message::CopyBuiltArtifacts],
         KeyCode::Char('c') if workbench => vec![Message::OpenCleanConfirm],
 
+        // `s` toggles the narrow-terminal sidebar overlay (T05 / D5
+        // responsive breakpoint) — harmless above the narrow width, where
+        // the sidebar already renders inline (see `views::workbench::render`).
+        KeyCode::Char('s') if workbench => vec![Message::ToggleSidebarOverlay],
+        // The overlay (when open) closes on `Esc` before the log-view's own
+        // Esc arm below gets a chance (a closed overlay never intercepts it).
+        KeyCode::Esc if state.sidebar_overlay_open => vec![Message::ToggleSidebarOverlay],
+
         // ── Log-view / tab controls (only meaningful with a session open) ──
         KeyCode::Char('x') if has_active_session => vec![Message::StopSession],
+        // `t` toggles the active session's perf sparkline panel (T05 / D6 —
+        // "the unique Frust advantage").
+        KeyCode::Char('t') if has_active_session => vec![Message::TogglePerfPanel],
         KeyCode::Tab if has_active_session => vec![Message::NextTab],
         KeyCode::BackTab if has_active_session => vec![Message::PrevTab],
         KeyCode::Char(c @ '1'..='9') if has_active_session => {
@@ -1094,6 +1121,16 @@ fn translate_clean_confirm_key(code: KeyCode) -> Vec<Message> {
     match code {
         KeyCode::Esc => vec![Message::CloseCleanConfirm],
         KeyCode::Enter | KeyCode::Char('y') => vec![Message::ConfirmClean],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the keyboard/help overlay is open (T05 /
+/// D5) — read-only reference content, so `Esc` or `?` again are its only
+/// bindings.
+fn translate_help_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Esc | KeyCode::Char('?') => vec![Message::CloseHelpOverlay],
         _ => vec![],
     }
 }
@@ -1448,5 +1485,113 @@ mod tests {
 
         assert_eq!(runner.recorded_cwd(), Some(project_dir.clone()));
         let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    // ── Help overlay (T05 / D5) ───────────────────────────────────────────────
+
+    #[test]
+    fn question_mark_opens_the_help_overlay_from_either_screen() {
+        let regions = MouseRegions::new();
+        assert_eq!(
+            translate_event(key(KeyCode::Char('?')), &AppState::default(), &regions),
+            vec![Message::OpenHelpOverlay],
+            "welcome screen"
+        );
+        let workbench = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('?')), &workbench, &regions),
+            vec![Message::OpenHelpOverlay],
+            "workbench"
+        );
+    }
+
+    #[test]
+    fn help_overlay_open_routes_esc_and_question_mark_to_close() {
+        let state = AppState {
+            help_open: true,
+            ..Default::default()
+        };
+        let regions = MouseRegions::new();
+        assert_eq!(
+            translate_event(key(KeyCode::Esc), &state, &regions),
+            vec![Message::CloseHelpOverlay]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('?')), &state, &regions),
+            vec![Message::CloseHelpOverlay]
+        );
+        // Any other key is swallowed (read-only reference content).
+        assert_eq!(
+            translate_event(key(KeyCode::Char('z')), &state, &regions),
+            Vec::<Message>::new()
+        );
+    }
+
+    // ── Responsive breakpoints (T05 / D5) ────────────────────────────────────
+
+    #[test]
+    fn s_toggles_the_sidebar_overlay_from_the_workbench_only() {
+        let workbench = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        let regions = MouseRegions::new();
+        assert_eq!(
+            translate_event(key(KeyCode::Char('s')), &workbench, &regions),
+            vec![Message::ToggleSidebarOverlay]
+        );
+        // No project/workbench open (welcome screen) — no-op.
+        assert_eq!(
+            translate_event(key(KeyCode::Char('s')), &AppState::default(), &regions),
+            Vec::<Message>::new()
+        );
+    }
+
+    #[test]
+    fn esc_closes_an_open_sidebar_overlay_ahead_of_the_selection_clear_arm() {
+        let state = AppState {
+            screen: Screen::Workbench,
+            sidebar_overlay_open: true,
+            ..Default::default()
+        };
+        let regions = MouseRegions::new();
+        assert_eq!(
+            translate_event(key(KeyCode::Esc), &state, &regions),
+            vec![Message::ToggleSidebarOverlay]
+        );
+    }
+
+    // ── Perf sparkline panel (T05 / D6) ──────────────────────────────────────
+
+    #[test]
+    fn t_toggles_the_perf_panel_only_with_an_active_session() {
+        use crate::engine::SessionView;
+        let regions = MouseRegions::new();
+        let with_session = AppState {
+            screen: Screen::Workbench,
+            sessions: vec![SessionView::new(
+                SessionId(0),
+                PathBuf::from("/tmp/a"),
+                "desktop",
+            )],
+            active_session: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('t')), &with_session, &regions),
+            vec![Message::TogglePerfPanel]
+        );
+        let workbench = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('t')), &workbench, &regions),
+            Vec::<Message>::new(),
+            "no active session — no-op"
+        );
     }
 }

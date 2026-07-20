@@ -15,6 +15,20 @@ pub const STATUS_HEIGHT: u16 = 1;
 /// across the render/engine layer boundary).
 pub const SIDEBAR_WIDTH: u16 = crate::engine::SIDEBAR_DEFAULT_WIDTH;
 
+/// The narrow-terminal responsive breakpoint (T05 / D5): below this width the
+/// workbench collapses its inline sidebar out of the layout (see
+/// `views::workbench::render`), reachable instead as a toggleable floating
+/// overlay (`s` / `AppState::sidebar_overlay_open`). Comfortably above
+/// [`crate::ui::views::too_small::MIN_WIDTH`], so there is a real narrow
+/// range between "sidebar collapses" and "unusable".
+pub const NARROW_WIDTH: u16 = 80;
+
+/// Whether `area` is narrow enough to collapse the sidebar out of the inline
+/// layout (see [`NARROW_WIDTH`]).
+pub fn is_narrow(area: Rect) -> bool {
+    area.width < NARROW_WIDTH
+}
+
 /// The three horizontal bands of the shell.
 #[derive(Debug, Clone, Copy)]
 pub struct Shell {

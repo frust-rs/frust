@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │                                                                          
+  ▸ huddle               │  Dashboard                                                               
+                         │  ━━━━━━━━━━                                                              
+ DEVICES ↻ r             ╭ Keyboard Shortcuts ────────────────────────────╮                         
+   none found            │                                                │▓▓b here.                
+                         │  r       Run on device(s)…                     │▓▓                       
+ SESSIONS                │  x       Stop session                          │▓▓                       
+   none running          │  b       Build…                                │▓▓                       
+                         │  c       Clean…                                │▓▓                       
+ ACTIONS                 │  d       Doctor                                │▓▓                       
+   New project · n       │  i       Toolchain setup…                      │▓▓                       
+   Doctor · d            │  n       New project…                          │▓▓                       
+   Build · b             │  ^O      Switch project…                       │▓▓                       
+   Clean · c             │  R       Refresh devices                       │▓▓                       
+                         │  ⌥m      Toggle mouse capture                  │▓▓                       
+                         │  f       Toggle follow-tail                    │▓▓                       
+                         │  /       Search logs…                          │▓▓                       
+                         │  q       Quit                                  │▓▓                       
+                         │                                                │▓▓                       
+                         │  Esc close                                     │▓▓                       
+                         ╰────────────────────────────────────────────────╯▓▓                       
+                         │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                       
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

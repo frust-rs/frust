@@ -194,6 +194,18 @@ fn render_modal(
             views::workbench::render(frame, area, state, theme, &mut suppressed);
             views::clean_confirm::render(frame, area, project_root, theme, mouse);
         }
+        // The help overlay can appear over either top-level screen, like the
+        // wizards above (both status bars carry the `? help` hint).
+        ActiveModal::HelpOverlay => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::help::render(frame, area, state, theme, mouse);
+        }
     }
 }
 

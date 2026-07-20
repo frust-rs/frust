@@ -134,6 +134,9 @@ pub enum RegionId {
     /// A row in the open context menu (0-based index into the menu's entries);
     /// hover highlights it, click activates it (T04 / D4).
     ContextMenuItem(usize),
+    /// The keyboard/help overlay (T05 / D5) — a click anywhere in the panel
+    /// closes it (mouse parity for `Esc`).
+    HelpClose,
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the
@@ -529,4 +532,22 @@ pub enum Message {
     /// runner as [`super::Effect::LaunchSessions`]. A no-op with no project or
     /// no discovered devices.
     RunOnAllDevices,
+
+    // ── Perf sparkline panel (T05 / PLAN.md D5/D6) ──────────────────────────
+    /// Toggle the active session's perf sparkline panel (`t`) — a no-op with
+    /// no active session.
+    TogglePerfPanel,
+
+    // ── Responsive breakpoints (T05 / D5) ───────────────────────────────────
+    /// Toggle the narrow-terminal sidebar overlay (`s` from the workbench, or
+    /// `Esc` while it's open) — meaningless (but harmless) above
+    /// `crate::ui::layout::NARROW_WIDTH`, where the sidebar already renders
+    /// inline.
+    ToggleSidebarOverlay,
+
+    // ── Help overlay (T05 / D5) ──────────────────────────────────────────────
+    /// Open the keyboard/help overlay (`?` from either top-level screen).
+    OpenHelpOverlay,
+    /// Close the help overlay (`Esc` / `?` again).
+    CloseHelpOverlay,
 }

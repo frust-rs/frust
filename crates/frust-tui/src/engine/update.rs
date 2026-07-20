@@ -15,7 +15,7 @@ use super::context_menu::ContextMenu;
 use super::create_wizard::{CreateWizard, WizardAdvance};
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
-use super::session_view::SessionView;
+use super::session_view::{Scroll, SessionView};
 use super::state::{AppState, Screen};
 use super::toast::ToastKind;
 use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec};
@@ -88,8 +88,17 @@ pub enum Effect {
     },
     /// Enable (`true`) or disable (`false`) crossterm mouse capture at the
     /// terminal level (T04 / D4) — the runner enacts the `EnableMouseCapture`/
-    /// `DisableMouseCapture` sequence; the pure engine only requests it.
+    /// `DisableMouseCapture` sequence; the pure engine only requests it. The
+    /// runner also persists this as the mouse-capture preference alongside
+    /// the terminal-level toggle (T05 settings persistence).
     SetMouseCapture(bool),
+    /// Persist the sidebar's current width — the runner's enactment of a
+    /// just-completed `SidebarSplitter` drag (T05 settings persistence,
+    /// fulfilling `DragEnd`'s previously-deferred note).
+    SaveSidebarWidth(u16),
+    /// Persist the follow-tail default — the runner's enactment of a
+    /// follow-tail toggle on the active session (T05 settings persistence).
+    SaveFollowTailDefault(bool),
 }
 
 /// What the loop must do after a transition.
@@ -196,9 +205,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             if state.session_index(id).is_some() {
                 return Outcome::idle();
             }
-            state
-                .sessions
-                .push(SessionView::new(id, project_root, target_label));
+            let mut view = SessionView::new(id, project_root, target_label);
+            // Honor the persisted follow-tail default (T05): an empty log has
+            // nothing to anchor to yet, so `Anchored(0)` simply starts the
+            // view "not following" until the first line arrives.
+            if !state.follow_tail_default {
+                view.scroll = Scroll::Anchored(0);
+            }
+            state.sessions.push(view);
             // Auto-select the first session that appears.
             if state.active_session.is_none() {
                 state.active_session = Some(state.sessions.len() - 1);
@@ -219,7 +233,22 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             Some(id) => Outcome::effect(Effect::StopSession(id)),
             None => Outcome::idle(),
         },
-        Message::ToggleFollow => with_active(state, |s| s.toggle_follow()),
+        Message::ToggleFollow => {
+            let Some(session) = state.active_session_mut() else {
+                return Outcome::idle();
+            };
+            session.toggle_follow();
+            // The most recently chosen follow state becomes the default a
+            // future session tab starts in (T05 settings persistence) —
+            // "last used" rather than a separate, undiscoverable preference
+            // toggle.
+            let now_following = session.is_following();
+            state.follow_tail_default = now_following;
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::SaveFollowTailDefault(now_following)),
+            }
+        }
         Message::ToggleWrap => {
             state.wrap = !state.wrap;
             Outcome::redraw()
@@ -736,10 +765,21 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             None => Outcome::idle(),
         },
         Message::DragEnd => {
-            // Clearing the active drag has no visual effect; the sidebar-width
-            // persistence is left for T05's settings task (see its req. 3).
+            // A just-completed sidebar-splitter drag persists the new width
+            // (T05 settings persistence, fulfilling the note this arm used to
+            // carry); a scrollbar-thumb drag (or no drag at all) has nothing
+            // to persist.
+            let effect = match state.active_drag {
+                Some(DragKind::SidebarSplitter { .. }) => {
+                    Some(Effect::SaveSidebarWidth(state.sidebar_width))
+                }
+                _ => None,
+            };
             state.active_drag = None;
-            Outcome::idle()
+            Outcome {
+                redraw: false,
+                effect,
+            }
         }
 
         // ── Context menus (T04 / D4) ────────────────────────────────────────
@@ -768,6 +808,33 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             Outcome {
                 redraw: true,
                 effect: Some(Effect::SetMouseCapture(state.mouse_capture)),
+            }
+        }
+
+        // ── Perf sparkline panel (T05 / D5/D6) ──────────────────────────────
+        Message::TogglePerfPanel => with_active(state, |s| s.perf.toggle()),
+
+        // ── Responsive breakpoints (T05 / D5) ───────────────────────────────
+        Message::ToggleSidebarOverlay => {
+            state.sidebar_overlay_open = !state.sidebar_overlay_open;
+            Outcome::redraw()
+        }
+
+        // ── Help overlay (T05 / D5) ──────────────────────────────────────────
+        Message::OpenHelpOverlay => {
+            if state.help_open {
+                Outcome::idle()
+            } else {
+                state.help_open = true;
+                Outcome::redraw()
+            }
+        }
+        Message::CloseHelpOverlay => {
+            if state.help_open {
+                state.help_open = false;
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
             }
         }
     }
@@ -2395,5 +2462,129 @@ mod tests {
         let out = update(&mut st, Message::ToggleMouseCapture);
         assert!(st.mouse_capture);
         assert_eq!(out.effect, Some(Effect::SetMouseCapture(true)));
+    }
+
+    // ── Settings persistence (T05 / D5/D6) ───────────────────────────────────
+
+    #[test]
+    fn ending_a_sidebar_splitter_drag_requests_the_save_effect() {
+        let mut st = workbench_with_project();
+        update(
+            &mut st,
+            Message::DragStart(DragKind::SidebarSplitter { body_left: 0 }),
+        );
+        update(&mut st, Message::DragMove(40, 10));
+        let out = update(&mut st, Message::DragEnd);
+        assert_eq!(out.effect, Some(Effect::SaveSidebarWidth(40)));
+        assert!(st.active_drag.is_none());
+    }
+
+    #[test]
+    fn ending_a_scrollbar_drag_requests_no_save_effect() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+        update(
+            &mut st,
+            Message::DragStart(DragKind::LogScrollbar {
+                track_top: 0,
+                track_height: 10,
+            }),
+        );
+        let out = update(&mut st, Message::DragEnd);
+        assert_eq!(out.effect, None, "only a sidebar-width drag persists");
+    }
+
+    #[test]
+    fn ending_a_drag_with_none_active_requests_no_effect() {
+        let mut st = workbench_with_project();
+        let out = update(&mut st, Message::DragEnd);
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn toggling_follow_updates_the_default_and_requests_the_save_effect() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+        assert!(st.follow_tail_default);
+        assert!(st.active_session().unwrap().is_following());
+        let out = update(&mut st, Message::ToggleFollow);
+        assert!(!st.active_session().unwrap().is_following());
+        assert!(!st.follow_tail_default, "the default follows the toggle");
+        assert_eq!(out.effect, Some(Effect::SaveFollowTailDefault(false)));
+
+        let out = update(&mut st, Message::ToggleFollow);
+        assert!(st.active_session().unwrap().is_following());
+        assert!(st.follow_tail_default);
+        assert_eq!(out.effect, Some(Effect::SaveFollowTailDefault(true)));
+    }
+
+    #[test]
+    fn a_freshly_registered_session_honors_a_false_follow_tail_default() {
+        let mut st = welcome();
+        st.follow_tail_default = false;
+        register(&mut st, 0, "/tmp/a", "desktop");
+        assert!(
+            !st.active_session().unwrap().is_following(),
+            "a new session tab starts anchored, not following, per the \
+             persisted default"
+        );
+    }
+
+    // ── Perf sparkline panel (T05 / D5/D6) ───────────────────────────────────
+
+    #[test]
+    fn toggle_perf_panel_flips_the_active_session_only() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+        assert!(!st.active_session().unwrap().perf.visible);
+        let out = update(&mut st, Message::TogglePerfPanel);
+        assert!(out.redraw);
+        assert!(st.active_session().unwrap().perf.visible);
+    }
+
+    #[test]
+    fn toggle_perf_panel_with_no_active_session_is_a_noop() {
+        let mut st = welcome();
+        let out = update(&mut st, Message::TogglePerfPanel);
+        assert!(!out.redraw);
+    }
+
+    // ── Responsive breakpoints (T05 / D5) ────────────────────────────────────
+
+    #[test]
+    fn toggle_sidebar_overlay_flips_and_redraws() {
+        let mut st = workbench_with_project();
+        assert!(!st.sidebar_overlay_open);
+        let out = update(&mut st, Message::ToggleSidebarOverlay);
+        assert!(out.redraw);
+        assert!(st.sidebar_overlay_open);
+        update(&mut st, Message::ToggleSidebarOverlay);
+        assert!(!st.sidebar_overlay_open);
+    }
+
+    // ── Help overlay (T05 / D5) ───────────────────────────────────────────────
+
+    #[test]
+    fn open_and_close_help_overlay() {
+        let mut st = welcome();
+        assert!(!st.help_open);
+        let out = update(&mut st, Message::OpenHelpOverlay);
+        assert!(out.redraw);
+        assert!(st.help_open);
+        assert!(matches!(
+            st.active_modal(),
+            Some(crate::engine::ActiveModal::HelpOverlay)
+        ));
+        let out = update(&mut st, Message::CloseHelpOverlay);
+        assert!(out.redraw);
+        assert!(!st.help_open);
+    }
+
+    #[test]
+    fn re_opening_an_already_open_help_overlay_is_a_noop() {
+        let mut st = welcome();
+        update(&mut st, Message::OpenHelpOverlay);
+        let out = update(&mut st, Message::OpenHelpOverlay);
+        assert!(!out.redraw);
     }
 }

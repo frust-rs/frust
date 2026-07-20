@@ -1,0 +1,28 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(70, 24, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…       ▶ Run    ⚒ Build 
+━━━━━━━━                                                              
+                                                                      
+┌ Sidebar · Esc/s close ───────┐                                      
+│ PROJECTS                    ││                                      
+│  ▸ huddle                   ││                                      
+│                             ││                                      
+│ DEVICES ↻ r                 ││un to open a log tab here.            
+│   none found                ││                                      
+│                             ││                                      
+│ SESSIONS                    ││                                      
+│   none running              ││                                      
+│                             ││                                      
+│ ACTIONS                     ││                                      
+│   New project · n           ││                                      
+│   Doctor · d                ││                                      
+│   Build · b                 ││                                      
+│   Clean · c                 ││                                      
+│                             ││                                      
+│                             ││                                      
+│                             ││                                      
+│                             ││                                      
+└──────────────────────────────┘                                      
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help ·[mouse ✓]

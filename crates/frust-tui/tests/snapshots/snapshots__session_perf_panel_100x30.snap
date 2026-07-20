@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │huddle:  1 ▶ desktop                                                      
+  ▸ huddle               │frust-perf raw n=20 total_us=2740 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf raw n=21 total_us=2777 rebuild_us=200 layout_us=300 paint_us=40
+ DEVICES ↻ r             │frust-perf raw n=22 total_us=2814 rebuild_us=200 layout_us=300 paint_us=40
+   none found            │frust-perf raw n=23 total_us=2851 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf raw n=24 total_us=2888 rebuild_us=200 layout_us=300 paint_us=40
+ SESSIONS                │frust-perf raw n=25 total_us=2925 rebuild_us=200 layout_us=300 paint_us=40
+   huddle                │frust-perf raw n=26 total_us=2962 rebuild_us=200 layout_us=300 paint_us=40
+   ▸ ▶ desktop           │frust-perf raw n=27 total_us=2999 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf raw n=28 total_us=3036 rebuild_us=200 layout_us=300 paint_us=40
+ ACTIONS                 │frust-perf raw n=29 total_us=3073 rebuild_us=200 layout_us=300 paint_us=40
+   New project · n       │frust-perf raw n=30 total_us=3110 rebuild_us=200 layout_us=300 paint_us=40
+   Doctor · d            │frust-perf raw n=31 total_us=3147 rebuild_us=200 layout_us=300 paint_us=40
+   Build · b             │frust-perf raw n=32 total_us=3184 rebuild_us=200 layout_us=300 paint_us=40
+   Clean · c             │frust-perf raw n=33 total_us=3221 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf raw n=34 total_us=3258 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf raw n=35 total_us=3295 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf raw n=36 total_us=3332 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf raw n=37 total_us=3369 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf raw n=38 total_us=3406 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf raw n=39 total_us=3443 rebuild_us=200 layout_us=300 paint_us=40
+                         │frust-perf frame n=40 total_p50_ms=8 total_p95_ms=14 total_p99_ms=22 rebu█
+                         │● follow  ·  wrap:off       x stop · f follow · w wrap · / search · t perf
+                         │  ▄▄▄▄▄▅▅▅▅▅▅▅▅▅▅▅▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇█                                
+                         │  perf n=40 p50=8ms p95=14ms p99=22ms skipped=0 total_frames=40           
+                         │  startup: app_created=2ms first_frame_presented=45ms                     
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

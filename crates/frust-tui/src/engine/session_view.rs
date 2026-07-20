@@ -11,6 +11,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use super::perf::PerfPanel;
 use crate::supervise::{SessionId, SessionState};
 
 /// Ring-buffer cap for a session's retained log lines.
@@ -204,6 +205,9 @@ pub struct SessionView {
     /// the log is missing lines the consumer couldn't keep up with, which the
     /// UI can surface. Mirrors `frust_drive::process::LineReceiver::dropped_lines`.
     pub dropped: u64,
+    /// The parsed `frust-perf` sparkline/stats panel for this session (T05 /
+    /// PLAN.md D5/D6) — fed one line at a time from [`Self::push_line`].
+    pub perf: PerfPanel,
 }
 
 impl SessionView {
@@ -218,6 +222,7 @@ impl SessionView {
             scroll: Scroll::Follow,
             selection: None,
             dropped: 0,
+            perf: PerfPanel::default(),
         }
     }
 
@@ -234,6 +239,7 @@ impl SessionView {
     /// points below the buffer. A non-evicted anchor/selection is left exactly
     /// where it was — the "survives incoming lines" invariant.
     pub fn push_line(&mut self, line: String) {
+        self.perf.ingest(&strip_ansi(&line));
         self.log.push(line);
         let base = self.log.base_index();
         if let Scroll::Anchored(b) = self.scroll

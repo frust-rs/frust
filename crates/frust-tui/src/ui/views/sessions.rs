@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Paragraph, Sparkline};
 
 use crate::engine::{
     AppState, ContextTarget, DragKind, Message, RegionId, Scroll, SessionView, detect_level,
@@ -34,11 +34,22 @@ pub fn render_main(
     theme: &Theme,
     mouse: &mut MouseCtx,
 ) {
+    // The perf sparkline panel (T05 / D6 — "the unique Frust advantage")
+    // renders only once its session has actually seen a `frust-perf` line
+    // *and* the tab has toggled it open (`t`) — zero-noise otherwise.
+    let active_session = state.active_session();
+    let show_perf = active_session.is_some_and(|s| s.perf.visible && s.perf.has_data());
+
     let mut constraints = vec![
         Constraint::Length(1), // tab bar
         Constraint::Min(1),    // log view
         Constraint::Length(1), // log status / keyhints
     ];
+    if show_perf {
+        constraints.push(Constraint::Length(perf_panel_height(
+            active_session.unwrap(),
+        )));
+    }
     if state.search.open {
         constraints.push(Constraint::Length(1)); // search input overlay
     }
@@ -50,8 +61,13 @@ pub fn render_main(
     render_tab_bar(frame, rows[0], state, theme, mouse);
     render_log(frame, rows[1], state, theme, mouse);
     render_log_status(frame, rows[2], state, theme, mouse);
+    let mut next = 3;
+    if show_perf {
+        render_perf_panel(frame, rows[next], active_session.unwrap(), theme);
+        next += 1;
+    }
     if state.search.open {
-        render_search(frame, rows[3], state, theme);
+        render_search(frame, rows[next], state, theme);
     }
 }
 
@@ -316,7 +332,14 @@ fn render_log_status(
         left.push(Span::styled("y copy", Style::default().fg(theme.accent())));
     }
 
-    const RIGHT_HINT: &str = "x stop · f follow · w wrap · / search";
+    // The perf-panel keyhint only shows once there's actually a panel to
+    // toggle (zero-noise) — the same gate `render_main` uses to decide
+    // whether to reserve its row.
+    let mut right_hint = "x stop · f follow · w wrap · / search".to_string();
+    if session.perf.has_data() {
+        right_hint.push_str(" · t perf");
+    }
+    let right_hint = right_hint;
 
     // Only add the built-artifacts segment (with its copy-path click region)
     // when it actually fits beside the right-aligned keyhint — both
@@ -331,7 +354,7 @@ fn render_log_status(
         let prefix = format!("  ·  {} built · ", artifacts.len());
         let copy_label = "c copy path";
         let needed = used + prefix.chars().count() + copy_label.chars().count();
-        if needed + RIGHT_HINT.chars().count() + 2 <= inner.width as usize {
+        if needed + right_hint.chars().count() + 2 <= inner.width as usize {
             let prefix_len = prefix.chars().count();
             left.push(Span::styled(prefix, Style::default().fg(theme.success())));
             left.push(Span::styled(
@@ -359,10 +382,91 @@ fn render_log_status(
     }
 
     frame.render_widget(
-        Paragraph::new(Line::styled(RIGHT_HINT, Style::default().fg(theme.muted())))
+        Paragraph::new(Line::styled(right_hint, Style::default().fg(theme.muted())))
             .alignment(Alignment::Right),
         inner,
     );
+}
+
+/// The perf panel's row height: a sparkline row + a stats row, plus one more
+/// once a startup summary has been seen (a session emits that line once,
+/// near the start of its output).
+fn perf_panel_height(session: &SessionView) -> u16 {
+    let base = 2;
+    base + u16::from(session.perf.last_startup.is_some())
+}
+
+/// The perf sparkline panel (T05 / D6 — "the unique Frust advantage"):
+/// recent frame totals as a sparkline (only present once `FRUST_TRACE_RAW`
+/// has produced per-frame samples), a p50/p95/p99 stats line from the latest
+/// periodic summary, and the one-shot startup-span line when seen.
+fn render_perf_panel(frame: &mut Frame, area: Rect, session: &SessionView, theme: &Theme) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.surface())),
+        area,
+    );
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let mut y = area.y;
+
+    // Sparkline row.
+    let samples: Vec<u64> = session.perf.samples().collect();
+    if samples.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "  no per-frame samples yet — set FRUST_TRACE_RAW=1 for the sparkline",
+                Style::default().fg(theme.muted()),
+            )),
+            Rect::new(area.x, y, area.width, 1),
+        );
+    } else {
+        let indent = 2.min(area.width);
+        let spark_x = area.x + indent;
+        frame.render_widget(
+            Sparkline::default()
+                .data(&samples)
+                .style(Style::default().fg(theme.accent())),
+            Rect::new(spark_x, y, area.width.saturating_sub(indent), 1),
+        );
+    }
+    y += 1;
+    if y >= area.bottom() {
+        return;
+    }
+
+    // Stats row.
+    let stats = match &session.perf.last_frame {
+        Some(f) => format!(
+            "  perf n={} p50={}ms p95={}ms p99={}ms skipped={} total_frames={}",
+            f.n, f.total_p50_ms, f.total_p95_ms, f.total_p99_ms, f.skipped, f.total_frames
+        ),
+        None => "  perf: waiting for a frame summary…".to_string(),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(stats, Style::default().fg(theme.fg()))),
+        Rect::new(area.x, y, area.width, 1),
+    );
+    y += 1;
+    if y >= area.bottom() {
+        return;
+    }
+
+    // Startup-span row (only once seen).
+    if let Some(startup) = &session.perf.last_startup {
+        let spans: Vec<String> = startup
+            .spans
+            .iter()
+            .map(|(name, ms)| format!("{name}={ms}ms"))
+            .collect();
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!("  startup: {}", spans.join(" ")),
+                Style::default().fg(theme.muted()),
+            )),
+            Rect::new(area.x, y, area.width, 1),
+        );
+    }
 }
 
 /// The search-input overlay row (shown while the overlay is open).

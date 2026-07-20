@@ -37,6 +37,10 @@ pub enum ActiveModal<'a> {
     /// create wizard, it can appear over either top-level screen (the
     /// titlebar chip shows on both).
     Bootstrap(&'a BootstrapWizard),
+    /// The keyboard/help overlay (`state.help_open`, `?` — T05 / D5) — like
+    /// the wizards above, reachable from either top-level screen (both
+    /// status bars carry the `? help` hint).
+    HelpOverlay,
     /// The run-config modal (`state.run_config`).
     RunConfig(&'a RunConfig),
     /// The titlebar project switcher (`state.project_switcher_open`).
@@ -63,6 +67,8 @@ impl AppState {
             Some(ActiveModal::CreateWizard(wizard))
         } else if let Some(wizard) = &self.bootstrap_wizard {
             Some(ActiveModal::Bootstrap(wizard))
+        } else if self.help_open {
+            Some(ActiveModal::HelpOverlay)
         } else if let Some(modal) = &self.run_config {
             Some(ActiveModal::RunConfig(modal))
         } else if self.project_switcher_open {

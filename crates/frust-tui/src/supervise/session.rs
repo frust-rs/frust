@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use frust_drive::build_info::BuildInfo;
+use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::devices::Device;
 
 /// A unique per-session identifier, handed out monotonically by a single
@@ -88,6 +88,19 @@ impl SessionSpec {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        // Verified plan gap (PLAN.md D6): the run-config modal builds
+        // `BuildInfo` directly (`RunConfig::build_info`) rather than through
+        // `BuildInfo::from_args`, which is what auto-injects
+        // `FRUST_TRACE=1` for a `--profile` build — bypassing that
+        // injection entirely. The supervisor owns the spawn env (this
+        // function), so it fills the same gap here: mirror
+        // `BuildInfo::from_args`'s "profile mode ⇒ FRUST_TRACE=1 unless the
+        // user already set it" rule, so the perf sparkline panel has data to
+        // parse on a desktop `--profile` run exactly like an Android/iOS one
+        // does.
+        if self.build.mode == BuildMode::Profile && !env.iter().any(|(k, _)| k == "FRUST_TRACE") {
+            env.push(("FRUST_TRACE".to_string(), "1".to_string()));
+        }
         env.sort();
 
         LaunchPlan {
@@ -328,6 +341,52 @@ mod tests {
                 ("Z_KEY".to_string(), "1".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn desktop_profile_plan_injects_frust_trace_when_missing() {
+        let spec = SessionSpec {
+            project_root: PathBuf::from("/tmp/app"),
+            target: DeviceTarget::Desktop,
+            build: build(BuildMode::Profile),
+        };
+        let plan = spec.launch_plan().unwrap();
+        assert_eq!(
+            plan.env,
+            vec![("FRUST_TRACE".to_string(), "1".to_string())],
+            "a --profile desktop run gets FRUST_TRACE=1 even though the \
+             run-config modal bypasses BuildInfo::from_args's own injection"
+        );
+    }
+
+    #[test]
+    fn desktop_profile_plan_respects_a_user_provided_frust_trace_define() {
+        let mut b = build(BuildMode::Profile);
+        b.defines.insert("FRUST_TRACE".into(), "0".into());
+        let spec = SessionSpec {
+            project_root: PathBuf::from("/tmp/app"),
+            target: DeviceTarget::Desktop,
+            build: b,
+        };
+        let plan = spec.launch_plan().unwrap();
+        assert_eq!(
+            plan.env,
+            vec![("FRUST_TRACE".to_string(), "0".to_string())],
+            "an explicit user define always wins over the auto-inject"
+        );
+    }
+
+    #[test]
+    fn debug_and_release_desktop_plans_never_inject_frust_trace() {
+        for mode in [BuildMode::Debug, BuildMode::Release] {
+            let spec = SessionSpec {
+                project_root: PathBuf::from("/tmp/app"),
+                target: DeviceTarget::Desktop,
+                build: build(mode),
+            };
+            let plan = spec.launch_plan().unwrap();
+            assert!(plan.env.is_empty(), "{mode:?} must not inject FRUST_TRACE");
+        }
     }
 
     #[test]

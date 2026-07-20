@@ -166,6 +166,20 @@ pub struct AppState {
     /// captures keyboard nav and suppresses the base layer's mouse regions like
     /// a modal, but renders as a small popup over the (still-visible) workbench.
     pub context_menu: Option<ContextMenu>,
+    /// The follow-tail state a freshly-registered session tab starts in (T05
+    /// settings persistence) — updated whenever the user toggles follow-tail
+    /// on the active session (`Message::ToggleFollow`), so it always reflects
+    /// the most recently chosen preference. Loaded from `tui.toml` at startup
+    /// (see [`super::persist::load_settings`]); `true` by default.
+    pub follow_tail_default: bool,
+    /// Whether the sidebar renders as a toggleable floating overlay instead
+    /// of its normal inline column — the narrow-terminal responsive
+    /// breakpoint (T05 / D5). Meaningless (ignored) above
+    /// [`crate::ui::layout::NARROW_WIDTH`]; `false` by default so a narrow
+    /// terminal starts with the sidebar collapsed, not covering the log view.
+    pub sidebar_overlay_open: bool,
+    /// The keyboard/help overlay (`?`), when open (T05 / D5).
+    pub help_open: bool,
 }
 
 impl AppState {
@@ -190,6 +204,10 @@ impl AppState {
         if state.project_root.is_some() {
             state.screen = Screen::Workbench;
         }
+        let settings = super::persist::load_settings();
+        state.sidebar_width = settings.sidebar_width;
+        state.mouse_capture = settings.mouse_capture;
+        state.follow_tail_default = settings.follow_tail_default;
         state
     }
 
@@ -234,6 +252,9 @@ impl AppState {
             mouse_capture: true,
             active_drag: None,
             context_menu: None,
+            follow_tail_default: true,
+            sidebar_overlay_open: false,
+            help_open: false,
         }
     }
 
@@ -355,6 +376,9 @@ impl Default for AppState {
             mouse_capture: true,
             active_drag: None,
             context_menu: None,
+            follow_tail_default: true,
+            sidebar_overlay_open: false,
+            help_open: false,
         }
     }
 }

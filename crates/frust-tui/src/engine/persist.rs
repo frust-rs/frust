@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use frust_drive::doctor::{EnvLookup, RealEnv};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
+use super::state::{SIDEBAR_DEFAULT_WIDTH, clamp_sidebar_width};
+
 /// Cap on the persisted recent-projects list (newest first) — trimmed on
 /// every save so the file never grows unbounded on a long-lived machine.
 const MAX_RECENT: usize = 20;
@@ -151,6 +153,143 @@ pub fn merge_recent_and_detected(recent: &[PathBuf], detected: &[PathBuf]) -> Ve
         }
     }
     out
+}
+
+// ── Settings persistence (T05 / PLAN.md D5/D6: sidebar width, mouse-capture
+// preference, follow-tail default) ─────────────────────────────────────────
+
+/// Persisted workbench preferences (`[settings]` table in `tui.toml`),
+/// alongside the `[recent].projects` array above — a fresh launch's
+/// "last-active project" is already covered by that list (`AppState::new`
+/// opens `projects.first()` when the cwd has no project of its own), so it
+/// carries no separate key here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settings {
+    /// The sidebar's drag-resized width (columns), from T04's splitter.
+    pub sidebar_width: u16,
+    /// Whether crossterm mouse capture is on.
+    pub mouse_capture: bool,
+    /// The follow-tail state a freshly-registered session tab starts in.
+    pub follow_tail_default: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+            mouse_capture: true,
+            follow_tail_default: true,
+        }
+    }
+}
+
+/// Load the persisted settings against the real process environment. A
+/// missing file, an unresolvable config dir, a corrupt document, or a
+/// missing/malformed individual key all fall back to that key's
+/// [`Settings::default`] value — never a panic, and never a partial load
+/// blocking the other keys (mirrors [`load_recent_projects`]'s tolerance).
+pub fn load_settings() -> Settings {
+    load_settings_with(&RealEnv)
+}
+
+fn load_settings_with(env: &dyn EnvLookup) -> Settings {
+    let Some(path) = config_path(env) else {
+        return Settings::default();
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Settings::default();
+    };
+    let Ok(doc) = text.parse::<DocumentMut>() else {
+        return Settings::default();
+    };
+    settings_from_doc(&doc)
+}
+
+fn settings_from_doc(doc: &DocumentMut) -> Settings {
+    let default = Settings::default();
+    let table = doc.as_table().get("settings").and_then(Item::as_table);
+    let sidebar_width = table
+        .and_then(|t| t.get("sidebar_width"))
+        .and_then(Item::as_integer)
+        .and_then(|n| u16::try_from(n).ok())
+        .map(clamp_sidebar_width)
+        .unwrap_or(default.sidebar_width);
+    let mouse_capture = table
+        .and_then(|t| t.get("mouse_capture"))
+        .and_then(Item::as_bool)
+        .unwrap_or(default.mouse_capture);
+    let follow_tail_default = table
+        .and_then(|t| t.get("follow_tail_default"))
+        .and_then(Item::as_bool)
+        .unwrap_or(default.follow_tail_default);
+    Settings {
+        sidebar_width,
+        mouse_capture,
+        follow_tail_default,
+    }
+}
+
+/// Persist the sidebar's current width — the runner's enactment of a
+/// completed `SidebarSplitter` drag (T04's deferred note; see
+/// `engine::update`'s `DragEnd` handling).
+pub fn save_sidebar_width(width: u16) {
+    save_sidebar_width_with(&RealEnv, width);
+}
+
+fn save_sidebar_width_with(env: &dyn EnvLookup, width: u16) {
+    save_setting(env, "sidebar_width", Value::from(i64::from(width)));
+}
+
+/// Persist the mouse-capture preference — the runner's enactment alongside
+/// [`super::update::Effect::SetMouseCapture`]'s terminal-level toggle.
+pub fn save_mouse_capture(on: bool) {
+    save_mouse_capture_with(&RealEnv, on);
+}
+
+fn save_mouse_capture_with(env: &dyn EnvLookup, on: bool) {
+    save_setting(env, "mouse_capture", Value::from(on));
+}
+
+/// Persist the follow-tail default — updated whenever the user toggles
+/// follow-tail on the active session (`Message::ToggleFollow`), so a future
+/// session tab starts in whichever mode was last chosen.
+pub fn save_follow_tail_default(on: bool) {
+    save_follow_tail_default_with(&RealEnv, on);
+}
+
+fn save_follow_tail_default_with(env: &dyn EnvLookup, on: bool) {
+    save_setting(env, "follow_tail_default", Value::from(on));
+}
+
+/// Format-preserving save of exactly one `[settings].<key>` — mirrors
+/// [`save_recent_project`]'s "parse, touch one key, write back whole"
+/// pattern, so a hand-edited file's comments/unrelated keys always survive
+/// (best-effort: an unresolvable config dir or an unwritable filesystem is
+/// silently dropped, settings being a convenience rather than load-bearing
+/// state).
+fn save_setting(env: &dyn EnvLookup, key: &str, value: Value) {
+    let Some(path) = config_path(env) else {
+        return;
+    };
+    let mut doc = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.parse::<DocumentMut>().ok())
+        .unwrap_or_default();
+
+    let root = doc.as_table_mut();
+    if !root.contains_table("settings") {
+        root.insert("settings", Item::Table(Table::new()));
+    }
+    if let Some(settings) = root.get_mut("settings").and_then(Item::as_table_mut) {
+        settings.insert(key, Item::Value(value));
+    }
+
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+    let _ = fs::write(path, doc.to_string());
 }
 
 #[cfg(test)]
@@ -307,6 +446,82 @@ mod tests {
             "existing recent entry first, deduped against detected; a dead \
              recent entry is dropped"
         );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    // ── Settings persistence ────────────────────────────────────────────
+
+    #[test]
+    fn missing_settings_file_yields_defaults() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        assert_eq!(load_settings_with(&env), Settings::default());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn each_setting_round_trips_independently() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        save_sidebar_width_with(&env, 40);
+        save_mouse_capture_with(&env, false);
+        save_follow_tail_default_with(&env, false);
+        let loaded = load_settings_with(&env);
+        assert_eq!(
+            loaded,
+            Settings {
+                sidebar_width: 40,
+                mouse_capture: false,
+                follow_tail_default: false,
+            }
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_saved_sidebar_width_is_clamped_to_the_drag_resize_bounds_on_load() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        // A value outside the T04 drag-resize bounds (e.g. hand-edited, or a
+        // stale value from before the bounds tightened) clamps on load
+        // rather than producing an out-of-range sidebar width.
+        save_sidebar_width_with(&env, 9999);
+        assert_eq!(
+            load_settings_with(&env).sidebar_width,
+            crate::engine::SIDEBAR_MAX_WIDTH
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn saving_one_setting_leaves_the_others_at_default_and_preserves_recent() {
+        let home = unique_temp_home();
+        let env = FakeEnv::home(&home);
+        record_recent_project_with(&env, Path::new("/tmp/huddle"));
+        save_mouse_capture_with(&env, false);
+        let loaded = load_settings_with(&env);
+        assert!(!loaded.mouse_capture);
+        assert_eq!(loaded.sidebar_width, Settings::default().sidebar_width);
+        assert_eq!(
+            loaded.follow_tail_default,
+            Settings::default().follow_tail_default
+        );
+        assert_eq!(
+            load_recent_projects_with(&env),
+            vec![PathBuf::from("/tmp/huddle")],
+            "the [recent] table must survive a [settings] save"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_corrupt_settings_file_yields_defaults_not_a_crash() {
+        let home = unique_temp_home();
+        let config = home.join(".config").join("frust");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("tui.toml"), "not [valid toml").unwrap();
+        let env = FakeEnv::home(&home);
+        assert_eq!(load_settings_with(&env), Settings::default());
         let _ = fs::remove_dir_all(&home);
     }
 }

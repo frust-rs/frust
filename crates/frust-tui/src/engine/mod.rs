@@ -15,6 +15,7 @@ mod doctor;
 mod message;
 mod modal;
 pub mod palette;
+mod perf;
 mod persist;
 mod run_config;
 mod session_view;
@@ -30,7 +31,11 @@ pub use doctor::{DoctorCheck, DoctorState};
 pub use message::{ContextTarget, DragKind, Message, RegionId};
 pub use modal::ActiveModal;
 pub use palette::{Palette, PaletteCommand};
-pub use persist::{load_recent_projects, merge_recent_and_detected, record_recent_project};
+pub use perf::{FrameSummary, PerfLine, PerfPanel, RawFrame, StartupSummary, parse_perf_line};
+pub use persist::{
+    Settings, load_recent_projects, load_settings, merge_recent_and_detected,
+    record_recent_project, save_follow_tail_default, save_mouse_capture, save_sidebar_width,
+};
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
 pub use session_view::{
     LineSelection, LogBuffer, LogLevel, Scroll, SessionView, detect_level, line_matches, strip_ansi,

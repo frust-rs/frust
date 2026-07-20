@@ -1,0 +1,28 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(70, 24, &workbench_state())"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…       ▶ Run    ⚒ Build 
+━━━━━━━━                                                              
+                                                                      
+                                                                      
+  Dashboard                                                           
+  ━━━━━━━━━━                                                          
+                                                                      
+  No session running — start a run to open a log tab here.            
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+                                                                      
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help ·[mouse ✓]

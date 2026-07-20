@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
 use crate::engine::{AppState, ContextTarget, DeviceRow, DoctorState, DragKind, Message, RegionId};
 use crate::ui::layout::{Shell, sidebar_main_at};
@@ -27,33 +27,92 @@ pub fn render(
     let shell = Shell::split(area);
     titlebar(frame, shell.titlebar, state, theme, mouse);
 
-    let (sidebar, main) = sidebar_main_at(shell.body, state.sidebar_width);
-    render_sidebar(frame, sidebar, state, theme, mouse);
-    // The sidebar's right border is a drag-to-resize splitter (T04 / D4): a
-    // left-press on that column starts a `SidebarSplitter` drag whose absolute
-    // column maps to a new sidebar width via `x - body_left`.
-    if sidebar.width > 0 && sidebar.height > 0 {
-        let splitter = Rect::new(
-            sidebar.right().saturating_sub(1),
-            sidebar.y,
-            1,
-            sidebar.height,
-        );
-        mouse.drag(
-            splitter,
-            DragKind::SidebarSplitter {
-                body_left: shell.body.x,
-            },
-        );
-    }
-    // With sessions open, the main area is the tab bar + log view; otherwise the
-    // static dashboard placeholder.
-    if state.sessions.is_empty() {
-        render_dashboard(frame, main, state, theme);
+    // Responsive breakpoint (T05 / D5): below `NARROW_WIDTH` the sidebar
+    // collapses out of the inline layout, reachable instead as a
+    // toggleable floating overlay (`s` / `AppState::sidebar_overlay_open`).
+    let narrow = crate::ui::layout::is_narrow(area);
+    if narrow && state.sidebar_overlay_open {
+        // The body renders full-width but non-interactive beneath the
+        // floating panel — the same base-layer suppression every
+        // workbench-blocking modal uses (D4), scoped to the body only (the
+        // titlebar/status stay live underneath).
+        let mut suppressed = MouseCtx::suppressed();
+        render_main_area(frame, shell.body, state, theme, &mut suppressed);
+        render_sidebar_overlay(frame, shell.body, state, theme, mouse);
     } else {
-        sessions::render_main(frame, main, state, theme, mouse);
+        let main = if narrow {
+            shell.body
+        } else {
+            let (sidebar, main) = sidebar_main_at(shell.body, state.sidebar_width);
+            render_sidebar(frame, sidebar, state, theme, mouse);
+            // The sidebar's right border is a drag-to-resize splitter (T04 /
+            // D4): a left-press on that column starts a `SidebarSplitter`
+            // drag whose absolute column maps to a new sidebar width via
+            // `x - body_left`.
+            if sidebar.width > 0 && sidebar.height > 0 {
+                let splitter = Rect::new(
+                    sidebar.right().saturating_sub(1),
+                    sidebar.y,
+                    1,
+                    sidebar.height,
+                );
+                mouse.drag(
+                    splitter,
+                    DragKind::SidebarSplitter {
+                        body_left: shell.body.x,
+                    },
+                );
+            }
+            main
+        };
+        render_main_area(frame, main, state, theme, mouse);
     }
-    status(frame, shell.status, state, theme);
+    status(frame, shell.status, state, theme, narrow);
+}
+
+/// With sessions open, the main area is the tab bar + log view; otherwise the
+/// static dashboard placeholder. Factored out of [`render`] so the
+/// narrow-overlay branch and the normal inline-sidebar branch share it.
+fn render_main_area(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
+    if state.sessions.is_empty() {
+        render_dashboard(frame, area, state, theme);
+    } else {
+        sessions::render_main(frame, area, state, theme, mouse);
+    }
+}
+
+/// The narrow-terminal sidebar overlay (T05 / D5): a floating, bordered panel
+/// pinned to the left edge of `body`, reusing [`render_sidebar`]'s exact
+/// content/regions — the same sidebar, just not part of the inline layout.
+fn render_sidebar_overlay(
+    frame: &mut Frame,
+    body: Rect,
+    state: &AppState,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
+    let width = (crate::engine::SIDEBAR_DEFAULT_WIDTH + 6).min(body.width);
+    let box_ = Rect::new(body.x, body.y, width, body.height);
+    frame.render_widget(Clear, box_);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent()))
+        .title(Span::styled(
+            " Sidebar · Esc/s close ",
+            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.surface()));
+    let inner = block.inner(box_);
+    frame.render_widget(block, box_);
+
+    render_sidebar(frame, inner, state, theme, mouse);
 }
 
 fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, mouse: &mut MouseCtx) {
@@ -437,7 +496,7 @@ fn render_dashboard(frame: &mut Frame, area: Rect, _state: &AppState, theme: &Th
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow: bool) {
     let running = state
         .sessions
         .iter()
@@ -448,13 +507,17 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     } else {
         ("●", theme.success(), "ready".to_string())
     };
+    let mut hint = "r run · b build · d doctor · ⌘ palette · ? help".to_string();
+    if narrow {
+        // The narrow-breakpoint sidebar-overlay toggle only matters (and
+        // only shows) once the sidebar has actually collapsed out of the
+        // inline layout — a zero-noise hint otherwise.
+        hint.push_str(" · s sidebar");
+    }
     let left = Line::from(vec![
         Span::styled(format!("{dot} {label}"), Style::default().fg(dot_color)),
         Span::styled("  │  ", Style::default().fg(theme.border())),
-        Span::styled(
-            "r run · b build · d doctor · ⌘ palette · ? help",
-            Style::default().fg(theme.muted()),
-        ),
+        Span::styled(hint, Style::default().fg(theme.muted())),
     ]);
     frame.render_widget(
         Paragraph::new(left).style(Style::default().bg(theme.surface())),

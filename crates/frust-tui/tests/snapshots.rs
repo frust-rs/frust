@@ -707,6 +707,111 @@ fn workbench_resized_sidebar_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
+// ── Help overlay (T05 / D5) ──────────────────────────────────────────────────
+
+/// The keyboard/help overlay open over the workbench, listing every
+/// palette-sourced command's keyhint (single source of truth).
+#[test]
+fn help_overlay_workbench_100x30() {
+    let mut state = workbench_state();
+    state.help_open = true;
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The same overlay reachable from the welcome screen too (T05: `?` works
+/// from either top-level screen, like the bootstrap/create wizards).
+#[test]
+fn help_overlay_welcome_80x24() {
+    let state = AppState {
+        help_open: true,
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(80, 24, &state));
+}
+
+// ── Perf sparkline panel (T05 / D6) ──────────────────────────────────────────
+
+/// A session with `frust-perf raw`/`frame`/`startup` lines already parsed and
+/// the panel toggled open: sparkline + p50/p95 stats + the startup summary.
+#[test]
+fn session_perf_panel_100x30() {
+    let root = "/tmp/huddle";
+    let mut sess = session(
+        0,
+        root,
+        "desktop",
+        SessionState::Running,
+        &["app: booting up"],
+    );
+    sess.push_line("frust-perf startup app_created=2ms first_frame_presented=45ms".to_string());
+    for i in 0..40 {
+        sess.push_line(format!(
+            "frust-perf raw n={i} total_us={} rebuild_us=200 layout_us=300 paint_us=400 \
+             encode_us=500 present_us=600 skipped=0",
+            2000 + i * 37 % 4000
+        ));
+    }
+    sess.push_line(
+        "frust-perf frame n=40 total_p50_ms=8 total_p95_ms=14 total_p99_ms=22 \
+         rebuild_p95_ms=1 layout_p95_ms=2 paint_p95_ms=2 encode_p95_ms=3 present_p95_ms=2 \
+         over_60hz=1 over_120hz=5 skipped=0 total_frames=40"
+            .to_string(),
+    );
+    sess.perf.toggle();
+    let state = AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The same session with perf data present but the panel *not* toggled
+/// open — zero-noise: no sparkline row, no `t perf` hint change beyond the
+/// keyhint itself (the row reservation is absent).
+#[test]
+fn session_perf_data_present_but_panel_closed_100x30() {
+    let root = "/tmp/huddle";
+    let mut sess = session(0, root, "desktop", SessionState::Running, &[]);
+    sess.push_line(
+        "frust-perf frame n=1 total_p50_ms=8 total_p95_ms=14 total_p99_ms=22 skipped=0 \
+         total_frames=1"
+            .to_string(),
+    );
+    let state = AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+// ── Responsive breakpoints (T05 / D5) ────────────────────────────────────────
+
+/// A narrow (< `NARROW_WIDTH`) terminal: the sidebar collapses out of the
+/// inline layout entirely, the main area (and, once open, a session log
+/// view) taking the full width; the status bar carries the `s sidebar`
+/// keyhint that only shows once narrow.
+#[test]
+fn workbench_narrow_sidebar_collapsed_70x24() {
+    insta::assert_snapshot!(render_to_string(70, 24, &workbench_state()));
+}
+
+/// The same narrow terminal with the sidebar overlay toggled open: a
+/// floating, bordered panel over the (now non-interactive) main area.
+#[test]
+fn workbench_narrow_sidebar_overlay_open_70x24() {
+    let mut state = workbench_state();
+    state.sidebar_overlay_open = true;
+    insta::assert_snapshot!(render_to_string(70, 24, &state));
+}
+
 /// A session whose log overflows the viewport: the log-view scrollbar thumb
 /// (T04) appears in the rightmost column, positioned near the bottom while the
 /// view follows the tail. Zero-noise on a short log (see the other session
