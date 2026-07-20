@@ -236,6 +236,16 @@ mod tests {
         ) -> Result<Output> {
             unreachable!("resolve_pid never streams")
         }
+
+        fn spawn_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&std::path::Path>,
+            _env: &[(&str, &str)],
+        ) -> Result<crate::process::StreamHandle> {
+            unreachable!("resolve_pid never streams")
+        }
     }
 
     #[test]

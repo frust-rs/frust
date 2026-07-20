@@ -6,9 +6,13 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 
 #[cfg(any(test, feature = "test-util"))]
 use std::collections::HashMap;
+#[cfg(any(test, feature = "test-util"))]
+use std::time::Duration;
 
 /// Captured result of a process invocation.
 ///
@@ -40,6 +44,84 @@ pub trait ProcessRunner {
         env: &[(&str, &str)],
         on_line: &mut dyn FnMut(&str),
     ) -> Result<Output>;
+
+    /// Like [`run_streaming`](ProcessRunner::run_streaming), but
+    /// **non-blocking**: spawns the process and returns immediately with a
+    /// [`StreamHandle`] a caller drains/cancels at its own pace instead of
+    /// blocking the calling thread for the process's whole lifetime. This is
+    /// the seam a cancellable, long-running session (the TUI's supervised
+    /// `run`/`logcat`/install streams) is built on; `run_streaming` stays the
+    /// right choice for a one-shot CLI invocation that just wants to print
+    /// lines as they arrive and block until done.
+    fn spawn_streaming(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
+    ) -> Result<StreamHandle>;
+}
+
+/// A running (or hung/exited) process spawned by
+/// [`ProcessRunner::spawn_streaming`].
+///
+/// **Drop behavior: detach, not kill-on-drop.** Dropping a `StreamHandle`
+/// without calling [`kill`](Self::kill) never blocks and never leaves a
+/// zombie: the background reader thread that owns the child keeps running
+/// undisturbed (a bare `JoinHandle` drop detaches rather than joins), reads
+/// stdout to EOF, and always calls `Child::wait` itself once EOF is reached
+/// — reaping the process whether it exited on its own or the caller lost
+/// interest. A caller that actually wants the process to *stop* (not just be
+/// abandoned) must call [`kill`](Self::kill) explicitly — the TUI
+/// supervisor's job on session close/quit, not this seam's.
+///
+/// The line channel (`lines`) is an unbounded `std::sync::mpsc`, so a
+/// producer that outruns a slow/absent consumer never blocks the reader
+/// thread trying to send — `send` only ever fails (cheaply, non-blocking)
+/// once the receiver is dropped, at which point the reader thread stops
+/// forwarding lines but still drains to EOF and reaps the child. This is
+/// also why `kill` can never deadlock against a full channel: there is no
+/// bound to fill.
+pub struct StreamHandle {
+    /// Each line of the process's stdout, in arrival order, as it streams
+    /// in. Closes (further `recv` calls return `Err`) once the process's
+    /// stdout has hit EOF.
+    pub lines: mpsc::Receiver<String>,
+    kill_action: Option<Box<dyn FnOnce() + Send>>,
+    worker: Option<thread::JoinHandle<bool>>,
+    result: Option<bool>,
+}
+
+impl StreamHandle {
+    /// Best-effort-terminates the underlying process, then blocks until the
+    /// reader thread (which reaps the child after its stdout hits EOF)
+    /// finishes — promptly, since killing the process closes its stdout
+    /// pipe and unblocks the reader's read loop. **Idempotent**: a second
+    /// call (or a call after the process has already exited and been
+    /// reaped via [`wait`](Self::wait)) is a no-op that returns the same
+    /// cached result.
+    pub fn kill(&mut self) {
+        if let Some(action) = self.kill_action.take() {
+            action();
+        }
+        self.join_worker();
+    }
+
+    /// Blocks until the process has exited — naturally, or because of a
+    /// prior [`kill`](Self::kill) — and returns whether it exited
+    /// successfully (`false` for a killed process, mirroring a non-zero
+    /// exit). Safe to call more than once; the result is cached after the
+    /// first call.
+    pub fn wait(&mut self) -> bool {
+        self.join_worker();
+        self.result.unwrap_or(false)
+    }
+
+    fn join_worker(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.result = worker.join().ok();
+        }
+    }
 }
 
 /// Returns the last `n` non-empty lines of `s.trim()`, joined by `\n`. Shared
@@ -154,6 +236,105 @@ impl ProcessRunner for RealProcessRunner {
             stderr,
         })
     }
+
+    fn spawn_streaming(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
+    ) -> Result<StreamHandle> {
+        use std::io::{BufRead, BufReader, Read};
+        use std::process::Stdio;
+
+        let mut command = Command::new(cmd);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(dir) = cwd {
+            command.current_dir(dir);
+        }
+        for (key, value) in env {
+            command.env(key, value);
+        }
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn `{cmd}`"))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        // The child itself is shared: the reader thread below waits on
+        // (reaps) it once stdout hits EOF, while `kill` locks it briefly
+        // just to send the kill signal. Killing can only ever contend for
+        // this lock during the reader thread's own final `wait` call —
+        // never block on it, since that `wait` doesn't block once the
+        // child has actually exited (which killing it just caused).
+        let child = Arc::new(Mutex::new(child));
+
+        let (line_tx, line_rx) = mpsc::channel();
+
+        let wait_child = Arc::clone(&child);
+        let worker = thread::spawn(move || {
+            // Drain stderr on its own thread, same deadlock-avoidance
+            // reason as `run_streaming` above; the content itself isn't
+            // surfaced through this non-blocking seam (a caller wanting
+            // buffered stderr text still reaches for `run_streaming`).
+            let stderr_drain = stderr.map(|mut stderr| {
+                thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = stderr.read_to_end(&mut buf);
+                })
+            });
+
+            if let Some(stdout) = stdout {
+                let mut reader = BufReader::new(stdout);
+                let mut raw = Vec::new();
+                loop {
+                    raw.clear();
+                    match reader.read_until(b'\n', &mut raw) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let line = decode_stream_line(&raw);
+                            if line_tx.send(line).is_err() {
+                                // Receiver dropped: stop forwarding lines,
+                                // but keep draining to EOF below so the
+                                // child still gets reaped (see
+                                // `StreamHandle`'s drop-behavior doc).
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(handle) = stderr_drain {
+                let _ = handle.join();
+            }
+
+            wait_child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .wait()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        });
+
+        let kill_child = Arc::clone(&child);
+        let kill_action: Box<dyn FnOnce() + Send> = Box::new(move || {
+            let _ = kill_child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .kill();
+        });
+
+        Ok(StreamHandle {
+            lines: line_rx,
+            kill_action: Some(kill_action),
+            worker: Some(worker),
+            result: None,
+        })
+    }
 }
 
 /// A canned response for [`FakeProcessRunner`].
@@ -169,6 +350,28 @@ enum FakeOutcome {
     Missing,
 }
 
+/// A scripted [`ProcessRunner::spawn_streaming`] response for
+/// [`FakeProcessRunner`].
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Clone)]
+struct ScriptedStream {
+    /// Each line to send, paired with how long to sleep before sending it
+    /// (`Duration::ZERO` for no artificial delay).
+    lines: Vec<(String, Duration)>,
+    exit: StreamExit,
+}
+
+/// How a [`ScriptedStream`] finishes after its scripted lines are sent.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Clone, Copy)]
+enum StreamExit {
+    /// Exits immediately with this success flag.
+    Exit(bool),
+    /// Never exits on its own — blocks until [`StreamHandle::kill`] is
+    /// called. Used to test cancellation.
+    Hang,
+}
+
 /// A fake [`ProcessRunner`] for tests: register canned responses keyed by
 /// `"<cmd> <args...>"`. Lookup tries an exact match first, then falls back to
 /// the longest registered key that is a prefix of the full invocation — this
@@ -178,12 +381,78 @@ enum FakeOutcome {
 #[derive(Default)]
 pub struct FakeProcessRunner {
     responses: HashMap<String, FakeOutcome>,
+    streams: HashMap<String, ScriptedStream>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
 impl FakeProcessRunner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register a scripted [`spawn_streaming`](ProcessRunner::spawn_streaming)
+    /// response: `lines` are sent in order with no artificial delay, then the
+    /// fake stream exits with `success`.
+    pub fn with_stream(
+        mut self,
+        key: impl Into<String>,
+        lines: impl IntoIterator<Item = impl Into<String>>,
+        success: bool,
+    ) -> Self {
+        self.streams.insert(
+            key.into(),
+            ScriptedStream {
+                lines: lines
+                    .into_iter()
+                    .map(|line| (line.into(), Duration::ZERO))
+                    .collect(),
+                exit: StreamExit::Exit(success),
+            },
+        );
+        self
+    }
+
+    /// Like [`with_stream`](Self::with_stream), but each line sleeps for its
+    /// paired `Duration` before being sent — lets a test observe lines
+    /// arriving over time instead of all at once.
+    pub fn with_stream_delayed(
+        mut self,
+        key: impl Into<String>,
+        lines: impl IntoIterator<Item = (impl Into<String>, Duration)>,
+        success: bool,
+    ) -> Self {
+        self.streams.insert(
+            key.into(),
+            ScriptedStream {
+                lines: lines
+                    .into_iter()
+                    .map(|(line, delay)| (line.into(), delay))
+                    .collect(),
+                exit: StreamExit::Exit(success),
+            },
+        );
+        self
+    }
+
+    /// Register a scripted stream that sends `lines` then hangs — never
+    /// exits on its own — until [`StreamHandle::kill`] is called. Used to
+    /// test cancellation.
+    pub fn with_hanging_stream(
+        mut self,
+        key: impl Into<String>,
+        lines: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.streams.insert(
+            key.into(),
+            ScriptedStream {
+                lines: lines
+                    .into_iter()
+                    .map(|line| (line.into(), Duration::ZERO))
+                    .collect(),
+                exit: StreamExit::Hang,
+            },
+        );
+        self
     }
 
     /// Register a response (success or failed-exit) for an exact invocation.
@@ -276,6 +545,62 @@ impl ProcessRunner for FakeProcessRunner {
             on_line(line);
         }
         Ok(out)
+    }
+
+    /// Fakes `spawn_streaming` from a registered [`with_stream`](FakeProcessRunner::with_stream)/
+    /// [`with_stream_delayed`](FakeProcessRunner::with_stream_delayed)/
+    /// [`with_hanging_stream`](FakeProcessRunner::with_hanging_stream) script,
+    /// keyed on exact `"<cmd> <args...>"` (no prefix fallback, unlike `run`).
+    /// A background thread sends the scripted lines (respecting any
+    /// per-line delay), then exits per the script's [`StreamExit`] — `Hang`
+    /// blocks on a real channel `recv`, so [`StreamHandle::kill`] unblocks
+    /// it immediately, no polling.
+    fn spawn_streaming(
+        &self,
+        cmd: &str,
+        args: &[&str],
+        _cwd: Option<&Path>,
+        _env: &[(&str, &str)],
+    ) -> Result<StreamHandle> {
+        let full = invocation_key(cmd, args);
+        let scripted = self
+            .streams
+            .get(&full)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No such file or directory (os error 2): {cmd}"))?;
+
+        let (line_tx, line_rx) = mpsc::channel();
+        let (kill_tx, kill_rx) = mpsc::channel::<()>();
+
+        let worker = thread::spawn(move || {
+            for (line, delay) in scripted.lines {
+                if !delay.is_zero() {
+                    thread::sleep(delay);
+                }
+                if line_tx.send(line).is_err() {
+                    // Receiver dropped; nothing left to script toward.
+                    return false;
+                }
+            }
+            match scripted.exit {
+                StreamExit::Exit(success) => success,
+                StreamExit::Hang => {
+                    // Blocks until `kill` sends, then reports "not
+                    // successful" — mirroring a killed real process.
+                    let _ = kill_rx.recv();
+                    false
+                }
+            }
+        });
+
+        Ok(StreamHandle {
+            lines: line_rx,
+            kill_action: Some(Box::new(move || {
+                let _ = kill_tx.send(());
+            })),
+            worker: Some(worker),
+            result: None,
+        })
     }
 }
 
@@ -418,5 +743,116 @@ mod tests {
         let content = std::fs::read_to_string(&tmp).unwrap();
         assert!(content.contains("devices"));
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn spawn_streaming_fake_lines_arrive_in_order_then_exit_status_surfaces() {
+        let runner =
+            FakeProcessRunner::new().with_stream("adb logcat", ["line one", "line two"], true);
+        let mut handle = runner
+            .spawn_streaming("adb", &["logcat"], None, &[])
+            .unwrap();
+
+        let seen: Vec<String> = handle.lines.iter().collect();
+        assert_eq!(seen, vec!["line one", "line two"]);
+        assert!(handle.wait());
+        // `wait` is safe to call again; cached result is returned.
+        assert!(handle.wait());
+    }
+
+    #[test]
+    fn spawn_streaming_fake_failed_exit_surfaces_as_unsuccessful() {
+        let runner = FakeProcessRunner::new().with_stream("cmd fail", ["oops"], false);
+        let mut handle = runner.spawn_streaming("cmd", &["fail"], None, &[]).unwrap();
+        let seen: Vec<String> = handle.lines.iter().collect();
+        assert_eq!(seen, vec!["oops"]);
+        assert!(!handle.wait());
+    }
+
+    #[test]
+    fn spawn_streaming_fake_kill_mid_hang_terminates_promptly_and_joins() {
+        let runner = FakeProcessRunner::new().with_hanging_stream("adb logcat", ["first line"]);
+        let mut handle = runner
+            .spawn_streaming("adb", &["logcat"], None, &[])
+            .unwrap();
+
+        // Drain the one scripted line before the hang.
+        assert_eq!(handle.lines.recv().as_deref(), Ok("first line"));
+
+        let start = std::time::Instant::now();
+        handle.kill();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "kill() on a hung fake stream should unblock ~immediately, took {:?}",
+            start.elapsed()
+        );
+        // A killed stream reports unsuccessful, mirroring a killed real process.
+        assert!(!handle.wait());
+    }
+
+    #[test]
+    fn spawn_streaming_fake_double_kill_is_a_noop() {
+        let runner = FakeProcessRunner::new().with_hanging_stream("adb logcat", Vec::<&str>::new());
+        let mut handle = runner
+            .spawn_streaming("adb", &["logcat"], None, &[])
+            .unwrap();
+        handle.kill();
+        let first = handle.wait();
+        // A second kill after the worker has already been joined must not
+        // panic and must not change the cached result.
+        handle.kill();
+        assert_eq!(handle.wait(), first);
+    }
+
+    #[test]
+    fn spawn_streaming_fake_unregistered_invocation_errs() {
+        let runner = FakeProcessRunner::new();
+        assert!(
+            runner
+                .spawn_streaming("adb", &["logcat"], None, &[])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn spawn_streaming_fake_drop_without_kill_does_not_block() {
+        // Dropping a `StreamHandle` for a stream still hanging must not
+        // block the caller (detach, not kill-on-drop — see the type's doc
+        // comment). If this ever regressed to a join-on-drop, this test
+        // would hang instead of returning.
+        let runner = FakeProcessRunner::new().with_hanging_stream("adb logcat", ["one line"]);
+        let handle = runner
+            .spawn_streaming("adb", &["logcat"], None, &[])
+            .unwrap();
+        drop(handle);
+    }
+
+    #[test]
+    fn spawn_streaming_real_process_lines_arrive_in_order_and_exit_status_surfaces() {
+        let runner = RealProcessRunner;
+        let mut handle = runner
+            .spawn_streaming("/bin/sh", &["-c", "echo one; echo two"], None, &[])
+            .unwrap();
+        let seen: Vec<String> = handle.lines.iter().collect();
+        assert_eq!(seen, vec!["one", "two"]);
+        assert!(handle.wait());
+    }
+
+    #[test]
+    fn spawn_streaming_real_kill_terminates_a_hung_process_promptly() {
+        let runner = RealProcessRunner;
+        let mut handle = runner
+            .spawn_streaming("/bin/sh", &["-c", "sleep 30"], None, &[])
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        handle.kill();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "kill() should terminate the hung child well before its 30s sleep, took {elapsed:?}"
+        );
+        // A killed process is not "successful".
+        assert!(!handle.wait());
     }
 }
