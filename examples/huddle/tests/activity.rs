@@ -13,8 +13,9 @@
 //! tests ("load renders items" at the data level, and the empty-feed shape)
 //! live as unit tests inside `src/features/activity/mod.rs` itself — that is
 //! the level at which item injection is reachable from outside the crate;
-//! production always seeds the controller from the real `mock::activity()`
-//! (see `src/screens/activity.rs`'s `Component::init`), so an integration test
+//! production always seeds the controller from the real
+//! `data::store::activity()` (see `src/screens/activity.rs`'s
+//! `Component::init`), so an integration test
 //! exercises exactly that real, non-empty feed.
 //!
 //! # Settling the boot/push cross-fade before driving input
@@ -332,7 +333,7 @@ fn tapping_a_row_navigates_to_the_channel_feed_and_back_retains_state() {
     // Settle the push cross-fade (and the channel feed's own real async
     // load): the tapped row navigated to a `/channel/:id` page — the mock
     // channel it names always exists (every activity item is derived from a
-    // real channel message — see `mock::activity`), so it renders real
+    // real channel message — see `data::store::activity`), so it renders real
     // content, not the "no such channel" fallback, and paints no
     // Activity-tab "Unread" chip (the feed's own message bubbles never paint
     // one).

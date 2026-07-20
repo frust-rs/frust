@@ -1,24 +1,31 @@
 //! Architecture conformance test (huddle clean-architecture refactor, task 06
-//! — `workflow/plans/features/huddle-clean-architecture/`).
+//! — `workflow/plans/features/huddle-clean-architecture/`; hardened by
+//! followups/fix-1 task F1 against review r0's three demonstrated bypass
+//! vectors — see the "What this is NOT" section below).
 //!
 //! A plain `std::fs` source scan over `src/`, run as an ordinary `cargo test`
 //! (this repo has no lint-plugin/static-analysis tooling — see
 //! `docs/CODE_STANDARDS.md`), enforcing the per-feature layering rules PLAN's
 //! Design Decisions 2/3/7 established:
 //!
-//! (a) a `features/*/domain/**` file never mentions `frust::`, `::presentation::`,
-//!     or `::data::` (which subsumes `crate::data::store`) — domain is the
-//!     framework- and layer-free core;
-//! (b) a `features/*/presentation/**` file never mentions `::data::` — a
-//!     presentation file reaches the shared dataset through an injected
-//!     repository trait, never the store or a sibling feature's `data/`
-//!     module, directly;
+//! (a) a `features/*/domain/**` file never mentions `frust::`, or any
+//!     `::presentation`/`::data` use-form needle below (which subsumes
+//!     `crate::data::store`) — domain is the framework- and layer-free core;
+//! (b) a `features/*/presentation/**` file never mentions any `::data`
+//!     use-form needle below — a presentation file reaches the shared
+//!     dataset through an injected repository trait, never the store or a
+//!     sibling feature's `data/` module, directly;
 //! (c) only a `*/data/**` file (or `src/data/` itself) mentions
 //!     `crate::data::store` — the raw shared dataset is the data layer's to
 //!     read;
 //! (d) no file anywhere mentions `crate::mock` or `crate::screens` — both
 //!     modules are deleted by this task, so any surviving reference is stale;
-//! (e) `features::search`/`features::profile`'s `domain`+`data` never mention
+//! (e) no file outside `*/data/**`, `src/lib.rs` (the composition root), or
+//!     the messages `resolve_repo` allowlist entry names a concrete
+//!     `Store*Repository`/`InMemory*Repository` type — closes both direct
+//!     construction AND a facade re-export (`pub use` of a concrete repo
+//!     type from a feature `mod.rs`) outside the sanctioned sites;
+//! (f) `features::search`/`features::profile`'s `domain`+`data` never mention
 //!     `HuddleFailure`, `ControllerCore`, or `async fn` — the Design
 //!     Decision 8 ratchet keeping both features' sync-infallible shape from
 //!     regressing toward the `ControllerCore`/`HuddleFailure` spine the other
@@ -39,18 +46,70 @@
 //! several domain/data files carry historical or intra-doc-link prose
 //! mentioning `crate::mock`/`crate::data::store`/`frust::` (e.g.
 //! `profile/domain/entities.rs`'s task-01-inherited link) that names, not
-//! imports, the thing it's talking about.
+//! imports, the thing it's talking about. Checks (a)/(b)/(e) additionally
+//! run over `production_lines`' *use-joined* output (see
+//! [`join_use_statements`]) so a needle can't be split across lines; checks
+//! (c)/(d)/(f) don't need this (see each check's own comment).
+//!
+//! # What this is NOT (review r0's boundary note)
+//!
+//! This is a **substring scan, not a parser** — it has no `syn`/AST
+//! understanding of Rust `use` trees, paths, or types. Review r0 (round 0)
+//! demonstrated three concrete ways a substring scan can be defeated; this
+//! hardening pass closes exactly those three, and no more:
+//!
+//! 1. **Alias/use-form bypass — CLOSED.** A single `"::data::"`/
+//!    `"::presentation::"` needle missed `use ...::data as msgdata;` (no
+//!    trailing `::`). [`DATA_NEEDLES`]/[`PRESENTATION_NEEDLES`] enumerate
+//!    every use-statement terminator form (`;`, ` as `, `}`, `,`) a banned
+//!    segment can end a `use` tree with.
+//! 2. **Concrete-repo-name bypass — CLOSED.** A facade re-export
+//!    (`pub use data::repositories::StoreChannelRepository;` from a feature
+//!    `mod.rs`) never matched the old `::data::`/`::presentation::` needles
+//!    at all — the banned type crosses the layer boundary by name, not by
+//!    path. [`contains_concrete_repo_name`] bans the
+//!    `Store[A-Za-z]*Repository`/`InMemory[A-Za-z]*Repository` name pattern
+//!    itself anywhere outside the data layer/composition root/allowlist (see
+//!    check (e)), covering both direct construction and a re-export.
+//! 3. **Split-use bypass — CLOSED.** A `use` tree spanning multiple physical
+//!    lines could put a banned segment on a different physical line than the
+//!    rest of the path, defeating a needle scanned line-by-line.
+//!    [`join_use_statements`] concatenates a `use ...;` statement's physical
+//!    lines into one logical line before any needle check runs.
+//!
+//! **Residual, accepted limitations** (not closed by this pass — a real
+//! `syn`-based checker would be the fix, judged not worth the dependency for
+//! a single-example conformance ratchet):
+//!
+//! - **Renames**: `type StoreChannelRepositoryAlias = StoreChannelRepository;`
+//!   (or a `use ... as` rename of the *type itself*, not the module) still
+//!   reads as the banned name pattern at the `type`/`use` site, but a
+//!   *subsequent* reference through the new short name (e.g.
+//!   `StoreChannelRepositoryAlias::new()` elsewhere) would not match — the
+//!   scan has no cross-file symbol-alias resolution.
+//! - **Macro-generated imports/types**: a `use`/type name produced by macro
+//!   expansion rather than appearing literally in source text is invisible
+//!   to a source-text scan by construction.
+//! - **Mid-file `#[cfg(test)]` over-stripping**: [`production_lines`]
+//!   truncates a file at its *first* `#[cfg(test)]`/`mod tests` marker,
+//!   assuming huddle's test-module-last-in-file convention (verified true
+//!   for every file in this crate with one, per task 06's completion summary
+//!   audit); a future file breaking that convention would have everything
+//!   after an early marker silently excluded from scanning, not just the
+//!   real test module (review r0 minor 4 — self-flagged, no action taken).
 //!
 //! # Sanctioned exemptions (explicit, file-scoped, comment-documented)
 //!
-//! Beyond the `#[cfg(test)]`/doc-comment stripping above, two further
-//! documented exceptions exist, each an explicit `(file, needle)` pair below
-//! rather than a blanket loosening of the ban it exempts from — see each
-//! test function's own doc comment for the full rationale:
+//! Beyond the `#[cfg(test)]`/doc-comment stripping above, documented
+//! exceptions exist, each an explicit `(file, needle)` pair below rather than
+//! a blanket loosening of the ban it exempts from — see each test function's
+//! own doc comment for the full rationale:
 //!
 //! 1. `features/messages/presentation/controllers.rs`'s `resolve_repo()`
 //!    fallback (task 03 ripple) — see
-//!    [`presentation_never_imports_data_directly`].
+//!    [`presentation_never_imports_data_directly`] and (the same fallback,
+//!    now also matching the concrete-name needle)
+//!    [`no_concrete_repo_type_name_outside_data_layer_or_composition_root`].
 //! 2. `features/settings/domain/{models.rs, accent.rs,
 //!    use_cases/set_theme.rs}`'s `frust::` value-type/side-effect imports
 //!    (task 05 ripple) — see [`domain_never_imports_frust_presentation_or_data`].
@@ -58,6 +117,10 @@
 //! Every exemption below is also asserted **used** (fired at least once) —
 //! an exemption nobody's code needs any more is exactly as stale as a
 //! violation, and should be deleted along with whatever code prompted it.
+//! `src/lib.rs` (the composition root) is instead a **structural carve-out**
+//! in check (e) below, not an allowlist entry — it's the one sanctioned
+//! construction site every concrete repository type is built at, not a
+//! narrow documented exception to a general ban.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -101,17 +164,22 @@ fn rel(path: &Path) -> String {
 }
 
 /// One production source line: 1-based line number (matching an editor's/
-/// `rustc`'s own numbering) plus its raw text.
+/// `rustc`'s own numbering) plus its raw text. A [`join_use_statements`]-
+/// joined logical line keeps the *first* physical line's number, so a
+/// failure still points a reader at the `use` statement's start.
 struct Line {
     number: usize,
     text: String,
 }
 
 /// A file's production-code lines: every doc-comment (`//!`/`///`) or plain
-/// `//` line-comment-only line dropped, and everything from the file's
+/// `//` line-comment-only line dropped, everything from the file's
 /// `#[cfg(test)]`/`mod tests` marker onward truncated (huddle convention
 /// keeps the test module last-in-file — verified true for every file in this
-/// crate that currently has one, per task 06's completion summary audit).
+/// crate that currently has one, per task 06's completion summary audit),
+/// and finally a multi-line `use` statement's physical lines joined into one
+/// logical [`Line`] (see [`join_use_statements`] — closes the split-use
+/// bypass review r0 demonstrated).
 ///
 /// The marker check is anchored on the line's own (non-comment) start, so a
 /// *prose* mention of `#[cfg(test)]` inside a doc comment (several files
@@ -132,7 +200,77 @@ fn production_lines(contents: &str) -> Vec<Line> {
             text: raw.to_string(),
         });
     }
+    join_use_statements(out)
+}
+
+/// Join a `use ...;` statement's physical lines into one logical [`Line`] so
+/// a banned needle can't straddle a line break (review r0's third
+/// demonstrated bypass — a `use` tree split across lines, with the banned
+/// segment on a different physical line than where a line-by-line scan would
+/// expect it). Deliberately simple and deterministic, not a real `use`-tree
+/// parser: any non-comment line (comments are already stripped by the time
+/// this runs) whose trimmed text starts with the literal `"use "` is treated
+/// as opening a `use` statement, and subsequent lines are appended (each
+/// trimmed) until the accumulated text contains a `;` — the one character
+/// every `use` statement in this codebase's style (one item per statement,
+/// `rustfmt`-formatted) ends on. A `use` statement already complete on one
+/// line (the common case) round-trips through this unchanged. A
+/// malformed/truncated accumulation (statement never closes before the file
+/// — or the pre-truncated `#[cfg(test)]` region — ends) just stops
+/// accumulating rather than panicking; the resulting text is scanned as-is
+/// like anything else.
+///
+/// **No blind space-insertion at the join point** — deliberately, not an
+/// oversight. A rustfmt-produced (or hand-written) `use` tree only ever
+/// breaks at a punctuation boundary that already supplies its own
+/// separation (`::`, `{`, `,`, `}`) or at a whitespace-delimited keyword
+/// (`as`) that needs one. [`needs_space_at_join`] tells the two cases apart:
+/// a needle like `"::data::"` must reconstruct with **no** space when a
+/// split lands right after the last `::` (`activity::` / `data::...` must
+/// rejoin as `activity::data::...`, not `activity:: data::...` — a stray
+/// space there would silently defeat the very needle this join exists to
+/// protect), while `"::data as msgdata;"` split right before `as` must
+/// rejoin **with** one (`data` / `as msgdata;` must become `data as
+/// msgdata;`, not `dataas msgdata;`).
+fn join_use_statements(lines: Vec<Line>) -> Vec<Line> {
+    let mut out = Vec::new();
+    let mut iter = lines.into_iter().peekable();
+    while let Some(line) = iter.next() {
+        let trimmed = line.text.trim_start();
+        if !trimmed.starts_with("use ") || line.text.contains(';') {
+            out.push(line);
+            continue;
+        }
+        let number = line.number;
+        let mut text = line.text.clone();
+        while !text.contains(';') {
+            match iter.next() {
+                Some(next) => {
+                    let next_trimmed = next.text.trim();
+                    if needs_space_at_join(&text, next_trimmed) {
+                        text.push(' ');
+                    }
+                    text.push_str(next_trimmed);
+                }
+                None => break,
+            }
+        }
+        out.push(Line { number, text });
+    }
     out
+}
+
+/// True only when both the accumulated text's last character and the next
+/// line's first character are identifier characters (ASCII alphanumeric or
+/// `_`) — the one case where concatenating with no separator would fuse two
+/// distinct tokens into one (e.g. `data` + `as` -> `dataas`). Any join where
+/// either side is punctuation (`::`, `{`, `,`, `}`) needs no inserted space:
+/// the punctuation already provides the separation the reconstructed text
+/// needs (e.g. `activity::` + `data::...` -> `activity::data::...`).
+fn needs_space_at_join(accumulated: &str, next_trimmed: &str) -> bool {
+    let is_ident_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    accumulated.chars().next_back().is_some_and(is_ident_char)
+        && next_trimmed.chars().next().is_some_and(is_ident_char)
 }
 
 fn domain_files() -> Vec<PathBuf> {
@@ -151,9 +289,83 @@ fn presentation_files() -> Vec<PathBuf> {
 
 /// True for a file inside a feature's `data/` layer or the shared
 /// `src/data/` module itself — the only files sanctioned to read
-/// `crate::data::store` directly (check c).
+/// `crate::data::store` directly (check c) or name a concrete
+/// `Store*Repository`/`InMemory*Repository` type (check e).
 fn is_data_layer_file(relp: &str) -> bool {
     relp.starts_with("data/") || relp.contains("/data/")
+}
+
+/// The needle forms a domain/presentation file mentioning the `data` module
+/// is banned from containing (checks a/b), broadened beyond the plain
+/// `"::data::"` substring to close the alias/use-form bypass review r0
+/// demonstrated: `use ...::data as msgdata;` has no `"::data::"` substring at
+/// all, since nothing follows the segment but the alias. Each entry is one
+/// way a `use` tree (already [`join_use_statements`]-joined onto one logical
+/// line by the time these run) can end the `data` segment:
+const DATA_NEEDLES: &[&str] = &[
+    "::data::",   // a further path segment follows: `::data::repositories::...`
+    "::data;",    // the module itself is the whole import: `use ...::data;`
+    "::data as ", // the alias-form bypass review r0 demonstrated: `use ...::data as x;`
+    "::data}",    // last item in a brace-list `use` tree: `use ...::{foo, data};`
+    "::data,",    // mid-list item in a brace-list `use` tree: `use ...::{data, foo};`
+];
+
+/// Same treatment as [`DATA_NEEDLES`], for the `::presentation` segment
+/// domain files ban (check a only — presentation files obviously mention
+/// `presentation` themselves, e.g. their own `mod.rs` path, so this is never
+/// applied to presentation files).
+const PRESENTATION_NEEDLES: &[&str] = &[
+    "::presentation::",
+    "::presentation;",
+    "::presentation as ",
+    "::presentation}",
+    "::presentation,",
+];
+
+/// True if `text` contains the concrete-repository-type-name pattern
+/// `Store[A-Za-z]*Repository` or `InMemory[A-Za-z]*Repository` — a concrete
+/// repository *struct* name (`StoreChannelRepository`,
+/// `StoreMessageRepository`, a future `InMemoryFooRepository`, ...) as
+/// opposed to the `*Repository` *trait* names each feature's own
+/// `domain/repositories.rs` declares, none of which carry a `Store`/
+/// `InMemory` prefix. Hand-rolled substring/char scan rather than a real
+/// regex engine — this crate carries no `regex` dependency, and adding one
+/// solely for this test would be disproportionate (see the module header's
+/// "What this is NOT" section); the scan below is exactly the naive-regex
+/// semantics `Store[A-Za-z]*Repository` describes (`Store`, then zero or
+/// more ASCII letters, then `Repository`, with no gap-character other than
+/// ASCII letters allowed in between).
+fn contains_concrete_repo_name(text: &str) -> bool {
+    ["Store", "InMemory"]
+        .iter()
+        .any(|prefix| has_repo_name_with_prefix(text, prefix))
+}
+
+/// Scans `text` for `prefix`, then — from right after each occurrence —
+/// walks forward one ASCII-letter at a time, checking at every position
+/// (including zero letters consumed) whether the remainder starts with
+/// `"Repository"`. A naive greedy `take_while(is_ascii_alphabetic)` would
+/// overshoot: since `"Repository"` is itself all letters, it would be
+/// consumed as part of the "middle" run, leaving nothing left to match
+/// against. Walking one letter at a time and checking at each step avoids
+/// that trap.
+fn has_repo_name_with_prefix(text: &str, prefix: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(rel_idx) = text[search_from..].find(prefix) {
+        let start = search_from + rel_idx;
+        let mut pos = start + prefix.len();
+        loop {
+            if text[pos..].starts_with("Repository") {
+                return true;
+            }
+            match text[pos..].chars().next() {
+                Some(c) if c.is_ascii_alphabetic() => pos += c.len_utf8(),
+                _ => break,
+            }
+        }
+        search_from = start + prefix.len();
+    }
+    false
 }
 
 /// One documented, explicitly-listed exemption: a specific file where a
@@ -187,8 +399,8 @@ fn assert_all_used(check: &str, exemptions: &[Exemption], used: &[bool]) {
 }
 
 // ---------------------------------------------------------------------------
-// (a) domain never mentions frust::, ::presentation::, ::data:: (which
-//     subsumes crate::data::store)
+// (a) domain never mentions frust::, ::presentation (any use-form), or
+//     ::data (any use-form)
 // ---------------------------------------------------------------------------
 
 /// PLAN's third exception category (task 05 ripple): settings is the one
@@ -198,10 +410,10 @@ fn assert_all_used(check: &str, exemptions: &[Exemption], used: &[bool]) {
 /// `set_app_theme`/`clear_app_theme` calls — the app's single theming
 /// side-effect site (pre-existing behavior, preserved verbatim per PLAN
 /// Design Decision 5). This exemption covers ONLY the `frust::` needle for
-/// exactly these three files — every other domain ban (`::presentation::`,
-/// `::data::`) still applies to settings' domain like every other feature's
-/// (asserted below: the loop applies all three needles uniformly, and only
-/// the `frust::` needle consults this table).
+/// exactly these three files — every other domain ban (`::presentation`,
+/// `::data`, in any use-form) still applies to settings' domain like every
+/// other feature's (asserted below: the loop applies every needle uniformly,
+/// and only the `frust::` needle consults this table).
 #[test]
 fn domain_never_imports_frust_presentation_or_data() {
     let frust_exemptions = [
@@ -228,13 +440,18 @@ fn domain_never_imports_frust_presentation_or_data() {
     ];
     let mut used = vec![false; frust_exemptions.len()];
 
+    let needles: Vec<&str> = std::iter::once("frust::")
+        .chain(PRESENTATION_NEEDLES.iter().copied())
+        .chain(DATA_NEEDLES.iter().copied())
+        .collect();
+
     let mut failures = Vec::new();
     for path in domain_files() {
         let relp = rel(&path);
         let contents =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         for line in production_lines(&contents) {
-            for needle in ["frust::", "::presentation::", "::data::"] {
+            for &needle in &needles {
                 if !line.text.contains(needle) {
                     continue;
                 }
@@ -257,7 +474,8 @@ fn domain_never_imports_frust_presentation_or_data() {
     assert!(
         failures.is_empty(),
         "domain layering ban violated ({} file:line hit(s)) — a domain file must not mention \
-         `frust::` (except the settings allowlist above), `::presentation::`, or `::data::`:\n{}",
+         `frust::` (except the settings allowlist above), `::presentation` (any use-form), or \
+         `::data` (any use-form):\n{}",
         failures.len(),
         failures.join("\n"),
     );
@@ -269,7 +487,7 @@ fn domain_never_imports_frust_presentation_or_data() {
 }
 
 // ---------------------------------------------------------------------------
-// (b) presentation never mentions ::data::
+// (b) presentation never mentions ::data (any use-form)
 // ---------------------------------------------------------------------------
 
 /// Sanctioned exemption (task 03 ripple, PLAN's second exception category):
@@ -301,27 +519,29 @@ fn presentation_never_imports_data_directly() {
         let contents =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         for line in production_lines(&contents) {
-            if !line.text.contains("::data::") {
-                continue;
+            for &needle in DATA_NEEDLES {
+                if !line.text.contains(needle) {
+                    continue;
+                }
+                if let Some(idx) = exemptions
+                    .iter()
+                    .position(|e| e.file == relp && line.text.contains(e.needle))
+                {
+                    used[idx] = true;
+                    continue;
+                }
+                failures.push(format!(
+                    "{relp}:{}: presentation file reaches into a `data` module — {}",
+                    line.number,
+                    line.text.trim()
+                ));
             }
-            if let Some(idx) = exemptions
-                .iter()
-                .position(|e| e.file == relp && line.text.contains(e.needle))
-            {
-                used[idx] = true;
-                continue;
-            }
-            failures.push(format!(
-                "{relp}:{}: presentation file reaches into a `data` module — {}",
-                line.number,
-                line.text.trim()
-            ));
         }
     }
     assert!(
         failures.is_empty(),
         "presentation layering ban violated ({} file:line hit(s)) — a presentation file must \
-         not mention `::data::` outside the resolve_repo allowlist above:\n{}",
+         not mention `::data` (any use-form) outside the resolve_repo allowlist above:\n{}",
         failures.len(),
         failures.join("\n"),
     );
@@ -336,6 +556,12 @@ fn presentation_never_imports_data_directly() {
 // (c) only */data/** (and src/data/ itself) reads crate::data::store
 // ---------------------------------------------------------------------------
 
+/// Unlike (a)/(b), this needle (`"crate::data::store"`) is already a
+/// complete path ending in a real segment (`store`), not a bare module name
+/// an alias can strand mid-path — `use crate::data::store as s;` still
+/// contains the full `"crate::data::store"` substring before ` as s;`, so
+/// this check doesn't need [`DATA_NEEDLES`]' use-form broadening the way
+/// checks (a)/(b) do.
 #[test]
 fn only_data_layer_reads_the_shared_store_directly() {
     let mut failures = Vec::new();
@@ -369,11 +595,12 @@ fn only_data_layer_reads_the_shared_store_directly() {
 // (d) no file mentions crate::mock or crate::screens (both deleted)
 // ---------------------------------------------------------------------------
 
-/// Unlike (a)-(c), this scans **every line, including comments and test
-/// regions** — `src/mock/` and `src/screens/` no longer exist anywhere in
-/// this crate (task 01/05/06), so there is no legitimate reason for even a
-/// doc-comment prose mention of either path to survive; any hit means a
-/// stale reference this task's own deletion should have caught.
+/// Unlike (a)-(c)/(e), this scans **every line, including comments and test
+/// regions** (raw `contents.lines()`, not [`production_lines`]) — `src/mock/`
+/// and `src/screens/` no longer exist anywhere in this crate (task 01/05/06),
+/// so there is no legitimate reason for even a doc-comment prose mention of
+/// either path to survive; any hit means a stale reference this task's own
+/// deletion should have caught.
 #[test]
 fn no_file_mentions_deleted_mock_or_screens_modules() {
     let mut failures = Vec::new();
@@ -403,7 +630,89 @@ fn no_file_mentions_deleted_mock_or_screens_modules() {
 }
 
 // ---------------------------------------------------------------------------
-// (e) search/profile domain+data never mention HuddleFailure, ControllerCore,
+// (e) no file outside */data/**, src/lib.rs, or the messages resolve_repo
+//     allowlist entry names a concrete Store*Repository/InMemory*Repository
+//     type — closes review r0's concrete-repo-name bypass (both direct
+//     construction and a facade re-export)
+// ---------------------------------------------------------------------------
+
+/// Review r0's second demonstrated bypass: a facade re-export
+/// (`pub use data::repositories::StoreChannelRepository;` from a feature's
+/// `mod.rs`) crosses the layer boundary by *type name*, not by path, so
+/// neither the `::data`/`::presentation` needles above nor the `crate::
+/// data::store` needle (check c) would ever see it. This check instead bans
+/// the concrete-repository-name *pattern itself*
+/// ([`contains_concrete_repo_name`]) everywhere except:
+///
+/// - a `*/data/**` file (or `src/data/` itself, [`is_data_layer_file`]) — a
+///   feature's own `data/repositories.rs` legitimately declares and names
+///   its own `Store*Repository` struct;
+/// - `src/lib.rs` — the composition root, a **structural** carve-out (not an
+///   allowlist entry: it's the one sanctioned site every concrete repository
+///   type is constructed at and wired into `provide_context`, not a narrow
+///   documented exception to a general ban — see the module header);
+/// - `features/messages/presentation/controllers.rs`'s `resolve_repo()`
+///   fallback — the same documented presentation->data edge
+///   [`presentation_never_imports_data_directly`] already allowlists, now
+///   also covering this check's concrete-name needle (its `use` import line
+///   and its `StoreMessageRepository::new()` construction both match one
+///   `"StoreMessageRepository"` needle).
+#[test]
+fn no_concrete_repo_type_name_outside_data_layer_or_composition_root() {
+    let exemptions = [Exemption {
+        file: "features/messages/presentation/controllers.rs",
+        needle: "StoreMessageRepository",
+        reason: "resolve_repo()'s composition-root-equivalent fallback (import + \
+                  construction) — the same presentation->data edge \
+                  presentation_never_imports_data_directly already allowlists (task 03 \
+                  completion summary, Notable Decisions #1)",
+    }];
+    let mut used = vec![false; exemptions.len()];
+
+    let mut failures = Vec::new();
+    for path in rust_files(&src_dir()) {
+        let relp = rel(&path);
+        if relp == "lib.rs" || is_data_layer_file(&relp) {
+            continue; // structural carve-outs: the composition root and the data layer itself
+        }
+        let contents =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        for line in production_lines(&contents) {
+            if !contains_concrete_repo_name(&line.text) {
+                continue;
+            }
+            if let Some(idx) = exemptions
+                .iter()
+                .position(|e| e.file == relp && line.text.contains(e.needle))
+            {
+                used[idx] = true;
+                continue;
+            }
+            failures.push(format!(
+                "{relp}:{}: names a concrete Store*Repository/InMemory*Repository type outside \
+                 the data layer/composition root/allowlist — {}",
+                line.number,
+                line.text.trim()
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "concrete-repo-name ban violated ({} file:line hit(s)) — only a `*/data/**` file, \
+         `src/lib.rs` (composition root), or the messages resolve_repo allowlist above may \
+         name a concrete Store*Repository/InMemory*Repository type:\n{}",
+        failures.len(),
+        failures.join("\n"),
+    );
+    assert_all_used(
+        "no_concrete_repo_type_name_outside_data_layer_or_composition_root",
+        &exemptions,
+        &used,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (f) search/profile domain+data never mention HuddleFailure, ControllerCore,
 //     or async fn (Design Decision 8 ratchet)
 // ---------------------------------------------------------------------------
 
