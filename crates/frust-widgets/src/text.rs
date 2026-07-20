@@ -152,6 +152,8 @@ impl<State: 'static> View<State> for TextView {
             color_explicit: self.color_explicit,
             role: self.role,
             layout: None,
+            laid_out_max_width: None,
+            laid_out_style: None,
         }
     }
 
@@ -196,6 +198,18 @@ pub struct TextWidget {
     /// `None` until the first layout pass, or after a content/style change
     /// invalidates it.
     layout: Option<TextLayout>,
+    /// The `max_width` the cached [`layout`](Self::layout) was shaped/broken at.
+    /// A layout pass with the same width, same effective style, and a live
+    /// cache reuses the shaped layout instead of re-shaping — the phase-10.B
+    /// fix for the verified defect where `layout` re-shaped unconditionally
+    /// every pass (see [`Widget::layout`]).
+    laid_out_max_width: Option<f32>,
+    /// The effective (themed-color-resolved) style the cached `layout` was
+    /// shaped with. Compared alongside `laid_out_max_width` so a bare theme
+    /// swap — which re-resolves the baked glyph color at layout time without a
+    /// view change — still forces a re-shape (the layout-time-baked-color
+    /// contract, see `docs/CODE_STANDARDS.md` Theming).
+    laid_out_style: Option<TextStyle>,
 }
 
 impl TextWidget {
@@ -238,10 +252,29 @@ impl Widget for TextWidget {
         // Resolve the themed color first so the theme borrow ends before the
         // (mutable) text-context borrow below.
         let style = self.effective_style(Theme::from_layout_ctx(ctx));
+
+        // Reuse the cached shaped layout when nothing that affects shaping has
+        // changed since the last pass. `layout` is `Some` only while content /
+        // base style / role are unchanged (rebuild clears it otherwise), so the
+        // remaining variables are the wrap width and the effective (themed)
+        // style — both compared here. This is the phase-10.B fix for the
+        // verified defect where every layout pass re-shaped unconditionally,
+        // and it preserves the theme-swap contract: a live appearance flip
+        // changes `style.color`, which mismatches `laid_out_style` and forces a
+        // re-shape even without a view change.
+        if let Some(cached) = &self.layout
+            && self.laid_out_max_width == max_width
+            && self.laid_out_style.as_ref() == Some(&style)
+        {
+            return bc.constrain(cached.size());
+        }
+
         let text_ctx = ctx.text_context::<TextContext>();
         let layout = text_ctx.layout(&self.content, &style, max_width);
         let size = bc.constrain(layout.size());
         self.layout = Some(layout);
+        self.laid_out_max_width = max_width;
+        self.laid_out_style = Some(style);
         size
     }
 
@@ -387,6 +420,54 @@ mod tests {
         let theme = Theme::m3_baseline();
         let custom = Color::from_rgb8(1, 2, 3);
         assert_eq!(painted_color(text("x").color(custom), Some(&theme)), custom);
+    }
+
+    // --- Cached-shape reuse (phase 10.B, the verified defect) ---
+
+    #[test]
+    fn unchanged_layout_pass_skips_reshaping_entirely() {
+        // The verified defect: `TextWidget::layout` re-shaped on every pass. Now
+        // an unchanged pass reuses the cached `TextLayout` WITHOUT touching the
+        // text context at all — observable as the shape cache seeing exactly one
+        // shape and, critically, zero further lookups (`hits == 0`). A non-zero
+        // `hits` would mean the widget still called into the context and only
+        // the frust-text cache saved it; `hits == 0` proves the widget-level
+        // skip.
+        let view = text("Hello from Frust");
+        let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mut tcx = TextContext::new();
+        let bc = BoxConstraints::loose(Size::new(200.0, 100.0));
+        {
+            let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+            widget.layout(&mut lctx, &bc);
+            widget.layout(&mut lctx, &bc);
+            widget.layout(&mut lctx, &bc);
+        }
+        let stats = tcx.shape_cache_stats();
+        assert_eq!(stats.shapes, 1, "shaping must run exactly once");
+        assert_eq!(
+            stats.hits, 0,
+            "an unchanged layout pass must not consult the text context at all"
+        );
+        assert_eq!(stats.line_breaks, 0);
+    }
+
+    #[test]
+    fn width_change_rebreaks_without_reshaping() {
+        // A width change breaks the widget-level skip (the cached width differs),
+        // so it re-lays-out through the context — but the frust-text shape cache
+        // reuses the shaping and re-runs line-breaking only.
+        let view = text("Hello from Frust, the pure Rust mobile UI toolkit");
+        let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mut tcx = TextContext::new();
+        {
+            let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+            widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
+            widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(120.0, 100.0)));
+        }
+        let stats = tcx.shape_cache_stats();
+        assert_eq!(stats.shapes, 1, "the width change must not re-shape");
+        assert_eq!(stats.line_breaks, 1, "the width change re-breaks once");
     }
 
     // --- Theme-swap regression (review F1) ---

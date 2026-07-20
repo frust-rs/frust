@@ -14,6 +14,7 @@ mod context;
 mod convert;
 mod editor;
 mod layout;
+mod shape_cache;
 mod style;
 
 pub use context::TextContext;
@@ -21,6 +22,7 @@ pub use editor::{
     EditOp, EditingState, EditingStateBytes, TextEditor, byte_to_utf16, utf16_to_byte,
 };
 pub use layout::TextLayout;
+pub use shape_cache::ShapeCacheStats;
 pub use style::{FontFamily, FontStyle, FontWeight, LineHeight, TextStyle};
 
 #[cfg(test)]

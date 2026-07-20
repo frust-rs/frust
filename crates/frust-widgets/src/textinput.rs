@@ -285,6 +285,15 @@ pub struct TextInputWidget {
     /// visible lines. Drives the wrap-width feed in `layout`, the height cap,
     /// and the keep-caret-in-view scroll offset (see the [module docs](self)).
     max_visible_lines: Option<usize>,
+    /// The soft-wrap width last installed on `editor` (`None` sentinel = not
+    /// yet applied / editor just rebuilt). `layout` only calls
+    /// [`TextEditor::set_wrap_width`] when the desired width differs from this —
+    /// the phase-10.B mirror of `Text`'s cached-shape reuse. parley's
+    /// `PlainEditor::set_width` unconditionally marks its layout dirty and the
+    /// next `refresh_layout` re-shapes, so an unconditional per-pass call
+    /// re-shaped every frame; guarding it here reshapes only on an actual
+    /// width/mode change (edits still reshape via their own `apply`).
+    applied_wrap_width: Option<Option<f32>>,
     /// Resolved Enter behavior: `true` submits, `false` inserts a newline.
     /// Defaults to true single-line / false multi-line; Shift+Enter inverts it
     /// (multi-line only — a single-line field always submits).
@@ -356,6 +365,10 @@ impl TextInputWidget {
         self.editor
             .apply(EditOp::ApplyEditingState(state), &mut self.text_ctx);
         self.applied_style = style;
+        // The freshly built editor carries no wrap width (`TextEditor::new`
+        // resets it to single-line); force `layout` to re-install the desired
+        // width on the next pass.
+        self.applied_wrap_width = None;
     }
 
     /// The single-line text height from the editor's refreshed metrics, floored
@@ -708,6 +721,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
             applied_style: style,
             placeholder: self.placeholder.clone(),
             max_visible_lines: self.max_visible_lines,
+            applied_wrap_width: None,
             submit_on_enter: resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter),
             focused: false,
             captured: false,
@@ -788,27 +802,32 @@ impl Widget for TextInputWidget {
         } else {
             DEFAULT_WIDTH
         };
+
+        // Desired soft-wrap width: `Some(px)` reflows the content in multi-line
+        // mode; `None` restores the single-line default (so `content_height`/
+        // `content_origin_y` agree with the centered single-line placement,
+        // resetting any stale wrap left by a dropped `.multiline(..)`). Only
+        // re-install it when it actually changed — parley re-shapes on every
+        // `set_width` regardless, so an unconditional per-pass call was the
+        // TextInput mirror of `Text`'s re-shape-every-frame defect (phase 10.B).
+        let desired_wrap: Option<f32> = self
+            .max_visible_lines
+            .map(|_| (width - 2.0 * PAD_X).max(0.0) as f32);
+        if self.applied_wrap_width != Some(desired_wrap) {
+            self.editor.set_wrap_width(desired_wrap, &mut self.text_ctx);
+            self.applied_wrap_width = Some(desired_wrap);
+        }
+
         let height = match self.max_visible_lines {
             Some(max_lines) => {
-                // Feed the content width to the editor as a soft-wrap width so
-                // it reflows, then clamp the reported content height to the
-                // [1, max_lines] line band (+ padding); overflow scrolls in paint.
-                let wrap_w = (width - 2.0 * PAD_X).max(0.0) as f32;
-                self.editor.set_wrap_width(Some(wrap_w), &mut self.text_ctx);
+                // Clamp the reported content height to the [1, max_lines] line
+                // band (+ padding); overflow scrolls in paint.
                 let line_h = self.line_height();
                 let content = self.editor.layout_size().height.max(line_h);
                 let capped = content.min(line_h * max_lines as f64);
                 capped + 2.0 * PAD_Y
             }
-            None => {
-                // A field rebuilt from multiline into single-line mode may still
-                // carry a stale wrap width on its editor (e.g. `.multiline(..)`
-                // dropped from the view) — reset it so `content_height`/
-                // `content_origin_y` agree with this branch's single-line,
-                // centered placement instead of a leftover wrapped layout.
-                self.editor.set_wrap_width(None, &mut self.text_ctx);
-                self.content_height() + 2.0 * PAD_Y
-            }
+            None => self.content_height() + 2.0 * PAD_Y,
         };
         bc.constrain(Size::new(width, height))
     }

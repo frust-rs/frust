@@ -10,6 +10,7 @@ use parley::style::StyleProperty;
 use peniko::Brush;
 
 use crate::layout::TextLayout;
+use crate::shape_cache::{DEFAULT_CAPACITY, ShapeCache, ShapeCacheStats, ShapeKey};
 use crate::style::{
     TextStyle, to_parley_family, to_parley_line_height, to_parley_style, to_parley_weight,
 };
@@ -23,6 +24,11 @@ use crate::style::{
 pub struct TextContext {
     font_ctx: parley::FontContext,
     layout_ctx: parley::LayoutContext<Brush>,
+    /// Width-independent shape cache (spec §10.3, phase 10.B): a bounded LRU of
+    /// shaped layouts keyed by (text, style), so a width change re-runs
+    /// line-breaking only and repeated content shapes once. See
+    /// [`crate::shape_cache`].
+    shape_cache: ShapeCache,
 }
 
 impl TextContext {
@@ -35,6 +41,7 @@ impl TextContext {
         Self {
             font_ctx: parley::FontContext::new(),
             layout_ctx: parley::LayoutContext::new(),
+            shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
         }
     }
 
@@ -46,6 +53,17 @@ impl TextContext {
     /// unwrapped line per hard break in `text`. An empty `text` yields a layout
     /// with no glyph runs and a near-zero size.
     pub fn layout(&mut self, text: &str, style: &TextStyle, max_width: Option<f32>) -> TextLayout {
+        let key = ShapeKey::new(text, style);
+
+        // Shape-cache fast path: reuse the shaped layout, re-running
+        // line-breaking only on a width change (never re-shaping). Shaping is
+        // width-independent, so `max_width` is not part of the key.
+        if let Some(layout) = self.shape_cache.get(&key, max_width) {
+            return TextLayout::new(layout);
+        }
+
+        // Miss: shape from scratch, then cache the shaped/broken result.
+        //
         // scale = 1.0: lay out in logical pixels; the render tier applies the
         // device scale factor. quantize = true snaps advances for crisp glyphs.
         let mut builder = self
@@ -71,7 +89,18 @@ impl TextContext {
             parley::layout::AlignmentOptions::default(),
         );
 
+        self.shape_cache.insert(key, layout.clone(), max_width);
         TextLayout::new(layout)
+    }
+
+    /// The shape cache's instrumentation counters (shapes performed,
+    /// line-break-only relayouts, full hits, evictions).
+    ///
+    /// The observable hook the phase-10 text-cache tests assert against, and a
+    /// perf signal otherwise. Plain scalar data — no `parley`/`vello`/`wgpu`
+    /// type leaks through (scene-layer purity).
+    pub fn shape_cache_stats(&self) -> ShapeCacheStats {
+        self.shape_cache.stats()
     }
 
     /// Borrows the parley font and layout contexts together, for constructing a
@@ -90,5 +119,130 @@ impl TextContext {
 impl Default for TextContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shape_cache::DEFAULT_CAPACITY;
+    use peniko::Color;
+
+    /// A body-text style at `size`.
+    fn style(size: f32) -> TextStyle {
+        TextStyle::new(size, Color::BLACK)
+    }
+
+    #[test]
+    fn same_text_two_widths_shapes_once() {
+        // The core phase-10.B claim: shaping is width-independent. Laying out
+        // the same text+style at two different widths shapes exactly once; the
+        // width change re-runs line-breaking only, and a repeated width is a
+        // full reuse.
+        let mut cx = TextContext::new();
+        let text = "Hello from Frust, the pure Rust mobile UI toolkit";
+        let s = style(16.0);
+
+        let _ = cx.layout(text, &s, Some(200.0)); // miss → shape
+        let _ = cx.layout(text, &s, Some(80.0)); // width change → line-break only
+        let _ = cx.layout(text, &s, Some(80.0)); // same width → full hit
+
+        let stats = cx.shape_cache_stats();
+        assert_eq!(stats.shapes, 1, "shaping must run exactly once");
+        assert_eq!(stats.line_breaks, 1, "the differing width re-breaks once");
+        assert_eq!(stats.hits, 1, "the repeated width is a full reuse");
+    }
+
+    #[test]
+    fn text_change_forces_a_fresh_shape() {
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let _ = cx.layout("hello", &s, None);
+        let _ = cx.layout("world", &s, None);
+        assert_eq!(
+            cx.shape_cache_stats().shapes,
+            2,
+            "a different string is a distinct key → fresh shape (no stale reuse)"
+        );
+    }
+
+    #[test]
+    fn style_and_color_changes_force_fresh_shapes() {
+        let mut cx = TextContext::new();
+        let _ = cx.layout("hello", &style(16.0), None);
+        // Size change.
+        let _ = cx.layout("hello", &style(24.0), None);
+        // Color change (the glyph brush is baked into the shaped layout, so a
+        // color change must not reuse an earlier shape — the theme-swap
+        // correctness contract at the shaping layer).
+        let _ = cx.layout("hello", &TextStyle::new(16.0, Color::WHITE), None);
+        assert_eq!(cx.shape_cache_stats().shapes, 3);
+    }
+
+    #[test]
+    fn invalidation_correct_across_all_mutation_orders() {
+        // Property-style: whatever the interleaving of text/style/width, every
+        // layout the cache returns matches a freshly-shaped reference — the
+        // stale-text/style/width failure mode is what this kills.
+        let styles = [style(16.0), style(28.0)];
+        let texts = ["alpha beta", "gamma delta epsilon zeta eta"];
+        let widths = [None, Some(60.0), Some(140.0)];
+
+        let mut cx = TextContext::new();
+        for _round in 0..3 {
+            for t in &texts {
+                for s in &styles {
+                    for w in &widths {
+                        let cached = cx.layout(t, s, *w).size();
+                        // A pristine context shapes this exact combination fresh.
+                        let mut reference = TextContext::new();
+                        let fresh = reference.layout(t, s, *w).size();
+                        assert_eq!(
+                            cached, fresh,
+                            "cached layout for (text={t:?}, size={}, width={w:?}) \
+                             is stale — got {cached:?}, expected {fresh:?}",
+                            s.size
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cache_is_bounded_and_evicts_least_recently_used() {
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let overflow = 8;
+        let n = DEFAULT_CAPACITY + overflow;
+
+        // Fill past capacity with distinct strings (entry 0 is the oldest).
+        for i in 0..n {
+            let _ = cx.layout(&format!("entry number {i}"), &s, None);
+        }
+        let stats = cx.shape_cache_stats();
+        assert_eq!(stats.shapes, n as u64, "each distinct string shapes once");
+        assert_eq!(
+            stats.evictions, overflow as u64,
+            "capacity overflow evicts exactly the surplus, no unbounded growth"
+        );
+
+        // The most recently used entry is still cached → a full hit.
+        let hits_before = cx.shape_cache_stats().hits;
+        let _ = cx.layout(&format!("entry number {}", n - 1), &s, None);
+        assert_eq!(
+            cx.shape_cache_stats().hits,
+            hits_before + 1,
+            "the most-recently-used entry survives eviction"
+        );
+
+        // The oldest entry was evicted → re-requesting it re-shapes.
+        let shapes_before = cx.shape_cache_stats().shapes;
+        let _ = cx.layout("entry number 0", &s, None);
+        assert_eq!(
+            cx.shape_cache_stats().shapes,
+            shapes_before + 1,
+            "an evicted entry is re-shaped, not served stale"
+        );
     }
 }
