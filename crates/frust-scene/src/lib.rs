@@ -15,3 +15,25 @@ pub use arc::arc_path;
 pub use builder::SceneBuilder;
 pub use glyph::{FontHandle, Glyph, GlyphRun};
 pub use scene::{Command, PathStyle, Scene};
+
+/// Compile-time assertion that [`Scene`] is [`Send`].
+///
+/// This tripwire is a refactor guard: any future field added to [`Scene`]
+/// that is `!Send` will fail this assertion with a helpful compiler message
+/// pointing to this site and the SPIKE note at
+/// `workflow/plans/features/frust-phase-9-rust-advantage/research/RENDER_SPLIT_SPIKE.md`.
+///
+/// The assertion is necessary to keep the render-thread-split path (a future
+/// optimization after benchmarking phase-9 scenarios) viable without building
+/// it — splitting render onto a dedicated thread requires the scene to move
+/// safely across thread boundaries.
+const _: () = {
+    /// Zero-cost static assertion that `T: Send`.
+    #[allow(dead_code)]
+    const fn assert_send<T: Send>() {}
+
+    #[allow(dead_code)]
+    const fn check_scene_is_send() {
+        assert_send::<Scene>();
+    }
+};
