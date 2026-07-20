@@ -13,10 +13,12 @@ mod create_wizard;
 mod doctor;
 mod message;
 mod modal;
+pub mod palette;
 mod persist;
 mod run_config;
 mod session_view;
 mod state;
+mod toast;
 mod update;
 
 pub use bootstrap::{BootstrapNode, BootstrapState, BootstrapWizard};
@@ -25,12 +27,14 @@ pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
 pub use doctor::{DoctorCheck, DoctorState};
 pub use message::{Message, RegionId};
 pub use modal::ActiveModal;
+pub use palette::{Palette, PaletteCommand};
 pub use persist::{load_recent_projects, merge_recent_and_detected, record_recent_project};
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
 pub use session_view::{
     LineSelection, LogBuffer, LogLevel, Scroll, SessionView, detect_level, line_matches, strip_ansi,
 };
 pub use state::{AppState, Screen, SearchState};
+pub use toast::{Toast, ToastKind, Toasts};
 pub use update::{Effect, Outcome, update};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};

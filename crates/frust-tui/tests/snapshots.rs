@@ -14,7 +14,8 @@ use frust_drive::devices::{Device, Kind, Platform};
 use frust_drive::doctor::{Area, Component, ComponentStatus, DoctorReport, FixCommand, Status};
 use frust_tui::engine::{
     AppState, BootstrapState, BootstrapWizard, BuildLauncher, CreateWizard, DeviceRow, DoctorCheck,
-    DoctorState, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView, WizardStep,
+    DoctorState, Palette, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView, ToastKind,
+    WizardStep,
 };
 use frust_tui::supervise::{SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -639,6 +640,32 @@ fn toolchain_chip_partial_from_report_100x30() {
 #[test]
 fn session_log_built_artifacts_130x30() {
     insta::assert_snapshot!(render_to_string(130, 30, &built_session_state()));
+}
+
+// ── Command palette + toasts (D5) ────────────────────────────────────────────
+
+/// The command palette open over the workbench with a "run" query: the ranked
+/// list is filtered/scored, the top row selected, and disabled commands (no
+/// session/devices) show their reason.
+#[test]
+fn palette_open_query_100x30() {
+    let mut state = workbench_state();
+    state.palette = Some(Palette {
+        query: "run".to_string(),
+        cursor: 0,
+    });
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// A stack of toasts (one per kind) floating above the workbench status bar —
+/// the auto-dismiss notice layer (rendered here at full TTL).
+#[test]
+fn toasts_stack_100x30() {
+    let mut state = workbench_state();
+    state.toasts.push(ToastKind::Success, "desktop: finished");
+    state.toasts.push(ToastKind::Warn, "Pixel 7: stopped");
+    state.toasts.push(ToastKind::Error, "build apk: failed");
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
 /// The same built session at the standard 100-col width: the built-artifacts

@@ -16,7 +16,8 @@ use super::message::Message;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use super::state::{AppState, Screen};
-use crate::supervise::{SessionEvent, SessionEventKind, SessionId, SessionSpec};
+use super::toast::ToastKind;
+use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec};
 
 /// A side effect the (terminal/supervisor-owning) runner performs after a
 /// transition — the pure core requests it, the runner enacts it.
@@ -138,8 +139,11 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // No point drawing a frame we're about to tear down.
             Outcome::idle()
         }
-        // The skeleton animates nothing, so a bare tick never dirties a frame.
-        Message::Tick => Outcome::idle(),
+        // A tick ages the toast stack (the only animated state); it dirties a
+        // frame only when a toast actually expires (its content is otherwise
+        // static). With no live toast `animating()` is false and the runner
+        // never delivers a tick here — the dirty-frame skip.
+        Message::Tick => Outcome::dirty(state.toasts.tick()),
         Message::Resize(_, _) => Outcome::redraw(),
         Message::HoverChanged(next) => {
             if state.hover == next {
@@ -261,10 +265,15 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::SelectionExtendDown(n) => with_active(state, |s| s.extend_selection_down(n)),
         Message::SelectionClear => with_active(state, |s| s.clear_selection()),
         Message::CopySelection => match state.active_session().and_then(|s| s.selected_text()) {
-            Some(text) => Outcome {
-                redraw: false,
-                effect: Some(Effect::Copy(text)),
-            },
+            Some(text) => {
+                state
+                    .toasts
+                    .push(ToastKind::Success, "Copied selection to clipboard");
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::Copy(text)),
+                }
+            }
             None => Outcome::idle(),
         },
 
@@ -423,6 +432,10 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         }
         Message::ScaffoldSucceeded { project_root } => {
             state.create_wizard = None;
+            let name = project_name_of(&project_root);
+            state
+                .toasts
+                .push(ToastKind::Success, format!("Created project {name}"));
             open_project(state, project_root)
         }
         Message::ScaffoldFailed(message) => with_wizard(state, |w| w.fail(message)),
@@ -438,6 +451,19 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::DoctorResults(results) => {
             state.doctor.results = results;
             state.doctor.refreshing = false;
+            // Surface a doctor failure as an error toast, but only when no modal
+            // is already showing (the panel/wizard carries the detail there).
+            let has_fail = state
+                .doctor
+                .results
+                .iter()
+                .any(|c| c.status == frust_drive::doctor::Status::Fail);
+            let quiet = state.active_modal().is_none();
+            if has_fail && quiet {
+                state
+                    .toasts
+                    .push(ToastKind::Error, "Doctor found problems · press d");
+            }
             Outcome::redraw()
         }
         Message::OpenDoctorPanel => {
@@ -537,16 +563,24 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             },
             None => Outcome::idle(),
         },
-        Message::BootstrapCopyFix => match state.bootstrap_wizard.as_ref() {
-            Some(w) => match w.selected_fix() {
-                Some(fix) => Outcome {
-                    redraw: false,
-                    effect: Some(Effect::Copy(fix_copy_text(fix))),
-                },
+        Message::BootstrapCopyFix => {
+            let text = state
+                .bootstrap_wizard
+                .as_ref()
+                .and_then(|w| w.selected_fix().map(fix_copy_text));
+            match text {
+                Some(t) => {
+                    state
+                        .toasts
+                        .push(ToastKind::Success, "Copied command to clipboard");
+                    Outcome {
+                        redraw: true,
+                        effect: Some(Effect::Copy(t)),
+                    }
+                }
                 None => Outcome::idle(),
-            },
-            None => Outcome::idle(),
-        },
+            }
+        }
 
         // ── Build launcher (TUI2-07) ────────────────────────────────────────
         Message::OpenBuildLauncher => match run_config_project(state) {
@@ -614,13 +648,50 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         },
 
         // ── Build artifact copy-path (TUI2-07) ──────────────────────────────
-        Message::CopyBuiltArtifacts => match state.active_session() {
-            Some(session) if !session.built_artifact_paths().is_empty() => Outcome {
-                redraw: false,
-                effect: Some(Effect::Copy(session.built_artifact_paths().join("\n"))),
-            },
-            _ => Outcome::idle(),
-        },
+        Message::CopyBuiltArtifacts => {
+            let joined = state
+                .active_session()
+                .map(|s| s.built_artifact_paths())
+                .filter(|p| !p.is_empty())
+                .map(|p| p.join("\n"));
+            match joined {
+                Some(text) => {
+                    state
+                        .toasts
+                        .push(ToastKind::Success, "Copied artifact path(s)");
+                    Outcome {
+                        redraw: true,
+                        effect: Some(Effect::Copy(text)),
+                    }
+                }
+                None => Outcome::idle(),
+            }
+        }
+
+        // ── Command palette (D5) ─────────────────────────────────────────────
+        Message::OpenPalette => {
+            if state.palette.is_some() {
+                Outcome::idle()
+            } else {
+                state.palette = Some(super::palette::Palette::new());
+                Outcome::redraw()
+            }
+        }
+        Message::ClosePalette => {
+            if state.palette.take().is_some() {
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::PaletteInput(c) => with_palette(state, |p| p.input_char(c)),
+        Message::PaletteBackspace => with_palette(state, super::palette::Palette::backspace),
+        Message::PaletteCursorUp => move_palette_cursor(state, -1),
+        Message::PaletteCursorDown => move_palette_cursor(state, 1),
+        Message::PaletteExecute => execute_palette(state, None),
+        Message::PaletteExecuteAt(i) => execute_palette(state, Some(i)),
+
+        Message::RunOnAllDevices => run_on_all_devices(state),
     }
 }
 
@@ -762,6 +833,97 @@ fn with_bootstrap(state: &mut AppState, f: impl FnOnce(&mut BootstrapWizard)) ->
     }
 }
 
+/// Apply `f` to the open command palette (if any) and redraw; idle when closed
+/// — mirrors [`with_modal`].
+fn with_palette(state: &mut AppState, f: impl FnOnce(&mut super::palette::Palette)) -> Outcome {
+    match state.palette.as_mut() {
+        Some(palette) => {
+            f(palette);
+            Outcome::redraw()
+        }
+        None => Outcome::idle(),
+    }
+}
+
+/// Move the palette selection by `delta`, clamped to the current ranked-result
+/// count; redraw only on a real move.
+fn move_palette_cursor(state: &mut AppState, delta: isize) -> Outcome {
+    let n = super::palette::ranked(state).len();
+    let Some(palette) = state.palette.as_mut() else {
+        return Outcome::idle();
+    };
+    if n == 0 {
+        palette.cursor = 0;
+        return Outcome::idle();
+    }
+    let cur = palette.cursor.min(n - 1) as isize;
+    let next = (cur + delta).clamp(0, n as isize - 1) as usize;
+    if next == palette.cursor {
+        Outcome::idle()
+    } else {
+        palette.cursor = next;
+        Outcome::redraw()
+    }
+}
+
+/// Execute a palette command: the row at `index` (a click) or the selected row
+/// (`Enter`). Closes the palette and **re-dispatches the command's existing
+/// `Message`** through `update` — the palette never duplicates command logic. A
+/// disabled command is a no-op (the palette stays open). An out-of-range index
+/// (a stale click after the ranking changed) is ignored.
+fn execute_palette(state: &mut AppState, index: Option<usize>) -> Outcome {
+    let ranked = super::palette::ranked(state);
+    let idx = index.unwrap_or_else(|| state.palette.as_ref().map_or(0, |p| p.cursor));
+    let Some(cmd) = ranked.get(idx) else {
+        return Outcome::idle();
+    };
+    if !cmd.enabled {
+        // A disabled command can't run; leave the palette open (its row shows
+        // the reason) rather than silently closing.
+        return Outcome::idle();
+    }
+    let message = cmd.message.clone();
+    state.palette = None;
+    // Route the command's own message through the same transition every other
+    // input path uses; force a redraw since closing the palette is itself a
+    // visible change even when the underlying message reports none.
+    let mut out = update(state, message);
+    out.redraw = true;
+    out
+}
+
+/// Launch one supervised session per discovered device (debug) for the active
+/// project — the palette's "run on all devices" action. Reuses [`RunConfig`]'s
+/// spec building (every device checked, desktop off) so it never re-implements
+/// launch logic. A no-op with no project or no devices.
+fn run_on_all_devices(state: &mut AppState) -> Outcome {
+    let Some(project) = run_config_project(state) else {
+        return Outcome::idle();
+    };
+    if state.devices.is_empty() {
+        return Outcome::idle();
+    }
+    let mut config = RunConfig::new(project, &state.devices);
+    for target in &mut config.targets {
+        target.selected = matches!(target.target, DeviceTarget::Device(_));
+    }
+    let specs = config.launch_specs();
+    if specs.is_empty() {
+        return Outcome::idle();
+    }
+    Outcome {
+        redraw: true,
+        effect: Some(Effect::LaunchSessions(specs)),
+    }
+}
+
+/// A project's short display name (its final path component), for a toast.
+fn project_name_of(root: &std::path::Path) -> String {
+    root.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.to_string_lossy().into_owned())
+}
+
 /// Cache a freshly-arrived component-level report: it feeds the titlebar chip's
 /// rollup and, if the wizard is open, refreshes its snapshot in place. On the
 /// first report of a launch it also drives the fresh-machine auto-open — the
@@ -842,27 +1004,59 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
         return Outcome::idle();
     };
     let is_active = state.active_session == Some(idx);
-    let session = &mut state.sessions[idx];
-    match ev.kind {
-        SessionEventKind::Lines(lines) => {
-            let following = session.is_following();
-            for line in lines {
-                session.push_line(line);
+    // A toast to raise once the session borrow ends (a terminal transition).
+    let mut toast: Option<(ToastKind, String)> = None;
+    let outcome = {
+        let session = &mut state.sessions[idx];
+        match ev.kind {
+            SessionEventKind::Lines(lines) => {
+                let following = session.is_following();
+                for line in lines {
+                    session.push_line(line);
+                }
+                Outcome::dirty(is_active && following)
             }
-            Outcome::dirty(is_active && following)
+            SessionEventKind::State(s) => {
+                session.state = s;
+                toast = terminal_toast(session);
+                Outcome::redraw()
+            }
+            SessionEventKind::Dropped(n) => {
+                // The supervisor's bounded-channel overflow counter (cumulative,
+                // drop-newest). Store it so the UI can flag a session whose log
+                // is missing lines; a change is worth a repaint on the active
+                // tab.
+                let changed = session.dropped != n;
+                session.dropped = n;
+                Outcome::dirty(is_active && changed)
+            }
         }
-        SessionEventKind::State(s) => {
-            session.state = s;
-            Outcome::redraw()
+    };
+    if let Some((kind, text)) = toast {
+        state.toasts.push(kind, text);
+    }
+    outcome
+}
+
+/// The toast (if any) for a session that just reached a terminal state: a
+/// success toast on a clean exit (noting built artifacts, when present), an
+/// error toast on a failed exit or a kill. A still-live session raises none.
+fn terminal_toast(session: &SessionView) -> Option<(ToastKind, String)> {
+    use crate::supervise::SessionState;
+    let label = session.target_label.clone();
+    match session.state {
+        SessionState::Exited(true) => {
+            let arts = session.built_artifact_paths().len();
+            let text = if arts > 0 {
+                format!("{label}: built {arts} artifact(s) · c copies path")
+            } else {
+                format!("{label}: finished")
+            };
+            Some((ToastKind::Success, text))
         }
-        SessionEventKind::Dropped(n) => {
-            // The supervisor's bounded-channel overflow counter (cumulative,
-            // drop-newest). Store it so the UI can flag a session whose log is
-            // missing lines; a change is worth a repaint on the active tab.
-            let changed = session.dropped != n;
-            session.dropped = n;
-            Outcome::dirty(is_active && changed)
-        }
+        SessionState::Exited(false) => Some((ToastKind::Error, format!("{label}: failed"))),
+        SessionState::Killed => Some((ToastKind::Warn, format!("{label}: stopped"))),
+        _ => None,
     }
 }
 

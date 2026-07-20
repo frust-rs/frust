@@ -126,6 +126,11 @@ pub enum RegionId {
     CleanConfirmNo,
     /// The log status row's "copy built artifact path(s)" affordance.
     CopyArtifactsAction,
+    /// A command row in the open command palette (0-based index into the
+    /// ranked result list); click executes it.
+    PaletteRow(usize),
+    /// The command palette's `[Esc] Close` title affordance.
+    PaletteClose,
 }
 
 /// A TEA message: the only way `AppState` ever changes.
@@ -403,4 +408,33 @@ pub enum Message {
     /// status row's copy affordance) — routed to the runner as
     /// [`super::Effect::Copy`].
     CopyBuiltArtifacts,
+
+    // ── Command palette (D5) ─────────────────────────────────────────────────
+    /// Open the fuzzy command palette (`Ctrl+P` / `:` from the base layer of
+    /// either top-level screen).
+    OpenPalette,
+    /// Close the palette without executing (`Esc` / the `[Esc] Close` title
+    /// affordance).
+    ClosePalette,
+    /// Append a character to the palette's live fuzzy query.
+    PaletteInput(char),
+    /// Delete the last character of the palette query.
+    PaletteBackspace,
+    /// Move the palette selection up / down (`↑`/`↓`).
+    PaletteCursorUp,
+    /// Move the palette selection down.
+    PaletteCursorDown,
+    /// Execute the palette's currently-selected command (`Enter`) — re-dispatches
+    /// the command's existing `Message` through `update` (the palette never
+    /// duplicates command logic). A disabled command is a no-op.
+    PaletteExecute,
+    /// Execute a palette command by ranked-row index (mouse click parity).
+    PaletteExecuteAt(usize),
+
+    // ── Run on all devices (D6b palette / device-header action) ──────────────
+    /// Launch one supervised session per discovered device (debug mode) for the
+    /// active project — the palette's "run on all devices" action, routed to the
+    /// runner as [`super::Effect::LaunchSessions`]. A no-op with no project or
+    /// no discovered devices.
+    RunOnAllDevices,
 }

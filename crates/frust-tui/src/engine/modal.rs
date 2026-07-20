@@ -14,6 +14,7 @@ use std::path::Path;
 use super::bootstrap::BootstrapWizard;
 use super::build_launcher::BuildLauncher;
 use super::create_wizard::CreateWizard;
+use super::palette::Palette;
 use super::run_config::RunConfig;
 use super::state::AppState;
 
@@ -26,8 +27,11 @@ use super::state::AppState;
 /// chain, now `AppState::active_modal`'s match arms).
 #[derive(Debug, Clone, Copy)]
 pub enum ActiveModal<'a> {
-    /// The create-project wizard (`state.create_wizard`) — top priority,
-    /// can appear over the welcome splash or the workbench.
+    /// The fuzzy command palette (`state.palette`) — top priority, opened from
+    /// the base layer of either top-level screen (`Ctrl+P` / `:`).
+    Palette(&'a Palette),
+    /// The create-project wizard (`state.create_wizard`) — can appear over the
+    /// welcome splash or the workbench.
     CreateWizard(&'a CreateWizard),
     /// The toolchain bootstrap wizard (`state.bootstrap_wizard`) — like the
     /// create wizard, it can appear over either top-level screen (the
@@ -53,7 +57,9 @@ impl AppState {
     /// suppression/overlay dispatch both match on exhaustively — see the
     /// module doc comment.
     pub fn active_modal(&self) -> Option<ActiveModal<'_>> {
-        if let Some(wizard) = &self.create_wizard {
+        if let Some(palette) = &self.palette {
+            Some(ActiveModal::Palette(palette))
+        } else if let Some(wizard) = &self.create_wizard {
             Some(ActiveModal::CreateWizard(wizard))
         } else if let Some(wizard) = &self.bootstrap_wizard {
             Some(ActiveModal::Bootstrap(wizard))

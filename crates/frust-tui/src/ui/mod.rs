@@ -41,12 +41,58 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
     // rather than silently missing its suppression/overlay dispatch.
     if let Some(modal) = state.active_modal() {
         render_modal(frame, area, state, theme, mouse, modal);
+    } else {
+        match state.screen {
+            Screen::Welcome => render_welcome(frame, area, state, theme, mouse),
+            Screen::Workbench => views::workbench::render(frame, area, state, theme, mouse),
+        }
+    }
+
+    // Toasts float in the status-bar area layer, over everything else (even a
+    // modal — an error toast surfaces regardless). Render-only: the tick loop
+    // ages them, this pass just paints the current stack.
+    render_toasts(frame, area, state, theme);
+}
+
+/// Render the auto-dismiss toast stack (D5) bottom-anchored just above the
+/// 1-row status bar, oldest-to-newest top-to-bottom, each colored by kind. A
+/// no-op when the stack is empty (the common case).
+fn render_toasts(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    use crate::engine::ToastKind;
+
+    let toasts = &state.toasts.items;
+    if toasts.is_empty() || area.height < 2 {
         return;
     }
 
-    match state.screen {
-        Screen::Welcome => render_welcome(frame, area, state, theme, mouse),
-        Screen::Workbench => views::workbench::render(frame, area, state, theme, mouse),
+    // One row per toast, stacked directly above the status bar (the last row).
+    let rows = (toasts.len() as u16).min(area.height.saturating_sub(1));
+    let start_y = area.bottom().saturating_sub(1 + rows);
+    for (i, toast) in toasts.iter().rev().take(rows as usize).enumerate() {
+        let y = area.bottom().saturating_sub(2 + i as u16);
+        if y < start_y {
+            break;
+        }
+        let (glyph, color) = match toast.kind {
+            ToastKind::Info => ("\u{2139}", theme.accent()),
+            ToastKind::Success => ("\u{2713}", theme.success()),
+            ToastKind::Warn => ("!", theme.warn()),
+            ToastKind::Error => ("\u{2717}", theme.error()),
+        };
+        let text = format!(" {glyph} {} ", toast.text);
+        let w = (text.chars().count() as u16).min(area.width);
+        let x = area.right().saturating_sub(w);
+        let rect = Rect::new(x, y, w, 1);
+        frame.render_widget(ratatui::widgets::Clear, rect);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::default().fg(color).bg(theme.overlay()),
+            )))
+            .alignment(Alignment::Right)
+            .style(Style::default().bg(theme.overlay())),
+            rect,
+        );
     }
 }
 
@@ -64,8 +110,20 @@ fn render_modal(
     modal: ActiveModal,
 ) {
     match modal {
-        // The create wizard is the top-priority modal and can appear over
-        // either screen, unlike the rest (workbench-only).
+        // The command palette is the top-priority modal and can appear over
+        // either top-level screen.
+        ActiveModal::Palette(_) => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::palette::render(frame, area, state, theme, mouse);
+        }
+        // The create wizard can appear over either screen, unlike the rest
+        // (workbench-only).
         ActiveModal::CreateWizard(wizard) => {
             let mut suppressed = MouseCtx::suppressed();
             match state.screen {
@@ -134,20 +192,14 @@ fn render_welcome(
 
     views::welcome::titlebar(frame, rows[0], state, theme, mouse);
     views::welcome::render(frame, rows[1], state, theme, mouse);
-    welcome_status(frame, rows[2], state, theme);
+    welcome_status(frame, rows[2], theme);
 }
 
-fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-    let left = match &state.toast {
-        Some(msg) => Line::from(Span::styled(
-            msg.clone(),
-            Style::default().fg(theme.accent()),
-        )),
-        None => Line::from(Span::styled(
-            "? help · ⌘ palette · q quit",
-            Style::default().fg(theme.muted()),
-        )),
-    };
+fn welcome_status(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let left = Line::from(Span::styled(
+        "? help · ⌘ palette · q quit",
+        Style::default().fg(theme.muted()),
+    ));
     frame.render_widget(
         Paragraph::new(left).style(Style::default().bg(theme.surface())),
         area,

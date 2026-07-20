@@ -6,6 +6,7 @@ pub mod build_launcher;
 pub mod clean_confirm;
 pub mod create_wizard;
 pub mod doctor;
+pub mod palette;
 pub mod project_switcher;
 pub mod run_config;
 pub mod sessions;

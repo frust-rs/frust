@@ -9,8 +9,10 @@ use super::build_launcher::BuildLauncher;
 use super::create_wizard::CreateWizard;
 use super::doctor::DoctorState;
 use super::message::RegionId;
+use super::palette::Palette;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
+use super::toast::Toasts;
 use crate::supervise::SessionId;
 
 /// Bounded-walk depth cap for [`detect`]/[`find_projects`]: `dir` itself is
@@ -58,9 +60,14 @@ pub struct AppState {
     pub hover: Option<RegionId>,
     /// Whether the Create button is showing its pressed chrome.
     pub create_pressed: bool,
-    /// A transient status message shown in the status bar. Cleared on the next
-    /// meaningful interaction.
-    pub toast: Option<String>,
+    /// The auto-dismiss toast stack rendered in the status-bar area layer (D5).
+    /// Bounded + drop-oldest, aged on the frame tick — see
+    /// [`super::toast::Toasts`].
+    pub toasts: Toasts,
+    /// The fuzzy command palette, when open (`Ctrl+P` / `:`). While `Some`, it
+    /// captures input and suppresses background mouse regions like the other
+    /// modals — see [`super::palette::Palette`].
+    pub palette: Option<Palette>,
     /// The active project root (`projects.first()`, the one the main area
     /// shows), if any. `None` on the welcome screen. Kept alongside
     /// `projects` for the call sites that only care about "the" open project
@@ -171,7 +178,8 @@ impl AppState {
             should_quit: false,
             hover: None,
             create_pressed: false,
-            toast: None,
+            toasts: Toasts::default(),
+            palette: None,
             project_root,
             projects,
             sessions: Vec::new(),
@@ -194,12 +202,12 @@ impl AppState {
         }
     }
 
-    /// Whether any animation is in flight and the loop must keep drawing on
-    /// each tick. The skeleton animates nothing, so this is always `false`
-    /// (the single knob a later animated widget flips to opt out of the
-    /// dirty-frame skip).
+    /// Whether the loop must keep processing the frame tick (to age toasts) and
+    /// redraw on change. `true` while any toast is live so its TTL counts down
+    /// off the tick loop (no ambient timer); `false` otherwise, restoring the
+    /// dirty-frame skip on an idle workbench.
     pub fn animating(&self) -> bool {
-        false
+        !self.toasts.items.is_empty()
     }
 
     /// The active session's view-model, if a tab is selected.
@@ -287,7 +295,8 @@ impl Default for AppState {
             should_quit: false,
             hover: None,
             create_pressed: false,
-            toast: None,
+            toasts: Toasts::default(),
+            palette: None,
             project_root: None,
             projects: Vec::new(),
             sessions: Vec::new(),

@@ -143,8 +143,14 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                 apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
             }
             _ = tick.tick() => {
+                // Only touch the model while something is animating (a live
+                // toast) — the dirty-frame skip keeps an idle workbench from
+                // aging/redrawing anything. The Tick transition drops expired
+                // toasts and reports whether the visible set changed.
                 if engine.state.animating() {
-                    needs_redraw = true;
+                    let out = engine.handle(Message::Tick);
+                    needs_redraw |= out.redraw;
+                    apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
                 }
             }
         }
@@ -734,6 +740,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     // falling through to the keys below.
     if let Some(modal) = state.active_modal() {
         return match modal {
+            ActiveModal::Palette(palette) => translate_palette_key(code, mods, palette),
             ActiveModal::CreateWizard(wizard) => translate_wizard_key(code, mods, wizard.step),
             ActiveModal::Bootstrap(wizard) => translate_bootstrap_key(code, wizard),
             ActiveModal::RunConfig(modal) => translate_modal_key(code, mods, modal),
@@ -771,6 +778,13 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         };
     }
 
+    // `Ctrl+P` opens the fuzzy command palette from either screen (mouse
+    // parity: the titlebar ⌘ affordance / status-bar hint); `:` is the vim-ish
+    // shorthand, handled in the match below.
+    if ctrl && matches!(code, KeyCode::Char('p')) {
+        return vec![Message::OpenPalette];
+    }
+
     let workbench = matches!(state.screen, Screen::Workbench);
     // `Ctrl+O` opens the titlebar project switcher (mouse parity: the ▾
     // chevron). Only meaningful once a workbench is open — the welcome
@@ -791,6 +805,10 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // `i` opens the toolchain bootstrap wizard from either screen (mouse
         // parity: the titlebar toolchain chip) — D6a's fresh-machine flow.
         KeyCode::Char('i') => vec![Message::OpenBootstrapWizard],
+
+        // `:` opens the command palette from either screen (the `Ctrl+P`
+        // shorthand above).
+        KeyCode::Char(':') => vec![Message::OpenPalette],
 
         // Welcome keyboard parity: Enter / c activate the Create button.
         KeyCode::Char('c') if matches!(state.screen, Screen::Welcome) => activate_create(state),
@@ -1017,6 +1035,30 @@ fn translate_clean_confirm_key(code: KeyCode) -> Vec<Message> {
     match code {
         KeyCode::Esc => vec![Message::CloseCleanConfirm],
         KeyCode::Enter | KeyCode::Char('y') => vec![Message::ConfirmClean],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the command palette is open. `Esc` (or
+/// `Ctrl+P`) closes it, `Enter` executes the selection, `↑`/`↓` move it,
+/// `Backspace` edits the query, and printable characters extend the fuzzy
+/// query. Mouse parity: each ranked row is a click target executing it.
+fn translate_palette_key(
+    code: KeyCode,
+    mods: KeyModifiers,
+    _palette: &crate::engine::Palette,
+) -> Vec<Message> {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    if ctrl && matches!(code, KeyCode::Char('p')) {
+        return vec![Message::ClosePalette];
+    }
+    match code {
+        KeyCode::Esc => vec![Message::ClosePalette],
+        KeyCode::Enter => vec![Message::PaletteExecute],
+        KeyCode::Up => vec![Message::PaletteCursorUp],
+        KeyCode::Down => vec![Message::PaletteCursorDown],
+        KeyCode::Backspace => vec![Message::PaletteBackspace],
+        KeyCode::Char(c) if !ctrl => vec![Message::PaletteInput(c)],
         _ => vec![],
     }
 }
