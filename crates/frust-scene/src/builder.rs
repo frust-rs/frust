@@ -13,21 +13,25 @@ use crate::scene::{Command, PathStyle, Scene};
 /// ancestor transform, mirroring nested widget placement.
 pub struct SceneBuilder<'a> {
     scene: &'a mut Scene,
-    transform_stack: Vec<Affine>,
 }
 
 impl<'a> SceneBuilder<'a> {
     /// Wraps `scene` for recording, starting with an identity transform.
+    ///
+    /// The transform stack's backing allocation lives on `scene` itself
+    /// (task 10.E, PLAN.md Phase 10.E) so it's reused across every call
+    /// instead of reallocating a fresh `Vec` per frame — reset here to
+    /// `[Affine::IDENTITY]`, identical to a freshly allocated stack.
     pub fn new(scene: &'a mut Scene) -> Self {
-        Self {
-            scene,
-            transform_stack: vec![Affine::IDENTITY],
-        }
+        scene.transform_stack.clear();
+        scene.transform_stack.push(Affine::IDENTITY);
+        Self { scene }
     }
 
     /// The transform currently in effect (composition of all pushed transforms).
     pub fn current_transform(&self) -> Affine {
         *self
+            .scene
             .transform_stack
             .last()
             .expect("transform stack is never empty")
@@ -39,7 +43,7 @@ impl<'a> SceneBuilder<'a> {
     /// [`SceneBuilder::pop_transform`].
     pub fn push_transform(&mut self, transform: Affine) {
         let composed = self.current_transform() * transform;
-        self.transform_stack.push(composed);
+        self.scene.transform_stack.push(composed);
     }
 
     /// Pops the most recently pushed transform, restoring the previous one.
@@ -47,8 +51,8 @@ impl<'a> SceneBuilder<'a> {
     /// A no-op if called without a matching `push_transform` (the base identity
     /// transform is never popped).
     pub fn pop_transform(&mut self) {
-        if self.transform_stack.len() > 1 {
-            self.transform_stack.pop();
+        if self.scene.transform_stack.len() > 1 {
+            self.scene.transform_stack.pop();
         }
     }
 

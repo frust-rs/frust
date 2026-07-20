@@ -125,6 +125,13 @@ pub enum Command {
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
     commands: Vec<Command>,
+    /// [`crate::SceneBuilder`]'s transform stack, parked here between frames
+    /// (task 10.E, PLAN.md Phase 10.E) so its backing `Vec` allocation is
+    /// reused across every `SceneBuilder::new` call instead of reallocating
+    /// per frame — a `SceneBuilder` borrows it via `&mut Scene` and resets it
+    /// to `[Affine::IDENTITY]` on construction, so behavior is unchanged.
+    /// Not part of the stable widget-facing API.
+    pub(crate) transform_stack: Vec<Affine>,
 }
 
 impl Scene {

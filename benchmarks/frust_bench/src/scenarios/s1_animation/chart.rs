@@ -27,7 +27,7 @@ use frust_core::{
 use frust_text::{FontWeight, TextContext, TextLayout, TextStyle};
 use kurbo::{BezPath, Circle, Point, Shape, Size};
 use peniko::color::DynamicColor;
-use peniko::{Brush, Color, ColorStop, Gradient};
+use peniko::{Brush, Color, ColorStop, Gradient, GradientKind};
 
 /// The fixed seed, matching the repro's `Random(42)`.
 pub const SEED: u64 = 42;
@@ -79,6 +79,14 @@ struct BubbleVisual {
     symbol_too_wide: bool,
     percent: TextLayout,
     percent_size: Size,
+    /// The radial fill's [`Gradient`] object, built once here (task 10.E S1
+    /// gradient-brush reuse, PLAN.md Phase 10.E) with its stops fixed for the
+    /// bubble's lifetime — paint only mutates `kind`'s center/radius in place
+    /// per frame (the bubble's only per-frame-changing input, from physics)
+    /// instead of reallocating a fresh `Gradient` + `ColorStops` every paint.
+    /// Workload-neutral: same two stops, same colors, same visual output as
+    /// building fresh each frame — an implementation-efficiency change only.
+    fill: Gradient,
 }
 
 /// The retained widget: the simulation, the per-bubble visual cache, and the
@@ -202,6 +210,24 @@ impl BubbleChartWidget {
                 let percent = text_ctx.layout(&percent_text, &percent_style, None);
                 let percent_size = percent.size();
 
+                // Stops fixed for the bubble's lifetime (verbatim from the
+                // repro's `_drawBubble`, see the constants above); paint
+                // updates only the position/radius in place each frame.
+                let fill = Gradient::new_radial(Point::ZERO, 0.0).with_stops([
+                    ColorStop {
+                        offset: 0.0,
+                        color: DynamicColor::from_alpha_color(
+                            base_color.with_alpha(FILL_CENTER_OPACITY),
+                        ),
+                    },
+                    ColorStop {
+                        offset: 1.0,
+                        color: DynamicColor::from_alpha_color(
+                            base_color.with_alpha(FILL_EDGE_OPACITY),
+                        ),
+                    },
+                ]);
+
                 BubbleVisual {
                     circle: Circle::new(Point::ZERO, b.radius).to_path(0.1),
                     base_color,
@@ -210,6 +236,7 @@ impl BubbleChartWidget {
                     symbol_too_wide: symbol_size.width > b.radius * 1.6,
                     percent,
                     percent_size,
+                    fill,
                 }
             })
             .collect();
@@ -264,7 +291,7 @@ impl Widget for BubbleChartWidget {
             self.fps_window = None;
         }
 
-        for (b, vis) in self.physics.bubbles.iter().zip(&self.visuals) {
+        for (b, vis) in self.physics.bubbles.iter().zip(self.visuals.iter_mut()) {
             let center = Point::new(origin.x + b.x, origin.y + b.y);
             let r = b.radius;
 
@@ -272,23 +299,16 @@ impl Widget for BubbleChartWidget {
             // radius, gradient radius 0.95r, 0.7→0.3 alpha — the repro's
             // `RadialGradient` verbatim. Brush geometry is in absolute scene
             // coordinates (the recorded command transform is identity here).
-            let fill =
-                Gradient::new_radial((center.x - 0.2 * r, center.y - 0.2 * r), (0.95 * r) as f32)
-                    .with_stops([
-                        ColorStop {
-                            offset: 0.0,
-                            color: DynamicColor::from_alpha_color(
-                                vis.base_color.with_alpha(FILL_CENTER_OPACITY),
-                            ),
-                        },
-                        ColorStop {
-                            offset: 1.0,
-                            color: DynamicColor::from_alpha_color(
-                                vis.base_color.with_alpha(FILL_EDGE_OPACITY),
-                            ),
-                        },
-                    ]);
-            scene.fill_path(center, &vis.circle, &Brush::Gradient(fill));
+            // The `Gradient` object itself is cached on `vis` (task 10.E S1
+            // gradient-brush reuse) — only the position updates in place per
+            // frame; the stops were fixed once in `init`.
+            if let GradientKind::Radial(pos) = &mut vis.fill.kind {
+                let gradient_center = Point::new(center.x - 0.2 * r, center.y - 0.2 * r);
+                pos.start_center = gradient_center;
+                pos.end_center = gradient_center;
+                pos.end_radius = (0.95 * r) as f32;
+            }
+            scene.fill_path(center, &vis.circle, &Brush::Gradient(vis.fill.clone()));
 
             scene.stroke_path(
                 center,
