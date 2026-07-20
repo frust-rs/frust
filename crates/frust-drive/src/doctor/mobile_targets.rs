@@ -4,7 +4,10 @@ use std::collections::HashSet;
 /// Required Rust compile targets for Android builds (spec §12.7) — checked
 /// on every platform, since `cargo-ndk`/Gradle cross-compile Android from
 /// any host.
-const ANDROID_TARGETS: &[&str] = &[
+///
+/// `pub(crate)`: also read by `doctor::report`'s per-area Android/iOS
+/// target breakdown (Plan D6a), sharing this list rather than duplicating it.
+pub(crate) const ANDROID_TARGETS: &[&str] = &[
     "aarch64-linux-android",
     "armv7-linux-androideabi",
     "x86_64-linux-android",
@@ -14,7 +17,23 @@ const ANDROID_TARGETS: &[&str] = &[
 /// macOS: `xcodebuild`/the simulator toolchain don't exist elsewhere, so
 /// flagging these as missing on a non-macOS host would be a false negative
 /// the user can't act on.
-const IOS_TARGETS: &[&str] = &["aarch64-apple-ios", "aarch64-apple-ios-sim"];
+pub(crate) const IOS_TARGETS: &[&str] = &["aarch64-apple-ios", "aarch64-apple-ios-sim"];
+
+/// Runs `rustup target list --installed` and returns the installed-target
+/// set, or `None` if `rustup` itself couldn't be run — the shared probe
+/// [`MobileTargetsValidator`] and `doctor::report`'s per-area target
+/// components (Plan D6a) both build on, so the check is never duplicated.
+pub(crate) fn probe_installed_targets(ctx: &DoctorCtx) -> Option<HashSet<String>> {
+    match ctx.runner.run("rustup", &["target", "list", "--installed"]) {
+        Ok(out) if out.success => Some(
+            out.stdout
+                .lines()
+                .map(|line| line.trim().to_string())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
 
 pub struct MobileTargetsValidator;
 
@@ -30,13 +49,12 @@ impl Validator for MobileTargetsValidator {
             ANDROID_TARGETS.to_vec()
         };
 
-        match ctx.runner.run("rustup", &["target", "list", "--installed"]) {
-            Ok(out) if out.success => {
-                let installed: HashSet<&str> = out.stdout.lines().map(str::trim).collect();
+        match probe_installed_targets(ctx) {
+            Some(installed) => {
                 let missing: Vec<&str> = required
                     .iter()
                     .copied()
-                    .filter(|t| !installed.contains(t))
+                    .filter(|t| !installed.contains(*t))
                     .collect();
                 if missing.is_empty() {
                     Validation {
@@ -53,7 +71,7 @@ impl Validator for MobileTargetsValidator {
                     }
                 }
             }
-            _ => Validation {
+            None => Validation {
                 status: Status::Fail,
                 messages: vec!["rustup not found. Install via https://rustup.rs".to_string()],
             },

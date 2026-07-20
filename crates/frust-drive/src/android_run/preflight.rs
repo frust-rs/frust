@@ -67,7 +67,11 @@ fn check_cargo_ndk(ctx: &PreflightCtx) -> Result<(), String> {
 
 /// Resolves a `JAVA_HOME` with Java 17+: prefers the env var, falls back
 /// (macOS only) to Android Studio's bundled JBR.
-fn check_java(ctx: &PreflightCtx) -> Result<String, String> {
+///
+/// `pub(crate)`: also the JDK probe `doctor::report`'s component-level
+/// report reuses (Plan D6a) rather than re-implementing Java-version
+/// detection.
+pub(crate) fn check_java(ctx: &PreflightCtx) -> Result<String, String> {
     if let Some(home) = ctx.env.get("JAVA_HOME")
         && java_at_least_17(ctx.runner, &home)
     {

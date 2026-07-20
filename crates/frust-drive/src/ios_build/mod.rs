@@ -9,7 +9,10 @@
 
 mod export;
 mod schemes;
-mod team;
+// `pub(crate)`: `doctor::report`'s Signing component (Plan D6a) reuses
+// `team::detect` rather than re-implementing `security find-identity`
+// parsing.
+pub(crate) mod team;
 pub(crate) mod xcodebuild;
 
 use std::collections::HashMap;

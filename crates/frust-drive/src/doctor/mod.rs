@@ -5,12 +5,14 @@
 mod android_sdk;
 mod cargo_ndk;
 mod mobile_targets;
+pub mod report;
 mod rust_toolchain;
 mod xcode;
 
 pub use android_sdk::AndroidSdkValidator;
 pub use cargo_ndk::CargoNdkValidator;
 pub use mobile_targets::MobileTargetsValidator;
+pub use report::{Area, Component, ComponentStatus, DoctorReport, FixCommand, build_report};
 pub use rust_toolchain::RustToolchainValidator;
 pub use xcode::XcodeValidator;
 
