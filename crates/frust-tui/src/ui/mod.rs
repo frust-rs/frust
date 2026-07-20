@@ -15,7 +15,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use crate::engine::{AppState, Screen};
+use crate::engine::{ActiveModal, AppState, Screen};
 use mouse::MouseCtx;
 use theme::Theme;
 
@@ -35,53 +35,71 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
         return;
     }
 
-    // The create wizard is the top-priority modal and can appear over either
-    // screen: the base layer draws suppressed (no live regions), the wizard on
-    // top with the live ctx — the D4 base-layer suppression.
-    if let Some(wizard) = &state.create_wizard {
-        let mut suppressed = MouseCtx::suppressed();
-        match state.screen {
-            Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
-            Screen::Workbench => {
-                views::workbench::render(frame, area, state, theme, &mut suppressed)
-            }
-        }
-        views::create_wizard::render(frame, area, wizard, theme, mouse);
+    // `active_modal` is the single priority source (G3) shared with
+    // `crate::runner::translate_key`'s key routing — an exhaustive match
+    // here means a new modal variant that isn't handled fails to compile
+    // rather than silently missing its suppression/overlay dispatch.
+    if let Some(modal) = state.active_modal() {
+        render_modal(frame, area, state, theme, mouse, modal);
         return;
     }
 
     match state.screen {
         Screen::Welcome => render_welcome(frame, area, state, theme, mouse),
-        Screen::Workbench => {
-            // Every workbench modal below shares the same D4 base-layer
-            // suppression: the workbench beneath renders with no live mouse
-            // regions (pass `None`) so only the topmost modal's regions are
-            // live — `translate_key` (crate::runner) enforces the matching
-            // keyboard exclusivity (each modal's own branch returns before
-            // any other can open while it's live).
-            if let Some(modal) = &state.run_config {
-                let mut suppressed = MouseCtx::suppressed();
-                views::workbench::render(frame, area, state, theme, &mut suppressed);
-                views::run_config::render(frame, area, modal, theme, mouse);
-            } else if state.project_switcher_open {
-                let mut suppressed = MouseCtx::suppressed();
-                views::workbench::render(frame, area, state, theme, &mut suppressed);
-                views::project_switcher::render(frame, area, state, theme, mouse);
-            } else if state.doctor_panel_open {
-                let mut suppressed = MouseCtx::suppressed();
-                views::workbench::render(frame, area, state, theme, &mut suppressed);
-                views::doctor::render(frame, area, &state.doctor, theme, mouse);
-            } else if let Some(launcher) = &state.build_launcher {
-                let mut suppressed = MouseCtx::suppressed();
-                views::workbench::render(frame, area, state, theme, &mut suppressed);
-                views::build_launcher::render(frame, area, launcher, theme, mouse);
-            } else if let Some(project_root) = &state.clean_confirm {
-                let mut suppressed = MouseCtx::suppressed();
-                views::workbench::render(frame, area, state, theme, &mut suppressed);
-                views::clean_confirm::render(frame, area, project_root, theme, mouse);
-            } else {
-                views::workbench::render(frame, area, state, theme, mouse);
+        Screen::Workbench => views::workbench::render(frame, area, state, theme, mouse),
+    }
+}
+
+/// Render the currently-active modal (`state.active_modal()`) over its base
+/// layer. Every arm shares the same D4 base-layer suppression: the chrome
+/// beneath draws with no live mouse regions (a `MouseCtx::suppressed()`), so
+/// only the topmost modal's regions are live — `translate_key`
+/// (`crate::runner`) enforces the matching keyboard exclusivity.
+fn render_modal(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+    modal: ActiveModal,
+) {
+    match modal {
+        // The create wizard is the top-priority modal and can appear over
+        // either screen, unlike the rest (workbench-only).
+        ActiveModal::CreateWizard(wizard) => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
             }
+            views::create_wizard::render(frame, area, wizard, theme, mouse);
+        }
+        ActiveModal::RunConfig(modal) => {
+            let mut suppressed = MouseCtx::suppressed();
+            views::workbench::render(frame, area, state, theme, &mut suppressed);
+            views::run_config::render(frame, area, modal, theme, mouse);
+        }
+        ActiveModal::ProjectSwitcher => {
+            let mut suppressed = MouseCtx::suppressed();
+            views::workbench::render(frame, area, state, theme, &mut suppressed);
+            views::project_switcher::render(frame, area, state, theme, mouse);
+        }
+        ActiveModal::DoctorPanel => {
+            let mut suppressed = MouseCtx::suppressed();
+            views::workbench::render(frame, area, state, theme, &mut suppressed);
+            views::doctor::render(frame, area, &state.doctor, theme, mouse);
+        }
+        ActiveModal::BuildLauncher(launcher) => {
+            let mut suppressed = MouseCtx::suppressed();
+            views::workbench::render(frame, area, state, theme, &mut suppressed);
+            views::build_launcher::render(frame, area, launcher, theme, mouse);
+        }
+        ActiveModal::CleanConfirm(project_root) => {
+            let mut suppressed = MouseCtx::suppressed();
+            views::workbench::render(frame, area, state, theme, &mut suppressed);
+            views::clean_confirm::render(frame, area, project_root, theme, mouse);
         }
     }
 }

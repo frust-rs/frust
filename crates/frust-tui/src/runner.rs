@@ -29,8 +29,8 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{
-    AppState, BuildFocus, BuildSpec, BuildTargetSpec, DoctorCheck, Effect, Engine, Message,
-    RegionId, RunFocus, Screen, WizardStep,
+    ActiveModal, AppState, BuildFocus, BuildSpec, BuildTargetSpec, DoctorCheck, Effect, Engine,
+    Message, RegionId, RunFocus, Screen, WizardStep,
 };
 use crate::supervise::{
     DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor,
@@ -644,35 +644,21 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         return vec![Message::Quit];
     }
 
-    // While the create wizard is open it captures every other key.
-    if let Some(wizard) = &state.create_wizard {
-        return translate_wizard_key(code, mods, wizard.step);
-    }
-
-    // While the run-config modal is open it captures every other key.
-    if let Some(modal) = &state.run_config {
-        return translate_modal_key(code, mods, modal);
-    }
-
-    // While the project switcher is open it captures every other key.
-    if state.project_switcher_open {
-        return translate_switcher_key(code, state);
-    }
-
-    // While the doctor panel is open it captures every other key (D4-style
-    // modal exclusivity — see `crate::ui::render`'s workbench-modal chain).
-    if state.doctor_panel_open {
-        return translate_doctor_key(code);
-    }
-
-    // While the build launcher is open it captures every other key.
-    if let Some(launcher) = &state.build_launcher {
-        return translate_build_key(code, mods, launcher);
-    }
-
-    // While the clean-confirm dialog is open it captures every other key.
-    if state.clean_confirm.is_some() {
-        return translate_clean_confirm_key(code);
+    // While a modal is open it captures every other key. `active_modal` is
+    // the single priority source (G3) — an exhaustive match here means a new
+    // modal variant that isn't handled fails to compile rather than silently
+    // falling through to the keys below.
+    if let Some(modal) = state.active_modal() {
+        return match modal {
+            ActiveModal::CreateWizard(wizard) => translate_wizard_key(code, mods, wizard.step),
+            ActiveModal::RunConfig(modal) => translate_modal_key(code, mods, modal),
+            ActiveModal::ProjectSwitcher => translate_switcher_key(code, state),
+            // D4-style modal exclusivity — see `crate::ui::render`'s
+            // workbench-modal dispatch, which shares this same priority order.
+            ActiveModal::DoctorPanel => translate_doctor_key(code),
+            ActiveModal::BuildLauncher(launcher) => translate_build_key(code, mods, launcher),
+            ActiveModal::CleanConfirm(_) => translate_clean_confirm_key(code),
+        };
     }
 
     // While the search overlay is open, keys edit the query.
