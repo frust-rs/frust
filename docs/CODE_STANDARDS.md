@@ -12,70 +12,60 @@
   avoid, each isolated in one function/module with a `# Safety` doc comment
   stating the caller contract:
   - `frust-render`'s `create_android_surface`/`create_metal_surface`
-    (`lifecycle.rs`) and the `on_surface_created_from_android_window`/
-    `on_surface_created_from_metal_layer` renderer methods (`renderer.rs`)
-    — turn a caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a
-    `wgpu::Surface`.
+    (`lifecycle.rs`) and `on_surface_created_from_android_window`/
+    `on_surface_created_from_metal_layer` (`renderer.rs`) — turn a
+    caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`.
   - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary
     (`extern "system"` exports, `Box::into_raw`/`from_raw` for the opaque
-    native handle, `ANativeWindow_fromSurface`, the `nativeInitPlatform`
-    export's `JavaVM`-pointer stash and `Global` context ref) — plus the
-    `#[unsafe(no_mangle)]` attributes the `android_app!` macro emits on its
-    generated exports.
+    handle, `ANativeWindow_fromSurface`, `nativeInitPlatform`'s `JavaVM`
+    stash/`Global` context ref) — plus the `#[unsafe(no_mangle)]` attrs
+    `android_app!` emits on its generated exports.
   - `frust-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary
-    (`extern "C"` exports, `Box::into_raw`/`from_raw` for the opaque native
-    handle, the call into `on_surface_created_from_metal_layer`) — plus the
-    `#[unsafe(no_mangle)]` attributes the `ios_app!` macro emits on its
-    generated exports.
-  - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/`jobject`
-    plugins need from `ndk-context`-stored handles (the shell-called
-    `initialize` entry and `with_jni_env`'s raw JavaVM/jobject reconstruction),
-    one sanctioned-`unsafe` module, scoped `AttachGuard` per call.
+    (`extern "C"` exports, `Box::into_raw`/`from_raw` for the opaque handle,
+    the call into `on_surface_created_from_metal_layer`) — plus the
+    `#[unsafe(no_mangle)]` attrs `ios_app!` emits on its generated exports.
+  - `frust-plugin`'s `android` module — reconstructs the raw
+    `JavaVM`/`jobject` plugins need from `ndk-context`-stored handles
+    (`initialize`/`with_jni_env`), one sanctioned module, scoped
+    `AttachGuard` per call.
   - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:`
     calls (`objc2` marks the untyped Foundation setter unsafe;
-    `NSString`/`NSArray` are property-list-safe values), each
-    `# Safety`-noted.
-  - `frust-render`'s `context.rs::RenderContext::create_pipeline_cache`
-    — one `unsafe { device.create_pipeline_cache(..) }` call building a
-    `wgpu::PipelineCache` from a shell-persisted blob. The blob is
-    `unframe`d and adapter-fingerprint-validated (`pipeline_cache::unframe`)
-    before this call, and wgpu's own `fallback: true` backstops any
-    residual mismatch — see `docs/ARCHITECTURE.md`'s GPU pipeline cache.
-- **No unwind across FFI.** Every platform export both shells define routes
-  through `frust-shell-common`'s `guard` helper, which `catch_unwind`s and
-  logs, returning a benign default instead of unwinding into JVM- or
-  Swift-owned stack frames — a panic crossing the FFI boundary is undefined
-  behavior, not just a bug.
+    `NSString`/`NSArray` are property-list-safe), each `# Safety`-noted.
+  - `frust-render`'s `RenderContext::create_pipeline_cache` — one `unsafe
+    { device.create_pipeline_cache(..) }` call building a
+    `wgpu::PipelineCache` from a shell-persisted, `unframe`d and
+    adapter-fingerprint-validated blob; wgpu's `fallback: true` backstops
+    any residual mismatch — see `docs/ARCHITECTURE.md`'s GPU pipeline cache.
+- **No unwind across FFI.** Every platform export routes through
+  `frust-shell-common`'s `guard` helper (`catch_unwind` + log, returning a
+  benign default) rather than unwinding into JVM-/Swift-owned stack frames
+  — a panic crossing the FFI boundary is undefined behavior, not a bug.
 - **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS
   platform text input doesn't send individual keystrokes across the FFI
   boundary — the platform owns composition (Gboard, CJK marked text) against
   a local mirror (Kotlin `Editable`/Swift `NSMutableString`), then hands the
   framework a whole reconciled `EditingState` (`nativeImeApply`/
-  `frust_ime_apply`) and reads a reconciled state back
-  (`nativeImeState`/`frust_ime_state_json`) to keep its own IME machinery
-  (`InputConnection`/`UITextInput`) synchronized. Do not add a per-keystroke
-  op-forwarding path for mobile text input — it fights the platform's own
-  composition state machine.
+  `frust_ime_apply`) and reads one back (`nativeImeState`/
+  `frust_ime_state_json`) to keep its own IME machinery
+  (`InputConnection`/`UITextInput`) synchronized — never add a per-keystroke
+  op-forwarding path; it fights the platform's own composition machine.
 - **UTF-16 at the FFI seam, bytes inside.** `EditingState`'s
   `selection_*`/`composing_*` indices are UTF-16 code-unit indexed
   everywhere they cross a shell boundary (JNI, C-ABI, `AppTree`) — the
   platform's native string type. Convert to/from byte offsets only inside
-  `frust-text`'s `TextEditor` (`byte_to_utf16`/`utf16_to_byte`); a
-  shell/glue module passes indices through opaquely and never does this
-  conversion itself.
+  `frust-text`'s `TextEditor` (`byte_to_utf16`/`utf16_to_byte`); a shell/glue
+  module passes indices through opaquely and never converts them itself.
 - **Hand-roll JSON at the mobile FFI boundary — no `serde` in shell crates.**
-  `frust-shell-android`/`frust-shell-ios` serialize `ImeState` with a
-  small hand-written escaper/builder, not a `serde_json` dependency, keeping
-  the always-host-testable half of each shell crate free of a codegen
-  dependency for a handful of fixed fields.
-- **Type-erase to avoid a downstream crate dependency**, not to avoid writing
-  a type. When a lower layer needs to thread a resource owned by a higher
-  layer (e.g. `frust-core`'s `LayoutCtx` carrying the shell's
-  `frust-text::TextContext`), pass it as `&mut dyn Any` rather than adding
-  the dependency, and recover it at the one call site that knows the
-  concrete type with a documented, panic-on-mismatch `downcast_mut::<T>()`
-  — the panic message should say this is a wiring bug, not a runtime-data
-  condition.
+  `frust-shell-android`/`frust-shell-ios` serialize `ImeState` with a small
+  hand-written escaper/builder, keeping each shell's host-testable half free
+  of a codegen dependency for a handful of fixed fields.
+- **Type-erase to avoid a downstream crate dependency**, not to avoid
+  writing a type. When a lower layer threads a resource owned by a higher
+  layer (e.g. `frust-core`'s `LayoutCtx` carrying `frust-text::TextContext`),
+  pass it as `&mut dyn Any` instead of adding the dependency, and recover it
+  at the one call site that knows the concrete type via a documented,
+  panic-on-mismatch `downcast_mut::<T>()` (the panic should say wiring bug,
+  not runtime-data condition).
 - **Edition-2024 `-> impl Trait` return types capture all in-scope
   lifetimes by default.** When a function returns an `impl Trait` that
   borrows nothing from its parameters (e.g. `app_logic(&mut State) -> impl
@@ -166,6 +156,16 @@ Structure) follow these conventions:
 - **A store shared with the OS namespaces its keys `frust.`**
   (NSUserDefaults, Android SharedPreferences) so plugin keys can't collide
   with other libraries'.
+
+## TUI Conventions
+
+- **`ui` renders `&AppState`, never mutates the engine** — all state
+  changes happen in `engine::update`; a render fn taking `&mut` state is a
+  layering violation.
+- **Every mouse action has keyboard parity** (e.g. the welcome Create
+  button: `Enter`/`c`) — mouse support is additive, never the sole path.
+- **fdemon is a pattern source, not a copy source** — it is BSL-1.1
+  licensed; study its patterns but never copy a file verbatim.
 
 ## Anti-patterns
 

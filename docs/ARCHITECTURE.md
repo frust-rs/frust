@@ -25,7 +25,9 @@ consumed by app code via the `frust` facade crate, and example apps under
 | `frust-shell-common` | Platform-agnostic shell plumbing shared by the Android and iOS shells: the `AppTree` type-erasure that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size`/`logical_insets` FFI-boundary helpers. Depends on `frust-core`/`frust-scene`/`frust-text`/`frust-theme` (its `theme_override` module is the app-facing `set_app_theme`/`clear_app_theme` seam — see Data Flow's Theme delivery; stays reactive-free in its shipped graph, see Layer Dependencies) — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. Its `frame_gate` module is the whole-frame skip gate both mobile shells consult before rebuilding (see Data Flow's Frame gate). |
 | `frust-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `frust_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `frust-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. |
 | `frust` | Facade crate: the public app-author API — the canonical `Component`/`app!`/`run` entry surface (spec §5.5), plus `App`/`View`/the widget vocabulary as the lower-level layer `app!` desugars to — composing the crates above into the spec's declarative call shape. Also home to `decode_image_async` (an off-thread `spawn_blocking` wrapper around `frust-widgets`' synchronous `ImageSource::decode`, composing with `use_task`) — it lives here rather than in `frust-widgets` because that crate stays reactive/tokio-free by charter (see Layer Dependencies). Depends on `frust-shell-android`, `frust-shell-ios`, and `frust-reactive` unconditionally, and on `frust-shell-desktop` only for non-Android targets; `run`/`App::run` (the desktop preview loop) are likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
-| `frust-cli` | Standalone `frust` binary: project scaffolding (including full Gradle/Kotlin Android and Xcode/Swift iOS project templates rendered into `<app>/android/` and `<app>/ios/`), environment doctor, device discovery, and the `frust run`/`build`/`clean` drive pipelines for both platforms (Android via Gradle/cargo-ndk, iOS via xcodebuild/devicectl). Depends on none of the framework crates above. |
+| `frust-drive` | Drive library: the `ProcessRunner` seam (`run`/`run_streaming`/cancellable `spawn_streaming` + `StreamHandle`), device discovery, environment doctor checks, the `BuildInfo` mode/flavor/defines funnel (sans the clap-derived `BuildArgs`, which stays CLI-side), the Android (Gradle/cargo-ndk) and iOS (xcodebuild/devicectl) run/build pipelines, and the project scaffold/template renderer (full Gradle/Kotlin Android and Xcode/Swift iOS project templates). Consumed by `frust-cli` and `frust-tui`; no framework-crate or clap dependency. |
+| `frust-tui` | Mouse-first ratatui TEA workbench: `engine` (pure `AppState`/`Message`/`update`, an mpsc-channeled `Engine`), `ui` (layout/views/theme/a per-frame mouse-region registry with hover — renders `&AppState` only, never mutates the engine), and a tokio-driven `runner` (terminal lifecycle, crossterm event loop, dirty-frame skip). Depends on `frust-drive` only; no other framework crate. |
+| `frust-cli` | Standalone `frust` binary: a thin clap front-end. `commands::dispatch` constructs one `RealProcessRunner` and injects it into every handler, which calls `frust-drive` for scaffolding, doctor/device checks, and the run/build/clean drive pipelines, and `frust-tui` for the `tui` subcommand. Depends on `frust-drive` + `frust-tui`; no direct dependency on the framework crates above. |
 | `frust-plugin` | Leaf plugin substrate (like `frust-reactive`): owns the Android `(JavaVM, application Context)` platform-handle install a plugin needs to reach the OS through FFI — the shell's `nativeInitPlatform` calls `android::initialize` once, which writes the handles into `ndk-context`'s process-wide slot and sets an atomic ready flag; a plugin reads them back via `android::with_jni_env` (a scoped JNI attach), gated on that flag first — see Data Flow's Plugin flow. No `frust-*` dependencies; inert (the flag never sets, so calls always report `NotInitialized`) on non-Android targets so it stays an unconditional plugin dependency. On Apple there is nothing to publish — the ObjC runtime is globally reachable via `objc2`. |
 | `frust-shared-preferences` (`plugins/shared-preferences`) | The first **platform plugin**: a synchronous, thread-safe key-value store (`bool`/`i64`/`f64`/`String`/`Vec<String>`) behind one `SharedPreferences` API, routed by `#[cfg(target_os)]` to three backends — `apple` (`NSUserDefaults` via `objc2`, also serving macOS desktop preview), `android` (`Context.getSharedPreferences` via `frust-plugin`), `file` (a JSON file on Linux/Windows). Depends on `frust-plugin` plus FFI crates only, never on a `frust-*` framework crate. |
 | `clean-signals-frust` (`plugins/clean-signals-frust`) | The first **facade-tier plugin**: a glue crate binding the (separately published) `clean-signals` clean-architecture core to Frust — nothing more than a crate depending on `frust`, sitting above the whole framework graph. A standalone workspace excluded from the root Cargo workspace (like `examples/huddle`), since its `clean-signals` dependency is a sibling-checkout path dep until `clean-signals` publishes to crates.io (see `docs/DEVELOPMENT.md`). |
@@ -46,7 +48,8 @@ frust-shell-android = core + scene + render + text + theme + reactive + shell-co
 frust-shell-ios     = core + scene + render + text + theme + reactive + shell-common           (iOS integration point; C-ABI FFI)
 frust  = core + widgets + reactive + shell-android (always) + shell-ios (always) + shell-desktop (non-Android only)
 
-frust-cli    (independent binary: clap/anyhow/serde/minijinja/include_dir/thiserror only)
+frust-drive  (leaf: no frust-* deps, no framework-crate deps — process/devices/doctor/build/scaffold + android/ios pipelines)
+frust-cli (bin) → frust-tui → frust-drive  (clap front-end → ratatui/crossterm TEA workbench → drive library; no other framework crate)
 
 frust-plugin  (leaf: no frust-* deps; Android-only jni/ndk-context, target-gated; inert stub elsewhere)
 plugins/*     (beside the facade, never inside it — the facade never depends on or re-exports a plugin)
@@ -365,14 +368,13 @@ a panic (see `docs/DEVELOPMENT.md`'s manual gate).
 
 **Deferred: build-time contribution manifests.** A plugin needing an
 OS-side contribution (an Android manifest entry, a Gradle dependency, an
-Info.plist key) would declare it in a per-platform `frust-plugin.toml`;
-`frust-cli` would discover contributions via `cargo metadata` at
-`run`/`build` preflight and inject them into the generated project through
-anchored marker-comment merges — never a wholesale re-render, since
-generated projects are user-editable (the `local.properties` merge-write
-precedent). **Implemented: no** — deferred until the first plugin that
-actually needs a contribution; `frust-shared-preferences` needs none on any
-platform.
+Info.plist key) would declare it in a per-platform `frust-plugin.toml`,
+discovered via `cargo metadata` at `run`/`build` preflight and merged into
+the generated project through anchored marker-comment merges — never a
+wholesale re-render, since generated projects are user-editable (the
+`local.properties` merge-write precedent). **Implemented: no** — deferred
+until the first plugin needs a contribution; `frust-shared-preferences`
+needs none.
 
 **Navigation flow:** `nav::navigator()`'s retained page stack is driven by
 `NavigatorController`, a cloneable handle that only *records* requested ops
@@ -430,22 +432,25 @@ closing the stale-by-one-frame window where a poppable stack could
 otherwise fall through to activity-finish; the navigator's own `len > 1`
 guard makes any residual mis-prediction a safe no-op pop.
 
-**CLI flow:** `Cli` (clap) parses into a `Command`, dispatched to a
-`commands::*` handler. `create` renders the embedded `templates/app/` tree
-(a full Gradle/Kotlin Android project and a full Xcode/Swift iOS project)
-against a `TemplateContext`. `doctor`/`devices` run fixed sets of
-`Validator`/`DeviceDiscovery` implementations against a shared
-`DoctorCtx`/`ProcessRunner`, so no handler ever shells out directly. `run`
-and `build` both resolve a `BuildInfo` funnel (mode/flavor/defines —
-debug-default for `run`, release-default for `build`) and dispatch per
-platform: Android through Gradle/cargo-ndk (`android_run`/`android_build`),
-iOS through `xcodebuild`/`devicectl`/`simctl` (`ios_run`/`ios_build`). `run`
-installs and streams device output until Ctrl-C, falling back to a streamed
-`cargo run` with no device selected; `build` resolves an
-`AndroidArtifact`/`IosArtifact` target and hands back a `BuiltArtifacts`
-path list. Release builds additionally gate on platform signing (a keystore
-for Android, a `DEVELOPMENT_TEAM` for iOS — see Key Types' `BuildInfo`
-row). `clean` removes Cargo and Gradle build output.
+**CLI flow:** `Cli` (clap) parses into a `Command`, dispatched by
+`commands::dispatch`, which builds one `RealProcessRunner` and injects it
+into every thin handler's `run_in` core — the CLI's sole `Real`
+construction site. `create` renders `templates/app/` via
+`frust-drive::scaffold` against a `TemplateContext` (see Module Structure).
+`doctor`/`devices` run fixed `Validator`/`DeviceDiscovery` sets against the
+injected runner, so no handler ever shells out directly. `run`/`build`
+convert a clap `BuildArgs` into `frust-drive`'s `BuildInfo` funnel
+(mode/flavor/defines — debug-default for `run`, release-default for
+`build`) and dispatch to `frust-drive`'s per-platform pipelines (see Module
+Structure's `frust-drive` row). `run` installs and streams device output
+until Ctrl-C, or falls back to a streamed `cargo run` desktop preview —
+threading `BuildInfo`'s mode into the `cargo` profile arg and every
+`--define` into the spawned env, matching on-device behavior. `build`
+resolves an `AndroidArtifact`/`IosArtifact` target into a `BuiltArtifacts`
+path list; release builds gate on platform signing (see Key Types'
+`BuildInfo` row). `clean` removes Cargo/Gradle build output; `tui` hands
+off to `frust-tui`'s entry point from its own tokio runtime, bridging the
+async workbench into the CLI's synchronous dispatch.
 
 ## Key Types
 
@@ -489,6 +494,6 @@ row). `clean` removes Cargo and Gradle build output.
 | `new_boxed_app_with` | `frust-shell-common`'s app-construction seam: builds an `AppTree` from a state *factory* closure (`FnOnce() -> State`) rather than a pre-built value, letting the entry macros bind `Component::init`; `new_boxed_app` (`State: Default`) is the convenience wrapper over it. |
 | `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines, build name/number); drives both the `build` command (release-default) and `run`'s Android/iOS pipelines (debug-default). |
 | `AndroidArtifact` / `IosArtifact` / `BuiltArtifacts` | Artifact-selection targets for the `build` command (Android APK with optional ABI splits, or an appbundle; iOS an `.app`, optionally unsigned, or an archived `.ipa` with an export method) and the resulting built-artifact path list `android_build`/`ios_build` hand back. |
-| `ProcessRunner` | Seam for every external tool invocation in the CLI, including streaming invocations (`run_streaming`) for long-running processes like `gradlew`/`logcat`; fakeable in tests. |
+| `ProcessRunner` | `frust-drive`'s seam for every external tool invocation, including blocking streaming (`run_streaming`) and cancellable streaming (`spawn_streaming` → `StreamHandle`, with `kill()`) for long-running processes like `gradlew`/`logcat`; fakeable in tests. |
 | `Validator` / `DeviceDiscovery` | Pluggable `doctor`/`devices` checks, each independent and non-fatal on failure. |
 | `TemplateContext` | Render/path substitution variables for `frust create`'s scaffold. |

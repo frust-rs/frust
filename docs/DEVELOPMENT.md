@@ -67,27 +67,19 @@ for the full A/B).
 ## Run
 
 ```bash
-# Huddle: the repo's sole example, a Slack-style showcase app (Component
-# tree wiring clean-signals ControllerCores to Frust via the
-# clean-signals-frust glue plugin) — exercises the framework surface
-# end-to-end. `examples/huddle` is a standalone package (its own
-# [workspace] root, own Cargo.lock — see Version-Pin Policy below),
-# excluded from the root workspace, so it is run and gated from its own
-# directory rather than by `-p` from the repo root.
+# Huddle: the repo's sole example (own [workspace]/Cargo.lock, excluded
+# from the root workspace — run/gate from its own directory, not `-p`).
 (cd examples/huddle && cargo run)
 ```
 
 `(cd examples/huddle && cargo run)` is the manual visual gate for
-rendering/interaction/theme/navigation/text-input changes — there is no
-automated pixel-diff test yet, so a person must look at the window. It
-exercises tab navigation with M3 transitions, a channel/feed/thread flow
-with shared-element transitions and swipe/long-press actions,
-pull-to-refresh and pagination, multiline text input, themed settings, and
-toast/undo feedback — plus the check that a background-thread wake (e.g. a
-timer-driven completion) renders content with zero mouse movement, not
-only on an input-triggered redraw. `examples/huddle`'s own verify gate
-(`cargo test` plus clippy, from its own directory) is the conditional step
-in *Test* below, gated on the clean-signals-rs sibling checkout.
+rendering/interaction/theme/navigation/text-input changes (no automated
+pixel-diff test yet, so a person must look at the window) — including the
+check that a background-thread wake (e.g. a timer-driven completion)
+renders content with zero mouse movement, not only on an input-triggered
+redraw. `examples/huddle`'s own verify gate (`cargo test` plus clippy, from
+its own directory) is the conditional step in *Test* below, gated on the
+clean-signals-rs sibling checkout.
 
 `examples/huddle` additionally builds and runs on Android and iOS, from
 its own directory (its own `frust.toml`, package `it.f0x.huddle`):
@@ -131,6 +123,11 @@ a 30–120Hz `preferredFrameRateRange`; Android calls `Surface.setFrameRate()`
 (API 30+) with the display's max rate. Both are hints, not guarantees —
 achieved rate is device/OEM/thermal-state dependent and unverifiable on the
 iOS Simulator (see *Known Issues*) or most Android emulators (60Hz-only).
+
+**TUI workbench.** `frust tui` opens the ratatui workbench; `q`/`Ctrl+Q`
+quits and restores the terminal. `cargo test -p frust-tui` covers
+engine/render logic; live-terminal hover/click and panic-restore are a
+**manual gate**.
 
 ## Dev Loop
 
@@ -193,6 +190,8 @@ cargo build --workspace --locked \
   && cargo clippy --workspace --all-targets -- -D warnings \
   && cargo fmt --check
 ```
+
+`frust-drive`/`frust-tui` ride this gate automatically (root workspace members).
 
 If the clean-signals-rs sibling checkout exists at `../clean-signals-rs`
 (branch `master` — see Prerequisites and *Version-Pin Policy*),
@@ -326,8 +325,7 @@ above, so each is a person-driven check:
 
 A kill-and-relaunch persistence gate for `frust-shared-preferences`
 (`plugins/shared-preferences`), against the scaffolded notes app template
-(`frust create`'s default `lib.rs.tmpl`, which persists its notes list +
-draft through the plugin):
+(`frust create`'s default `lib.rs.tmpl`, persisting its notes list + draft):
 
 - **Persistence:** add a note (and/or edit the draft), kill the app, relaunch
   it, and confirm the note/draft survived — on the desktop preview (`cargo
@@ -427,6 +425,9 @@ deliberately, not floating:
 - `notify = "8"` (`frust run --watch`'s filesystem-watch dependency,
   `frust-cli`-only like `ctrlc` above) is pinned to minor; `cargo test -p
   frust-cli` is the tripwire for a breaking bump.
+- `ratatui = "0.30"` / `crossterm = "0.29"` (`frust-tui`'s render/terminal
+  stack) are pinned to minor — pre-1.0 churn expected; `cargo test -p
+  frust-tui` is the tripwire.
 - `examples/huddle` and `plugins/clean-signals-frust` are each a
   **standalone package** (own `[workspace]` root and `Cargo.lock`,
   `exclude`d from the root `[workspace]`). Both path-depend on the
@@ -460,40 +461,39 @@ The codebase is formatted with `rustfmt` using default settings (no
 ### Android emulator GPU on Apple Silicon
 
 An Apple-Silicon Android emulator's default (hardware) GPU path segfaults on
-`vkQueueSubmit` inside the emulator's gfxstream/MoltenVK Vulkan driver — an
-emulator/driver limitation, not a Frust bug. Use a physical device, or
-boot the emulator with `-gpu swiftshader_indirect` (software Vulkan; slower
-but correct).
+`vkQueueSubmit` in the emulator's gfxstream/MoltenVK Vulkan driver (an
+emulator/driver limitation, not a Frust bug). Use a physical device, or
+boot with `-gpu swiftshader_indirect` (software Vulkan; slower but
+correct).
 
 ### iOS Simulator cannot render (vello 0.9 / wgpu 29)
 
-The iOS Simulator's GPU only exposes the Apple2 Metal feature family, which
-lacks `wgpu::DownlevelFlags::INDIRECT_EXECUTION` — a flag vello 0.9's
-renderer unconditionally requires. A wgpu-hal-29/vello-0.9 limitation, not
-fixable under the workspace's version pin (see *Version-Pin Policy*);
-`frust-render` detects it up front and fails fast with a clear diagnostic
-instead of letting vello panic every frame — `frust run` on a simulator
-still builds/installs/launches, but the window stays black. **Physical iOS
-devices are unaffected** (Apple7+ GPUs expose the flag; verified on an
-iPhone 13 mini) — use a physical device for a pixel-accurate check until a
-future wgpu/vello upgrade closes the gap.
+The iOS Simulator's GPU only exposes the Apple2 Metal feature family,
+lacking `wgpu::DownlevelFlags::INDIRECT_EXECUTION`, which vello 0.9's
+renderer unconditionally requires — a wgpu-hal-29/vello-0.9 limitation, not
+fixable under the version pin (see *Version-Pin Policy*). `frust-render`
+detects it and fails fast with a clear diagnostic instead of a per-frame
+panic; `frust run` still builds/installs/launches, but the window stays
+black. **Physical iOS devices are unaffected** (Apple7+ GPUs expose the
+flag; verified on an iPhone 13 mini) — use one for a pixel-accurate check
+until a future wgpu/vello upgrade closes the gap.
 
 ### vello bitmap color-emoji decode (desktop confirmed safe; Android CBDT at risk)
 
 vello 0.9's bitmap-glyph decode path (`sbix`/COLR bitmap strikes) errors
-and skips any glyph whose PNG isn't already `(RGBA, 8-bit)` — pinned,
-unfixed upstream ([linebender/vello#1031](https://github.com/linebender/vello/issues/1031),
+and skips any glyph whose PNG isn't `(RGBA, 8-bit)` — pinned, unfixed
+upstream ([linebender/vello#1031](https://github.com/linebender/vello/issues/1031),
 open as of 2026-07-16; not addressable under the Version-Pin Policy without
-vendoring). Confirmed **safe** for huddle's current desktop emoji set: every
-reaction-emoji glyph's Apple Color Emoji `sbix` strike is uniformly RGBA8 at
-every size. The one **unverified, at-risk** path is Android's CBDT bitmap
-strikes (see `docs/ARCHITECTURE.md`'s `frust-text` row) — legacy Noto
-Color Emoji CBDT strikes are known in the wild to use palette-indexed PNGs
-at smaller sizes, which would trigger this defect; no Android
+vendoring). **Safe** for huddle's current desktop emoji set (every
+reaction-emoji glyph's Apple Color Emoji `sbix` strike is uniformly RGBA8
+at every size); the one **unverified, at-risk** path is Android's CBDT
+bitmap strikes (see `docs/ARCHITECTURE.md`'s `frust-text` row) — legacy
+Noto Color Emoji CBDT strikes are known to use palette-indexed PNGs at
+smaller sizes, which would trigger this defect, and no Android
 device/emulator has confirmed either way. If an on-device check finds a
 broken glyph, revisit vendoring the one-line `Transformations::EXPAND` fix
-before taking a future vello major-version bump. The desktop logger suppresses
-known-noisy vello `Error`/`Warn` messages (e.g. "Unsupported `output_color_type`",
-"Invalid PNG in font") below `debug` (see *Instrumentation*'s `FRUST_LOG` row),
-so a triggered glyph can't spam stderr; other vello errors still surface at the
-default level to catch unexpected render issues.
+before a future vello major bump. The desktop logger suppresses
+known-noisy vello `Error`/`Warn` messages (e.g. "Unsupported
+`output_color_type`", "Invalid PNG in font") below `debug`
+(*Instrumentation*'s `FRUST_LOG` row); other vello errors still surface at
+the default level.
