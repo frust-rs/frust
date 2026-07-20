@@ -41,7 +41,13 @@
 //!
 //! Same reasoning as S2 (see that module's doc): `ListView` has no
 //! programmatic scroll-to/controller API, so a scripted (no-real-input)
-//! auto-scroll must drive its own offset during paint. This scenario reuses
+//! auto-scroll must drive its own offset during paint — and, like S2, must
+//! **publish that offset through a signal** so the next rebuild reports
+//! `ChangeFlags::LAYOUT` and the cell window re-windows as it scrolls, even
+//! under Android's layout-skip frame gate (`docs/ARCHITECTURE.md`'s Frame gate;
+//! without it, layout runs only on frame 1 on device, the window freezes, no
+//! new image ids become visible to decode, and the scene goes empty). This
+//! scenario reuses
 //! the real `frust::Image`/`ImageView` leaf widget per visible cell (built and
 //! driven directly through the public `frust_core` `View`/`Widget`/`BuildCtx`/
 //! `LayoutCtx`/`PaintCtx` API — the same pattern `frust-widgets`' own
@@ -274,6 +280,17 @@ struct ImageStreamPage;
 struct ImageStreamState {
     tasks: HashMap<u64, UseTask<ImageSource>>,
     visible_ids: RwSignal<Vec<u64>>,
+    /// The scripted scroll offset, published by the stream widget during paint
+    /// and read back (tracked) here every rebuild. Threading it through a signal
+    /// lets [`ImageStream::rebuild`] report `ChangeFlags::LAYOUT` when the scroll
+    /// advances, so the materialized cell window (and the widget-reported
+    /// `visible_ids` that drive decode scheduling) re-window every frame on every
+    /// platform — including Android's otherwise layout-skipping frame gate
+    /// (`docs/ARCHITECTURE.md`'s Frame gate). Without it, layout runs only on
+    /// frame 1 on device, the window freezes at offset 0, no new ids ever become
+    /// visible (so nothing new decodes), and the scripted scroll slides every
+    /// materialized cell off-screen into an empty scene.
+    offset: RwSignal<f64>,
 }
 
 impl Component for ImageStreamPage {
@@ -283,6 +300,7 @@ impl Component for ImageStreamPage {
         ImageStreamState {
             tasks: HashMap::new(),
             visible_ids: RwSignal::new(Vec::new()),
+            offset: RwSignal::new(0.0),
         }
     }
 
@@ -307,6 +325,11 @@ impl Component for ImageStreamPage {
         any(ImageStream {
             ready,
             visible_ids: state.visible_ids,
+            offset: state.offset,
+            // Tracked read: a paint-time `offset.set` wakes the next rebuild,
+            // whose `ImageStream::rebuild` then reports `ChangeFlags::LAYOUT`
+            // (see `ImageStreamState::offset`).
+            scroll_offset: state.offset.get(),
         })
     }
 }
@@ -316,12 +339,23 @@ impl Component for ImageStreamPage {
 struct ImageStream {
     ready: HashMap<u64, ImageSource>,
     visible_ids: RwSignal<Vec<u64>>,
+    /// The scroll-offset signal the widget publishes to during paint.
+    offset: RwSignal<f64>,
+    /// The current value of [`offset`](Self::offset), read (tracked) in the
+    /// component build; a change between rebuilds triggers the
+    /// `ChangeFlags::LAYOUT` that re-windows the stream under the Android gate.
+    scroll_offset: f64,
 }
 
 struct ImageStreamWidget {
     ready: HashMap<u64, ImageSource>,
     visible_ids: RwSignal<Vec<u64>>,
     last_reported_ids: Vec<u64>,
+    /// The scroll-offset signal published during paint (see [`ImageStream::offset`]).
+    offset_signal: RwSignal<f64>,
+    /// The last offset published, so a paint only writes the signal (waking a
+    /// relayout-forcing rebuild) when the scripted scroll actually advanced.
+    last_offset_published: f64,
     image_widgets: HashMap<u64, Box<dyn Widget>>,
     offset: f64,
     viewport: Size,
@@ -379,7 +413,19 @@ impl ImageStreamWidget {
         };
         self.last_frame = Some(now);
         self.script_ms = (self.script_ms + dt_ms) % CYCLE_MS;
-        self.offset = s5_scripted_offset(self.script_ms, self.max_offset());
+        // Publish (only on change) the next scripted offset through the signal
+        // rather than mutating the drawn offset directly. The drawn/windowed
+        // `self.offset` is set from this signal by `ImageStream::rebuild`, so the
+        // cell window (laid out from `self.offset`) and this paint always agree
+        // on one offset — no one-frame lag a fast scroll could slide the window
+        // off-screen through. A rebuild seeing the advanced offset also reports
+        // `ChangeFlags::LAYOUT`, forcing the relayout (and `visible_ids`
+        // republish) Android's frame gate would otherwise skip.
+        let next = s5_scripted_offset(self.script_ms, self.max_offset());
+        if next != self.last_offset_published {
+            self.last_offset_published = next;
+            self.offset_signal.set(next);
+        }
     }
 }
 
@@ -391,6 +437,8 @@ impl<State: 'static> View<State> for ImageStream {
             ready: self.ready.clone(),
             visible_ids: self.visible_ids,
             last_reported_ids: Vec::new(),
+            offset_signal: self.offset,
+            last_offset_published: 0.0,
             image_widgets: HashMap::new(),
             offset: 0.0,
             viewport: Size::ZERO,
@@ -402,14 +450,29 @@ impl<State: 'static> View<State> for ImageStream {
 
     fn rebuild(
         &self,
-        _prev: &Self,
+        prev: &Self,
         element: &mut ImageStreamWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.visible_ids = self.visible_ids;
         // Cheap: an Arc clone per already-decoded image, not a re-decode.
         element.ready = self.ready.clone();
-        ChangeFlags::PAINT
+        element.offset_signal = self.offset;
+        // The drawn/windowed offset is the signal value the previous paint
+        // published — layout and paint both read `element.offset` (see
+        // `advance_script`).
+        element.offset = self.scroll_offset;
+        let mut flags = ChangeFlags::PAINT;
+        // Re-window (in layout) when the scripted scroll advanced, OR when a new
+        // decode landed (a new `ready` entry needs its `Image` child built and
+        // laid out — which only happens in `layout`). Either way the relayout is
+        // forced through the Android layout-skip gate; without it the cell window
+        // freezes and no newly-decoded image ever gets displayed (see
+        // `ImageStreamState::offset`).
+        if prev.scroll_offset != self.scroll_offset || prev.ready.len() != self.ready.len() {
+            flags |= ChangeFlags::LAYOUT;
+        }
+        flags
     }
 }
 

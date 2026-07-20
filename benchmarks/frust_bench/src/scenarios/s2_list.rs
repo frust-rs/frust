@@ -19,7 +19,17 @@
 //!
 //! - drives its own scroll offset from a fixed, deterministic scripted
 //!   timeline advanced during **paint** (`PaintCtx::frame_time`), exactly like
-//!   `BubbleChartWidget` advances its physics — a steady scroll to 25%, a fast
+//!   `BubbleChartWidget` advances its physics, and **publishes that offset back
+//!   through a signal** so the next rebuild reports `ChangeFlags::LAYOUT` and
+//!   the row window is re-laid-out as the scroll advances — the same
+//!   force-a-relayout-from-paint contract S6's `WidthBox` uses. This matters on
+//!   Android specifically: its frame gate skips layout after the first frame
+//!   unless the rebuild reports `needs_layout` (`docs/ARCHITECTURE.md`'s Frame
+//!   gate), and the materialized row window (plus the shaped-text cache, which
+//!   needs the layout-time `TextContext`) is computed only during layout — so a
+//!   scroll that advances only during paint, reporting only `PAINT`, would
+//!   freeze the window at offset 0 and slide every row off-screen into an empty
+//!   scene. The script itself is a steady scroll to 25%, a fast
 //!   ease-out fling to the end, a steady scroll back to the top, looping
 //!   (Flutter's own S2 script runs this sequence once; looping it here keeps
 //!   the scenario exercising continuously for however long the harness
@@ -161,6 +171,17 @@ struct LongListState {
     /// Written by the list widget during paint: whether the scrolled viewport
     /// is nearing the loaded edge (see the module doc's Pagination section).
     near_end: RwSignal<bool>,
+    /// The scripted scroll offset, published by the list widget during paint
+    /// and read back (tracked) here every rebuild. Threading the offset through
+    /// a signal — rather than keeping it purely widget-internal — is what lets
+    /// [`LongList::rebuild`] report `ChangeFlags::LAYOUT` when the scroll
+    /// advances, forcing the materialized row window to be re-laid-out (and new
+    /// rows shaped) on every platform, including Android's otherwise
+    /// layout-skipping frame gate (see `docs/ARCHITECTURE.md`'s Frame gate and
+    /// the S6 `WidthBox` precedent). Without it, layout is skipped after frame 1
+    /// on device, the window freezes at offset 0, and the scripted scroll slides
+    /// every materialized row off-screen into an empty scene.
+    offset: RwSignal<f64>,
 }
 
 impl Component for LongListPage {
@@ -179,6 +200,7 @@ impl Component for LongListPage {
             fetching: true,
             task,
             near_end: RwSignal::new(false),
+            offset: RwSignal::new(0.0),
         }
     }
 
@@ -197,6 +219,11 @@ impl Component for LongListPage {
         any(LongList {
             loaded: state.loaded,
             near_end: state.near_end,
+            offset: state.offset,
+            // Tracked read: a paint-time `offset.set` wakes the next rebuild,
+            // whose `LongList::rebuild` then reports `ChangeFlags::LAYOUT` (see
+            // `LongListState::offset`).
+            scroll_offset: state.offset.get(),
         })
     }
 }
@@ -206,6 +233,12 @@ impl Component for LongListPage {
 struct LongList {
     loaded: usize,
     near_end: RwSignal<bool>,
+    /// The scroll-offset signal the widget publishes to during paint.
+    offset: RwSignal<f64>,
+    /// The current value of [`offset`](Self::offset), read (tracked) in the
+    /// component build; a change between rebuilds is what triggers the
+    /// `ChangeFlags::LAYOUT` that re-windows the list under the Android gate.
+    scroll_offset: f64,
 }
 
 /// A visible row's pre-built leaf widgets, cached by row index across frames
@@ -219,6 +252,12 @@ struct LongListWidget {
     loaded: usize,
     near_end: RwSignal<bool>,
     last_near_end_reported: bool,
+    /// The scroll-offset signal published during paint (see [`LongList::offset`]).
+    offset_signal: RwSignal<f64>,
+    /// The last offset value published to [`offset_signal`](Self::offset_signal),
+    /// so a paint only writes the signal (waking a relayout-forcing rebuild) when
+    /// the scripted scroll actually advanced.
+    last_offset_published: f64,
     offset: f64,
     viewport: Size,
     window: (usize, usize),
@@ -306,7 +345,7 @@ fn scripted_offset(t_ms: f64, max_offset: f64) -> f64 {
 }
 
 impl LongListWidget {
-    fn new(loaded: usize, near_end: RwSignal<bool>) -> Self {
+    fn new(loaded: usize, near_end: RwSignal<bool>, offset_signal: RwSignal<f64>) -> Self {
         let icon_widgets: Vec<Box<dyn Widget>> = TRAILING_ICONS
             .into_iter()
             .map(|source| {
@@ -322,6 +361,8 @@ impl LongListWidget {
             loaded,
             near_end,
             last_near_end_reported: false,
+            offset_signal,
+            last_offset_published: 0.0,
             offset: 0.0,
             viewport: Size::ZERO,
             window: (0, 0),
@@ -359,7 +400,19 @@ impl LongListWidget {
         };
         self.last_frame = Some(now);
         self.script_ms = (self.script_ms + dt_ms) % SCRIPT_CYCLE_MS;
-        self.offset = scripted_offset(self.script_ms, self.max_offset());
+        // Publish (only on change) the next scripted offset through the signal
+        // rather than mutating the drawn offset directly. The drawn/windowed
+        // `self.offset` is set from this signal by `LongList::rebuild`, so the
+        // row window (laid out from `self.offset`) and this paint always agree
+        // on one offset — no one-frame lag that a fast fling could slide the
+        // whole window off-screen through. A rebuild seeing the advanced offset
+        // also reports `ChangeFlags::LAYOUT`, forcing the relayout Android's
+        // frame gate would otherwise skip (see the module doc).
+        let next = scripted_offset(self.script_ms, self.max_offset());
+        if next != self.last_offset_published {
+            self.last_offset_published = next;
+            self.offset_signal.set(next);
+        }
     }
 
     /// Publish (only on change) whether the scrolled viewport is nearing the
@@ -424,7 +477,7 @@ impl<State: 'static> View<State> for LongList {
     type Element = LongListWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> LongListWidget {
-        LongListWidget::new(self.loaded, self.near_end)
+        LongListWidget::new(self.loaded, self.near_end, self.offset)
     }
 
     fn rebuild(
@@ -434,12 +487,24 @@ impl<State: 'static> View<State> for LongList {
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.near_end = self.near_end;
+        element.offset_signal = self.offset;
+        // The drawn/windowed offset is the signal value the previous paint
+        // published — layout and paint both read `element.offset`, so they never
+        // disagree (see `advance_script`).
+        element.offset = self.scroll_offset;
+        let mut flags = ChangeFlags::NONE;
         if prev.loaded != self.loaded {
             element.loaded = self.loaded;
-            ChangeFlags::PAINT
-        } else {
-            ChangeFlags::NONE
+            flags |= ChangeFlags::PAINT;
         }
+        if prev.scroll_offset != self.scroll_offset {
+            // The scripted scroll advanced (published from the previous paint):
+            // force a relayout so the materialized row window re-windows around
+            // the new offset — and new rows get shaped — even under Android's
+            // otherwise layout-skipping frame gate (mirrors S6's `WidthBox`).
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        flags
     }
 }
 

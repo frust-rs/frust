@@ -79,6 +79,31 @@ fn frame_at<S: 'static, V: View<S>>(
     (scene, outcome.needs_frame)
 }
 
+/// One frame the way Android's frame gate runs it: rebuild always, then lay out
+/// **only** when the rebuild reports `needs_layout` (or `force_layout`, e.g. the
+/// first frame), then paint. Returns the painted scene and whether layout
+/// actually ran. See `docs/ARCHITECTURE.md`'s Frame gate ("Android also skips
+/// layout unless `take_change_flags` reports `needs_layout()`, first frame, or
+/// resize").
+fn gated_frame<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+    t_ms: u64,
+    force_layout: bool,
+) -> (RecScene, bool) {
+    let flags = root.rebuild(logic, state);
+    let laid_out = force_layout || flags.needs_layout();
+    if laid_out {
+        let tcx_any: &mut dyn Any = tcx;
+        root.layout_with_text(Size::new(W, H), tcx_any);
+    }
+    let mut scene = RecScene::default();
+    root.paint(&mut scene, FrameTime::from_nanos(t_ms * 1_000_000));
+    (scene, laid_out)
+}
+
 #[test]
 fn registry_has_eight_scenarios_in_id_order() {
     let ids: Vec<&str> = SCENARIOS.iter().map(|s| s.id()).collect();
@@ -195,6 +220,88 @@ fn s5_image_pipeline_keeps_requesting_frames() {
     assert!(
         live,
         "S5's scripted auto-scroll keeps requesting frames while decodes stream in"
+    );
+}
+
+#[test]
+fn s2_scene_stays_nonempty_under_android_layout_skip_gate() {
+    // Regression for the on-device empty-render bug: S2's materialized row
+    // window (and shaped-text cache) is computed only in `layout`, while the
+    // scripted scroll offset advances only in `paint`. Under Android's frame
+    // gate, layout runs only when the rebuild reports `needs_layout`; if S2's
+    // rebuild reported only `PAINT` (the bug), layout would be skipped after
+    // frame 1, the window would freeze at offset 0, and the scripted scroll
+    // would slide every row off-screen into an empty scene. Here we drive the
+    // exact gate: layout only on frame 1 and thereafter only when the rebuild
+    // asks for it, and assert the scene stays non-empty as the scroll advances.
+    let _owner = setup();
+    let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();
+    let mut state = BenchState::new();
+    let mut tcx = TextContext::new();
+    let mut logic = scenario_logic(1); // s2
+
+    let (first, laid1) = gated_frame(&mut root, &mut logic, &mut state, &mut tcx, 0, true);
+    assert!(laid1, "frame 1 always lays out (first build)");
+    assert!(first.glyph_runs > 0, "S2 paints row text on frame 1");
+
+    // Drive several seconds of scripted scroll at 300ms/frame. The fling phase
+    // pushes the offset far past the frame-1 window, so a frozen window would
+    // paint zero rows here.
+    let mut saw_gated_relayout = false;
+    let mut min_glyphs = usize::MAX;
+    for i in 1..=40u64 {
+        let (scene, laid) =
+            gated_frame(&mut root, &mut logic, &mut state, &mut tcx, i * 300, false);
+        if laid {
+            saw_gated_relayout = true;
+        }
+        min_glyphs = min_glyphs.min(scene.glyph_runs);
+    }
+    assert!(
+        saw_gated_relayout,
+        "S2 must report needs_layout as its scripted scroll advances, so the \
+         Android gate relayouts and the row window follows the scroll"
+    );
+    assert!(
+        min_glyphs > 0,
+        "S2's scene must stay non-empty across the scripted scroll under the \
+         layout-skip gate (got an empty frame — the on-device regression)"
+    );
+}
+
+#[test]
+fn s5_requests_relayout_as_scroll_advances_under_layout_skip_gate() {
+    // S5 has the same shape as S2 (window + per-cell `Image` widgets built only
+    // in `layout`, offset advanced only in `paint`) plus decode scheduling keyed
+    // off the layout-reported `visible_ids`. Its scene draws via `draw_image`/
+    // `fill_rect`, which the GPU-free `RecScene` records as nothing, so we assert
+    // the load-bearing contract directly: the widget reports `needs_layout` as
+    // the scroll advances, so the Android gate relayouts (re-windowing the cells
+    // and republishing `visible_ids` so new images decode). If it reported only
+    // `PAINT` (the bug), the window would freeze after frame 1 and the stream
+    // would render nothing on device.
+    let _owner = setup();
+    let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();
+    let mut state = BenchState::new();
+    let mut tcx = TextContext::new();
+    let mut logic = scenario_logic(4); // s5
+
+    let (_first, laid1) = gated_frame(&mut root, &mut logic, &mut state, &mut tcx, 0, true);
+    assert!(laid1, "frame 1 always lays out (first build)");
+
+    let mut saw_gated_relayout = false;
+    for i in 1..=20u64 {
+        let (_scene, laid) =
+            gated_frame(&mut root, &mut logic, &mut state, &mut tcx, i * 300, false);
+        if laid {
+            saw_gated_relayout = true;
+        }
+    }
+    assert!(
+        saw_gated_relayout,
+        "S5 must report needs_layout as its scripted scroll advances, so the \
+         Android gate relayouts (cell window + decode-scheduling visible_ids \
+         follow the scroll instead of freezing into an empty stream)"
     );
 }
 
