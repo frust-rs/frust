@@ -364,6 +364,63 @@ The burst variant (`FRUST_BENCH_S8_BURST=1` / `--dart-define=S8_BURST=1`) was no
 included in this short-form pass (deviation) — unchanged by this revalidation,
 which was scoped to the base S8 quiescent path only.
 
+### Phase-10 re-run — S1/S2/S5/S6, frust only (2026-07-21, raw format v2)
+
+> **Annotated re-run, does not supersede the tables above for cross-app
+> comparison.** Captured for Phase 10.A attribution (task 06 —
+> `workflow/plans/features/frust-phase-10-smoothness/research/ATTRIBUTION.md`
+> holds the full per-pass decomposition, first-frame span analysis, and the
+> render-thread-split GO/NO-GO). **Frust only** (Flutter columns above are
+> unchanged 2026-07-20 numbers). **Raw format v2** (`encode_us`+`present_us`
+> split — PROTOCOL §7; sum the two to compare against a v1
+> `encode_present_us` capture). **Full-form run count: 12 runs × 30s, first
+> 2 discarded (10 kept)** — this re-run meets PROTOCOL §4 (the 2026-07-20
+> series was 5×30s short-form). **Build includes the phase-10 optimizations
+> P01–P05** (raw-v2 split, S6 shape cache, pointer-resample/deadline
+> instrumentation, first-frame font-preload overlap, encode micro-wins), so
+> deltas vs the rows above mix optimization effect with run-to-run variance.
+> Build: repo `main` @ `59610e4`, `frust build apk --release` (huddle
+> keystore, JBR `JAVA_HOME`, NDK `27.0.12077973`, `FRUST_TRACE=1
+> FRUST_TRACE_RAW=1` exported at build time + `perf.rs` mtime-only touch —
+> deviation #13's recipe, unchanged), v2 emission confirmed on-device and
+> every scenario screencap-spot-checked before scoring. Raw series
+> (filtered to perf/marker lines) under
+> `raw/oneplus9/frust_release/<scenario>_p10v2/run-NN.log` (gitignored).
+
+| Scenario (frust release, v2) | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | encode p50 / present p50 (ms) | active frames (10 kept runs) |
+|---|---|---|---|---|---|---|---|---|
+| S1 animation storm | 9.68 | 12.23 | 15.69 | 65.48 | 154 | 14,952 | 6.47 / 2.59 | 19,328 |
+| S2 long-list scroll | 10.87 | 14.98 | 17.85 | 54.98 | 275 | 17,031 | 4.50 / 2.00 | 18,010 |
+| S5 image pipeline | 9.62 | 11.49 | 13.23 | 52.26 | 58 | 15,138 | 5.44 / 2.83 | 18,970 |
+| S6 text shaping | **5.67** | **10.86** | **12.20** | 56.27 | 26 | 5,105 | 3.73 / 1.43 | 30,467 |
+
+- **S1/S2/S5 reproduce the 2026-07-20 series within noise** (p50 9.68 vs
+  9.75, 10.87 vs 11.04, 9.62 vs 9.85) — the phase-10 changes did not move
+  these scenarios' totals materially. Health gates held: S2 `layout_us>0`
+  on 18,000/18,010 frames (mean 3,823µs), S5 on 18,960/18,970 — genuine
+  scrolls; 0 skipped frames anywhere.
+- **S6 improved dramatically under the 10.B shape cache** (P02): p50
+  10.66→5.67ms, p95 14.52→10.86ms, and sustained rate rose ~64→~102 fps.
+  Against Flutter's unchanged 2026-07-20 profile row (8.27/9.75ms):
+  **frust now leads p50 by 31%; p95 is +11.4% — the 10.B "within 10%"
+  target is narrowly missed** (was +48.9%). S6's frame time is now
+  encode-bound like the other scenarios (text passes: layout p50 156µs).
+- **Work-vs-wait split (the v2 headline):** Android `present_us` is a
+  modest 1.4–2.8ms p50 everywhere (no iOS-style vsync-blocking artifact);
+  **encode is the dominant pass** (3.7–6.5ms p50 = 41–67% of the median
+  frame; 22–39% of the 16.67ms budget) → **render-thread split: GO** per
+  RENDER_SPLIT_SPIKE.md's 10% encode-only rule (full table in
+  ATTRIBUTION.md).
+- **First frame (48 cold starts):** `first_frame_presented` median 131.5ms
+  (123–162) vs ~147ms in the 2026-07-20 series; font preload (P04) fully
+  overlapped GPU init on every launch (0ms join delta); the remaining
+  floor is a flat ~71ms first-frame-encode span
+  (`first_rebuild_done`→`first_encode_done`). Pipeline-cache hit/miss is
+  not observable on Android — `SPAN_PIPELINE_CACHE_RESTORED` is wired
+  desktop-only, and the flat first-encode span across all 48 launches
+  shows no warm-start benefit (instrumentation follow-up recorded in
+  ATTRIBUTION.md §2).
+
 ### Methodology deviations (this device)
 
 1. **RESOLVED — Frust ran `--release` (PROTOCOL §2 satisfied).** The initial pass
@@ -491,6 +548,23 @@ which was scoped to the base S8 quiescent path only.
     deterministic `run-NN.log` scheme, so no `gmktemp` PATH shim was needed
     this pass; noted here since it resolves that long-standing workaround note
     for any future S8 (or other-scenario) re-run on this macOS host.
+18. **Phase-10 re-run (2026-07-21) build/device-state note.** Frust-only
+    S1/S2/S5/S6 re-run (see its own section above): full-form 12×30s runs
+    (first PROTOCOL §4-compliant pass on this device — deviation #2 does not
+    apply to it); airplane mode on (`settings put`, read-back 1; the
+    AIRPLANE_MODE broadcast is shell-denied on Android 15, same as the
+    S1/S3 final re-run), Wi-Fi disabled, `dumpsys battery unplug`
+    re-applied before each scenario block (run.sh's exit cleanup resets the
+    spoof between blocks), brightness 128, `svc power stayon true` during
+    blocks; thermal 27.7–36.2°C, 38°C ceiling never reached; all state
+    restored + read-back confirmed after the session. `run.sh` unmodified
+    (deterministic `run-NN.log` naming from the H4 mktemp fix — no PATH
+    shim needed, matching deviation #17's finding). Flutter was NOT re-run
+    (task scope: frust attribution only), so S6's cross-app delta compares
+    a 10-kept-run frust series against the 3-kept-run 2026-07-20 Flutter
+    series. S6's per-run frame counts were bimodal (2,374–3,578 per 30s —
+    ~80 vs ~120 fps regimes, a display-mode/DVFS effect at the panel's two
+    advertised modes); combined percentiles span both regimes.
 
 ---
 
