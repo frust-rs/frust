@@ -47,11 +47,10 @@ crates (`vello`, `vello_shaders`, `vello_encoding`, `wgpu`, `wgpu-core`,
 compilation/translation is slow enough on mobile CPUs to trip the iOS
 launch watchdog, so only this stack is optimized, keeping the rest of a
 debug build fast. The three manifests are hand-synced (`cargo test -p
-frust-cli --test profile_sync` is the tripwire); a scaffolded project
-inherits the template's overrides. A separate `[profile.dev.package."*"]`
+frust-cli --test profile_sync` is the tripwire; a scaffolded project
+inherits the template's overrides). A separate `[profile.dev.package."*"]`
 wildcard (`opt-level = 1`, a named override still wins) widens every other
-non-workspace-member dependency's debug optimization, hand-synced the same
-way.
+non-workspace-member dependency's debug optimization, hand-synced the same way.
 
 **Release-profile hardening.** `[profile.release]` (root, template, huddle)
 sets `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic =
@@ -85,14 +84,13 @@ its own directory (its own `frust.toml`, package `it.f0x.huddle`):
 ```bash
 cd examples/huddle
 /path/to/frust build apk --debug   # debug APK via Gradle + cargo-ndk
-frust run -d <device-id>           # build, install, launch, stream logcat
-                                       # (Android device/emulator or iOS Simulator/device)
+frust run -d <device-id>           # build/install/launch/stream (Android or iOS sim/device)
 ```
 
 The template `frust create` scaffolds is its own demo (a notes app,
-`templates/app/src/lib.rs.tmpl`) with no example counterpart to run directly
-in this repo; check scaffold changes via *Template development* below or
-`cargo test -p frust-cli --test create_e2e -- --ignored`.
+`templates/app/src/lib.rs.tmpl`) with no example counterpart to run
+directly in this repo; check scaffold changes via *Template development*
+below or the scaffold end-to-end test in *Test*.
 
 In a generated project, `frust run [-d <device>] [--release|--profile]
 [--flavor <name>]` builds and launches on a connected Android
@@ -105,33 +103,39 @@ Simulator (preflight → `xcodebuild build` → `simctl install`/
 --console --terminate-existing`, streamed — failures hint at
 unlocking/pairing/Developer Mode). `run` defaults to debug (`build`
 defaults to release — see *Release Builds*); with no device selected it
-falls back to a streamed `cargo run` (desktop preview — or the watch loop
-below, with `--watch`). First Android/iOS builds take a few minutes
+falls back to a streamed `cargo run` (desktop preview, or the watch loop
+below with `--watch`) — first Android/iOS builds take a few minutes
 (Gradle download / full simulator dependency compile).
 
 `frust run --render-tier <gpu|cpu>` forces the desktop preview's render
 tier (`FRUST_RENDER_TIER`, settable directly for a manual `cargo run`); an
-explicit choice wins among tiers the adapter supports — forcing `gpu` on an
-incapable adapter fails fast with the probe's diagnosis, `cpu` can always
-be forced. Desktop-preview-only today; an Android/iOS device run prints a
-not-plumbed note and probes its own tier.
+explicit choice wins among tiers the adapter supports — `gpu` fails fast
+on an incapable adapter, `cpu` can always be forced. Desktop-preview-only
+today; a device run prints a not-plumbed note and probes its own tier.
 
 **High refresh-rate hints.** A generated app's iOS `CADisplayLink` requests
 a 30–120Hz `preferredFrameRateRange`; Android calls `Surface.setFrameRate()`
-(API 30+) with the display's max rate. Both are hints, not guarantees —
-achieved rate is device/OEM/thermal-state dependent and unverifiable on the
-iOS Simulator (see *Known Issues*) or most Android emulators (60Hz-only).
+(API 30+) with the display's max rate — both hints, not guarantees; achieved
+rate is device/OEM/thermal-state dependent and unverifiable on the iOS
+Simulator (see *Known Issues*) or most Android emulators (60Hz-only).
 
 **TUI workbench.** `frust tui` opens the ratatui workbench: `n` scaffolds a
 project (create wizard); the devices panel launches concurrent sessions
 (desktop plus multi-device, `r`/`Enter` on a selection); `d`/`b`/`c` run
 doctor/build/clean as supervised sessions with their own log tab; `Ctrl+O`/
-`p` opens the project switcher. Recent projects persist to
+`p` opens the project switcher, `i`/chip-click the bootstrap wizard
+(auto-runnable fixes run as a supervised session, re-preflighting on
+exit), `Ctrl+P`/`:` a fuzzy command palette, `?` a help overlay generated
+from that registry, `Alt+m` toggles mouse capture. A per-session perf
+sparkline (`t`) parses `frust-perf` lines once `FRUST_TRACE` is set
+(desktop `--profile` sessions auto-inject it); recent projects plus
+sidebar/mouse-capture/follow-tail settings persist to
 `$XDG_CONFIG_HOME/frust/tui.toml` (`~/.config` fallback) via `toml_edit`'s
-format-preserving edits, so switching never needs a fresh `cd`. `q`/
-`Ctrl+Q` quits and restores the terminal. `cargo test -p frust-tui` covers
-engine/render logic; live-terminal hover/click, OSC-52 copy, and
-panic-restore are a **manual gate**.
+format-preserving edits. `q`/`Ctrl+Q` quits and restores the terminal.
+`cargo test -p frust-tui` covers engine/render logic; live-terminal
+gestures, OSC-52 copy, panic-restore, and a fresh-machine bootstrap walk
+(no toolchain installed — confirm the wizard, its fixes, and guidance
+links) are a **manual gate** for a person at a real desk, not CI.
 
 ## Dev Loop
 
@@ -183,9 +187,9 @@ scheme+configuration already declared in the generated project.
 **Android release minification.** A generated app's `release`/`profile`
 Gradle build type runs R8 (`isMinifyEnabled`/`isShrinkResources = true`)
 against `proguard-rules.pro` (keeps the Frust JNI surface and the vendored
-`accesskit_android` delegate); `frust build apk --debug` is unaffected. NDK
-r27+ already 16KB-aligns `.so` `LOAD` segments by default, so Android 15's
-page-size requirement needed no linker-flag change.
+`accesskit_android` delegate); `--debug` is unaffected. NDK r27+ already
+16KB-aligns `.so` `LOAD` segments by default, so Android 15's page-size
+requirement needed no linker-flag change.
 
 ## Test
 
@@ -263,12 +267,11 @@ cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences
 ```
 
 The iOS compile gate above is also the only check of the `accesskit_ios`
-adapter today — it has not yet been compiled on any host in this repo's CI
-history (Linux-only so far). Screen-reader verification (TalkBack on
-Android, VoiceOver on iOS) and the `cpu-tier` render tier's visual behavior
-on real hardware are not yet verified — both need a device/Simulator with a
-screen reader enabled or a physical GPU, which this repo's headless host
-cannot provide.
+adapter today — uncompiled on any host in this repo's history (Linux-only
+so far). Screen-reader verification (TalkBack/VoiceOver) and the
+`cpu-tier` tier's visual behavior on real hardware are unverified — both
+need a device/Simulator with a screen reader or a physical GPU, which this
+headless host cannot provide.
 
 ### Deep-link manual test (Android)
 
@@ -492,7 +495,5 @@ at-risk** path is Android's CBDT strikes (see `docs/ARCHITECTURE.md`'s
 palette-indexed PNGs at smaller sizes, triggering this defect, unconfirmed
 on any device/emulator. If an on-device check finds a broken glyph, revisit
 vendoring the one-line `Transformations::EXPAND` fix before a future vello
-major bump. The desktop logger suppresses known-noisy vello `Error`/`Warn`
-messages (e.g. "Unsupported `output_color_type`", "Invalid PNG in font")
-below `debug` (*Instrumentation*'s `FRUST_LOG` row); other vello errors
-still surface at the default level.
+major bump. The desktop logger suppresses this specific noise below
+`debug` — see *Instrumentation*'s `FRUST_LOG` row.

@@ -163,6 +163,8 @@ Structure) follow these conventions:
   layering violation.
 - **Every mouse action has keyboard parity** (e.g. the welcome Create
   button: `Enter`/`c`) — mouse support is additive, never the sole path.
+- **Commands/keybindings have one registry**, `engine::palette::commands`
+  — the palette and help overlay both render from it; never a parallel list.
 - **fdemon is a pattern source, not a copy source** — it is BSL-1.1
   licensed; study its patterns but never copy a file verbatim.
 
@@ -174,8 +176,7 @@ Structure) follow these conventions:
 ```rust
 let out = std::process::Command::new("rustc").arg("--version").output()?;
 ```
-Untestable without actually invoking `rustc`, and every caller re-implements
-its own spawn-failure handling.
+Untestable without invoking `rustc`; every caller re-implements spawn-failure handling.
 
 **GOOD:**
 ```rust
@@ -184,8 +185,7 @@ fn validate(&self, ctx: &DoctorCtx) -> Validation {
 }
 ```
 Every external tool invocation (`rustc`, `adb`, `xcrun`, `cargo ndk`, …) goes
-through the `ProcessRunner` trait, so `doctor`/`devices` logic is exercised in
-`cargo test` with `FakeProcessRunner` and never shells out during a test run.
+through `ProcessRunner`, so `doctor`/`devices` logic tests via `FakeProcessRunner`.
 
 ### Leaking `vello`/`wgpu` types outside `frust-render`
 
@@ -476,8 +476,8 @@ Semantics pass):
 
 - **Fixture-driven tests for parsers/validators**: register canned
   `ProcessRunner`/`EnvLookup` responses keyed by the exact invocation, then
-  assert the resulting `Status`/`Validation` (`frust-cli`'s `doctor`/
-  `devices` validators).
+  assert the resulting `Status`/`Validation`/`DoctorReport` (`frust-drive`'s
+  `doctor`/`devices` validators and component report).
 - **Injectable hook seams for process-global side effects**: a function
   installing a real handler in production (`ctrlc::set_handler`, a
   filesystem watcher) takes a small `Hooks` struct defaulted to the real
