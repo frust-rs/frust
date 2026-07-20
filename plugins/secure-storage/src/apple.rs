@@ -60,16 +60,6 @@
 //! operation from the Rust-`String` service name — the shared-preferences
 //! precedent), so [`AppleStore`] is a plain value, trivially `Send + Sync`.
 
-// Every item in this module is exercised by the `#[cfg(test)]` conformance
-// suite below, but none is reachable from a non-test build yet: `lib.rs`'s
-// `open_with` selection point still constructs `file::FileStore` for the
-// apple arm. Flipping that one line to `Arc::new(apple::AppleStore::new(..))`
-// is deferred past the S02/S03/S04 parallel wave (each task edits only its
-// own sibling backend file — flipping adjacent selection-point lines
-// concurrently would collide on merge), so this `allow` stays until the
-// conductor wires the apple arm post-merge, at which point every item here
-// becomes live and the attribute is removed.
-#![allow(dead_code)]
 // `objc2-security`'s `errSec*` status codes are `camelCase` `const`s; using
 // one in a `match` pattern trips `non_upper_case_globals` (an upstream naming
 // choice, not ours). Silence it for this module — every such pattern is a

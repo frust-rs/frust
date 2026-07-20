@@ -51,12 +51,6 @@
 //! constructed (S05 adds the biometric gate). So this module implements plain
 //! secure storage only.
 
-#![allow(dead_code)] // AndroidStore is constructed by lib.rs's Android
-// selection arm, which the parallel-wave freeze defers to the conductor's
-// integration flip (see the completion summary). Until that one-line flip
-// lands, nothing in this module is reachable on the host toolchain, so the
-// whole module is allow(dead_code); remove this once the arm is flipped.
-
 use jni::objects::{JByteArray, JMap, JObject, JString, JValue};
 use jni::{Env, jni_sig, jni_str};
 

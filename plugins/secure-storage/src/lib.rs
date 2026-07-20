@@ -47,14 +47,10 @@
 // S04 (Plan Phase 4) landed `desktop` for linux/windows (see `open_with`'s
 // selection point below), so `file` is no longer dispatched to there — it's
 // now purely the `#[cfg(test)]` conformance-suite target on that arm,
-// mirroring `frust-shared-preferences`' backend-routing structure. It stays
-// compiled outside tests on `apple`/`android` here too, **only** because
-// S02/S03 (parallel wave-2 tasks, per PLAN.md) haven't landed in *this*
-// worktree yet and their arms below still dispatch to `file::FileStore`;
-// once merged with S02/S03 (which flip those two arms to their own
-// backends), a trivial follow-up narrows this predicate to plain
-// `#[cfg(test)]` — no other file needs to change for that.
-#[cfg(any(test, target_vendor = "apple", target_os = "android"))]
+// mirroring `frust-shared-preferences`' backend-routing structure. Every
+// real target now routes to a platform backend (S02/S03/S04 landed), so
+// the file backend is the conformance-harness backend only.
+#[cfg(test)]
 mod file;
 
 // Backend stub modules (task S01b, Plan Phases 2-4 preamble): compiling,
@@ -369,9 +365,10 @@ impl SecureStorage {
         //     `Arc::new(desktop::DesktopStore)` (and demotes `file.rs` to
         //     `#[cfg(test)]`-only) — DONE.
         #[cfg(target_vendor = "apple")]
-        let backend: Arc<dyn Backend> = Arc::new(file::FileStore::standard(name)?);
+        let backend: Arc<dyn Backend> =
+            Arc::new(apple::AppleStore::new(name, options.accessibility));
         #[cfg(target_os = "android")]
-        let backend: Arc<dyn Backend> = Arc::new(file::FileStore::standard(name)?);
+        let backend: Arc<dyn Backend> = Arc::new(android::AndroidStore::open(name)?);
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         let backend: Arc<dyn Backend> = Arc::new(desktop::DesktopStore::standard(name)?);
 
