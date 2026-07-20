@@ -15,6 +15,41 @@ import 'dart:typed_data';
 import 'rng.dart';
 
 // ---------------------------------------------------------------------------
+// S1 — animation storm (bubble geometry parity)
+// ---------------------------------------------------------------------------
+
+/// PRNG seed for the S1 bubble field (both apps seed the same [SplitMix64]).
+const int s1BubbleSeed = 42;
+
+/// Number of bubbles in the S1 field.
+const int s1BubbleCount = 60;
+
+/// **S1 size-parity spec (canonical).** Bubble radius and the initial cluster
+/// spread are FRACTIONS of `S = min(playWidth, playHeight)` — the *safe-area
+/// inset* play region on BOTH apps (Flutter hosts the scenario under
+/// `Scaffold > SafeArea`; the frust app wraps its scenario host in `SafeArea`)
+/// — rather than absolute logical pixels. Expressing them as fractions makes
+/// the bubble-size-to-play-area ratio (and therefore the collision density and
+/// settle behavior) identical across the two apps regardless of any residual
+/// difference in each shell's reported logical size, which is what makes S1 a
+/// valid head-to-head. Before this normalization the two apps packed the same
+/// absolute-pixel bubbles into differently-sized play areas (frust rendered
+/// edge-to-edge, Flutter inside the SafeArea), so frust's field was far more
+/// crammed — the invalid comparison this spec fixes.
+///
+/// The velocity/physics constants (friction, center pull, collision strength,
+/// wall bounce, the settle/zeroing velocity thresholds) are dimensionally
+/// consistent and left byte-identical between the two apps, so a given `S`
+/// reproduces a byte-identical simulation. The four per-bubble RNG draws
+/// (performance, radius, x, y) keep their original order so `seed 42` yields
+/// the same sequence on both sides. Fractions are anchored so a phone-sized
+/// play area (`S ≈ 380–400` logical px on the reference OnePlus 9) resolves to
+/// the original ~20–60 px radii.
+const double s1RadiusMinFrac = 0.05;
+const double s1RadiusSpanFrac = 0.10;
+const double s1ClusterSpanFrac = 0.5;
+
+// ---------------------------------------------------------------------------
 // S5 — image pipeline
 // ---------------------------------------------------------------------------
 

@@ -306,6 +306,76 @@ fn s5_requests_relayout_as_scroll_advances_under_layout_skip_gate() {
 }
 
 #[test]
+fn s3_op_transitions_stay_nonempty_and_relayout_under_layout_skip_gate() {
+    // Regression companion to the S2/S5 gated tests, for S3's *op-driven*
+    // mutations. Unlike the pre-fix S2/S5 (whose changing quantity — the scroll
+    // offset — was advanced only in `paint`, so their rebuild reported only
+    // `PAINT` and the Android layout-skip gate froze the window into emptiness),
+    // S3 mutates its row set inside the component's `build`, and the virtualized
+    // `list_view`'s reconcile already reports `ChangeFlags::LAYOUT` on every op
+    // (a count change on create/clear, an in-place text re-shape on
+    // update/swap). The on-device capture confirms this: every S3 op frame
+    // relayouts (`layout_us` > 0 — create1k 317µs, create10k 435µs, update
+    // 1260µs, swap 2563µs, clear 395µs), so S3 does NOT have the S2/S5
+    // layout-gate disease. This test locks that in: driving the full scripted
+    // create1k → create10k → update → swap → clear sequence through the exact
+    // gate (layout only on frame 1, and thereafter only when the rebuild asks),
+    // the scene stays non-empty across every op until the final `clear` — and
+    // only then goes, and stays, empty (no transient mid-run blank) — while each
+    // op forces a gated relayout. A regression that made an op report only
+    // `PAINT` would blank/stale the table mid-run (the "glitches out" signature).
+    let _owner = setup();
+    let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();
+    let mut state = BenchState::new();
+    let mut tcx = TextContext::new();
+    let mut logic = scenario_logic(2); // s3
+
+    let (first, laid1) = gated_frame(&mut root, &mut logic, &mut state, &mut tcx, 0, true);
+    assert!(laid1, "frame 1 always lays out (first build)");
+    assert!(first.glyph_runs > 0, "S3 paints its first rows on frame 1");
+
+    let mut relayouts = 0usize;
+    let mut became_empty = false;
+    let mut refilled_after_empty = false;
+    // Drive well past the scripted sequence (5 ops × ~20 settle frames ≈ 100
+    // rebuilds); the script advances by rebuild count, not wall time, so 300
+    // frames comfortably reaches and passes the final `clear`.
+    for i in 1..=300u64 {
+        let (scene, laid) = gated_frame(&mut root, &mut logic, &mut state, &mut tcx, i * 16, false);
+        if laid {
+            relayouts += 1;
+        }
+        if scene.glyph_runs == 0 {
+            became_empty = true;
+        } else if became_empty {
+            // Content reappeared after the table went empty — a transient blank
+            // in the middle of the run, which is exactly the layout-skip disease
+            // signature (an op's relayout was skipped, sliding stale/empty
+            // content into the scene) rather than the legitimate terminal
+            // `clear`.
+            refilled_after_empty = true;
+        }
+    }
+
+    assert!(
+        !refilled_after_empty,
+        "S3's table must not blank mid-run and refill — the only empty scene is \
+         the terminal `clear` (a transient blank is the layout-skip regression)"
+    );
+    assert!(
+        became_empty,
+        "the scripted sequence must reach its terminal `clear` (empty table) \
+         within the frame budget"
+    );
+    assert!(
+        relayouts >= 4,
+        "each S3 op (create10k/update/swap/clear after the first-frame create1k) \
+         must report needs_layout so the Android gate relayouts and the visible \
+         rows reflect the mutation (got {relayouts} gated relayouts)"
+    );
+}
+
+#[test]
 fn full_app_mounts_with_scenario_switcher() {
     let _owner = setup();
     let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();

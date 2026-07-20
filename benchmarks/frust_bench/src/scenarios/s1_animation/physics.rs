@@ -22,7 +22,9 @@ pub struct Bubble {
     pub y: f64,
     pub vx: f64,
     pub vy: f64,
-    /// Fixed at init, in `20.0..60.0` logical pixels.
+    /// Fixed at init: a fraction of `S = min(play_width, play_height)` (the
+    /// SafeArea-inset play region), per the S1 size-parity spec below — not an
+    /// absolute logical-pixel value.
     pub radius: f64,
 }
 
@@ -49,6 +51,27 @@ const TOUCH_RADIUS: f64 = 200.0;
 const WALL_BOUNCE: f64 = 0.35;
 const SETTLED_VELOCITY_THRESHOLD: f64 = 0.1;
 const SETTLED_FRAME_COUNT: u32 = 30;
+
+// --- S1 size-parity spec (canonical) -------------------------------------
+//
+// Contract home: `benchmarks/flutter_bench/lib/bench/datasets.dart`'s S1
+// section — these constants mirror it byte-for-byte.
+//
+// Bubble radius and the initial cluster spread are FRACTIONS of
+// `S = min(play_width, play_height)` — the SafeArea-inset play region on both
+// apps — not absolute logical pixels. This makes the bubble-size-to-play-area
+// ratio (hence collision density and settle behavior) identical across frust
+// and Flutter regardless of any residual difference in each shell's reported
+// logical size, which is what makes S1 a valid head-to-head. The velocity
+// constants above are dimensionally consistent and stay byte-identical between
+// the two apps, so a given `S` reproduces a byte-identical simulation; the four
+// per-bubble RNG draws (performance, radius, x, y) keep their original order so
+// `seed 42` yields the same sequence on both sides. Fractions are anchored so a
+// phone-sized play area (`S ≈ 380–400` px on the reference OnePlus 9) resolves
+// to the original ~20–60 px radii.
+const RADIUS_MIN_FRAC: f64 = 0.05;
+const RADIUS_SPAN_FRAC: f64 = 0.10;
+const CLUSTER_SPAN_FRAC: f64 = 0.5;
 
 /// splitmix64 — a tiny deterministic PRNG so `seed 42` reproduces the same
 /// layout every run (the repro seeds Dart's `Random(42)`; the exact sequence
@@ -102,19 +125,25 @@ impl BubblePhysics {
         }
     }
 
-    /// (Re)seed `count` bubbles clustered around the center, mirroring the
-    /// repro's `initializeBubbles`: performance in `-20..20`, radius in
-    /// `20..60`, position within ±100px of center.
+    /// (Re)seed `count` bubbles clustered around the center, per the S1
+    /// size-parity spec: performance in `-20..20`, radius and cluster spread as
+    /// FRACTIONS of `S = min(width, height)` (the SafeArea-inset play region),
+    /// so the bubble-to-play-area ratio matches the Flutter side regardless of
+    /// absolute logical size. Requires [`set_size`](Self::set_size) to have run
+    /// first (the chart widget's `layout` pass guarantees this).
     pub fn initialize_bubbles(&mut self, count: usize, seed: u64) {
         self.bubbles.clear();
         self.consecutive_settled_frames = 0;
         self.is_fully_settled = false;
+        let s = self.width.min(self.height);
         let mut rng = SplitMix64(seed);
         for i in 0..count {
             let performance = rng.next_f64() * 40.0 - 20.0;
-            let radius = 20.0 + rng.next_f64() * 40.0;
-            let x = self.center_x + (rng.next_f64() * 200.0 - 100.0);
-            let y = self.center_y + (rng.next_f64() * 200.0 - 100.0);
+            let radius = (RADIUS_MIN_FRAC + rng.next_f64() * RADIUS_SPAN_FRAC) * s;
+            let x =
+                self.center_x + (rng.next_f64() * CLUSTER_SPAN_FRAC - CLUSTER_SPAN_FRAC / 2.0) * s;
+            let y =
+                self.center_y + (rng.next_f64() * CLUSTER_SPAN_FRAC - CLUSTER_SPAN_FRAC / 2.0) * s;
             self.bubbles.push(Bubble {
                 symbol: SYMBOLS[i % SYMBOLS.len()],
                 performance,
@@ -286,9 +315,14 @@ mod tests {
                 (y.x, y.y, y.radius, y.performance)
             );
         }
-        // Radii and performance stay inside the repro's ranges.
+        // Radii scale with the play area per the size-parity spec: for
+        // `field()`'s 800×600 area, `S = 600`, so radius ∈
+        // `[0.05·600, 0.15·600] = [30, 90]`. Performance stays in `-20..20`.
+        let s = 800.0_f64.min(600.0);
+        let r_lo = RADIUS_MIN_FRAC * s;
+        let r_hi = (RADIUS_MIN_FRAC + RADIUS_SPAN_FRAC) * s;
         for bb in &a.bubbles {
-            assert!((20.0..60.0).contains(&bb.radius));
+            assert!((r_lo..=r_hi).contains(&bb.radius));
             assert!((-20.0..20.0).contains(&bb.performance));
         }
     }

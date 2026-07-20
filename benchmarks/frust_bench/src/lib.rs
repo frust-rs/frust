@@ -21,7 +21,7 @@ pub mod scenarios;
 
 use frust::{
     AnyView, Axis, Brightness, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, Set,
-    SizedBox, Stack, Theme, any, button, flexible, inflexible, set_app_theme,
+    SizedBox, Stack, Theme, any, button, flexible, inflexible, safe_area, set_app_theme,
 };
 
 use scenarios::{BenchState, SCENARIOS};
@@ -63,7 +63,17 @@ impl Component for BenchApp {
 
         let scenario_view = SCENARIOS[state.active].build(state);
 
-        any(Stack(vec![scenario_view, any(scenario_switcher(state))]))
+        // Host the scenario (and the dev switcher) inside `SafeArea` so content
+        // renders within the system-bar/cutout insets rather than edge-to-edge
+        // behind the status/nav bars — mirroring the Flutter app's
+        // `Scaffold > SafeArea` host (`flutter_bench/lib/main.dart`). This is
+        // also the S1 size-parity contract's play area: `min(playW, playH)` is
+        // measured over the SafeArea-inset region on both apps (see
+        // `benchmarks/flutter_bench/lib/bench/datasets.dart`'s S1 spec).
+        any(safe_area(Stack(vec![
+            scenario_view,
+            any(scenario_switcher(state)),
+        ])))
     }
 }
 

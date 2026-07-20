@@ -208,7 +208,7 @@ via a launch arg / deep link so one binary drives the whole matrix):
 
 | ID | Scenario | What it stresses | Rust-advantage claim under test |
 |----|----------|------------------|-------------------------------|
-| S1 | **Animation storm** — the bubblebench workload (60 gradient bubbles + text, perpetual physics) | per-frame paint, gradient/state-change behavior | vello single-dispatch vs Impeller per-primitive state churn (proven on Adreno 840; now formalized) |
+| S1 | **Animation storm** — the bubblebench workload (60 gradient bubbles + text, perpetual physics; bubble sizes normalized to the play area — see S1-specific notes) | per-frame paint, gradient/state-change behavior | vello single-dispatch vs Impeller per-primitive state churn (proven on Adreno 840; now formalized) |
 | S2 | **Long-list scroll** — 10k rows, text + thumbnail + icons, scripted fling + steady scroll | virtualization, reconciliation, shaping cache | no-GC frame stability at 120Hz |
 | S3 | **Table ops** — js-framework-benchmark subset: create 1k, update every 10th of 10k, swap, clear (scripted, timed per op) | build/diff/reconcile throughput | view-diff + arena rebuild vs Element tree |
 | S4 | **Heavy-work responsiveness** — parse a ~50MB JSON (or synthetic equivalent) while an animation runs; measure animation percentiles during the work + total wall time | the heavy-work idiom end-to-end | `use_task`+`spawn_blocking` (move) vs `compute()`/`Isolate.run` (copy) |
@@ -216,6 +216,20 @@ via a launch arg / deep link so one binary drives the whole matrix):
 | S6 | **Text shaping stress** — multilingual long-paragraph relayout on width animation | Parley vs Flutter text pipeline | shaping cost + cache behavior |
 | S7 | **Cold start + idle** — launch to first frame (each framework's own spans + external `am start -W`); then 60s idle CPU + sustained memory | startup, idle cost | thin runtime, frame-gate idle |
 | S8 | **Plugin-call overhead** — shared_preferences write+read loops (N unique keys, all five value types), latency per op + total wall time; a burst variant runs during an S1-style animation to measure UI-thread impact | the plugin boundary itself | direct in-process FFI (`objc2`/`jni`, zero codec) vs MethodChannel round-trip (StandardMethodCodec serialize → channel hop → Kotlin/Swift wrapper → and back) |
+
+### S1-specific notes
+
+- **Bubble sizes are normalized to the play area** (both apps re-run after this
+  parity fix): bubble radius and initial cluster spread are fractions of
+  `min(playWidth, playHeight)` rather than absolute logical pixels, so the
+  bubble-size-to-play-area ratio (and thus collision density / settle behavior)
+  is identical across the two apps regardless of each shell's reported logical
+  size. The **play area = the safe-area-inset region on both sides** (Flutter
+  hosts under `Scaffold > SafeArea`; the frust app wraps its scenario host in
+  `SafeArea`). Seeds/counts and the velocity/physics constants stay
+  byte-identical. The canonical spec lives in
+  `flutter_bench/lib/bench/datasets.dart` (mirrored in the frust side's
+  `s1_animation/physics.rs`).
 
 ### S7-specific notes
 

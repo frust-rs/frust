@@ -10,7 +10,13 @@
 //! its source would couple this benchmark to that example's on-disk layout.
 //! The copy keeps `frust_bench` self-contained; the shared physics constants
 //! and per-frame paint workload stay byte-identical to the repro (see
-//! `physics.rs`'s own module doc for the flutter/flutter#180958 provenance).
+//! `physics.rs`'s own module doc for the flutter/flutter#180958 provenance),
+//! **except** bubble geometry: radius and initial cluster spread are now
+//! fractions of the SafeArea-inset play area's `min(width, height)` per the
+//! canonical S1 size-parity spec (contract home:
+//! `benchmarks/flutter_bench/lib/bench/datasets.dart`; see `physics.rs`), so
+//! the bubble-to-play-area ratio matches the Flutter side exactly. The scenario
+//! host is wrapped in the facade's `SafeArea` in `crate::BenchApp::build`.
 //!
 //! Scenario markers: the driver's default [`Scenario::on_start`]/
 //! [`on_end`](Scenario::on_end) bracket the whole animation window as `s1`;

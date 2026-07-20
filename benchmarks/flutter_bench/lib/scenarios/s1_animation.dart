@@ -16,12 +16,16 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Ticker;
 
+import '../bench/datasets.dart';
 import '../bench/rng.dart';
 
-/// The physics simulation — a port of `bubblebench/src/physics.rs`.
+/// The physics simulation — a port of `bubblebench/src/physics.rs`. Bubble
+/// geometry follows the canonical S1 size-parity spec (see [s1RadiusMinFrac] in
+/// `datasets.dart`, the contract home): radius + cluster spread are fractions
+/// of `min(playWidth, playHeight)`, the SafeArea-inset play region.
 class BubblePhysics {
-  static const int bubbleCount = 60;
-  static const int seed = 42;
+  static const int bubbleCount = s1BubbleCount;
+  static const int seed = s1BubbleSeed;
 
   static const double _friction = 0.90;
   static const double _centerPull = 0.001;
@@ -56,14 +60,19 @@ class BubblePhysics {
   }
 
   /// Seed `count` bubbles clustered around center — mirrors `initialize_bubbles`.
+  /// Radius and cluster spread are fractions of `S = min(width, height)` per the
+  /// S1 size-parity spec ([s1RadiusMinFrac]); requires [setSize] to have run.
   void initializeBubbles(int count, int seed) {
     bubbles.clear();
+    final s = math.min(_width, _height);
     final rng = SplitMix64(seed);
     for (var i = 0; i < count; i++) {
       final performance = rng.nextF64() * 40.0 - 20.0;
-      final radius = 20.0 + rng.nextF64() * 40.0;
-      final x = _centerX + (rng.nextF64() * 200.0 - 100.0);
-      final y = _centerY + (rng.nextF64() * 200.0 - 100.0);
+      final radius = (s1RadiusMinFrac + rng.nextF64() * s1RadiusSpanFrac) * s;
+      final x =
+          _centerX + (rng.nextF64() * s1ClusterSpanFrac - s1ClusterSpanFrac / 2) * s;
+      final y =
+          _centerY + (rng.nextF64() * s1ClusterSpanFrac - s1ClusterSpanFrac / 2) * s;
       bubbles.add(Bubble(
         symbol: _symbols[i % _symbols.length],
         performance: performance,

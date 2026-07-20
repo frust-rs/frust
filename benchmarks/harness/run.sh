@@ -287,6 +287,16 @@ adb_shell() {
   adb -s "${DEVICE}" shell "$@"
 }
 
+# Restore device power/battery state on any exit (normal, error, or Ctrl-C):
+# undo the keep-awake override and clear any battery spoof so the device
+# returns to its real charge/timeout behavior after the session. Best-effort —
+# a lost device must not turn cleanup into a hard failure.
+cleanup() {
+  adb -s "${DEVICE}" shell svc power stayon false >/dev/null 2>&1 || true
+  adb -s "${DEVICE}" shell dumpsys battery reset >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
 for i in $(seq 1 "${RUNS}"); do
   echo "== ${APP} / ${SCENARIO} / run ${i} of ${RUNS} =="
 
@@ -297,6 +307,14 @@ for i in $(seq 1 "${RUNS}"); do
 
   adb_shell am force-stop "${PKG}" >/dev/null 2>&1 || true
   adb -s "${DEVICE}" logcat -c
+
+  # Keep the screen on and awake for this run. The screen would otherwise
+  # sleep during the inter-run gap (or the per-scenario switch) and lock the
+  # device mid-capture — blanking the scenario and starving the raw trace;
+  # `stayon true` disables the screen-off timeout and `KEYCODE_WAKEUP` turns
+  # a already-off screen back on. Restored to `stayon false` in cleanup().
+  adb_shell svc power stayon true >/dev/null 2>&1 || true
+  adb_shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
 
   adb_shell dumpsys meminfo "${PKG}" >"${pss_before}" 2>/dev/null \
     || echo "note: could not capture pre-run PSS (app likely not yet running) — non-fatal" >&2
