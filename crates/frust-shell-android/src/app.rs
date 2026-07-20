@@ -354,9 +354,16 @@ impl AndroidAppHandle {
     /// records [`perf::SPAN_FIRST_REBUILD_DONE`] right after the initial
     /// `rebuild()` below, then carries the recorder into the returned handle
     /// for `Self::frame` to finish (first frame presented + emit).
+    ///
+    /// `text_ctx` is the [`TextContext`] `create_handle` already resolved
+    /// (phase 10.D) — the pre-built one from `JNI_OnLoad`'s background
+    /// font-preload thread when it finished in time, or a synchronous
+    /// fallback otherwise (see `jni_glue::take_preinit_text_context`) — so
+    /// this method never itself pays the font-DB load cost.
     pub(crate) fn new(
         render_cx: RenderContext,
         renderer: SurfaceRenderer,
+        text_ctx: TextContext,
         window: NativeWindow,
         physical: (u32, u32),
         scale: f32,
@@ -378,7 +385,7 @@ impl AndroidAppHandle {
         Self {
             render_cx,
             renderer,
-            text_ctx: TextContext::new(),
+            text_ctx,
             scene: Scene::new(),
             app,
             physical,

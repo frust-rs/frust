@@ -226,9 +226,15 @@ impl IosAppHandle {
     /// Must be called under the root reactive `Owner` (see
     /// `crate::ffi_glue::create_handle`) so `provide_context` isn't a silent
     /// no-op.
+    ///
+    /// `text_ctx` is the [`TextContext`] `create_handle` already resolved
+    /// (phase 10.D) — the pre-built one from its own background font-preload
+    /// thread when it finished in time, or a synchronous fallback otherwise —
+    /// so this method never itself pays the font-DB load cost.
     pub(crate) fn new(
         render_cx: RenderContext,
         renderer: SurfaceRenderer,
+        text_ctx: TextContext,
         metal_layer: *mut c_void,
         physical: (u32, u32),
         scale: f32,
@@ -248,7 +254,7 @@ impl IosAppHandle {
         Self {
             render_cx,
             renderer,
-            text_ctx: TextContext::new(),
+            text_ctx,
             scene: Scene::new(),
             app,
             scope: TrackedScope::new(),

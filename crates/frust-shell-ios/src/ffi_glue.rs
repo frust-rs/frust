@@ -28,10 +28,25 @@ use frust_reactive::{ReactiveRuntime, push_deep_link};
 use frust_render::{RenderContext, SurfaceRenderer};
 use frust_shell_common::perf::{self, StartupSpans};
 use frust_shell_common::{AppTree, guard};
+use frust_text::TextContext;
 
 use crate::accessibility::IosA11yAdapter;
 use crate::app::IosAppHandle;
 use crate::ffi_support::CaretRect;
+
+/// Startup-span name (phase 10.D): `create_handle` is about to join the
+/// background font-preload thread [`create_handle`] spawned at the top of its
+/// own body (see that fn's doc — iOS has no `JNI_OnLoad`-equivalent
+/// process-wide load hook to spawn it earlier from, so the thread is spawned
+/// as early as possible inside `create_handle` itself instead, overlapping the
+/// synchronous GPU surface/device bring-up below it). Mirrors the Android
+/// shell's `SPAN_FONT_PREINIT_STARTED`/`SPAN_FONT_PREINIT_JOINED` pair.
+const SPAN_FONT_PREINIT_STARTED: &str = "font_preinit_started";
+
+/// Startup-span name (phase 10.D): the background font-preload join returned —
+/// the pre-built [`TextContext`] was adopted, or `create_handle` fell back to
+/// a synchronous [`TextContext::new`]. See [`SPAN_FONT_PREINIT_STARTED`].
+const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
 
 /// A minimal `log::Log` writing to stderr, installed once in [`init`].
 ///
@@ -207,6 +222,17 @@ fn create_handle(
         bail!("frust-shell-ios: frust_init called with a null CAMetalLayer");
     }
 
+    // Font/`TextContext` warmup (phase 10.D): iOS has no `JNI_OnLoad`-style
+    // process-wide load hook to start this earlier from (unlike the Android
+    // shell — `frust_init` is the earliest Rust entry point Swift ever calls),
+    // so spawn the background thread here, as the very first thing, right
+    // before the synchronous GPU surface/device bring-up below — the iOS
+    // counterpart to Android's pre-init overlap window. `TextContext::new` has
+    // no fallible step, so this thread cannot fail, only panic (handled at the
+    // join below). Joined as late as possible (right before
+    // `IosAppHandle::new` needs it) to maximize overlap with the GPU work.
+    let font_preinit = std::thread::spawn(TextContext::new);
+
     let mut render_cx = RenderContext::new();
     let mut renderer = SurfaceRenderer::new();
     let physical = (width.max(1), height.max(1));
@@ -247,6 +273,23 @@ fn create_handle(
     // signal write, so the waker is a no-op (mirrors the Android shell).
     let rt = ReactiveRuntime::init(no_op_waker());
 
+    // Join the font-preload thread spawned at the top of this function, as
+    // late as possible — right before `IosAppHandle::new` actually needs the
+    // result — so the join has the maximum window to have already completed
+    // on its own (it started before the surface/device bring-up above, which
+    // itself is not-trivial synchronous work). Best-effort: a panicked thread
+    // falls back to a synchronous `TextContext::new` with a log line — kill
+    // nothing, defer nothing silently (never a crash/block).
+    startup.record(SPAN_FONT_PREINIT_STARTED);
+    let text_ctx = font_preinit.join().unwrap_or_else(|_| {
+        log::warn!(
+            "frust-shell-ios: font pre-init thread panicked; \
+             falling back to synchronous TextContext::new"
+        );
+        TextContext::new()
+    });
+    startup.record(SPAN_FONT_PREINIT_JOINED);
+
     // Construct the app AND its handle under the root `Owner`. `make_app` runs
     // `Component::init` (via `new_boxed_app_with`'s state factory), and
     // `IosAppHandle::new` runs the initial `rebuild()` — both must see an
@@ -258,7 +301,15 @@ fn create_handle(
     // by recreating the surface from it (iOS never re-delivers the layer).
     let mut handle = rt.with_owner(|| {
         let app = make_app();
-        IosAppHandle::new(render_cx, renderer, metal_layer, physical, scale, app)
+        IosAppHandle::new(
+            render_cx,
+            renderer,
+            text_ctx,
+            metal_layer,
+            physical,
+            scale,
+            app,
+        )
     });
     // `IosAppHandle::new` runs the app's first `rebuild()` synchronously as
     // its last step before returning, so recording the span here is

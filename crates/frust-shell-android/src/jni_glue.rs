@@ -37,6 +37,7 @@ use frust_core::event::{EditingState, ImeState};
 use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_link};
 use frust_shell_common::perf::{self, StartupSpans};
 use frust_shell_common::{AppTree, guard};
+use frust_text::TextContext;
 
 use crate::app::AndroidAppHandle;
 use crate::ffi_support::{
@@ -66,6 +67,19 @@ const SPAN_PREINIT_STARTED: &str = "preinit_started";
 /// init. See [`SPAN_PREINIT_STARTED`].
 const SPAN_PREINIT_JOINED: &str = "preinit_joined";
 
+/// Startup-span name (phase 10.D): `create_handle` is about to join the
+/// background font-preload thread [`JNI_OnLoad`] spawned at native-library
+/// load (see [`spawn_font_preinit`]). Mirrors [`SPAN_PREINIT_STARTED`]'s shape
+/// for the GPU pre-init thread — a near-zero delta to
+/// [`SPAN_FONT_PREINIT_JOINED`] means the font DB/`TextContext` build fully
+/// overlapped the window-acquire/GPU-init work above it.
+const SPAN_FONT_PREINIT_STARTED: &str = "font_preinit_started";
+
+/// Startup-span name (phase 10.D): the background font-preload join returned —
+/// the pre-built [`TextContext`] was adopted, or `create_handle` fell back to
+/// a synchronous [`TextContext::new`]. See [`SPAN_FONT_PREINIT_STARTED`].
+const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
+
 /// Task 19: the GPU pre-init join handle spawned by [`JNI_OnLoad`]. The
 /// background thread builds a [`frust_render::RenderContext`] and creates its
 /// logical device (wgpu instance + adapter + device, no surface — see
@@ -79,6 +93,20 @@ const SPAN_PREINIT_JOINED: &str = "preinit_joined";
 /// synchronous context.
 type PreInitResult = Option<frust_render::RenderContext>;
 static GPU_PREINIT: OnceLock<Mutex<Option<JoinHandle<PreInitResult>>>> = OnceLock::new();
+
+/// Phase 10.D: the GPU pre-init thread's font-warmup counterpart, spawned by
+/// [`JNI_OnLoad`] alongside it. Builds a [`TextContext`] (parley's
+/// `FontContext`/`LayoutContext` — the font-DB load `Widget::layout`'s first
+/// text pass would otherwise pay for) off the JVM main thread, overlapping the
+/// same window the GPU adapter/device build overlaps. `TextContext` is
+/// `!Sync` but plain owned data (no raw pointers), so it is `Send`-safe to hand
+/// across this one thread boundary via the join below; nothing shares it
+/// mutably across threads afterward — [`take_preinit_text_context`] takes it
+/// exactly once and hands it to the UI thread that then owns it exclusively for
+/// the handle's lifetime (a prewarm-then-move design, not shared mutable
+/// state). Holds `Some(TextContext)` unconditionally — construction has no
+/// fallible step — until [`take_preinit_text_context`] takes it.
+static FONT_PREINIT: OnceLock<Mutex<Option<JoinHandle<TextContext>>>> = OnceLock::new();
 
 /// The process [`JavaVM`](jni::JavaVM) pointer, captured at [`JNI_OnLoad`]
 /// (task 01, plugin system). The JVM hands `JNI_OnLoad` the `JavaVM` before any
@@ -108,7 +136,8 @@ static CONTEXT_GLOBAL: OnceLock<Global<JObject<'static>>> = OnceLock::new();
 /// [`JavaVM`](jni::JavaVM) pointer for the plugin platform bridge (task 01 —
 /// stashed in [`JAVA_VM`] for [`native_init_platform`]) and kicks off the
 /// background GPU pre-init so wgpu adapter/device creation overlaps the JVM's
-/// own Activity/Surface bring-up.
+/// own Activity/Surface bring-up, plus the font-preload pre-init (phase 10.D)
+/// so the `TextContext`/font-DB build overlaps the same window.
 ///
 /// Defined here in the shell crate (not in the [`crate::android_app!`] macro)
 /// deliberately: `JNI_OnLoad` is a single, process-wide symbol — a per-app
@@ -127,7 +156,10 @@ pub extern "system" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> ji
     // Retain the VM pointer for `nativeInitPlatform`; a plain pointer store,
     // never dereferenced here. `Release` pairs with the `Acquire` load there.
     JAVA_VM.store(vm, Ordering::Release);
-    guard("JNI_OnLoad", (), spawn_gpu_preinit);
+    guard("JNI_OnLoad", (), || {
+        spawn_gpu_preinit();
+        spawn_font_preinit();
+    });
     JNI_VERSION_1_6
 }
 
@@ -262,6 +294,63 @@ fn take_preinit_context() -> frust_render::RenderContext {
             }
         });
     crate::ffi_support::resolve_preinit(joined, frust_render::RenderContext::new)
+}
+
+/// Spawn the single background font-preload thread (phase 10.D), best-effort
+/// and single-shot, mirroring [`spawn_gpu_preinit`]'s shape exactly: it builds
+/// a [`TextContext`] (parley font-DB/`FontContext` + `LayoutContext`
+/// construction) off the JVM main thread during the same `JNI_OnLoad` window
+/// the GPU pre-init overlaps, so [`create_handle`] can join finished work
+/// instead of paying the font-load span on the first `layout` pass.
+/// Idempotent — a second call (e.g. the library re-loaded in the same process)
+/// never spawns a second thread. `TextContext::new` has no fallible step, so
+/// this thread cannot fail — only panic, handled at the join site
+/// ([`take_preinit_text_context`]).
+fn spawn_font_preinit() {
+    let slot = FONT_PREINIT.get_or_init(|| Mutex::new(None));
+    let Ok(mut slot_guard) = slot.lock() else {
+        return; // a prior panic poisoned the lock; skip pre-init, nativeInit falls back
+    };
+    if slot_guard.is_some() {
+        return; // already spawned this process
+    }
+    *slot_guard = Some(std::thread::spawn(TextContext::new));
+}
+
+/// Join the [`JNI_OnLoad`] font-preload thread (phase 10.D) and return the
+/// [`TextContext`] [`create_handle`] should use: the pre-built one (font-DB
+/// already loaded off-thread) when the background build finished, or a fresh
+/// synchronous [`TextContext::new`] on any best-effort fallback case — pre-init
+/// absent (`JNI_OnLoad` never ran, or the handle was already taken by a prior
+/// `nativeInit`) or the thread panicked. Kill nothing, defer nothing silently:
+/// a fallback here degrades to the cold path with a log line, never a
+/// crash/block.
+///
+/// The `.join()` is never slower than the pre-phase-10.D status quo: the same
+/// `TextContext::new()` work ran synchronously inside `AndroidAppHandle::new`
+/// before, so at worst this blocks for the remainder of work already in
+/// flight.
+fn take_preinit_text_context() -> TextContext {
+    let joined = FONT_PREINIT
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()))
+        .and_then(|handle| match handle.join() {
+            Ok(text_ctx) => Some(text_ctx),
+            Err(_) => {
+                log::warn!(
+                    "frust-shell-android: font pre-init thread panicked; \
+                     falling back to synchronous TextContext::new"
+                );
+                None
+            }
+        });
+    joined.unwrap_or_else(|| {
+        log::debug!(
+            "frust-shell-android: no font pre-init result available; \
+             building TextContext synchronously"
+        );
+        TextContext::new()
+    })
 }
 
 /// Pump the process-wide [`ReactiveRuntime`]'s UI-thread local task queue, if
@@ -482,6 +571,18 @@ fn create_handle(
         persist_pipeline_cache_if_changed(path, loaded_cache.as_deref(), &renderer);
     }
 
+    // Font/`TextContext` warmup (phase 10.D): join the `JNI_OnLoad`
+    // font-preload thread as late as possible in this function — right before
+    // it's actually needed by `AndroidAppHandle::new` below — so the join has
+    // the maximum window to have already completed on its own (the thread
+    // started at native-library load, well before this whole function ran).
+    // Best-effort: a panicked/never-spawned thread falls back to a synchronous
+    // `TextContext::new` with a log line (see `take_preinit_text_context`),
+    // never a crash/block.
+    startup_spans.record(SPAN_FONT_PREINIT_STARTED);
+    let text_ctx = take_preinit_text_context();
+    startup_spans.record(SPAN_FONT_PREINIT_JOINED);
+
     // Process-once (the runtime's own `OnceLock` provides that property; a
     // repeat call — e.g. an activity recreated in the same process — just
     // re-marks the calling thread as the UI thread and swaps in a fresh no-op
@@ -511,6 +612,7 @@ fn create_handle(
         AndroidAppHandle::new(
             render_cx,
             renderer,
+            text_ctx,
             window,
             physical,
             scale,
