@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &bootstrap_state(partial_report(), 2))"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ! partial                                       ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │                                                                          
+  ▸ huddle               │  Dashboard                                                               
+             ╭ ⚙ Toolchain setup — get this machine building Frust apps ! [Esc] Close ╮             
+ DEVICES ↻ r │                                                                        │▓▓           
+   none found│  STEPS                  ANDROID — partial                              │▓▓           
+             │   ✓ Rust toolchain      ✓ Android Rust targets  ok                     │▓▓           
+ SESSIONS    │   ! Platforms ▾         ✗ cargo-ndk  not found                         │▓▓           
+   none runni│  ▸  ! Android           ✗ JDK  not found                               │▓▓           
+             │     ✓ iOS                                                              │▓▓           
+ ACTIONS     │     ✓ Desktop           FIX IT — one command per confirm               │▓▓           
+   New projec│   ! Doctor rollup       ▶ cargo install cargo-ndk                      │▓▓           
+   Doctor · d│                           Install a JDK 17+                            │▓▓           
+   Build · b │                                                                        │▓▓           
+   Clean · c │                          ▶ Run in session    c copy                    │▓▓           
+             │                                                                        │▓▓           
+             │                                                                        │▓▓           
+             │                                                                        │▓▓           
+             │                                                                        │▓▓           
+             │                                                                        │▓▓           
+             │                                                                        │▓▓           
+             │  ↑↓ steps · Space expand · Tab fix · Enter/r run · c copy · Esc close  │▓▓           
+             ╰────────────────────────────────────────────────────────────────────────╯▓▓           
+               ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓           
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

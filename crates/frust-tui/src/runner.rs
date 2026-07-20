@@ -29,8 +29,8 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{
-    ActiveModal, AppState, BuildFocus, BuildSpec, BuildTargetSpec, DoctorCheck, Effect, Engine,
-    Message, RegionId, RunFocus, Screen, WizardStep,
+    ActiveModal, AppState, BootstrapNode, BootstrapWizard, BuildFocus, BuildSpec, BuildTargetSpec,
+    DoctorCheck, Effect, Engine, Message, RegionId, RunFocus, Screen, WizardStep,
 };
 use crate::supervise::{
     DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor,
@@ -92,6 +92,10 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // startup source, refreshed on demand via `d`/the chip/the panel re-run).
     let _ = msg_tx.send(Message::RefreshDevices);
     let _ = msg_tx.send(Message::RunDoctor);
+    // The component-level report (D6a): seeds the titlebar toolchain-chip
+    // rollup and the bootstrap wizard, and drives the fresh-machine auto-open
+    // when the core toolchain is missing.
+    let _ = msg_tx.send(Message::RunBootstrapReport);
     // Record whichever project came up active at startup (cwd-detected, or
     // the persisted most-recently-opened one — see `AppState::new`) as the
     // most-recently-opened, so opening the TUI itself counts as a "use" for
@@ -180,6 +184,15 @@ fn apply_effect(
             let id = next_adhoc_session_id(next_adhoc_id);
             launch_clean_session(root, id, tx.clone());
         }
+        Some(Effect::RunBootstrapReport) => spawn_bootstrap_report(tx.clone()),
+        Some(Effect::RunBootstrapCommand {
+            program,
+            args,
+            label,
+        }) => {
+            let id = next_adhoc_session_id(next_adhoc_id);
+            launch_bootstrap_fix_session(program, args, label, id, tx.clone());
+        }
         None => {}
     }
 }
@@ -214,6 +227,77 @@ fn spawn_doctor_run(tx: UnboundedSender<Message>) {
             })
             .collect();
         let _ = tx.send(Message::DoctorResults(results));
+    });
+}
+
+/// Run `frust-drive`'s component-level report off the UI thread (the same
+/// blocking probes `spawn_doctor_run` runs, reshaped by `build_report` into the
+/// grouped Prerequisites/Android/iOS/Desktop components + fix commands the
+/// bootstrap wizard consumes), posting it back as [`Message::BootstrapReport`]
+/// — the titlebar chip's rollup source (D6a).
+fn spawn_bootstrap_report(tx: UnboundedSender<Message>) {
+    tokio::task::spawn_blocking(move || {
+        let env = RealEnv;
+        let ctx = DoctorCtx {
+            runner: &RealProcessRunner,
+            env: &env,
+            is_macos: cfg!(target_os = "macos"),
+        };
+        let report = doctor::build_report(&ctx);
+        let _ = tx.send(Message::BootstrapReport(report));
+    });
+}
+
+/// Run a bootstrap wizard's guided fix command off the UI thread as a
+/// supervised session — one command, never chained (the wizard only ever emits
+/// an `auto_runnable` fix). It streams through the same ad-hoc-session machinery
+/// [`launch_clean_session`] uses (`RegisterSession` + a `run_streaming` line
+/// sink into the session's log tab, never the raw-mode tty), and on exit
+/// re-runs the preflight report ([`Message::RunBootstrapReport`]) so the chip
+/// and wizard reflect the now-fixed component — D6a's fresh-machine flow.
+fn launch_bootstrap_fix_session(
+    program: String,
+    args: Vec<String>,
+    label: String,
+    id: SessionId,
+    tx: UnboundedSender<Message>,
+) {
+    // Bootstrap fixes (`rustup target add …`, `cargo install cargo-ndk`) are
+    // machine-global — no project root, so the session groups under a synthetic
+    // "toolchain" root that keeps its tab distinct from any project's sessions.
+    let root = PathBuf::from("toolchain");
+    let _ = tx.send(Message::RegisterSession {
+        id,
+        project_root: root,
+        target_label: format!("fix: {label}"),
+    });
+    tokio::task::spawn_blocking(move || {
+        let _ = tx.send(session_state(id, SessionState::Building));
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let result = {
+            let mut on_line = |line: &str| {
+                let _ = tx.send(session_line(id, line.to_string()));
+            };
+            RealProcessRunner
+                .run_streaming(&program, &arg_refs, None, &[], &mut on_line)
+                .with_context(|| format!("failed to run `{program}`"))
+        };
+        let terminal = match result {
+            Ok(out) if out.success => SessionState::Exited(true),
+            Ok(out) => {
+                if !out.stderr.trim().is_empty() {
+                    let _ = tx.send(session_line(id, out.stderr.trim().to_string()));
+                }
+                SessionState::Exited(false)
+            }
+            Err(err) => {
+                let _ = tx.send(session_line(id, format!("error: {err:#}")));
+                SessionState::Exited(false)
+            }
+        };
+        let _ = tx.send(session_state(id, terminal));
+        // Re-preflight so the chip/wizard pick up the fixed component.
+        let _ = tx.send(Message::RunBootstrapReport);
     });
 }
 
@@ -651,6 +735,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     if let Some(modal) = state.active_modal() {
         return match modal {
             ActiveModal::CreateWizard(wizard) => translate_wizard_key(code, mods, wizard.step),
+            ActiveModal::Bootstrap(wizard) => translate_bootstrap_key(code, wizard),
             ActiveModal::RunConfig(modal) => translate_modal_key(code, mods, modal),
             ActiveModal::ProjectSwitcher => translate_switcher_key(code, state),
             // D4-style modal exclusivity — see `crate::ui::render`'s
@@ -702,6 +787,10 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     match code {
         // Global quit.
         KeyCode::Char('q') => vec![Message::Quit],
+
+        // `i` opens the toolchain bootstrap wizard from either screen (mouse
+        // parity: the titlebar toolchain chip) — D6a's fresh-machine flow.
+        KeyCode::Char('i') => vec![Message::OpenBootstrapWizard],
 
         // Welcome keyboard parity: Enter / c activate the Create button.
         KeyCode::Char('c') if matches!(state.screen, Screen::Welcome) => activate_create(state),
@@ -852,6 +941,30 @@ fn translate_doctor_key(code: KeyCode) -> Vec<Message> {
     match code {
         KeyCode::Esc => vec![Message::CloseDoctorPanel],
         KeyCode::Char('r') => vec![Message::RunDoctor],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the bootstrap wizard is open, honoring the
+/// selected step. `Esc` closes it, `↑`/`↓` move the step-tree cursor,
+/// `Tab`/`Shift+Tab` move the detail-pane fix cursor, `Space`/`Enter` toggle a
+/// selected `Platforms` header (else `Enter` runs the selected fix), and `r`/`c`
+/// run/copy the selected fix. Mouse parity: the wizard registers a click region
+/// per step row, per fix row, and for the Run/copy/close affordances.
+fn translate_bootstrap_key(code: KeyCode, wizard: &BootstrapWizard) -> Vec<Message> {
+    let on_header = matches!(wizard.current_node(), BootstrapNode::PlatformsHeader);
+    match code {
+        KeyCode::Esc => vec![Message::CloseBootstrapWizard],
+        KeyCode::Up => vec![Message::BootstrapNavUp],
+        KeyCode::Down => vec![Message::BootstrapNavDown],
+        KeyCode::Tab => vec![Message::BootstrapFixDown],
+        KeyCode::BackTab => vec![Message::BootstrapFixUp],
+        KeyCode::Char(' ') => vec![Message::BootstrapToggleExpand],
+        // Enter toggles a header, otherwise runs the selected fix.
+        KeyCode::Enter if on_header => vec![Message::BootstrapToggleExpand],
+        KeyCode::Enter => vec![Message::BootstrapRunFix],
+        KeyCode::Char('r') => vec![Message::BootstrapRunFix],
+        KeyCode::Char('c') => vec![Message::BootstrapCopyFix],
         _ => vec![],
     }
 }

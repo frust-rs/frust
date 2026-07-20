@@ -11,10 +11,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 
 use frust_drive::devices::{Device, Kind, Platform};
-use frust_drive::doctor::Status;
+use frust_drive::doctor::{Area, Component, ComponentStatus, DoctorReport, FixCommand, Status};
 use frust_tui::engine::{
-    AppState, BuildLauncher, CreateWizard, DeviceRow, DoctorCheck, DoctorState, RegionId,
-    RunConfig, RunFocus, Screen, Scroll, SessionView, WizardStep,
+    AppState, BootstrapState, BootstrapWizard, BuildLauncher, CreateWizard, DeviceRow, DoctorCheck,
+    DoctorState, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView, WizardStep,
 };
 use frust_tui::supervise::{SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -463,6 +463,174 @@ fn built_session_state() -> AppState {
         active_session: Some(0),
         ..Default::default()
     }
+}
+
+// ── Bootstrap wizard + toolchain chip (D6a) ─────────────────────────────────
+
+fn comp(name: &str, status: ComponentStatus, fixes: Vec<FixCommand>) -> Component {
+    Component {
+        name: name.to_string(),
+        status,
+        summary: match status {
+            ComponentStatus::Ok => "ok".to_string(),
+            ComponentStatus::Partial => "partial".to_string(),
+            ComponentStatus::Missing => "not found".to_string(),
+        },
+        fix_commands: fixes,
+    }
+}
+
+fn runnable(display: &str, program: &str, args: &[&str]) -> FixCommand {
+    FixCommand {
+        display: display.to_string(),
+        program: program.to_string(),
+        args: args.iter().map(|s| s.to_string()).collect(),
+        auto_runnable: true,
+        doc_link: None,
+    }
+}
+
+fn guidance(display: &str, doc: &str) -> FixCommand {
+    FixCommand {
+        display: display.to_string(),
+        program: String::new(),
+        args: Vec::new(),
+        auto_runnable: false,
+        doc_link: Some(doc.to_string()),
+    }
+}
+
+/// A macOS-shaped report: green core, an Android area with a runnable cargo-ndk
+/// fix and a guidance-only JDK fix, green iOS, always-green Desktop.
+fn partial_report() -> DoctorReport {
+    DoctorReport {
+        areas: vec![
+            Area {
+                name: "Prerequisites".to_string(),
+                components: vec![comp("Rust toolchain", ComponentStatus::Ok, vec![])],
+            },
+            Area {
+                name: "Android".to_string(),
+                components: vec![
+                    comp("Android Rust targets", ComponentStatus::Ok, vec![]),
+                    comp(
+                        "cargo-ndk",
+                        ComponentStatus::Missing,
+                        vec![runnable(
+                            "cargo install cargo-ndk",
+                            "cargo",
+                            &["install", "cargo-ndk"],
+                        )],
+                    ),
+                    comp(
+                        "JDK",
+                        ComponentStatus::Missing,
+                        vec![guidance(
+                            "Install a JDK 17+",
+                            "https://developer.android.com/studio",
+                        )],
+                    ),
+                ],
+            },
+            Area {
+                name: "iOS".to_string(),
+                components: vec![comp("Xcode", ComponentStatus::Ok, vec![])],
+            },
+            Area {
+                name: "Desktop".to_string(),
+                components: vec![comp("Desktop preview", ComponentStatus::Ok, vec![])],
+            },
+        ],
+    }
+}
+
+fn all_green_report() -> DoctorReport {
+    DoctorReport {
+        areas: vec![
+            Area {
+                name: "Prerequisites".to_string(),
+                components: vec![comp("Rust toolchain", ComponentStatus::Ok, vec![])],
+            },
+            Area {
+                name: "Android".to_string(),
+                components: vec![comp("cargo-ndk", ComponentStatus::Ok, vec![])],
+            },
+            Area {
+                name: "Desktop".to_string(),
+                components: vec![comp("Desktop preview", ComponentStatus::Ok, vec![])],
+            },
+        ],
+    }
+}
+
+fn missing_core_report() -> DoctorReport {
+    let mut r = partial_report();
+    r.areas[0].components[0] = comp(
+        "Rust toolchain",
+        ComponentStatus::Missing,
+        vec![guidance("Install Rust via rustup", "https://rustup.rs")],
+    );
+    r
+}
+
+/// Open the bootstrap wizard over the workbench from `report`, with the step
+/// cursor at `cursor`.
+fn bootstrap_state(report: DoctorReport, cursor: usize) -> AppState {
+    let mut wizard = BootstrapWizard::from_report(report.clone());
+    wizard.cursor = cursor;
+    let mut state = workbench_state();
+    state.bootstrap = BootstrapState {
+        report: Some(report),
+        refreshing: false,
+        auto_shown: true,
+    };
+    state.bootstrap_wizard = Some(wizard);
+    state
+}
+
+/// The wizard over an all-green toolchain (rollup Ok), cursor on the core step.
+#[test]
+fn bootstrap_wizard_green_100x30() {
+    insta::assert_snapshot!(render_to_string(
+        100,
+        30,
+        &bootstrap_state(all_green_report(), 0)
+    ));
+}
+
+/// The wizard on the Android step (cursor 2), a runnable cargo-ndk fix selected
+/// — the "▶ Run in session" affordance is live.
+#[test]
+fn bootstrap_wizard_partial_android_100x30() {
+    insta::assert_snapshot!(render_to_string(
+        100,
+        30,
+        &bootstrap_state(partial_report(), 2)
+    ));
+}
+
+/// The wizard with a Missing core (Rust toolchain), cursor on the core step —
+/// the gating case that blocks handback.
+#[test]
+fn bootstrap_wizard_missing_core_100x30() {
+    insta::assert_snapshot!(render_to_string(
+        100,
+        30,
+        &bootstrap_state(missing_core_report(), 0)
+    ));
+}
+
+/// The titlebar chip reflecting a Partial report rollup (D6a) — the chip's real
+/// source once a component report is cached.
+#[test]
+fn toolchain_chip_partial_from_report_100x30() {
+    let mut state = workbench_state();
+    state.bootstrap = BootstrapState {
+        report: Some(partial_report()),
+        refreshing: false,
+        auto_shown: true,
+    };
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
 /// A completed build session's log view, showing the "N built · c copy path"

@@ -7,6 +7,7 @@
 //! emits `Message`s but never mutates the model; `crate::runner` owns the
 //! terminal lifecycle and drives the loop.
 
+mod bootstrap;
 mod build_launcher;
 mod create_wizard;
 mod doctor;
@@ -18,6 +19,7 @@ mod session_view;
 mod state;
 mod update;
 
+pub use bootstrap::{BootstrapNode, BootstrapState, BootstrapWizard};
 pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, BuildTargetSpec};
 pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
 pub use doctor::{DoctorCheck, DoctorState};

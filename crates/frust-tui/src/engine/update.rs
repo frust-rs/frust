@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 
+use super::bootstrap::BootstrapWizard;
 use super::build_launcher::{BuildLauncher, BuildSpec};
 use super::create_wizard::{CreateWizard, WizardAdvance};
 use super::message::Message;
@@ -65,6 +66,24 @@ pub enum Effect {
     /// directories for `project_root` off-thread, reported the same way as
     /// [`Effect::LaunchBuild`].
     RunClean(PathBuf),
+    /// Run `frust-drive`'s component-level toolchain report off-thread
+    /// ([`frust_drive::doctor::build_report`]), posting the result back as
+    /// [`Message::BootstrapReport`] — the titlebar chip's rollup source and the
+    /// bootstrap wizard's data (D6a).
+    RunBootstrapReport,
+    /// Run a bootstrap wizard's guided fix command off-thread as a supervised
+    /// session (streamed into a log tab, reusing the ad-hoc-session machinery
+    /// like [`Effect::LaunchBuild`]), then re-run the preflight report so the
+    /// chip/wizard reflect the fixed component (D6a's fresh-machine flow). Only
+    /// ever carries an `auto_runnable` fix — one command, never chained.
+    RunBootstrapCommand {
+        /// The program to spawn (`rustup`, `cargo`, …).
+        program: String,
+        /// Its arguments.
+        args: Vec<String>,
+        /// A short label for the session tab.
+        label: String,
+    },
 }
 
 /// What the loop must do after a transition.
@@ -438,6 +457,97 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
 
+        // ── Bootstrap wizard + titlebar toolchain chip (D6a) ────────────────
+        Message::RunBootstrapReport => {
+            state.bootstrap.refreshing = true;
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::RunBootstrapReport),
+            }
+        }
+        Message::BootstrapReport(report) => on_bootstrap_report(state, report),
+        Message::OpenBootstrapWizard => open_bootstrap_wizard(state),
+        Message::CloseBootstrapWizard => {
+            if state.bootstrap_wizard.take().is_some() {
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::BootstrapNavUp => with_bootstrap(state, |w| {
+            w.nav(-1);
+        }),
+        Message::BootstrapNavDown => with_bootstrap(state, |w| {
+            w.nav(1);
+        }),
+        Message::BootstrapSelectStep(i) => match state.bootstrap_wizard.as_mut() {
+            Some(w) => {
+                // Clicking a `Platforms` header toggles it; any other row just
+                // selects it (mouse parity for the keyboard nav + Space).
+                let was_header = matches!(
+                    w.nodes().get(i),
+                    Some(super::BootstrapNode::PlatformsHeader)
+                );
+                w.select_step(i);
+                if was_header {
+                    w.toggle_expand();
+                }
+                Outcome::redraw()
+            }
+            None => Outcome::idle(),
+        },
+        Message::BootstrapToggleExpand => match state.bootstrap_wizard.as_mut() {
+            Some(w) => {
+                if matches!(w.current_node(), super::BootstrapNode::PlatformsHeader) {
+                    w.toggle_expand();
+                    Outcome::redraw()
+                } else {
+                    Outcome::idle()
+                }
+            }
+            None => Outcome::idle(),
+        },
+        Message::BootstrapFixUp => with_bootstrap(state, |w| {
+            w.nav_fix(-1);
+        }),
+        Message::BootstrapFixDown => with_bootstrap(state, |w| {
+            w.nav_fix(1);
+        }),
+        Message::BootstrapSelectFix(i) => with_bootstrap(state, |w| w.select_fix(i)),
+        Message::BootstrapRunFix => match state.bootstrap_wizard.as_ref() {
+            Some(w) => match w.runnable_selected_fix() {
+                Some(fix) => {
+                    let effect = Effect::RunBootstrapCommand {
+                        program: fix.program.clone(),
+                        args: fix.args.clone(),
+                        label: fix.display.clone(),
+                    };
+                    // Running a fix closes the wizard so its streamed session
+                    // log tab (which the modal would otherwise cover) is
+                    // visible; the re-preflight after it exits refreshes the
+                    // chip (see `crate::runner`).
+                    state.bootstrap_wizard = None;
+                    Outcome {
+                        redraw: true,
+                        effect: Some(effect),
+                    }
+                }
+                // A guidance-only fix has nothing to run.
+                None => Outcome::idle(),
+            },
+            None => Outcome::idle(),
+        },
+        Message::BootstrapCopyFix => match state.bootstrap_wizard.as_ref() {
+            Some(w) => match w.selected_fix() {
+                Some(fix) => Outcome {
+                    redraw: false,
+                    effect: Some(Effect::Copy(fix_copy_text(fix))),
+                },
+                None => Outcome::idle(),
+            },
+            None => Outcome::idle(),
+        },
+
         // ── Build launcher (TUI2-07) ────────────────────────────────────────
         Message::OpenBuildLauncher => match run_config_project(state) {
             Some(project_root) if state.build_launcher.is_none() => {
@@ -637,6 +747,85 @@ fn with_build_launcher(state: &mut AppState, f: impl FnOnce(&mut BuildLauncher))
             Outcome::redraw()
         }
         None => Outcome::idle(),
+    }
+}
+
+/// Apply `f` to the open bootstrap wizard (if any) and redraw; idle when
+/// closed — mirrors [`with_modal`].
+fn with_bootstrap(state: &mut AppState, f: impl FnOnce(&mut BootstrapWizard)) -> Outcome {
+    match state.bootstrap_wizard.as_mut() {
+        Some(wizard) => {
+            f(wizard);
+            Outcome::redraw()
+        }
+        None => Outcome::idle(),
+    }
+}
+
+/// Cache a freshly-arrived component-level report: it feeds the titlebar chip's
+/// rollup and, if the wizard is open, refreshes its snapshot in place. On the
+/// first report of a launch it also drives the fresh-machine auto-open — the
+/// wizard pops once (never re-nags) when the core toolchain is `Missing` and no
+/// other modal is already up (PLAN D6a).
+fn on_bootstrap_report(state: &mut AppState, report: frust_drive::doctor::DoctorReport) -> Outcome {
+    use frust_drive::doctor::ComponentStatus;
+
+    state.bootstrap.refreshing = false;
+    if let Some(wizard) = state.bootstrap_wizard.as_mut() {
+        wizard.set_report(report.clone());
+    }
+    let first = !state.bootstrap.auto_shown;
+    state.bootstrap.auto_shown = true;
+    let missing_core = report.rollup() == ComponentStatus::Missing;
+    state.bootstrap.report = Some(report);
+
+    // Fresh-machine auto-open: only on the first report, only for a blocking
+    // (Missing) core, and only when nothing else is already open.
+    let should_auto_open =
+        first && missing_core && state.bootstrap_wizard.is_none() && state.active_modal().is_none();
+    if let Some(report) = state.bootstrap.report.clone().filter(|_| should_auto_open) {
+        state.bootstrap_wizard = Some(BootstrapWizard::from_report(report));
+    }
+    Outcome::redraw()
+}
+
+/// Open the bootstrap wizard from the cached report, requesting a preflight
+/// first when none is cached yet (the wizard opens over an empty report showing
+/// "running preflight…", then refreshes in place when the report lands).
+fn open_bootstrap_wizard(state: &mut AppState) -> Outcome {
+    if state.bootstrap_wizard.is_some() {
+        return Outcome::idle();
+    }
+    let report = state
+        .bootstrap
+        .report
+        .clone()
+        .unwrap_or_else(|| frust_drive::doctor::DoctorReport { areas: Vec::new() });
+    let need_preflight = state.bootstrap.report.is_none() && !state.bootstrap.refreshing;
+    state.bootstrap_wizard = Some(BootstrapWizard::from_report(report));
+    if need_preflight {
+        state.bootstrap.refreshing = true;
+        Outcome {
+            redraw: true,
+            effect: Some(Effect::RunBootstrapReport),
+        }
+    } else {
+        Outcome::redraw()
+    }
+}
+
+/// The clipboard text for a fix command: the runnable command line
+/// (`program args…`) for an auto-runnable fix, else its doc link, else its
+/// display string.
+fn fix_copy_text(fix: &frust_drive::doctor::FixCommand) -> String {
+    if fix.auto_runnable && !fix.program.is_empty() {
+        let mut parts = vec![fix.program.clone()];
+        parts.extend(fix.args.iter().cloned());
+        parts.join(" ")
+    } else if let Some(link) = &fix.doc_link {
+        link.clone()
+    } else {
+        fix.display.clone()
     }
 }
 
@@ -1551,6 +1740,142 @@ mod tests {
         assert_eq!(
             out.effect,
             Some(Effect::Copy("/tmp/a/app.apk\n/tmp/a/app2.apk".to_string()))
+        );
+    }
+
+    // ── Bootstrap wizard + titlebar toolchain chip (D6a) ────────────────────
+
+    use crate::engine::bootstrap::tests::partial_report;
+    use frust_drive::doctor::ComponentStatus;
+
+    #[test]
+    fn run_bootstrap_report_flags_refreshing_and_requests_the_effect() {
+        let mut st = welcome();
+        let out = update(&mut st, Message::RunBootstrapReport);
+        assert!(st.bootstrap.refreshing);
+        assert_eq!(out.effect, Some(Effect::RunBootstrapReport));
+        assert!(out.redraw);
+    }
+
+    #[test]
+    fn bootstrap_report_caches_rollup_and_refreshes_an_open_wizard() {
+        let mut st = welcome();
+        update(&mut st, Message::OpenBootstrapWizard); // opens empty, requests preflight
+        assert!(st.bootstrap_wizard.is_some());
+        update(&mut st, Message::BootstrapReport(partial_report()));
+        assert!(!st.bootstrap.refreshing);
+        assert_eq!(st.bootstrap.rollup(), Some(ComponentStatus::Partial));
+        // The open wizard now projects the real report (core + Platforms +
+        // 3 areas + Rollup = 6 nodes).
+        assert_eq!(st.bootstrap_wizard.as_ref().unwrap().nodes().len(), 6);
+    }
+
+    #[test]
+    fn open_from_a_cached_report_does_not_re_request_preflight() {
+        let mut st = welcome();
+        // Seed a cached report first.
+        update(&mut st, Message::BootstrapReport(partial_report()));
+        let out = update(&mut st, Message::OpenBootstrapWizard);
+        assert!(st.bootstrap_wizard.is_some());
+        assert_eq!(out.effect, None, "a cached report needs no re-run");
+    }
+
+    #[test]
+    fn a_missing_core_auto_opens_the_wizard_once() {
+        let mut st = welcome();
+        let mut report = partial_report();
+        report.areas[0].components[0].status = ComponentStatus::Missing;
+        // First report with a Missing core auto-opens the wizard.
+        update(&mut st, Message::BootstrapReport(report.clone()));
+        assert!(st.bootstrap_wizard.is_some(), "fresh-machine auto-open");
+        // Close it; a later re-preflight does NOT re-nag.
+        update(&mut st, Message::CloseBootstrapWizard);
+        update(&mut st, Message::BootstrapReport(report));
+        assert!(
+            st.bootstrap_wizard.is_none(),
+            "auto-open fires at most once"
+        );
+    }
+
+    #[test]
+    fn a_green_core_never_auto_opens() {
+        let mut st = welcome();
+        update(&mut st, Message::BootstrapReport(partial_report()));
+        assert!(st.bootstrap_wizard.is_none());
+    }
+
+    #[test]
+    fn running_an_auto_runnable_fix_emits_a_command_effect_and_closes_the_wizard() {
+        let mut st = welcome();
+        update(&mut st, Message::BootstrapReport(partial_report()));
+        update(&mut st, Message::OpenBootstrapWizard);
+        // Navigate to the Android area (cursor 2) where the runnable
+        // cargo-ndk fix lives; its fix cursor defaults to 0.
+        update(&mut st, Message::BootstrapNavDown); // -> Platforms header (1)
+        update(&mut st, Message::BootstrapNavDown); // -> Android (2)
+        let out = update(&mut st, Message::BootstrapRunFix);
+        assert!(
+            st.bootstrap_wizard.is_none(),
+            "running a fix closes the wizard"
+        );
+        assert_eq!(
+            out.effect,
+            Some(Effect::RunBootstrapCommand {
+                program: "cargo".to_string(),
+                args: vec!["install".to_string(), "cargo-ndk".to_string()],
+                label: "cargo install cargo-ndk".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn running_a_guidance_only_fix_is_a_noop() {
+        let mut st = welcome();
+        update(&mut st, Message::BootstrapReport(partial_report()));
+        update(&mut st, Message::OpenBootstrapWizard);
+        update(&mut st, Message::BootstrapNavDown);
+        update(&mut st, Message::BootstrapNavDown); // Android
+        update(&mut st, Message::BootstrapFixDown); // -> the JDK guidance fix
+        let out = update(&mut st, Message::BootstrapRunFix);
+        assert_eq!(out.effect, None, "a guidance-only fix has nothing to run");
+        assert!(st.bootstrap_wizard.is_some(), "and leaves the wizard open");
+    }
+
+    #[test]
+    fn copy_fix_yields_the_command_line_or_doc_link() {
+        let mut st = welcome();
+        update(&mut st, Message::BootstrapReport(partial_report()));
+        update(&mut st, Message::OpenBootstrapWizard);
+        update(&mut st, Message::BootstrapNavDown);
+        update(&mut st, Message::BootstrapNavDown); // Android, fix 0 = cargo-ndk
+        let out = update(&mut st, Message::BootstrapCopyFix);
+        assert_eq!(
+            out.effect,
+            Some(Effect::Copy("cargo install cargo-ndk".to_string()))
+        );
+        // The guidance fix copies its doc link instead.
+        update(&mut st, Message::BootstrapFixDown);
+        let out = update(&mut st, Message::BootstrapCopyFix);
+        assert_eq!(
+            out.effect,
+            Some(Effect::Copy(
+                "https://developer.android.com/studio".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn clicking_the_platforms_header_toggles_its_expansion() {
+        let mut st = welcome();
+        update(&mut st, Message::BootstrapReport(partial_report()));
+        update(&mut st, Message::OpenBootstrapWizard);
+        assert_eq!(st.bootstrap_wizard.as_ref().unwrap().nodes().len(), 6);
+        // Header is node 1.
+        update(&mut st, Message::BootstrapSelectStep(1));
+        assert_eq!(
+            st.bootstrap_wizard.as_ref().unwrap().nodes().len(),
+            3,
+            "clicking the header collapsed the platform leaves"
         );
     }
 }

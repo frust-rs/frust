@@ -11,6 +11,7 @@
 
 use std::path::Path;
 
+use super::bootstrap::BootstrapWizard;
 use super::build_launcher::BuildLauncher;
 use super::create_wizard::CreateWizard;
 use super::run_config::RunConfig;
@@ -28,6 +29,10 @@ pub enum ActiveModal<'a> {
     /// The create-project wizard (`state.create_wizard`) — top priority,
     /// can appear over the welcome splash or the workbench.
     CreateWizard(&'a CreateWizard),
+    /// The toolchain bootstrap wizard (`state.bootstrap_wizard`) — like the
+    /// create wizard, it can appear over either top-level screen (the
+    /// titlebar chip shows on both).
+    Bootstrap(&'a BootstrapWizard),
     /// The run-config modal (`state.run_config`).
     RunConfig(&'a RunConfig),
     /// The titlebar project switcher (`state.project_switcher_open`).
@@ -50,6 +55,8 @@ impl AppState {
     pub fn active_modal(&self) -> Option<ActiveModal<'_>> {
         if let Some(wizard) = &self.create_wizard {
             Some(ActiveModal::CreateWizard(wizard))
+        } else if let Some(wizard) = &self.bootstrap_wizard {
+            Some(ActiveModal::Bootstrap(wizard))
         } else if let Some(modal) = &self.run_config {
             Some(ActiveModal::RunConfig(modal))
         } else if self.project_switcher_open {

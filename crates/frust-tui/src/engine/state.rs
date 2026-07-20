@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::bootstrap::{BootstrapState, BootstrapWizard};
 use super::build_launcher::BuildLauncher;
 use super::create_wizard::CreateWizard;
 use super::doctor::DoctorState;
@@ -119,6 +120,14 @@ pub struct AppState {
     /// runs against. While `Some`, it captures input and suppresses
     /// background mouse regions like the other modals.
     pub clean_confirm: Option<PathBuf>,
+    /// The cached component-level toolchain report + titlebar-chip rollup
+    /// source (D6a). Populated by a startup preflight and re-run after a
+    /// guided-fix session; present regardless of whether the wizard is open.
+    pub bootstrap: BootstrapState,
+    /// The bootstrap wizard, when open (the `i` key, or a titlebar
+    /// toolchain-chip click). While `Some`, it captures input and suppresses
+    /// background mouse regions like the other modals.
+    pub bootstrap_wizard: Option<BootstrapWizard>,
 }
 
 impl AppState {
@@ -180,6 +189,8 @@ impl AppState {
             doctor_panel_open: false,
             build_launcher: None,
             clean_confirm: None,
+            bootstrap: BootstrapState::default(),
+            bootstrap_wizard: None,
         }
     }
 
@@ -294,6 +305,8 @@ impl Default for AppState {
             doctor_panel_open: false,
             build_launcher: None,
             clean_confirm: None,
+            bootstrap: BootstrapState::default(),
+            bootstrap_wizard: None,
         }
     }
 }

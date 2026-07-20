@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use frust_drive::devices::Device;
+use frust_drive::doctor::DoctorReport;
 
 use super::build_launcher::BuildFocus;
 use super::doctor::DoctorCheck;
@@ -69,8 +70,26 @@ pub enum RegionId {
     /// A row inside the open titlebar switcher dropdown (0-based index into
     /// `AppState::projects`); click switches and closes the dropdown.
     ProjectMenuItem(usize),
-    /// The titlebar toolchain chip; click opens the doctor panel.
+    /// The titlebar toolchain chip; click opens the bootstrap wizard (D6a —
+    /// the workbook's toolchain chip → bootstrap flow; the doctor detail panel
+    /// stays reachable via `d` / the sidebar "Doctor" action).
     DoctorChip,
+    /// A step-tree row in the bootstrap wizard (0-based index into the wizard's
+    /// visible node list); click selects it (a `Platforms` header row toggles
+    /// its expansion).
+    BootstrapStep(usize),
+    /// A fix-command row in the bootstrap wizard's detail pane (0-based index
+    /// into the selected step's fix list); click selects it.
+    BootstrapFix(usize),
+    /// The bootstrap wizard's "Run in session" affordance (runs the selected
+    /// auto-runnable fix as a supervised session).
+    BootstrapRunFix,
+    /// The bootstrap wizard's "copy" affordance (copies the selected fix's
+    /// command / doc link to the clipboard).
+    BootstrapCopyFix,
+    /// The bootstrap wizard's close affordance (the `[Esc] Close` title
+    /// button).
+    BootstrapClose,
     /// The sidebar "Doctor" action row; click opens the doctor panel.
     DoctorAction,
     /// The doctor panel's re-run affordance.
@@ -295,6 +314,47 @@ pub enum Message {
     OpenDoctorPanel,
     /// Close the doctor panel (`Esc`).
     CloseDoctorPanel,
+
+    // ── Bootstrap wizard + titlebar toolchain chip (D6a) ───────────────────
+    /// Run the component-level toolchain report off-thread
+    /// ([`frust_drive::doctor::build_report`]) — routed to the runner as
+    /// [`super::Effect::RunBootstrapReport`]. Fired once at startup to seed the
+    /// chip, and again after a guided-fix session exits (re-preflight).
+    RunBootstrapReport,
+    /// The off-thread report finished: cache it (the titlebar chip's rollup
+    /// source) and refresh the wizard if it's open. Carries the drive report
+    /// directly (it derives `PartialEq`/`Eq`/`Clone`, so no mirror type is
+    /// needed).
+    BootstrapReport(DoctorReport),
+    /// Open the bootstrap wizard (the `i` key, or a titlebar toolchain-chip
+    /// click) — seeds it from the cached report, requesting a preflight first
+    /// if none is cached yet.
+    OpenBootstrapWizard,
+    /// Close the bootstrap wizard (`Esc` / the `[Esc] Close` title button).
+    CloseBootstrapWizard,
+    /// Move the step-tree cursor up / down (`↑`/`↓`).
+    BootstrapNavUp,
+    /// Move the step-tree cursor down.
+    BootstrapNavDown,
+    /// Select a step-tree row by index (mouse click parity); a `Platforms`
+    /// header row toggles its expansion.
+    BootstrapSelectStep(usize),
+    /// Toggle the selected `Platforms` header's expansion (`Space`/`Enter` on
+    /// it) — a no-op on any other row.
+    BootstrapToggleExpand,
+    /// Move the detail-pane fix cursor up / down (`Shift+Tab` / `Tab`).
+    BootstrapFixUp,
+    /// Move the detail-pane fix cursor down.
+    BootstrapFixDown,
+    /// Select a fix-command row by index (mouse click parity).
+    BootstrapSelectFix(usize),
+    /// Run the selected auto-runnable fix as a supervised session (`r` / the
+    /// "Run in session" button) — routed to the runner as
+    /// [`super::Effect::RunBootstrapCommand`]; guidance-only fixes are a no-op.
+    BootstrapRunFix,
+    /// Copy the selected fix's command (or its doc link) to the clipboard (`c`
+    /// / the "copy" affordance) — routed as [`super::Effect::Copy`].
+    BootstrapCopyFix,
 
     // ── Build launcher (TUI2-07) ────────────────────────────────────────────
     /// Open the build launcher, primed for the active project (`b` from the

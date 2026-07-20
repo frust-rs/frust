@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::engine::{AppState, RegionId};
+use crate::engine::{AppState, Message, RegionId};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{ButtonState, big_button};
@@ -105,16 +105,37 @@ pub fn render(
 }
 
 /// Render the titlebar toolchain chip for the welcome screen (right-aligned),
-/// wired to the real startup-preflight state (TUI2-07) — the same chip logic
-/// `views::workbench::titlebar` uses.
-pub fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+/// wired to the real startup-preflight state — the same chip logic
+/// `views::workbench::titlebar` uses. Clicking it opens the bootstrap wizard
+/// (D6a; keyboard parity: `i`), so a fresh machine can reach the toolchain
+/// setup even before creating a project.
+pub fn titlebar(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
     let row = Rect::new(area.x, area.y, area.width, 1);
-    let (glyph, label, color) = super::workbench::doctor_chip(&state.doctor, theme);
+    let (glyph, label, color) = super::workbench::toolchain_chip(state, theme);
+    let prefix = "toolchain ";
+    let chip_text = format!("{glyph} {label}");
     let chip = Line::from(vec![
-        Span::styled("toolchain ", Style::default().fg(theme.muted())),
-        Span::styled(format!("{glyph} {label}"), Style::default().fg(color)),
+        Span::styled(prefix.to_string(), Style::default().fg(theme.muted())),
+        Span::styled(chip_text.clone(), Style::default().fg(color)),
     ]);
     frame.render_widget(Paragraph::new(chip).alignment(Alignment::Right), row);
+
+    // The chip is right-aligned, so its click rect is the trailing columns.
+    let chip_w = (prefix.chars().count() + chip_text.chars().count()) as u16;
+    if chip_w <= area.width {
+        let chip_x = area.right() - chip_w;
+        mouse.click(
+            Rect::new(chip_x, area.y, chip_w, 1),
+            RegionId::DoctorChip,
+            Message::OpenBootstrapWizard,
+        );
+    }
 }
 
 fn centered_line(frame: &mut Frame, area: Rect, line: Line) {

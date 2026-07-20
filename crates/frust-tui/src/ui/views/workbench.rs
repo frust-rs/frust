@@ -14,7 +14,7 @@ use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
 use crate::ui::views::sessions;
 use frust_drive::devices::{Kind, Platform};
-use frust_drive::doctor::Status;
+use frust_drive::doctor::{ComponentStatus, Status};
 
 /// Render the workbench shell into `area`.
 pub fn render(
@@ -94,7 +94,7 @@ fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, mous
         Style::default().fg(theme.muted()),
     );
     let chip_x = area.x + col;
-    let (glyph, label, chip_color) = doctor_chip(&state.doctor, theme);
+    let (glyph, label, chip_color) = toolchain_chip(state, theme);
     push(
         &mut spans,
         &mut col,
@@ -110,7 +110,7 @@ fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, mous
         mouse.click(
             Rect::new(chip_x, area.y, w, 1),
             RegionId::DoctorChip,
-            Message::OpenDoctorPanel,
+            Message::OpenBootstrapWizard,
         );
     }
 
@@ -251,10 +251,27 @@ fn render_sidebar(
     }
 }
 
-/// The titlebar toolchain chip's glyph/label/color for the aggregate doctor
-/// status (TUI2-07): "checking…" (muted) before the startup preflight's first
-/// result arrives, else "ok"/"partial"/"missing" per [`DoctorState::overall`].
-/// Shared with `views::welcome::titlebar`'s chip.
+/// The titlebar toolchain chip's glyph/label/color (D6a): the component-level
+/// bootstrap report's rollup when one is cached (its `Ok`/`Partial`/`Missing`
+/// is the chip's real source), falling back to the flat doctor `overall`
+/// (TUI2-07) until the first report lands, then to "checking…" before either
+/// preflight completes. Shared with `views::welcome::titlebar`'s chip; clicking
+/// it opens the bootstrap wizard.
+pub(crate) fn toolchain_chip(
+    state: &AppState,
+    theme: &Theme,
+) -> (&'static str, &'static str, Color) {
+    match state.bootstrap.rollup() {
+        Some(ComponentStatus::Ok) => (theme.icons.ok(), "toolchain", theme.success()),
+        Some(ComponentStatus::Partial) => ("!", "partial", theme.warn()),
+        Some(ComponentStatus::Missing) => ("\u{2717}", "missing", theme.error()),
+        None => doctor_chip(&state.doctor, theme),
+    }
+}
+
+/// The chip glyph/label/color for the flat doctor `overall` status (the
+/// pre-report fallback): "checking…" (muted) before the startup preflight's
+/// first result, else "ok"/"partial"/"missing" per [`DoctorState::overall`].
 pub(crate) fn doctor_chip(
     doctor: &DoctorState,
     theme: &Theme,

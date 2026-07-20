@@ -76,6 +76,18 @@ fn render_modal(
             }
             views::create_wizard::render(frame, area, wizard, theme, mouse);
         }
+        // The bootstrap wizard also appears over either screen (the toolchain
+        // chip shows on the welcome splash too).
+        ActiveModal::Bootstrap(wizard) => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::bootstrap::render(frame, area, wizard, theme, mouse);
+        }
         ActiveModal::RunConfig(modal) => {
             let mut suppressed = MouseCtx::suppressed();
             views::workbench::render(frame, area, state, theme, &mut suppressed);
@@ -120,7 +132,7 @@ fn render_welcome(
         ])
         .split(area);
 
-    views::welcome::titlebar(frame, rows[0], state, theme);
+    views::welcome::titlebar(frame, rows[0], state, theme, mouse);
     views::welcome::render(frame, rows[1], state, theme, mouse);
     welcome_status(frame, rows[2], state, theme);
 }
