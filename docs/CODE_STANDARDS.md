@@ -365,11 +365,10 @@ Semantics pass):
 ## State & Reactivity Conventions
 
 - **Local state lives in the retained `Component` element, not signals,
-  unless it needs cross-tree reactivity.** A `Component::State` is plain data
+  unless it needs cross-tree reactivity.** `Component::State` is plain data
   `ComponentWidget` retains across rebuilds — reach for an `RwSignal` field
   only when something outside the component's own `build` (a background
-  task, a sibling, a nested component) needs to observe a write. Most
-  `Component::State` should be plain structs/enums, not signal-wrapped.
+  task, a sibling, a nested component) needs to observe a write.
 - **Teardown disposes the component's `Owner`; register cleanup via
   `on_cleanup`, not `Drop`.** `ComponentWidget::teardown` tears down the child
   element, then disposes the owner (running every `on_cleanup` registered
@@ -383,30 +382,31 @@ Semantics pass):
   `Cancel` crossing a component boundary carries real state (unlike the
   throwaway `()` at the root), but the contract not to reach for it is
   identical.
-- **`spawn` is for `Send` background work; `spawn_local` only ever runs on
-  the UI thread.** `frust::spawn` hands a `Send` future to the background
-  tokio runtime; `frust::spawn_local` queues a `!Send` future the shell
-  drains via `ReactiveRuntime::pump_local` once per frame. Calling
-  `spawn_local` off the UI thread is a wiring bug, not a runtime-data
-  condition, and panics with a message saying so (the same convention as the
-  `downcast_mut` panic message above). On iOS, a backgrounded app pauses
-  `CADisplayLink`, so a timer-driven local task stalls until
-  `frust_resume` fires the next pump — don't assume a `spawn_local` timer
-  completes promptly while backgrounded.
+- **Heavy work routes by shape: `spawn` (async IO) / `spawn_local` (UI-thread
+  `!Send`) / `spawn_blocking` (one-off CPU) / rayon (an app-level choice, not
+  bundled).** Calling `spawn_local` off the UI thread is a wiring bug, not a
+  runtime-data condition, and panics saying so (the `downcast_mut` convention
+  above); a backgrounded iOS app pauses `CADisplayLink`, so a `spawn_local`
+  timer stalls until `frust_resume`'s next pump. `use_task` composes
+  `AsyncValue<T>` over this routing as the blessed load/compute-a-value idiom
+  (see `docs/ARCHITECTURE.md`'s Key Types): a UI-thread coordinator, run under
+  the calling component's `Owner`, hands work to `spawn`/`spawn_blocking` and
+  is the sole signal writer, ruling out a cross-thread write race by
+  construction rather than discipline. Cancellation is layered: owner cleanup
+  aborts the coordinator; the coordinator aborts the background `JoinHandle`
+  via a registered `AbortHandle`; an already-running `spawn_blocking` closure
+  can't be interrupted — only its result delivery is dropped.
 - **`Component::State` holds `RwSignal`s directly; app code depends on the
-  `frust` facade only, never `reactive_graph`/`any_spawner`/
-  `frust-reactive` directly.** A state field needing reactive read-tracking
-  is typed `RwSignal<T>`, read/written through the `Get`/`Set`/`Update`
-  traits the facade re-exports (see `docs/ARCHITECTURE.md`'s Key Types) —
-  an app crate never adds `reactive_graph`/`any_spawner`/`frust-reactive`
-  directly. **An `examples/*` or app crate's `Cargo.toml` depends on
-  `frust` plus plugin crates (`plugins/*`) only** — the facade never
-  re-exports plugins, an app adds them directly (Flutter's pubspec
-  pattern; see Plugin Conventions below). `examples/huddle` additionally
-  carries a **documented** `frust-core`/`kurbo`/`peniko` escape hatch (see
-  its `Cargo.toml` comment) for a handful of custom widgets no facade
-  widget covers yet — a new example reaching for it should first check
-  whether the gap belongs in the facade instead.
+  `frust` facade only, never `reactive_graph`/`any_spawner`/`frust-reactive`
+  directly.** A reactive field is typed `RwSignal<T>`, read/written through
+  the facade's `Get`/`Set`/`Update` traits (see `docs/ARCHITECTURE.md`'s Key
+  Types). **An `examples/*` or app crate's `Cargo.toml` depends on `frust`
+  plus plugin crates (`plugins/*`) only** — the facade never re-exports
+  plugins, an app adds them directly (Flutter's pubspec pattern; see Plugin
+  Conventions below). `examples/huddle` carries a **documented**
+  `frust-core`/`kurbo`/`peniko` escape hatch (its `Cargo.toml` comment) for
+  custom widgets no facade widget covers yet — check whether a gap belongs
+  in the facade before reaching for it again.
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it
   later — an untracked read is a silent wake hazard, not a stale value.**
   `.get()` subscribes only when called from *inside* a live

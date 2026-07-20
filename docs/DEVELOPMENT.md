@@ -45,17 +45,15 @@ manifest/lockfile drift is caught (see *Version-Pin Policy*).
 `templates/app/Cargo.toml.tmpl`, and `examples/huddle/Cargo.toml` each carry
 a `[profile.dev.package.*]` override (`opt-level = 2`) for the shader/render
 crates (`vello`, `vello_shaders`, `vello_encoding`, `wgpu`, `wgpu-core`,
-`wgpu-hal`, `naga`). Debug-profile (`opt-level = 0`) shader
-compilation/translation on app launch is slow enough on mobile-class CPUs to
-trip the iOS launch watchdog; optimizing just this stack keeps the rest of a
-debug build fast while making dev-mode launches survive. These three
-manifests must be kept in sync by hand (`cargo test -p frust-cli --test
-profile_sync` is the automated tripwire) — a project scaffolded by
-`frust create` inherits the overrides from the template. A separate
-`[profile.dev.package."*"]` wildcard (`opt-level = 1`) widens every other
-non-workspace-member dependency's debug optimization (a named override above
-still wins) and is hand-synced across the same three manifests (root,
-template, `examples/huddle/Cargo.toml`).
+`wgpu-hal`, `naga`): debug-profile (`opt-level = 0`) shader
+compilation/translation is slow enough on mobile CPUs to trip the iOS
+launch watchdog, so only this stack is optimized, keeping the rest of a
+debug build fast. The three manifests are hand-synced (`cargo test -p
+frust-cli --test profile_sync` is the tripwire); a scaffolded project
+inherits the template's overrides. A separate `[profile.dev.package."*"]`
+wildcard (`opt-level = 1`, a named override still wins) widens every other
+non-workspace-member dependency's debug optimization, hand-synced the same
+way.
 
 **Release-profile hardening.** `[profile.release]` (root, template, huddle)
 sets `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic =
@@ -109,36 +107,50 @@ in this repo; check scaffold changes via *Template development* below or
 In a generated project, `frust run [-d <device>] [--release|--profile]
 [--flavor <name>]` builds and launches on a connected Android
 device/emulator (preflight → variant-aware `gradlew assemble<Flavor><Mode>`
-(cargo-ndk builds the Rust `.so` for the device's detected ABI) →
-`adb install`/`launch` → streamed `logcat` until Ctrl-C; release mode needs
-the same signing keystore as `build apk` — see Prerequisites), a booted iOS
-Simulator (preflight → `xcodebuild build` at the mode's Xcode configuration
-→ `simctl install` → `simctl launch --console-pty`, streamed, until
-Ctrl-C), or a physical iPhone (iOS 17+ only: a signed device build →
-`xcrun devicectl device install app` → `xcrun devicectl device process
-launch --console --terminate-existing`, streamed, until Ctrl-C — failures
-hint at unlocking/pairing/Developer Mode). `run` defaults to debug mode
-(`frust build` defaults to release — see *Release Builds* below). With no
-device selected, it falls back to a streamed `cargo run` (desktop preview).
-The first Android build downloads Gradle 9.5.x, and the first iOS build
-compiles the whole Rust dependency graph for the simulator target — expect
-either to take a few minutes.
+via cargo-ndk → `adb install`/`launch` → streamed `logcat` until Ctrl-C;
+release needs the signing keystore, see Prerequisites), a booted iOS
+Simulator (preflight → `xcodebuild build` → `simctl install`/
+`launch --console-pty`, streamed until Ctrl-C), or a physical iPhone (iOS
+17+: a signed build → `xcrun devicectl device install app`/`process launch
+--console --terminate-existing`, streamed — failures hint at
+unlocking/pairing/Developer Mode). `run` defaults to debug (`build`
+defaults to release — see *Release Builds*); with no device selected it
+falls back to a streamed `cargo run` (desktop preview — or the watch loop
+below, with `--watch`). First Android/iOS builds take a few minutes
+(Gradle download / full simulator dependency compile).
 
-`frust run --render-tier <gpu|cpu>` forces the render tier
-(`FRUST_RENDER_TIER`, the same variable a manual `cargo run` can set
-directly) for the desktop preview; an explicit choice wins among tiers the
-adapter supports — forcing `gpu` on an incapable adapter fails fast with the
-probe's diagnosis, while `cpu` can always be forced. It is desktop-preview-only today — passed for an Android/iOS device
-run, `run` prints a not-plumbed note and the device still probes its own
-tier.
+`frust run --render-tier <gpu|cpu>` forces the desktop preview's render
+tier (`FRUST_RENDER_TIER`, settable directly for a manual `cargo run`); an
+explicit choice wins among tiers the adapter supports — forcing `gpu` on an
+incapable adapter fails fast with the probe's diagnosis, `cpu` can always
+be forced. Desktop-preview-only today; an Android/iOS device run prints a
+not-plumbed note and probes its own tier.
 
 **High refresh-rate hints.** A generated app's iOS `CADisplayLink` requests
-a 30–120Hz `preferredFrameRateRange` (`CADisableMinimumFrameDurationOnPhone`
-in `Info.plist.tmpl`); Android calls `Surface.setFrameRate()` (API 30+) with
-the display's max refresh rate on `surfaceCreated`/`surfaceChanged`. Both
-are hints, not guarantees — actual achieved rate is device/OEM/thermal-state
-dependent and unverifiable on the iOS Simulator (see *Known Issues* below)
-or on most Android emulators (which typically report only 60Hz).
+a 30–120Hz `preferredFrameRateRange`; Android calls `Surface.setFrameRate()`
+(API 30+) with the display's max rate. Both are hints, not guarantees —
+achieved rate is device/OEM/thermal-state dependent and unverifiable on the
+iOS Simulator (see *Known Issues*) or most Android emulators (60Hz-only).
+
+## Dev Loop
+
+```bash
+frust run --watch
+```
+
+Desktop only: watches `src/` and `Cargo.toml`, killing and relaunching
+(`cargo run`, incremental) on change, debouncing a save-burst into one
+relaunch; Ctrl-C exits the loop. A **relaunch loop, not state-preserving
+hot reload** — app state resets every rebuild. `--watch` + `-d <device>` is
+a hard error (device-side watch isn't implemented).
+
+**Measured baseline** (methodology/hardware:
+`workflow/plans/features/frust-phase-9-rust-advantage/research/DEVLOOP_BASELINE.md`):
+default-config incremental `cargo build` medians 0.89s; edit-to-first-frame
+(`FRUST_TRACE=1`'s `first_frame_presented`) medians ~263ms once built. An
+alternate linker (`ld64.lld`, 1.23s) and `cranelift` (2.85s, ~3.2×) both
+measured worse, so **no fast-dev template recipe ships** — re-run
+`scripts/devloop-measure.sh` if that changes.
 
 ## Release Builds
 
@@ -197,13 +209,10 @@ additionally run:
 directory rather than `-p` from the repo root because both are standalone
 workspaces excluded from the root one (see *Version-Pin Policy*). No sibling
 checkout? Do not run these commands — record "huddle/clean-signals-frust
-gate not run — no clean-signals-rs sibling checkout" in your completion
-summary instead, and do not touch either directory without the sibling in
-place. There is no CI for this repo, so this doc is the only enforcement; if
-CI is ever introduced, whether it provisions the sibling must be decided
-explicitly. This gate is not part of `frust build apk`/`run`'s Android/iOS
-pipeline gate, which is verified separately (see *Run*) rather than in this
-chain.
+gate not run — no clean-signals-rs sibling checkout" instead, and do not
+touch either directory without the sibling in place. There is no CI for
+this repo, so this doc is the only enforcement. This gate is separate from
+`frust build apk`/`run`'s Android/iOS pipeline gate (see *Run*).
 
 The `cpu-tier` feature (experimental `vello_cpu` render backend, non-default
 — see *Version-Pin Policy*) is headless and needs no GPU, but isn't compiled
@@ -287,19 +296,17 @@ xcrun simctl openurl booted "<scheme>://<path>"
 A physical device has no CLI trigger — test by tapping a link to the
 registered `CFBundleURLSchemes` scheme (e.g. from Notes) instead.
 
-`frust.toml`'s `[deeplink]` section (`scheme`/`host`, written by
-`frust create`'s `--deeplink-scheme`/`--deeplink-host` flags) is
-informational only — it documents what's already baked into the generated
-Android manifest intent filter / iOS `Info.plist`; editing it does not
-re-render either, so re-scaffold (`--overwrite`) or edit the platform files
-directly to change the scheme after the fact.
+`frust.toml`'s `[deeplink]` section (written by `--deeplink-scheme`/
+`--deeplink-host`) is informational only — editing it does not re-render
+the Android manifest intent filter or iOS `Info.plist` it documents; use
+`--overwrite` or edit the platform files directly to change the scheme.
 
 ### Safe-area / keyboard / back manual test (Android + iOS)
 
 A device/emulator gate for the inset and back contracts (see
 `docs/ARCHITECTURE.md`'s Inset delivery / Back flow), against an installed
-app (`frust run -d <device>`) — none of these has a CLI trigger like the
-deep-link gate above, so each is a person-driven check:
+app (`frust run -d <device>`) — no CLI trigger like the deep-link gate
+above, so each is a person-driven check:
 
 - **Safe-area:** rotate the device and confirm top/bottom-anchored content
   reflows around the status bar/notch/gesture-nav insets in both
@@ -334,27 +341,24 @@ draft through the plugin):
 - **macOS storage-location caveat:** the desktop preview is an unbundled
   binary (no `CFBundleIdentifier`), so its `NSUserDefaults` writes land in
   the global defaults domain rather than an app-specific plist — a
-  storage-location difference from a bundled iOS/macOS app, not a
-  behavioral one (the plugin's `frust.`-prefixed keys keep it isolated from
-  unrelated global defaults either way).
+  storage-location difference from a bundled app, not a behavioral one (the
+  plugin's `frust.`-prefixed keys keep it isolated regardless).
 
 ### Template development
 
-`frust create` embeds `templates/app/` into the binary at compile time.
-To iterate on template files without rebuilding the embedded copy, pass the
-hidden, development-only `--template-dir <path>` flag to point at a
-filesystem copy of the template tree instead. Every scaffold also gets a
+`frust create` embeds `templates/app/` into the binary at compile time; the
+hidden, development-only `--template-dir <path>` flag iterates on template
+files without rebuilding the embedded copy. Every scaffold also gets a
 default launcher icon set and the platform-specific edge-to-edge/safe-area/
 keyboard-inset and back-navigation glue the generated app needs — see
-`docs/ARCHITECTURE.md`'s Inset delivery and Back flow for the Rust-side
-contract this glue calls into.
+`docs/ARCHITECTURE.md`'s Inset delivery and Back flow.
 
 `--arch clean-signals` scaffolds a clean-architecture variant (controller +
 use-case + `async_view` over `clean-signals-frust`) instead of the default
-notes-app template. Dev-machine-only while `clean-signals` is unpublished:
-the generated project path-depends into this checkout and the sibling
-`../clean-signals-rs` checkout (see *Version-Pin Policy*), so it only
-builds where both are present; `--help` carries this caveat.
+notes-app template — dev-machine-only while `clean-signals` is unpublished,
+since the generated project path-depends into this checkout and the
+sibling `../clean-signals-rs` checkout (see *Version-Pin Policy*); `--help`
+carries this caveat.
 
 ## Instrumentation
 
@@ -364,6 +368,7 @@ builds where both are present; `--help` carries this caveat.
 | `FRUST_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/ARCHITECTURE.md`'s Frame gate) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
 | `FRUST_LOG` | Desktop-only stderr log level override (`frust-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger suppresses only known-noisy vello Error/Warn messages below `debug` (see *Known Issues*' vello bitmap-emoji note); unknown vello errors still surface at the default level. Pass `FRUST_LOG=debug` to see all vello log lines when debugging the render stack. | `info` |
 | `FRUST_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`) — see *Run* above. | adapter-probed |
+| `FRUST_TRACE_RAW` | A second dial beside `FRUST_TRACE`: with both set, `FrameStats` emits one parseable `frust-perf raw ...` line per frame (instead of periodic summaries), plus `bench-scenario-start/end <name>` marker lines for a benchmark harness to slice by. Setting `FRUST_TRACE_RAW` alone does nothing — `FRUST_TRACE` must also be on. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off |
 
 `FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints one
 `frust-perf startup ...` line, then periodic `frust-perf frame ...`
@@ -413,31 +418,29 @@ deliberately, not floating:
   API, isolated behind the `SceneSink` encode seam so a breaking bump never
   reaches the default GPU path. See *Test* below for its tripwire command.
 - `ndk-context = "0.1"` (`frust-plugin`'s Android platform-handle slot,
-  written via `frust_plugin::android::initialize`, called by the Android
-  shell's `nativeInitPlatform`, and read by every plugin) is pinned to minor;
-  `cargo check --target aarch64-linux-android -p frust-plugin` is the tripwire
-  for a breaking bump. `objc2 = "0.6"` / `objc2-foundation = "0.3"` (the Apple
-  ObjC runtime bridge, consumed by `frust-shared-preferences`'s
+  written by the Android shell's `nativeInitPlatform`, read by every
+  plugin) is pinned to minor; `cargo check --target aarch64-linux-android
+  -p frust-plugin` is the tripwire. `objc2 = "0.6"` / `objc2-foundation =
+  "0.3"` (the Apple ObjC bridge, `frust-shared-preferences`'s
   `NSUserDefaults` backend) are pinned to minor; `cargo check --target
   aarch64-apple-ios-sim -p frust-shared-preferences` is the tripwire.
+- `notify = "8"` (`frust run --watch`'s filesystem-watch dependency,
+  `frust-cli`-only like `ctrlc` above) is pinned to minor; `cargo test -p
+  frust-cli` is the tripwire for a breaking bump.
 - `examples/huddle` and `plugins/clean-signals-frust` are each a
   **standalone package** (own `[workspace]` root and `Cargo.lock`,
-  `exclude`d from the root `[workspace]`). Both depend on the
-  `clean-signals` core crate as a path dependency to the same **sibling
-  checkout** at `../../../clean-signals-rs` (relative to each package) on
-  its `master` branch — `clean-signals` is not git+rev-pinned yet, and
-  every in-repo consumer must resolve it the same way (all by path); if one
-  used `git`+`rev` while another used `path`, Cargo would build two
-  distinct `clean-signals` crate identities and the controller/glue types
-  (`AsyncState`, `ControllerCore`, `use_controller`, `async_view`) would
-  fail to unify — swap every consumer to `git`+`rev` together, never one at
-  a time, once `clean-signals` gains a remote. `examples/huddle` is
-  additionally standalone because its generated Android/iOS projects need a
-  project-local `target/` dir. Neither manifest can use `{ workspace = true
-  }` (outside the root workspace) — every dependency, including pins shared
-  with the root workspace, is a literal spec kept in sync by hand. Gate
-  each from its own directory (`cargo test` + `cargo clippy --all-targets
-  -- -D warnings`).
+  `exclude`d from the root `[workspace]`). Both path-depend on the
+  `clean-signals` core crate at the same **sibling checkout**
+  (`../../../clean-signals-rs`, branch `master`) — not git+rev-pinned yet,
+  so every consumer must resolve it the same way (all by path); mixing
+  `path`/`git`+`rev` would build two distinct `clean-signals` identities
+  and its controller/glue types would fail to unify, so swap every
+  consumer together, never one at a time, once it gains a remote.
+  `examples/huddle` is additionally standalone for its project-local
+  `target/` dir (generated Android/iOS projects). Neither manifest can use
+  `{ workspace = true }` — every dependency is a literal spec kept in sync
+  by hand. Gate each from its own directory (`cargo test` + `cargo clippy
+  --all-targets -- -D warnings`).
 - **Never run a blind `cargo update`.** If a manifest changes any pinned
   dependency, run `cargo generate-lockfile` and then confirm
   `cargo build --workspace --locked` still succeeds before committing.
@@ -466,16 +469,14 @@ but correct).
 
 The iOS Simulator's GPU only exposes the Apple2 Metal feature family, which
 lacks `wgpu::DownlevelFlags::INDIRECT_EXECUTION` — a flag vello 0.9's
-renderer unconditionally requires for its working buffers. This is a
-wgpu-hal-29/vello-0.9 limitation, not fixable under the workspace's version
-pin (see *Version-Pin Policy*). `frust-render` detects the missing flag
-up front and fails fast with a clear diagnostic instead of letting vello
-panic every frame; `frust run` on a simulator still builds, installs, and
-launches, but the app window stays black and the console logs the adapter
-diagnostic. **Physical iOS devices are unaffected** (Apple7+ GPUs expose the
-flag; verified rendering on an iPhone 13 mini) — this is a simulator-only
-gap, not an iOS-wide one. Use a physical device for a pixel-accurate check
-until a future wgpu/vello upgrade closes the gap.
+renderer unconditionally requires. A wgpu-hal-29/vello-0.9 limitation, not
+fixable under the workspace's version pin (see *Version-Pin Policy*);
+`frust-render` detects it up front and fails fast with a clear diagnostic
+instead of letting vello panic every frame — `frust run` on a simulator
+still builds/installs/launches, but the window stays black. **Physical iOS
+devices are unaffected** (Apple7+ GPUs expose the flag; verified on an
+iPhone 13 mini) — use a physical device for a pixel-accurate check until a
+future wgpu/vello upgrade closes the gap.
 
 ### vello bitmap color-emoji decode (desktop confirmed safe; Android CBDT at risk)
 
