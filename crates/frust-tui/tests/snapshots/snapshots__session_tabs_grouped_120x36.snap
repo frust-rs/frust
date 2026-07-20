@@ -2,7 +2,7 @@
 source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(120, 36, &multi_session_state())"
 ---
-⚙ Frust │ huddle ▾ · frust 0.1.0 · ✓ toolchain                                                         ▶ Run    ⚒ Build 
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                                         ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                                                
                                                                                                                         
  PROJECTS                │huddle:  1 ▶ desktop   2 ◐ Pixel 7    bubblebench:  3 ✗ desktop                               
@@ -20,10 +20,10 @@ expression: "render_to_string(120, 36, &multi_session_state())"
      ✗ desktop           │                                                                                              
                          │                                                                                              
  ACTIONS                 │                                                                                              
-   New project           │                                                                                              
-   Doctor · Settings     │                                                                                              
-                         │                                                                                              
-                         │                                                                                              
+   New project · n       │                                                                                              
+   Doctor · d            │                                                                                              
+   Build · b             │                                                                                              
+   Clean · c             │                                                                                              
                          │                                                                                              
                          │                                                                                              
                          │                                                                                              

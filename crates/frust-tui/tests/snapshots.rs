@@ -11,9 +11,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 
 use frust_drive::devices::{Device, Kind, Platform};
+use frust_drive::doctor::Status;
 use frust_tui::engine::{
-    AppState, CreateWizard, DeviceRow, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView,
-    WizardStep,
+    AppState, BuildLauncher, CreateWizard, DeviceRow, DoctorCheck, DoctorState, RegionId,
+    RunConfig, RunFocus, Screen, Scroll, SessionView, WizardStep,
 };
 use frust_tui::supervise::{SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -363,4 +364,120 @@ fn wizard_arch_step_sibling_present_80x24() {
         24,
         &wizard_state(WizardStep::Arch, "my_app", true, 1)
     ));
+}
+
+// ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────────────
+
+/// A `Pass`/`Partial`/`Fail` mix — the panel and chip both key off the worst
+/// (`overall`).
+fn doctor_results() -> Vec<DoctorCheck> {
+    vec![
+        DoctorCheck {
+            name: "Rust toolchain".to_string(),
+            status: Status::Pass,
+            messages: Vec::new(),
+        },
+        DoctorCheck {
+            name: "Android SDK/NDK".to_string(),
+            status: Status::Partial,
+            messages: vec!["ANDROID_NDK_HOME not set".to_string()],
+        },
+        DoctorCheck {
+            name: "Xcode".to_string(),
+            status: Status::Fail,
+            messages: vec!["Xcode not found. Run: xcode-select --install".to_string()],
+        },
+    ]
+}
+
+/// The titlebar chip reflecting an all-`Pass` doctor state (the common case).
+#[test]
+fn titlebar_chip_ok_100x30() {
+    let mut state = workbench_state();
+    state.doctor = DoctorState {
+        results: vec![DoctorCheck {
+            name: "Rust toolchain".to_string(),
+            status: Status::Pass,
+            messages: Vec::new(),
+        }],
+        refreshing: false,
+    };
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The doctor panel open over the workbench, showing a mixed
+/// Pass/Partial/Fail result set with actionable hints under the non-passing
+/// checks.
+#[test]
+fn doctor_panel_100x30() {
+    let mut state = workbench_state();
+    state.doctor = DoctorState {
+        results: doctor_results(),
+        refreshing: false,
+    };
+    state.doctor_panel_open = true;
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+// ── Build launcher (TUI2-07) ────────────────────────────────────────────────
+
+/// The build-launcher modal open over the workbench: an Apk target with
+/// split-per-ABI checked and a flavor set.
+#[test]
+fn build_launcher_apk_100x30() {
+    let mut state = workbench_state();
+    let mut launcher = BuildLauncher::new(state.project_root.clone().unwrap());
+    launcher.split_per_abi = true;
+    launcher.flavor = "paid".into();
+    state.build_launcher = Some(launcher);
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+// ── Clean confirm dialog (TUI2-07) ──────────────────────────────────────────
+
+/// The clean-confirm dialog open over the workbench.
+#[test]
+fn clean_confirm_100x30() {
+    let mut state = workbench_state();
+    state.clean_confirm = state.project_root.clone();
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+// ── Build artifact copy-path (TUI2-07) ──────────────────────────────────────
+
+fn built_session_state() -> AppState {
+    let root = "/tmp/huddle";
+    let mut sess = session(
+        0,
+        root,
+        "build apk",
+        SessionState::Exited(true),
+        &["Building `it.f0x.huddle`…"],
+    );
+    sess.push_line("Built: /tmp/huddle/android/app/build/outputs/apk/release/app.apk".to_string());
+    AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        ..Default::default()
+    }
+}
+
+/// A completed build session's log view, showing the "N built · c copy path"
+/// segment in the log status row — wide enough (130 cols) for the segment to
+/// fit beside the right-aligned keyhint.
+#[test]
+fn session_log_built_artifacts_130x30() {
+    insta::assert_snapshot!(render_to_string(130, 30, &built_session_state()));
+}
+
+/// The same built session at the standard 100-col width: the built-artifacts
+/// segment doesn't fit beside the keyhint, so it's omitted entirely (`c`
+/// still copies via the keyboard) rather than overlapping/garbling either —
+/// see `render_log_status`'s fit guard.
+#[test]
+fn session_log_built_artifacts_narrow_100x30() {
+    insta::assert_snapshot!(render_to_string(100, 30, &built_session_state()));
 }

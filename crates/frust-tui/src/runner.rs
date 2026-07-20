@@ -18,15 +18,23 @@ use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton as CtMouseButton, MouseEventKind,
 };
+use frust_drive::android_build::{self, AndroidArtifact};
 use frust_drive::devices::{default_discoverers, discover_all};
-use frust_drive::process::RealProcessRunner;
+use frust_drive::doctor::{self, DoctorCtx, RealEnv};
+use frust_drive::ios_build::{self, IosArtifact};
+use frust_drive::process::{ProcessRunner, RealProcessRunner};
 use frust_drive::scaffold::{self, TemplateContext};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::{AppState, Effect, Engine, Message, RegionId, RunFocus, Screen, WizardStep};
-use crate::supervise::{DeviceTarget, SessionSpec, Supervisor};
+use crate::engine::{
+    AppState, BuildFocus, BuildSpec, BuildTargetSpec, DoctorCheck, Effect, Engine, Message,
+    RegionId, RunFocus, Screen, WizardStep,
+};
+use crate::supervise::{
+    DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor,
+};
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
 
@@ -73,9 +81,17 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut reader = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     let mut needs_redraw = true;
+    // Ids for ad-hoc (build/clean) sessions that never go through
+    // `Supervisor::start`, minted downward from `u64::MAX` so they can never
+    // collide with `Supervisor`'s own upward-counting ids for the life of one
+    // run — see `apply_effect`'s `LaunchBuild`/`RunClean` enactment.
+    let mut next_adhoc_id: u64 = u64::MAX;
 
-    // Kick an initial device discovery so the panel populates on open.
+    // Kick an initial device discovery + doctor preflight so the panel/chip
+    // populate on open (TUI2-07: the doctor run is the titlebar chip's cached
+    // startup source, refreshed on demand via `d`/the chip/the panel re-run).
     let _ = msg_tx.send(Message::RefreshDevices);
+    let _ = msg_tx.send(Message::RunDoctor);
     // Record whichever project came up active at startup (cwd-detected, or
     // the persisted most-recently-opened one — see `AppState::new`) as the
     // most-recently-opened, so opening the TUI itself counts as a "use" for
@@ -103,7 +119,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         for msg in translate_event(event, &engine.state, &regions) {
                             let out = engine.handle(msg);
                             needs_redraw |= out.redraw;
-                            apply_effect(out.effect, &mut supervisor, &msg_tx);
+                            apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
                         }
                     }
                     // A read error (rare) is logged and ignored — the loop
@@ -115,12 +131,12 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
             Some(msg) = rx.recv() => {
                 let out = engine.handle(msg);
                 needs_redraw |= out.redraw;
-                apply_effect(out.effect, &mut supervisor, &msg_tx);
+                apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
             }
             Some(ev) = session_rx.recv() => {
                 let out = engine.handle(Message::Session(ev));
                 needs_redraw |= out.redraw;
-                apply_effect(out.effect, &mut supervisor, &msg_tx);
+                apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
             }
             _ = tick.tick() => {
                 if engine.state.animating() {
@@ -141,6 +157,7 @@ fn apply_effect(
     effect: Option<Effect>,
     supervisor: &mut Supervisor,
     tx: &UnboundedSender<Message>,
+    next_adhoc_id: &mut u64,
 ) {
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
@@ -154,8 +171,226 @@ fn apply_effect(
             project_name,
             arch,
         }) => scaffold_project(directory, project_name, arch, tx.clone()),
+        Some(Effect::RunDoctor) => spawn_doctor_run(tx.clone()),
+        Some(Effect::LaunchBuild(spec)) => {
+            let id = next_adhoc_session_id(next_adhoc_id);
+            launch_build_session(spec, id, tx.clone());
+        }
+        Some(Effect::RunClean(root)) => {
+            let id = next_adhoc_session_id(next_adhoc_id);
+            launch_clean_session(root, id, tx.clone());
+        }
         None => {}
     }
+}
+
+/// Mint an id for an ad-hoc (build/clean) session — see `run_loop`'s
+/// `next_adhoc_id` doc comment for why this never collides with a
+/// `Supervisor`-issued id.
+fn next_adhoc_session_id(next_adhoc_id: &mut u64) -> SessionId {
+    let id = SessionId(*next_adhoc_id);
+    *next_adhoc_id = next_adhoc_id.saturating_sub(1);
+    id
+}
+
+/// Run `frust-drive`'s validator set off the UI thread (blocking `rustc`/
+/// `cargo-ndk`/`xcrun` invocations), posting the flattened results back as
+/// [`Message::DoctorResults`] — the titlebar chip's live source (TUI2-07).
+fn spawn_doctor_run(tx: UnboundedSender<Message>) {
+    tokio::task::spawn_blocking(move || {
+        let env = RealEnv;
+        let ctx = DoctorCtx {
+            runner: &RealProcessRunner,
+            env: &env,
+            is_macos: cfg!(target_os = "macos"),
+        };
+        let validators = doctor::default_validators();
+        let results = doctor::run_all(&ctx, &validators)
+            .into_iter()
+            .map(|(name, validation)| DoctorCheck {
+                name,
+                status: validation.status,
+                messages: validation.messages,
+            })
+            .collect();
+        let _ = tx.send(Message::DoctorResults(results));
+    });
+}
+
+/// Drive a resolved build off the UI thread directly through `frust-drive`'s
+/// `android_build`/`ios_build` pipelines (never shelling out itself),
+/// reporting progress as a session reusing the tab/log-view machinery: a
+/// `RegisterSession` gives it a home, each built artifact path arrives as a
+/// `"Built: {path}"` line (`SessionView::built_artifact_paths` parses it back
+/// out), and the pipeline's `Result` becomes the terminal `Exited` state.
+fn launch_build_session(spec: BuildSpec, id: SessionId, tx: UnboundedSender<Message>) {
+    let _ = tx.send(Message::RegisterSession {
+        id,
+        project_root: spec.project_root.clone(),
+        target_label: format!("build {}", build_target_label(&spec.target)),
+    });
+    tokio::task::spawn_blocking(move || {
+        let _ = tx.send(session_state(id, SessionState::Building));
+        let terminal = match run_build(&RealProcessRunner, &spec) {
+            Ok(paths) => {
+                for path in paths {
+                    let _ = tx.send(session_line(id, format!("Built: {}", path.display())));
+                }
+                SessionState::Exited(true)
+            }
+            Err(err) => {
+                let _ = tx.send(session_line(id, format!("error: {err:#}")));
+                SessionState::Exited(false)
+            }
+        };
+        let _ = tx.send(session_state(id, terminal));
+    });
+}
+
+/// The blocking build call, dispatching on the resolved [`BuildTargetSpec`]
+/// into `android_build::build`/`ios_build::build`.
+fn run_build(runner: &dyn ProcessRunner, spec: &BuildSpec) -> Result<Vec<PathBuf>> {
+    match &spec.target {
+        BuildTargetSpec::Apk {
+            split_per_abi,
+            abis,
+        } => {
+            let target = AndroidArtifact::Apk {
+                split_per_abi: *split_per_abi,
+                abis: abis.clone(),
+            };
+            android_build::build(runner, &spec.project_root, &spec.info, &target)
+                .map(|artifacts| artifacts.paths)
+        }
+        BuildTargetSpec::Appbundle => android_build::build(
+            runner,
+            &spec.project_root,
+            &spec.info,
+            &AndroidArtifact::Appbundle,
+        )
+        .map(|artifacts| artifacts.paths),
+        BuildTargetSpec::IosApp {
+            simulator,
+            codesign,
+        } => {
+            let target = IosArtifact::App {
+                simulator: *simulator,
+                codesign: *codesign,
+            };
+            ios_build::build(runner, &spec.project_root, &spec.info, &target)
+                .map(|artifacts| artifacts.paths)
+        }
+        BuildTargetSpec::Ipa { export_method } => {
+            let target = IosArtifact::Ipa {
+                export_method: export_method.clone(),
+            };
+            ios_build::build(runner, &spec.project_root, &spec.info, &target)
+                .map(|artifacts| artifacts.paths)
+        }
+    }
+}
+
+/// The build-session tab label per artifact kind (`build apk`/`build ios`/…).
+fn build_target_label(target: &BuildTargetSpec) -> &'static str {
+    match target {
+        BuildTargetSpec::Apk { .. } => "apk",
+        BuildTargetSpec::Appbundle => "appbundle",
+        BuildTargetSpec::IosApp { .. } => "ios",
+        BuildTargetSpec::Ipa { .. } => "ipa",
+    }
+}
+
+/// Build-output directories a clean session removes beyond `cargo clean`'s
+/// own `target/` — the same set `frust-cli`'s `commands/clean.rs::REMOVED_DIRS`
+/// removes; duplicated by value here since `clean` has no `frust-drive`
+/// surface to call into (see `docs/ARCHITECTURE.md`'s Module Structure —
+/// `clean` lives entirely in `frust-cli`, unlike `doctor`/`build`).
+const CLEAN_REMOVED_DIRS: &[&str] = &["android/app/build", "android/.gradle", "build"];
+
+/// Run `cargo clean` + remove the generated Android/iOS build directories for
+/// `project_root` off the UI thread, reporting progress the same way
+/// [`launch_build_session`] does.
+fn launch_clean_session(project_root: PathBuf, id: SessionId, tx: UnboundedSender<Message>) {
+    let _ = tx.send(Message::RegisterSession {
+        id,
+        project_root: project_root.clone(),
+        target_label: "clean".to_string(),
+    });
+    tokio::task::spawn_blocking(move || {
+        let _ = tx.send(session_state(id, SessionState::Building));
+        let terminal = match run_clean(&RealProcessRunner, &project_root, &tx, id) {
+            Ok(()) => SessionState::Exited(true),
+            Err(err) => {
+                let _ = tx.send(session_line(id, format!("error: {err:#}")));
+                SessionState::Exited(false)
+            }
+        };
+        let _ = tx.send(session_state(id, terminal));
+    });
+}
+
+/// The blocking clean call: `cargo clean` via the injected [`ProcessRunner`],
+/// then remove [`CLEAN_REMOVED_DIRS`], reporting each step as a session line.
+fn run_clean(
+    runner: &dyn ProcessRunner,
+    project_dir: &Path,
+    tx: &UnboundedSender<Message>,
+    id: SessionId,
+) -> Result<()> {
+    if !project_dir.join("frust.toml").exists() {
+        let _ = tx.send(session_line(
+            id,
+            format!(
+                "no `frust.toml` found in `{}` — nothing to clean.",
+                project_dir.display()
+            ),
+        ));
+        return Ok(());
+    }
+
+    let out = runner
+        .run("cargo", &["clean"])
+        .context("failed to run `cargo clean`")?;
+    if out.success {
+        let _ = tx.send(session_line(
+            id,
+            "Removed cargo build artifacts (`cargo clean`).".to_string(),
+        ));
+    } else {
+        let _ = tx.send(session_line(
+            id,
+            format!("`cargo clean` failed:\n{}", out.stderr.trim()),
+        ));
+    }
+
+    for rel in CLEAN_REMOVED_DIRS {
+        let path = project_dir.join(rel);
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {
+                let _ = tx.send(session_line(id, format!("Removed `{}`.", path.display())));
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("removing `{}`", path.display())),
+        }
+    }
+
+    Ok(())
+}
+
+/// One [`SessionEventKind::Line`] message for `id`.
+fn session_line(id: SessionId, text: String) -> Message {
+    Message::Session(SessionEvent {
+        id,
+        kind: SessionEventKind::Line(text),
+    })
+}
+
+/// One [`SessionEventKind::State`] message for `id`.
+fn session_state(id: SessionId, state: SessionState) -> Message {
+    Message::Session(SessionEvent {
+        id,
+        kind: SessionEventKind::State(state),
+    })
 }
 
 /// Probe (off the UI thread) whether the `../clean-signals-rs` sibling
@@ -394,6 +629,22 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         return translate_switcher_key(code, state);
     }
 
+    // While the doctor panel is open it captures every other key (D4-style
+    // modal exclusivity — see `crate::ui::render`'s workbench-modal chain).
+    if state.doctor_panel_open {
+        return translate_doctor_key(code);
+    }
+
+    // While the build launcher is open it captures every other key.
+    if let Some(launcher) = &state.build_launcher {
+        return translate_build_key(code, mods, launcher);
+    }
+
+    // While the clean-confirm dialog is open it captures every other key.
+    if state.clean_confirm.is_some() {
+        return translate_clean_confirm_key(code);
+    }
+
     // While the search overlay is open, keys edit the query.
     if state.search.open {
         return match code {
@@ -456,6 +707,16 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
         KeyCode::Up if devices_focused => vec![Message::DeviceCursorUp],
         KeyCode::Down if devices_focused => vec![Message::DeviceCursorDown],
+        // `d` opens the doctor panel; `b` opens the build launcher (mouse
+        // parity: the titlebar chip / sidebar ACTIONS "Doctor"/"Build" rows).
+        KeyCode::Char('d') if workbench => vec![Message::OpenDoctorPanel],
+        KeyCode::Char('b') if workbench => vec![Message::OpenBuildLauncher],
+        // `c` copies a build session's artifact path(s) when one is active
+        // (mirroring the welcome screen's own `c` for Create, a different
+        // screen/context); otherwise it opens the clean-confirm dialog (mouse
+        // parity: the sidebar ACTIONS "Clean" row).
+        KeyCode::Char('c') if has_active_session => vec![Message::CopyBuiltArtifacts],
+        KeyCode::Char('c') if workbench => vec![Message::OpenCleanConfirm],
 
         // ── Log-view / tab controls (only meaningful with a session open) ──
         KeyCode::Char('x') if has_active_session => vec![Message::StopSession],
@@ -564,6 +825,69 @@ fn translate_switcher_key(code: KeyCode, state: &AppState) -> Vec<Message> {
         KeyCode::Down => vec![Message::ProjectSwitcherCursorDown],
         KeyCode::Enter => vec![Message::SwitchProject(state.project_switcher_cursor)],
         KeyCode::Char(c @ '1'..='9') => vec![Message::SwitchProject(c as usize - '1' as usize)],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the doctor panel is open. `Esc` closes it,
+/// `r` re-runs the validator set (mouse parity: the panel's Re-run button /
+/// the titlebar chip).
+fn translate_doctor_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Esc => vec![Message::CloseDoctorPanel],
+        KeyCode::Char('r') => vec![Message::RunDoctor],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the build-launcher modal is open — the same
+/// shape as [`translate_modal_key`] (run-config), widened with the artifact
+/// kind row (`←`/`→` cycles it) and the kind-conditional toggle rows
+/// (`Space`).
+fn translate_build_key(
+    code: KeyCode,
+    mods: KeyModifiers,
+    launcher: &crate::engine::BuildLauncher,
+) -> Vec<Message> {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let text_field = matches!(
+        launcher.focus,
+        BuildFocus::Flavor | BuildFocus::Defines | BuildFocus::ExportMethod
+    );
+    let toggle_row = matches!(
+        launcher.focus,
+        BuildFocus::SplitPerAbi | BuildFocus::Simulator | BuildFocus::NoCodesign
+    );
+    match code {
+        KeyCode::Esc => vec![Message::CloseBuildLauncher],
+        KeyCode::Enter => vec![Message::BuildLaunch],
+        KeyCode::Tab => vec![Message::BuildFocusNext],
+        KeyCode::BackTab => vec![Message::BuildFocusPrev],
+        KeyCode::Up => vec![Message::BuildFocusPrev],
+        KeyCode::Down => vec![Message::BuildFocusNext],
+        KeyCode::Left if launcher.focus == BuildFocus::Kind => vec![Message::BuildCycleKind(-1)],
+        KeyCode::Right if launcher.focus == BuildFocus::Kind => vec![Message::BuildCycleKind(1)],
+        KeyCode::Left if launcher.focus == BuildFocus::Mode => vec![Message::BuildCycleMode(-1)],
+        KeyCode::Right if launcher.focus == BuildFocus::Mode => vec![Message::BuildCycleMode(1)],
+        KeyCode::Backspace => vec![Message::BuildBackspace],
+        KeyCode::Char(' ') if toggle_row => vec![match launcher.focus {
+            BuildFocus::SplitPerAbi => Message::BuildToggleSplitPerAbi,
+            BuildFocus::Simulator => Message::BuildToggleSimulator,
+            BuildFocus::NoCodesign => Message::BuildToggleNoCodesign,
+            _ => unreachable!("guarded by `toggle_row`"),
+        }],
+        KeyCode::Char(c) if text_field && !ctrl => vec![Message::BuildInput(c)],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the clean-confirm dialog is open. `Esc`
+/// cancels, `Enter`/`y` confirms (mouse parity: the dialog's Clean/Cancel
+/// buttons).
+fn translate_clean_confirm_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Esc => vec![Message::CloseCleanConfirm],
+        KeyCode::Enter | KeyCode::Char('y') => vec![Message::ConfirmClean],
         _ => vec![],
     }
 }

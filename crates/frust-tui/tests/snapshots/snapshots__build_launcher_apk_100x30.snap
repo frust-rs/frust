@@ -1,6 +1,6 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-expression: "render_to_string(100, 30, &workbench_state())"
+expression: "render_to_string(100, 30, &state)"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
@@ -11,19 +11,19 @@ expression: "render_to_string(100, 30, &workbench_state())"
  DEVICES ↻ r             │                                                                          
    none found            │  No session running — start a run to open a log tab here.                
                          │                                                                          
- SESSIONS                │                                                                          
-   none running          │                                                                          
-                         │                                                                          
- ACTIONS                 │                                                                          
-   New project · n       │                                                                          
-   Doctor · d            │                                                                          
-   Build · b             │                                                                          
-   Clean · c             │                                                                          
-                         │                                                                          
-                         │                                                                          
-                         │                                                                          
-                         │                                                                          
-                         │                                                                          
+ SESSIONS          ╭ Build · huddle ────────────────────────────────────────────╮                   
+   none running    │                                                            │▓▓                 
+                   │  Kind     ‹ apk ›                                          │▓▓                 
+ ACTIONS           │  Mode     ‹ release ›                                      │▓▓                 
+   New project · n │  Flavor   paid                                             │▓▓                 
+   Doctor · d      │  Defines  KEY=VALUE …                                      │▓▓                 
+   Build · b       │  Split per ABI [x]                                         │▓▓                 
+   Clean · c       │                                                            │▓▓                 
+                   │   Build     Cancel                                         │▓▓                 
+                   │  Space toggle · ←/→ cycle · Tab next · Enter build · Esc   │▓▓                 
+                   │                                                            │▓▓                 
+                   ╰────────────────────────────────────────────────────────────╯▓▓                 
+                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                 
                          │                                                                          
                          │                                                                          
                          │                                                                          

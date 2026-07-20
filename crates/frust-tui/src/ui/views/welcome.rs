@@ -104,19 +104,17 @@ pub fn render(
     );
 }
 
-/// Render the titlebar toolchain chip for the welcome screen (right-aligned).
-pub fn titlebar(frame: &mut Frame, area: Rect, theme: &Theme) {
+/// Render the titlebar toolchain chip for the welcome screen (right-aligned),
+/// wired to the real startup-preflight state (TUI2-07) — the same chip logic
+/// `views::workbench::titlebar` uses.
+pub fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let row = Rect::new(area.x, area.y, area.width, 1);
+    let (glyph, label, color) = super::workbench::doctor_chip(&state.doctor, theme);
     let chip = Line::from(vec![
         Span::styled("toolchain ", Style::default().fg(theme.muted())),
-        Span::styled(
-            format!("{} ready", theme.icons.ok()),
-            Style::default().fg(theme.success()),
-        ),
+        Span::styled(format!("{glyph} {label}"), Style::default().fg(color)),
     ]);
-    frame.render_widget(
-        Paragraph::new(chip).alignment(Alignment::Right),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
+    frame.render_widget(Paragraph::new(chip).alignment(Alignment::Right), row);
 }
 
 fn centered_line(frame: &mut Frame, area: Rect, line: Line) {

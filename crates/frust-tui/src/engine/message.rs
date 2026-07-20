@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 use frust_drive::devices::Device;
 
+use super::build_launcher::BuildFocus;
+use super::doctor::DoctorCheck;
 use super::run_config::RunFocus;
 use crate::supervise::{SessionEvent, SessionId};
 
@@ -67,6 +69,44 @@ pub enum RegionId {
     /// A row inside the open titlebar switcher dropdown (0-based index into
     /// `AppState::projects`); click switches and closes the dropdown.
     ProjectMenuItem(usize),
+    /// The titlebar toolchain chip; click opens the doctor panel.
+    DoctorChip,
+    /// The sidebar "Doctor" action row; click opens the doctor panel.
+    DoctorAction,
+    /// The doctor panel's re-run affordance.
+    DoctorRerun,
+    /// The doctor panel's close button.
+    DoctorClose,
+    /// The sidebar "Build" action row; click opens the build launcher.
+    BuildAction,
+    /// The build-launcher modal's artifact-kind selector.
+    BuildKindRow,
+    /// The build-launcher modal's build-mode selector.
+    BuildModeRow,
+    /// The build-launcher modal's flavor text field.
+    BuildFlavorRow,
+    /// The build-launcher modal's defines text field.
+    BuildDefinesRow,
+    /// The build-launcher modal's split-per-ABI toggle (Apk only).
+    BuildSplitPerAbiRow,
+    /// The build-launcher modal's Simulator toggle (Ios only).
+    BuildSimulatorRow,
+    /// The build-launcher modal's no-codesign toggle (Ios only).
+    BuildNoCodesignRow,
+    /// The build-launcher modal's export-method text field (Ipa only).
+    BuildExportMethodRow,
+    /// The build-launcher modal's launch button.
+    BuildLaunchButton,
+    /// The build-launcher modal's cancel button.
+    BuildCancelButton,
+    /// The sidebar "Clean" action row; click opens the clean confirm dialog.
+    CleanAction,
+    /// The clean-confirm dialog's confirm button.
+    CleanConfirmYes,
+    /// The clean-confirm dialog's cancel button.
+    CleanConfirmNo,
+    /// The log status row's "copy built artifact path(s)" affordance.
+    CopyArtifactsAction,
 }
 
 /// A TEA message: the only way `AppState` ever changes.
@@ -242,4 +282,65 @@ pub enum Message {
     /// persist it as the most-recently-opened project
     /// ([`super::Effect::RecordRecentProject`]).
     SwitchProject(usize),
+
+    // ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────────
+    /// Run the validator set off-thread (`d` from the workbench, the sidebar
+    /// "Doctor" action, the titlebar chip, or the panel's re-run affordance)
+    /// — routed to the runner as [`super::Effect::RunDoctor`]. Also fired
+    /// once at startup (`crate::runner`) to seed the chip.
+    RunDoctor,
+    /// The off-thread validator run finished: replace the cached results.
+    DoctorResults(Vec<DoctorCheck>),
+    /// Open the doctor panel.
+    OpenDoctorPanel,
+    /// Close the doctor panel (`Esc`).
+    CloseDoctorPanel,
+
+    // ── Build launcher (TUI2-07) ────────────────────────────────────────────
+    /// Open the build launcher, primed for the active project (`b` from the
+    /// workbench, or the sidebar "Build" action).
+    OpenBuildLauncher,
+    /// Close the build launcher without launching (`Esc`).
+    CloseBuildLauncher,
+    /// Move modal focus to the next / previous control (`Tab`/`↓`, `↑`).
+    BuildFocusNext,
+    /// Move modal focus to the previous control.
+    BuildFocusPrev,
+    /// Cycle the artifact kind by `delta` (`←`/`→` on the kind row).
+    BuildCycleKind(isize),
+    /// Cycle the build mode by `delta` (`←`/`→` on the mode row).
+    BuildCycleMode(isize),
+    /// Toggle the split-per-ABI flag (`Space` on that row, Apk only).
+    BuildToggleSplitPerAbi,
+    /// Toggle the Simulator flag (`Space` on that row, Ios only).
+    BuildToggleSimulator,
+    /// Toggle the no-codesign flag (`Space` on that row, Ios only).
+    BuildToggleNoCodesign,
+    /// Move modal focus to a specific control (mouse parity for the
+    /// flavor/defines/export-method rows).
+    BuildFocus(BuildFocus),
+    /// Type a character into the focused modal text field.
+    BuildInput(char),
+    /// Delete the last character of the focused modal text field.
+    BuildBackspace,
+    /// Launch the resolved build (`Enter` on the launch button) — routed to
+    /// the runner as [`super::Effect::LaunchBuild`].
+    BuildLaunch,
+
+    // ── Clean confirm dialog (TUI2-07) ──────────────────────────────────────
+    /// Open the clean-confirm dialog for the active project (`c` from the
+    /// workbench, or the sidebar "Clean" action).
+    OpenCleanConfirm,
+    /// Close the dialog without cleaning (`Esc`).
+    CloseCleanConfirm,
+    /// Confirm the clean (`Enter`/`y`) — routed to the runner as
+    /// [`super::Effect::RunClean`].
+    ConfirmClean,
+
+    // ── Build artifact copy-path (TUI2-07) ──────────────────────────────────
+    /// Copy the active (build) session's reported artifact path(s) to the
+    /// clipboard (`c` on a session tab with built artifacts, or the log
+    /// status row's copy affordance) — routed to the runner as
+    /// [`super::Effect::Copy`].
+    CopyBuiltArtifacts,
 }

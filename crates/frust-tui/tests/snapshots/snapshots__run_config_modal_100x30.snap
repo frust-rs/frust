@@ -2,7 +2,7 @@
 source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(100, 30, &run_config_modal_state())"
 ---
-⚙ Frust │ huddle ▾ · frust 0.1.0 · ✓ toolchain                                     ▶ Run    ⚒ Build 
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │                                                                          
@@ -17,10 +17,10 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
    none running    │    [ ] Pixel 7                                             │▓▓                 
                    │    [ ] iPhone SE                                           │▓▓                 
  ACTIONS           │                                                            │▓▓                 
-   New project     │  Mode     ‹ release ›                                      │▓▓                 
-   Doctor · Setting│  Flavor   paid                                             │▓▓                 
-                   │  Defines  FRUST_TRACE=1█                                   │▓▓                 
-                   │                                                            │▓▓                 
+   New project · n │  Mode     ‹ release ›                                      │▓▓                 
+   Doctor · d      │  Flavor   paid                                             │▓▓                 
+   Build · b       │  Defines  FRUST_TRACE=1█                                   │▓▓                 
+   Clean · c       │                                                            │▓▓                 
                    │   Launch (1)     Cancel                                    │▓▓                 
                    │  Space toggle · ←/→ mode · Tab next · Enter launch · Esc   │▓▓                 
                    ╰────────────────────────────────────────────────────────────╯▓▓                 

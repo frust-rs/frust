@@ -53,19 +53,32 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
     match state.screen {
         Screen::Welcome => render_welcome(frame, area, state, theme, mouse),
         Screen::Workbench => {
+            // Every workbench modal below shares the same D4 base-layer
+            // suppression: the workbench beneath renders with no live mouse
+            // regions (pass `None`) so only the topmost modal's regions are
+            // live — `translate_key` (crate::runner) enforces the matching
+            // keyboard exclusivity (each modal's own branch returns before
+            // any other can open while it's live).
             if let Some(modal) = &state.run_config {
-                // D4 base-layer suppression: the workbench beneath the modal
-                // registers no mouse regions (pass `None`), so only the modal's
-                // regions are live while it is open.
                 let mut suppressed = MouseCtx::suppressed();
                 views::workbench::render(frame, area, state, theme, &mut suppressed);
                 views::run_config::render(frame, area, modal, theme, mouse);
             } else if state.project_switcher_open {
-                // Same D4 base-layer suppression as the run-config modal above,
-                // for the titlebar project-switcher dropdown.
                 let mut suppressed = MouseCtx::suppressed();
                 views::workbench::render(frame, area, state, theme, &mut suppressed);
                 views::project_switcher::render(frame, area, state, theme, mouse);
+            } else if state.doctor_panel_open {
+                let mut suppressed = MouseCtx::suppressed();
+                views::workbench::render(frame, area, state, theme, &mut suppressed);
+                views::doctor::render(frame, area, &state.doctor, theme, mouse);
+            } else if let Some(launcher) = &state.build_launcher {
+                let mut suppressed = MouseCtx::suppressed();
+                views::workbench::render(frame, area, state, theme, &mut suppressed);
+                views::build_launcher::render(frame, area, launcher, theme, mouse);
+            } else if let Some(project_root) = &state.clean_confirm {
+                let mut suppressed = MouseCtx::suppressed();
+                views::workbench::render(frame, area, state, theme, &mut suppressed);
+                views::clean_confirm::render(frame, area, project_root, theme, mouse);
             } else {
                 views::workbench::render(frame, area, state, theme, mouse);
             }
@@ -89,7 +102,7 @@ fn render_welcome(
         ])
         .split(area);
 
-    views::welcome::titlebar(frame, rows[0], theme);
+    views::welcome::titlebar(frame, rows[0], state, theme);
     views::welcome::render(frame, rows[1], state, theme, mouse);
     welcome_status(frame, rows[2], state, theme);
 }

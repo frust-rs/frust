@@ -46,7 +46,7 @@ pub fn render_main(
 
     render_tab_bar(frame, rows[0], state, theme, mouse);
     render_log(frame, rows[1], state, theme, mouse);
-    render_log_status(frame, rows[2], state, theme);
+    render_log_status(frame, rows[2], state, theme, mouse);
     if state.search.open {
         render_search(frame, rows[3], state, theme);
     }
@@ -222,8 +222,16 @@ fn render_log(
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
-/// The log status / keyhint line under the log view.
-fn render_log_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+/// The log status / keyhint line under the log view. Registers the
+/// copy-built-artifacts click region when the active session reported any
+/// (see `SessionView::built_artifact_paths`).
+fn render_log_status(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.surface())),
         area,
@@ -255,14 +263,52 @@ fn render_log_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Th
         left.push(Span::styled("  ·  ", Style::default().fg(theme.border())));
         left.push(Span::styled("y copy", Style::default().fg(theme.accent())));
     }
+
+    const RIGHT_HINT: &str = "x stop · f follow · w wrap · / search";
+
+    // Only add the built-artifacts segment (with its copy-path click region)
+    // when it actually fits beside the right-aligned keyhint — both
+    // `Paragraph`s share this one row, so an unchecked append can overlap and
+    // garble both (narrow terminals, or a session with many artifacts). The
+    // mouse action degrades gracefully when it doesn't fit; `c` still copies
+    // via the keyboard regardless (CODE_STANDARDS' mouse-is-additive policy).
+    let artifacts = session.built_artifact_paths();
+    let mut copy_click: Option<(u16, u16)> = None; // (x, width), relative to `inner.x`
+    if !artifacts.is_empty() {
+        let used: usize = left.iter().map(|s| s.content.chars().count()).sum();
+        let prefix = format!("  ·  {} built · ", artifacts.len());
+        let copy_label = "c copy path";
+        let needed = used + prefix.chars().count() + copy_label.chars().count();
+        if needed + RIGHT_HINT.chars().count() + 2 <= inner.width as usize {
+            let prefix_len = prefix.chars().count();
+            left.push(Span::styled(prefix, Style::default().fg(theme.success())));
+            left.push(Span::styled(
+                copy_label,
+                Style::default().fg(theme.accent()),
+            ));
+            copy_click = Some((
+                (used + prefix_len) as u16,
+                copy_label.chars().count() as u16,
+            ));
+        }
+    }
     frame.render_widget(Paragraph::new(Line::from(left)), inner);
+    if let Some((x, w)) = copy_click {
+        mouse.click(
+            Rect::new(
+                inner.x + x,
+                inner.y,
+                w.min(inner.right().saturating_sub(inner.x + x)),
+                1,
+            ),
+            RegionId::CopyArtifactsAction,
+            Message::CopyBuiltArtifacts,
+        );
+    }
 
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            "x stop · f follow · w wrap · / search",
-            Style::default().fg(theme.muted()),
-        ))
-        .alignment(Alignment::Right),
+        Paragraph::new(Line::styled(RIGHT_HINT, Style::default().fg(theme.muted())))
+            .alignment(Alignment::Right),
         inner,
     );
 }

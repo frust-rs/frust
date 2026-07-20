@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 
+use super::build_launcher::{BuildLauncher, BuildSpec};
 use super::create_wizard::{CreateWizard, WizardAdvance};
 use super::message::Message;
 use super::run_config::{DeviceRow, RunConfig};
@@ -52,6 +53,18 @@ pub enum Effect {
         /// The selected architecture tag (`None` = default template).
         arch: Option<String>,
     },
+    /// Run `frust-drive`'s validator set off-thread, posting the results back
+    /// as [`Message::DoctorResults`] — the titlebar chip's live source.
+    RunDoctor,
+    /// Drive the resolved build off-thread through `frust-drive`'s
+    /// `android_build`/`ios_build` pipelines, reporting progress/completion
+    /// as a supervised-style session (reusing the tab/log-view machinery via
+    /// `Message::RegisterSession`/`Message::Session`).
+    LaunchBuild(BuildSpec),
+    /// Run `cargo clean` + remove the generated Android/iOS build
+    /// directories for `project_root` off-thread, reported the same way as
+    /// [`Effect::LaunchBuild`].
+    RunClean(PathBuf),
 }
 
 /// What the loop must do after a transition.
@@ -394,6 +407,110 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             open_project(state, project_root)
         }
         Message::ScaffoldFailed(message) => with_wizard(state, |w| w.fail(message)),
+
+        // ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────
+        Message::RunDoctor => {
+            state.doctor.refreshing = true;
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::RunDoctor),
+            }
+        }
+        Message::DoctorResults(results) => {
+            state.doctor.results = results;
+            state.doctor.refreshing = false;
+            Outcome::redraw()
+        }
+        Message::OpenDoctorPanel => {
+            if state.doctor_panel_open {
+                Outcome::idle()
+            } else {
+                state.doctor_panel_open = true;
+                Outcome::redraw()
+            }
+        }
+        Message::CloseDoctorPanel => {
+            if state.doctor_panel_open {
+                state.doctor_panel_open = false;
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+
+        // ── Build launcher (TUI2-07) ────────────────────────────────────────
+        Message::OpenBuildLauncher => match run_config_project(state) {
+            Some(project_root) if state.build_launcher.is_none() => {
+                state.build_launcher = Some(BuildLauncher::new(project_root));
+                Outcome::redraw()
+            }
+            _ => Outcome::idle(),
+        },
+        Message::CloseBuildLauncher => {
+            if state.build_launcher.take().is_some() {
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::BuildFocusNext => with_build_launcher(state, BuildLauncher::focus_next),
+        Message::BuildFocusPrev => with_build_launcher(state, BuildLauncher::focus_prev),
+        Message::BuildCycleKind(delta) => with_build_launcher(state, |l| l.cycle_kind(delta)),
+        Message::BuildCycleMode(delta) => with_build_launcher(state, |l| l.cycle_mode(delta)),
+        Message::BuildToggleSplitPerAbi => {
+            with_build_launcher(state, BuildLauncher::toggle_split_per_abi)
+        }
+        Message::BuildToggleSimulator => {
+            with_build_launcher(state, BuildLauncher::toggle_simulator)
+        }
+        Message::BuildToggleNoCodesign => {
+            with_build_launcher(state, BuildLauncher::toggle_no_codesign)
+        }
+        Message::BuildFocus(focus) => with_build_launcher(state, |l| l.focus = focus),
+        Message::BuildInput(c) => with_build_launcher(state, |l| l.input_char(c)),
+        Message::BuildBackspace => with_build_launcher(state, BuildLauncher::backspace),
+        Message::BuildLaunch => match state.build_launcher.take() {
+            Some(launcher) => {
+                let spec = launcher.build_spec();
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::LaunchBuild(spec)),
+                }
+            }
+            None => Outcome::idle(),
+        },
+
+        // ── Clean confirm dialog (TUI2-07) ──────────────────────────────────
+        Message::OpenCleanConfirm => match run_config_project(state) {
+            Some(project_root) if state.clean_confirm.is_none() => {
+                state.clean_confirm = Some(project_root);
+                Outcome::redraw()
+            }
+            _ => Outcome::idle(),
+        },
+        Message::CloseCleanConfirm => {
+            if state.clean_confirm.take().is_some() {
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::ConfirmClean => match state.clean_confirm.take() {
+            Some(root) => Outcome {
+                redraw: true,
+                effect: Some(Effect::RunClean(root)),
+            },
+            None => Outcome::idle(),
+        },
+
+        // ── Build artifact copy-path (TUI2-07) ──────────────────────────────
+        Message::CopyBuiltArtifacts => match state.active_session() {
+            Some(session) if !session.built_artifact_paths().is_empty() => Outcome {
+                redraw: false,
+                effect: Some(Effect::Copy(session.built_artifact_paths().join("\n"))),
+            },
+            _ => Outcome::idle(),
+        },
     }
 }
 
@@ -505,6 +622,18 @@ fn with_modal(state: &mut AppState, f: impl FnOnce(&mut RunConfig)) -> Outcome {
     match state.run_config.as_mut() {
         Some(modal) => {
             f(modal);
+            Outcome::redraw()
+        }
+        None => Outcome::idle(),
+    }
+}
+
+/// Apply `f` to the open build-launcher modal (if any) and redraw; idle when
+/// closed — mirrors [`with_modal`].
+fn with_build_launcher(state: &mut AppState, f: impl FnOnce(&mut BuildLauncher)) -> Outcome {
+    match state.build_launcher.as_mut() {
+        Some(launcher) => {
+            f(launcher);
             Outcome::redraw()
         }
         None => Outcome::idle(),
@@ -1264,5 +1393,153 @@ mod tests {
         // Switching to /tmp/b (which has sessions) focuses its first one.
         update(&mut st, Message::SwitchProject(1));
         assert_eq!(st.active_session, Some(0));
+    }
+
+    // ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────────
+
+    use crate::engine::doctor::DoctorCheck;
+    use frust_drive::doctor::Status;
+
+    #[test]
+    fn run_doctor_flags_refreshing_and_requests_the_effect() {
+        let mut st = welcome();
+        let out = update(&mut st, Message::RunDoctor);
+        assert!(st.doctor.refreshing);
+        assert_eq!(out.effect, Some(Effect::RunDoctor));
+        assert!(out.redraw);
+    }
+
+    #[test]
+    fn doctor_results_populate_and_clear_refreshing() {
+        let mut st = welcome();
+        update(&mut st, Message::RunDoctor);
+        let results = vec![DoctorCheck {
+            name: "Rust toolchain".to_string(),
+            status: Status::Pass,
+            messages: Vec::new(),
+        }];
+        update(&mut st, Message::DoctorResults(results.clone()));
+        assert!(!st.doctor.refreshing);
+        assert_eq!(st.doctor.results, results);
+    }
+
+    #[test]
+    fn open_and_close_doctor_panel_toggles_and_dedupes() {
+        let mut st = welcome();
+        assert!(update(&mut st, Message::OpenDoctorPanel).redraw);
+        assert!(st.doctor_panel_open);
+        assert!(
+            !update(&mut st, Message::OpenDoctorPanel).redraw,
+            "already open"
+        );
+        assert!(update(&mut st, Message::CloseDoctorPanel).redraw);
+        assert!(!st.doctor_panel_open);
+        assert!(
+            !update(&mut st, Message::CloseDoctorPanel).redraw,
+            "already closed"
+        );
+    }
+
+    // ── Build launcher (TUI2-07) ────────────────────────────────────────────
+
+    use crate::engine::build_launcher::{ArtifactKind, BuildTargetSpec};
+
+    #[test]
+    fn open_build_launcher_primes_from_the_active_project() {
+        let mut st = workbench_with_project();
+        assert!(update(&mut st, Message::OpenBuildLauncher).redraw);
+        let launcher = st.build_launcher.as_ref().expect("launcher open");
+        assert_eq!(launcher.project_root, PathBuf::from("/tmp/huddle"));
+        assert_eq!(launcher.kind, ArtifactKind::Apk);
+        // A second open while already open is a no-op.
+        assert!(!update(&mut st, Message::OpenBuildLauncher).redraw);
+        assert!(update(&mut st, Message::CloseBuildLauncher).redraw);
+        assert!(st.build_launcher.is_none());
+    }
+
+    #[test]
+    fn open_build_launcher_is_a_noop_on_the_welcome_screen() {
+        let mut st = welcome();
+        assert!(!update(&mut st, Message::OpenBuildLauncher).redraw);
+        assert!(st.build_launcher.is_none());
+    }
+
+    #[test]
+    fn build_launcher_edits_route_through_the_focused_control() {
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenBuildLauncher);
+        update(&mut st, Message::BuildCycleKind(1));
+        assert_eq!(
+            st.build_launcher.as_ref().unwrap().kind,
+            ArtifactKind::Appbundle
+        );
+        update(
+            &mut st,
+            Message::BuildFocus(crate::engine::BuildFocus::Flavor),
+        );
+        update(&mut st, Message::BuildInput('p'));
+        update(&mut st, Message::BuildInput('q'));
+        update(&mut st, Message::BuildBackspace);
+        assert_eq!(st.build_launcher.as_ref().unwrap().flavor, "p");
+    }
+
+    #[test]
+    fn build_launch_emits_the_resolved_spec_and_closes_the_modal() {
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenBuildLauncher);
+        let out = update(&mut st, Message::BuildLaunch);
+        assert!(st.build_launcher.is_none(), "launch closes the modal");
+        let Some(Effect::LaunchBuild(spec)) = out.effect else {
+            panic!("expected a LaunchBuild effect, got {:?}", out.effect);
+        };
+        assert_eq!(spec.project_root, PathBuf::from("/tmp/huddle"));
+        assert!(matches!(spec.target, BuildTargetSpec::Apk { .. }));
+    }
+
+    #[test]
+    fn build_launch_with_no_modal_open_is_a_noop() {
+        let mut st = workbench_with_project();
+        assert_eq!(update(&mut st, Message::BuildLaunch).effect, None);
+    }
+
+    // ── Clean confirm dialog (TUI2-07) ──────────────────────────────────────
+
+    #[test]
+    fn open_clean_confirm_primes_from_the_active_project_and_confirm_emits_effect() {
+        let mut st = workbench_with_project();
+        assert!(update(&mut st, Message::OpenCleanConfirm).redraw);
+        assert_eq!(st.clean_confirm, Some(PathBuf::from("/tmp/huddle")));
+        let out = update(&mut st, Message::ConfirmClean);
+        assert!(st.clean_confirm.is_none(), "confirming closes the dialog");
+        assert_eq!(
+            out.effect,
+            Some(Effect::RunClean(PathBuf::from("/tmp/huddle")))
+        );
+    }
+
+    #[test]
+    fn close_clean_confirm_dismisses_without_an_effect() {
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenCleanConfirm);
+        let out = update(&mut st, Message::CloseCleanConfirm);
+        assert!(out.redraw);
+        assert!(st.clean_confirm.is_none());
+        assert_eq!(update(&mut st, Message::ConfirmClean).effect, None);
+    }
+
+    // ── Build artifact copy-path (TUI2-07) ──────────────────────────────────
+
+    #[test]
+    fn copy_built_artifacts_emits_effect_only_when_the_active_session_built_something() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "build apk");
+        assert_eq!(update(&mut st, Message::CopyBuiltArtifacts).effect, None);
+        update(&mut st, line(a, "Built: /tmp/a/app.apk"));
+        update(&mut st, line(a, "Built: /tmp/a/app2.apk"));
+        let out = update(&mut st, Message::CopyBuiltArtifacts);
+        assert_eq!(
+            out.effect,
+            Some(Effect::Copy("/tmp/a/app.apk\n/tmp/a/app2.apk".to_string()))
+        );
     }
 }

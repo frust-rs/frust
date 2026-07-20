@@ -4,16 +4,17 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
-use crate::engine::{AppState, DeviceRow, Message, RegionId};
+use crate::engine::{AppState, DeviceRow, DoctorState, Message, RegionId};
 use crate::ui::layout::{Shell, sidebar_main};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
 use crate::ui::views::sessions;
 use frust_drive::devices::{Kind, Platform};
+use frust_drive::doctor::Status;
 
 /// Render the workbench shell into `area`.
 pub fn render(
@@ -92,14 +93,26 @@ fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, mous
         "· frust 0.1.0 · ".to_string(),
         Style::default().fg(theme.muted()),
     );
+    let chip_x = area.x + col;
+    let (glyph, label, chip_color) = doctor_chip(&state.doctor, theme);
     push(
         &mut spans,
         &mut col,
-        format!("{} toolchain", theme.icons.ok()),
-        Style::default().fg(theme.success()),
+        format!("{glyph} {label}"),
+        Style::default().fg(chip_color),
     );
+    let chip_w = col - (chip_x - area.x);
 
     frame.render_widget(Paragraph::new(Line::from(spans)), row0);
+
+    if chip_x < area.right() {
+        let w = chip_w.min(area.right().saturating_sub(chip_x));
+        mouse.click(
+            Rect::new(chip_x, area.y, w, 1),
+            RegionId::DoctorChip,
+            Message::OpenDoctorPanel,
+        );
+    }
 
     if switcher_x < area.right() {
         let w = switcher_w.min(area.right().saturating_sub(switcher_x));
@@ -196,8 +209,13 @@ fn render_sidebar(
     lines.push(Line::from(""));
     lines.push(heading("ACTIONS"));
     let new_project_row = lines.len();
-    lines.push(item("New project"));
-    lines.push(item("Doctor · Settings"));
+    lines.push(item("New project · n"));
+    let doctor_row = lines.len();
+    lines.push(item("Doctor · d"));
+    let build_row = lines.len();
+    lines.push(item("Build · b"));
+    let clean_row = lines.len();
+    lines.push(item("Clean · c"));
     frame.render_widget(Paragraph::new(lines), inner);
 
     // Register the interactive regions now that row indices are known (a row
@@ -219,8 +237,33 @@ fn render_sidebar(
             mouse.click(rect, RegionId::DeviceRow(i), Message::SelectDeviceAt(i));
         }
     }
+    if let Some(rect) = row_rect(doctor_row) {
+        mouse.click(rect, RegionId::DoctorAction, Message::OpenDoctorPanel);
+    }
+    if let Some(rect) = row_rect(build_row) {
+        mouse.click(rect, RegionId::BuildAction, Message::OpenBuildLauncher);
+    }
+    if let Some(rect) = row_rect(clean_row) {
+        mouse.click(rect, RegionId::CleanAction, Message::OpenCleanConfirm);
+    }
     if let Some(rect) = row_rect(new_project_row) {
         mouse.click(rect, RegionId::NewProjectAction, Message::OpenCreateWizard);
+    }
+}
+
+/// The titlebar toolchain chip's glyph/label/color for the aggregate doctor
+/// status (TUI2-07): "checking…" (muted) before the startup preflight's first
+/// result arrives, else "ok"/"partial"/"missing" per [`DoctorState::overall`].
+/// Shared with `views::welcome::titlebar`'s chip.
+pub(crate) fn doctor_chip(
+    doctor: &DoctorState,
+    theme: &Theme,
+) -> (&'static str, &'static str, Color) {
+    match doctor.overall() {
+        None => ("\u{25cc}", "checking…", theme.muted()),
+        Some(Status::Pass) => (theme.icons.ok(), "toolchain", theme.success()),
+        Some(Status::Partial) => ("!", "partial", theme.warn()),
+        Some(Status::Fail) => ("\u{2717}", "missing", theme.error()),
     }
 }
 

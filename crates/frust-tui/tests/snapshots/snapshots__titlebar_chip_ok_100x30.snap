@@ -2,18 +2,17 @@
 source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(100, 30, &state)"
 ---
-⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ✓ toolchain                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
- PROJECTS                │huddle:  1 ▶ desktop                                                      
-  ▸ huddle               │app: booting up                                                           
-                         │app: frame 1 rendered                                                     
- DEVICES ↻ r             │app: recovering                                                           
-   none found            │                                                                          
+ PROJECTS                │                                                                          
+  ▸ huddle               │  Dashboard                                                               
+                         │  ━━━━━━━━━━                                                              
+ DEVICES ↻ r             │                                                                          
+   none found            │  No session running — start a run to open a log tab here.                
                          │                                                                          
  SESSIONS                │                                                                          
-   huddle                │                                                                          
-   ▸ ▶ desktop           │                                                                          
+   none running          │                                                                          
                          │                                                                          
  ACTIONS                 │                                                                          
    New project · n       │                                                                          
@@ -30,5 +29,6 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-                         │● follow  ·  wrap:off  ·  /app/      x stop · f follow · w wrap · / search
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+                         │                                                                          
+                         │                                                                          
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

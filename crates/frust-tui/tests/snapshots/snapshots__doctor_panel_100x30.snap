@@ -1,8 +1,8 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-expression: "render_to_string(100, 30, &workbench_state())"
+expression: "render_to_string(100, 30, &state)"
 ---
-⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ✗ missing                                       ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │                                                                          
@@ -11,18 +11,18 @@ expression: "render_to_string(100, 30, &workbench_state())"
  DEVICES ↻ r             │                                                                          
    none found            │  No session running — start a run to open a log tab here.                
                          │                                                                          
- SESSIONS                │                                                                          
-   none running          │                                                                          
-                         │                                                                          
- ACTIONS                 │                                                                          
-   New project · n       │                                                                          
-   Doctor · d            │                                                                          
-   Build · b             │                                                                          
-   Clean · c             │                                                                          
-                         │                                                                          
-                         │                                                                          
-                         │                                                                          
-                         │                                                                          
+ SESSIONS        ╭ Doctor ────────────────────────────────────────────────────────╮                 
+   none running  │                                                                │▓▓               
+                 │  ✓ Rust toolchain                                              │▓▓               
+ ACTIONS         │  ! Android SDK/NDK                                             │▓▓               
+   New project · │      ANDROID_NDK_HOME not set                                  │▓▓               
+   Doctor · d    │  ✗ Xcode                                                       │▓▓               
+   Build · b     │      Xcode not found. Run: xcode-select --install              │▓▓               
+   Clean · c     │                                                                │▓▓               
+                 │   Re-run     Close                                             │▓▓               
+                 │  r re-run · Esc close                                          │▓▓               
+                 ╰────────────────────────────────────────────────────────────────╯▓▓               
+                   ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓               
                          │                                                                          
                          │                                                                          
                          │                                                                          

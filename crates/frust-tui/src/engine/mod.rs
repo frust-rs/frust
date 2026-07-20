@@ -7,7 +7,9 @@
 //! emits `Message`s but never mutates the model; `crate::runner` owns the
 //! terminal lifecycle and drives the loop.
 
+mod build_launcher;
 mod create_wizard;
+mod doctor;
 mod message;
 mod persist;
 mod run_config;
@@ -15,7 +17,9 @@ mod session_view;
 mod state;
 mod update;
 
+pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, BuildTargetSpec};
 pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
+pub use doctor::{DoctorCheck, DoctorState};
 pub use message::{Message, RegionId};
 pub use persist::{load_recent_projects, merge_recent_and_detected, record_recent_project};
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};

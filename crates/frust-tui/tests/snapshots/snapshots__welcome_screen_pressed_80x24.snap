@@ -2,7 +2,7 @@
 source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(80, 24, &state)"
 ---
-                                                               toolchain ✓ ready
+                                                           toolchain ◌ checking…
                                                                                 
                                                                                 
                                                                                 

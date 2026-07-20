@@ -2,7 +2,7 @@
 source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(100, 30, &state)"
 ---
-⚙ Frust │ bubblebench ▾ · frust 0.1.0 · ✓ toolchain                                ▶ Run    ⚒ Build 
+⚙ Frust │ bubblebench ▾ · frust 0.1.0 · ◌ checking…                                ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
 ╭────────────────────────╮                                                                          
@@ -16,10 +16,10 @@ expression: "render_to_string(100, 30, &state)"
    none running          │                                                                          
                          │                                                                          
  ACTIONS                 │                                                                          
-   New project           │                                                                          
-   Doctor · Settings     │                                                                          
-                         │                                                                          
-                         │                                                                          
+   New project · n       │                                                                          
+   Doctor · d            │                                                                          
+   Build · b             │                                                                          
+   Clean · c             │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

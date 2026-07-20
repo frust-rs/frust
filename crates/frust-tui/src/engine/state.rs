@@ -4,7 +4,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::build_launcher::BuildLauncher;
 use super::create_wizard::CreateWizard;
+use super::doctor::DoctorState;
 use super::message::RegionId;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
@@ -100,6 +102,23 @@ pub struct AppState {
     /// and suppresses background mouse regions — the same D4 base-layer
     /// suppression the run-config modal uses.
     pub create_wizard: Option<CreateWizard>,
+    /// The doctor panel's cached validator results + titlebar chip source
+    /// (TUI2-07). Populated by a startup preflight and refreshed on demand;
+    /// present regardless of whether the panel itself is open.
+    pub doctor: DoctorState,
+    /// Whether the doctor panel is open (`d` from the workbench, or the
+    /// titlebar chip / sidebar "Doctor" action). While `true`, it captures
+    /// input and suppresses background mouse regions like the other modals.
+    pub doctor_panel_open: bool,
+    /// The build-launcher modal, when open (`b` from the workbench, or the
+    /// sidebar "Build" action). While `Some`, it captures input and
+    /// suppresses background mouse regions like the other modals.
+    pub build_launcher: Option<BuildLauncher>,
+    /// The clean-confirm dialog, when open (`c` from the workbench, or the
+    /// sidebar "Clean" action), holding the project root a confirmed clean
+    /// runs against. While `Some`, it captures input and suppresses
+    /// background mouse regions like the other modals.
+    pub clean_confirm: Option<PathBuf>,
 }
 
 impl AppState {
@@ -157,6 +176,10 @@ impl AppState {
             project_switcher_open: false,
             project_switcher_cursor: 0,
             create_wizard: None,
+            doctor: DoctorState::default(),
+            doctor_panel_open: false,
+            build_launcher: None,
+            clean_confirm: None,
         }
     }
 
@@ -267,6 +290,10 @@ impl Default for AppState {
             project_switcher_open: false,
             project_switcher_cursor: 0,
             create_wizard: None,
+            doctor: DoctorState::default(),
+            doctor_panel_open: false,
+            build_launcher: None,
+            clean_confirm: None,
         }
     }
 }

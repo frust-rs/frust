@@ -340,6 +340,20 @@ impl SessionView {
         self.selection = None;
     }
 
+    /// The artifact paths a completed build session reported, in the order
+    /// they were built. A build session (`crate::runner`'s `Effect::LaunchBuild`
+    /// enactment) reports each with a `"Built: {path}"` line — the same
+    /// prefix `frust-cli`'s own `commands/build.rs::print_artifacts` prints —
+    /// so this is a pure, testable parse over the retained log rather than a
+    /// dedicated (drive-touching) event kind.
+    pub fn built_artifact_paths(&self) -> Vec<&str> {
+        const PREFIX: &str = "Built: ";
+        self.log
+            .iter()
+            .filter_map(|(_, line)| line.strip_prefix(PREFIX))
+            .collect()
+    }
+
     /// The selected lines joined by newlines, ANSI-stripped, ready for the
     /// clipboard — or `None` if nothing is selected / retained.
     pub fn selected_text(&self) -> Option<String> {
@@ -507,5 +521,29 @@ mod tests {
     fn line_matches_is_case_insensitive_and_ansi_blind() {
         assert!(line_matches("\u{1b}[31mERROR here\u{1b}[0m", "error"));
         assert!(!line_matches("all good", "error"));
+    }
+
+    #[test]
+    fn built_artifact_paths_parses_the_built_prefix() {
+        let mut s = sess();
+        s.push_line("Building `it.f0x.huddle`…".to_string());
+        s.push_line("Built: /tmp/huddle/android/app/build/outputs/apk/release/app.apk".to_string());
+        s.push_line(
+            "Built: /tmp/huddle/android/app/build/outputs/apk/release/app2.apk".to_string(),
+        );
+        assert_eq!(
+            s.built_artifact_paths(),
+            vec![
+                "/tmp/huddle/android/app/build/outputs/apk/release/app.apk",
+                "/tmp/huddle/android/app/build/outputs/apk/release/app2.apk",
+            ]
+        );
+    }
+
+    #[test]
+    fn built_artifact_paths_empty_with_no_built_lines() {
+        let mut s = sess();
+        s.push_line("hello".to_string());
+        assert!(s.built_artifact_paths().is_empty());
     }
 }
