@@ -290,6 +290,10 @@ fn prepare_physical_session(
             simulator: false,
             codesign: true,
         },
+        // Route the signed build's `[xcodebuild] …` stream through this
+        // session's line sink, not `println!` — a TUI physical-run session
+        // holds the terminal in raw mode (the tty-garbling fix).
+        on_line,
     )?;
     on_line(&format!(
         "Build finished in {:.1}s.",

@@ -231,7 +231,18 @@ fn launch_build_session(spec: BuildSpec, id: SessionId, tx: UnboundedSender<Mess
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
-        let terminal = match run_build(&RealProcessRunner, &spec) {
+        // The drive build cores are print-free: their streamed gradle/
+        // xcodebuild output arrives through this `on_line` sink (routed into
+        // the build session's log tab) instead of `println!`ing to the raw-mode
+        // TUI terminal, which would garble the whole screen (the tty-garbling
+        // fix). Scoped so the `&tx` borrow ends before `tx` is reused below.
+        let result = {
+            let mut on_line = |line: &str| {
+                let _ = tx.send(session_line(id, line.to_string()));
+            };
+            run_build(&RealProcessRunner, &spec, &mut on_line)
+        };
+        let terminal = match result {
             Ok(paths) => {
                 for path in paths {
                     let _ = tx.send(session_line(id, format!("Built: {}", path.display())));
@@ -248,8 +259,14 @@ fn launch_build_session(spec: BuildSpec, id: SessionId, tx: UnboundedSender<Mess
 }
 
 /// The blocking build call, dispatching on the resolved [`BuildTargetSpec`]
-/// into `android_build::build`/`ios_build::build`.
-fn run_build(runner: &dyn ProcessRunner, spec: &BuildSpec) -> Result<Vec<PathBuf>> {
+/// into `android_build::build`/`ios_build::build`. `on_line` is the print-free
+/// drive cores' line sink — the caller routes it into the build session's log
+/// tab (never the raw-mode tty; the tty-garbling fix).
+fn run_build(
+    runner: &dyn ProcessRunner,
+    spec: &BuildSpec,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Vec<PathBuf>> {
     match &spec.target {
         BuildTargetSpec::Apk {
             split_per_abi,
@@ -259,7 +276,7 @@ fn run_build(runner: &dyn ProcessRunner, spec: &BuildSpec) -> Result<Vec<PathBuf
                 split_per_abi: *split_per_abi,
                 abis: abis.clone(),
             };
-            android_build::build(runner, &spec.project_root, &spec.info, &target)
+            android_build::build(runner, &spec.project_root, &spec.info, &target, on_line)
                 .map(|artifacts| artifacts.paths)
         }
         BuildTargetSpec::Appbundle => android_build::build(
@@ -267,6 +284,7 @@ fn run_build(runner: &dyn ProcessRunner, spec: &BuildSpec) -> Result<Vec<PathBuf
             &spec.project_root,
             &spec.info,
             &AndroidArtifact::Appbundle,
+            on_line,
         )
         .map(|artifacts| artifacts.paths),
         BuildTargetSpec::IosApp {
@@ -277,14 +295,14 @@ fn run_build(runner: &dyn ProcessRunner, spec: &BuildSpec) -> Result<Vec<PathBuf
                 simulator: *simulator,
                 codesign: *codesign,
             };
-            ios_build::build(runner, &spec.project_root, &spec.info, &target)
+            ios_build::build(runner, &spec.project_root, &spec.info, &target, on_line)
                 .map(|artifacts| artifacts.paths)
         }
         BuildTargetSpec::Ipa { export_method } => {
             let target = IosArtifact::Ipa {
                 export_method: export_method.clone(),
             };
-            ios_build::build(runner, &spec.project_root, &spec.info, &target)
+            ios_build::build(runner, &spec.project_root, &spec.info, &target, on_line)
                 .map(|artifacts| artifacts.paths)
         }
     }

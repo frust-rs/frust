@@ -126,7 +126,12 @@ fn build_android(
         info.mode.gradle_infix(),
         info.mode.cargo_profile_arg()
     );
-    let artifacts = android_build::build(runner, project_dir, info, &target)?;
+    // The drive core is print-free (its `on_line` sink was added by the
+    // tty-garbling fix); the CLI restores today's behavior by `println!`ing
+    // each streamed line verbatim.
+    let artifacts = android_build::build(runner, project_dir, info, &target, &mut |line| {
+        println!("{line}")
+    })?;
     print_artifacts(&artifacts.paths);
     Ok(0)
 }
@@ -145,7 +150,11 @@ fn build_ios(
         info.mode.xcode_configuration(),
         info.mode.cargo_profile_arg()
     );
-    let artifacts = ios_build::build(runner, project_dir, info, &target)?;
+    // Print-free drive core (see `build_android` above); the CLI `println!`s
+    // each streamed line to keep its stdout verbatim.
+    let artifacts = ios_build::build(runner, project_dir, info, &target, &mut |line| {
+        println!("{line}")
+    })?;
     print_artifacts(&artifacts.paths);
     Ok(0)
 }

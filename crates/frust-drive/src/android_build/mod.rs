@@ -48,15 +48,24 @@ pub struct BuiltArtifacts {
 /// `bundle<Flavor><Mode>`, `cargo ndk` under the hood) for `target` in the
 /// Frust project rooted at `project_dir`.
 ///
-/// **Frozen signature** (task 61) — do not change without updating both
-/// `commands::build` and this doc comment.
+/// **Print-free core.** Every line this pipeline would surface (streamed
+/// `[gradle] …` output, the produced-artifact size notes) is emitted through
+/// `on_line`, never `println!` — so a caller holding a raw-mode terminal (the
+/// `frust-tui` build session) can route it into a log tab instead of leaking
+/// it to the tty. The CLI (`commands::build`) passes an `on_line` that just
+/// `println!`s each line, preserving its stdout verbatim.
+///
+/// **Frozen signature** (task 61) — do not change without updating every
+/// caller (`commands::build`, `frust-tui`'s build session) and this doc
+/// comment. The `on_line` sink was added by the tty-garbling fix.
 pub fn build(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
     info: &BuildInfo,
     target: &AndroidArtifact,
+    on_line: &mut dyn FnMut(&str),
 ) -> Result<BuiltArtifacts> {
-    build_with_env(runner, project_dir, info, target, &RealEnv)
+    build_with_env(runner, project_dir, info, target, &RealEnv, on_line)
 }
 
 /// The testable core of [`build`], taking an injected [`EnvLookup`] so
@@ -70,6 +79,7 @@ fn build_with_env(
     info: &BuildInfo,
     target: &AndroidArtifact,
     env: &dyn EnvLookup,
+    on_line: &mut dyn FnMut(&str),
 ) -> Result<BuiltArtifacts> {
     let android_dir = project_dir.join("android");
 
@@ -100,14 +110,14 @@ fn build_with_env(
         args.push(prop.as_str());
     }
 
-    let mut on_line = |line: &str| println!("[gradle] {line}");
+    let mut prefixed = |line: &str| on_line(&format!("[gradle] {line}"));
     let out = runner
         .run_streaming(
             "./gradlew",
             &args,
             Some(&android_dir),
             &[("JAVA_HOME", &outcome.java_home)],
-            &mut on_line,
+            &mut prefixed,
         )
         .with_context(|| format!("running `./gradlew {task}` in `{}`", android_dir.display()))?;
 
@@ -131,7 +141,7 @@ fn build_with_env(
     let paths = artifacts::discover(&android_dir, target, info.mode, info.flavor.as_deref())?;
     for path in &paths {
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        println!("{} ({size} bytes)", path.display());
+        on_line(&format!("{} ({size} bytes)", path.display()));
     }
 
     Ok(BuiltArtifacts { paths })
@@ -233,7 +243,15 @@ mod tests {
             abis: vec!["arm64-v8a".to_string()],
         };
         let build_info = info(BuildMode::Debug, None);
-        let result = build_with_env(&runner, &dir, &build_info, &target, &fake_env()).unwrap();
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &target,
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap();
         assert_eq!(result.paths, vec![out_dir.join("app-debug.apk")]);
 
         // local.properties merge-write happened as a side effect.
@@ -276,7 +294,15 @@ mod tests {
             abis: vec!["arm64-v8a".to_string()],
         };
         let build_info = info(BuildMode::Debug, None);
-        let err = build_with_env(&runner, &dir, &build_info, &target, &fake_env()).unwrap_err();
+        let err = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &target,
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("expected 1"), "{message}");
         assert!(message.contains("found 2"), "{message}");
@@ -320,7 +346,15 @@ mod tests {
         };
         let build_info = BuildInfo::from_args(build_args, BuildMode::Release).unwrap();
 
-        let result = build_with_env(&runner, &dir, &build_info, &target, &fake_env()).unwrap();
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &target,
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap();
         assert_eq!(result.paths, vec![out_dir.join("app-paid-release.apk")]);
 
         let _ = fs::remove_dir_all(&dir);
@@ -338,7 +372,15 @@ mod tests {
             abis: vec!["arm64-v8a".to_string()],
         };
         let build_info = info(BuildMode::Release, None);
-        let err = build_with_env(&runner, &dir, &build_info, &target, &fake_env()).unwrap_err();
+        let err = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &target,
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("keytool"), "{err}");
 
         let _ = fs::remove_dir_all(&dir);
@@ -364,7 +406,15 @@ mod tests {
             abis: vec!["arm64-v8a".to_string()],
         };
         let build_info = info(BuildMode::Release, Some("paid"));
-        let err = build_with_env(&runner, &dir, &build_info, &target, &fake_env()).unwrap_err();
+        let err = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &target,
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("flavor 'paid'"), "{message}");
         assert!(message.contains("build.gradle.kts"), "{message}");
@@ -389,7 +439,15 @@ mod tests {
             abis: vec!["arm64-v8a".to_string()],
         };
         let build_info = info(BuildMode::Debug, None);
-        let err = build_with_env(&runner, &dir, &build_info, &target, &fake_env()).unwrap_err();
+        let err = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &target,
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("compile error in MainActivity.kt"),
             "{err}"
@@ -423,6 +481,7 @@ mod tests {
             &build_info,
             &AndroidArtifact::Appbundle,
             &fake_env(),
+            &mut |_| {},
         )
         .unwrap();
         assert_eq!(result.paths, vec![out_dir.join("app-release.aab")]);

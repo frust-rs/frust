@@ -44,15 +44,27 @@ pub struct BuiltArtifacts {
 /// `-exportArchive`) for `target` in the Frust project rooted at
 /// `project_dir`.
 ///
-/// **Frozen signature** — do not change it without updating both
-/// `commands::build` and this doc comment.
+/// **Print-free core.** Every line this pipeline would surface (streamed
+/// `[xcodebuild] …` output, the team-resolution note) is emitted through
+/// `on_line`, never `println!` — so a caller holding a raw-mode terminal (the
+/// `frust-tui` build session, or the physical-device run session in
+/// `ios_run`) can route it into a log tab instead of leaking it to the tty
+/// (an inherited/`println!`-ed `xcodebuild` env dump garbles a raw-mode
+/// terminal). The CLI (`commands::build`) passes an `on_line` that just
+/// `println!`s each line, preserving its stdout verbatim.
+///
+/// **Frozen signature** — do not change it without updating every caller
+/// (`commands::build`, `frust-tui`'s build session, `ios_run`'s physical-run
+/// session) and this doc comment. The `on_line` sink was added by the
+/// tty-garbling fix.
 pub fn build(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
     info: &BuildInfo,
     target: &IosArtifact,
+    on_line: &mut dyn FnMut(&str),
 ) -> Result<BuiltArtifacts> {
-    build_with_env(runner, &RealEnv, project_dir, info, target)
+    build_with_env(runner, &RealEnv, project_dir, info, target, on_line)
 }
 
 /// The team-resolution-testable core: takes an injected [`EnvLookup`] so
@@ -64,6 +76,7 @@ fn build_with_env(
     project_dir: &Path,
     info: &BuildInfo,
     target: &IosArtifact,
+    on_line: &mut dyn FnMut(&str),
 ) -> Result<BuiltArtifacts> {
     let sc = schemes::resolve(info);
     let simulator = matches!(
@@ -89,7 +102,7 @@ fn build_with_env(
             } else if *codesign {
                 let choice = team::resolve(env, runner, project_dir)?;
                 if let Some(note) = &choice.note {
-                    println!("{note}");
+                    on_line(note);
                 }
                 Signing::Automatic { team: choice.team }
             } else {
@@ -105,7 +118,7 @@ fn build_with_env(
                 current_project_version: info.build_number,
                 defines_b64: defines_b64.as_deref(),
             };
-            run_xcodebuild(runner, project_dir, &inv.build_argv())?;
+            run_xcodebuild(runner, project_dir, &inv.build_argv(), on_line)?;
 
             let products = products_dir(project_dir, &sc.configuration, *simulator);
             let app = glob_one(&products, "app").with_context(|| {
@@ -118,7 +131,7 @@ fn build_with_env(
             // always required for an archive/export.
             let choice = team::resolve(env, runner, project_dir)?;
             if let Some(note) = &choice.note {
-                println!("{note}");
+                on_line(note);
             }
 
             let inv = Invocation {
@@ -132,7 +145,7 @@ fn build_with_env(
                 current_project_version: info.build_number,
                 defines_b64: defines_b64.as_deref(),
             };
-            run_xcodebuild(runner, project_dir, &inv.archive_argv())?;
+            run_xcodebuild(runner, project_dir, &inv.archive_argv(), on_line)?;
 
             let plist = export::export_options_plist(export_method, Some(&choice.team));
             let plist_path = project_dir.join(export::EXPORT_OPTIONS_PATH);
@@ -143,7 +156,7 @@ fn build_with_env(
             fs::write(&plist_path, plist)
                 .with_context(|| format!("writing `{}`", plist_path.display()))?;
 
-            run_xcodebuild(runner, project_dir, &export::export_argv())?;
+            run_xcodebuild(runner, project_dir, &export::export_argv(), on_line)?;
 
             let ipa_dir = project_dir.join(export::EXPORT_PATH);
             let ipa = glob_one(&ipa_dir, "ipa").with_context(|| {
@@ -182,11 +195,16 @@ fn preflight(runner: &dyn ProcessRunner, simulator: bool) -> Result<(), String> 
 /// a non-zero exit into an error whose message tails both stdout and stderr
 /// (xcodebuild reports most errors on stdout) plus a `frust doctor` hint —
 /// signing errors pass through verbatim (spec §16).
-fn run_xcodebuild(runner: &dyn ProcessRunner, root: &Path, argv: &[String]) -> Result<()> {
+fn run_xcodebuild(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    argv: &[String],
+    on_line: &mut dyn FnMut(&str),
+) -> Result<()> {
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let mut on_line = |line: &str| println!("[xcodebuild] {line}");
+    let mut prefixed = |line: &str| on_line(&format!("[xcodebuild] {line}"));
     let out = runner
-        .run_streaming("xcrun", &refs, Some(root), &[], &mut on_line)
+        .run_streaming("xcrun", &refs, Some(root), &[], &mut prefixed)
         .with_context(|| format!("running `xcodebuild` in `{}`", root.display()))?;
     if !out.success {
         bail!("{}", failure_message(&out));
@@ -383,6 +401,7 @@ mod tests {
                 simulator: false,
                 codesign: true,
             },
+            &mut |_| {},
         )
         .unwrap();
         assert_eq!(
@@ -412,6 +431,7 @@ mod tests {
                 simulator: false,
                 codesign: false,
             },
+            &mut |_| {},
         )
         .unwrap();
         assert_eq!(artifacts.paths.len(), 1);
@@ -436,6 +456,7 @@ mod tests {
                 simulator: true,
                 codesign: false,
             },
+            &mut |_| {},
         )
         .unwrap();
         assert_eq!(
@@ -471,6 +492,7 @@ mod tests {
                 simulator: false,
                 codesign: true,
             },
+            &mut |_| {},
         )
         .unwrap();
         assert_eq!(artifacts.paths.len(), 1);
@@ -506,6 +528,7 @@ mod tests {
             &IosArtifact::Ipa {
                 export_method: "app-store-connect".to_string(),
             },
+            &mut |_| {},
         )
         .unwrap();
 
@@ -555,6 +578,7 @@ mod tests {
                 &IosArtifact::Ipa {
                     export_method: method.to_string(),
                 },
+                &mut |_| {},
             )
             .unwrap();
             let plist = fs::read_to_string(dir.join("build/ios/ExportOptions.plist")).unwrap();
@@ -582,6 +606,7 @@ mod tests {
                 simulator: false,
                 codesign: false,
             },
+            &mut |_| {},
         )
         .unwrap_err();
         assert!(err.to_string().contains("Paid"), "{err}");
@@ -610,6 +635,7 @@ mod tests {
                 simulator: true,
                 codesign: false,
             },
+            &mut |_| {},
         )
         .unwrap_err();
         let message = err.to_string();

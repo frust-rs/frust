@@ -258,10 +258,10 @@ impl<'a> IntoIterator for &'a LineReceiver {
 /// can never deadlock against a full buffer: nothing ever blocks trying to
 /// fill it.
 pub struct StreamHandle {
-    /// Each line of the process's stdout, in arrival order, as it streams
-    /// in, bounded to the last [`LINE_BUFFER_CAP`] lines. Closes (further
-    /// `recv`/`try_recv` calls return `Err`) once the process's stdout has
-    /// hit EOF.
+    /// Each line of the process's stdout AND stderr (merged/interleaved), in
+    /// arrival order, as it streams in, bounded to the last
+    /// [`LINE_BUFFER_CAP`] lines. Closes (further `recv`/`try_recv` calls
+    /// return `Err`) once both streams have hit EOF and the child is reaped.
     pub lines: LineReceiver,
     kill_action: Option<Box<dyn FnOnce() + Send>>,
     worker: Option<thread::JoinHandle<bool>>,
@@ -332,6 +332,50 @@ fn decode_stream_line(mut raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
 
+/// The stdio configuration every streaming spawn
+/// ([`RealProcessRunner::run_streaming`] and
+/// [`RealProcessRunner::spawn_streaming`]) applies to its child: BOTH stdout
+/// AND stderr piped, never inherited.
+///
+/// This is load-bearing for the TUI. An inherited stdout/stderr writes the
+/// child's raw bytes straight to the parent's terminal — and while `frust tui`
+/// holds that terminal in raw mode, those bytes bypass ratatui entirely and
+/// garble the whole screen (the classic LF-without-CR diagonal staircase a
+/// leaked child produces). Both streaming spawns therefore pipe both streams so
+/// no child byte ever reaches the tty; a caller surfaces them through the line
+/// callback / [`StreamHandle`] instead. Centralized in one const + helper
+/// ([`apply_streaming_stdio`]) so the invariant is asserted in one unit test
+/// (`streaming_spawns_pipe_both_streams`) and can't silently regress to
+/// `Stdio::inherit()` at either spawn site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StreamStdio {
+    stdout_piped: bool,
+    stderr_piped: bool,
+}
+
+/// The one stdio config every TUI-reachable streaming spawn uses — see
+/// [`StreamStdio`].
+const STREAMING_STDIO: StreamStdio = StreamStdio {
+    stdout_piped: true,
+    stderr_piped: true,
+};
+
+/// Apply [`STREAMING_STDIO`] to `command`'s stdout/stderr.
+fn apply_streaming_stdio(command: &mut Command) {
+    use std::process::Stdio;
+    let stdout = if STREAMING_STDIO.stdout_piped {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    };
+    let stderr = if STREAMING_STDIO.stderr_piped {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    };
+    command.stdout(stdout).stderr(stderr);
+}
+
 // POSIX `kill(2)`, declared directly rather than taking a `libc` dependency
 // for this one syscall (target-gated behind `#[cfg(unix)]` all the same).
 // Used by `group_kill_unix` to signal a whole process group; the tests
@@ -399,13 +443,12 @@ impl ProcessRunner for RealProcessRunner {
         on_line: &mut dyn FnMut(&str),
     ) -> Result<Output> {
         use std::io::{BufRead, BufReader, Read};
-        use std::process::Stdio;
 
         let mut command = Command::new(cmd);
-        command
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.args(args);
+        // Both streams piped — never inherited — so no child byte reaches the
+        // (possibly raw-mode TUI) tty; see `apply_streaming_stdio`.
+        apply_streaming_stdio(&mut command);
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
@@ -468,14 +511,14 @@ impl ProcessRunner for RealProcessRunner {
         cwd: Option<&Path>,
         env: &[(&str, &str)],
     ) -> Result<StreamHandle> {
-        use std::io::{BufRead, BufReader, Read};
-        use std::process::Stdio;
+        use std::io::{BufRead, BufReader};
 
         let mut command = Command::new(cmd);
-        command
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.args(args);
+        // Both streams piped — never inherited — so no child byte reaches the
+        // (possibly raw-mode TUI) tty; see `apply_streaming_stdio`. stderr is
+        // then merged into the same line ring below rather than discarded.
+        apply_streaming_stdio(&mut command);
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
@@ -514,17 +557,29 @@ impl ProcessRunner for RealProcessRunner {
 
         let shared = LineBufferShared::new();
         let shared_producer = Arc::clone(&shared);
+        let stderr_producer = Arc::clone(&shared);
 
         let wait_child = Arc::clone(&child);
         let worker = thread::spawn(move || {
-            // Drain stderr on its own thread, same deadlock-avoidance
-            // reason as `run_streaming` above; the content itself isn't
-            // surfaced through this non-blocking seam (a caller wanting
-            // buffered stderr text still reaches for `run_streaming`).
-            let stderr_drain = stderr.map(|mut stderr| {
+            // Drain stderr on its own thread (same deadlock-avoidance reason as
+            // `run_streaming` above), MERGING each stderr line into the same
+            // line ring as stdout — an interactive session (`simctl launch
+            // --console-pty`, `devicectl … --console`, a `cargo run` preview)
+            // writes to both, and a TUI tab that showed only stdout would drop
+            // half the output. Unlabeled/interleaved on purpose (the drive
+            // phases prefix their own lines; per-line stderr tagging here would
+            // just be noise). Never leaked to the tty — both are piped.
+            let stderr_drain = stderr.map(|stderr| {
                 thread::spawn(move || {
-                    let mut buf = Vec::new();
-                    let _ = stderr.read_to_end(&mut buf);
+                    let mut reader = BufReader::new(stderr);
+                    let mut raw = Vec::new();
+                    loop {
+                        raw.clear();
+                        match reader.read_until(b'\n', &mut raw) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => stderr_producer.push(decode_stream_line(&raw)),
+                        }
+                    }
                 })
             });
 
@@ -1292,5 +1347,88 @@ mod tests {
         // caller memory; signal `0` only probes the target without signalling.
         let rc = unsafe { kill(pid, 0) };
         rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(ESRCH)
+    }
+
+    /// The stdio-config invariant, asserted in one place: every TUI-reachable
+    /// streaming spawn must pipe BOTH stdout and stderr — never inherit either,
+    /// which would write the child's raw bytes onto the parent's raw-mode
+    /// `frust tui` terminal and garble the whole screen (the LF-without-CR
+    /// staircase). `run_streaming`/`spawn_streaming` both route through
+    /// [`apply_streaming_stdio`], so pinning [`STREAMING_STDIO`] here pins both.
+    #[test]
+    fn streaming_spawns_pipe_both_streams() {
+        // Compile-time invariant (a `const` block so a regression to
+        // `Stdio::inherit()` — flipping either flag — fails to build, not just
+        // at test time): every streaming spawn pipes BOTH streams, so no child
+        // byte leaks to the raw-mode TUI tty.
+        const {
+            assert!(
+                STREAMING_STDIO.stdout_piped,
+                "a streaming spawn must PIPE stdout — inheriting it leaks child output to the tty"
+            );
+            assert!(
+                STREAMING_STDIO.stderr_piped,
+                "a streaming spawn must PIPE stderr — inheriting it leaks child output to the tty"
+            );
+        }
+    }
+
+    /// End-to-end proof (real child, no fake) that `run_streaming` pipes BOTH
+    /// streams: stdout arrives through the line callback and stderr is captured
+    /// into `Output.stderr`. If either were inherited the byte would go to the
+    /// test process's own tty instead of being captured here.
+    #[cfg(unix)]
+    #[test]
+    fn run_streaming_real_pipes_both_stdout_and_stderr() {
+        let runner = RealProcessRunner;
+        let mut lines = Vec::new();
+        let out = runner
+            .run_streaming(
+                "/bin/sh",
+                &["-c", "echo to-stdout; echo to-stderr 1>&2"],
+                None,
+                &[],
+                &mut |line| lines.push(line.to_string()),
+            )
+            .unwrap();
+        assert!(out.success);
+        assert!(
+            lines.iter().any(|l| l == "to-stdout"),
+            "stdout should stream through on_line (piped), got {lines:?}"
+        );
+        assert!(
+            out.stderr.contains("to-stderr"),
+            "stderr should be captured into Output.stderr (piped, not inherited), got {:?}",
+            out.stderr
+        );
+    }
+
+    /// End-to-end proof (real child) that `spawn_streaming` pipes AND merges
+    /// stderr into the line stream: a child writing to both stdout and stderr
+    /// surfaces both as lines through the `StreamHandle`. Before the tty-leak
+    /// fix stderr was piped but silently discarded; now it is merged.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_streaming_real_merges_stderr_into_the_line_stream() {
+        let runner = RealProcessRunner;
+        let mut handle = runner
+            .spawn_streaming(
+                "/bin/sh",
+                &["-c", "echo to-stdout; echo to-stderr 1>&2"],
+                None,
+                &[],
+            )
+            .unwrap();
+        let mut seen: Vec<String> = handle.lines.iter().collect();
+        handle.wait();
+        seen.sort();
+        assert!(
+            seen.iter().any(|l| l == "to-stdout"),
+            "stdout should arrive as a line (piped), got {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|l| l == "to-stderr"),
+            "stderr should be MERGED into the line stream (piped, not discarded), got {seen:?}"
+        );
     }
 }
