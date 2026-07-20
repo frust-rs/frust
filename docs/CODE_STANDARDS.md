@@ -15,27 +15,27 @@
     caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`.
   - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary
     (`extern "system"` exports, `Box::into_raw`/`from_raw`, `ANativeWindow_fromSurface`,
-    `nativeInitPlatform`'s `JavaVM` stash/`Global` context ref) — plus the
-    `#[unsafe(no_mangle)]` attrs `android_app!` emits on its generated exports.
+    `nativeInitPlatform`'s `JavaVM` stash) — plus `android_app!`'s generated exports.
   - `frust-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary
     (`extern "C"` exports, `Box::into_raw`/`from_raw`, the call into
-    `on_surface_created_from_metal_layer`) — plus the `#[unsafe(no_mangle)]`
-    attrs `ios_app!` emits on its generated exports.
+    `on_surface_created_from_metal_layer`) — plus `ios_app!`'s generated exports.
   - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/`jobject`
-    plugins need from `ndk-context`-stored handles (`initialize`/
-    `with_jni_env`), one sanctioned module, scoped `AttachGuard` per call.
+    plugins need from `ndk-context`-stored handles, one sanctioned module,
+    scoped `AttachGuard` per call.
   - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:`
     calls (`objc2` marks the untyped Foundation setter unsafe;
     `NSString`/`NSArray` are property-list-safe), each `# Safety`-noted.
+  - `frust-secure-storage`'s `apple` backend — a confined `as_cf`
+    objc→`CFType` bridge for the Keychain/`SecAccessControl` calls, one
+    function, `# Safety`-noted.
   - `frust-render`'s `RenderContext::create_pipeline_cache` — one `unsafe
     { device.create_pipeline_cache(..) }` call building a `wgpu::PipelineCache`
-    from a shell-persisted, `unframe`d and adapter-fingerprint-validated blob;
-    wgpu's `fallback: true` backstops any residual mismatch — see
-    `docs/ARCHITECTURE.md`'s GPU pipeline cache.
-  - `frust-drive`'s `process` module — a `kill(2)` FFI shim (`unsafe extern
-    "C" { fn kill(pid, sig) -> i32; }`, since std exposes no `killpg`) that
-    group-kills a streamed child's whole Unix process group; one scoped
-    declaration with a `# Safety` comment stating the syscall's contract.
+    from a shell-persisted, adapter-fingerprint-validated blob; wgpu's
+    `fallback: true` backstops any residual mismatch (see `docs/ARCHITECTURE.md`'s
+    GPU pipeline cache).
+  - `frust-drive`'s `process` module — a `kill(2)` FFI shim (std exposes no
+    `killpg`) that group-kills a streamed child's whole Unix process group;
+    one scoped declaration with a `# Safety` comment.
 - **No unwind across FFI.** Every platform export routes through
   `frust-shell-common`'s `guard` helper (`catch_unwind` + log, returning a
   benign default) rather than unwinding into JVM-/Swift-owned stack frames
@@ -45,19 +45,17 @@
   composition (Gboard, CJK marked text) against a local mirror (Kotlin `Editable`/Swift
   `NSMutableString`), then hands the framework a whole reconciled `EditingState`
   (`nativeImeApply`/`frust_ime_apply`) and reads one back (`nativeImeState`/
-  `frust_ime_state_json`) to keep its own IME machinery (`InputConnection`/`UITextInput`)
-  synchronized — never add a per-keystroke op-forwarding path; it fights the platform's own
-  composition machine.
+  `frust_ime_state_json`) to keep its own IME machinery synchronized — never
+  add a per-keystroke op-forwarding path; it fights the platform's own composition machine.
 - **UTF-16 at the FFI seam, bytes inside.** `EditingState`'s
   `selection_*`/`composing_*` indices are UTF-16 code-unit indexed
-  everywhere they cross a shell boundary (JNI, C-ABI, `AppTree`) — the
-  platform's native string type. Convert to/from byte offsets only inside
-  `frust-text`'s `TextEditor` (`byte_to_utf16`/`utf16_to_byte`); a shell/glue
-  module passes indices through opaquely and never converts them itself.
+  everywhere they cross a shell boundary (JNI, C-ABI, `AppTree`). Convert
+  to/from byte offsets only inside `frust-text`'s `TextEditor`; a
+  shell/glue module passes indices through opaquely, never converting them.
 - **Hand-roll JSON at the mobile FFI boundary — no `serde` in shell crates.**
   `frust-shell-android`/`frust-shell-ios` serialize `ImeState` with a small
-  hand-written escaper/builder, keeping each shell's host-testable half free
-  of a codegen dependency for a handful of fixed fields.
+  hand-written escaper/builder, keeping each shell's host-testable half
+  free of a codegen dependency for a handful of fixed fields.
 - **Type-erase to avoid a downstream crate dependency**, not to avoid
   writing a type. When a lower layer threads a resource owned by a higher
   layer (e.g. `frust-core`'s `LayoutCtx` carrying `frust-text::TextContext`),
@@ -146,15 +144,21 @@ Structure) follow these conventions:
 - **A JNI attach is scoped per call, never permanent** — threads don't
   auto-detach on exit, so `attach_permanently` leaks the attachment; use
   `frust-plugin::android::with_jni_env`'s scoped `AttachGuard`.
-- **No panics/unwinds near an FFI boundary**, the same rule as shell
-  exports (Language Idioms, above).
+- **No panics/unwinds near an FFI boundary**, the same rule as shell exports (Language Idioms, above).
 - **Platform plugins never depend on `frust-*` framework crates**
   (`frust-plugin` + FFI crates only); **facade plugins depend on `frust`
-  alone**. A plugin needing both splits into a platform-core crate plus a
-  facade-glue crate.
+  alone**. A plugin needing both splits into a platform-core plus facade-glue crate.
 - **A store shared with the OS namespaces its keys `frust.`**
   (NSUserDefaults, Android SharedPreferences) so plugin keys can't collide
   with other libraries'.
+- **An Android plugin's app-side Kotlin lives under `dev.frust`, beside
+  the generated `FrustSurfaceView.kt`.** The package/class name is a hard
+  JNI lookup contract; ship the canonical file for a caller to copy in
+  (`plugins/<name>/platform/`), never render it from a template.
+- **A generated-project mutation is idempotent, never a blind overwrite.**
+  Adding an OS-side contribution (dependency, manifest permission, Kotlin
+  file, plist key) checks first and no-ops if already present — the
+  contract `frust-drive::plugin::add_plugin` implements (see `docs/ARCHITECTURE.md`'s Plugin flow).
 
 ## TUI Conventions
 
@@ -245,19 +249,17 @@ interactive widget in `frust-widgets`:
   focus only where identity is actually lost — preservation is
   stable-prefix/key-matched, not a blanket clear:** positional
   reconciliation clears a child's recorded path only at/after the first
-  index whose concrete type changed (an unchanged leading prefix keeps its
-  path); keyed reconciliation clears it only for a removed or type-swapped
-  child — a key-matched reorder relocates the widget, and its recorded
-  path, intact. `RenderRoot`'s cached `focus_active`/`ime_state` are not
-  pushed at rebuild time and self-correct on the next event pass.
+  index whose concrete type changed; keyed reconciliation clears it only
+  for a removed or type-swapped child (a key-matched reorder relocates the
+  widget, and its recorded path, intact). `RenderRoot`'s cached
+  `focus_active`/`ime_state` self-correct on the next event pass.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key,
   view)` marks a `Flex` child list for identity-based reconciliation; once
-  any child in a list is keyed, every child in that list must be (a mixed
-  keyed/unkeyed set, or duplicate keys, `debug_assert!`s and falls back to
-  positional matching in release builds — never panics live). A matched
-  reorder relocates the existing widget, preserving its internal state,
-  rather than rebuilding it.
+  any child in a list is keyed, every child must be (a mixed or duplicate
+  key set `debug_assert!`s and falls back to positional matching in
+  release builds — never panics live). A matched reorder relocates the
+  existing widget, preserving its state, rather than rebuilding it.
 
 - **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`,
   `MOUSE_SLOP`), scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`,
@@ -274,19 +276,17 @@ interactive widget in `frust-widgets`:
 - **Insets follow the same physical-at-FFI, logical-inside rule as
   coordinates.** A platform delivers occlusion in physical px (Android
   `Insets`) or already-logical points (iOS `safeAreaInsets`); either way the
-  FFI-boundary `logical_insets` helper (mirroring `logical_size`) is the one
-  place that reconciles it — widget code only ever sees a resolved
-  `WindowInsets` in logical px (see `docs/ARCHITECTURE.md`'s Inset
-  delivery). An inset change rides the existing `ChangeFlags::LAYOUT |
-  PAINT` pending path, needing no new frame-gate input.
+  FFI-boundary `logical_insets` helper reconciles it — widget code only
+  ever sees a resolved `WindowInsets` in logical px (see
+  `docs/ARCHITECTURE.md`'s Inset delivery). An inset change rides the
+  existing `ChangeFlags::LAYOUT | PAINT` pending path.
 
 - **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear
   internal flags (`self.pressed`/`self.captured`/`self.armed`) and request a
   redraw. A structural container rebuild can synthesize a `Cancel` to a
-  still-captured child with no application state in scope, delivered over a
-  throwaway `()` state (see `docs/ARCHITECTURE.md`'s Event pipeline); a
-  handler that reached for real state there panics on the `()` downcast — a
-  deliberate tripwire, not silent corruption.
+  still-captured child delivered over a throwaway `()` state (see
+  `docs/ARCHITECTURE.md`'s Event pipeline); a handler that reached for real
+  state there panics on the `()` downcast — a deliberate tripwire.
 
 - **A container that suppresses routing to its children must cancel their
   capture, clear their focus, and publish a cleared IME surface — in that
