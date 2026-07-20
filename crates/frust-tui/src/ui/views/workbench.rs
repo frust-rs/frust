@@ -8,8 +8,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
-use crate::engine::{AppState, DeviceRow, DoctorState, Message, RegionId};
-use crate::ui::layout::{Shell, sidebar_main};
+use crate::engine::{AppState, ContextTarget, DeviceRow, DoctorState, DragKind, Message, RegionId};
+use crate::ui::layout::{Shell, sidebar_main_at};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
 use crate::ui::views::sessions;
@@ -27,8 +27,25 @@ pub fn render(
     let shell = Shell::split(area);
     titlebar(frame, shell.titlebar, state, theme, mouse);
 
-    let (sidebar, main) = sidebar_main(shell.body);
+    let (sidebar, main) = sidebar_main_at(shell.body, state.sidebar_width);
     render_sidebar(frame, sidebar, state, theme, mouse);
+    // The sidebar's right border is a drag-to-resize splitter (T04 / D4): a
+    // left-press on that column starts a `SidebarSplitter` drag whose absolute
+    // column maps to a new sidebar width via `x - body_left`.
+    if sidebar.width > 0 && sidebar.height > 0 {
+        let splitter = Rect::new(
+            sidebar.right().saturating_sub(1),
+            sidebar.y,
+            1,
+            sidebar.height,
+        );
+        mouse.drag(
+            splitter,
+            DragKind::SidebarSplitter {
+                body_left: shell.body.x,
+            },
+        );
+    }
     // With sessions open, the main area is the tab bar + log view; otherwise the
     // static dashboard placeholder.
     if state.sessions.is_empty() {
@@ -227,6 +244,7 @@ fn render_sidebar(
     for i in 0..project_row_count {
         if let Some(rect) = row_rect(project_rows_start + i) {
             mouse.click(rect, RegionId::ProjectRow(i), Message::SwitchProject(i));
+            mouse.context(rect, ContextTarget::ProjectRow(i));
         }
     }
     if let Some(rect) = row_rect(devices_header_row) {
@@ -235,6 +253,7 @@ fn render_sidebar(
     for (i, &row) in device_rows.iter().enumerate() {
         if let Some(rect) = row_rect(row) {
             mouse.click(rect, RegionId::DeviceRow(i), Message::SelectDeviceAt(i));
+            mouse.context(rect, ContextTarget::DeviceRow(i));
         }
     }
     if let Some(rect) = row_rect(doctor_row) {
@@ -443,7 +462,7 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     );
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "[mouse ✓]",
+            crate::ui::mouse_indicator(state),
             Style::default().fg(theme.muted()),
         ))
         .alignment(Alignment::Right)

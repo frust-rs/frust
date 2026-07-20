@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │huddle:  1 ▶ desktop                                                      
+  ▸ huddle               │   Compiling huddle v0.1.0                                                
+                         │    Fini╭───────────────────────────╮                                     
+ DEVICES ↻ r             │     Run│▸ Select tab           1-9 │▓                                    
+   none found            │app: boo│  Stop session           x │▓                                    
+                         │warning:│  Toggle follow-tail     f │▓                                    
+ SESSIONS                │app: fra│  Copy artifact path(s)  c │▓                                    
+   huddle                │error: t╰───────────────────────────╯▓                                    
+   ▸ ▶ desktop           │app: reco▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                                    
+                         │                                                                          
+ ACTIONS                 │                                                                          
+   New project · n       │                                                                          
+   Doctor · d            │                                                                          
+   Build · b             │                                                                          
+   Clean · c             │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │● follow  ·  wrap:off                x stop · f follow · w wrap · / search
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

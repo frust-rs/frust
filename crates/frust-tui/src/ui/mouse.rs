@@ -21,7 +21,7 @@
 
 use ratatui::layout::{Position, Rect};
 
-use crate::engine::{Message, RegionId};
+use crate::engine::{ContextTarget, DragKind, Message, RegionId};
 
 /// A clickable/hoverable region.
 #[derive(Debug, Clone)]
@@ -44,14 +44,23 @@ struct ScrollRegion {
     z_index: u8,
 }
 
-/// A drag region (splitter / scrollbar thumb). Typed stub wired in Phase 3;
-/// registered here so the region-kind vocabulary is complete from the start.
+/// A drag region (splitter / scrollbar thumb): a left-press inside `rect`
+/// begins a drag of `kind`, whose geometry the pure engine uses to map later
+/// pointer positions to a result (T04 / D4 — see [`DragKind`]).
 #[derive(Debug, Clone)]
 struct DragRegion {
-    #[allow(dead_code)]
     rect: Rect,
-    #[allow(dead_code)]
-    id: RegionId,
+    kind: DragKind,
+    z_index: u8,
+}
+
+/// A context region: a right-press inside `rect` opens a context menu built for
+/// `target` (T04 / D4 — see `crate::engine::context_menu`).
+#[derive(Debug, Clone)]
+struct ContextRegion {
+    rect: Rect,
+    target: ContextTarget,
+    z_index: u8,
 }
 
 /// The per-frame registry.
@@ -60,6 +69,7 @@ pub struct MouseRegions {
     clicks: Vec<ClickRegion>,
     scrolls: Vec<ScrollRegion>,
     drags: Vec<DragRegion>,
+    contexts: Vec<ContextRegion>,
 }
 
 impl MouseRegions {
@@ -69,6 +79,7 @@ impl MouseRegions {
             clicks: Vec::with_capacity(32),
             scrolls: Vec::with_capacity(8),
             drags: Vec::with_capacity(4),
+            contexts: Vec::with_capacity(16),
         }
     }
 
@@ -77,6 +88,7 @@ impl MouseRegions {
         self.clicks.clear();
         self.scrolls.clear();
         self.drags.clear();
+        self.contexts.clear();
     }
 
     /// The id of the topmost region under `(x, y)`, if any — the hover source.
@@ -112,9 +124,43 @@ impl MouseRegions {
             .map(|(_, r)| if down { r.down.clone() } else { r.up.clone() })
     }
 
+    /// The [`DragKind`] of the topmost drag region under `(x, y)`, if any — the
+    /// splitter/scrollbar-thumb grab source (T04).
+    pub fn drag_at(&self, x: u16, y: u16) -> Option<DragKind> {
+        let pos = Position::new(x, y);
+        self.drags
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.rect.contains(pos))
+            .max_by_key(|(i, r)| (r.z_index, *i))
+            .map(|(_, r)| r.kind)
+    }
+
+    /// The [`ContextTarget`] of the topmost context region under `(x, y)`, if
+    /// any — the right-click menu source (T04).
+    pub fn context_at(&self, x: u16, y: u16) -> Option<ContextTarget> {
+        let pos = Position::new(x, y);
+        self.contexts
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.rect.contains(pos))
+            .max_by_key(|(i, r)| (r.z_index, *i))
+            .map(|(_, r)| r.target)
+    }
+
     /// Number of registered click regions (tests).
     pub fn click_len(&self) -> usize {
         self.clicks.len()
+    }
+
+    /// Number of registered drag regions (tests).
+    pub fn drag_len(&self) -> usize {
+        self.drags.len()
+    }
+
+    /// Number of registered context regions (tests).
+    pub fn context_len(&self) -> usize {
+        self.contexts.len()
     }
 }
 
@@ -201,13 +247,51 @@ impl<'a> MouseCtx<'a> {
         }
     }
 
-    /// Register a drag region (Phase 3 stub — splitter / scrollbar thumb).
-    pub fn drag(&mut self, rect: Rect, id: RegionId) {
+    /// Register a drag region (T04 — the sidebar splitter or a log scrollbar
+    /// thumb). A left-press inside `rect` begins a drag of `kind`.
+    pub fn drag(&mut self, rect: Rect, kind: DragKind) {
         if rect.is_empty() {
             return;
         }
         if let Some(r) = self.regions.as_deref_mut() {
-            r.drags.push(DragRegion { rect, id });
+            r.drags.push(DragRegion {
+                rect,
+                kind,
+                z_index: 0,
+            });
+        }
+    }
+
+    /// Register a context region (T04 — a right-clickable row/pane). A
+    /// right-press inside `rect` opens a context menu built for `target`.
+    pub fn context(&mut self, rect: Rect, target: ContextTarget) {
+        if rect.is_empty() {
+            return;
+        }
+        if let Some(r) = self.regions.as_deref_mut() {
+            r.contexts.push(ContextRegion {
+                rect,
+                target,
+                z_index: 0,
+            });
+        }
+    }
+
+    /// Register an open context-menu entry as a top-`z` (z=2) click + hover
+    /// target: hover highlights row `index` (via [`RegionId::ContextMenuItem`]),
+    /// a left click activates it (`msg`). The high z keeps it above any base
+    /// region a suppressed base layer might still carry.
+    pub fn menu_item(&mut self, rect: Rect, index: usize, msg: Message) {
+        if rect.is_empty() {
+            return;
+        }
+        if let Some(r) = self.regions.as_deref_mut() {
+            r.clicks.push(ClickRegion {
+                rect,
+                id: Some(RegionId::ContextMenuItem(index)),
+                on_left: Some(msg),
+                z_index: 2,
+            });
         }
     }
 }
@@ -273,6 +357,51 @@ mod tests {
         assert_eq!(regions.click_len(), 1);
         regions.begin_frame();
         assert_eq!(regions.click_len(), 0);
+    }
+
+    #[test]
+    fn drag_region_hit_test_returns_kind() {
+        let mut regions = MouseRegions::new();
+        {
+            let mut ctx = MouseCtx::new(&mut regions);
+            ctx.drag(
+                Rect::new(25, 3, 1, 20),
+                DragKind::SidebarSplitter { body_left: 0 },
+            );
+        }
+        assert_eq!(
+            regions.drag_at(25, 10),
+            Some(DragKind::SidebarSplitter { body_left: 0 })
+        );
+        assert_eq!(regions.drag_at(0, 10), None);
+    }
+
+    #[test]
+    fn context_region_hit_test_returns_target() {
+        let mut regions = MouseRegions::new();
+        {
+            let mut ctx = MouseCtx::new(&mut regions);
+            ctx.context(Rect::new(0, 0, 10, 1), ContextTarget::SessionTab(2));
+        }
+        assert_eq!(regions.context_at(4, 0), Some(ContextTarget::SessionTab(2)));
+        assert_eq!(regions.context_at(40, 0), None);
+    }
+
+    #[test]
+    fn menu_item_binds_a_top_z_click_and_hover_id() {
+        let mut regions = MouseRegions::new();
+        {
+            let mut ctx = MouseCtx::new(&mut regions);
+            // A background click region under the same cell — the menu item's
+            // higher z must win.
+            ctx.click(Rect::new(0, 0, 10, 1), RegionId::LogView, Message::Quit);
+            ctx.menu_item(Rect::new(0, 0, 10, 1), 1, Message::ContextMenuActivateAt(1));
+        }
+        assert_eq!(
+            regions.click_at(2, 0),
+            Some(Message::ContextMenuActivateAt(1))
+        );
+        assert_eq!(regions.hover_at(2, 0), Some(RegionId::ContextMenuItem(1)));
     }
 
     #[test]

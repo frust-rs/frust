@@ -199,7 +199,22 @@ fn apply_effect(
             let id = next_adhoc_session_id(next_adhoc_id);
             launch_bootstrap_fix_session(program, args, label, id, tx.clone());
         }
+        Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         None => {}
+    }
+}
+
+/// Enact a mouse-capture toggle (T04 / D4): a failure (a terminal that rejects
+/// the sequence) is logged and ignored — the whole UI has keyboard parity, so
+/// capture is never load-bearing.
+fn set_mouse_capture(on: bool) {
+    let result = if on {
+        enable_mouse_capture()
+    } else {
+        disable_mouse_capture()
+    };
+    if let Err(e) = result {
+        eprintln!("frust-tui: toggling mouse capture failed: {e}");
     }
 }
 
@@ -689,15 +704,37 @@ fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Ve
             let (x, y) = (m.column, m.row);
             match m.kind {
                 MouseEventKind::Moved => vec![Message::HoverChanged(regions.hover_at(x, y))],
+                // Right-click opens a context menu for the row/pane under the
+                // cursor (T04 / D4); over empty space it closes an open menu.
+                MouseEventKind::Down(CtMouseButton::Right) => match regions.context_at(x, y) {
+                    Some(target) => vec![Message::OpenContextMenu { x, y, target }],
+                    None if state.context_menu.is_some() => vec![Message::CloseContextMenu],
+                    None => vec![],
+                },
                 MouseEventKind::Down(CtMouseButton::Left) => {
-                    if regions.hover_at(x, y) == Some(RegionId::CreateButton) {
+                    // A press on a drag region (splitter / scrollbar thumb)
+                    // begins a drag and immediately applies the pressed
+                    // position (a click on the scrollbar track jumps to it).
+                    if let Some(kind) = regions.drag_at(x, y) {
+                        vec![Message::DragStart(kind), Message::DragMove(x, y)]
+                    } else if regions.hover_at(x, y) == Some(RegionId::CreateButton) {
                         vec![Message::CreatePressed]
                     } else {
                         vec![]
                     }
                 }
+                // A held-button move drives an in-progress drag.
+                MouseEventKind::Drag(CtMouseButton::Left) => {
+                    if state.active_drag.is_some() {
+                        vec![Message::DragMove(x, y)]
+                    } else {
+                        vec![]
+                    }
+                }
                 MouseEventKind::Up(CtMouseButton::Left) => {
-                    if state.create_pressed {
+                    if state.active_drag.is_some() {
+                        vec![Message::DragEnd]
+                    } else if state.create_pressed {
                         if regions.hover_at(x, y) == Some(RegionId::CreateButton) {
                             vec![Message::CreateActivate]
                         } else {
@@ -705,6 +742,9 @@ fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Ve
                         }
                     } else if let Some(msg) = regions.click_at(x, y) {
                         vec![msg]
+                    } else if state.context_menu.is_some() {
+                        // A left click outside the open menu dismisses it.
+                        vec![Message::CloseContextMenu]
                     } else {
                         vec![]
                     }
@@ -728,10 +768,29 @@ fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Ve
 fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Message> {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let shift = mods.contains(KeyModifiers::SHIFT);
+    let alt = mods.contains(KeyModifiers::ALT);
 
     // Ctrl+Q always quits, even while typing a search or in a modal.
     if ctrl && matches!(code, KeyCode::Char('q')) {
         return vec![Message::Quit];
+    }
+
+    // Alt+m toggles mouse capture from anywhere (T04 / D4) — off hands the
+    // terminal its native text selection back; keyboard operation stays whole.
+    if alt && matches!(code, KeyCode::Char('m')) {
+        return vec![Message::ToggleMouseCapture];
+    }
+
+    // An open context menu (T04) captures navigation keys — it sits on the top
+    // z-layer above everything, so route to it before any modal/screen keys.
+    if state.context_menu.is_some() {
+        return match code {
+            KeyCode::Esc => vec![Message::CloseContextMenu],
+            KeyCode::Up => vec![Message::ContextMenuCursorUp],
+            KeyCode::Down => vec![Message::ContextMenuCursorDown],
+            KeyCode::Enter => vec![Message::ContextMenuActivate],
+            _ => vec![],
+        };
     }
 
     // While a modal is open it captures every other key. `active_modal` is
@@ -1192,6 +1251,142 @@ mod tests {
         assert_eq!(
             translate_event(up, &state, &regions),
             vec![Message::CreateActivate]
+        );
+    }
+
+    #[test]
+    fn alt_m_toggles_mouse_capture_anywhere() {
+        let state = AppState::default();
+        let regions = MouseRegions::new();
+        let ev = Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert_eq!(
+            translate_event(ev, &state, &regions),
+            vec![Message::ToggleMouseCapture]
+        );
+    }
+
+    #[test]
+    fn right_click_over_a_context_region_opens_the_menu() {
+        let state = AppState::default();
+        let mut regions = MouseRegions::new();
+        {
+            let mut ctx = crate::ui::mouse::MouseCtx::new(&mut regions);
+            ctx.context(
+                ratatui::layout::Rect::new(0, 0, 10, 1),
+                crate::engine::ContextTarget::SessionTab(3),
+            );
+        }
+        let ev = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(CtMouseButton::Right),
+            column: 2,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            translate_event(ev, &state, &regions),
+            vec![Message::OpenContextMenu {
+                x: 2,
+                y: 0,
+                target: crate::engine::ContextTarget::SessionTab(3),
+            }]
+        );
+    }
+
+    #[test]
+    fn left_press_on_a_drag_region_starts_and_seeds_the_drag() {
+        let state = AppState::default();
+        let mut regions = MouseRegions::new();
+        {
+            let mut ctx = crate::ui::mouse::MouseCtx::new(&mut regions);
+            ctx.drag(
+                ratatui::layout::Rect::new(25, 3, 1, 20),
+                crate::engine::DragKind::SidebarSplitter { body_left: 0 },
+            );
+        }
+        let ev = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(CtMouseButton::Left),
+            column: 25,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            translate_event(ev, &state, &regions),
+            vec![
+                Message::DragStart(crate::engine::DragKind::SidebarSplitter { body_left: 0 }),
+                Message::DragMove(25, 10),
+            ]
+        );
+    }
+
+    #[test]
+    fn held_drag_move_routes_while_active() {
+        let state = AppState {
+            active_drag: Some(crate::engine::DragKind::SidebarSplitter { body_left: 0 }),
+            ..Default::default()
+        };
+        let regions = MouseRegions::new();
+        let ev = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(CtMouseButton::Left),
+            column: 30,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            translate_event(ev, &state, &regions),
+            vec![Message::DragMove(30, 10)]
+        );
+        // A release ends the drag.
+        let up = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(CtMouseButton::Left),
+            column: 30,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            translate_event(up, &state, &regions),
+            vec![Message::DragEnd]
+        );
+    }
+
+    #[test]
+    fn context_menu_open_routes_nav_keys_and_left_click_outside_closes() {
+        use crate::engine::{ContextMenu, ContextTarget, MenuEntry};
+        let state = AppState {
+            context_menu: Some(ContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::LogView,
+                entries: vec![MenuEntry {
+                    label: "Search logs…",
+                    hint: "/",
+                    message: Message::SearchOpen,
+                    enabled: true,
+                }],
+                cursor: 0,
+            }),
+            ..Default::default()
+        };
+        let regions = MouseRegions::new(); // nothing registered (menu suppressed base)
+        // Esc closes.
+        assert_eq!(
+            translate_event(key(KeyCode::Esc), &state, &regions),
+            vec![Message::CloseContextMenu]
+        );
+        // Down navigates.
+        assert_eq!(
+            translate_event(key(KeyCode::Down), &state, &regions),
+            vec![Message::ContextMenuCursorDown]
+        );
+        // A left click landing on no region closes the menu.
+        let up = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(CtMouseButton::Left),
+            column: 70,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            translate_event(up, &state, &regions),
+            vec![Message::CloseContextMenu]
         );
     }
 

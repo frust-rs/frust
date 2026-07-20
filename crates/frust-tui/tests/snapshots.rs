@@ -13,9 +13,9 @@ use ratatui::layout::Position;
 use frust_drive::devices::{Device, Kind, Platform};
 use frust_drive::doctor::{Area, Component, ComponentStatus, DoctorReport, FixCommand, Status};
 use frust_tui::engine::{
-    AppState, BootstrapState, BootstrapWizard, BuildLauncher, CreateWizard, DeviceRow, DoctorCheck,
-    DoctorState, Palette, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView, ToastKind,
-    WizardStep,
+    AppState, BootstrapState, BootstrapWizard, BuildLauncher, ContextTarget, CreateWizard,
+    DeviceRow, DoctorCheck, DoctorState, Message, Palette, RegionId, RunConfig, RunFocus, Screen,
+    Scroll, SessionView, ToastKind, WizardStep, update,
 };
 use frust_tui::supervise::{SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -675,4 +675,55 @@ fn toasts_stack_100x30() {
 #[test]
 fn session_log_built_artifacts_narrow_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &built_session_state()));
+}
+
+// ── Context menus + drag-to-resize (T04 / D4) ────────────────────────────────
+
+/// A right-click context menu open over a session tab: the popup floats on the
+/// top z-layer with target-specific entries (Select / Stop / Follow / Copy
+/// path), the disabled Copy row muted; the workbench base layer stays visible
+/// beneath it.
+#[test]
+fn context_menu_session_tab_100x30() {
+    let mut state = single_session_state();
+    update(
+        &mut state,
+        Message::OpenContextMenu {
+            x: 34,
+            y: 5,
+            target: ContextTarget::SessionTab(0),
+        },
+    );
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The workbench with a drag-widened sidebar (T04 splitter): the sidebar
+/// occupies more columns and the main area reflows to the narrower remainder,
+/// exercising `sidebar_main_at` with a non-default width.
+#[test]
+fn workbench_resized_sidebar_100x30() {
+    let mut state = workbench_state();
+    state.sidebar_width = 40;
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// A session whose log overflows the viewport: the log-view scrollbar thumb
+/// (T04) appears in the rightmost column, positioned near the bottom while the
+/// view follows the tail. Zero-noise on a short log (see the other session
+/// snapshots, which show no thumb).
+#[test]
+fn session_log_scrollbar_thumb_100x30() {
+    let root = "/tmp/huddle";
+    let owned: Vec<String> = (0..60).map(|i| format!("line {i}")).collect();
+    let borrowed: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let sess = session(0, root, "desktop", SessionState::Running, &borrowed);
+    let state = AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
 }

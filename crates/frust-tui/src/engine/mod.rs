@@ -9,6 +9,7 @@
 
 mod bootstrap;
 mod build_launcher;
+mod context_menu;
 mod create_wizard;
 mod doctor;
 mod message;
@@ -23,9 +24,10 @@ mod update;
 
 pub use bootstrap::{BootstrapNode, BootstrapState, BootstrapWizard};
 pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, BuildTargetSpec};
+pub use context_menu::{ContextMenu, MenuEntry};
 pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
 pub use doctor::{DoctorCheck, DoctorState};
-pub use message::{Message, RegionId};
+pub use message::{ContextTarget, DragKind, Message, RegionId};
 pub use modal::ActiveModal;
 pub use palette::{Palette, PaletteCommand};
 pub use persist::{load_recent_projects, merge_recent_and_detected, record_recent_project};
@@ -33,7 +35,10 @@ pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
 pub use session_view::{
     LineSelection, LogBuffer, LogLevel, Scroll, SessionView, detect_level, line_matches, strip_ansi,
 };
-pub use state::{AppState, Screen, SearchState};
+pub use state::{
+    AppState, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Screen, SearchState,
+    clamp_sidebar_width,
+};
 pub use toast::{Toast, ToastKind, Toasts};
 pub use update::{Effect, Outcome, update};
 

@@ -11,8 +11,9 @@ use std::path::PathBuf;
 
 use super::bootstrap::BootstrapWizard;
 use super::build_launcher::{BuildLauncher, BuildSpec};
+use super::context_menu::ContextMenu;
 use super::create_wizard::{CreateWizard, WizardAdvance};
-use super::message::Message;
+use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use super::state::{AppState, Screen};
@@ -85,6 +86,10 @@ pub enum Effect {
         /// A short label for the session tab.
         label: String,
     },
+    /// Enable (`true`) or disable (`false`) crossterm mouse capture at the
+    /// terminal level (T04 / D4) — the runner enacts the `EnableMouseCapture`/
+    /// `DisableMouseCapture` sequence; the pure engine only requests it.
+    SetMouseCapture(bool),
 }
 
 /// What the loop must do after a transition.
@@ -146,12 +151,20 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::Tick => Outcome::dirty(state.toasts.tick()),
         Message::Resize(_, _) => Outcome::redraw(),
         Message::HoverChanged(next) => {
-            if state.hover == next {
-                Outcome::idle()
-            } else {
-                state.hover = next;
-                Outcome::redraw()
+            let hover_changed = state.hover != next;
+            state.hover = next;
+            // Hovering a context-menu row moves its highlight (mouse parity for
+            // the keyboard arrows) — see `context_menu`.
+            let mut menu_changed = false;
+            if let (Some(menu), Some(super::message::RegionId::ContextMenuItem(i))) =
+                (state.context_menu.as_mut(), next)
+                && i < menu.entries.len()
+                && menu.cursor != i
+            {
+                menu.cursor = i;
+                menu_changed = true;
             }
+            Outcome::dirty(hover_changed || menu_changed)
         }
         Message::CreatePressed => {
             if state.create_pressed {
@@ -692,7 +705,143 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::PaletteExecuteAt(i) => execute_palette(state, Some(i)),
 
         Message::RunOnAllDevices => run_on_all_devices(state),
+
+        // ── Drag-to-resize + scrollbar thumb (T04 / D4) ─────────────────────
+        Message::DragStart(kind) => {
+            state.active_drag = Some(kind);
+            // No visual change yet; the immediately-following DragMove (the
+            // runner sends one on press) applies the initial position.
+            Outcome::idle()
+        }
+        Message::DragMove(x, y) => match state.active_drag {
+            Some(DragKind::SidebarSplitter { body_left }) => {
+                let next = super::state::clamp_sidebar_width(x.saturating_sub(body_left));
+                if next != state.sidebar_width {
+                    state.sidebar_width = next;
+                    Outcome::redraw()
+                } else {
+                    Outcome::idle()
+                }
+            }
+            Some(DragKind::LogScrollbar {
+                track_top,
+                track_height,
+            }) => {
+                let frac = track_fraction(y, track_top, track_height);
+                match state.active_session_mut() {
+                    Some(s) => Outcome::dirty(s.scroll_to_fraction(frac)),
+                    None => Outcome::idle(),
+                }
+            }
+            None => Outcome::idle(),
+        },
+        Message::DragEnd => {
+            // Clearing the active drag has no visual effect; the sidebar-width
+            // persistence is left for T05's settings task (see its req. 3).
+            state.active_drag = None;
+            Outcome::idle()
+        }
+
+        // ── Context menus (T04 / D4) ────────────────────────────────────────
+        Message::OpenContextMenu { x, y, target } => open_context_menu(state, x, y, target),
+        Message::CloseContextMenu => {
+            if state.context_menu.take().is_some() {
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::ContextMenuCursorUp => with_context_menu(state, ContextMenu::cursor_up),
+        Message::ContextMenuCursorDown => with_context_menu(state, ContextMenu::cursor_down),
+        Message::ContextMenuActivate => activate_context_menu(state, None),
+        Message::ContextMenuActivateAt(i) => activate_context_menu(state, Some(i)),
+
+        // ── Mouse-capture toggle (T04 / D4) ─────────────────────────────────
+        Message::ToggleMouseCapture => {
+            state.mouse_capture = !state.mouse_capture;
+            let msg = if state.mouse_capture {
+                "Mouse capture on"
+            } else {
+                "Mouse capture off · terminal selection restored"
+            };
+            state.toasts.push(ToastKind::Info, msg);
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::SetMouseCapture(state.mouse_capture)),
+            }
+        }
     }
+}
+
+/// The scrollbar-track fraction (`0.0`..=`1.0`, top→bottom) for a pointer at
+/// absolute row `y` over a track spanning `track_top .. track_top +
+/// track_height`. A degenerate (≤1-row) track maps everything to the top.
+fn track_fraction(y: u16, track_top: u16, track_height: u16) -> f32 {
+    if track_height <= 1 {
+        return 0.0;
+    }
+    let rel = y.saturating_sub(track_top).min(track_height - 1);
+    rel as f32 / (track_height - 1) as f32
+}
+
+/// Open a context menu for `target`, focusing the target row first (mouse
+/// parity with a left click) so a follow-up entry acts on the row the user
+/// pointed at. An empty entry set (nothing to offer) opens no menu but still
+/// commits the focus change.
+fn open_context_menu(state: &mut AppState, x: u16, y: u16, target: ContextTarget) -> Outcome {
+    match target {
+        ContextTarget::SessionTab(i) if i < state.sessions.len() => {
+            state.active_session = Some(i);
+        }
+        ContextTarget::DeviceRow(i) if i < state.devices.len() => {
+            state.device_cursor = i;
+        }
+        _ => {}
+    }
+    let entries = super::context_menu::entries_for(state, target);
+    if entries.is_empty() {
+        return Outcome::redraw();
+    }
+    state.context_menu = Some(ContextMenu {
+        x,
+        y,
+        target,
+        entries,
+        cursor: 0,
+    });
+    Outcome::redraw()
+}
+
+/// Apply `f` to the open context menu (if any), redrawing only when it reports
+/// a change; idle when closed.
+fn with_context_menu(state: &mut AppState, f: impl FnOnce(&mut ContextMenu) -> bool) -> Outcome {
+    match state.context_menu.as_mut() {
+        Some(menu) => Outcome::dirty(f(menu)),
+        None => Outcome::idle(),
+    }
+}
+
+/// Activate a context-menu entry: the row at `index` (a click) or the
+/// highlighted row (`Enter`). Closes the menu and **re-dispatches the entry's
+/// existing `Message`** through `update` — the menu never duplicates command
+/// logic (the palette discipline). A disabled entry is a no-op (the menu stays
+/// open); an out-of-range index is ignored.
+fn activate_context_menu(state: &mut AppState, index: Option<usize>) -> Outcome {
+    let Some(menu) = state.context_menu.as_ref() else {
+        return Outcome::idle();
+    };
+    let idx = index.unwrap_or(menu.cursor);
+    let Some(entry) = menu.entries.get(idx) else {
+        return Outcome::idle();
+    };
+    if !entry.enabled {
+        return Outcome::idle();
+    }
+    let message = entry.message.clone();
+    state.context_menu = None;
+    let mut out = update(state, message);
+    out.redraw = true;
+    out
 }
 
 /// Open the create wizard and request the off-thread clean-signals sibling
@@ -2071,5 +2220,180 @@ mod tests {
             3,
             "clicking the header collapsed the platform leaves"
         );
+    }
+
+    // ── Drag-to-resize + scrollbar thumb (T04 / D4) ─────────────────────────
+
+    use crate::engine::message::{ContextTarget, DragKind};
+
+    #[test]
+    fn sidebar_splitter_drag_resizes_and_clamps() {
+        let mut st = workbench_with_project();
+        assert_eq!(st.sidebar_width, crate::engine::SIDEBAR_DEFAULT_WIDTH);
+        // Body origin at column 0; a DragStart records the active drag.
+        update(
+            &mut st,
+            Message::DragStart(DragKind::SidebarSplitter { body_left: 0 }),
+        );
+        assert!(st.active_drag.is_some());
+        // Dragging to column 40 sets the width to 40 (within bounds).
+        assert!(update(&mut st, Message::DragMove(40, 10)).redraw);
+        assert_eq!(st.sidebar_width, 40);
+        // Dragging way out clamps to the max, not past it.
+        update(&mut st, Message::DragMove(500, 10));
+        assert_eq!(st.sidebar_width, crate::engine::SIDEBAR_MAX_WIDTH);
+        // And below the min clamps up.
+        update(&mut st, Message::DragMove(2, 10));
+        assert_eq!(st.sidebar_width, crate::engine::SIDEBAR_MIN_WIDTH);
+        // Release clears the active drag.
+        update(&mut st, Message::DragEnd);
+        assert!(st.active_drag.is_none());
+        // A stray move with no active drag is a no-op.
+        assert!(!update(&mut st, Message::DragMove(30, 10)).redraw);
+    }
+
+    #[test]
+    fn scrollbar_thumb_drag_moves_the_log_anchor() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        for i in 0..100 {
+            update(&mut st, line(a, &format!("line {i}")));
+        }
+        assert!(st.active_session().unwrap().is_following());
+        update(
+            &mut st,
+            Message::DragStart(DragKind::LogScrollbar {
+                track_top: 5,
+                track_height: 21, // rows 5..=25
+            }),
+        );
+        // Drag to the top of the track → oldest line anchored.
+        update(&mut st, Message::DragMove(0, 5));
+        assert!(matches!(
+            st.active_session().unwrap().scroll,
+            Scroll::Anchored(0)
+        ));
+        // Drag to the bottom → follow re-engaged.
+        update(&mut st, Message::DragMove(0, 25));
+        assert!(st.active_session().unwrap().is_following());
+        update(&mut st, Message::DragEnd);
+    }
+
+    // ── Context menus (T04 / D4) ────────────────────────────────────────────
+
+    #[test]
+    fn opening_a_session_tab_menu_focuses_the_tab_and_builds_entries() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+        register(&mut st, 1, "/tmp/b", "desktop");
+        assert_eq!(st.active_session, Some(0));
+        // Right-clicking tab 1 focuses it (mouse parity) and opens the menu.
+        let out = update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 4,
+                y: 2,
+                target: ContextTarget::SessionTab(1),
+            },
+        );
+        assert!(out.redraw);
+        assert_eq!(st.active_session, Some(1));
+        let menu = st.context_menu.as_ref().expect("menu open");
+        assert!(!menu.entries.is_empty());
+    }
+
+    #[test]
+    fn context_menu_nav_activate_redispatches_and_closes() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+        // Log-view menu: Copy selection (disabled, no selection) / Follow / Search.
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 10,
+                y: 10,
+                target: ContextTarget::LogView,
+            },
+        );
+        // Move to "Toggle follow-tail" (index 1) and activate it.
+        update(&mut st, Message::ContextMenuCursorDown);
+        let following_before = st.active_session().unwrap().is_following();
+        let out = update(&mut st, Message::ContextMenuActivate);
+        assert!(out.redraw);
+        assert!(st.context_menu.is_none(), "activation closes the menu");
+        assert_ne!(
+            st.active_session().unwrap().is_following(),
+            following_before,
+            "the entry re-dispatched ToggleFollow"
+        );
+    }
+
+    #[test]
+    fn activating_a_disabled_entry_is_a_noop_and_keeps_the_menu_open() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 10,
+                y: 10,
+                target: ContextTarget::LogView,
+            },
+        );
+        // Index 0 is "Copy selection", disabled with no selection.
+        let out = update(&mut st, Message::ContextMenuActivateAt(0));
+        assert!(!out.redraw);
+        assert!(st.context_menu.is_some(), "a disabled entry doesn't close");
+    }
+
+    #[test]
+    fn close_context_menu_clears_it() {
+        let mut st = welcome();
+        st.projects = vec![PathBuf::from("/tmp/a")];
+        st.project_root = Some(PathBuf::from("/tmp/a"));
+        update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 1,
+                y: 1,
+                target: ContextTarget::ProjectRow(0),
+            },
+        );
+        assert!(st.context_menu.is_some());
+        assert!(update(&mut st, Message::CloseContextMenu).redraw);
+        assert!(st.context_menu.is_none());
+        // Closing an already-closed menu is idle.
+        assert!(!update(&mut st, Message::CloseContextMenu).redraw);
+    }
+
+    #[test]
+    fn empty_target_menu_does_not_open() {
+        let mut st = welcome();
+        // No sessions → a session-tab menu has no entries → no menu opens.
+        let out = update(
+            &mut st,
+            Message::OpenContextMenu {
+                x: 0,
+                y: 0,
+                target: ContextTarget::SessionTab(0),
+            },
+        );
+        assert!(out.redraw);
+        assert!(st.context_menu.is_none());
+    }
+
+    // ── Mouse-capture toggle (T04 / D4) ─────────────────────────────────────
+
+    #[test]
+    fn toggle_mouse_capture_flips_state_and_requests_the_effect() {
+        let mut st = welcome();
+        assert!(st.mouse_capture);
+        let out = update(&mut st, Message::ToggleMouseCapture);
+        assert!(!st.mouse_capture);
+        assert_eq!(out.effect, Some(Effect::SetMouseCapture(false)));
+        assert!(out.redraw);
+        let out = update(&mut st, Message::ToggleMouseCapture);
+        assert!(st.mouse_capture);
+        assert_eq!(out.effect, Some(Effect::SetMouseCapture(true)));
     }
 }

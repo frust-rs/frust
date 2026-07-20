@@ -131,6 +131,52 @@ pub enum RegionId {
     PaletteRow(usize),
     /// The command palette's `[Esc] Close` title affordance.
     PaletteClose,
+    /// A row in the open context menu (0-based index into the menu's entries);
+    /// hover highlights it, click activates it (T04 / D4).
+    ContextMenuItem(usize),
+}
+
+/// The kind of an in-progress drag, identifying which draggable chrome the
+/// pointer grabbed (T04 / D4). Each variant carries the layout geometry
+/// captured from the registered drag region at press time, so the pure engine
+/// maps a later pointer position to a result (a sidebar width, or a log scroll
+/// anchor) without ever knowing the terminal layout itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragKind {
+    /// The sidebar splitter (its right border column). `body_left` is the x
+    /// origin of the body area, so a drag to absolute column `x` yields a
+    /// sidebar width of `x - body_left`, clamped to the sidebar min/max.
+    SidebarSplitter {
+        /// The x origin of the workbench body area.
+        body_left: u16,
+    },
+    /// The log-view scrollbar thumb. The track spans terminal rows
+    /// `track_top .. track_top + track_height`; a drag to absolute row `y` maps
+    /// to a fraction of the track, then to an absolute log-line scroll anchor
+    /// (respecting the existing exact scroll bounds — see
+    /// [`super::SessionView::scroll_to_fraction`]).
+    LogScrollbar {
+        /// The top terminal row of the scrollbar track.
+        track_top: u16,
+        /// The height (rows) of the scrollbar track.
+        track_height: u16,
+    },
+}
+
+/// What a right-click landed on — the context a [`super::ContextMenu`] is built
+/// from (T04 / D4). Each variant names the row/pane under the cursor so
+/// [`super::context_menu::entries_for`] can offer target-specific entries whose
+/// messages already exist (never a menu-only command — see that module).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextTarget {
+    /// A session tab (flat index into `AppState::sessions`).
+    SessionTab(usize),
+    /// A device row (index into `AppState::devices`).
+    DeviceRow(usize),
+    /// A project row (index into `AppState::projects`).
+    ProjectRow(usize),
+    /// The log view pane.
+    LogView,
 }
 
 /// A TEA message: the only way `AppState` ever changes.
@@ -430,6 +476,52 @@ pub enum Message {
     PaletteExecute,
     /// Execute a palette command by ranked-row index (mouse click parity).
     PaletteExecuteAt(usize),
+
+    // ── Drag-to-resize + scrollbar thumb (T04 / D4) ─────────────────────────
+    /// A drag started on a draggable region (the sidebar splitter or the log
+    /// scrollbar thumb) — records the active drag so subsequent move/up events
+    /// route to it (`crate::runner` gates them on `AppState::active_drag`).
+    DragStart(DragKind),
+    /// The pointer moved to absolute column/row `(x, y)` while a drag is active
+    /// — applies the drag's effect (resize the sidebar, or move the log scroll
+    /// anchor). A no-op with no active drag.
+    DragMove(u16, u16),
+    /// The drag button was released — clears the active drag.
+    DragEnd,
+
+    // ── Context menus (T04 / D4) ────────────────────────────────────────────
+    /// Open a right-click context menu at `(x, y)` for whatever row/pane the
+    /// click landed on — builds target-specific entries (see
+    /// [`super::context_menu`]). Focuses the target row (mouse parity with a
+    /// left click) as it opens.
+    OpenContextMenu {
+        /// The column the menu's top-left corner anchors at (clamped on render).
+        x: u16,
+        /// The row the menu's top-left corner anchors at (clamped on render).
+        y: u16,
+        /// What was right-clicked.
+        target: ContextTarget,
+    },
+    /// Close the context menu without activating an entry (`Esc` / a
+    /// click-outside).
+    CloseContextMenu,
+    /// Move the context-menu highlight up (`↑`).
+    ContextMenuCursorUp,
+    /// Move the context-menu highlight down (`↓`).
+    ContextMenuCursorDown,
+    /// Activate the highlighted context-menu entry (`Enter`) — re-dispatches its
+    /// existing `Message` through `update`, exactly like the palette.
+    ContextMenuActivate,
+    /// Activate a context-menu entry by index (mouse click parity).
+    ContextMenuActivateAt(usize),
+
+    // ── Mouse-capture toggle (T04 / D4) ─────────────────────────────────────
+    /// Toggle crossterm mouse capture on/off (`Alt+m`, the palette command, or
+    /// the status-bar indicator) — routed to the runner as
+    /// [`super::Effect::SetMouseCapture`] so users can fall back to the
+    /// terminal's own native text selection. Keyboard operation stays complete
+    /// while capture is off.
+    ToggleMouseCapture,
 
     // ── Run on all devices (D6b palette / device-header action) ──────────────
     /// Launch one supervised session per discovered device (debug mode) for the

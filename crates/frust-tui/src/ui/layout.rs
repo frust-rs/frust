@@ -10,8 +10,10 @@ pub const TITLEBAR_HEIGHT: u16 = 3;
 /// Height of the status bar (rows).
 pub const STATUS_HEIGHT: u16 = 1;
 
-/// Default sidebar width (columns) before drag-resize (Phase 3).
-pub const SIDEBAR_WIDTH: u16 = 26;
+/// Default sidebar width (columns) before drag-resize — the engine's
+/// [`crate::engine::SIDEBAR_DEFAULT_WIDTH`] by re-export (one number, shared
+/// across the render/engine layer boundary).
+pub const SIDEBAR_WIDTH: u16 = crate::engine::SIDEBAR_DEFAULT_WIDTH;
 
 /// The three horizontal bands of the shell.
 #[derive(Debug, Clone, Copy)]
@@ -43,11 +45,19 @@ impl Shell {
     }
 }
 
-/// Split a body area into a fixed-width sidebar and the remaining main area.
+/// Split a body area into the default-width sidebar and the remaining main area.
 pub fn sidebar_main(body: Rect) -> (Rect, Rect) {
+    sidebar_main_at(body, SIDEBAR_WIDTH)
+}
+
+/// Split a body area into a `width`-column sidebar and the remaining main area
+/// (T04 drag-to-resize). `width` is clamped to the sidebar min/max and to
+/// `body.width - 1` so the main area never vanishes.
+pub fn sidebar_main_at(body: Rect, width: u16) -> (Rect, Rect) {
+    let w = crate::engine::clamp_sidebar_width(width).min(body.width.saturating_sub(1));
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+        .constraints([Constraint::Length(w), Constraint::Min(1)])
         .split(body);
     (cols[0], cols[1])
 }

@@ -35,10 +35,38 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
         return;
     }
 
-    // `active_modal` is the single priority source (G3) shared with
-    // `crate::runner::translate_key`'s key routing — an exhaustive match
-    // here means a new modal variant that isn't handled fails to compile
-    // rather than silently missing its suppression/overlay dispatch.
+    // A right-click context menu (T04 / D4) floats on the top z-layer over the
+    // still-visible base layer, which is drawn with a *suppressed* `MouseCtx`
+    // so only the menu's own rows are hit-testable while it's open — the same
+    // D4 base-layer suppression the workbench modals use.
+    if let Some(menu) = &state.context_menu {
+        let mut suppressed = MouseCtx::suppressed();
+        render_base(frame, area, state, theme, &mut suppressed);
+        views::context_menu::render(frame, area, menu, theme, mouse);
+    } else {
+        render_base(frame, area, state, theme, mouse);
+    }
+
+    // Toasts float in the status-bar area layer, over everything else (even a
+    // modal — an error toast surfaces regardless). Render-only: the tick loop
+    // ages them, this pass just paints the current stack.
+    render_toasts(frame, area, state, theme);
+}
+
+/// The base layer under any context menu: the active modal (if any) over its
+/// suppressed backdrop, else the current top-level screen.
+///
+/// `active_modal` is the single priority source (G3) shared with
+/// `crate::runner::translate_key`'s key routing — an exhaustive match in
+/// [`render_modal`] means a new modal variant that isn't handled fails to
+/// compile rather than silently missing its suppression/overlay dispatch.
+fn render_base(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
     if let Some(modal) = state.active_modal() {
         render_modal(frame, area, state, theme, mouse, modal);
     } else {
@@ -47,11 +75,6 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
             Screen::Workbench => views::workbench::render(frame, area, state, theme, mouse),
         }
     }
-
-    // Toasts float in the status-bar area layer, over everything else (even a
-    // modal — an error toast surfaces regardless). Render-only: the tick loop
-    // ages them, this pass just paints the current stack.
-    render_toasts(frame, area, state, theme);
 }
 
 /// Render the auto-dismiss toast stack (D5) bottom-anchored just above the
@@ -192,10 +215,10 @@ fn render_welcome(
 
     views::welcome::titlebar(frame, rows[0], state, theme, mouse);
     views::welcome::render(frame, rows[1], state, theme, mouse);
-    welcome_status(frame, rows[2], theme);
+    welcome_status(frame, rows[2], state, theme);
 }
 
-fn welcome_status(frame: &mut Frame, area: Rect, theme: &Theme) {
+fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let left = Line::from(Span::styled(
         "? help · ⌘ palette · q quit",
         Style::default().fg(theme.muted()),
@@ -206,11 +229,23 @@ fn welcome_status(frame: &mut Frame, area: Rect, theme: &Theme) {
     );
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "[mouse ✓]",
+            mouse_indicator(state),
             Style::default().fg(theme.muted()),
         ))
         .alignment(Alignment::Right)
         .style(Style::default().bg(theme.surface())),
         area,
     );
+}
+
+/// The status-bar mouse-capture indicator (T04 / D4): a check while capture is
+/// on, an "off" hint (with the `⌥m` toggle key) while it's off so users know
+/// the terminal's own text selection is available. Shared by the welcome and
+/// workbench status bars.
+pub(crate) fn mouse_indicator(state: &AppState) -> &'static str {
+    if state.mouse_capture {
+        "[mouse ✓]"
+    } else {
+        "[mouse off · ⌥m]"
+    }
 }

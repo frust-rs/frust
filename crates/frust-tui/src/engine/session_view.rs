@@ -303,6 +303,36 @@ impl SessionView {
         self.scroll = Scroll::Follow;
     }
 
+    /// Set the scroll position from a scrollbar-thumb `frac` in `0.0..=1.0`
+    /// (top → oldest retained line, bottom → the tail) — the drag mapping for
+    /// [`crate::engine::DragKind::LogScrollbar`]. Maps the fraction across the
+    /// exact retained range `[base_index, end_index-1]` so it honors the same
+    /// bounds `scroll_up`/`scroll_down` clamp to; at (or past) the very bottom
+    /// it re-engages follow-tail. A no-op on an empty log. Returns whether the
+    /// scroll position actually changed.
+    pub fn scroll_to_fraction(&mut self, frac: f32) -> bool {
+        let end = self.log.end_index();
+        if end == 0 {
+            return false;
+        }
+        let base = self.log.base_index();
+        let last = end - 1;
+        let span = last.saturating_sub(base);
+        let f = frac.clamp(0.0, 1.0);
+        let target = base + (f * span as f32).round() as u64;
+        let next = if target >= last {
+            Scroll::Follow
+        } else {
+            Scroll::Anchored(target)
+        };
+        if next != self.scroll {
+            self.scroll = next;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Toggle follow-tail: engage it, or freeze at the current tail line.
     pub fn toggle_follow(&mut self) {
         self.scroll = match self.scroll {
@@ -436,6 +466,35 @@ mod tests {
         s.scroll = Scroll::Anchored(0); // anchor the very first line
         s.push_line("one more".into()); // evicts line 0
         assert_eq!(s.scroll, Scroll::Anchored(1));
+    }
+
+    #[test]
+    fn scroll_to_fraction_maps_track_position_to_anchor() {
+        let mut s = sess();
+        for i in 0..100 {
+            s.push_line(format!("line {i}")); // base 0, end 100, last 99
+        }
+        // Top of the track → oldest line anchored.
+        assert!(s.scroll_to_fraction(0.0));
+        assert_eq!(s.scroll, Scroll::Anchored(0));
+        // Middle → ~line 50.
+        s.scroll_to_fraction(0.5);
+        assert_eq!(s.scroll, Scroll::Anchored(50));
+        // Bottom → follow re-engaged (never an out-of-range anchor).
+        s.scroll_to_fraction(1.0);
+        assert!(s.is_following());
+        // Out-of-range fractions clamp, never panic.
+        s.scroll_to_fraction(-3.0);
+        assert_eq!(s.scroll, Scroll::Anchored(0));
+        s.scroll_to_fraction(9.0);
+        assert!(s.is_following());
+    }
+
+    #[test]
+    fn scroll_to_fraction_is_a_noop_on_empty_log() {
+        let mut s = sess();
+        assert!(!s.scroll_to_fraction(0.5));
+        assert!(s.is_following());
     }
 
     #[test]

@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 
 use super::bootstrap::{BootstrapState, BootstrapWizard};
 use super::build_launcher::BuildLauncher;
+use super::context_menu::ContextMenu;
 use super::create_wizard::CreateWizard;
 use super::doctor::DoctorState;
-use super::message::RegionId;
+use super::message::{DragKind, RegionId};
 use super::palette::Palette;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
@@ -19,6 +20,21 @@ use crate::supervise::SessionId;
 /// depth 0, its children depth 1, its grandchildren depth 2 — nothing past
 /// that is ever read. Keeps a repo-root walk instant regardless of tree size.
 const MAX_DETECT_DEPTH: u32 = 2;
+
+/// Sidebar drag-to-resize bounds (T04 / D4). Kept **by value** in sync with
+/// `crate::ui::layout::SIDEBAR_WIDTH` (the default) — the engine stays
+/// render-free, so the two layers share the number, not a symbol (the
+/// `LOG_LINE_CAP` cross-layer-constant precedent).
+pub const SIDEBAR_MIN_WIDTH: u16 = 18;
+/// Maximum sidebar width (columns) a drag can grow the sidebar to.
+pub const SIDEBAR_MAX_WIDTH: u16 = 50;
+/// Default sidebar width (columns) before any drag-resize.
+pub const SIDEBAR_DEFAULT_WIDTH: u16 = 26;
+
+/// Clamp a proposed sidebar width into the drag-resize bounds.
+pub fn clamp_sidebar_width(width: u16) -> u16 {
+    width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+}
 
 /// The top-level screen the workbench is showing.
 ///
@@ -135,6 +151,21 @@ pub struct AppState {
     /// toolchain-chip click). While `Some`, it captures input and suppresses
     /// background mouse regions like the other modals.
     pub bootstrap_wizard: Option<BootstrapWizard>,
+    /// The sidebar width (columns), drag-resizable via the splitter (T04 / D4).
+    /// Clamped to [`SIDEBAR_MIN_WIDTH`]..=[`SIDEBAR_MAX_WIDTH`]. In-memory only
+    /// for now — persistence is T05's settings task (see its requirement 3).
+    pub sidebar_width: u16,
+    /// Whether crossterm mouse capture is on (`Alt+m` / palette toggle). Off
+    /// hands the terminal its native text selection back; keyboard operation
+    /// stays complete either way. In-memory only — T05 persists the preference.
+    pub mouse_capture: bool,
+    /// The drag currently in progress (a splitter or scrollbar-thumb grab),
+    /// tracked from press to release so move/up events route to it (T04 / D4).
+    pub active_drag: Option<DragKind>,
+    /// The open right-click context menu, if any (T04 / D4). While `Some`, it
+    /// captures keyboard nav and suppresses the base layer's mouse regions like
+    /// a modal, but renders as a small popup over the (still-visible) workbench.
+    pub context_menu: Option<ContextMenu>,
 }
 
 impl AppState {
@@ -199,6 +230,10 @@ impl AppState {
             clean_confirm: None,
             bootstrap: BootstrapState::default(),
             bootstrap_wizard: None,
+            sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+            mouse_capture: true,
+            active_drag: None,
+            context_menu: None,
         }
     }
 
@@ -316,6 +351,10 @@ impl Default for AppState {
             clean_confirm: None,
             bootstrap: BootstrapState::default(),
             bootstrap_wizard: None,
+            sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+            mouse_capture: true,
+            active_drag: None,
+            context_menu: None,
         }
     }
 }

@@ -69,9 +69,9 @@ pub struct PaletteCommand {
 ///
 /// Deliberately omitted (no existing `Message` to wire to — see the task
 /// completion summary): "open project by path" (needs a path-input flow not in
-/// the tree), a "help" overlay (not yet landed), and the "mouse-capture toggle"
-/// (T04 — not yet landed). Each returns with no palette entry rather than a
-/// dead command.
+/// the tree) and a "help" overlay (not yet landed). Each returns with no
+/// palette entry rather than a dead command. The mouse-capture toggle (T04) is
+/// now wired below.
 pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     let has_project = state.project_root.is_some();
     let has_devices = !state.devices.is_empty();
@@ -147,6 +147,7 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no projects detected",
         ),
         always("Refresh devices", "R", Message::RefreshDevices),
+        always("Toggle mouse capture", "⌥m", Message::ToggleMouseCapture),
         gated(
             "Toggle follow-tail",
             "f",

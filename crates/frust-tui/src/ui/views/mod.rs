@@ -4,6 +4,7 @@
 pub mod bootstrap;
 pub mod build_launcher;
 pub mod clean_confirm;
+pub mod context_menu;
 pub mod create_wizard;
 pub mod doctor;
 pub mod palette;

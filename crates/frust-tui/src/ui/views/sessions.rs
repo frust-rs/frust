@@ -16,7 +16,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph};
 
-use crate::engine::{AppState, Message, RegionId, Scroll, SessionView, detect_level, line_matches};
+use crate::engine::{
+    AppState, ContextTarget, DragKind, Message, RegionId, Scroll, SessionView, detect_level,
+    line_matches,
+};
 use crate::supervise::SessionState;
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
@@ -150,14 +153,12 @@ fn render_tab_bar(
             push(&mut spans, &mut col, " ".into(), Style::default());
             col += 1; // trailing gap
 
-            // Register the click target (clamped to the row).
+            // Register the click + right-click-context target (clamped to row).
             if tab_x < area.right() {
                 let w = width.min(area.right().saturating_sub(tab_x));
-                mouse.click(
-                    Rect::new(tab_x, area.y, w, 1),
-                    RegionId::SessionTab(idx),
-                    Message::SelectTab(idx),
-                );
+                let rect = Rect::new(tab_x, area.y, w, 1);
+                mouse.click(rect, RegionId::SessionTab(idx), Message::SelectTab(idx));
+                mouse.context(rect, ContextTarget::SessionTab(idx));
             }
         }
     }
@@ -187,6 +188,8 @@ fn render_log(
     // Wheel over the log scrolls it (not a global focus) — one line per notch.
     mouse.scroll(area, Message::LogScrollUp(1), Message::LogScrollDown(1));
     mouse.hover(area, RegionId::LogView);
+    // Right-click over the log pane opens its context menu (copy/follow/search).
+    mouse.context(area, ContextTarget::LogView);
 
     if session.log.is_empty() {
         let hint = match session.state {
@@ -220,6 +223,55 @@ fn render_log(
 
     let lines = display_window(session, &vis, state.wrap, area.width, area.height, theme);
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
+
+    render_scrollbar(frame, area, session, &vis, theme, mouse);
+}
+
+/// Draw the log-view scrollbar thumb and register its drag region (T04 / D4).
+///
+/// Only shown when the visible line count overflows the viewport (a zero-noise
+/// affordance on a short log). The thumb marks the bottom-anchored line's
+/// position; grabbing anywhere on the track begins a `LogScrollbar` drag whose
+/// row maps to a scroll fraction (see
+/// [`crate::engine::SessionView::scroll_to_fraction`]). The whole rightmost
+/// column is the track; the thumb is drawn over it, leaving content untouched
+/// (log lines rarely reach the last column, so snapshot impact is one cell).
+fn render_scrollbar(
+    frame: &mut Frame,
+    area: Rect,
+    session: &SessionView,
+    vis: &[u64],
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
+    if area.width == 0 || area.height <= 1 || vis.len() <= area.height as usize {
+        return;
+    }
+    let track_x = area.right() - 1;
+    let track_top = area.y;
+    let track_height = area.height;
+
+    // The fraction of the way down the log the bottom-visible line sits.
+    let bottom = bottom_pos(session, vis);
+    let denom = vis.len().saturating_sub(1).max(1) as f32;
+    let frac = (bottom as f32 / denom).clamp(0.0, 1.0);
+    let thumb_y = track_top + (frac * (track_height - 1) as f32).round() as u16;
+
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "\u{2588}", // █ thumb
+            Style::default().fg(theme.accent()),
+        )),
+        Rect::new(track_x, thumb_y, 1, 1),
+    );
+
+    mouse.drag(
+        Rect::new(track_x, track_top, 1, track_height),
+        DragKind::LogScrollbar {
+            track_top,
+            track_height,
+        },
+    );
 }
 
 /// The log status / keyhint line under the log view. Registers the
