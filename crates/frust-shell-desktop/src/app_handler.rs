@@ -41,11 +41,12 @@ use frust_core::event::{
 };
 use frust_core::view::View;
 use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
-use frust_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
+use frust_render::{EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::perf::{
-    FramePasses, FrameStats, SPAN_ADAPTER_READY, SPAN_DEVICE_READY, SPAN_FIRST_FRAME_PRESENTED,
-    SPAN_FIRST_REBUILD_DONE, SPAN_INIT_ENTRY, SPAN_RENDERER_READY, StartupSpans,
+    FramePasses, FrameStats, SPAN_ADAPTER_READY, SPAN_DEVICE_READY, SPAN_FIRST_ENCODE_DONE,
+    SPAN_FIRST_FRAME_PRESENTED, SPAN_FIRST_REBUILD_DONE, SPAN_INIT_ENTRY,
+    SPAN_PIPELINE_CACHE_RESTORED, SPAN_RENDERER_READY, StartupSpans,
 };
 use frust_shell_common::{ThemeOverrideWatcher, effective_brightness_for_platform_change};
 use frust_text::TextContext;
@@ -176,6 +177,7 @@ where
         startup_spans,
         renderer_spans_recorded: false,
         first_rebuild_recorded: false,
+        first_encode_recorded: false,
         first_frame_recorded: false,
         frame_stats: FrameStats::new(),
     };
@@ -456,12 +458,18 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// desktop shell rebuilds every redraw-requested frame, but the span is
     /// only meaningful once, for the app's first rebuild.
     first_rebuild_recorded: bool,
+    /// Whether `SPAN_FIRST_ENCODE_DONE` has already been recorded - the shell
+    /// encodes every redraw-requested frame, but the first-frame-decomposition
+    /// span (task 10.A) is only meaningful once, for the app's first encode.
+    /// Distinct from `first_frame_recorded` because a first encode can precede
+    /// the first successful present (an intervening `Redraw` reconfigure frame).
+    first_encode_recorded: bool,
     /// Whether `SPAN_FIRST_FRAME_PRESENTED` has already been recorded (and
     /// `StartupSpans::emit_log` fired) - set on the first
     /// `FrameOutcome::Rendered`.
     first_frame_recorded: bool,
     /// Perf instrumentation (task 10): per-pass frame timings
-    /// (rebuild/layout/paint/encode+present), aggregated into rolling
+    /// (rebuild/layout/paint/encode/present), aggregated into rolling
     /// percentiles and emitted periodically while frames are actually being
     /// produced - desktop is dirty-driven (spec §8), so this piggybacks on
     /// `RedrawRequested` rather than a timer; see `FrameStats::should_emit`'s
@@ -667,6 +675,9 @@ where
             // a no-op there; on Linux/Windows (Vulkan) it seeds the shader-pipeline
             // compilation to near-zero on warm starts.
             let cache_data = crate::cache::load_cache();
+            // Warm-start signal for the first-frame decomposition (task 10.A):
+            // a restored cache blob is a hit; its absence a cold miss.
+            let pipeline_cache_hit = cache_data.is_some();
             if cache_data.is_some() {
                 self.renderer.set_initial_pipeline_cache_data(cache_data);
             }
@@ -702,6 +713,14 @@ where
             if !self.renderer_spans_recorded {
                 self.startup_spans.record(SPAN_ADAPTER_READY);
                 self.startup_spans.record(SPAN_DEVICE_READY);
+                // First-frame decomposition (task 10.A): record the pipeline-cache
+                // milestone only on a warm-start hit — its presence/absence in the
+                // startup line attributes a slow first frame to shader-pipeline
+                // compilation vs a warm cache (the `RENDERER_READY` delta that
+                // follows brackets the surface/pipeline build cost).
+                if pipeline_cache_hit {
+                    self.startup_spans.record(SPAN_PIPELINE_CACHE_RESTORED);
+                }
                 self.startup_spans.record(SPAN_RENDERER_READY);
                 self.renderer_spans_recorded = true;
             }
@@ -998,11 +1017,38 @@ where
                 // Clear to the live theme's surface color rather than a
                 // hardcoded white, so a dark-scheme app doesn't render its
                 // dark-themed widgets over a white canvas (6e Finding 6).
+                // Two-phase render seam (Phase 10.A): time the GPU/CPU encode
+                // and the swapchain-acquire (vsync) present separately so the
+                // render-thread-split decision has an encode-only number. Each
+                // span is its own `Instant` read; desktop's frame budget is
+                // generous enough not to gate them behind `perf::enabled()` (see
+                // docs/CODE_STANDARDS.md Instrumentation conventions).
                 let encode_start = Instant::now();
-                let render_outcome =
+                let encode_outcome =
                     self.renderer
-                        .render(&self.render_cx, &self.scene, self.theme.scheme().surface);
+                        .encode(&self.render_cx, &self.scene, self.theme.scheme().surface);
                 let encode_dur = encode_start.elapsed();
+
+                // First-frame decomposition (task 10.A): stamp the first frame's
+                // encode-complete boundary once, so the startup line splits the
+                // first frame into paint/encode vs present. Its own latch (not
+                // `first_frame_recorded`) because a first encode can precede the
+                // first present across an intervening `Redraw` reconfigure frame.
+                if !self.first_encode_recorded {
+                    self.startup_spans.record(SPAN_FIRST_ENCODE_DONE);
+                    self.first_encode_recorded = true;
+                }
+
+                let present_start = Instant::now();
+                let render_outcome = match encode_outcome {
+                    Ok(EncodeOutcome::Encoded) => self.renderer.present(&self.render_cx),
+                    // Nothing was encoded (no renderable surface): don't present,
+                    // and surface the same `Skipped` the old combined `render`
+                    // returned so the match below is unchanged.
+                    Ok(EncodeOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+                    Err(err) => Err(err),
+                };
+                let present_dur = present_start.elapsed();
 
                 // Perf instrumentation (task 10): one FramePasses record per
                 // produced frame, piggybacking on this event-driven redraw path
@@ -1013,7 +1059,8 @@ where
                     rebuild: rebuild_dur,
                     layout: layout_dur,
                     paint: paint_dur,
-                    encode_present: encode_dur,
+                    encode: encode_dur,
+                    present: present_dur,
                     skipped: false,
                 });
                 if self.frame_stats.should_emit() {

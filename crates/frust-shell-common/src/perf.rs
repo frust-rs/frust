@@ -4,7 +4,7 @@
 //! # What lives here
 //!
 //! - [`FrameStats`] — a per-shell recorder of one frame's pass durations
-//!   (rebuild/layout/paint/encode+present, plus a `skipped` marker the
+//!   (rebuild/layout/paint/encode/present, plus a `skipped` marker the
 //!   mobile dirty-gate (task 16+) will set), aggregated into a ring buffer
 //!   plus running totals; [`FrameStats::summary`] reports p50/p95/p99 total
 //!   frame time, per-pass p95, and frames-over-budget counts against the
@@ -151,14 +151,29 @@ pub struct FramePasses {
     pub rebuild: Duration,
     pub layout: Duration,
     pub paint: Duration,
-    pub encode_present: Duration,
+    /// GPU/CPU encode cost — the [`SurfaceRenderer::encode`] span
+    /// (`vello` encode + `render_to_texture`, or the CPU rasterize+upload),
+    /// with no swapchain-acquire wait folded in. Split out from the old
+    /// combined `encode_present` (Phase 10.A) so encode work and the vsync/
+    /// present wait are separately attributable — the number the
+    /// render-thread-split GO/NO-GO decision is made on.
+    ///
+    /// [`SurfaceRenderer::encode`]: https://docs.rs/frust-render
+    pub encode: Duration,
+    /// Swapchain-acquire + blit + present cost — the
+    /// [`SurfaceRenderer::present`] span, dominated by the blocking vsync wait
+    /// (per the surface's present mode). See [`Self::encode`] for the split
+    /// rationale.
+    ///
+    /// [`SurfaceRenderer::present`]: https://docs.rs/frust-render
+    pub present: Duration,
     pub skipped: bool,
 }
 
 impl FramePasses {
-    /// The sum of all four pass durations — the frame's total wall time.
+    /// The sum of all five pass durations — the frame's total wall time.
     pub fn total(&self) -> Duration {
-        self.rebuild + self.layout + self.paint + self.encode_present
+        self.rebuild + self.layout + self.paint + self.encode + self.present
     }
 }
 
@@ -176,7 +191,11 @@ pub struct FrameSummary {
     pub rebuild_p95: Duration,
     pub layout_p95: Duration,
     pub paint_p95: Duration,
-    pub encode_present_p95: Duration,
+    /// p95 of the [`FramePasses::encode`] span (GPU/CPU encode, no vsync wait).
+    pub encode_p95: Duration,
+    /// p95 of the [`FramePasses::present`] span (swapchain-acquire/vsync wait +
+    /// blit + present).
+    pub present_p95: Duration,
     /// Lifetime count of frames whose total exceeded [`BUDGET_60HZ`]
     /// (16.6ms) — a running total, not windowed to the ring buffer.
     pub over_60hz_budget: u64,
@@ -344,12 +363,14 @@ impl FrameStats {
         let mut rebuilds: Vec<Duration> = active.iter().map(|p| p.rebuild).collect();
         let mut layouts: Vec<Duration> = active.iter().map(|p| p.layout).collect();
         let mut paints: Vec<Duration> = active.iter().map(|p| p.paint).collect();
-        let mut encodes: Vec<Duration> = active.iter().map(|p| p.encode_present).collect();
+        let mut encodes: Vec<Duration> = active.iter().map(|p| p.encode).collect();
+        let mut presents: Vec<Duration> = active.iter().map(|p| p.present).collect();
         totals.sort_unstable();
         rebuilds.sort_unstable();
         layouts.sort_unstable();
         paints.sort_unstable();
         encodes.sort_unstable();
+        presents.sort_unstable();
 
         FrameSummary {
             frame_count: self.ring.len(),
@@ -359,7 +380,8 @@ impl FrameStats {
             rebuild_p95: nearest_rank_percentile(&rebuilds, 95),
             layout_p95: nearest_rank_percentile(&layouts, 95),
             paint_p95: nearest_rank_percentile(&paints, 95),
-            encode_present_p95: nearest_rank_percentile(&encodes, 95),
+            encode_p95: nearest_rank_percentile(&encodes, 95),
+            present_p95: nearest_rank_percentile(&presents, 95),
             over_60hz_budget: self.over_60hz,
             over_120hz_budget: self.over_120hz,
             skipped_frames: self.skipped_frames,
@@ -385,7 +407,7 @@ impl FrameStats {
         let s = self.summary();
         log::info!(
             "frust-perf frame n={} total_p50_ms={} total_p95_ms={} total_p99_ms={} \
-             rebuild_p95_ms={} layout_p95_ms={} paint_p95_ms={} encode_present_p95_ms={} \
+             rebuild_p95_ms={} layout_p95_ms={} paint_p95_ms={} encode_p95_ms={} present_p95_ms={} \
              over_60hz={} over_120hz={} skipped={} total_frames={}",
             s.frame_count,
             s.total_p50.as_millis(),
@@ -394,7 +416,8 @@ impl FrameStats {
             s.rebuild_p95.as_millis(),
             s.layout_p95.as_millis(),
             s.paint_p95.as_millis(),
-            s.encode_present_p95.as_millis(),
+            s.encode_p95.as_millis(),
+            s.present_p95.as_millis(),
             s.over_60hz_budget,
             s.over_120hz_budget,
             s.skipped_frames,
@@ -441,20 +464,26 @@ const RAW_FRAME_PREFIX: &str = "frust-perf raw";
 /// `String` per call (see `docs/CODE_STANDARDS.md`'s Instrumentation
 /// conventions — formatting only, no allocation growth on the hot path).
 /// Field order: `n`, `total_us`, `rebuild_us`, `layout_us`, `paint_us`,
-/// `encode_present_us`, `skipped` (`0`/`1`) — microsecond resolution so a
+/// `encode_us`, `present_us`, `skipped` (`0`/`1`) — microsecond resolution so a
 /// sub-millisecond pass still shows nonzero.
+///
+/// **Format v2 (Phase 10.A, 2026-07-21):** the single `encode_present_us`
+/// field of v1 was split into separate `encode_us` + `present_us` fields (no
+/// combined field is kept). Any harness parsing this line must handle both
+/// fields; see `benchmarks/PROTOCOL.md`'s format-change note.
 fn format_raw_frame_line(buf: &mut String, n: u64, passes: &FramePasses) {
     use std::fmt::Write as _;
     buf.clear();
     let _ = write!(
         buf,
         "{RAW_FRAME_PREFIX} n={n} total_us={} rebuild_us={} layout_us={} paint_us={} \
-         encode_present_us={} skipped={}",
+         encode_us={} present_us={} skipped={}",
         passes.total().as_micros(),
         passes.rebuild.as_micros(),
         passes.layout.as_micros(),
         passes.paint.as_micros(),
-        passes.encode_present.as_micros(),
+        passes.encode.as_micros(),
+        passes.present.as_micros(),
         u8::from(passes.skipped),
     );
 }
@@ -540,8 +569,21 @@ pub const SPAN_DEVICE_READY: &str = "device_ready";
 /// Startup-span name: the vello renderer (and surface) are ready to
 /// present.
 pub const SPAN_RENDERER_READY: &str = "renderer_ready";
+/// Startup-span name (Phase 10.A first-frame decomposition): a persisted GPU
+/// pipeline cache blob was restored before surface creation — its *presence* in
+/// the startup line is the warm-start (cache-**hit**) signal, its *absence* the
+/// cold-start (cache-**miss**) one, so a slow first frame can be attributed to
+/// shader-pipeline compilation vs a warm cache. Recorded only on a hit, right
+/// before the surface (and thus the pipeline) is built.
+pub const SPAN_PIPELINE_CACHE_RESTORED: &str = "pipeline_cache_restored";
 /// Startup-span name: the app's first `rebuild` pass has completed.
 pub const SPAN_FIRST_REBUILD_DONE: &str = "first_rebuild_done";
+/// Startup-span name (Phase 10.A first-frame decomposition): the app's first
+/// frame's GPU/CPU **encode** has completed — the boundary between the first
+/// frame's paint/encode work and its swapchain-acquire (present) wait, so a
+/// first-frame outlier (a 3646ms-class span) decomposes into encode vs present
+/// exactly as the per-frame [`FramePasses`] split does.
+pub const SPAN_FIRST_ENCODE_DONE: &str = "first_encode_done";
 /// Startup-span name: the app's first frame has been presented to the
 /// surface.
 pub const SPAN_FIRST_FRAME_PRESENTED: &str = "first_frame_presented";
@@ -752,12 +794,17 @@ mod tests {
     // FrameStats
     // ---------------------------------------------------------------
 
+    /// The `encode_ms` argument is split evenly-ish across the `encode` and
+    /// `present` spans (encode gets the whole value, present zero) so existing
+    /// total-time assertions are unchanged by the field split — only the
+    /// per-span attribution moved.
     fn passes(rebuild_ms: u64, layout_ms: u64, paint_ms: u64, encode_ms: u64) -> FramePasses {
         FramePasses {
             rebuild: Duration::from_millis(rebuild_ms),
             layout: Duration::from_millis(layout_ms),
             paint: Duration::from_millis(paint_ms),
-            encode_present: Duration::from_millis(encode_ms),
+            encode: Duration::from_millis(encode_ms),
+            present: Duration::ZERO,
             skipped: false,
         }
     }
@@ -825,6 +872,35 @@ mod tests {
     }
 
     #[test]
+    fn summary_attributes_encode_and_present_spans_separately() {
+        // Phase 10.A: the old combined encode_present is now two spans. A frame
+        // that spends 6ms encoding and 9ms waiting on present must report each
+        // p95 independently — not one conflated number.
+        let mut stats = FrameStats::new_enabled(true);
+        stats.record(FramePasses {
+            rebuild: Duration::from_millis(2),
+            layout: Duration::from_millis(1),
+            paint: Duration::from_millis(1),
+            encode: Duration::from_millis(6),
+            present: Duration::from_millis(9),
+            skipped: false,
+        });
+        let s = stats.summary();
+        assert_eq!(
+            s.encode_p95,
+            Duration::from_millis(6),
+            "encode span attributed"
+        );
+        assert_eq!(
+            s.present_p95,
+            Duration::from_millis(9),
+            "present span attributed"
+        );
+        // Total still sums every span (19ms here).
+        assert_eq!(s.total_p95, Duration::from_millis(19));
+    }
+
+    #[test]
     fn ring_buffer_evicts_oldest_beyond_capacity() {
         let mut stats = FrameStats::with_capacity_enabled(3, true);
         stats.record(passes(1, 0, 0, 0));
@@ -874,7 +950,8 @@ mod tests {
         rebuild_us: u128,
         layout_us: u128,
         paint_us: u128,
-        encode_present_us: u128,
+        encode_us: u128,
+        present_us: u128,
         skipped: bool,
     }
 
@@ -885,7 +962,8 @@ mod tests {
         let mut rebuild_us = None;
         let mut layout_us = None;
         let mut paint_us = None;
-        let mut encode_present_us = None;
+        let mut encode_us = None;
+        let mut present_us = None;
         let mut skipped = None;
         for field in rest.split_whitespace() {
             let (key, value) = field.split_once('=')?;
@@ -895,7 +973,8 @@ mod tests {
                 "rebuild_us" => rebuild_us = value.parse().ok(),
                 "layout_us" => layout_us = value.parse().ok(),
                 "paint_us" => paint_us = value.parse().ok(),
-                "encode_present_us" => encode_present_us = value.parse().ok(),
+                "encode_us" => encode_us = value.parse().ok(),
+                "present_us" => present_us = value.parse().ok(),
                 "skipped" => skipped = value.parse::<u8>().ok().map(|v| v != 0),
                 _ => {}
             }
@@ -906,7 +985,8 @@ mod tests {
             rebuild_us: rebuild_us?,
             layout_us: layout_us?,
             paint_us: paint_us?,
-            encode_present_us: encode_present_us?,
+            encode_us: encode_us?,
+            present_us: present_us?,
             skipped: skipped?,
         })
     }
@@ -918,7 +998,8 @@ mod tests {
             rebuild: Duration::from_micros(1234),
             layout: Duration::from_micros(200),
             paint: Duration::from_micros(300),
-            encode_present: Duration::from_micros(50),
+            encode: Duration::from_micros(50),
+            present: Duration::from_micros(80),
             skipped: false,
         };
         format_raw_frame_line(&mut buf, 42, &p);
@@ -930,7 +1011,8 @@ mod tests {
         assert_eq!(parsed.rebuild_us, 1234);
         assert_eq!(parsed.layout_us, 200);
         assert_eq!(parsed.paint_us, 300);
-        assert_eq!(parsed.encode_present_us, 50);
+        assert_eq!(parsed.encode_us, 50);
+        assert_eq!(parsed.present_us, 80);
         assert!(!parsed.skipped);
     }
 

@@ -216,6 +216,24 @@ pub enum FrameOutcome {
     SurfaceLost,
 }
 
+/// The outcome of a single [`crate::SurfaceRenderer::encode`] call — the first
+/// phase of the two-phase render seam ([`crate::SurfaceRenderer::encode`] +
+/// [`crate::SurfaceRenderer::present`]).
+///
+/// A shell that times encode and present separately (Phase 10.A attribution)
+/// branches on this to decide whether presenting is worthwhile: an
+/// [`EncodeOutcome::Skipped`] frame laid no pixels into the intermediate target
+/// (no renderable surface), so there is nothing to present.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncodeOutcome {
+    /// The scene was encoded into the intermediate target; [`FrameOutcome`] now
+    /// comes from [`crate::SurfaceRenderer::present`].
+    Encoded,
+    /// No renderable surface (`NoSurface`/`SurfaceLost`): nothing was encoded
+    /// and nothing was queued.
+    Skipped,
+}
+
 /// Builds a `wgpu::Surface` from a raw `ANativeWindow` pointer.
 ///
 /// This is one of the framework's sanctioned `unsafe` boundaries: turning a

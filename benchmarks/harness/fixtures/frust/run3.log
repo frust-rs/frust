@@ -1,12 +1,12 @@
 01-01 12:00:09.000  1234  1234 I frust_app: bench-scenario-start s1
-01-01 12:00:09.020  1234  1234 I frust_app: frust-perf raw n=1 total_us=14500 rebuild_us=4000 layout_us=3000 paint_us=6000 encode_present_us=1500 skipped=0
-01-01 12:00:09.037  1234  1234 I frust_app: frust-perf raw n=2 total_us=15200 rebuild_us=4200 layout_us=3100 paint_us=6300 encode_present_us=1600 skipped=0
-01-01 12:00:09.054  1234  1234 I frust_app: frust-perf raw n=3 total_us=0 rebuild_us=0 layout_us=0 paint_us=0 encode_present_us=0 skipped=1
-01-01 12:00:09.071  1234  1234 I frust_app: frust-perf raw n=4 total_us=14800 rebuild_us=4100 layout_us=3000 paint_us=6100 encode_present_us=1600 skipped=0
-01-01 12:00:09.088  1234  1234 I frust_app: frust-perf raw n=5 total_us=17200 rebuild_us=5000 layout_us=3500 paint_us=7000 encode_present_us=1700 skipped=0
-01-01 12:00:09.105  1234  1234 I frust_app: frust-perf raw n=6 total_us=8900 rebuild_us=2500 layout_us=1800 paint_us=3800 encode_present_us=800 skipped=0
-01-01 12:00:09.122  1234  1234 I frust_app: frust-perf raw n=7 total_us=15600 rebuild_us=4300 layout_us=3200 paint_us=6400 encode_present_us=1700 skipped=0
-01-01 12:00:09.139  1234  1234 I frust_app: frust-perf raw n=8 total_us=14900 rebuild_us=4100 layout_us=3000 paint_us=6200 encode_present_us=1600 skipped=0
-01-01 12:00:09.156  1234  1234 I frust_app: frust-perf raw n=9 total_us=16100 rebuild_us=4500 layout_us=3300 paint_us=6700 encode_present_us=1600 skipped=0
-01-01 12:00:09.173  1234  1234 I frust_app: frust-perf raw n=10 total_us=15000 rebuild_us=4200 layout_us=3100 paint_us=6100 encode_present_us=1600 skipped=0
+01-01 12:00:09.020  1234  1234 I frust_app: frust-perf raw n=1 total_us=14500 rebuild_us=4000 layout_us=3000 paint_us=6000 encode_us=750 present_us=750 skipped=0
+01-01 12:00:09.037  1234  1234 I frust_app: frust-perf raw n=2 total_us=15200 rebuild_us=4200 layout_us=3100 paint_us=6300 encode_us=800 present_us=800 skipped=0
+01-01 12:00:09.054  1234  1234 I frust_app: frust-perf raw n=3 total_us=0 rebuild_us=0 layout_us=0 paint_us=0 encode_us=0 present_us=0 skipped=1
+01-01 12:00:09.071  1234  1234 I frust_app: frust-perf raw n=4 total_us=14800 rebuild_us=4100 layout_us=3000 paint_us=6100 encode_us=800 present_us=800 skipped=0
+01-01 12:00:09.088  1234  1234 I frust_app: frust-perf raw n=5 total_us=17200 rebuild_us=5000 layout_us=3500 paint_us=7000 encode_us=850 present_us=850 skipped=0
+01-01 12:00:09.105  1234  1234 I frust_app: frust-perf raw n=6 total_us=8900 rebuild_us=2500 layout_us=1800 paint_us=3800 encode_us=400 present_us=400 skipped=0
+01-01 12:00:09.122  1234  1234 I frust_app: frust-perf raw n=7 total_us=15600 rebuild_us=4300 layout_us=3200 paint_us=6400 encode_us=850 present_us=850 skipped=0
+01-01 12:00:09.139  1234  1234 I frust_app: frust-perf raw n=8 total_us=14900 rebuild_us=4100 layout_us=3000 paint_us=6200 encode_us=800 present_us=800 skipped=0
+01-01 12:00:09.156  1234  1234 I frust_app: frust-perf raw n=9 total_us=16100 rebuild_us=4500 layout_us=3300 paint_us=6700 encode_us=800 present_us=800 skipped=0
+01-01 12:00:09.173  1234  1234 I frust_app: frust-perf raw n=10 total_us=15000 rebuild_us=4200 layout_us=3100 paint_us=6100 encode_us=800 present_us=800 skipped=0
 01-01 12:00:09.500  1234  1234 I frust_app: bench-scenario-end s1

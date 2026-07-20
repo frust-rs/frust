@@ -28,7 +28,7 @@ use frust_core::event::{
 };
 use frust_core::insets::WindowInsets;
 use frust_reactive::{ReactiveRuntime, TrackedScope, provide_context};
-use frust_render::{FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
+use frust_render::{EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
 use frust_shell_common::{
@@ -921,14 +921,45 @@ impl AndroidAppHandle {
         }
         let paint_time = paint_start.map_or(Duration::ZERO, |t| t.elapsed());
 
-        // Clear to the live theme's surface color rather than a hardcoded
-        // white, so a dark-scheme app doesn't render its dark-themed widgets
-        // over a white canvas (6e Finding 6).
+        // Two-phase render seam (Phase 10.A): time the GPU/CPU encode and the
+        // swapchain-acquire (vsync) present separately so the render-thread-split
+        // decision has an encode-only number. Each span's `Instant::now()` stays
+        // gated behind `perf_on` (this module's FFI-path perf convention: zero
+        // clock reads when disabled). Clear to the live theme's surface color
+        // rather than a hardcoded white, so a dark-scheme app doesn't render its
+        // dark-themed widgets over a white canvas (6e Finding 6).
         let encode_start = perf_on.then(Instant::now);
-        let render_result =
+        let encode_outcome =
             self.renderer
-                .render(&self.render_cx, &self.scene, self.theme.scheme().surface);
-        let encode_present_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
+                .encode(&self.render_cx, &self.scene, self.theme.scheme().surface);
+        let encode_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+        // First-frame decomposition (task 10.A): stamp the first encode-complete
+        // boundary once (only when something was actually encoded), so the
+        // startup line splits the first frame into paint/encode vs present. The
+        // `startup_spans` Option is consumed on the first present below, so this
+        // records at most once; the `any` guard covers a pre-present `Redraw`.
+        // `StartupSpans::record` reads no clock when perf is disabled, so this
+        // stays zero-clock-read on a disabled build (FFI-path perf convention).
+        if matches!(encode_outcome, Ok(EncodeOutcome::Encoded)) {
+            if let Some(spans) = self.startup_spans.as_mut() {
+                if !spans
+                    .spans()
+                    .iter()
+                    .any(|(n, _)| *n == perf::SPAN_FIRST_ENCODE_DONE)
+                {
+                    spans.record(perf::SPAN_FIRST_ENCODE_DONE);
+                }
+            }
+        }
+
+        let present_start = perf_on.then(Instant::now);
+        let render_result = match encode_outcome {
+            Ok(EncodeOutcome::Encoded) => self.renderer.present(&self.render_cx),
+            Ok(EncodeOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+            Err(err) => Err(err),
+        };
+        let present_time = present_start.map_or(Duration::ZERO, |t| t.elapsed());
 
         match render_result {
             // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
@@ -962,7 +993,8 @@ impl AndroidAppHandle {
             rebuild: rebuild_time,
             layout: layout_time,
             paint: paint_time,
-            encode_present: encode_present_time,
+            encode: encode_time,
+            present: present_time,
             skipped: false,
         });
         if self.frame_stats.should_emit() {

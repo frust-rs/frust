@@ -18,8 +18,8 @@ use anyhow::{Result, anyhow};
 use crate::context::RenderContext;
 use crate::convert;
 use crate::lifecycle::{
-    AcquireAction, AcquireStatus, FrameOutcome, SurfaceEvent, SurfacePhase, decide_acquire,
-    next_invalid_streak, next_phase,
+    AcquireAction, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent, SurfacePhase,
+    decide_acquire, next_invalid_streak, next_phase,
 };
 
 /// The live GPU resources of a [`SurfacePhase::SurfaceReady`] surface.
@@ -391,6 +391,15 @@ impl SurfaceRenderer {
     /// Encodes `scene` and presents it, clearing to `base_color`; returns the
     /// [`FrameOutcome`] so the shell can react.
     ///
+    /// This is a thin convenience wrapper over the two-phase seam
+    /// [`Self::encode`] + [`Self::present`]: it encodes, and — unless the frame
+    /// was skipped for want of a renderable surface — presents. A caller that
+    /// wants to attribute GPU encode cost separately from the swapchain-acquire
+    /// (vsync) wait — the render-thread-split decision hinges on that split
+    /// (Phase 10.A) — calls the two entry points directly and times each with
+    /// its own clock (timing stays shell-owned; this crate reads no clock — see
+    /// `frust-shell-common::perf`'s layering note).
+    ///
     /// In [`SurfacePhase::NoSurface`]/[`SurfacePhase::SurfaceLost`] the frame is
     /// dropped ([`FrameOutcome::Skipped`]) — never panicking, never queueing
     /// (spec §8.1). On an `Outdated` acquire the surface is reconfigured and
@@ -406,22 +415,44 @@ impl SurfaceRenderer {
         scene: &frust_scene::Scene,
         base_color: peniko::Color,
     ) -> Result<FrameOutcome> {
+        match self.encode(ctx, scene, base_color)? {
+            EncodeOutcome::Skipped => Ok(FrameOutcome::Skipped),
+            EncodeOutcome::Encoded => self.present(ctx),
+        }
+    }
+
+    /// Phase 1 of the frame — the **encode** span: reset the internal
+    /// `vello::Scene`, encode `scene` into it, and render it (clearing to
+    /// `base_color`) into the intermediate `Rgba8Unorm` target. This is the
+    /// GPU-encode/CPU-rasterize work; it does **not** touch the swapchain, so a
+    /// caller timing this call in isolation measures encode cost with no vsync
+    /// wait folded in.
+    ///
+    /// Returns [`EncodeOutcome::Skipped`] (no work done, nothing queued) in any
+    /// phase but [`SurfacePhase::SurfaceReady`] (spec §8.1); otherwise
+    /// [`EncodeOutcome::Encoded`], after which [`Self::present`] blits and
+    /// presents the target. The internal scene is `reset()` every call; nothing
+    /// accumulates across frames.
+    pub fn encode(
+        &mut self,
+        ctx: &RenderContext,
+        scene: &frust_scene::Scene,
+        base_color: peniko::Color,
+    ) -> Result<EncodeOutcome> {
         // Frames are dropped in every phase but SurfaceReady (spec §8.1).
         if !self.phase().can_render() {
-            return Ok(FrameOutcome::Skipped);
+            return Ok(EncodeOutcome::Skipped);
         }
-        // Disjoint field borrows: the reusable scene, the live surface, and the
-        // consecutive-Invalid counter.
+        // Disjoint field borrows: only the reusable scene and the live surface
+        // are needed here; `consecutive_invalid` belongs to `present`.
         let Self {
             scene: vello_scene,
             state,
-            consecutive_invalid,
-            // Consumed only at surface install; irrelevant to the per-frame path.
-            initial_cache_data: _,
+            ..
         } = self;
         let SurfaceState::Ready(ready) = state else {
             // Unreachable: `can_render()` above guaranteed SurfaceReady.
-            return Ok(FrameOutcome::Skipped);
+            return Ok(EncodeOutcome::Skipped);
         };
         // Reborrow through the `Box` once so `ready.backend` and `ready.surface`
         // are disjoint field borrows of a plain `&mut ReadySurface` — the tier
@@ -433,7 +464,7 @@ impl SurfaceRenderer {
 
         // Fill the intermediate `Rgba8Unorm` target for this frame, per tier.
         // Both paths land pixels in `ready.surface.target_view`/`target_texture`;
-        // the acquire/blit/present tail below is tier-agnostic.
+        // the acquire/blit/present tail (see `present`) is tier-agnostic.
         match &mut ready.backend {
             TierBackend::Gpu(renderer) => {
                 vello_scene.reset();
@@ -480,6 +511,41 @@ impl SurfaceRenderer {
             }
         }
 
+        Ok(EncodeOutcome::Encoded)
+    }
+
+    /// Phase 2 of the frame — the **present** span: acquire the swapchain
+    /// texture (the blocking vsync/present wait, per the surface's present
+    /// mode), blit the encoded intermediate target into it, submit, and
+    /// present. Timing this call in isolation attributes the present/vsync wait
+    /// separately from [`Self::encode`]'s GPU work — the split the
+    /// render-thread-split GO/NO-GO decision is made on (Phase 10.A).
+    ///
+    /// Assumes [`Self::encode`] has already filled the intermediate target this
+    /// frame. In any phase but [`SurfacePhase::SurfaceReady`] the call is a
+    /// no-op returning [`FrameOutcome::Skipped`] (spec §8.1). On an `Outdated`
+    /// acquire the surface is reconfigured and [`FrameOutcome::Redraw`] asks the
+    /// shell to try again; on `Lost` the surface is dropped, the machine moves
+    /// to [`SurfacePhase::SurfaceLost`], and [`FrameOutcome::SurfaceLost`] tells
+    /// the shell to recreate it.
+    pub fn present(&mut self, ctx: &RenderContext) -> Result<FrameOutcome> {
+        // Frames are dropped in every phase but SurfaceReady (spec §8.1).
+        if !self.phase().can_render() {
+            return Ok(FrameOutcome::Skipped);
+        }
+        // Disjoint field borrows: the live surface and the consecutive-Invalid
+        // counter (the reusable scene belongs to `encode`).
+        let Self {
+            state,
+            consecutive_invalid,
+            ..
+        } = self;
+        let SurfaceState::Ready(ready) = state else {
+            // Unreachable: `can_render()` above guaranteed SurfaceReady.
+            return Ok(FrameOutcome::Skipped);
+        };
+        let ready: &mut ReadySurface = ready;
+
         use wgpu::CurrentSurfaceTexture as Cst;
         let acquired = ready.surface.surface.get_current_texture();
         let status = match &acquired {
@@ -515,6 +581,7 @@ impl SurfaceRenderer {
                         return Err(anyhow!("frust-render: acquire classification desync"));
                     }
                 };
+                let device_handle = ctx.device_handle();
                 let target_view = surface_texture
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());

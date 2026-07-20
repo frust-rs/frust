@@ -21,9 +21,11 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 class ParseRawLineTests(unittest.TestCase):
     def test_parses_frust_raw_line(self):
+        # Raw format v2 (Phase 10.A): encode_present_us split into
+        # encode_us + present_us.
         rec = stats.parse_raw_line(
             "frust-perf raw n=42 total_us=15234 rebuild_us=3000 layout_us=2000 "
-            "paint_us=8000 encode_present_us=2234 skipped=0"
+            "paint_us=8000 encode_us=1100 present_us=1134 skipped=0"
         )
         self.assertIsNotNone(rec)
         self.assertEqual(rec.source, "frust")
@@ -31,11 +33,14 @@ class ParseRawLineTests(unittest.TestCase):
         self.assertEqual(rec.total_us, 15234)
         self.assertFalse(rec.skipped)
         self.assertEqual(rec.fields["rebuild_us"], "3000")
+        # Both new v2 pass fields are captured in the generic field dict.
+        self.assertEqual(rec.fields["encode_us"], "1100")
+        self.assertEqual(rec.fields["present_us"], "1134")
 
     def test_parses_frust_raw_line_with_skipped_flag(self):
         rec = stats.parse_raw_line(
             "frust-perf raw n=7 total_us=0 rebuild_us=0 layout_us=0 paint_us=0 "
-            "encode_present_us=0 skipped=1"
+            "encode_us=0 present_us=0 skipped=1"
         )
         self.assertIsNotNone(rec)
         self.assertTrue(rec.skipped)
@@ -66,7 +71,7 @@ class ParseRawLineTests(unittest.TestCase):
         # `frust-perf raw`/`flutter-perf raw` substring position at the
         # start of the (already-stripped) line, so a harness that greps
         # logcat down to the bare message before parsing works correctly.
-        line = "  frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 " "paint_us=10 encode_present_us=70 skipped=0  "
+        line = "  frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 " "paint_us=10 encode_us=35 present_us=35 skipped=0  "
         rec = stats.parse_raw_line(line)
         self.assertIsNotNone(rec)
         self.assertEqual(rec.n, 1)
@@ -95,12 +100,12 @@ class SliceScenarioTests(unittest.TestCase):
     def test_slices_only_bracketed_frames(self):
         lines = [
             "noise before",
-            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_present_us=70 skipped=0",
+            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_us=35 present_us=35 skipped=0",
             "bench-scenario-start s1",
-            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_present_us=140 skipped=0",
-            "frust-perf raw n=3 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_present_us=210 skipped=0",
+            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 present_us=70 skipped=0",
+            "frust-perf raw n=3 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_us=105 present_us=105 skipped=0",
             "bench-scenario-end s1",
-            "frust-perf raw n=4 total_us=400 rebuild_us=40 layout_us=40 paint_us=40 encode_present_us=280 skipped=0",
+            "frust-perf raw n=4 total_us=400 rebuild_us=40 layout_us=40 paint_us=40 encode_us=140 present_us=140 skipped=0",
         ]
         frames = stats.slice_scenario(lines, "s1")
         self.assertEqual([f.n for f in frames], [2, 3])
@@ -108,10 +113,10 @@ class SliceScenarioTests(unittest.TestCase):
     def test_slices_ignore_other_scenario_names(self):
         lines = [
             "bench-scenario-start s2",
-            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_present_us=70 skipped=0",
+            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_us=35 present_us=35 skipped=0",
             "bench-scenario-end s2",
             "bench-scenario-start s1",
-            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_present_us=140 skipped=0",
+            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 present_us=70 skipped=0",
             "bench-scenario-end s1",
         ]
         frames = stats.slice_scenario(lines, "s1")
@@ -119,8 +124,8 @@ class SliceScenarioTests(unittest.TestCase):
 
     def test_none_scenario_includes_every_raw_line(self):
         lines = [
-            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_present_us=70 skipped=0",
-            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_present_us=140 skipped=0",
+            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_us=35 present_us=35 skipped=0",
+            "frust-perf raw n=2 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 present_us=70 skipped=0",
         ]
         frames = stats.slice_scenario(lines, None)
         self.assertEqual([f.n for f in frames], [1, 2])
@@ -133,19 +138,19 @@ class SliceScenarioTests(unittest.TestCase):
         # series instead of only picking up the first (or breaking).
         lines = [
             "bench-scenario-start s3-create1k",
-            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_present_us=70 skipped=0",
+            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_us=35 present_us=35 skipped=0",
             "bench-scenario-end s3-create1k",
             # An unrelated op's window in between must not leak in.
             "bench-scenario-start s3-create10k",
-            "frust-perf raw n=2 total_us=999 rebuild_us=10 layout_us=10 paint_us=10 encode_present_us=969 skipped=0",
+            "frust-perf raw n=2 total_us=999 rebuild_us=10 layout_us=10 paint_us=10 encode_us=484 present_us=485 skipped=0",
             "bench-scenario-end s3-create10k",
             # Cycle 2's create1k window — same marker name, repeats.
             "bench-scenario-start s3-create1k",
-            "frust-perf raw n=3 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_present_us=140 skipped=0",
+            "frust-perf raw n=3 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_us=70 present_us=70 skipped=0",
             "bench-scenario-end s3-create1k",
             # Cycle 3's create1k window — a third repeat.
             "bench-scenario-start s3-create1k",
-            "frust-perf raw n=4 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_present_us=210 skipped=0",
+            "frust-perf raw n=4 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_us=105 present_us=105 skipped=0",
             "bench-scenario-end s3-create1k",
         ]
         frames = stats.slice_scenario(lines, "s3-create1k")

@@ -179,13 +179,26 @@ table). One line per recorded frame, microsecond resolution, in this exact
 field order (`format_raw_frame_line`):
 
 ```
-frust-perf raw n=<u64> total_us=<u128> rebuild_us=<u128> layout_us=<u128> paint_us=<u128> encode_present_us=<u128> skipped=<0|1>
+frust-perf raw n=<u64> total_us=<u128> rebuild_us=<u128> layout_us=<u128> paint_us=<u128> encode_us=<u128> present_us=<u128> skipped=<0|1>
 ```
 
+> **Raw-format change — v2, 2026-07-21 (Phase 10.A).** The single
+> `encode_present_us` field of v1 was split into separate `encode_us` +
+> `present_us` fields so GPU/CPU encode cost and the swapchain-acquire
+> (vsync) wait are separately attributable (the render-thread-split GO/NO-GO
+> decision is made on the encode-only number). No combined field is kept.
+> **Cross-device comparability:** a v1 log's `encode_present_us` corresponds
+> to `encode_us + present_us` in v2 — sum the two when comparing a post-split
+> capture against a pre-2026-07-21 baseline. `stats.py`'s parsing is
+> key=value and forward-compatible, so its cross-app percentile table (keyed
+> on `total_us`) is unaffected by the split.
+
 - `n` — 1-indexed running frame counter.
-- `total_us` — whole-frame duration (rebuild+layout+paint+encode_present).
-- `rebuild_us` / `layout_us` / `paint_us` / `encode_present_us` — per-pass
-  durations, microseconds.
+- `total_us` — whole-frame duration (rebuild+layout+paint+encode+present).
+- `rebuild_us` / `layout_us` / `paint_us` / `encode_us` / `present_us` —
+  per-pass durations, microseconds. `encode_us` is the GPU/CPU encode span
+  (no vsync wait); `present_us` is the swapchain-acquire + blit + present
+  span (dominated by the blocking vsync wait).
 - `skipped` — `1` if the frame-gate skipped this tick (see
   `docs/ARCHITECTURE.md`'s Frame gate), else `0`. A skipped frame's other
   fields are near-zero and should be excluded from percentile math the
@@ -222,7 +235,9 @@ frust-bench raw n=<u64> total_us=<u64> build_us=<u64> raster_us=<u64> skipped=0
   Frust's `FramePasses` does, so this is reported as one combined figure,
   not force-split to match Frust's finer granularity).
 - `raster_us` — `FrameTiming.rasterDuration.inMicroseconds` (Flutter's
-  nearest equivalent to `encode_present_us`).
+  nearest equivalent to Frust's `encode_us + present_us` combined; Flutter's
+  raster span does not separate encode from present the way Frust's v2 raw
+  line now does).
 - `skipped` — always `0` today; reserved for parity with Frust's frame
   gate if the Flutter app ever gains an analogous skip path.
 

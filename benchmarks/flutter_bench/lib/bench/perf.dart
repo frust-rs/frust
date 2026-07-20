@@ -3,7 +3,7 @@
 ///
 /// The frust side (`crates/frust-shell-common/src/perf.rs`) emits, per frame,
 /// one `frust-perf raw n=.. total_us=.. rebuild_us=.. layout_us=.. paint_us=..
-/// encode_present_us=.. skipped=0|1` line plus `bench-scenario-start/end NAME`
+/// encode_us=.. present_us=.. skipped=0|1` line plus `bench-scenario-start/end NAME`
 /// markers, all via `log::info!` (logcat on device). This module
 /// emits the analogous Flutter series so ONE shared stats script can slice
 /// both by identical markers and compute identical percentiles.
@@ -20,7 +20,9 @@
 /// - `build_us`  — [FrameTiming.buildDuration], the UI-thread build+layout+paint
 ///   phase. Analogous to the frust side's `rebuild_us + layout_us + paint_us`.
 /// - `raster_us` — [FrameTiming.rasterDuration], the raster-thread GPU encode
-///   + present. Analogous to the frust side's `encode_present_us`.
+///   + present. Analogous to the frust side's `encode_us + present_us`
+///   combined (frust's v2 raw line splits the two; Flutter's raster span
+///   does not).
 /// - `total_us`  — [FrameTiming.totalSpan], vsync-start to raster-finish, the
 ///   frame's wall time. Directly comparable to the frust side's `total_us`.
 ///
