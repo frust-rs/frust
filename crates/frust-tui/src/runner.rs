@@ -407,11 +407,11 @@ fn run_clean(
     Ok(())
 }
 
-/// One [`SessionEventKind::Line`] message for `id`.
+/// One single-line [`SessionEventKind::Lines`] batch message for `id`.
 fn session_line(id: SessionId, text: String) -> Message {
     Message::Session(SessionEvent {
         id,
-        kind: SessionEventKind::Line(text),
+        kind: SessionEventKind::Lines(vec![text]),
     })
 }
 

@@ -642,11 +642,12 @@ fn with_build_launcher(state: &mut AppState, f: impl FnOnce(&mut BuildLauncher))
 
 /// Route one supervisor event into the matching session's view-model.
 ///
-/// Redraw policy honors the dirty-frame skip: a **line** for a background
-/// (non-active) session is buffered without a repaint; a line for the *active*
-/// followed session, and *any* state change (the sidebar/tab status glyph),
-/// redraw. An event for an unknown id is dropped (the session must be
-/// registered first — see [`Message::RegisterSession`]).
+/// Redraw policy honors the dirty-frame skip: a **line batch** for a
+/// background (non-active) session is buffered without a repaint; a batch for
+/// the *active* followed session, and *any* state change (the sidebar/tab
+/// status glyph) or a new drop count, redraw. An event for an unknown id is
+/// dropped (the session must be registered first — see
+/// [`Message::RegisterSession`]).
 fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     let Some(idx) = state.session_index(ev.id) else {
         return Outcome::idle();
@@ -654,14 +655,24 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     let is_active = state.active_session == Some(idx);
     let session = &mut state.sessions[idx];
     match ev.kind {
-        SessionEventKind::Line(line) => {
+        SessionEventKind::Lines(lines) => {
             let following = session.is_following();
-            session.push_line(line);
+            for line in lines {
+                session.push_line(line);
+            }
             Outcome::dirty(is_active && following)
         }
         SessionEventKind::State(s) => {
             session.state = s;
             Outcome::redraw()
+        }
+        SessionEventKind::Dropped(n) => {
+            // The supervisor's bounded-channel overflow counter (cumulative,
+            // drop-newest). Store it so the UI can flag a session whose log is
+            // missing lines; a change is worth a repaint on the active tab.
+            let changed = session.dropped != n;
+            session.dropped = n;
+            Outcome::dirty(is_active && changed)
         }
     }
 }
@@ -782,7 +793,7 @@ mod tests {
     fn line(id: SessionId, s: &str) -> Message {
         Message::Session(SessionEvent {
             id,
-            kind: SessionEventKind::Line(s.to_string()),
+            kind: SessionEventKind::Lines(vec![s.to_string()]),
         })
     }
 

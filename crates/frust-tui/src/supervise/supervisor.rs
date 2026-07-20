@@ -13,16 +13,37 @@
 //! [`StreamHandle::lines`] is a blocking [`LineReceiver`]; draining
 //! it is a blocking loop that must not sit on a tokio worker. A plain std
 //! thread per session keeps the blocking recv off the async runtime while
-//! still feeding the async channel (`tokio::sync::mpsc::UnboundedSender::send`
-//! is a non-blocking, runtime-free call). This is the "spawn_blocking / std
-//! thread" split PLAN D2 calls for.
+//! still feeding the async channel through `try_send` — a non-blocking,
+//! runtime-free call. This is the "spawn_blocking / std thread" split PLAN D2
+//! calls for.
+//!
+//! # Bounded channel + overflow policy (drop-newest, counted)
+//!
+//! The engine channel is **bounded** ([`SESSION_CHANNEL_CAP`]) rather than
+//! unbounded, so a runaway session can never grow it without limit. The drain
+//! threads send with [`Sender::try_send`] **only** — never a blocking send —
+//! so a full channel (a stalled/behind engine) can never wedge a drain
+//! thread, and [`Supervisor`]'s `Drop` join stays prompt. On a full channel a
+//! line batch is **dropped (newest first)** and its lines are added to a
+//! per-session cumulative counter, surfaced to the engine as
+//! [`SessionEventKind::Dropped`] the moment the channel has room again — the
+//! same drop-oldest-vs-drop-newest tradeoff `frust-drive`'s
+//! [`LineReceiver`] ring makes one layer down, mirrored here for the second
+//! hop. Coalescing (a burst becomes one [`SessionEventKind::Lines`] batch)
+//! keeps the channel near-empty in practice, so an overflow only happens under
+//! a pathological flood against a wedged consumer.
 //!
 //! # Kill boundary (PLAN D3's known limitation)
 //!
 //! `stop` is prompt for anything spawned through `spawn_streaming` (the
 //! desktop `cargo run` preview, or a device session's logcat/console streaming
 //! phase): killing the child closes its stdout pipe, which unblocks the drain
-//! loop immediately. A device session's multi-phase drive pipeline (build →
+//! loop immediately. Once a session is streaming, the stop→kill→EOF path is
+//! **unconditional** — there is no window in which a `stop` can be observed
+//! yet the just-installed stream keeps running: the device stream is installed
+//! and rechecked against the cancel flag under a single continuous lock hold
+//! (see [`DeviceControl::install_logcat`]), and `stop`'s kill takes that same
+//! lock. A device session's multi-phase drive pipeline (build →
 //! install → launch → logcat) is only *promptly* killable once it reaches its
 //! streaming phase — a kill requested mid-Gradle sets the pipeline's cancel
 //! flag, which the drive checks at each phase boundary, so it takes effect at
@@ -40,12 +61,24 @@ use anyhow::{Context, Result};
 use frust_drive::devices::{Kind, Platform};
 use frust_drive::process::{LineReceiver, ProcessRunner, StreamHandle};
 use frust_drive::{android_run, ios_run};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use super::session::{
     DevicePlan, DeviceTarget, LaunchPlan, SessionEvent, SessionEventKind, SessionId, SessionSpec,
     SessionState, infer_state,
 };
+
+/// Bounded capacity of the single engine event channel every session feeds.
+///
+/// Low-hundreds by design: each slot carries a whole coalesced
+/// [`SessionEventKind::Lines`] batch (a burst of output), not a single line,
+/// so this bounds the number of *bursts* in flight rather than lines — deep
+/// enough to absorb many concurrent sessions' bursts against a momentarily
+/// behind engine, small enough that a wedged consumer can't let memory grow
+/// without limit. Overflow is drop-newest + counted, never a blocking send
+/// (see the module docs' overflow policy).
+const SESSION_CHANNEL_CAP: usize = 256;
 
 /// One live (or terminated) session's supervisor-side bookkeeping.
 struct SessionEntry {
@@ -104,32 +137,58 @@ impl DeviceControl {
             handle.kill();
         }
     }
+
+    /// Install the just-started logcat/console stream and hand back its line
+    /// receiver — the single-lock-hold install+recheck that closes the
+    /// device-stop race (G2).
+    ///
+    /// Under **one continuous hold** of the same `logcat` mutex `stop`'s kill
+    /// takes: store the handle, then re-check `cancel`; if a `stop` already set
+    /// it (its kill found an empty slot because the stream didn't exist yet),
+    /// kill the just-stored handle now. This leaves no window in which a
+    /// `stop` is observed yet the stream keeps running — the two orderings are
+    /// (a) `stop` first: it sets `cancel`, finds no handle, returns; this
+    /// install then sees `cancel` under the lock and kills; (b) install first:
+    /// it stores the handle and sees `cancel` clear; `stop` then takes the
+    /// lock and kills the present handle. Either way the stream is killed
+    /// exactly once and the drain sees EOF promptly.
+    fn install_logcat(&self, handle: StreamHandle) -> LineReceiver {
+        let mut slot = lock_logcat(&self.logcat);
+        let lines = handle.lines.clone();
+        *slot = Some(handle);
+        if self.cancel.load(Ordering::SeqCst)
+            && let Some(installed) = slot.as_mut()
+        {
+            installed.kill();
+        }
+        lines
+    }
 }
 
 /// Owns every supervised session and the single event channel they feed.
 ///
-/// Construct with [`Supervisor::new`], which hands back the
-/// [`UnboundedReceiver`] the engine drains. Start sessions with
+/// Construct with [`Supervisor::new`], which hands back the bounded
+/// [`Receiver`] the engine drains. Start sessions with
 /// [`Supervisor::start`] (a [`SessionSpec`]) or [`Supervisor::start_with_plan`]
 /// (a purpose-built [`LaunchPlan`]); stop them with [`Supervisor::stop`] /
 /// [`Supervisor::stop_all`].
 pub struct Supervisor {
     runner: Arc<dyn ProcessRunner + Send + Sync>,
-    events_tx: UnboundedSender<SessionEvent>,
+    events_tx: Sender<SessionEvent>,
     next_id: u64,
     sessions: HashMap<SessionId, SessionEntry>,
 }
 
 impl Supervisor {
     /// Build a supervisor over `runner`, returning it paired with the event
-    /// receiver the engine `select!`s on. Production passes
+    /// receiver the engine `select!`s on. The channel is bounded
+    /// ([`SESSION_CHANNEL_CAP`]) with a drop-newest overflow policy (module
+    /// docs). Production passes
     /// `Arc::new(frust_drive::process::RealProcessRunner)`; tests pass an
     /// `Arc<FakeProcessRunner>` scripted with `with_stream`/
     /// `with_hanging_stream`.
-    pub fn new(
-        runner: Arc<dyn ProcessRunner + Send + Sync>,
-    ) -> (Self, UnboundedReceiver<SessionEvent>) {
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
+    pub fn new(runner: Arc<dyn ProcessRunner + Send + Sync>) -> (Self, Receiver<SessionEvent>) {
+        let (events_tx, events_rx) = mpsc::channel(SESSION_CHANNEL_CAP);
         let supervisor = Self {
             runner,
             events_tx,
@@ -303,35 +362,159 @@ fn lock(handle: &Mutex<StreamHandle>) -> std::sync::MutexGuard<'_, StreamHandle>
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// A drain thread's non-blocking sender into the bounded engine channel,
+/// enforcing the drop-newest overflow policy (module docs) and the per-session
+/// dropped-line accounting.
+///
+/// Every send goes through [`Sender::try_send`] — never a blocking send — so a
+/// full channel can never wedge a drain thread and [`Supervisor`]'s `Drop`
+/// join stays prompt. A failed `Ok`-path send returns `Err(())`, the "engine
+/// dropped the receiver, stop" signal every caller bails on.
+struct SessionSender {
+    tx: Sender<SessionEvent>,
+    id: SessionId,
+    /// Cumulative output lines dropped so far because the channel was full.
+    dropped: u64,
+    /// The last `dropped` value actually delivered as a
+    /// [`SessionEventKind::Dropped`], so we only re-report an increase.
+    reported: u64,
+}
+
+impl SessionSender {
+    fn new(tx: Sender<SessionEvent>, id: SessionId) -> Self {
+        Self {
+            tx,
+            id,
+            dropped: 0,
+            reported: 0,
+        }
+    }
+
+    /// Send one coalesced batch. On a full channel, drop it (newest first) and
+    /// add its lines to the cumulative dropped counter; on success, flush any
+    /// pending dropped count. An empty batch only flushes. `Err(())` once the
+    /// receiver is gone.
+    fn send_lines(&mut self, lines: Vec<String>) -> Result<(), ()> {
+        if lines.is_empty() {
+            return self.flush_dropped();
+        }
+        let n = lines.len() as u64;
+        match self.tx.try_send(SessionEvent {
+            id: self.id,
+            kind: SessionEventKind::Lines(lines),
+        }) {
+            Ok(()) => self.flush_dropped(),
+            Err(TrySendError::Full(_)) => {
+                self.dropped += n;
+                Ok(())
+            }
+            Err(TrySendError::Closed(_)) => Err(()),
+        }
+    }
+
+    /// Send a lifecycle state change. Like every send it is non-blocking
+    /// (`try_send`); a state lost to a full channel is possible only under the
+    /// pathological flood the module docs describe (batch coalescing keeps the
+    /// channel near-empty otherwise), and is preferred over ever blocking the
+    /// drain thread — which would stall `Drop`'s join. `Err(())` once the
+    /// receiver is gone.
+    fn send_state(&mut self, state: SessionState) -> Result<(), ()> {
+        match self.tx.try_send(SessionEvent {
+            id: self.id,
+            kind: SessionEventKind::State(state),
+        }) {
+            Ok(()) => self.flush_dropped(),
+            Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Closed(_)) => Err(()),
+        }
+    }
+
+    /// If more lines have been dropped than last reported, try (non-blocking)
+    /// to deliver the new cumulative count. A full channel leaves it pending
+    /// for the next successful send; `Err(())` once the receiver is gone.
+    fn flush_dropped(&mut self) -> Result<(), ()> {
+        if self.dropped > self.reported {
+            match self.tx.try_send(SessionEvent {
+                id: self.id,
+                kind: SessionEventKind::Dropped(self.dropped),
+            }) {
+                Ok(()) => self.reported = self.dropped,
+                Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Closed(_)) => return Err(()),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Send one coalesced batch of lines and, for every phase transition the batch
+/// announces (forward-only, across the batch in order), the new state —
+/// keeping the desktop drain and the device pipeline/logcat feeds identical.
+/// Lines go out first, then any state transitions, matching the engine's
+/// "line then glyph" ordering. Returns `Err(())` once the engine has dropped
+/// the receiver.
+fn feed_lines(
+    sender: &mut SessionSender,
+    state: &mut SessionState,
+    batch: Vec<String>,
+) -> Result<(), ()> {
+    let mut transitions = Vec::new();
+    for line in &batch {
+        if let Some(next) = infer_state(state, line) {
+            *state = next.clone();
+            transitions.push(next);
+        }
+    }
+    sender.send_lines(batch)?;
+    for t in transitions {
+        sender.send_state(t)?;
+    }
+    Ok(())
+}
+
+/// Drain a [`LineReceiver`] to EOF, coalescing each burst into one batch: block
+/// on `recv` for the next line, then drain everything already buffered via
+/// `try_recv` into the same batch before sending. `try_recv`'s natural
+/// emptying is also the cancel-observation point — a killed stream closes,
+/// unblocking the `recv`. Returns `Ok(())` at EOF (the stream closed) or
+/// `Err(())` if the engine dropped the receiver mid-drain (the caller then
+/// bails without emitting a terminal state).
+fn drain_receiver(
+    sender: &mut SessionSender,
+    state: &mut SessionState,
+    lines: &LineReceiver,
+) -> Result<(), ()> {
+    while let Ok(first) = lines.recv() {
+        let mut batch = vec![first];
+        while let Ok(line) = lines.try_recv() {
+            batch.push(line);
+        }
+        feed_lines(sender, state, batch)?;
+    }
+    Ok(())
+}
+
 /// The per-session drain loop, run on its own std thread: forward every line
-/// and inferred state change into the engine channel, then reap the child and
-/// emit the terminal state.
+/// (coalesced into batches) and inferred state change into the engine channel,
+/// then reap the child and emit the terminal state.
 fn drain_session(
     id: SessionId,
     lines: LineReceiver,
     handle: Arc<Mutex<StreamHandle>>,
     killed: Arc<AtomicBool>,
-    events: UnboundedSender<SessionEvent>,
+    events: Sender<SessionEvent>,
 ) {
+    let mut sender = SessionSender::new(events, id);
     let mut state = SessionState::Configuring;
-    // The engine dropping the receiver (shutdown) makes every `send` fail;
-    // bail out of the loop immediately when that happens — there is nothing
-    // left to report to, and the child is reaped via the handle's own
-    // drop-detach path.
-    if emit(&events, id, SessionEventKind::State(state.clone())).is_err() {
+    // The engine dropping the receiver (shutdown) makes every send fail; bail
+    // out immediately when that happens — there is nothing left to report to,
+    // and the child is reaped via the handle's own drop-detach path.
+    if sender.send_state(state.clone()).is_err() {
         return;
     }
 
-    while let Ok(line) = lines.recv() {
-        if emit(&events, id, SessionEventKind::Line(line.clone())).is_err() {
-            return;
-        }
-        if let Some(next) = infer_state(&state, &line) {
-            state = next;
-            if emit(&events, id, SessionEventKind::State(state.clone())).is_err() {
-                return;
-            }
-        }
+    if drain_receiver(&mut sender, &mut state, &lines).is_err() {
+        return;
     }
 
     // stdout hit EOF: the process exited on its own or a `stop` killed it.
@@ -342,17 +525,7 @@ fn drain_session(
     } else {
         SessionState::Exited(success)
     };
-    let _ = emit(&events, id, SessionEventKind::State(terminal));
-}
-
-/// Send one event, mapping the tokio send error to `()` (the only failure is a
-/// dropped receiver, which every caller treats as "engine gone, stop").
-fn emit(
-    events: &UnboundedSender<SessionEvent>,
-    id: SessionId,
-    kind: SessionEventKind,
-) -> Result<(), ()> {
-    events.send(SessionEvent { id, kind }).map_err(|_| ())
+    let _ = sender.send_state(terminal);
 }
 
 /// Lock a device session's logcat slot, recovering from a poisoned mutex the
@@ -363,70 +536,49 @@ fn lock_logcat(
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Emit one line for a session and, if it announces a later build phase,
-/// advance the state machine and emit the new state — the shared feed both the
-/// device pipeline's phase lines and its logcat stream route through, so state
-/// inference is identical to the desktop drain's ([`drain_session`]). Returns
-/// `Err(())` once the engine has dropped the receiver.
-fn feed_line(
-    events: &UnboundedSender<SessionEvent>,
-    id: SessionId,
-    state: &mut SessionState,
-    line: &str,
-) -> Result<(), ()> {
-    emit(events, id, SessionEventKind::Line(line.to_string()))?;
-    if let Some(next) = infer_state(state, line) {
-        *state = next;
-        emit(events, id, SessionEventKind::State(state.clone()))?;
-    }
-    Ok(())
-}
-
 /// The per-device-session pipeline loop, run on its own std thread: drive the
 /// drive's multi-phase device pipeline (feeding phase lines through
-/// [`feed_line`]), then — once it hands back the logcat/console stream — drain
-/// that stream the same way [`drain_session`] drains a desktop child, and emit
-/// the terminal state. A cancellation observed before streaming (or a killed
-/// stream) reports [`SessionState::Killed`]; a pipeline error reports the
-/// error as a line then [`SessionState::Exited(false)`].
+/// [`feed_lines`]), then — once it hands back the logcat/console stream —
+/// install it under the stop-race-closing lock hold
+/// ([`DeviceControl::install_logcat`]) and drain it the same way
+/// [`drain_session`] drains a desktop child, and emit the terminal state. A
+/// cancellation observed before streaming (or a killed stream) reports
+/// [`SessionState::Killed`]; a pipeline error reports the error as a line then
+/// [`SessionState::Exited(false)`].
 fn run_device_session(
     id: SessionId,
     plan: DevicePlan,
     runner: Arc<dyn ProcessRunner + Send + Sync>,
     control: Arc<DeviceControl>,
-    events: UnboundedSender<SessionEvent>,
+    events: Sender<SessionEvent>,
 ) {
+    let mut sender = SessionSender::new(events, id);
     let mut state = SessionState::Configuring;
-    if emit(&events, id, SessionEventKind::State(state.clone())).is_err() {
+    if sender.send_state(state.clone()).is_err() {
         return;
     }
 
     // Run build → install → launch, streaming phase lines; the closure borrows
-    // `state`/`events` only for the pipeline's duration (it returns the logcat
-    // handle, after which `state` is used again for the drain below).
+    // `sender`/`state` only for the pipeline's duration (it returns the logcat
+    // handle, after which both are used again for the drain below).
     let pipeline = {
-        let events = &events;
+        let sender = &mut sender;
+        let state = &mut state;
         let mut on_line = |line: &str| {
-            let _ = feed_line(events, id, &mut state, line);
+            let _ = feed_lines(sender, state, vec![line.to_string()]);
         };
         launch_device_stream(&plan, runner.as_ref(), &control.cancel, &mut on_line)
     };
 
     let terminal = match pipeline {
         Ok(Some(handle)) => {
-            // Clone the receive side, then stash the handle so `stop` can kill
-            // the stream; the drain owns receiving, the handle owns kill/wait.
-            let lines = handle.lines.clone();
-            *lock_logcat(&control.logcat) = Some(handle);
+            // Install the stream under one continuous lock hold, closing the
+            // stop race (G2): a `stop` observed just before or after this
+            // point kills the stream exactly once, so the drain always sees
+            // EOF rather than blocking forever (see `install_logcat`).
+            let lines = control.install_logcat(handle);
 
-            let mut disconnected = false;
-            while let Ok(line) = lines.recv() {
-                if feed_line(&events, id, &mut state, &line).is_err() {
-                    disconnected = true;
-                    break;
-                }
-            }
-            if disconnected {
+            if drain_receiver(&mut sender, &mut state, &lines).is_err() {
                 return;
             }
 
@@ -444,15 +596,11 @@ fn run_device_session(
         // Cancelled before the streaming phase began.
         Ok(None) => SessionState::Killed,
         Err(err) => {
-            let _ = emit(
-                &events,
-                id,
-                SessionEventKind::Line(format!("error: {err:#}")),
-            );
+            let _ = sender.send_lines(vec![format!("error: {err:#}")]);
             SessionState::Exited(false)
         }
     };
-    let _ = emit(&events, id, SessionEventKind::State(terminal));
+    let _ = sender.send_state(terminal);
 }
 
 /// Dispatch the drive's cancellable device pipeline by the plan's device
@@ -524,10 +672,7 @@ mod tests {
 
     /// Receive the next event for `want_id`, ignoring events for other
     /// sessions, within [`RECV_TIMEOUT`].
-    async fn next_for(
-        rx: &mut UnboundedReceiver<SessionEvent>,
-        want_id: SessionId,
-    ) -> SessionEvent {
+    async fn next_for(rx: &mut Receiver<SessionEvent>, want_id: SessionId) -> SessionEvent {
         loop {
             let ev = timeout(RECV_TIMEOUT, rx.recv())
                 .await
@@ -545,14 +690,15 @@ mod tests {
     /// other ids, so multi-session tests must use [`drain_all_to_terminal`]
     /// instead (which never throws another session's events away).
     async fn drain_to_terminal(
-        rx: &mut UnboundedReceiver<SessionEvent>,
+        rx: &mut Receiver<SessionEvent>,
         want_id: SessionId,
     ) -> (Vec<String>, SessionState) {
         let mut lines = Vec::new();
         loop {
             let ev = next_for(rx, want_id).await;
             match ev.kind {
-                SessionEventKind::Line(l) => lines.push(l),
+                SessionEventKind::Lines(mut ls) => lines.append(&mut ls),
+                SessionEventKind::Dropped(_) => {}
                 SessionEventKind::State(s) if s.is_terminal() => return (lines, s),
                 SessionEventKind::State(_) => {}
             }
@@ -568,7 +714,7 @@ mod tests {
     /// session's terminal event while scanning for the first, wedging the
     /// second drain forever.
     async fn drain_all_to_terminal(
-        rx: &mut UnboundedReceiver<SessionEvent>,
+        rx: &mut Receiver<SessionEvent>,
         ids: &[SessionId],
     ) -> HashMap<SessionId, (Vec<String>, SessionState)> {
         let mut lines: HashMap<SessionId, Vec<String>> =
@@ -580,11 +726,12 @@ mod tests {
                 .expect("timed out waiting for a session event")
                 .expect("event channel closed unexpectedly");
             match ev.kind {
-                SessionEventKind::Line(l) => {
+                SessionEventKind::Lines(mut ls) => {
                     if let Some(v) = lines.get_mut(&ev.id) {
-                        v.push(l);
+                        v.append(&mut ls);
                     }
                 }
+                SessionEventKind::Dropped(_) => {}
                 SessionEventKind::State(s) if s.is_terminal() => {
                     terminals.insert(ev.id, s);
                 }
@@ -848,5 +995,180 @@ mod tests {
         let results = drain_all_to_terminal(&mut rx, &[a, b]).await;
         assert_eq!(results[&a].1, SessionState::Killed);
         assert_eq!(results[&b].1, SessionState::Killed);
+    }
+
+    // ── G2: device-stop race (install+recheck under one lock) ───────────────
+
+    /// Spawn a hanging fake stream directly and hand back its [`StreamHandle`],
+    /// the raw material for the install-race tests below.
+    fn hanging_handle(key_cmd: &str, key_args: &[&str]) -> StreamHandle {
+        let runner = FakeProcessRunner::new()
+            .with_hanging_stream(invocation(key_cmd, key_args), ["streaming…"]);
+        runner
+            .spawn_streaming(key_cmd, key_args, None, &[])
+            .expect("fake hanging stream spawns")
+    }
+
+    fn invocation(cmd: &str, args: &[&str]) -> String {
+        std::iter::once(cmd)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The classic G2 gap: a `stop` arrives *before* the logcat handle exists,
+    /// so its kill finds an empty slot and sets only `cancel`. `install_logcat`
+    /// must — under the same lock — observe `cancel` and kill the
+    /// just-installed stream, so its drain sees EOF promptly instead of
+    /// blocking forever. No second `stop` is needed.
+    #[test]
+    fn install_logcat_closes_the_stop_race_when_stop_arrives_first() {
+        let handle = hanging_handle("adb", &["logcat"]);
+        let control = DeviceControl::new();
+
+        // stop races ahead of the stream: cancel set, empty slot, nothing killed.
+        control.stop();
+        assert!(control.cancel.load(Ordering::SeqCst));
+
+        // Install under one continuous lock hold — it must kill on seeing cancel.
+        let lines = control.install_logcat(handle);
+
+        let (tx, _rx) = mpsc::channel(SESSION_CHANNEL_CAP);
+        let mut sender = SessionSender::new(tx, SessionId(0));
+        let mut state = SessionState::Running;
+        let started = std::time::Instant::now();
+        drain_receiver(&mut sender, &mut state, &lines).expect("receiver stays connected");
+        assert!(
+            started.elapsed() < PROMPT_STOP,
+            "a stream killed by install_logcat must drain to EOF promptly, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The reverse ordering: install first (cancel still clear, stream left
+    /// running), then `stop` kills the now-installed stream. Draining is prompt
+    /// and the double path (install's recheck + stop's kill) never
+    /// double-kills into a panic.
+    #[test]
+    fn stop_kills_a_stream_installed_before_it() {
+        let handle = hanging_handle("adb", &["logcat"]);
+        let control = Arc::new(DeviceControl::new());
+
+        let lines = control.install_logcat(handle);
+        assert!(!control.cancel.load(Ordering::SeqCst), "not cancelled yet");
+
+        control.stop(); // now kills the installed stream
+
+        let (tx, _rx) = mpsc::channel(SESSION_CHANNEL_CAP);
+        let mut sender = SessionSender::new(tx, SessionId(0));
+        let mut state = SessionState::Running;
+        let started = std::time::Instant::now();
+        drain_receiver(&mut sender, &mut state, &lines).expect("receiver stays connected");
+        assert!(
+            started.elapsed() < PROMPT_STOP,
+            "a stopped stream must drain to EOF promptly, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    // ── G6: batch coalescing + bounded-channel overflow ─────────────────────
+
+    /// A burst of buffered lines drains into exactly ONE coalesced
+    /// [`SessionEventKind::Lines`] batch — the whole point of the recv-then-
+    /// try_recv coalescing loop. Deterministic: `wait` joins the fake
+    /// producer, so every line is buffered (and the stream closed) before the
+    /// drain begins.
+    #[test]
+    fn a_buffered_burst_coalesces_into_one_lines_batch() {
+        let runner = FakeProcessRunner::new().with_stream(
+            "cargo run",
+            ["   Compiling app", "     Running `app`", "hello", "world"],
+            true,
+        );
+        let mut handle = runner
+            .spawn_streaming("cargo", &["run"], None, &[])
+            .expect("fake stream spawns");
+        let lines = handle.lines.clone();
+        handle.wait(); // all lines pushed + buffer closed → a fully-buffered burst
+
+        let (tx, mut rx) = mpsc::channel(SESSION_CHANNEL_CAP);
+        let mut sender = SessionSender::new(tx, SessionId(0));
+        let mut state = SessionState::Configuring;
+        drain_receiver(&mut sender, &mut state, &lines).expect("receiver stays connected");
+        drop(sender);
+
+        let mut batches: Vec<Vec<String>> = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let SessionEventKind::Lines(ls) = ev.kind {
+                batches.push(ls);
+            }
+        }
+        assert_eq!(
+            batches.len(),
+            1,
+            "a fully-buffered burst coalesces into one batch, got {batches:?}"
+        );
+        assert_eq!(
+            batches[0],
+            vec![
+                "   Compiling app".to_string(),
+                "     Running `app`".to_string(),
+                "hello".to_string(),
+                "world".to_string(),
+            ]
+        );
+    }
+
+    /// Overflow policy: with the consumer paused, a full bounded channel drops
+    /// the newest batches (never blocking the sender) and counts their lines;
+    /// the cumulative count surfaces as a [`SessionEventKind::Dropped`] the
+    /// moment there is room again. This is the drain thread's non-blocking
+    /// guarantee (Drop's join stays prompt) exercised at the send primitive.
+    #[test]
+    fn a_full_channel_drops_newest_batches_and_counts_them() {
+        // A tiny channel so we can fill it deterministically; consumer paused.
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut sender = SessionSender::new(tx, SessionId(7));
+
+        // Fill both slots with the two oldest batches.
+        sender.send_lines(vec!["a".into()]).expect("connected");
+        sender.send_lines(vec!["b".into()]).expect("connected");
+
+        // Full now: the newest batches are dropped, their lines counted — and
+        // crucially each call RETURNS (never blocks).
+        sender
+            .send_lines(vec!["c1".into(), "c2".into()])
+            .expect("connected");
+        sender.send_lines(vec!["d".into()]).expect("connected");
+        assert_eq!(sender.dropped, 3, "c1, c2, d were dropped while full");
+
+        // Drop-newest, not drop-oldest: the two oldest batches survived.
+        let first = rx.try_recv().expect("a batch is queued");
+        assert_eq!(first.kind, SessionEventKind::Lines(vec!["a".into()]));
+
+        // With room again, the next send flushes the cumulative dropped count.
+        sender.send_lines(Vec::new()).expect("connected");
+        let mut dropped_seen = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let SessionEventKind::Dropped(n) = ev.kind {
+                dropped_seen = Some(n);
+            }
+        }
+        assert_eq!(
+            dropped_seen,
+            Some(3),
+            "the cumulative dropped count surfaces once the channel has room"
+        );
+    }
+
+    /// A closed receiver (engine gone) turns every send into the `Err(())`
+    /// "stop draining" signal — the drain loops bail rather than spin.
+    #[test]
+    fn sends_report_the_receiver_going_away() {
+        let (tx, rx) = mpsc::channel(SESSION_CHANNEL_CAP);
+        let mut sender = SessionSender::new(tx, SessionId(1));
+        drop(rx);
+        assert_eq!(sender.send_lines(vec!["x".into()]), Err(()));
+        assert_eq!(sender.send_state(SessionState::Running), Err(()));
     }
 }

@@ -213,9 +213,22 @@ pub struct SessionEvent {
 pub enum SessionEventKind {
     /// The session transitioned to a new lifecycle state.
     State(SessionState),
-    /// A line of output arrived from the session's process (already stripped
-    /// of its trailing newline by the drive's stream decoder).
-    Line(String),
+    /// A coalesced batch of output lines (each already stripped of its
+    /// trailing newline by the drive's stream decoder), in order.
+    ///
+    /// The supervisor's drain thread coalesces a burst — after a blocking
+    /// `recv` returns one line it drains every line already buffered via
+    /// `try_recv` — into a single batch per send, so a flood of output costs
+    /// one bounded-channel slot rather than one per line (see
+    /// [`super::supervisor`]).
+    Lines(Vec<String>),
+    /// The **cumulative** count of output lines the drain thread dropped
+    /// because the bounded engine channel was full (drop-newest overflow
+    /// policy). Mirrors `frust_drive::process::LineReceiver::dropped_lines`:
+    /// additive, never resets, `0` for a healthy session. Surfaced so the UI
+    /// can show that a session's log is missing lines the consumer couldn't
+    /// keep up with.
+    Dropped(u64),
 }
 
 /// Tolerant, forward-only inference of a lifecycle phase from one streamed

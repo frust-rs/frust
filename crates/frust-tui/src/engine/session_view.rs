@@ -198,6 +198,12 @@ pub struct SessionView {
     pub scroll: Scroll,
     /// The copy-while-scrolling selection, if any.
     pub selection: Option<LineSelection>,
+    /// Cumulative count of output lines the supervisor dropped because its
+    /// bounded engine channel was full (drop-newest overflow — see
+    /// [`crate::supervise`]). `0` for a healthy session; a non-zero value means
+    /// the log is missing lines the consumer couldn't keep up with, which the
+    /// UI can surface. Mirrors `frust_drive::process::LineReceiver::dropped_lines`.
+    pub dropped: u64,
 }
 
 impl SessionView {
@@ -211,6 +217,7 @@ impl SessionView {
             log: LogBuffer::default(),
             scroll: Scroll::Follow,
             selection: None,
+            dropped: 0,
         }
     }
 
