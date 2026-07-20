@@ -8,8 +8,8 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │app: booting up                                                           
                          │app: frame 1 rendered                                                     
- DEVICES                 │app: recovering                                                           
-   (refresh in Phase 2)  │                                                                          
+ DEVICES ↻ r             │app: recovering                                                           
+   none found            │                                                                          
                          │                                                                          
  SESSIONS                │                                                                          
    huddle                │                                                                          

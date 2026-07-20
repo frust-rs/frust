@@ -13,6 +13,7 @@ pub mod simctl;
 pub mod xcodebuild;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -20,7 +21,7 @@ use anyhow::{Context, Result, bail};
 use crate::build_info::BuildInfo;
 use crate::devices::Device;
 use crate::ios_build::{self, IosArtifact};
-use crate::process::{ProcessRunner, RealProcessRunner, tail_lines};
+use crate::process::{ProcessRunner, RealProcessRunner, StreamHandle, tail_lines};
 
 /// Drives the full iOS simulator pipeline (preflight → xcodebuild →
 /// `simctl install` → `simctl launch`) on `device`, an already-discovered
@@ -36,62 +37,27 @@ pub fn run(
     device: &Device,
     info: &BuildInfo,
 ) -> Result<u8> {
-    let project = project::detect(root)?;
-    project::require_ios_dir(&project.root)?;
+    // The CLI path never cancels — drive the shared preflight/build/install
+    // core to completion, then block on `simctl launch` under a Ctrl-C
+    // handler (the TUI seam [`spawn_session`] takes the same core but returns
+    // the launch stream's killable handle instead).
+    let never = AtomicBool::new(false);
+    let mut on_line = |line: &str| println!("{line}");
+    let prepared =
+        match prepare_simulator_session(runner, root, device, info, &mut on_line, &never)? {
+            Some(prepared) => prepared,
+            None => return Ok(0),
+        };
 
-    let preflight_ctx = preflight::PreflightCtx {
-        runner,
-        udid: &device.id,
-    };
-    preflight::run(&preflight_ctx).map_err(|err| anyhow::anyhow!(err))?;
-
-    let configuration = info.mode.xcode_configuration();
-
-    println!("Building `{}`…", project.bundle_id);
-    let build_start = Instant::now();
-    let mut on_xcodebuild_line = |line: &str| println!("{line}");
-    let build_out = xcodebuild::build(
-        runner,
-        &project.root,
-        &device.id,
-        configuration,
-        &mut on_xcodebuild_line,
-    )?;
-    if !build_out.success {
-        bail!("{}", xcodebuild_failure_message(&build_out));
-    }
-    println!(
-        "Build finished in {:.1}s.",
-        build_start.elapsed().as_secs_f32()
-    );
-
-    let app_path = xcodebuild::app_bundle_path(&project.root, configuration);
-    if !app_path.exists() {
-        bail!(
-            "app bundle not found at `{}` after `xcodebuild build`",
-            app_path.display()
-        );
-    }
-    let app_path = app_path.to_string_lossy().into_owned();
-
-    println!("Installing on {}…", device.name);
-    let install_out = simctl::install(runner, &device.id, &app_path)?;
-    if !install_out.success {
-        bail!(
-            "`xcrun simctl install` failed: {}",
-            install_out.stderr.trim()
-        );
-    }
-
-    println!("Launching {}…", project.bundle_id);
+    println!("Launching {}…", prepared.bundle_id);
     // Best-effort cleanup on Ctrl-C: `simctl launch` is a foreground bridge
     // process, not the app itself, so killing it (the default SIGINT
     // disposition) does not terminate the app running in the simulator —
     // explicitly `simctl terminate` it for deterministic cleanup. Uses a
     // fresh `RealProcessRunner` (not the injected `runner`) since the
     // handler must be `'static` and this path only ever runs for real.
-    let udid_for_handler = device.id.clone();
-    let bundle_id_for_handler = project.bundle_id.clone();
+    let udid_for_handler = prepared.udid.clone();
+    let bundle_id_for_handler = prepared.bundle_id.clone();
     ctrlc::set_handler(move || {
         let _ = RealProcessRunner.run(
             "xcrun",
@@ -107,12 +73,135 @@ pub fn run(
     .context("failed to install Ctrl-C handler")?;
 
     let mut on_launch_line = |line: &str| println!("{line}");
-    let launch_out = simctl::launch(runner, &device.id, &project.bundle_id, &mut on_launch_line)?;
+    let launch_out = simctl::launch(
+        runner,
+        &prepared.udid,
+        &prepared.bundle_id,
+        &mut on_launch_line,
+    )?;
 
     // Best-effort cleanup on normal stream end too (app may already be gone).
-    simctl::terminate(runner, &device.id, &project.bundle_id);
+    simctl::terminate(runner, &prepared.udid, &prepared.bundle_id);
 
     Ok(if launch_out.success { 0 } else { 1 })
+}
+
+/// What the iOS-simulator preflight → build → install core resolves before
+/// the `simctl launch` streaming phase: the app's bundle id and the target
+/// simulator udid, for the launch both front-ends attach.
+struct PreparedIosSession {
+    bundle_id: String,
+    udid: String,
+}
+
+/// The shared preflight → build → install core of the iOS-simulator run
+/// pipeline, feeding each phase line to `on_line` and checking `cancel` at
+/// each boundary (see `android_run`'s `prepare_session` for the cancel-latency
+/// contract). Returns `Ok(None)` when `cancel` was observed at a boundary.
+fn prepare_simulator_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Option<PreparedIosSession>> {
+    let project = project::detect(root)?;
+    project::require_ios_dir(&project.root)?;
+
+    let preflight_ctx = preflight::PreflightCtx {
+        runner,
+        udid: &device.id,
+    };
+    preflight::run(&preflight_ctx).map_err(|err| anyhow::anyhow!(err))?;
+
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    let configuration = info.mode.xcode_configuration();
+
+    on_line(&format!("Building `{}`…", project.bundle_id));
+    let build_start = Instant::now();
+    let build_out = xcodebuild::build(runner, &project.root, &device.id, configuration, on_line)?;
+    if !build_out.success {
+        bail!("{}", xcodebuild_failure_message(&build_out));
+    }
+    on_line(&format!(
+        "Build finished in {:.1}s.",
+        build_start.elapsed().as_secs_f32()
+    ));
+
+    let app_path = xcodebuild::app_bundle_path(&project.root, configuration);
+    if !app_path.exists() {
+        bail!(
+            "app bundle not found at `{}` after `xcodebuild build`",
+            app_path.display()
+        );
+    }
+    let app_path = app_path.to_string_lossy().into_owned();
+
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    on_line(&format!("Installing on {}…", device.name));
+    let install_out = simctl::install(runner, &device.id, &app_path)?;
+    if !install_out.success {
+        bail!(
+            "`xcrun simctl install` failed: {}",
+            install_out.stderr.trim()
+        );
+    }
+
+    Ok(Some(PreparedIosSession {
+        bundle_id: project.bundle_id,
+        udid: device.id.clone(),
+    }))
+}
+
+/// The streaming, cancellable variant of [`run`] for the `frust-tui`
+/// supervisor: the same preflight → build → install core, then the
+/// `simctl launch --console-pty` stream spawned through the cancellable
+/// [`ProcessRunner::spawn_streaming`] seam, its [`StreamHandle`] handed back
+/// for the supervisor to drain and kill. Returns `Ok(None)` when `cancel` was
+/// observed before the launch stream began.
+///
+/// Killing the returned handle stops the `simctl launch` foreground bridge but
+/// (like [`run`]'s own Ctrl-C path) does not itself terminate the app inside
+/// the simulator — the supervisor's `stop` is prompt for the *stream*, the
+/// same best-effort boundary the CLI has.
+pub fn spawn_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Option<StreamHandle>> {
+    let Some(prepared) = prepare_simulator_session(runner, root, device, info, on_line, cancel)?
+    else {
+        return Ok(None);
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    on_line(&format!("Launching {}…", prepared.bundle_id));
+    let handle = runner
+        .spawn_streaming(
+            "xcrun",
+            &[
+                "simctl",
+                "launch",
+                "--console-pty",
+                &prepared.udid,
+                &prepared.bundle_id,
+            ],
+            None,
+            &[],
+        )
+        .with_context(|| format!("spawning `simctl launch {}`", prepared.bundle_id))?;
+    Ok(Some(handle))
 }
 
 /// Minimum `devicectl`-drivable iOS major version (spec/RESEARCH.md §C):
@@ -135,56 +224,22 @@ pub fn run_physical(
     device: &Device,
     info: &BuildInfo,
 ) -> Result<u8> {
-    let project = project::detect(root)?;
-    project::require_ios_dir(&project.root)?;
+    let never = AtomicBool::new(false);
+    let mut on_line = |line: &str| println!("{line}");
+    let prepared = match prepare_physical_session(runner, root, device, info, &mut on_line, &never)?
+    {
+        Some(prepared) => prepared,
+        None => return Ok(0),
+    };
 
-    match os_version_major(device.os_version.as_deref()) {
-        Some(major) if major >= MIN_DEVICECTL_IOS_MAJOR => {}
-        _ => bail!(
-            "physical-device runs need iOS {MIN_DEVICECTL_IOS_MAJOR}+ (devicectl); this device reports {}",
-            device.os_version.as_deref().unwrap_or("unknown")
-        ),
-    }
-
-    println!("Building `{}`…", project.bundle_id);
-    let build_start = Instant::now();
-    let artifacts = ios_build::build(
-        runner,
-        &project.root,
-        info,
-        &IosArtifact::App {
-            simulator: false,
-            codesign: true,
-        },
-    )?;
-    println!(
-        "Build finished in {:.1}s.",
-        build_start.elapsed().as_secs_f32()
-    );
-
-    let app_path = artifacts
-        .paths
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("ios_build::build returned no `.app` artifact"))?
-        .to_string_lossy()
-        .into_owned();
-
-    println!("Installing on {}…", device.name);
-    let install_out = devicectl::install(runner, &device.id, &app_path)?;
-    if !install_out.success {
-        bail!(
-            "{}",
-            with_developer_mode_hint(format!(
-                "`xcrun devicectl device install app` failed: {}",
-                install_out.stderr.trim()
-            ))
-        );
-    }
-
-    println!("Launching {}…", project.bundle_id);
+    println!("Launching {}…", prepared.bundle_id);
     let mut on_launch_line = |line: &str| println!("{line}");
-    let launch_out =
-        devicectl::launch(runner, &device.id, &project.bundle_id, &mut on_launch_line)?;
+    let launch_out = devicectl::launch(
+        runner,
+        &prepared.udid,
+        &prepared.bundle_id,
+        &mut on_launch_line,
+    )?;
     if !launch_out.success {
         bail!(
             "{}",
@@ -196,6 +251,120 @@ pub fn run_physical(
     }
 
     Ok(0)
+}
+
+/// The shared iOS-17+ gate → signed build → install core of the physical-iOS
+/// pipeline (mirrors [`prepare_simulator_session`]), feeding each phase line
+/// to `on_line` and checking `cancel` at each boundary. Returns `Ok(None)`
+/// when `cancel` was observed at a boundary.
+fn prepare_physical_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Option<PreparedIosSession>> {
+    let project = project::detect(root)?;
+    project::require_ios_dir(&project.root)?;
+
+    match os_version_major(device.os_version.as_deref()) {
+        Some(major) if major >= MIN_DEVICECTL_IOS_MAJOR => {}
+        _ => bail!(
+            "physical-device runs need iOS {MIN_DEVICECTL_IOS_MAJOR}+ (devicectl); this device reports {}",
+            device.os_version.as_deref().unwrap_or("unknown")
+        ),
+    }
+
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    on_line(&format!("Building `{}`…", project.bundle_id));
+    let build_start = Instant::now();
+    let artifacts = ios_build::build(
+        runner,
+        &project.root,
+        info,
+        &IosArtifact::App {
+            simulator: false,
+            codesign: true,
+        },
+    )?;
+    on_line(&format!(
+        "Build finished in {:.1}s.",
+        build_start.elapsed().as_secs_f32()
+    ));
+
+    let app_path = artifacts
+        .paths
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("ios_build::build returned no `.app` artifact"))?
+        .to_string_lossy()
+        .into_owned();
+
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    on_line(&format!("Installing on {}…", device.name));
+    let install_out = devicectl::install(runner, &device.id, &app_path)?;
+    if !install_out.success {
+        bail!(
+            "{}",
+            with_developer_mode_hint(format!(
+                "`xcrun devicectl device install app` failed: {}",
+                install_out.stderr.trim()
+            ))
+        );
+    }
+
+    Ok(Some(PreparedIosSession {
+        bundle_id: project.bundle_id,
+        udid: device.id.clone(),
+    }))
+}
+
+/// The streaming, cancellable variant of [`run_physical`] for the `frust-tui`
+/// supervisor: the same iOS-17+ gate → signed build → install core, then the
+/// `devicectl device process launch --console` stream spawned through the
+/// cancellable [`ProcessRunner::spawn_streaming`] seam. Returns `Ok(None)`
+/// when `cancel` was observed before the launch stream began.
+pub fn spawn_physical_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Option<StreamHandle>> {
+    let Some(prepared) = prepare_physical_session(runner, root, device, info, on_line, cancel)?
+    else {
+        return Ok(None);
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    on_line(&format!("Launching {}…", prepared.bundle_id));
+    let handle = runner
+        .spawn_streaming(
+            "xcrun",
+            &[
+                "devicectl",
+                "device",
+                "process",
+                "launch",
+                "--device",
+                &prepared.udid,
+                "--console",
+                "--terminate-existing",
+                &prepared.bundle_id,
+            ],
+            None,
+            &[],
+        )
+        .with_context(|| format!("spawning `devicectl process launch {}`", prepared.bundle_id))?;
+    Ok(Some(handle))
 }
 
 /// Parses the major version number out of a `devicectl` `osVersionNumber`

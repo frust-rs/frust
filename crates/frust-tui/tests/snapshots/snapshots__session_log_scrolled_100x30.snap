@@ -8,8 +8,8 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │   Compiling huddle v0.1.0                                                
                          │    Finished dev profile                                                  
- DEVICES                 │     Running `target/debug/huddle`                                        
-   (refresh in Phase 2)  │                                                                          
+ DEVICES ↻ r             │     Running `target/debug/huddle`                                        
+   none found            │                                                                          
                          │                                                                          
  SESSIONS                │                                                                          
    huddle                │                                                                          

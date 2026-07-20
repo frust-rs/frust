@@ -17,12 +17,14 @@ use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton as CtMouseButton, MouseEventKind,
 };
+use frust_drive::devices::{default_discoverers, discover_all};
 use frust_drive::process::RealProcessRunner;
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
+use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::{AppState, Effect, Engine, Message, RegionId, Screen};
-use crate::supervise::Supervisor;
+use crate::engine::{AppState, Effect, Engine, Message, RegionId, RunFocus, Screen};
+use crate::supervise::{DeviceTarget, SessionSpec, Supervisor};
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
 
@@ -62,10 +64,16 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // wires the channel and the kill/copy effect path so those tasks only add
     // start calls. On return the supervisor's `Drop` stops+joins every session.
     let (mut supervisor, mut session_rx) = Supervisor::new(Arc::new(RealProcessRunner));
+    // A cloneable handle background tasks (device discovery, session
+    // registration) post `Message`s back through.
+    let msg_tx = engine.sender();
     let mut regions = MouseRegions::new();
     let mut reader = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     let mut needs_redraw = true;
+
+    // Kick an initial device discovery so the panel populates on open.
+    let _ = msg_tx.send(Message::RefreshDevices);
 
     while !engine.state.should_quit {
         if needs_redraw {
@@ -86,7 +94,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         for msg in translate_event(event, &engine.state, &regions) {
                             let out = engine.handle(msg);
                             needs_redraw |= out.redraw;
-                            apply_effect(out.effect, &mut supervisor);
+                            apply_effect(out.effect, &mut supervisor, &msg_tx);
                         }
                     }
                     // A read error (rare) is logged and ignored — the loop
@@ -98,12 +106,12 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
             Some(msg) = rx.recv() => {
                 let out = engine.handle(msg);
                 needs_redraw |= out.redraw;
-                apply_effect(out.effect, &mut supervisor);
+                apply_effect(out.effect, &mut supervisor, &msg_tx);
             }
             Some(ev) = session_rx.recv() => {
                 let out = engine.handle(Message::Session(ev));
                 needs_redraw |= out.redraw;
-                apply_effect(out.effect, &mut supervisor);
+                apply_effect(out.effect, &mut supervisor, &msg_tx);
             }
             _ = tick.tick() => {
                 if engine.state.animating() {
@@ -116,14 +124,65 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
-/// Enact an engine-requested [`Effect`] — the runner owns the two side effects
-/// the pure engine can't perform: killing a session through the supervisor, and
-/// writing the system clipboard.
-fn apply_effect(effect: Option<Effect>, supervisor: &mut Supervisor) {
+/// Enact an engine-requested [`Effect`] — the runner owns the side effects the
+/// pure engine can't perform: killing a session through the supervisor, writing
+/// the system clipboard, discovering devices off-thread, and launching
+/// sessions.
+fn apply_effect(
+    effect: Option<Effect>,
+    supervisor: &mut Supervisor,
+    tx: &UnboundedSender<Message>,
+) {
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
         Some(Effect::Copy(text)) => copy_to_clipboard(&text),
+        Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
+        Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx),
         None => {}
+    }
+}
+
+/// Discover devices off the UI thread (the `frust-drive` discoverer set is
+/// blocking — `adb`/`xcrun` invocations), posting the result back as
+/// [`Message::DevicesLoaded`]. A dropped receiver (shutdown) just drops the
+/// send.
+fn spawn_device_discovery(tx: UnboundedSender<Message>) {
+    tokio::task::spawn_blocking(move || {
+        let discoverers = default_discoverers();
+        let (devices, _notes) = discover_all(&RealProcessRunner, &discoverers);
+        let _ = tx.send(Message::DevicesLoaded(devices));
+    });
+}
+
+/// Launch one supervised session per spec (the run-config modal's checked
+/// targets), registering each successfully-started session back into the model
+/// so its events have a home. A spec that fails to start (e.g. a desktop
+/// `cargo run` that can't spawn) is skipped — a device pipeline that fails
+/// mid-build instead surfaces the error as a line in its own session tab.
+fn launch_sessions(
+    specs: Vec<SessionSpec>,
+    supervisor: &mut Supervisor,
+    tx: &UnboundedSender<Message>,
+) {
+    for spec in specs {
+        match supervisor.start(&spec) {
+            Ok(id) => {
+                let _ = tx.send(Message::RegisterSession {
+                    id,
+                    project_root: spec.project_root.clone(),
+                    target_label: target_label(&spec.target),
+                });
+            }
+            Err(err) => eprintln!("frust-tui: failed to start session: {err:#}"),
+        }
+    }
+}
+
+/// The short tab label for a launch target (`desktop`, or the device name).
+fn target_label(target: &DeviceTarget) -> String {
+    match target {
+        DeviceTarget::Desktop => "desktop".to_string(),
+        DeviceTarget::Device(device) => device.name.clone(),
     }
 }
 
@@ -216,9 +275,14 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let shift = mods.contains(KeyModifiers::SHIFT);
 
-    // Ctrl+Q always quits, even while typing a search.
+    // Ctrl+Q always quits, even while typing a search or in a modal.
     if ctrl && matches!(code, KeyCode::Char('q')) {
         return vec![Message::Quit];
+    }
+
+    // While the run-config modal is open it captures every other key.
+    if let Some(modal) = &state.run_config {
+        return translate_modal_key(code, mods, modal);
     }
 
     // While the search overlay is open, keys edit the query.
@@ -246,6 +310,13 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         };
     }
 
+    let workbench = matches!(state.screen, Screen::Workbench);
+    // Keyboard focus heuristic (a full focus system is Phase 3): with no
+    // session open the devices panel owns the arrows/Space/Enter; once a
+    // session is running the log view owns them (devices stay mouse- and
+    // `r`-driven).
+    let devices_focused = workbench && !has_active_session;
+
     match code {
         // Global quit.
         KeyCode::Char('q') => vec![Message::Quit],
@@ -253,6 +324,16 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // Welcome keyboard parity: Enter / c activate the Create button.
         KeyCode::Char('c') if matches!(state.screen, Screen::Welcome) => activate_create(state),
         KeyCode::Enter if matches!(state.screen, Screen::Welcome) => activate_create(state),
+
+        // ── Devices panel + run-config (workbench) ──
+        // `r`/`Enter` open the run-config modal primed with the panel
+        // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance).
+        KeyCode::Char('r') if workbench => vec![Message::OpenRunConfig],
+        KeyCode::Char('R') if workbench => vec![Message::RefreshDevices],
+        KeyCode::Enter if devices_focused => vec![Message::OpenRunConfig],
+        KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
+        KeyCode::Up if devices_focused => vec![Message::DeviceCursorUp],
+        KeyCode::Down if devices_focused => vec![Message::DeviceCursorDown],
 
         // ── Log-view / tab controls (only meaningful with a session open) ──
         KeyCode::Char('x') if has_active_session => vec![Message::StopSession],
@@ -281,6 +362,36 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         {
             vec![Message::SelectionClear]
         }
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the run-config modal is open. `Esc` cancels,
+/// `Enter` launches, `Tab`/arrows move focus, `Space` toggles the focused
+/// target, `←`/`→` cycle the build mode (only on the mode row), and printable
+/// characters edit the focused text field (flavor/defines). Mouse parity: the
+/// modal registers a click region per control.
+fn translate_modal_key(
+    code: KeyCode,
+    mods: KeyModifiers,
+    modal: &crate::engine::RunConfig,
+) -> Vec<Message> {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let text_field = matches!(modal.focus, RunFocus::Flavor | RunFocus::Defines);
+    match code {
+        KeyCode::Esc => vec![Message::CloseRunConfig],
+        KeyCode::Enter => vec![Message::RunConfigLaunch],
+        KeyCode::Tab => vec![Message::RunConfigFocusNext],
+        KeyCode::BackTab => vec![Message::RunConfigFocusPrev],
+        KeyCode::Up => vec![Message::RunConfigFocusPrev],
+        KeyCode::Down => vec![Message::RunConfigFocusNext],
+        KeyCode::Left if modal.focus == RunFocus::Mode => vec![Message::RunConfigCycleMode(-1)],
+        KeyCode::Right if modal.focus == RunFocus::Mode => vec![Message::RunConfigCycleMode(1)],
+        KeyCode::Backspace => vec![Message::RunConfigBackspace],
+        // A space toggles the focused target, unless a text field is focused
+        // (where it's a literal character — `defines` is space-separated).
+        KeyCode::Char(' ') if !text_field => vec![Message::RunConfigToggleTarget],
+        KeyCode::Char(c) if text_field && !ctrl => vec![Message::RunConfigInput(c)],
         _ => vec![],
     }
 }

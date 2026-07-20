@@ -1,19 +1,20 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-expression: "render_to_string(100, 30, &state)"
+expression: "render_to_string(100, 30, &devices_panel_state())"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ✓ toolchain                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
- PROJECTS                │huddle:  1 ▶ desktop                                                      
-  ▸ huddle               │   Compiling huddle v0.1.0                                                
-                         │    Finished dev profile                                                  
- DEVICES ↻ r             │     Running `target/debug/huddle`                                        
-   none found            │app: booting up                                                           
-                         │warning: unused variable `x`                                              
- SESSIONS                │app: frame 1 rendered                                                     
-   huddle                │error: texture upload failed                                              
-   ▸ ▶ desktop           │app: recovering                                                           
+ PROJECTS                │                                                                          
+  ▸ huddle               │  Dashboard                                                               
+                         │  ━━━━━━━━━━                                                              
+ DEVICES (1) ↻ r         │                                                                          
+    [x] ● OnePlus 9 andr │  No session running — start a run to open a log tab here.                
+  ▸ [ ] ● Pixel 7 androi │                                                                          
+    [ ] ● iPhone SE ios· │                                                                          
+                         │                                                                          
+ SESSIONS                │                                                                          
+   none running          │                                                                          
                          │                                                                          
  ACTIONS                 │                                                                          
    Doctor · Settings     │                                                                          
@@ -29,6 +30,5 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-                         │● follow  ·  wrap:off                x stop · f follow · w wrap · / search
-                         │ /  err█                                                                  
-● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
+                         │                                                                          
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

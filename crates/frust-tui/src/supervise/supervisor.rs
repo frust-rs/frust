@@ -20,13 +20,16 @@
 //! # Kill boundary (PLAN D3's known limitation)
 //!
 //! `stop` is prompt for anything spawned through `spawn_streaming` (the
-//! desktop `cargo run` preview, or any streaming phase): killing the child
-//! closes its stdout pipe, which unblocks the drain loop immediately. A
-//! device session's multi-phase drive pipeline (build → install → launch →
-//! logcat) is only killable once it reaches its streaming phase — a kill
-//! requested mid-Gradle takes effect when streaming begins, not instantly.
-//! Wiring that device path is TUI2-04; this module ships the core plus the
-//! fully-killable desktop path.
+//! desktop `cargo run` preview, or a device session's logcat/console streaming
+//! phase): killing the child closes its stdout pipe, which unblocks the drain
+//! loop immediately. A device session's multi-phase drive pipeline (build →
+//! install → launch → logcat) is only *promptly* killable once it reaches its
+//! streaming phase — a kill requested mid-Gradle sets the pipeline's cancel
+//! flag, which the drive checks at each phase boundary, so it takes effect at
+//! the next boundary (a blocking Gradle/xcodebuild phase can't be interrupted
+//! mid-flight), not instantly. The device path is driven by
+//! [`Supervisor::start_device`] over `frust-drive`'s `android_run`/`ios_run`
+//! cancellable `spawn_session` seams; the desktop path is fully killable.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,27 +37,73 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result};
+use frust_drive::devices::{Kind, Platform};
 use frust_drive::process::{LineReceiver, ProcessRunner, StreamHandle};
+use frust_drive::{android_run, ios_run};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::session::{
-    LaunchPlan, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState, infer_state,
+    DevicePlan, DeviceTarget, LaunchPlan, SessionEvent, SessionEventKind, SessionId, SessionSpec,
+    SessionState, infer_state,
 };
 
 /// One live (or terminated) session's supervisor-side bookkeeping.
 struct SessionEntry {
-    /// The drive's kill handle, shared with the drain thread (which reaps the
-    /// child at EOF). `stop` locks it briefly to send the kill signal.
-    handle: Arc<Mutex<StreamHandle>>,
-    /// Set by `stop` before killing, so the drain thread reports [`Killed`]
-    /// rather than [`Exited`] at EOF.
-    ///
-    /// [`Killed`]: SessionState::Killed
-    /// [`Exited`]: SessionState::Exited
-    killed: Arc<AtomicBool>,
-    /// The drain thread; joined on `Drop` so a torn-down supervisor never
-    /// leaks a running supervision thread.
+    /// How `stop` terminates this session — a single streaming child (desktop
+    /// `cargo run`) or a multi-phase device pipeline.
+    killer: Killer,
+    /// The supervision thread; joined on `Drop` so a torn-down supervisor
+    /// never leaks a running supervision thread.
     worker: Option<JoinHandle<()>>,
+}
+
+/// The kill path for a session, differing by launch shape.
+enum Killer {
+    /// A single streaming child (the desktop `cargo run` preview, or any
+    /// `LaunchPlan`): killing closes its stdout pipe and unblocks the drain.
+    Stream {
+        /// The drive's kill handle, shared with the drain thread (which reaps
+        /// the child at EOF). `stop` locks it briefly to send the kill signal.
+        handle: Arc<Mutex<StreamHandle>>,
+        /// Set by `stop` before killing, so the drain thread reports
+        /// [`Killed`](SessionState::Killed) rather than
+        /// [`Exited`](SessionState::Exited) at EOF.
+        killed: Arc<AtomicBool>,
+    },
+    /// A multi-phase device pipeline (build → install → launch → logcat).
+    /// `stop` sets its cancel flag (abandoning the pipeline at the next phase
+    /// boundary) and kills the logcat stream if it has begun.
+    Device(Arc<DeviceControl>),
+}
+
+/// The cancel primitive for a supervised device session. `stop` sets `cancel`
+/// (checked between the drive pipeline's phases — a stop mid-build takes
+/// effect at the next boundary, matching the module doc's kill boundary) and
+/// kills the logcat [`StreamHandle`] once the pipeline has reached its
+/// streaming phase (prompt from there on).
+struct DeviceControl {
+    cancel: AtomicBool,
+    /// The logcat/console stream, installed by the device worker once the
+    /// build/install/launch core completes; `None` until then.
+    logcat: Mutex<Option<StreamHandle>>,
+}
+
+impl DeviceControl {
+    fn new() -> Self {
+        Self {
+            cancel: AtomicBool::new(false),
+            logcat: Mutex::new(None),
+        }
+    }
+
+    /// Request cancellation: flag the pipeline and, if streaming has begun,
+    /// group-kill the logcat stream (prompt). Idempotent.
+    fn stop(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(handle) = lock_logcat(&self.logcat).as_mut() {
+            handle.kill();
+        }
+    }
 }
 
 /// Owns every supervised session and the single event channel they feed.
@@ -90,13 +139,24 @@ impl Supervisor {
         (supervisor, events_rx)
     }
 
-    /// Start a session from a [`SessionSpec`], resolving it to a
-    /// [`LaunchPlan`] first (see [`SessionSpec::launch_plan`]). Errors if the
-    /// spec can't be resolved (e.g. an unwired device target) or the process
-    /// fails to spawn.
+    /// Start a session from a [`SessionSpec`], dispatching on its target: a
+    /// [`DeviceTarget::Desktop`] resolves to a [`LaunchPlan`] and spawns a
+    /// single streaming `cargo run` child; a [`DeviceTarget::Device`] drives
+    /// the multi-phase device pipeline (build → install → launch → logcat) on
+    /// its own supervision thread (see [`Supervisor::start_device`]). Errors
+    /// if the process/thread fails to spawn.
     pub fn start(&mut self, spec: &SessionSpec) -> Result<SessionId> {
-        let plan = spec.launch_plan()?;
-        self.start_with_plan(plan)
+        match &spec.target {
+            DeviceTarget::Desktop => {
+                let plan = spec.launch_plan()?;
+                self.start_with_plan(plan)
+            }
+            DeviceTarget::Device(device) => self.start_device(DevicePlan {
+                project_root: spec.project_root.clone(),
+                device: device.clone(),
+                build: spec.build.clone(),
+            }),
+        }
     }
 
     /// Start a session from an already-resolved [`LaunchPlan`] — the general
@@ -147,8 +207,7 @@ impl Supervisor {
         self.sessions.insert(
             id,
             SessionEntry {
-                handle,
-                killed,
+                killer: Killer::Stream { handle, killed },
                 worker: Some(worker),
             },
         );
@@ -156,15 +215,54 @@ impl Supervisor {
         Ok(id)
     }
 
-    /// Stop a session: mark it killed, then group-kill its process. The drain
-    /// thread observes the closed stdout pipe, reaps the child, and emits a
-    /// final [`SessionState::Killed`]. Idempotent and safe on an
-    /// already-exited session (the underlying [`StreamHandle::kill`] is a
-    /// no-op then); an unknown id is ignored.
+    /// Start a supervised **device** session from a resolved [`DevicePlan`]:
+    /// the multi-phase drive pipeline (build → install → launch → logcat, per
+    /// the plan's `device` platform/kind) runs on a dedicated std thread,
+    /// bridging every phase line — and the inferred [`SessionState`] changes —
+    /// into the same engine channel a desktop session feeds. The returned
+    /// [`SessionId`] tags every event; [`Supervisor::stop`] cancels the
+    /// pipeline (prompt once streaming, at the next phase boundary before it —
+    /// see [`DeviceControl`] and the module doc's kill boundary).
+    pub fn start_device(&mut self, plan: DevicePlan) -> Result<SessionId> {
+        let id = SessionId(self.next_id);
+        let control = Arc::new(DeviceControl::new());
+        let runner = Arc::clone(&self.runner);
+        let events = self.events_tx.clone();
+
+        let worker = {
+            let control = Arc::clone(&control);
+            thread::Builder::new()
+                .name(format!("frust-tui-device-{}", id.0))
+                .spawn(move || run_device_session(id, plan, runner, control, events))
+                .context("spawning device session supervision thread")?
+        };
+
+        self.sessions.insert(
+            id,
+            SessionEntry {
+                killer: Killer::Device(control),
+                worker: Some(worker),
+            },
+        );
+        self.next_id += 1;
+        Ok(id)
+    }
+
+    /// Stop a session. For a streaming (desktop) session: mark it killed, then
+    /// group-kill its process — the drain thread observes the closed stdout
+    /// pipe, reaps the child, and emits a final [`SessionState::Killed`]. For
+    /// a device session: cancel the pipeline and kill its logcat stream if
+    /// streaming. Idempotent and safe on an already-exited session; an unknown
+    /// id is ignored.
     pub fn stop(&mut self, id: SessionId) {
         if let Some(entry) = self.sessions.get(&id) {
-            entry.killed.store(true, Ordering::SeqCst);
-            lock(&entry.handle).kill();
+            match &entry.killer {
+                Killer::Stream { handle, killed } => {
+                    killed.store(true, Ordering::SeqCst);
+                    lock(handle).kill();
+                }
+                Killer::Device(control) => control.stop(),
+            }
         }
     }
 
@@ -255,6 +353,144 @@ fn emit(
     kind: SessionEventKind,
 ) -> Result<(), ()> {
     events.send(SessionEvent { id, kind }).map_err(|_| ())
+}
+
+/// Lock a device session's logcat slot, recovering from a poisoned mutex the
+/// same way [`lock`] does for the streaming kill handle.
+fn lock_logcat(
+    slot: &Mutex<Option<StreamHandle>>,
+) -> std::sync::MutexGuard<'_, Option<StreamHandle>> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Emit one line for a session and, if it announces a later build phase,
+/// advance the state machine and emit the new state — the shared feed both the
+/// device pipeline's phase lines and its logcat stream route through, so state
+/// inference is identical to the desktop drain's ([`drain_session`]). Returns
+/// `Err(())` once the engine has dropped the receiver.
+fn feed_line(
+    events: &UnboundedSender<SessionEvent>,
+    id: SessionId,
+    state: &mut SessionState,
+    line: &str,
+) -> Result<(), ()> {
+    emit(events, id, SessionEventKind::Line(line.to_string()))?;
+    if let Some(next) = infer_state(state, line) {
+        *state = next;
+        emit(events, id, SessionEventKind::State(state.clone()))?;
+    }
+    Ok(())
+}
+
+/// The per-device-session pipeline loop, run on its own std thread: drive the
+/// drive's multi-phase device pipeline (feeding phase lines through
+/// [`feed_line`]), then — once it hands back the logcat/console stream — drain
+/// that stream the same way [`drain_session`] drains a desktop child, and emit
+/// the terminal state. A cancellation observed before streaming (or a killed
+/// stream) reports [`SessionState::Killed`]; a pipeline error reports the
+/// error as a line then [`SessionState::Exited(false)`].
+fn run_device_session(
+    id: SessionId,
+    plan: DevicePlan,
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    control: Arc<DeviceControl>,
+    events: UnboundedSender<SessionEvent>,
+) {
+    let mut state = SessionState::Configuring;
+    if emit(&events, id, SessionEventKind::State(state.clone())).is_err() {
+        return;
+    }
+
+    // Run build → install → launch, streaming phase lines; the closure borrows
+    // `state`/`events` only for the pipeline's duration (it returns the logcat
+    // handle, after which `state` is used again for the drain below).
+    let pipeline = {
+        let events = &events;
+        let mut on_line = |line: &str| {
+            let _ = feed_line(events, id, &mut state, line);
+        };
+        launch_device_stream(&plan, runner.as_ref(), &control.cancel, &mut on_line)
+    };
+
+    let terminal = match pipeline {
+        Ok(Some(handle)) => {
+            // Clone the receive side, then stash the handle so `stop` can kill
+            // the stream; the drain owns receiving, the handle owns kill/wait.
+            let lines = handle.lines.clone();
+            *lock_logcat(&control.logcat) = Some(handle);
+
+            let mut disconnected = false;
+            while let Ok(line) = lines.recv() {
+                if feed_line(&events, id, &mut state, &line).is_err() {
+                    disconnected = true;
+                    break;
+                }
+            }
+            if disconnected {
+                return;
+            }
+
+            // Reap the logcat child (idempotent with `stop`'s kill).
+            let success = lock_logcat(&control.logcat)
+                .as_mut()
+                .map(StreamHandle::wait)
+                .unwrap_or(false);
+            if control.cancel.load(Ordering::SeqCst) {
+                SessionState::Killed
+            } else {
+                SessionState::Exited(success)
+            }
+        }
+        // Cancelled before the streaming phase began.
+        Ok(None) => SessionState::Killed,
+        Err(err) => {
+            let _ = emit(
+                &events,
+                id,
+                SessionEventKind::Line(format!("error: {err:#}")),
+            );
+            SessionState::Exited(false)
+        }
+    };
+    let _ = emit(&events, id, SessionEventKind::State(terminal));
+}
+
+/// Dispatch the drive's cancellable device pipeline by the plan's device
+/// platform/kind, returning the logcat/console [`StreamHandle`] to drain
+/// (`Ok(Some)`), a cancellation before streaming (`Ok(None)`), or a pipeline
+/// error (`Err`).
+fn launch_device_stream(
+    plan: &DevicePlan,
+    runner: &dyn ProcessRunner,
+    cancel: &AtomicBool,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Option<StreamHandle>> {
+    match (plan.device.platform, plan.device.kind) {
+        (Platform::Android, _) => android_run::spawn_session(
+            runner,
+            &plan.project_root,
+            &plan.device,
+            &plan.build,
+            on_line,
+            cancel,
+        ),
+        (Platform::Ios, Kind::PhysicalDevice) => ios_run::spawn_physical_session(
+            runner,
+            &plan.project_root,
+            &plan.device,
+            &plan.build,
+            on_line,
+            cancel,
+        ),
+        (Platform::Ios, _) => ios_run::spawn_session(
+            runner,
+            &plan.project_root,
+            &plan.device,
+            &plan.build,
+            on_line,
+            cancel,
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +755,83 @@ mod tests {
         let runner = FakeProcessRunner::new();
         let (mut sup, _rx) = Supervisor::new(Arc::new(runner));
         assert!(sup.start_with_plan(plan("cargo", &["run"])).is_err());
+    }
+
+    // ── Target dispatch (TUI2-04) ───────────────────────────────────────────
+
+    use frust_drive::build_info::{BuildInfo, BuildMode};
+    use frust_drive::devices::{Device, Kind, Platform};
+
+    fn desktop_spec(root: &str) -> SessionSpec {
+        SessionSpec {
+            project_root: PathBuf::from(root),
+            target: DeviceTarget::Desktop,
+            build: BuildInfo {
+                mode: BuildMode::Debug,
+                flavor: None,
+                defines: HashMap::new(),
+                build_name: None,
+                build_number: None,
+            },
+        }
+    }
+
+    /// `start` dispatches a desktop spec to the single-stream path; N specs →
+    /// N concurrent sessions, each terminating independently.
+    #[tokio::test]
+    async fn start_launches_a_desktop_session_per_spec() {
+        let runner = FakeProcessRunner::new().with_stream(
+            "cargo run",
+            ["   Compiling app", "     Running `app`", "hello"],
+            true,
+        );
+        let (mut sup, mut rx) = Supervisor::new(Arc::new(runner));
+        let a = sup.start(&desktop_spec("/tmp/a")).unwrap();
+        let b = sup.start(&desktop_spec("/tmp/b")).unwrap();
+        assert_ne!(a, b);
+
+        let results = drain_all_to_terminal(&mut rx, &[a, b]).await;
+        assert_eq!(results[&a].1, SessionState::Exited(true));
+        assert_eq!(results[&b].1, SessionState::Exited(true));
+        // Each session saw the run's lines (its own copy of the stream).
+        assert!(results[&a].0.iter().any(|l| l == "hello"));
+    }
+
+    /// `start` dispatches a device spec to the multi-phase pipeline. With a
+    /// project root that has no `frust.toml`, the drive pipeline errors at
+    /// project detection — the device worker surfaces the error as a line and
+    /// terminates `Exited(false)` (no real `adb`/env needed; the plumbing is
+    /// what's under test).
+    #[tokio::test]
+    async fn start_device_surfaces_a_pipeline_error_as_a_line() {
+        let device = Device {
+            id: "emulator-5554".into(),
+            name: "Pixel 7".into(),
+            platform: Platform::Android,
+            kind: Kind::Emulator,
+            os_version: None,
+            connection_state: None,
+        };
+        let spec = SessionSpec {
+            project_root: PathBuf::from("/frust-tui-nonexistent-project-xyz"),
+            target: DeviceTarget::Device(device),
+            build: BuildInfo {
+                mode: BuildMode::Debug,
+                flavor: None,
+                defines: HashMap::new(),
+                build_name: None,
+                build_number: None,
+            },
+        };
+        let (mut sup, mut rx) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let id = sup.start(&spec).unwrap();
+
+        let (lines, terminal) = drain_to_terminal(&mut rx, id).await;
+        assert_eq!(terminal, SessionState::Exited(false));
+        assert!(
+            lines.iter().any(|l| l.starts_with("error:")),
+            "expected a surfaced pipeline error line, got {lines:?}"
+        );
     }
 
     #[tokio::test]

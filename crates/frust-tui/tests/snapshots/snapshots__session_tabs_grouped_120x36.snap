@@ -9,8 +9,8 @@ expression: "render_to_string(120, 36, &multi_session_state())"
   ▸ huddle               │Building it.f0x.huddle…                                                                       
     bubblebench          │                                                                                              
                          │                                                                                              
- DEVICES                 │                                                                                              
-   (refresh in Phase 2)  │                                                                                              
+ DEVICES ↻ r             │                                                                                              
+   none found            │                                                                                              
                          │                                                                                              
  SESSIONS                │                                                                                              
    huddle                │                                                                                              

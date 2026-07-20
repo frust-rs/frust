@@ -8,9 +8,10 @@
 //! unit-testable without a terminal (see the tests below).
 
 use super::message::Message;
+use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use super::state::{AppState, CREATE_TOAST};
-use crate::supervise::{SessionEvent, SessionEventKind, SessionId};
+use crate::supervise::{SessionEvent, SessionEventKind, SessionId, SessionSpec};
 
 /// A side effect the (terminal/supervisor-owning) runner performs after a
 /// transition — the pure core requests it, the runner enacts it.
@@ -20,6 +21,12 @@ pub enum Effect {
     StopSession(SessionId),
     /// Copy text to the system clipboard (the runner emits an OSC 52 sequence).
     Copy(String),
+    /// Discover devices off-thread (`frust-drive`'s `DeviceDiscovery` set),
+    /// posting the result back as [`Message::DevicesLoaded`].
+    RefreshDevices,
+    /// Launch one supervised session per spec (the run-config modal's checked
+    /// targets), registering each returned id back into the model.
+    LaunchSessions(Vec<SessionSpec>),
 }
 
 /// What the loop must do after a transition.
@@ -204,6 +211,130 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             },
             None => Outcome::idle(),
         },
+
+        // ── Devices panel + run-config modal (D6b) ──────────────────────────
+        Message::RefreshDevices => {
+            state.devices_refreshing = true;
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::RefreshDevices),
+            }
+        }
+        Message::DevicesLoaded(devices) => {
+            // Preserve the panel multi-select across a refresh for any device
+            // still present (matched by id); new devices arrive unselected.
+            let previously: std::collections::HashSet<String> = state
+                .devices
+                .iter()
+                .filter(|d| d.selected)
+                .map(|d| d.device.id.clone())
+                .collect();
+            state.devices = devices
+                .into_iter()
+                .map(|device| {
+                    let selected = previously.contains(&device.id);
+                    DeviceRow { device, selected }
+                })
+                .collect();
+            state.devices_refreshing = false;
+            state.clamp_device_cursor();
+            Outcome::redraw()
+        }
+        Message::DeviceCursorUp => move_device_cursor(state, -1),
+        Message::DeviceCursorDown => move_device_cursor(state, 1),
+        Message::ToggleDeviceSelect => {
+            let i = state.device_cursor;
+            match state.devices.get_mut(i) {
+                Some(row) => {
+                    row.selected = !row.selected;
+                    Outcome::redraw()
+                }
+                None => Outcome::idle(),
+            }
+        }
+        Message::SelectDeviceAt(i) => match state.devices.get_mut(i) {
+            Some(row) => {
+                row.selected = !row.selected;
+                state.device_cursor = i;
+                Outcome::redraw()
+            }
+            None => Outcome::idle(),
+        },
+        Message::OpenRunConfig => match run_config_project(state) {
+            Some(project_root) => {
+                state.run_config = Some(RunConfig::new(project_root, &state.devices));
+                Outcome::redraw()
+            }
+            None => Outcome::idle(),
+        },
+        Message::CloseRunConfig => {
+            if state.run_config.take().is_some() {
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::RunConfigFocusNext => with_modal(state, RunConfig::focus_next),
+        Message::RunConfigFocusPrev => with_modal(state, RunConfig::focus_prev),
+        Message::RunConfigToggleTarget => with_modal(state, RunConfig::toggle_focused_target),
+        Message::RunConfigToggleTargetAt(i) => with_modal(state, |m| m.toggle_target(i)),
+        Message::RunConfigCycleMode(delta) => with_modal(state, |m| {
+            m.cycle_mode(delta);
+            m.focus = super::run_config::RunFocus::Mode;
+        }),
+        Message::RunConfigFocus(focus) => with_modal(state, |m| m.focus = focus),
+        Message::RunConfigInput(c) => with_modal(state, |m| m.input_char(c)),
+        Message::RunConfigBackspace => with_modal(state, RunConfig::backspace),
+        Message::RunConfigLaunch => match &state.run_config {
+            Some(modal) if modal.any_selected() => {
+                let specs = modal.launch_specs();
+                state.run_config = None;
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::LaunchSessions(specs)),
+                }
+            }
+            // Modal open but nothing checked, or no modal: nothing to launch.
+            _ => Outcome::idle(),
+        },
+    }
+}
+
+/// The project the run-config modal launches under: the active project, else
+/// the first detected project. `None` on the welcome screen (no project).
+fn run_config_project(state: &AppState) -> Option<std::path::PathBuf> {
+    state
+        .project_root
+        .clone()
+        .or_else(|| state.projects.first().cloned())
+}
+
+/// Move the devices-panel cursor by `delta`, clamped to the list; redraw only
+/// on a real move.
+fn move_device_cursor(state: &mut AppState, delta: isize) -> Outcome {
+    let n = state.devices.len();
+    if n == 0 {
+        return Outcome::idle();
+    }
+    let cur = state.device_cursor.min(n - 1) as isize;
+    let next = (cur + delta).clamp(0, n as isize - 1) as usize;
+    if next == state.device_cursor {
+        Outcome::idle()
+    } else {
+        state.device_cursor = next;
+        Outcome::redraw()
+    }
+}
+
+/// Apply `f` to the open run-config modal (if any) and redraw; idle when the
+/// modal is closed.
+fn with_modal(state: &mut AppState, f: impl FnOnce(&mut RunConfig)) -> Outcome {
+    match state.run_config.as_mut() {
+        Some(modal) => {
+            f(modal);
+            Outcome::redraw()
+        }
+        None => Outcome::idle(),
     }
 }
 
@@ -470,6 +601,232 @@ mod tests {
         update(&mut st, Message::SearchCancel);
         assert!(!st.search.open);
         assert_eq!(st.search.filter.as_deref(), Some("er"));
+    }
+
+    // ── Devices panel + run-config modal (D6b) ──────────────────────────────
+
+    use crate::engine::run_config::RunFocus;
+    use frust_drive::build_info::BuildMode;
+    use frust_drive::devices::{Device, Kind, Platform};
+
+    fn dev(id: &str, name: &str, platform: Platform, kind: Kind) -> Device {
+        Device {
+            id: id.into(),
+            name: name.into(),
+            platform,
+            kind,
+            os_version: None,
+            connection_state: None,
+        }
+    }
+
+    fn workbench_with_project() -> AppState {
+        let root = PathBuf::from("/tmp/huddle");
+        AppState {
+            screen: crate::engine::Screen::Workbench,
+            project_root: Some(root.clone()),
+            projects: vec![root],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn refresh_requests_the_discovery_effect_and_flags_scanning() {
+        let mut st = workbench_with_project();
+        let out = update(&mut st, Message::RefreshDevices);
+        assert!(st.devices_refreshing);
+        assert_eq!(out.effect, Some(Effect::RefreshDevices));
+        assert!(out.redraw);
+    }
+
+    #[test]
+    fn devices_loaded_populates_clears_flag_and_preserves_selection() {
+        let mut st = workbench_with_project();
+        st.devices_refreshing = true;
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![
+                dev(
+                    "emulator-5554",
+                    "Pixel 7",
+                    Platform::Android,
+                    Kind::Emulator,
+                ),
+                dev("AAAA", "iPhone 15", Platform::Ios, Kind::Simulator),
+            ]),
+        );
+        assert!(!st.devices_refreshing);
+        assert_eq!(st.devices.len(), 2);
+        // Select the emulator, then a refresh keeps it selected (matched by id).
+        st.devices[0].selected = true;
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![
+                dev(
+                    "emulator-5554",
+                    "Pixel 7",
+                    Platform::Android,
+                    Kind::Emulator,
+                ),
+                dev("BBBB", "iPhone SE", Platform::Ios, Kind::PhysicalDevice),
+            ]),
+        );
+        assert!(
+            st.devices[0].selected,
+            "surviving device keeps its selection"
+        );
+        assert!(!st.devices[1].selected, "new device arrives unselected");
+    }
+
+    #[test]
+    fn device_cursor_moves_and_clamps() {
+        let mut st = workbench_with_project();
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![
+                dev("a", "A", Platform::Android, Kind::Emulator),
+                dev("b", "B", Platform::Android, Kind::Emulator),
+            ]),
+        );
+        assert_eq!(st.device_cursor, 0);
+        assert!(!update(&mut st, Message::DeviceCursorUp).redraw); // at top, no-op
+        assert!(update(&mut st, Message::DeviceCursorDown).redraw);
+        assert_eq!(st.device_cursor, 1);
+        assert!(!update(&mut st, Message::DeviceCursorDown).redraw); // at bottom
+        // Toggling select tracks the cursor.
+        update(&mut st, Message::ToggleDeviceSelect);
+        assert!(st.devices[1].selected);
+        // A click on index 0 toggles it and moves the cursor.
+        update(&mut st, Message::SelectDeviceAt(0));
+        assert!(st.devices[0].selected);
+        assert_eq!(st.device_cursor, 0);
+    }
+
+    #[test]
+    fn open_run_config_primes_from_panel_selection() {
+        let mut st = workbench_with_project();
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![dev(
+                "emulator-5554",
+                "Pixel 7",
+                Platform::Android,
+                Kind::Emulator,
+            )]),
+        );
+        update(&mut st, Message::ToggleDeviceSelect); // select Pixel 7
+        assert!(update(&mut st, Message::OpenRunConfig).redraw);
+        let modal = st.run_config.as_ref().expect("modal open");
+        // desktop + Pixel 7, the device checked.
+        assert_eq!(modal.targets.len(), 2);
+        assert!(modal.targets[1].selected);
+        // Esc closes it.
+        assert!(update(&mut st, Message::CloseRunConfig).redraw);
+        assert!(st.run_config.is_none());
+    }
+
+    #[test]
+    fn open_run_config_is_a_noop_on_the_welcome_screen() {
+        let mut st = welcome();
+        assert!(!update(&mut st, Message::OpenRunConfig).redraw);
+        assert!(st.run_config.is_none());
+    }
+
+    #[test]
+    fn modal_edits_route_through_the_focused_control() {
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenRunConfig); // desktop-only modal
+        update(&mut st, Message::RunConfigCycleMode(1));
+        assert_eq!(st.run_config.as_ref().unwrap().mode, BuildMode::Profile);
+        // Cycling focuses the mode row.
+        assert_eq!(st.run_config.as_ref().unwrap().focus, RunFocus::Mode);
+        update(&mut st, Message::RunConfigFocus(RunFocus::Flavor));
+        update(&mut st, Message::RunConfigInput('p'));
+        update(&mut st, Message::RunConfigInput('q'));
+        update(&mut st, Message::RunConfigBackspace);
+        assert_eq!(st.run_config.as_ref().unwrap().flavor, "p");
+    }
+
+    /// The N-device multi-launch acceptance path (engine level): N selected
+    /// targets → a launch effect carrying N specs → N registered sessions,
+    /// grouped under the one project.
+    #[test]
+    fn multi_device_launch_produces_one_session_per_target() {
+        let mut st = workbench_with_project();
+        update(
+            &mut st,
+            Message::DevicesLoaded(vec![
+                dev(
+                    "emulator-5554",
+                    "Pixel 7",
+                    Platform::Android,
+                    Kind::Emulator,
+                ),
+                dev(
+                    "emulator-5556",
+                    "Pixel 8",
+                    Platform::Android,
+                    Kind::Emulator,
+                ),
+                dev("AAAA", "iPhone 15", Platform::Ios, Kind::Simulator),
+            ]),
+        );
+        // Select all three devices in the panel.
+        for _ in 0..3 {
+            update(&mut st, Message::ToggleDeviceSelect);
+            update(&mut st, Message::DeviceCursorDown);
+        }
+        update(&mut st, Message::OpenRunConfig);
+        // Also check desktop for a 4-way launch.
+        update(&mut st, Message::RunConfigToggleTargetAt(0));
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert!(st.run_config.is_none(), "launch closes the modal");
+        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+            panic!("expected a LaunchSessions effect, got {:?}", out.effect);
+        };
+        // desktop + 3 devices.
+        assert_eq!(specs.len(), 4);
+        assert!(
+            specs
+                .iter()
+                .all(|s| s.project_root == std::path::Path::new("/tmp/huddle"))
+        );
+
+        // Simulate the runner registering each started session (the supervisor
+        // hands back ids in order); the model then holds N grouped sessions.
+        for (i, spec) in specs.iter().enumerate() {
+            let label = match &spec.target {
+                crate::supervise::DeviceTarget::Desktop => "desktop".to_string(),
+                crate::supervise::DeviceTarget::Device(d) => d.name.clone(),
+            };
+            update(
+                &mut st,
+                Message::RegisterSession {
+                    id: SessionId(i as u64),
+                    project_root: spec.project_root.clone(),
+                    target_label: label,
+                },
+            );
+        }
+        assert_eq!(st.sessions.len(), 4);
+        // All under the one project → a single group.
+        assert_eq!(st.sessions_grouped().len(), 1);
+        assert_eq!(st.active_session, Some(0));
+    }
+
+    #[test]
+    fn launch_with_nothing_checked_does_not_emit_an_effect() {
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenRunConfig);
+        // Uncheck the defaulted desktop target.
+        update(&mut st, Message::RunConfigToggleTargetAt(0));
+        let out = update(&mut st, Message::RunConfigLaunch);
+        assert_eq!(out.effect, None);
+        assert!(
+            st.run_config.is_some(),
+            "modal stays open with nothing to launch"
+        );
     }
 
     #[test]

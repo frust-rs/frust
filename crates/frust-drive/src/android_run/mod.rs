@@ -10,6 +10,7 @@ pub mod project;
 
 use std::io::IsTerminal;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -18,7 +19,7 @@ use crate::android_build::AndroidArtifact;
 use crate::build_info::BuildInfo;
 use crate::devices::{Device, Platform};
 use crate::doctor::{EnvLookup, RealEnv};
-use crate::process::{ProcessRunner, tail_lines};
+use crate::process::{ProcessRunner, StreamHandle, tail_lines};
 
 /// Outcome of matching discovered devices against `-d`/no-flag selection
 /// (spec §12.4 step 2).
@@ -125,92 +126,19 @@ fn run_with_env(
     info: &BuildInfo,
     env: &dyn EnvLookup,
 ) -> Result<u8> {
-    let project = project::detect(root)?;
-    let android_dir = project::require_android_dir(&project.root)?;
-
-    let preflight_ctx = preflight::PreflightCtx {
-        runner,
-        env,
-        is_macos: cfg!(target_os = "macos"),
+    // The CLI path never cancels — the shared build/install/launch core is
+    // driven to completion, then `run` blocks on logcat under a Ctrl-C
+    // handler (the TUI seam [`spawn_session`] takes the same core but returns
+    // a killable logcat handle instead, honoring a cancel flag).
+    let never = AtomicBool::new(false);
+    let mut on_line = |line: &str| println!("{line}");
+    let prepared = match prepare_session(runner, root, device, info, env, &mut on_line, &never)? {
+        Some(prepared) => prepared,
+        // Unreachable in the CLI path (`never` never sets), but keeps the
+        // function total against the cancellable core.
+        None => return Ok(0),
     };
-    let outcome = preflight::run(&preflight_ctx).map_err(|err| anyhow::anyhow!(err))?;
-
-    if let Some(gradle_user_home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-        let gradle_user_home = gradle_user_home.join(".gradle");
-        if !gradle::wrapper_dist_cached(&gradle_user_home) {
-            println!("Note: first Gradle run downloads the wrapper distribution (~1-2 min).");
-        }
-    }
-
-    let version_name = info.build_name.clone().unwrap_or_else(|| "1.0".to_string());
-    let version_code = info
-        .build_number
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "1".to_string());
-    crate::android_build::local_properties::write(&android_dir, &version_name, &version_code)
-        .context("writing android/local.properties")?;
-
-    crate::android_build::signing::check_release_signing(&android_dir, info.mode)?;
-
-    let abi = adb::device_abi(runner, &device.id);
-    let target = AndroidArtifact::Apk {
-        split_per_abi: false,
-        abis: vec![abi],
-    };
-    let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
-    let props = crate::android_build::tasks::gradle_properties(&target, &info.defines);
-
-    println!("Building `{}`…", project.app_id);
-    let build_start = Instant::now();
-    let mut on_gradle_line = |line: &str| println!("{line}");
-    let build_out = gradle::assemble(
-        runner,
-        &android_dir,
-        &outcome.java_home,
-        &task,
-        &props,
-        &mut on_gradle_line,
-    )?;
-    if !build_out.success {
-        let tail = tail_lines(&build_out.stderr, 50);
-        if tail.is_empty() {
-            bail!("`./gradlew {task}` failed");
-        }
-        bail!("`./gradlew {task}` failed:\n{tail}");
-    }
-    println!(
-        "Build finished in {:.1}s.",
-        build_start.elapsed().as_secs_f32()
-    );
-
-    let apk_path = gradle::apk_output_path(&android_dir, info.mode, info.flavor.as_deref())?;
-    let apk_path = apk_path.to_string_lossy().into_owned();
-
-    println!("Installing on {}…", device.name);
-    let install_start = Instant::now();
-    let install_out = adb::install(runner, &device.id, &apk_path)?;
-    if !install_out.success {
-        bail!("`adb install` failed: {}", install_out.stderr.trim());
-    }
-    println!(
-        "Installed in {:.1}s.",
-        install_start.elapsed().as_secs_f32()
-    );
-
-    println!("Launching {}…", project.app_id);
-    let launch_out = adb::launch(runner, &device.id, &project.app_id)?;
-    if !launch_out.success {
-        bail!("`adb shell am start` failed: {}", launch_out.stderr.trim());
-    }
-
-    let mut sleep = || std::thread::sleep(adb::PID_RETRY_DELAY);
-    let pid = adb::resolve_pid(
-        runner,
-        &device.id,
-        &project.app_id,
-        adb::PID_RETRY_ATTEMPTS,
-        &mut sleep,
-    )?;
+    let pid = prepared.pid;
 
     println!("Streaming logs (pid {pid}); press Ctrl-C to stop.");
     // Default SIGINT disposition would exit 130; spec §12.4 wants Ctrl-C to
@@ -225,6 +153,188 @@ fn run_with_env(
     adb::stream_logcat(runner, &device.id, &pid, &mut on_log_line)?;
 
     Ok(0)
+}
+
+/// What the build → install → launch core resolves before the logcat
+/// streaming phase begins: the launched app's pid, for the `logcat --pid`
+/// stream both front-ends attach.
+struct PreparedSession {
+    pid: String,
+}
+
+/// The shared build → install → launch → resolve-pid core of the Android run
+/// pipeline, feeding every phase line to `on_line` (no `println!`) and
+/// checking `cancel` at each phase boundary so a stop request abandons the
+/// pipeline promptly at the next boundary. Returns `Ok(None)` when `cancel`
+/// was observed at a boundary (the caller reports it as a cancelled session),
+/// or `Ok(Some(PreparedSession))` once the app is launched and its pid
+/// resolved. A blocking phase (`./gradlew`, `adb install`) can't itself be
+/// interrupted — a cancel requested mid-Gradle takes effect the moment that
+/// phase returns, matching the supervisor's documented kill boundary
+/// (`docs/ARCHITECTURE.md` / `supervise` module doc).
+fn prepare_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    env: &dyn EnvLookup,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Option<PreparedSession>> {
+    let project = project::detect(root)?;
+    let android_dir = project::require_android_dir(&project.root)?;
+
+    let preflight_ctx = preflight::PreflightCtx {
+        runner,
+        env,
+        is_macos: cfg!(target_os = "macos"),
+    };
+    let outcome = preflight::run(&preflight_ctx).map_err(|err| anyhow::anyhow!(err))?;
+
+    if let Some(gradle_user_home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        let gradle_user_home = gradle_user_home.join(".gradle");
+        if !gradle::wrapper_dist_cached(&gradle_user_home) {
+            on_line("Note: first Gradle run downloads the wrapper distribution (~1-2 min).");
+        }
+    }
+
+    let version_name = info.build_name.clone().unwrap_or_else(|| "1.0".to_string());
+    let version_code = info
+        .build_number
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "1".to_string());
+    crate::android_build::local_properties::write(&android_dir, &version_name, &version_code)
+        .context("writing android/local.properties")?;
+
+    crate::android_build::signing::check_release_signing(&android_dir, info.mode)?;
+
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    let abi = adb::device_abi(runner, &device.id);
+    let target = AndroidArtifact::Apk {
+        split_per_abi: false,
+        abis: vec![abi],
+    };
+    let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
+    let props = crate::android_build::tasks::gradle_properties(&target, &info.defines);
+
+    on_line(&format!("Building `{}`…", project.app_id));
+    let build_start = Instant::now();
+    let build_out = gradle::assemble(
+        runner,
+        &android_dir,
+        &outcome.java_home,
+        &task,
+        &props,
+        on_line,
+    )?;
+    if !build_out.success {
+        let tail = tail_lines(&build_out.stderr, 50);
+        if tail.is_empty() {
+            bail!("`./gradlew {task}` failed");
+        }
+        bail!("`./gradlew {task}` failed:\n{tail}");
+    }
+    on_line(&format!(
+        "Build finished in {:.1}s.",
+        build_start.elapsed().as_secs_f32()
+    ));
+
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    let apk_path = gradle::apk_output_path(&android_dir, info.mode, info.flavor.as_deref())?;
+    let apk_path = apk_path.to_string_lossy().into_owned();
+
+    on_line(&format!("Installing on {}…", device.name));
+    let install_start = Instant::now();
+    let install_out = adb::install(runner, &device.id, &apk_path)?;
+    if !install_out.success {
+        bail!("`adb install` failed: {}", install_out.stderr.trim());
+    }
+    on_line(&format!(
+        "Installed in {:.1}s.",
+        install_start.elapsed().as_secs_f32()
+    ));
+
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    on_line(&format!("Launching {}…", project.app_id));
+    let launch_out = adb::launch(runner, &device.id, &project.app_id)?;
+    if !launch_out.success {
+        bail!("`adb shell am start` failed: {}", launch_out.stderr.trim());
+    }
+
+    let mut sleep = || std::thread::sleep(adb::PID_RETRY_DELAY);
+    let pid = adb::resolve_pid(
+        runner,
+        &device.id,
+        &project.app_id,
+        adb::PID_RETRY_ATTEMPTS,
+        &mut sleep,
+    )?;
+
+    Ok(Some(PreparedSession { pid }))
+}
+
+/// The streaming, cancellable variant of [`run`] for a front-end that
+/// supervises the session itself (the `frust-tui` supervisor). Drives the
+/// same build → install → launch core, feeding each phase line to `on_line`
+/// and honoring `cancel` at every phase boundary, then — rather than blocking
+/// on logcat under a `ctrlc` handler the way [`run`] does — spawns the
+/// `adb logcat --pid <pid>` stream through the cancellable
+/// [`ProcessRunner::spawn_streaming`] seam and hands the caller its
+/// [`StreamHandle`] to drain and [`kill`](StreamHandle::kill).
+///
+/// Returns `Ok(None)` when `cancel` was observed before the streaming phase
+/// began (a stop during build/install/launch — the caller reports the session
+/// as killed), or `Ok(Some(handle))` with the live logcat stream otherwise.
+pub fn spawn_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Option<StreamHandle>> {
+    spawn_session_with_env(runner, root, device, info, on_line, cancel, &RealEnv)
+}
+
+/// The testable core of [`spawn_session`], taking an injected [`EnvLookup`]
+/// so `JAVA_HOME` resolution can be exercised with a `crate::doctor::FakeEnv`.
+fn spawn_session_with_env(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    env: &dyn EnvLookup,
+) -> Result<Option<StreamHandle>> {
+    let Some(prepared) = prepare_session(runner, root, device, info, env, on_line, cancel)? else {
+        return Ok(None);
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let pid = prepared.pid;
+    // The `Streaming logs (pid …)` marker the supervisor's `infer_state`
+    // reads to advance a session to `Running`, mirroring `run`'s own line.
+    on_line(&format!("Streaming logs (pid {pid})"));
+    let handle = runner
+        .spawn_streaming(
+            "adb",
+            &["-s", &device.id, "logcat", "--pid", &pid],
+            None,
+            &[],
+        )
+        .with_context(|| format!("spawning `adb logcat --pid {pid}`"))?;
+    Ok(Some(handle))
 }
 
 #[cfg(test)]
@@ -607,6 +717,89 @@ mod tests {
             let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
 
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The TUI streaming seam drives the same build→install→launch core and
+        /// hands back a live, drainable logcat [`StreamHandle`] — the phase
+        /// lines (including the `Streaming logs (pid …)` marker) arrive through
+        /// `on_line`, the logcat lines through the handle.
+        #[test]
+        fn spawn_session_reaches_a_drainable_logcat_stream() {
+            let dir = unique_project_dir("spawn-happy");
+            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+
+            let runner = preflight_ok_runner()
+                .with(
+                    "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                )
+                .with(format!("adb -s emulator-5554 install -r {apk_path}"), ok(""))
+                .with(
+                    "adb -s emulator-5554 shell am start -n dev.f0x.myapp/.MainActivity",
+                    ok(""),
+                )
+                .with("adb -s emulator-5554 shell pidof dev.f0x.myapp", ok("4242\n"))
+                .with_stream(
+                    "adb -s emulator-5554 logcat --pid 4242",
+                    ["D/frust: hello", "D/frust: world"],
+                    true,
+                );
+
+            let cancel = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let mut handle = spawn_session_with_env(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                &mut |l| lines.push(l.to_string()),
+                &cancel,
+                &fake_env(),
+            )
+            .unwrap()
+            .expect("a live logcat handle, not a cancellation");
+
+            assert!(lines.iter().any(|l| l.starts_with("Building")), "{lines:?}");
+            assert!(
+                lines.iter().any(|l| l == "Streaming logs (pid 4242)"),
+                "{lines:?}"
+            );
+
+            let mut logcat = Vec::new();
+            while let Ok(line) = handle.lines.recv() {
+                logcat.push(line);
+            }
+            assert_eq!(logcat, vec!["D/frust: hello", "D/frust: world"]);
+            assert!(handle.wait());
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A cancel observed before the streaming phase (here: from the start,
+        /// tripping the first post-preflight boundary check) abandons the
+        /// pipeline with `Ok(None)` and never spawns a logcat stream — no
+        /// gradle/adb fixtures are registered, proving the build phase is never
+        /// reached.
+        #[test]
+        fn spawn_session_cancelled_before_streaming_returns_none() {
+            let dir = unique_project_dir("spawn-cancel");
+            let runner = preflight_ok_runner();
+            let cancel = AtomicBool::new(true);
+            let out = spawn_session_with_env(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                &mut |_l| {},
+                &cancel,
+                &fake_env(),
+            )
+            .unwrap();
+            assert!(out.is_none());
             let _ = fs::remove_dir_all(&dir);
         }
     }

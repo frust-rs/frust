@@ -8,8 +8,8 @@ expression: "render_to_string(80, 24, &workbench_state())"
  PROJECTS                │                                                      
   ▸ huddle               │  Dashboard                                           
                          │  ━━━━━━━━━━                                          
- DEVICES                 │                                                      
-   (refresh in Phase 2)  │  No session running — start a run to open a log tab  
+ DEVICES ↻ r             │                                                      
+   none found            │  No session running — start a run to open a log tab  
                          │                                                      
  SESSIONS                │                                                      
    none running          │                                                      

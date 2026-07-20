@@ -11,15 +11,17 @@
 //! - [`supervisor`] is the moving part — [`Supervisor`] owns a supervision
 //!   thread per session and the single event channel.
 //!
-//! Engine/UI wiring (session tabs, the log view, run-config) lands in TUI2-03/
-//! TUI2-04; this module is standalone and unit-tested against a scripted
-//! `FakeProcessRunner`.
+//! The desktop `cargo run` path and the multi-phase device pipeline (build →
+//! install → launch → logcat, via `frust-drive`'s `android_run`/`ios_run`
+//! cancellable seams) both feed the same channel; [`Supervisor::start`]
+//! dispatches on the [`SessionSpec`]'s target. The module is unit-tested
+//! against a scripted `FakeProcessRunner`.
 
 mod session;
 mod supervisor;
 
 pub use session::{
-    DeviceTarget, LaunchError, LaunchPlan, SessionEvent, SessionEventKind, SessionId, SessionSpec,
-    SessionState,
+    DevicePlan, DeviceTarget, LaunchError, LaunchPlan, SessionEvent, SessionEventKind, SessionId,
+    SessionSpec, SessionState,
 };
 pub use supervisor::Supervisor;

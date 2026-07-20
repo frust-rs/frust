@@ -99,6 +99,21 @@ impl SessionSpec {
     }
 }
 
+/// A resolved device-session plan: the pieces the multi-phase device pipeline
+/// (`frust-drive`'s `android_run`/`ios_run`) needs, owned so they can cross
+/// onto the device supervision thread (see [`super::Supervisor::start`]'s
+/// device dispatch). Built from a [`SessionSpec`] whose `target` is a
+/// [`DeviceTarget::Device`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevicePlan {
+    /// The project the session builds/runs.
+    pub project_root: PathBuf,
+    /// The concrete device the pipeline targets.
+    pub device: Device,
+    /// The build mode/flavor/defines funnel.
+    pub build: BuildInfo,
+}
+
 /// A concrete, spawnable streaming invocation: the program, its args, the
 /// working directory, and any extra environment for the child only. This is
 /// what the supervisor feeds to `ProcessRunner::spawn_streaming`; keeping it

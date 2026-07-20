@@ -10,7 +10,10 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 
-use frust_tui::engine::{AppState, RegionId, Screen, Scroll, SessionView};
+use frust_drive::devices::{Device, Kind, Platform};
+use frust_tui::engine::{
+    AppState, DeviceRow, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView,
+};
 use frust_tui::supervise::{SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
 use frust_tui::ui::theme::{ColorDepth, Theme};
@@ -219,4 +222,82 @@ fn multi_session_state() -> AppState {
 #[test]
 fn session_tabs_grouped_120x36() {
     insta::assert_snapshot!(render_to_string(120, 36, &multi_session_state()));
+}
+
+// ── Devices panel + run-config modal (D6b) ──────────────────────────────────
+
+fn device(id: &str, name: &str, platform: Platform, kind: Kind) -> Device {
+    Device {
+        id: id.into(),
+        name: name.into(),
+        platform,
+        kind,
+        os_version: None,
+        connection_state: None,
+    }
+}
+
+fn devices() -> Vec<DeviceRow> {
+    vec![
+        DeviceRow {
+            device: device(
+                "53f887ac",
+                "OnePlus 9",
+                Platform::Android,
+                Kind::PhysicalDevice,
+            ),
+            selected: true,
+        },
+        DeviceRow {
+            device: device(
+                "emulator-5554",
+                "Pixel 7",
+                Platform::Android,
+                Kind::Emulator,
+            ),
+            selected: false,
+        },
+        DeviceRow {
+            device: device("AAAA", "iPhone SE", Platform::Ios, Kind::PhysicalDevice),
+            selected: false,
+        },
+    ]
+}
+
+/// The devices sidebar populated: three targets, one multi-selected, the
+/// cursor on the second, and the DEVICES header showing the select count.
+fn devices_panel_state() -> AppState {
+    let root = PathBuf::from("/tmp/huddle");
+    AppState {
+        screen: Screen::Workbench,
+        project_root: Some(root.clone()),
+        projects: vec![root],
+        devices: devices(),
+        device_cursor: 1,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn devices_panel_100x30() {
+    insta::assert_snapshot!(render_to_string(100, 30, &devices_panel_state()));
+}
+
+/// The run-config modal open over the workbench: desktop + the three devices
+/// (OnePlus 9 pre-checked from the panel), a non-default mode/flavor, focus on
+/// the defines field.
+fn run_config_modal_state() -> AppState {
+    let mut state = devices_panel_state();
+    let mut modal = RunConfig::new(state.project_root.clone().unwrap(), &state.devices);
+    modal.mode = frust_drive::build_info::BuildMode::Release;
+    modal.flavor = "paid".into();
+    modal.defines = "FRUST_TRACE=1".into();
+    modal.focus = RunFocus::Defines;
+    state.run_config = Some(modal);
+    state
+}
+
+#[test]
+fn run_config_modal_100x30() {
+    insta::assert_snapshot!(render_to_string(100, 30, &run_config_modal_state()));
 }

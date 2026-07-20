@@ -8,11 +8,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
-use crate::engine::AppState;
+use crate::engine::{AppState, DeviceRow, Message, RegionId};
 use crate::ui::layout::{Shell, sidebar_main};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
 use crate::ui::views::sessions;
+use frust_drive::devices::{Kind, Platform};
 
 /// Render the workbench shell into `area`.
 pub fn render(
@@ -26,7 +27,7 @@ pub fn render(
     titlebar(frame, shell.titlebar, state, theme);
 
     let (sidebar, main) = sidebar_main(shell.body);
-    render_sidebar(frame, sidebar, state, theme);
+    render_sidebar(frame, sidebar, state, theme, mouse);
     // With sessions open, the main area is the tab bar + log view; otherwise the
     // static dashboard placeholder.
     if state.sessions.is_empty() {
@@ -91,7 +92,13 @@ fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     }
 }
 
-fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+fn render_sidebar(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(Style::default().fg(theme.border()))
@@ -110,11 +117,31 @@ fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
     };
     let item = |s: &str| Line::styled(format!("  {s}"), Style::default().fg(theme.muted()));
 
+    // Build the whole sidebar as a stacked line list, remembering which rows
+    // are interactive device rows (and the refresh affordance) so their
+    // single-row click rects can be registered after layout.
     let mut lines = vec![heading("PROJECTS")];
     lines.extend(project_lines(state, theme));
     lines.push(Line::from(""));
-    lines.push(heading("DEVICES"));
-    lines.push(item("(refresh in Phase 2)"));
+
+    // DEVICES header carries the refresh affordance on the right.
+    let devices_header_row = lines.len();
+    lines.push(devices_header_line(state, theme));
+    let mut device_rows: Vec<usize> = Vec::new();
+    if state.devices.is_empty() {
+        let msg = if state.devices_refreshing {
+            "scanning…"
+        } else {
+            "none found"
+        };
+        lines.push(item(msg));
+    } else {
+        for (i, row) in state.devices.iter().enumerate() {
+            device_rows.push(lines.len());
+            lines.push(device_line(state, i, row, theme));
+        }
+    }
+
     lines.push(Line::from(""));
     lines.push(heading("SESSIONS"));
     lines.extend(sessions::sidebar_lines(state, theme));
@@ -122,6 +149,99 @@ fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
     lines.push(heading("ACTIONS"));
     lines.push(item("Doctor · Settings"));
     frame.render_widget(Paragraph::new(lines), inner);
+
+    // Register the interactive regions now that row indices are known (a row
+    // scrolled past the visible height registers nothing).
+    let row_rect = |row: usize| -> Option<Rect> {
+        let y = inner.y + row as u16;
+        (y < inner.bottom()).then(|| Rect::new(inner.x, y, inner.width, 1))
+    };
+    if let Some(rect) = row_rect(devices_header_row) {
+        mouse.click(rect, RegionId::RefreshDevices, Message::RefreshDevices);
+    }
+    for (i, &row) in device_rows.iter().enumerate() {
+        if let Some(rect) = row_rect(row) {
+            mouse.click(rect, RegionId::DeviceRow(i), Message::SelectDeviceAt(i));
+        }
+    }
+}
+
+/// The DEVICES section header, with the refresh affordance (a spinner-ish
+/// glyph while a scan is in flight) right-aligned into the label.
+fn devices_header_line(state: &AppState, theme: &Theme) -> Line<'static> {
+    let selected = state.selected_device_count();
+    let count = if selected > 0 {
+        format!("DEVICES ({selected})")
+    } else {
+        "DEVICES".to_string()
+    };
+    let refresh = if state.devices_refreshing {
+        Span::styled(" \u{25cc} scanning", Style::default().fg(theme.warn()))
+    } else {
+        Span::styled(" \u{21bb} r", Style::default().fg(theme.muted()))
+    };
+    Line::from(vec![
+        Span::styled(
+            count,
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        refresh,
+    ])
+}
+
+/// One device row: cursor marker, select checkbox, a connection-colored dot,
+/// the device name, and a dim platform·kind tag.
+fn device_line(state: &AppState, index: usize, row: &DeviceRow, theme: &Theme) -> Line<'static> {
+    let under_cursor = state.device_cursor == index;
+    let marker = if under_cursor { "\u{25b8}" } else { " " };
+    let check = if row.selected { "[x]" } else { "[ ]" };
+    let (dot_color, tag) = device_glyph(&row.device, theme);
+    let name_style = if under_cursor {
+        Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD)
+    } else if row.selected {
+        Style::default().fg(theme.fg())
+    } else {
+        Style::default().fg(theme.muted())
+    };
+    Line::from(vec![
+        Span::styled(format!(" {marker} "), Style::default().fg(theme.accent())),
+        Span::styled(
+            format!("{check} "),
+            Style::default().fg(if row.selected {
+                theme.success()
+            } else {
+                theme.muted()
+            }),
+        ),
+        Span::styled("\u{25cf} ", Style::default().fg(dot_color)),
+        Span::styled(row.device.name.clone(), name_style),
+        Span::styled(format!(" {tag}"), Style::default().fg(theme.muted())),
+    ])
+}
+
+/// The connection dot color and the `platform·kind` tag for a device.
+fn device_glyph(
+    device: &frust_drive::devices::Device,
+    theme: &Theme,
+) -> (ratatui::style::Color, String) {
+    let platform = match device.platform {
+        Platform::Android => "android",
+        Platform::Ios => "ios",
+    };
+    let kind = match device.kind {
+        Kind::PhysicalDevice => "device",
+        Kind::Emulator => "emulator",
+        Kind::Simulator => "simulator",
+    };
+    // A physical iOS device reports a connection state; "disconnected" is a
+    // paired-but-not-tunneled device (still targetable) — dim it.
+    let color = match device.connection_state.as_deref() {
+        Some("disconnected") => theme.warn(),
+        _ => theme.success(),
+    };
+    (color, format!("{platform}·{kind}"))
 }
 
 /// One line per detected project (F5 bounded-walk detection); the active one

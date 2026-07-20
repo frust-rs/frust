@@ -37,7 +37,18 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
 
     match state.screen {
         Screen::Welcome => render_welcome(frame, area, state, theme, mouse),
-        Screen::Workbench => views::workbench::render(frame, area, state, theme, mouse),
+        Screen::Workbench => {
+            if let Some(modal) = &state.run_config {
+                // D4 base-layer suppression: the workbench beneath the modal
+                // registers no mouse regions (pass `None`), so only the modal's
+                // regions are live while it is open.
+                let mut suppressed = MouseCtx::suppressed();
+                views::workbench::render(frame, area, state, theme, &mut suppressed);
+                views::run_config::render(frame, area, modal, theme, mouse);
+            } else {
+                views::workbench::render(frame, area, state, theme, mouse);
+            }
+        }
     }
 }
 

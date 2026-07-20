@@ -8,6 +8,9 @@
 
 use std::path::PathBuf;
 
+use frust_drive::devices::Device;
+
+use super::run_config::RunFocus;
 use crate::supervise::{SessionEvent, SessionId};
 
 /// A semantic id for a per-frame mouse region.
@@ -27,6 +30,24 @@ pub enum RegionId {
     SessionTab(usize),
     /// The scrollable log-view pane (pointer-aware wheel scroll region).
     LogView,
+    /// The devices-panel "refresh" affordance; click re-runs discovery.
+    RefreshDevices,
+    /// A device row in the sidebar DEVICES section (0-based index into
+    /// `AppState::devices`); click moves the cursor there and toggles select.
+    DeviceRow(usize),
+    /// A target checkbox row in the run-config modal (0-based index into the
+    /// modal's `targets`); click toggles it.
+    RunTargetRow(usize),
+    /// The run-config modal's build-mode selector; click cycles it.
+    RunModeRow,
+    /// The run-config modal's flavor text field; click focuses it.
+    RunFlavorRow,
+    /// The run-config modal's defines text field; click focuses it.
+    RunDefinesRow,
+    /// The run-config modal's launch button.
+    RunLaunch,
+    /// The run-config modal's cancel button.
+    RunCancel,
 }
 
 /// A TEA message: the only way `AppState` ever changes.
@@ -110,4 +131,47 @@ pub enum Message {
     /// Copy the current selection to the clipboard (`y`) — routed to the runner
     /// as an [`super::Effect::Copy`].
     CopySelection,
+
+    // ── Devices panel + run-config modal (D6b) ──────────────────────────────
+    /// Refresh the device list (`r` from the panel with no modal, or the
+    /// panel refresh affordance) — routed to the runner as
+    /// [`super::Effect::RefreshDevices`], which discovers off-thread.
+    RefreshDevices,
+    /// The background discovery task finished: replace the device list.
+    DevicesLoaded(Vec<Device>),
+    /// Move the devices-panel cursor up / down (`↑`/`↓` while the panel has
+    /// focus and no modal is open).
+    DeviceCursorUp,
+    /// Move the devices-panel cursor down.
+    DeviceCursorDown,
+    /// Toggle the multi-select of the device under the cursor (`Space`).
+    ToggleDeviceSelect,
+    /// Move the cursor to a device by index and toggle it (mouse click parity).
+    SelectDeviceAt(usize),
+    /// Open the run-config modal, primed from the panel selection (`Enter`
+    /// from the devices panel).
+    OpenRunConfig,
+    /// Close the run-config modal without launching (`Esc`).
+    CloseRunConfig,
+    /// Move modal focus to the next / previous control (`Tab` / `↓`, `↑`).
+    RunConfigFocusNext,
+    /// Move modal focus to the previous control.
+    RunConfigFocusPrev,
+    /// Toggle the focused target checkbox (`Space`).
+    RunConfigToggleTarget,
+    /// Toggle a target checkbox by index (mouse click parity).
+    RunConfigToggleTargetAt(usize),
+    /// Cycle the build mode by `delta` (`←`/`→`).
+    RunConfigCycleMode(isize),
+    /// Move modal focus to a specific control (mouse parity for the
+    /// flavor/defines rows).
+    RunConfigFocus(RunFocus),
+    /// Type a character into the focused modal text field.
+    RunConfigInput(char),
+    /// Delete the last character of the focused modal text field.
+    RunConfigBackspace,
+    /// Launch one session per checked target (`Enter` on the launch button, or
+    /// the launch affordance) — routed to the runner as
+    /// [`super::Effect::LaunchSessions`].
+    RunConfigLaunch,
 }

@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::message::RegionId;
+use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use crate::supervise::SessionId;
 
@@ -79,6 +80,17 @@ pub struct AppState {
     pub wrap: bool,
     /// The log search/filter overlay state.
     pub search: SearchState,
+    /// The discovered devices list (sidebar DEVICES section), each with its
+    /// panel multi-select flag. Populated by a background discovery task.
+    pub devices: Vec<DeviceRow>,
+    /// The highlighted row in the devices panel (`↑`/`↓` move it); clamped to
+    /// `devices` on every mutation.
+    pub device_cursor: usize,
+    /// Whether a device refresh is in flight (shows a spinner/label).
+    pub devices_refreshing: bool,
+    /// The run-config modal, when open (`r`/`Enter` from the devices panel).
+    /// While `Some`, it captures input and suppresses background mouse regions.
+    pub run_config: Option<RunConfig>,
 }
 
 impl AppState {
@@ -113,6 +125,10 @@ impl AppState {
             active_session: None,
             wrap: false,
             search: SearchState::default(),
+            devices: Vec::new(),
+            device_cursor: 0,
+            devices_refreshing: false,
+            run_config: None,
         }
     }
 
@@ -145,6 +161,21 @@ impl AppState {
     /// Whether any tracked session is still in a live (non-terminal) state.
     pub fn any_session_running(&self) -> bool {
         self.sessions.iter().any(|s| !s.state.is_terminal())
+    }
+
+    /// Clamp `device_cursor` into range after the device list changes (an
+    /// empty list parks it at 0).
+    pub fn clamp_device_cursor(&mut self) {
+        if self.devices.is_empty() {
+            self.device_cursor = 0;
+        } else if self.device_cursor >= self.devices.len() {
+            self.device_cursor = self.devices.len() - 1;
+        }
+    }
+
+    /// The number of devices currently selected in the panel.
+    pub fn selected_device_count(&self) -> usize {
+        self.devices.iter().filter(|d| d.selected).count()
     }
 
     /// The sessions grouped by project, preserving first-seen project order and
@@ -181,6 +212,10 @@ impl Default for AppState {
             active_session: None,
             wrap: false,
             search: SearchState::default(),
+            devices: Vec::new(),
+            device_cursor: 0,
+            devices_refreshing: false,
+            run_config: None,
         }
     }
 }
