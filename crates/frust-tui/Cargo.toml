@@ -23,6 +23,9 @@ path = "src/main.rs"
 # the `frust` CLI does; the skeleton links it but does not yet drive it.
 frust-drive = { path = "../frust-drive" }
 anyhow.workspace = true
+# `thiserror` backs the supervisor's matched `LaunchError` (CODE_STANDARDS'
+# "errors callers match on" rule); already a workspace dependency.
+thiserror.workspace = true
 ratatui.workspace = true
 # `event-stream` gives the async `EventStream` the tokio `select!` loop polls.
 crossterm = { workspace = true, features = ["event-stream"] }
@@ -41,3 +44,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 [dev-dependencies]
 # TestBackend + insta snapshot harness for the render suite.
 insta.workspace = true
+# Enables `frust-drive`'s `test-util` feature (its scripted `FakeProcessRunner`)
+# for the supervisor suite — the fake stays out of the shipped build (feature is
+# off in the normal `[dependencies]` entry above; only `cargo test` unifies it in).
+frust-drive = { path = "../frust-drive", features = ["test-util"] }

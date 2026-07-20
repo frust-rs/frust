@@ -19,13 +19,9 @@
 //! pipelines) and never on the framework render stack
 //! (`frust-core`/`vello`/`wgpu`) — same isolation charter as `frust-cli`.
 
-// `frust-drive` is the drive backend Phase 2's project detection and session
-// supervision consume; declared now so the crate graph is complete and the
-// dependency is pinned. (Kept as a link-only dependency until then.)
-use frust_drive as _;
-
 pub mod engine;
 mod runner;
+pub mod supervise;
 pub mod ui;
 
 pub use runner::run;

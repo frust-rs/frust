@@ -1587,6 +1587,7 @@ dependencies = [
  "futures-util",
  "insta",
  "ratatui",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
