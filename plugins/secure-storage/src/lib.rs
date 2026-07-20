@@ -41,13 +41,26 @@
 //! `frust-reactive`'s `spawn_blocking` (the plugin itself stays framework-free
 //! per charter). See the plugin `README.md` (Phase 5) for the full contract.
 
-// The `file` backend is the sole backend this phase ships, so it is compiled
-// unconditionally today and also serves the conformance suite. Later phases
-// introduce `#[cfg(target_os = ...)]`-gated `apple`/`android`/`desktop`
-// backends and demote `file` to a Linux/Windows fallback plus a
-// `#[cfg(test)]` conformance target (plan Phase 4) — mirroring
+// The `file` backend is the sole backend actually *dispatched to* today
+// (see `open_with`'s selection point below), so it stays compiled
+// unconditionally and also serves the conformance suite. S04 (Plan Phase 4)
+// demotes it to a `#[cfg(test)]`-only conformance target once `desktop`
+// takes over the linux/windows arm — mirroring
 // `frust-shared-preferences`' backend-routing structure.
 mod file;
+
+// Backend stub modules (task S01b, Plan Phases 2-4 preamble): compiling,
+// `#[cfg]`-gated `Backend` impls that every op `Err`s
+// `NotAvailable(UnsupportedPlatform)`, added now so the platform-FFI deps
+// below compile on every real target ahead of S02/S03/S04's work. None is
+// constructed yet — `open_with`'s selection point below still routes every
+// arm to `file::FileStore` until each task flips its own one line.
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_vendor = "apple")]
+mod apple;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod desktop;
 
 #[cfg(test)]
 mod conformance;
@@ -329,9 +342,25 @@ impl SecureStorage {
             ));
         }
 
-        // Phase 1 routes every target to the file backend. Later phases add
-        // `#[cfg(target_os = ...)]` dispatch (Apple/Android/desktop) here.
+        // FINAL backend routing (task S01b, Plan Phases 2-4 preamble): apple
+        // targets -> `apple`, android -> `android`, linux/windows ->
+        // `desktop`. Until each platform backend lands, every arm below
+        // still constructs `file::FileStore` — this is the single,
+        // clearly-marked selection point each task flips its own one line
+        // of, and no other line in this file (or any other shared file)
+        // needs to change to land a platform backend:
+        //   - S02 flips the apple arm to `Arc::new(apple::AppleStore)`.
+        //   - S03 flips the android arm to `Arc::new(android::AndroidStore)`.
+        //   - S04 flips the linux/windows arm to
+        //     `Arc::new(desktop::DesktopStore)` (and demotes `file.rs` to
+        //     `#[cfg(test)]`-only).
+        #[cfg(target_vendor = "apple")]
         let backend: Arc<dyn Backend> = Arc::new(file::FileStore::standard(name)?);
+        #[cfg(target_os = "android")]
+        let backend: Arc<dyn Backend> = Arc::new(file::FileStore::standard(name)?);
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        let backend: Arc<dyn Backend> = Arc::new(file::FileStore::standard(name)?);
+
         Ok(Self { backend })
     }
 

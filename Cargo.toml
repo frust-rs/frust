@@ -167,6 +167,32 @@ accesskit_ios = "=0.1.2"
 # unstable API, isolated behind the encode adapter so a breaking bump never
 # reaches the default GPU path.
 vello_cpu = "=0.0.9"
+# frust-secure-storage's Apple Keychain + LocalAuthentication bindings (task
+# S01b, Plan Phases 2/5) — same rationale/precedent as `objc2`/
+# `objc2-foundation` above: plain version strings (no `default-features`
+# set) so a member can pick its own minimal feature list and
+# `default-features = false` without Cargo's workspace-inheritance
+# restriction tripping (see `plugins/secure-storage/Cargo.toml`'s comment).
+# Pinned to minor per the Version-Pin Policy, matching `objc2`/
+# `objc2-foundation`'s existing rows; the tripwire is
+# `cargo check --target aarch64-apple-ios-sim -p frust-secure-storage`
+# (verified buildable against a scratch crate during S01b — objc2-security
+# 0.3.2, objc2-local-authentication 0.3.2, both actively maintained per
+# research/RESEARCH.md).
+objc2-security = "0.3"
+objc2-local-authentication = "0.3"
+# frust-secure-storage's desktop (Linux/Windows) secret-store backend (task
+# S01b, Plan Phase 4) — `keyring` 4.x's re-architecture fronts `keyring-core`
+# + separate opt-in per-platform store crates (research/RESEARCH.md §6).
+# Linux's zbus-based secret-service store is pure Rust (no libdbus to
+# vendor); Windows' wraps Credential Manager. Pinned to minor per the
+# Version-Pin Policy; the tripwire is `cargo check -p frust-secure-storage`
+# for `keyring-core` (every target) and a Linux/Windows host build for the
+# platform-specific store crates (not available on this macOS host — see
+# DEVELOPMENT.md's Test section note on that gate).
+keyring-core = "1.0"
+zbus-secret-service-keyring-store = "1.0"
+windows-native-keyring-store = "1.1"
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md / phase-5.5 research doc)
 reactive_graph = "0.2"

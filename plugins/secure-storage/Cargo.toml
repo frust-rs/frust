@@ -11,13 +11,81 @@ thiserror = { workspace = true }
 # The file backend's on-disk JSON map encoding.
 serde_json = { workspace = true }
 
-# Platform-FFI dependencies are added with their backends in later phases,
-# target-gated exactly like `frust-shared-preferences` (platform-plugin
-# charter — see `docs/ARCHITECTURE.md`'s Module Structure):
-#   - Phase 2 (Apple Keychain): `objc2` / `objc2-security`
-#     under `cfg(any(target_os = "ios", target_os = "macos"))`.
-#   - Phase 3 (Android Keystore): `frust-plugin` + `jni`
-#     under `cfg(target_os = "android")`.
-#   - Phase 4 (desktop keyring): `keyring-core` + platform store crates
-#     under `cfg(any(target_os = "linux", target_os = "windows"))`.
-# This phase ships only the `file` backend, so no FFI deps exist yet.
+# Task S01b (Plan Phases 2-4 preamble): every platform-FFI dependency the
+# real backends need is pinned here now, target-gated exactly like
+# `frust-shared-preferences` (platform-plugin charter — see
+# `docs/ARCHITECTURE.md`'s Module Structure), so S02/S03/S04 run in parallel
+# worktrees without contending on this file. Each arm compiles today only
+# against the matching `apple.rs`/`android.rs`/`desktop.rs` stub (every op
+# `NotAvailable(UnsupportedPlatform)`) — see `src/lib.rs`'s module doc and
+# `open_with`'s selection point.
+
+# Apple Keychain (Phase 2 storage, Phase 5 biometric gate) — iOS, macOS,
+# tvOS, watchOS. Feature lists are minimal-but-forward: `SecItem`/`SecBase`
+# cover Phase 2's `kSecClassGenericPassword` CRUD, `SecAccessControl` covers
+# Phase 5's `SecAccessControlCreateWithFlags` gate; `objc2-local-authentication`
+# covers Phase 5's `LAContext.canEvaluatePolicy` probe + LAError taxonomy.
+# Not `{ workspace = true, features = [...] }`: Cargo's workspace-dependency
+# inheritance forbids a member from overriding `default-features` unless the
+# workspace-level entry already sets it explicitly (see
+# `objc2-foundation`'s comment below and in
+# `plugins/shared-preferences/Cargo.toml`), so every one of these repeats its
+# version literal instead of inheriting.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { workspace = true }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFString",
+    "CFDictionary",
+    "CFData",
+    "CFError",
+] }
+objc2-security = { version = "0.3", default-features = false, features = [
+    "std",
+    "SecBase",
+    "SecItem",
+    "SecAccessControl",
+] }
+objc2-local-authentication = { version = "0.3", default-features = false, features = [
+    "std",
+    "LABase",
+    "LABiometryType",
+    "LAContext",
+    "LAError",
+] }
+
+# Android Keystore (Phase 3 storage, Phase 5 biometric gate) — matches
+# `frust-shared-preferences`' Android arm: `frust-plugin` is the only
+# `frust-*` dependency a platform plugin may carry (platform-plugin
+# charter), reached through directly (not just via `frust-plugin`'s
+# re-export) for this crate's own JNI signature calls
+# (`KeyGenParameterSpec`/`Cipher`/`BiometricPrompt`).
+[target.'cfg(target_os = "android")'.dependencies]
+frust-plugin = { path = "../../crates/frust-plugin" }
+jni = { workspace = true }
+
+# Desktop secret store (Phase 4 storage only — biometric gate stays
+# `NotAvailable` on linux/windows permanently, per PLAN.md). `keyring-core`
+# is the shared cross-platform API; the actual OS store is a separate
+# opt-in crate per `keyring` 4.x's re-architecture (research/RESEARCH.md
+# §6) — Linux's `zbus-secret-service-keyring-store` is pure-Rust (no
+# libdbus to vendor), Windows' `windows-native-keyring-store` wraps
+# Credential Manager. macOS desktop is NOT part of this arm — it shares
+# `apple.rs` with iOS via the `target_vendor = "apple"` arm above.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+keyring-core = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# `secret-service`/`zbus` are async internally; `rt-async-io-crypto-rust`
+# picks the `async-io`-based runtime (not tokio) + a pure-Rust crypto
+# backend, so this sync-API plugin pulls no tokio dependency of its own
+# (verified buildable: `cargo check` against a scratch crate, task S01b).
+# Not `{ workspace = true, ... }`: same `default-features` override
+# restriction as the Apple deps above — the workspace-level entry is a
+# plain version string, so this repeats it literally instead.
+zbus-secret-service-keyring-store = { version = "1.0", default-features = false, features = [
+    "rt-async-io-crypto-rust",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = { workspace = true }
