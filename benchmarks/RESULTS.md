@@ -794,3 +794,117 @@ fix (Flutter marker placement) is a follow-up, not a re-run. Moving Frust from
 profile to a true `--release` build changed the per-frame and plugin numbers
 only within noise (S1/S4/S6/S7/S8) — the wins/losses are structural, not a
 build-mode artifact.
+
+---
+
+## App size (release)
+
+A one-time size snapshot, not a per-device frame benchmark — measured on the
+build host via the new `benchmarks/harness/app_size.sh` (degrades to a
+printed "not built" note per artifact rather than failing; reruns the same
+`unzip -l`/`du -sk` measurements below on demand). Both apps' Android release
+APK (universal, all three ABIs, plus an arm64-v8a-only split for a same-ABI
+comparison) and iOS release `.app` bundle.
+
+### Android release APK
+
+| App | Universal APK (arm64+armv7+x86_64) | arm64-v8a split |
+|---|---|---|
+| Frust | **21.16 MB** (22,188,018 bytes) | **7.49 MB** (7,858,991 bytes)† |
+| Flutter | 43.51 MB (45,628,582 bytes) | 15.48 MB (16,236,261 bytes) |
+
+†Measured directly off the just-built artifact (`app-arm64-v8a-release.apk`,
+7,858,991 bytes) but not left on disk for `app_size.sh` to re-report:
+Frust's Gradle project writes every release-variant APK to the same
+`android/app/build/outputs/apk/release/` directory regardless of
+`--split-per-abi`, so rebuilding the universal APK afterward (to restore
+the run-matrix's default artifact) overwrote the split one in place.
+Flutter's `build/app/outputs/flutter-apk/` directory keeps every variant
+side by side, so its arm64 split stays on disk and is directly
+re-measurable by `app_size.sh`.
+
+**Build commands:**
+- Frust universal: `(cd benchmarks/frust_bench && frust build apk --release)`
+  — already built by the run-matrix campaign; rebuilding it this pass
+  reproduced the identical 22,188,018-byte artifact (deterministic release
+  build).
+- Frust arm64 split: `(cd benchmarks/frust_bench && frust build apk --release
+  --split-per-abi --target-platform android-arm64)` — same huddle upload
+  keystore, JBR `JAVA_HOME`, NDK `27.0.12077973` as the OnePlus 9 release
+  recipe above (`docs/DEVELOPMENT.md`'s Prerequisites).
+- Flutter universal: `(cd benchmarks/flutter_bench && flutter build apk
+  --release)` — debug-signed (Flutter's default with no `key.properties`
+  present; fine for a size comparison, doesn't affect artifact size).
+- Flutter arm64 split: `(cd benchmarks/flutter_bench && flutter build apk
+  --release --split-per-abi)`.
+
+**Per-ABI `.so`/dex breakdown** (`unzip -l` summed by path — the
+`scripts/size-report.sh` technique; these are uncompressed listing sizes, so
+a row sum can exceed the compressed APK total):
+
+| Component | Frust (universal APK) | Flutter (arm64 split APK) |
+|---|---|---|
+| `lib/arm64-v8a/*.so` (engine + app) | 7.39 MB (7,748,168 bytes) | 14.61 MB (11,579,920 + 3,736,464 bytes: `libflutter.so` + `libapp.so`) |
+| `lib/armeabi-v7a/*.so` | 5.28 MB (5,534,276 bytes) | n/a (not in the arm64-only split) |
+| `lib/x86_64/*.so` | 8.38 MB (8,789,176 bytes) | n/a (not in the arm64-only split) |
+| `classes.dex` (total) | 0.13 MB (138,796 bytes) | 0.78 MB (821,848 bytes) |
+
+Flutter's arm64 `.so` payload splits into two named pieces — `libflutter.so`
+(11.58 MB, the **engine**: Skia/Impeller renderer + Dart VM runtime,
+general-purpose and identical across any Flutter app) and `libapp.so`
+(3.56 MB, the **AOT-compiled app snapshot**, this benchmark's actual
+compiled Dart) — plus
+a small `libdatastore_shared_counter.so` (~7 KB, `shared_preferences_android`
+plugin support lib). Frust ships one `.so` per ABI with no such split: the
+vello/wgpu render stack and the app's own logic compile straight into
+`libfrustbench.so`, so there's no separately-shipped "engine" to measure.
+
+### iOS release `.app` bundle
+
+| App | Release `.app` (`du -sk`) | Profile `.app` (reference only — not release) |
+|---|---|---|
+| Frust | **7.96 MB** (8,156 KB) | n/a — the run-matrix builds Frust release-only on iOS (see the iPhone SE section above) |
+| Flutter | **14.58 MB** (14,928 KB) | 22.10 MB (22,632 KB) |
+
+**Build commands / provenance:**
+- Frust: `frust build ios --release` (signed `FRUST_IOS_TEAM=87MFQ5L648`) —
+  the existing campaign artifact under
+  `benchmarks/frust_bench/build/ios/Build/Products/Release-iphoneos/Runner.app`
+  (built 2026-07-20, the same release build the iPhone SE device matrix
+  above used for S1–S8) — measured directly, not rebuilt this pass.
+- Flutter: `flutter build ios --release` — **attempted and succeeded** this
+  pass (Automatic signing; `DEVELOPMENT_TEAM = 87MFQ5L648` was already
+  committed in the Xcode project, and a valid "Apple Development" signing
+  identity for that team was present on this build host), producing
+  `benchmarks/flutter_bench/build/ios/iphoneos/Runner.app` fresh. Flutter's
+  pre-existing `Profile-iphoneos/Runner.app` (from the device campaign's
+  per-scenario `--profile` builds) is shown only for reference — profile
+  mode ships extra JIT-capable/tracing scaffolding and is a **different,
+  larger config**, never compared head-to-head against Frust's release
+  number.
+
+### Narrative
+
+**Frust's Android APK is roughly half Flutter's** (21.16 MB vs 43.51 MB
+universal; 7.49 MB vs 15.48 MB arm64-only) and **its iOS `.app` is roughly
+half Flutter's release build too** (7.96 MB vs 14.58 MB) — consistent with
+the release profile's `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`
+hardening (`docs/DEVELOPMENT.md`'s Release-profile hardening) producing one
+self-contained, dead-code-eliminated native binary with no separate runtime
+to ship. This is architectural, not merely a smaller optimization setting:
+Frust's `.app` **is** its Rust binary almost in full (the `Runner` executable
+alone is 8,260,736 bytes ≈ 7.88 MB of the 7.96 MB iOS bundle total — the
+vello/wgpu render stack and UI logic all link straight into it), whereas
+Flutter's `.app` bundles a general-purpose **engine**
+(`Flutter.framework`, ~9.83 MB of the 14.58 MB iOS release total) *beside*
+the app's own **AOT snapshot** (`App.framework`, ~4.36 MB) — a Skia/Impeller
+renderer plus Dart VM shipped with every Flutter app regardless of what that
+app does, a fixed cost no single app's LTO/tree-shaking pass can remove. The
+same engine-vs-app split shows up on Android's arm64 breakdown above
+(`libflutter.so` 11.58 MB vs `libapp.so` 3.56 MB). No build-config asymmetry
+to flag on Android (release-vs-release, same-ABI-vs-same-ABI on both sides);
+the one asymmetry the campaign initially had was iOS Flutter having only a
+profile `.app` on disk — resolved this pass by successfully building
+Flutter's release `.app` too, so both iOS numbers above are release vs.
+release, with the earlier profile artifact kept only as a clearly-labeled
+reference row.
