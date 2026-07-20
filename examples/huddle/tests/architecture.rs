@@ -60,7 +60,9 @@
 //! understanding of Rust `use` trees, paths, or types. Review r0 (round 0)
 //! demonstrated three concrete ways a substring scan can be defeated; fix-1
 //! closed those three, but review r1's adversarial re-review reproduced two
-//! more gaps *in that hardening itself* (both closed here, by fix-2):
+//! more gaps *in that hardening itself* (both closed here, by fix-2). Review
+//! r2's convergence re-review then found one more, LATENT (fails-safe, never
+//! a bypass) gap, closed here by fix-3 (below):
 //!
 //! 1. **Alias/use-form bypass — CLOSED (fix-1).** A single `"::data::"`/
 //!    `"::presentation::"` needle missed `use ...::data as msgdata;` (no
@@ -100,11 +102,29 @@
 //!    segment token is banned regardless of which punctuation surrounds it, so
 //!    no enumeration of use-form terminators is needed at all — the r1
 //!    reviewers' own recommended fix shape.
+//! 6. **Trailing-comment false positive — CLOSED (fix-3).** Review r2's one
+//!    confirmed Major: [`has_exact_segment`]'s segment tokenizer ran over
+//!    un-comment-stripped `use`-line text, so a trailing `// … data …`
+//!    comment on an otherwise-clean `use` line could trip an exact-token
+//!    false positive on the comment's own prose — LATENT (fails-safe: a loud
+//!    spurious failure naming file+line, never a silent bypass; the opposite
+//!    direction from the bypass class rounds 0-2 hunted). [`join_use_statements`]
+//!    now strips a trailing `//`-to-end-of-line suffix from each physical
+//!    line on the use-statement path only, via [`strip_trailing_comment`],
+//!    before any joining/tokenizing happens — see that function's doc
+//!    comment for why the strip is safe there and only there.
 //!
-//! **Residual, accepted limitations** (not closed by either pass — a real
+//! **Residual, accepted limitations** (not closed by any pass — a real
 //! `syn`-based checker would be the fix, judged not worth the dependency for
 //! a single-example conformance ratchet):
 //!
+//! - **Keyword-adjacent `use\n<path>` split**: a theoretical `use` statement
+//!   split immediately after the `use` keyword itself, e.g. `use\n    crate::…;`
+//!   (as opposed to every split this scan's fixtures/injections exercise,
+//!   which break at a punctuation/path boundary further in) — pre-existing
+//!   since fix-1, r2 optional minor. `rustfmt` never emits this shape (it
+//!   only breaks a `use` item at `::`/`{`/`,` boundaries), so it is
+//!   documented here rather than fixed.
 //! - **Renames**: `type StoreChannelRepositoryAlias = StoreChannelRepository;`
 //!   (or a `use ... as` rename of the *type itself*, not the module) still
 //!   reads as the banned name pattern at the `type`/`use` site, but a
@@ -277,6 +297,14 @@ fn is_use_trigger_line(trimmed: &str) -> bool {
 /// `#[cfg(test)]` region — ends) just stops accumulating rather than
 /// panicking; the resulting text is scanned as-is like anything else.
 ///
+/// **Trailing `//` comments are stripped on this path only (fix-3, review
+/// r2).** Every physical line that's part of a `use` statement — the trigger
+/// line and every line appended to it — is run through
+/// [`strip_trailing_comment`] before it's checked for `;` or joined, so a
+/// trailing `// … data …` comment can no longer feed a banned segment token
+/// into the scan. See [`strip_trailing_comment`]'s doc comment for why this
+/// is safe only on this path.
+///
 /// **No blind space-insertion at the join point** — deliberately, not an
 /// oversight. A rustfmt-produced (or hand-written) `use` tree only ever
 /// breaks at a punctuation boundary that already supplies its own
@@ -294,16 +322,29 @@ fn join_use_statements(lines: Vec<Line>) -> Vec<Line> {
     let mut iter = lines.into_iter().peekable();
     while let Some(line) = iter.next() {
         let trimmed = line.text.trim_start();
-        if !is_use_trigger_line(trimmed) || line.text.contains(';') {
+        if !is_use_trigger_line(trimmed) {
             out.push(line);
             continue;
         }
+        // Use-statement path only: strip this physical line's trailing `//`
+        // comment (if any) before it's checked for `;` or accumulated — see
+        // strip_trailing_comment's doc comment for why this is confined to
+        // the use-statement path and must never run on a general expression
+        // line.
+        let stripped = strip_trailing_comment(&line.text).to_string();
+        if stripped.contains(';') {
+            out.push(Line {
+                number: line.number,
+                text: stripped,
+            });
+            continue;
+        }
         let number = line.number;
-        let mut text = line.text.clone();
+        let mut text = stripped;
         while !text.contains(';') {
             match iter.next() {
                 Some(next) => {
-                    let next_trimmed = next.text.trim();
+                    let next_trimmed = strip_trailing_comment(next.text.trim());
                     if needs_space_at_join(&text, next_trimmed) {
                         text.push(' ');
                     }
@@ -315,6 +356,28 @@ fn join_use_statements(lines: Vec<Line>) -> Vec<Line> {
         out.push(Line { number, text });
     }
     out
+}
+
+/// Strip a trailing `//`-to-end-of-line comment from one physical line of a
+/// `use` statement, returning everything before the first `//` (right-
+/// trimmed of the whitespace that preceded it), or the line unchanged if it
+/// has no `//`.
+///
+/// **Safe ONLY on the use-statement path — [`join_use_statements`] is this
+/// function's one caller, and must stay so.** A `use` item can never contain
+/// a string literal (there is no such thing as `use "foo";`), so a naive
+/// first-`//` split can't misfire the way it could on a general expression
+/// line, where a `"https://…"` string literal's `//` would be truncated
+/// mid-string and corrupt the line. This is exactly why review r2's fix is
+/// scoped to the use-statement path rather than folded into
+/// [`production_lines`]'s general per-line stripping (which only ever drops
+/// a line whose *entire* trimmed text is a comment, never a trailing one on
+/// real code) — see the module header's "What this is NOT" section, item 6.
+fn strip_trailing_comment(text: &str) -> &str {
+    match text.find("//") {
+        Some(idx) => text[..idx].trim_end(),
+        None => text,
+    }
 }
 
 /// True only when both the accumulated text's last character and the next
@@ -875,5 +938,70 @@ fn search_and_profile_domain_and_data_stay_sync_infallible() {
          must stay sync-infallible:\n{}",
         failures.len(),
         failures.join("\n"),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (g) trailing `//` comments on a use line don't trip the segment scan
+//     (review r2's one confirmed Major, LATENT/fails-safe; closed by fix-3)
+// ---------------------------------------------------------------------------
+
+/// Review r2's finding: before fix-3, [`has_exact_segment`] ran over
+/// un-comment-stripped `use`-line text, so a trailing `// … data …` comment
+/// on an otherwise-clean `use` line could trip an exact-token false positive
+/// on the comment's own prose, not on anything actually imported. This test
+/// exercises [`production_lines`]/[`join_use_statements`]/[`has_exact_segment`]
+/// directly on literal strings (no file I/O — this file is itself a test
+/// file, so a unit test in its own module is in scope) to prove:
+///
+/// 1. a trailing comment mentioning `data` on an already-complete
+///    single-line `use` statement does NOT trip the scan;
+/// 2. a trailing comment mentioning `data` on the FIRST physical line of a
+///    split `use` statement (i.e. present before the join loop even starts
+///    accumulating) does NOT trip the scan either;
+/// 3. a REAL `data` segment inside the `use` tree itself (no comment
+///    involved) still DOES trip the scan — proving the strip didn't weaken
+///    detection, only blinded it to comment prose.
+#[test]
+fn trailing_comment_on_use_line_does_not_trip_the_segment_scan() {
+    // Case 1: single-line, comment trails the terminating `;`.
+    let single_line = "use crate::features::messages::domain::FeedMessage; // now covers data too";
+    let joined = production_lines(single_line);
+    assert_eq!(joined.len(), 1, "expected exactly one production line");
+    assert!(
+        !has_exact_segment(&joined[0].text, "data"),
+        "a trailing comment on a single-line use statement must not trip the `data` segment \
+         scan, got: {:?}",
+        joined[0].text,
+    );
+
+    // Case 2: split use statement, comment trails the FIRST physical line
+    // (before the statement's `;` — and before the join loop has
+    // accumulated anything from the remaining lines).
+    let split_with_comment = "use crate::features::messages:: // data is mentioned here, but only in a comment\n    domain::FeedMessage;";
+    let joined = production_lines(split_with_comment);
+    assert_eq!(
+        joined.len(),
+        1,
+        "expected the split use statement to join into one logical line"
+    );
+    assert!(
+        !has_exact_segment(&joined[0].text, "data"),
+        "a trailing comment on a split use statement's first physical line must not trip the \
+         `data` segment scan, got: {:?}",
+        joined[0].text,
+    );
+
+    // Negative control: a real `data` segment inside a brace-list use tree
+    // (gap B's shape) — no comment anywhere — must still trip the scan.
+    let real_violation = "use crate::features::messages::{domain::FeedMessage, \
+                           data::repositories::StoreMessageRepository};";
+    let joined = production_lines(real_violation);
+    assert_eq!(joined.len(), 1);
+    assert!(
+        has_exact_segment(&joined[0].text, "data"),
+        "a real `data` segment in a use tree (no comment involved) must still trip the segment \
+         scan, got: {:?}",
+        joined[0].text,
     );
 }
