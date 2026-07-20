@@ -141,21 +141,27 @@ fn s7_is_static_and_paints_text() {
 }
 
 #[test]
-fn stub_scenario_renders_a_placeholder() {
-    let _owner = setup();
-    let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();
-    let mut state = BenchState::new();
-    let mut tcx = TextContext::new();
-    // s3 is still a compiling stub (task 04's scope); s2/s5 are implemented
-    // by task 03 below.
-    let mut logic = scenario_logic(2);
+fn every_registered_scenario_mounts_and_paints() {
+    // All 8 scenarios are implemented (tasks 02/03/04) — no stubs remain.
+    // Each must mount from the registry and paint something on frame 0;
+    // per-scenario behavior (animation liveness, scroll, decode) is covered
+    // by the dedicated tests in this file and the scenario modules.
+    for idx in 0..8 {
+        let _owner = setup();
+        let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();
+        let mut state = BenchState::new();
+        let mut tcx = TextContext::new();
+        let mut logic = scenario_logic(idx);
 
-    let (scene, live) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
-    assert!(
-        scene.glyph_runs > 0,
-        "a stub paints its labeled placeholder"
-    );
-    assert!(!live, "a static placeholder requests no further frames");
+        let (scene, live) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+        // A scenario must not be inert at mount: it either paints something
+        // on frame 0 or is live (requesting frames while async work — e.g.
+        // S5's first image decode — completes).
+        assert!(
+            scene.glyph_runs > 0 || scene.solid_fills > 0 || scene.gradient_fills > 0 || live,
+            "scenario index {idx} is inert on its first frame (paints nothing, requests nothing)"
+        );
+    }
 }
 
 #[test]
