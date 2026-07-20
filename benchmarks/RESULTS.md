@@ -797,6 +797,19 @@ build-mode artifact.
 
 ---
 
+## Post-publication integrity note (2026-07-21)
+
+The S8 latency numbers in both device sections were captured BEFORE the
+S8 error-accounting fix (commit 3a02cd6) existed: the then-current code
+discarded per-op write Results, so silently-failed ops cannot be
+retroactively ruled out of the published series (no err= field existed in
+those captures). The headline S8 direction is corroborated independently
+on two devices at large margins, but the specific numbers are unverified
+against swallowed failures until an S8 re-run under the fixed binaries at
+the next device session. A read-timing-window asymmetry introduced by the
+same fix (Rust timed read+verify vs Flutter read-only) is queued for
+correction BEFORE any such re-run.
+
 ## App size (release)
 
 A one-time size snapshot, not a per-device frame benchmark — measured on the
