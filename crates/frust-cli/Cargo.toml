@@ -18,8 +18,8 @@ anyhow.workspace = true
 # minijinja, include_dir, ctrlc, thiserror) followed their modules there.
 frust-drive = { path = "../frust-drive" }
 frust-tui = { path = "../frust-tui" }
-# Tokio runtime for executing `frust tui`'s async entry point.
-tokio = { workspace = true, features = ["rt", "macros"] }
+# Tokio runtime for executing `frust tui`'s async entry point; rt-multi-thread required for Runtime::new().
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # Targeted exception, direct precedent `ctrlc` (frust-drive's Cargo.toml):
 # `frust run --watch`'s desktop rebuild-relaunch loop (PLAN.md Phase 9.D
 # step 2) needs a filesystem watcher to detect source changes, and that
