@@ -994,6 +994,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-plugin"
+version = "0.1.0"
+dependencies = [
+ "jni 0.22.4",
+ "ndk-context",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "frust-reactive"
 version = "0.1.0"
 dependencies = [
@@ -1033,6 +1042,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "frust-core",
+ "frust-plugin",
  "frust-reactive",
  "frust-render",
  "frust-scene",
