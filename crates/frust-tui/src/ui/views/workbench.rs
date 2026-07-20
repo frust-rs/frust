@@ -10,17 +10,31 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
 use crate::engine::AppState;
 use crate::ui::layout::{Shell, sidebar_main};
+use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
+use crate::ui::views::sessions;
 
 /// Render the workbench shell into `area`.
-pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
     let shell = Shell::split(area);
     titlebar(frame, shell.titlebar, state, theme);
 
     let (sidebar, main) = sidebar_main(shell.body);
     render_sidebar(frame, sidebar, state, theme);
-    render_main(frame, main, state, theme);
-    status(frame, shell.status, theme);
+    // With sessions open, the main area is the tab bar + log view; otherwise the
+    // static dashboard placeholder.
+    if state.sessions.is_empty() {
+        render_dashboard(frame, main, state, theme);
+    } else {
+        sessions::render_main(frame, main, state, theme, mouse);
+    }
+    status(frame, shell.status, state, theme);
 }
 
 fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -103,7 +117,7 @@ fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
     lines.push(item("(refresh in Phase 2)"));
     lines.push(Line::from(""));
     lines.push(heading("SESSIONS"));
-    lines.push(item("none running"));
+    lines.extend(sessions::sidebar_lines(state, theme));
     lines.push(Line::from(""));
     lines.push(heading("ACTIONS"));
     lines.push(item("Doctor · Settings"));
@@ -143,7 +157,7 @@ fn project_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn render_main(frame: &mut Frame, area: Rect, _state: &AppState, theme: &Theme) {
+fn render_dashboard(frame: &mut Frame, area: Rect, _state: &AppState, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::NONE)
         .padding(Padding::new(2, 2, 1, 1))
@@ -159,16 +173,26 @@ fn render_main(frame: &mut Frame, area: Rect, _state: &AppState, theme: &Theme) 
         Line::styled("━━━━━━━━━━", Style::default().fg(theme.accent())),
         Line::from(""),
         Line::styled(
-            "Workbench shell — sessions, devices, and run flows arrive in Phase 2.",
+            "No session running — start a run to open a log tab here.",
             Style::default().fg(theme.muted()),
         ),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn status(frame: &mut Frame, area: Rect, theme: &Theme) {
+fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let running = state
+        .sessions
+        .iter()
+        .filter(|s| !s.state.is_terminal())
+        .count();
+    let (dot, dot_color, label) = if running > 0 {
+        ("●", theme.success(), format!("{running} running"))
+    } else {
+        ("●", theme.success(), "ready".to_string())
+    };
     let left = Line::from(vec![
-        Span::styled("● ready", Style::default().fg(theme.success())),
+        Span::styled(format!("{dot} {label}"), Style::default().fg(dot_color)),
         Span::styled("  │  ", Style::default().fg(theme.border())),
         Span::styled(
             "r run · b build · d doctor · ⌘ palette · ? help",

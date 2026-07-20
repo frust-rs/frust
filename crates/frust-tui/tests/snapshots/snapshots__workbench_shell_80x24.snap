@@ -9,7 +9,7 @@ expression: "render_to_string(80, 24, &workbench_state())"
   ▸ huddle               │  Dashboard                                           
                          │  ━━━━━━━━━━                                          
  DEVICES                 │                                                      
-   (refresh in Phase 2)  │  Workbench shell — sessions, devices, and run flows  
+   (refresh in Phase 2)  │  No session running — start a run to open a log tab  
                          │                                                      
  SESSIONS                │                                                      
    none running          │                                                      

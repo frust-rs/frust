@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::message::RegionId;
+use super::session_view::SessionView;
+use crate::supervise::SessionId;
 
 /// Bounded-walk depth cap for [`detect`]/[`find_projects`]: `dir` itself is
 /// depth 0, its children depth 1, its grandchildren depth 2 — nothing past
@@ -27,6 +29,21 @@ pub enum Screen {
 /// The toast shown when the (Phase 2) create wizard is requested from the
 /// skeleton.
 pub const CREATE_TOAST: &str = "Create wizard arrives in Phase 2";
+
+/// The log search/filter overlay state (D5's log-view search/filter).
+///
+/// While `open`, keystrokes edit `query` live; committing (`Enter`) promotes it
+/// to `filter`, which restricts the visible log lines to those that match.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchState {
+    /// Whether the overlay is open and capturing keystrokes.
+    pub open: bool,
+    /// The live query being typed.
+    pub query: String,
+    /// The committed filter applied to the visible log lines (`None` = show
+    /// everything).
+    pub filter: Option<String>,
+}
 
 /// The whole application model.
 #[derive(Debug, Clone)]
@@ -53,6 +70,15 @@ pub struct AppState {
     /// deterministic (name-sorted) order; `projects[0]` is `project_root`.
     /// Empty on the welcome screen.
     pub projects: Vec<PathBuf>,
+    /// Every supervised session's view-model, in start (id) order. The tab bar
+    /// renders these grouped by project; `active_session` indexes this vec.
+    pub sessions: Vec<SessionView>,
+    /// The index into `sessions` of the tab whose log view is shown, if any.
+    pub active_session: Option<usize>,
+    /// Whether the log view soft-wraps long lines (`w` toggles).
+    pub wrap: bool,
+    /// The log search/filter overlay state.
+    pub search: SearchState,
 }
 
 impl AppState {
@@ -83,6 +109,10 @@ impl AppState {
             toast: None,
             project_root,
             projects,
+            sessions: Vec::new(),
+            active_session: None,
+            wrap: false,
+            search: SearchState::default(),
         }
     }
 
@@ -92,6 +122,46 @@ impl AppState {
     /// dirty-frame skip).
     pub fn animating(&self) -> bool {
         false
+    }
+
+    /// The active session's view-model, if a tab is selected.
+    pub fn active_session(&self) -> Option<&SessionView> {
+        self.active_session.and_then(|i| self.sessions.get(i))
+    }
+
+    /// The active session's view-model, mutably.
+    pub fn active_session_mut(&mut self) -> Option<&mut SessionView> {
+        match self.active_session {
+            Some(i) => self.sessions.get_mut(i),
+            None => None,
+        }
+    }
+
+    /// The position of a session in `sessions` by id.
+    pub fn session_index(&self, id: SessionId) -> Option<usize> {
+        self.sessions.iter().position(|s| s.id == id)
+    }
+
+    /// Whether any tracked session is still in a live (non-terminal) state.
+    pub fn any_session_running(&self) -> bool {
+        self.sessions.iter().any(|s| !s.state.is_terminal())
+    }
+
+    /// The sessions grouped by project, preserving first-seen project order and
+    /// each project's session order — the tab-bar / sidebar grouping (D5). Each
+    /// group is `(project_root, [(flat tab index, &session)])`, where the flat
+    /// index is the position in `sessions` (what `SelectTab`/`active_session`
+    /// use).
+    pub fn sessions_grouped(&self) -> Vec<(&Path, Vec<(usize, &SessionView)>)> {
+        let mut groups: Vec<(&Path, Vec<(usize, &SessionView)>)> = Vec::new();
+        for (i, s) in self.sessions.iter().enumerate() {
+            let root = s.project_root.as_path();
+            match groups.iter_mut().find(|(r, _)| *r == root) {
+                Some((_, v)) => v.push((i, s)),
+                None => groups.push((root, vec![(i, s)])),
+            }
+        }
+        groups
     }
 }
 
@@ -107,6 +177,10 @@ impl Default for AppState {
             toast: None,
             project_root: None,
             projects: Vec::new(),
+            sessions: Vec::new(),
+            active_session: None,
+            wrap: false,
+            search: SearchState::default(),
         }
     }
 }

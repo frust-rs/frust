@@ -27,6 +27,10 @@ anyhow.workspace = true
 # "errors callers match on" rule); already a workspace dependency.
 thiserror.workspace = true
 ratatui.workspace = true
+# ANSI-aware log rendering for the session log view (PLAN.md D5) — parses a
+# process's ANSI/SGR output into styled ratatui `Text`. Pin lives in the root
+# manifest (Version-Pin Policy).
+ansi-to-tui.workspace = true
 # `event-stream` gives the async `EventStream` the tokio `select!` loop polls.
 crossterm = { workspace = true, features = ["event-stream"] }
 # The workspace `tokio` pin is `default-features = false`; the TUI crate enables

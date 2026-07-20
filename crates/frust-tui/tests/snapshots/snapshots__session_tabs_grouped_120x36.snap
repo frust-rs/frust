@@ -1,0 +1,40 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(120, 36, &multi_session_state())"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ✓ toolchain                                                         ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                                                
+                                                                                                                        
+ PROJECTS                │huddle:  1 ▶ desktop   2 ◐ Pixel 7    bubblebench:  3 ✗ desktop                               
+  ▸ huddle               │Building it.f0x.huddle…                                                                       
+    bubblebench          │                                                                                              
+                         │                                                                                              
+ DEVICES                 │                                                                                              
+   (refresh in Phase 2)  │                                                                                              
+                         │                                                                                              
+ SESSIONS                │                                                                                              
+   huddle                │                                                                                              
+     ▶ desktop           │                                                                                              
+   ▸ ◐ Pixel 7           │                                                                                              
+   bubblebench           │                                                                                              
+     ✗ desktop           │                                                                                              
+                         │                                                                                              
+ ACTIONS                 │                                                                                              
+   Doctor · Settings     │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │                                                                                              
+                         │● follow  ·  wrap:off                                    x stop · f follow · w wrap · / search
+● 2 running  │  r run · b build · d doctor · ⌘ palette · ? help                                                [mouse ✓]

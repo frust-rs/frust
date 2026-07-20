@@ -10,7 +10,8 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 
-use frust_tui::engine::{AppState, RegionId, Screen};
+use frust_tui::engine::{AppState, RegionId, Screen, Scroll, SessionView};
+use frust_tui::supervise::{SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
 use frust_tui::ui::theme::{ColorDepth, Theme};
 
@@ -112,4 +113,110 @@ fn workbench_multi_project_sidebar_100x30() {
 fn too_small_terminal_40x10() {
     let state = AppState::default();
     insta::assert_snapshot!(render_to_string(40, 10, &state));
+}
+
+// ── Session workspace (tab bar + log view) ──────────────────────────────────
+
+/// A session on `project`/`target`, seeded with `lines`, in `state`.
+fn session(id: u64, project: &str, target: &str, s: SessionState, lines: &[&str]) -> SessionView {
+    let mut sv = SessionView::new(SessionId(id), PathBuf::from(project), target);
+    sv.state = s;
+    for l in lines {
+        sv.push_line((*l).to_string());
+    }
+    sv
+}
+
+/// One running desktop session with a mix of plain, error, and warning lines —
+/// following the tail (the default).
+fn single_session_state() -> AppState {
+    let root = "/tmp/huddle";
+    let sess = session(
+        0,
+        root,
+        "desktop",
+        SessionState::Running,
+        &[
+            "   Compiling huddle v0.1.0",
+            "    Finished dev profile",
+            "     Running `target/debug/huddle`",
+            "app: booting up",
+            "warning: unused variable `x`",
+            "app: frame 1 rendered",
+            "error: texture upload failed",
+            "app: recovering",
+        ],
+    );
+    AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn session_log_follow_100x30() {
+    insta::assert_snapshot!(render_to_string(100, 30, &single_session_state()));
+}
+
+#[test]
+fn session_log_scrolled_100x30() {
+    let mut state = single_session_state();
+    // Freeze the view with line 2 ("Running …") at the bottom — scrolled up
+    // off the tail, so the follow indicator flips to "scrolled".
+    state.sessions[0].scroll = Scroll::Anchored(2);
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+#[test]
+fn session_log_filtered_100x30() {
+    let mut state = single_session_state();
+    state.search.filter = Some("app".to_string());
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+#[test]
+fn session_search_overlay_100x30() {
+    let mut state = single_session_state();
+    state.search.open = true;
+    state.search.query = "err".to_string();
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// Two projects, three sessions — the tab bar and sidebar group by project.
+fn multi_session_state() -> AppState {
+    let huddle = "/tmp/frust/examples/huddle";
+    let bubble = "/tmp/frust/examples/bubblebench";
+    AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(huddle)),
+        projects: vec![PathBuf::from(huddle), PathBuf::from(bubble)],
+        sessions: vec![
+            session(0, huddle, "desktop", SessionState::Running, &["huddle: up"]),
+            session(
+                1,
+                huddle,
+                "Pixel 7",
+                SessionState::Building,
+                &["Building it.f0x.huddle…"],
+            ),
+            session(
+                2,
+                bubble,
+                "desktop",
+                SessionState::Exited(false),
+                &["error: bubble crashed"],
+            ),
+        ],
+        active_session: Some(1),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn session_tabs_grouped_120x36() {
+    insta::assert_snapshot!(render_to_string(120, 36, &multi_session_state()));
 }

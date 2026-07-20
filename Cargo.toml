@@ -82,6 +82,14 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 # dev-only snapshot harness for the TUI's TestBackend render tests.
 ratatui = "0.30"
 crossterm = "0.29"
+# ANSI-colored log parsing for the TUI session log view (PLAN.md D5): converts a
+# process's raw ANSI/SGR output into styled `ratatui::text::Text`. Pinned to a
+# known-good release tied to the ratatui-0.30 line (it builds on `ratatui-core`,
+# the same split-out core ratatui 0.30 re-exports); `cargo test -p frust-tui` is
+# the tripwire, alongside the `ratatui`/`crossterm` pins above. Default features
+# (`simd`/`zero-copy`) dropped — the owned `into_text()` path is all the log
+# view uses, keeping the dependency graph lean.
+ansi-to-tui = { version = "8.0.1", default-features = false }
 insta = "1"
 # cli
 clap = { version = "4.6", features = ["derive"] }

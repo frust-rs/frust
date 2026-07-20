@@ -8,12 +8,16 @@
 //! terminal lifecycle and drives the loop.
 
 mod message;
+mod session_view;
 mod state;
 mod update;
 
 pub use message::{Message, RegionId};
-pub use state::{AppState, CREATE_TOAST, Screen};
-pub use update::{Outcome, update};
+pub use session_view::{
+    LineSelection, LogBuffer, LogLevel, Scroll, SessionView, detect_level, line_matches, strip_ansi,
+};
+pub use state::{AppState, CREATE_TOAST, Screen, SearchState};
+pub use update::{Effect, Outcome, update};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 

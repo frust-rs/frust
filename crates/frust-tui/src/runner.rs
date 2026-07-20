@@ -7,7 +7,8 @@
 //! skip (D2: only `terminal.draw` when the state changed or something is
 //! animating).
 
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,16 +17,22 @@ use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton as CtMouseButton, MouseEventKind,
 };
+use frust_drive::process::RealProcessRunner;
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 
-use crate::engine::{AppState, Engine, Message, RegionId};
+use crate::engine::{AppState, Effect, Engine, Message, RegionId, Screen};
+use crate::supervise::Supervisor;
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
 
 /// Frame tick cadence. Cheap because of the dirty-frame skip — a tick only
 /// forces a draw while something is animating (nothing, in Phase 1).
 const TICK: Duration = Duration::from_millis(50);
+
+/// Lines a `PageUp`/`PageDown` scrolls the log view. A fixed step (the event
+/// translator has no viewport height); a comfortable page on typical panes.
+const PAGE_LINES: u64 = 10;
 
 /// Run the TUI: set up the terminal, run the loop, and restore on the way out
 /// (including on panic, via the installed hook).
@@ -50,6 +57,11 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     let theme = Theme::frust_dark();
     let mut engine = Engine::new(AppState::new());
     let mut rx = engine.take_receiver();
+    // The session supervisor and the channel every supervised session feeds.
+    // Sessions are *started* by later tasks (run-config, TUI2-04); this loop
+    // wires the channel and the kill/copy effect path so those tasks only add
+    // start calls. On return the supervisor's `Drop` stops+joins every session.
+    let (mut supervisor, mut session_rx) = Supervisor::new(Arc::new(RealProcessRunner));
     let mut regions = MouseRegions::new();
     let mut reader = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
@@ -72,7 +84,9 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                 match maybe_event {
                     Some(Ok(event)) => {
                         for msg in translate_event(event, &engine.state, &regions) {
-                            needs_redraw |= engine.handle(msg).redraw;
+                            let out = engine.handle(msg);
+                            needs_redraw |= out.redraw;
+                            apply_effect(out.effect, &mut supervisor);
                         }
                     }
                     // A read error (rare) is logged and ignored — the loop
@@ -82,7 +96,14 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
             }
             Some(msg) = rx.recv() => {
-                needs_redraw |= engine.handle(msg).redraw;
+                let out = engine.handle(msg);
+                needs_redraw |= out.redraw;
+                apply_effect(out.effect, &mut supervisor);
+            }
+            Some(ev) = session_rx.recv() => {
+                let out = engine.handle(Message::Session(ev));
+                needs_redraw |= out.redraw;
+                apply_effect(out.effect, &mut supervisor);
             }
             _ = tick.tick() => {
                 if engine.state.animating() {
@@ -95,6 +116,52 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
+/// Enact an engine-requested [`Effect`] — the runner owns the two side effects
+/// the pure engine can't perform: killing a session through the supervisor, and
+/// writing the system clipboard.
+fn apply_effect(effect: Option<Effect>, supervisor: &mut Supervisor) {
+    match effect {
+        Some(Effect::StopSession(id)) => supervisor.stop(id),
+        Some(Effect::Copy(text)) => copy_to_clipboard(&text),
+        None => {}
+    }
+}
+
+/// Copy `text` to the terminal's clipboard via an OSC 52 escape (broadly
+/// supported, no clipboard-crate dependency). Best-effort: a terminal that
+/// ignores OSC 52 simply drops it.
+fn copy_to_clipboard(text: &str) {
+    let payload = base64_encode(text.as_bytes());
+    let seq = format!("\u{1b}]52;c;{payload}\u{07}");
+    let mut out = stdout();
+    let _ = out.write_all(seq.as_bytes());
+    let _ = out.flush();
+}
+
+/// Minimal standard base64 (no dependency) for the OSC 52 clipboard payload.
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(b2 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// Translate one crossterm event into zero or more engine messages, using the
 /// current frame's mouse regions for hit-testing.
 fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Vec<Message> {
@@ -103,16 +170,7 @@ fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Ve
             if key.kind == KeyEventKind::Release {
                 return vec![];
             }
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            match key.code {
-                KeyCode::Char('q') => vec![Message::Quit],
-                // Ctrl+Q / Ctrl+C quit (no sessions to stop yet in Phase 1).
-                KeyCode::Char('c') if ctrl => vec![Message::Quit],
-                // Welcome keyboard parity: Enter / c activate the Create button.
-                KeyCode::Char('c') => activate_create(state),
-                KeyCode::Enter => activate_create(state),
-                _ => vec![],
-            }
+            translate_key(key.code, key.modifiers, state)
         }
         Event::Mouse(m) => {
             let (x, y) = (m.column, m.row);
@@ -144,6 +202,85 @@ fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Ve
             }
         }
         Event::Resize(w, h) => vec![Message::Resize(w, h)],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press into engine messages, honoring the current mode
+/// (search overlay open vs. normal) and screen (welcome vs. workbench).
+///
+/// Every log-view / tab action here has a mouse counterpart (tab click, wheel
+/// scroll) — keyboard is the primary path, mouse additive (CODE_STANDARDS' TUI
+/// keyboard-parity policy).
+fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Message> {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let shift = mods.contains(KeyModifiers::SHIFT);
+
+    // Ctrl+Q always quits, even while typing a search.
+    if ctrl && matches!(code, KeyCode::Char('q')) {
+        return vec![Message::Quit];
+    }
+
+    // While the search overlay is open, keys edit the query.
+    if state.search.open {
+        return match code {
+            KeyCode::Esc => vec![Message::SearchCancel],
+            KeyCode::Enter => vec![Message::SearchCommit],
+            KeyCode::Backspace => vec![Message::SearchBackspace],
+            KeyCode::Char(c) if !ctrl => vec![Message::SearchInput(c)],
+            _ => vec![],
+        };
+    }
+
+    let has_active_session = state.active_session().is_some();
+    let active_running = state
+        .active_session()
+        .is_some_and(|s| !s.state.is_terminal());
+
+    // Ctrl+C stops the active running session, else falls through to quit.
+    if ctrl && matches!(code, KeyCode::Char('c')) {
+        return if active_running {
+            vec![Message::StopSession]
+        } else {
+            vec![Message::Quit]
+        };
+    }
+
+    match code {
+        // Global quit.
+        KeyCode::Char('q') => vec![Message::Quit],
+
+        // Welcome keyboard parity: Enter / c activate the Create button.
+        KeyCode::Char('c') if matches!(state.screen, Screen::Welcome) => activate_create(state),
+        KeyCode::Enter if matches!(state.screen, Screen::Welcome) => activate_create(state),
+
+        // ── Log-view / tab controls (only meaningful with a session open) ──
+        KeyCode::Char('x') if has_active_session => vec![Message::StopSession],
+        KeyCode::Tab if has_active_session => vec![Message::NextTab],
+        KeyCode::BackTab if has_active_session => vec![Message::PrevTab],
+        KeyCode::Char(c @ '1'..='9') if has_active_session => {
+            vec![Message::SelectTab(c as usize - '1' as usize)]
+        }
+        KeyCode::Char('/') if has_active_session => vec![Message::SearchOpen],
+        KeyCode::Char('f') if has_active_session => vec![Message::ToggleFollow],
+        KeyCode::Char('w') if has_active_session => vec![Message::ToggleWrap],
+        KeyCode::Char('v') if has_active_session => vec![Message::SelectionBegin],
+        KeyCode::Char('y') if has_active_session => vec![Message::CopySelection],
+        KeyCode::Up if has_active_session && shift => vec![Message::SelectionExtendUp(1)],
+        KeyCode::Down if has_active_session && shift => vec![Message::SelectionExtendDown(1)],
+        KeyCode::Up if has_active_session => vec![Message::LogScrollUp(1)],
+        KeyCode::Down if has_active_session => vec![Message::LogScrollDown(1)],
+        KeyCode::PageUp if has_active_session => vec![Message::LogScrollUp(PAGE_LINES)],
+        KeyCode::PageDown if has_active_session => vec![Message::LogScrollDown(PAGE_LINES)],
+        KeyCode::Home if has_active_session => vec![Message::LogScrollToTop],
+        KeyCode::End if has_active_session => vec![Message::LogScrollToBottom],
+        KeyCode::Esc
+            if state
+                .active_session()
+                .is_some_and(|s| s.selection.is_some()) =>
+        {
+            vec![Message::SelectionClear]
+        }
         _ => vec![],
     }
 }

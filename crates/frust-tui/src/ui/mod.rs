@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
 
     match state.screen {
         Screen::Welcome => render_welcome(frame, area, state, theme, mouse),
-        Screen::Workbench => views::workbench::render(frame, area, state, theme),
+        Screen::Workbench => views::workbench::render(frame, area, state, theme, mouse),
     }
 }
 

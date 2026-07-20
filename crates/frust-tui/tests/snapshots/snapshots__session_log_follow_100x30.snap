@@ -1,19 +1,19 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-expression: "render_to_string(100, 30, &multi_project_workbench_state())"
+expression: "render_to_string(100, 30, &single_session_state())"
 ---
-⚙ Frust │ bubblebench ▾ · frust 0.1.0 · ✓ toolchain                                ▶ Run    ⚒ Build 
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ✓ toolchain                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
- PROJECTS                │                                                                          
-  ▸ bubblebench          │  Dashboard                                                               
-    huddle               │  ━━━━━━━━━━                                                              
-                         │                                                                          
- DEVICES                 │  No session running — start a run to open a log tab here.                
-   (refresh in Phase 2)  │                                                                          
-                         │                                                                          
- SESSIONS                │                                                                          
-   none running          │                                                                          
+ PROJECTS                │huddle:  1 ▶ desktop                                                      
+  ▸ huddle               │   Compiling huddle v0.1.0                                                
+                         │    Finished dev profile                                                  
+ DEVICES                 │     Running `target/debug/huddle`                                        
+   (refresh in Phase 2)  │app: booting up                                                           
+                         │warning: unused variable `x`                                              
+ SESSIONS                │app: frame 1 rendered                                                     
+   huddle                │error: texture upload failed                                              
+   ▸ ▶ desktop           │app: recovering                                                           
                          │                                                                          
  ACTIONS                 │                                                                          
    Doctor · Settings     │                                                                          
@@ -30,5 +30,5 @@ expression: "render_to_string(100, 30, &multi_project_workbench_state())"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-                         │                                                                          
-● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
+                         │● follow  ·  wrap:off                x stop · f follow · w wrap · / search
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
