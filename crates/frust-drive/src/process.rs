@@ -152,7 +152,10 @@ pub enum TryRecvError {
 /// stdout lines (see [`LINE_BUFFER_CAP`]) — replaces the previous unbounded
 /// `std::sync::mpsc::Receiver<String>`. Shape-compatible with the subset of
 /// `mpsc::Receiver`'s API this crate's consumers use: `recv`, `try_recv`,
-/// `iter`/`IntoIterator`.
+/// `iter`/`IntoIterator`. Cloneable (it is an `Arc` over the shared ring):
+/// clones COMPETE for lines (each line is delivered to exactly one
+/// receiver), so hand exactly one clone to whichever thread drains.
+#[derive(Clone)]
 pub struct LineReceiver {
     shared: Arc<LineBufferShared>,
 }

@@ -10,7 +10,7 @@
 //!
 //! # Why a std thread, not a tokio task
 //!
-//! [`StreamHandle::lines`] is a blocking `std::sync::mpsc::Receiver`; draining
+//! [`StreamHandle::lines`] is a blocking [`LineReceiver`]; draining
 //! it is a blocking loop that must not sit on a tokio worker. A plain std
 //! thread per session keeps the blocking recv off the async runtime while
 //! still feeding the async channel (`tokio::sync::mpsc::UnboundedSender::send`
@@ -30,11 +30,11 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc as std_mpsc};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result};
-use frust_drive::process::{ProcessRunner, StreamHandle};
+use frust_drive::process::{LineReceiver, ProcessRunner, StreamHandle};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::session::{
@@ -115,7 +115,7 @@ impl Supervisor {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        let mut handle = self
+        let handle = self
             .runner
             .spawn_streaming(
                 &plan.program,
@@ -125,11 +125,12 @@ impl Supervisor {
             )
             .with_context(|| format!("failed to start session `{}`", plan.program))?;
 
-        // Move the line receiver out to the drain thread, leaving a
-        // disconnected dummy in its place. `kill`/`wait` never touch `lines`,
-        // so the handle stays fully functional for the kill path while the
+        // Clone the line receiver for the drain thread (`LineReceiver` is an
+        // `Arc` over the shared ring; clones compete for lines and only the
+        // drain thread ever receives). `kill`/`wait` never touch `lines`, so
+        // the handle stays fully functional for the kill path while the
         // drain thread owns the receive side.
-        let lines = std::mem::replace(&mut handle.lines, std_mpsc::channel().1);
+        let lines = handle.lines.clone();
         let handle = Arc::new(Mutex::new(handle));
         let killed = Arc::new(AtomicBool::new(false));
 
@@ -209,7 +210,7 @@ fn lock(handle: &Mutex<StreamHandle>) -> std::sync::MutexGuard<'_, StreamHandle>
 /// emit the terminal state.
 fn drain_session(
     id: SessionId,
-    lines: std_mpsc::Receiver<String>,
+    lines: LineReceiver,
     handle: Arc<Mutex<StreamHandle>>,
     killed: Arc<AtomicBool>,
     events: UnboundedSender<SessionEvent>,
