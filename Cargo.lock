@@ -1083,6 +1083,7 @@ dependencies = [
  "frust-text",
  "frust-theme",
  "frust-widgets",
+ "image",
  "kurbo",
  "peniko",
  "reactive_graph",

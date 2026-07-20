@@ -327,6 +327,17 @@ pub fn spawn_local(fut: impl std::future::Future<Output = ()> + 'static) {
 /// heavy-work surface. See `frust_reactive::task` for the threading contract.
 pub use frust_reactive::{AsyncValue, TaskError, UseTask, spawn_blocking, use_task};
 
+mod image_async;
+
+/// Off-thread image decode (Phase 9.B step 1): [`decode_image_async`] wraps
+/// the existing synchronous `ImageSource::decode` in `spawn_blocking`, so it
+/// composes with [`use_task`] for the full load/error/ready idiom without
+/// ever blocking the UI thread on a decode. See `image_async`'s module docs
+/// for why this lives in the facade rather than `frust-widgets` (which stays
+/// reactive-free by charter) and for the Arc-move contract the decoded
+/// [`ImageSource`] crosses threads under.
+pub use image_async::{ImageDecodeError, decode_image_async};
+
 // Re-export the Android JNI-bridge macro so generated apps write
 // `frust::android_app!(AppState, app_logic)` (spec §10.1). `pub use` of a
 // `#[macro_export]` macro re-exports it on edition 2021+; the macro only expands

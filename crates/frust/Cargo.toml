@@ -62,3 +62,10 @@ peniko = { workspace = true }
 frust-core = { workspace = true }
 frust-scene = { workspace = true }
 frust-text = { workspace = true }
+# Test-only (`image_async` tests): encodes a tiny in-memory PNG fixture via
+# the `image` crate's own encoder, mirroring `frust-widgets::image`'s own
+# test fixture — no filesystem asset to keep in sync. Already pinned exact at
+# the workspace level (`image = "=0.25.10"`, see docs/DEVELOPMENT.md's
+# Version-Pin Policy); `frust-widgets` already depends on it non-dev, this
+# only adds the dev-only copy the facade's own tests need.
+image = { workspace = true }
