@@ -14,14 +14,17 @@
 //!
 //! # Phased delivery
 //!
-//! This module is the **storage core** (plan Phase 1): the full public API,
-//! a [`file`] backend, and a conformance suite, with **no platform FFI**.
-//! Later phases route [`SecureStorage::open`] to native backends behind the
-//! same API by `#[cfg(target_os = ...)]` (Phase 2 Apple Keychain, Phase 3
-//! Android Keystore, Phase 4 desktop keyring), and add the biometric gate
-//! (Phase 5). Until then every backend resolves to [`file`], and any store
-//! opened with [`AuthPolicy::Required`] fails with
-//! [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`.
+//! This module started as the **storage core** (plan Phase 1): the full
+//! public API, a [`file`] fallback backend, and a conformance suite, with
+//! **no platform FFI**. Later phases route [`SecureStorage::open`] to native
+//! backends behind the same API by `#[cfg(target_os = ...)]` (Phase 2 Apple
+//! Keychain, Phase 3 Android Keystore, **Phase 4 desktop keyring — landed**:
+//! Linux/Windows now route to [`desktop`]), and add the biometric gate
+//! (Phase 5). The Apple/Android arms still resolve to [`file`] pending their
+//! own tasks; any store opened with [`AuthPolicy::Required`] fails with
+//! [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`
+//! everywhere (permanently on Linux/Windows — no platform biometric
+//! primitive exists there).
 //!
 //! # Named-store-handle model
 //!
@@ -41,12 +44,17 @@
 //! `frust-reactive`'s `spawn_blocking` (the plugin itself stays framework-free
 //! per charter). See the plugin `README.md` (Phase 5) for the full contract.
 
-// The `file` backend is the sole backend actually *dispatched to* today
-// (see `open_with`'s selection point below), so it stays compiled
-// unconditionally and also serves the conformance suite. S04 (Plan Phase 4)
-// demotes it to a `#[cfg(test)]`-only conformance target once `desktop`
-// takes over the linux/windows arm — mirroring
-// `frust-shared-preferences`' backend-routing structure.
+// S04 (Plan Phase 4) landed `desktop` for linux/windows (see `open_with`'s
+// selection point below), so `file` is no longer dispatched to there — it's
+// now purely the `#[cfg(test)]` conformance-suite target on that arm,
+// mirroring `frust-shared-preferences`' backend-routing structure. It stays
+// compiled outside tests on `apple`/`android` here too, **only** because
+// S02/S03 (parallel wave-2 tasks, per PLAN.md) haven't landed in *this*
+// worktree yet and their arms below still dispatch to `file::FileStore`;
+// once merged with S02/S03 (which flip those two arms to their own
+// backends), a trivial follow-up narrows this predicate to plain
+// `#[cfg(test)]` — no other file needs to change for that.
+#[cfg(any(test, target_vendor = "apple", target_os = "android"))]
 mod file;
 
 // Backend stub modules (task S01b, Plan Phases 2-4 preamble): compiling,
@@ -276,8 +284,8 @@ pub enum SecureStorageError {
     Io(#[from] std::io::Error),
 }
 
-/// One backend implementation — the [`file`] backend today, and the
-/// `#[cfg]`-gated `apple`/`android`/`desktop` backends in later phases.
+/// One backend implementation — [`desktop::DesktopStore`] on Linux/Windows,
+/// the [`file`] fallback backend on Apple/Android pending their own tasks.
 ///
 /// Crate-private and deliberately minimal: [`SecureStorage`]'s public API is
 /// a thin, String-valued wrapper over one of these, scoped to a single named
@@ -352,22 +360,20 @@ impl SecureStorage {
 
         // FINAL backend routing (task S01b, Plan Phases 2-4 preamble): apple
         // targets -> `apple`, android -> `android`, linux/windows ->
-        // `desktop`. Until each platform backend lands, every arm below
-        // still constructs `file::FileStore` — this is the single,
-        // clearly-marked selection point each task flips its own one line
-        // of, and no other line in this file (or any other shared file)
-        // needs to change to land a platform backend:
+        // `desktop`. This is the single, clearly-marked selection point each
+        // task flips its own one line of, and no other line in this file (or
+        // any other shared file) needs to change to land a platform backend:
         //   - S02 flips the apple arm to `Arc::new(apple::AppleStore)`.
         //   - S03 flips the android arm to `Arc::new(android::AndroidStore)`.
         //   - S04 flips the linux/windows arm to
         //     `Arc::new(desktop::DesktopStore)` (and demotes `file.rs` to
-        //     `#[cfg(test)]`-only).
+        //     `#[cfg(test)]`-only) — DONE.
         #[cfg(target_vendor = "apple")]
         let backend: Arc<dyn Backend> = Arc::new(file::FileStore::standard(name)?);
         #[cfg(target_os = "android")]
         let backend: Arc<dyn Backend> = Arc::new(file::FileStore::standard(name)?);
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        let backend: Arc<dyn Backend> = Arc::new(file::FileStore::standard(name)?);
+        let backend: Arc<dyn Backend> = Arc::new(desktop::DesktopStore::standard(name)?);
 
         Ok(Self { backend })
     }

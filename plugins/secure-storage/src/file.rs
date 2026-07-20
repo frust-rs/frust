@@ -11,11 +11,14 @@
 //! # Not secure at rest
 //!
 //! This backend stores plaintext JSON — it is the storage-core fallback and
-//! the `#[cfg(test)]` conformance target, **not** a secure store. The
-//! secure platform backends (Apple Keychain, Android Keystore, desktop
-//! keyring) arrive in later phases and supersede it on their targets; on
-//! Linux/Windows a future phase may keep it strictly as a documented
-//! dev-preview convenience.
+//! the conformance-suite target, **not** a secure store. [`crate::desktop`]'s
+//! `keyring-core`-backed store (Plan Phase 4) has superseded it on
+//! Linux/Windows — this module is compiled there only under `#[cfg(test)]`
+//! now (see `lib.rs`'s `mod file;` declaration). It remains the real
+//! fallback backend on Apple/Android (`#[cfg(any(test, target_vendor =
+//! "apple", target_os = "android"))]`) pending those platforms' own Phase
+//! 2/3 tasks; once those land, this module compiles under `#[cfg(test)]`
+//! everywhere, as the shared conformance-suite target for every backend.
 //!
 //! # On-disk shape
 //!
