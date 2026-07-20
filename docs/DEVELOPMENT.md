@@ -10,26 +10,24 @@
   (tested with 4.x); JDK 17+ on `JAVA_HOME` (Android Studio's bundled JBR is
   auto-detected as a fallback on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`
   and `ANDROID_NDK_HOME` set. `frust doctor` checks all of these.
-- **iOS** (only needed for `frust run`/`build`/`create`'s iOS output;
-  macOS host only): Xcode 26+ with `xcode-select -p` resolving to it;
-  `rustup target add aarch64-apple-ios-sim aarch64-apple-ios`. A booted
-  Simulator is enough for a debug `frust run`. A signed build
-  (`frust build ios`/`ipa`, `frust run --release`, or any physical-device
-  run) needs a codesigning identity — `frust` auto-detects the
-  `DEVELOPMENT_TEAM` from `security find-identity`, or it can be set via
-  `FRUST_IOS_TEAM` or `[ios] team` in `frust.toml`. A physical iPhone
-  run additionally needs iOS 17+ (driven via `devicectl`), the device
-  unlocked/paired/trusted, and Developer Mode enabled (Settings → Privacy &
-  Security → Developer Mode). `frust doctor` checks the Rust targets on
-  macOS hosts only.
-- **clean-signals-rs** cloned as a sibling directory (`../clean-signals-rs`
-  next to this checkout), on branch `master` — needed only for the
-  `clean-signals` core crate itself, consumed by two in-repo dependents:
-  `examples/huddle` (the repo's sole example) and the `plugins/clean-signals-frust`
-  glue plugin (the glue code itself is in-repo, not sibling). The root
-  workspace never needs it. See *Version-Pin Policy* for why. Both
-  dependents' verify gates are conditional steps in *Test* below, not part
-  of the unconditional chain.
+- **iOS** (only needed for `frust run`/`build`/`create`'s iOS output; macOS
+  host only): Xcode 26+ with `xcode-select -p` resolving to it; `rustup
+  target add aarch64-apple-ios-sim aarch64-apple-ios`. A booted Simulator
+  suffices for a debug `frust run`. A signed build (`frust build ios`/`ipa`,
+  `frust run --release`, or any physical-device run) needs a codesigning
+  identity — `frust` auto-detects `DEVELOPMENT_TEAM` from `security
+  find-identity`, or set it via `FRUST_IOS_TEAM`/`[ios] team` in
+  `frust.toml`. A physical iPhone run also needs iOS 17+ (via `devicectl`),
+  the device unlocked/paired/trusted, and Developer Mode enabled (Settings →
+  Privacy & Security → Developer Mode). `frust doctor` checks Rust targets
+  on macOS hosts only.
+- **clean-signals-rs** cloned as a sibling directory (`../clean-signals-rs`,
+  branch `master`) — needed only for the `clean-signals` core crate,
+  consumed by two in-repo dependents: `examples/huddle` (the repo's sole
+  example) and the `plugins/clean-signals-frust` glue plugin (glue code
+  itself is in-repo). The root workspace never needs it (see
+  *Version-Pin Policy*); both dependents' verify gates are conditional
+  steps in *Test*, not part of the unconditional chain.
 - No Docker, CI config, or `.env` setup exists in this repo yet.
 
 ## Build
@@ -353,6 +351,33 @@ since the generated project path-depends into this checkout and the
 sibling `../clean-signals-rs` checkout (see *Version-Pin Policy*); `--help`
 carries this caveat.
 
+## Benchmarks
+
+`benchmarks/` is a paired Frust-vs-Flutter measurement suite, out-of-tree
+from the crate workspace: `frust_bench/` (standalone Cargo package, own
+workspace/lockfile, path-deps into `crates/*` — gate from its own
+directory, same posture as `examples/huddle`) and `flutter_bench/`
+(idiomatic Flutter, needs the Flutter SDK — tested against 3.44.2 stable)
+implement the same eight scenarios (S1–S8), driven by `harness/`'s shared
+scripts:
+
+```bash
+./benchmarks/harness/run.sh <scenario> --app frust|flutter --device <serial>
+```
+
+`benchmarks/PROTOCOL.md` is the published methodology (device matrix, run
+counts, statistics, fairness gates, raw-line formats); `benchmarks/
+RESULTS.md` is the filled record of actual device runs (never placeholder/
+projected numbers), with every methodology deviation labeled per run.
+Scenario workload parity between the two apps (shared physics/RNG/layout
+constants) is contract-governed by `flutter_bench/lib/bench/datasets.dart`,
+mirrored in the Frust scenario source.
+
+**macOS `mktemp` caveat.** `harness/run.sh`'s `mktemp` call only expands
+correctly under GNU mktemp; BSD/macOS `mktemp` returns the literal template
+unexpanded, silently colliding every run after the first — alias `mktemp`
+to `gmktemp` (`brew install coreutils`) until the script is fixed.
+
 ## Instrumentation
 
 | Variable | Purpose | Default |
@@ -380,63 +405,36 @@ for recorded baselines.
 ## Version-Pin Policy
 
 The rendering stack's versions in `[workspace.dependencies]` are pinned
-deliberately, not floating:
+deliberately, not floating. Each row's tripwire must be re-run after
+touching that pin:
 
-- `vello = "0.9.0"` requires `wgpu ^29.0.3`; the workspace pins
-  `wgpu = "29.0.3"` (currently resolving to `29.0.4`) even though `wgpu`
-  30.x is the ecosystem-latest release — bumping `wgpu` independently of
-  `vello` breaks the build. See `docs/spec.md` §8/§15 for the ecosystem
-  status this pin is tracking.
-- `image = "=0.25.10"` (the `Image` widget's PNG/JPEG decoder,
-  `default-features = false`, `png`/`jpeg` only) is exact-pinned: the only
-  0.25.x release whose MSRV equals the workspace's `rust-version` (1.88), not
-  lower — bumping it needs a fresh MSRV check, not just `cargo update`.
-- `reactive_graph = "0.2"` / `any_spawner = "0.3"` / `tokio = { version = "1",
-  default-features = false }` (the `frust-reactive` substrate, spec §5.5)
-  are pinned to minor — a pre-1.0 Leptos-ecosystem stack expected to churn;
-  `cargo test -p frust-reactive` is the tripwire. Never enable
-  `reactive_graph`'s `effects` feature (the frame path is a custom
-  subscriber, not `RenderEffect` — see `docs/ARCHITECTURE.md`'s Key Types).
-- `accesskit = "0.24"` (`frust-core`'s semantics-pass vocabulary, spec §9)
-  is pinned to minor; `cargo test -p frust-core semantics` is the tripwire.
-  The three per-shell adapters unify on this pin: `accesskit_winit = "0.33"`
-  (desktop)/`accesskit_android = "0.7"` pinned to minor, `accesskit_ios =
-  "=0.1.2"` exact-pinned (younger/less proven — see *Test* for its
-  compile-gate status).
-- `vello_cpu = "=0.0.9"` (the experimental CPU render tier, `frust-render`'s
-  non-default `cpu-tier` feature) is pinned exact — pre-1.0 with an unstable
-  API, isolated behind the `SceneSink` encode seam so a breaking bump never
-  reaches the default GPU path. See *Test* below for its tripwire command.
-- `ndk-context = "0.1"` (`frust-plugin`'s Android platform-handle slot,
-  written by `nativeInitPlatform`, read by every plugin) is pinned to minor;
-  `cargo check --target aarch64-linux-android -p frust-plugin` is the
-  tripwire. `objc2 = "0.6"` / `objc2-foundation = "0.3"` (the Apple ObjC
-  bridge, `frust-shared-preferences`'s `NSUserDefaults` backend) are
-  minor-pinned; `cargo check --target aarch64-apple-ios-sim -p
-  frust-shared-preferences` is the tripwire.
-- `notify = "8"` (`frust run --watch`'s filesystem-watch dependency) is a
-  `frust-cli`-only pin, minor-pinned; `cargo test -p frust-cli` is the
-  tripwire. `ctrlc` is a floating workspace dependency consumed by both
-  `frust-drive` and `frust-cli` (not pinned here).
-- `ratatui = "0.30"` / `crossterm = "0.29"` (`frust-tui`'s render/terminal
-  stack) are pinned to minor — pre-1.0 churn expected. `ansi-to-tui = "8.0.1"`
-  (log-view ANSI parsing) and `toml_edit = "0.25"` (recent-projects
-  persistence) are pinned alongside them, `frust-tui`-only; `cargo test -p
-  frust-tui` is the shared tripwire for all four.
+| Pin | Why | Tripwire |
+|---|---|---|
+| `vello 0.9.0` / `wgpu 29.0.3` (resolves 29.0.4) | `vello` requires `wgpu ^29.0.3`; bumping `wgpu` independently (30.x is ecosystem-latest) breaks the build — see `docs/spec.md` §8/§15 | `cargo build --workspace --locked` |
+| `image =0.25.10` exact (`Image` widget's PNG/JPEG decoder, `png`/`jpeg` only) | Only 0.25.x release whose MSRV equals the workspace `rust-version` (1.88) | fresh MSRV check before bumping, not just `cargo update` |
+| `reactive_graph 0.2` / `any_spawner 0.3` / `tokio 1` (no default features), minor | `frust-reactive` substrate (spec §5.5), pre-1.0 Leptos-ecosystem churn expected; never enable `reactive_graph`'s `effects` feature — the frame path is a custom subscriber, not `RenderEffect` (see ARCHITECTURE's Key Types) | `cargo test -p frust-reactive` |
+| `accesskit 0.24` minor + adapters (`accesskit_winit 0.33`, `accesskit_android 0.7` minor, `accesskit_ios =0.1.2` exact) | `frust-core`'s semantics-pass vocabulary (spec §9); `accesskit_ios` is younger/less proven, compile-gate only (*Test*) | `cargo test -p frust-core semantics` |
+| `vello_cpu =0.0.9` exact | Experimental CPU render tier (`frust-render`'s non-default `cpu-tier` feature), pre-1.0 unstable API, isolated behind the `SceneSink` encode seam so a breaking bump never reaches the default GPU path | tripwire in *Test* |
+| `ndk-context 0.1` minor | `frust-plugin`'s Android platform-handle slot (written by `nativeInitPlatform`, read by every plugin) | `cargo check --target aarch64-linux-android -p frust-plugin` |
+| `objc2 0.6` / `objc2-foundation 0.3` minor | Apple ObjC bridge (`frust-shared-preferences`'s `NSUserDefaults` backend) | `cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences` |
+| `notify 8` minor (`frust-cli`-only) | `frust run --watch`'s filesystem watcher (`ctrlc` floats, shared by `frust-drive`/`frust-cli`, unpinned) | `cargo test -p frust-cli` |
+| `ratatui 0.30` / `crossterm 0.29` / `ansi-to-tui 8.0.1` / `toml_edit 0.25` minor | `frust-tui`'s render/terminal/log/persistence stack, pre-1.0 churn expected | `cargo test -p frust-tui` (shared) |
+
 - `examples/huddle` and `plugins/clean-signals-frust` are each a
   **standalone package** (own `[workspace]` root/`Cargo.lock`, excluded from
-  the root `[workspace]`), path-depending on the `clean-signals` core crate
-  at the same **sibling checkout** (`../../../clean-signals-rs`, branch
-  `master` — not git+rev-pinned, so every consumer must resolve it the same
-  way; mixing `path`/`git`+`rev` builds two distinct identities whose
-  controller/glue types fail to unify, so swap every consumer together once
-  it gains a remote). `examples/huddle` is additionally standalone for its
-  project-local `target/` dir. Neither manifest can use `{ workspace = true
-  }` — every dependency is a literal spec kept in sync by hand; gate each
-  from its own directory (`cargo test` + `cargo clippy --all-targets -- -D warnings`).
-- **Never run a blind `cargo update`.** If a manifest changes any pinned
-  dependency, run `cargo generate-lockfile` and then confirm
-  `cargo build --workspace --locked` still succeeds before committing.
+  the root `[workspace]`; `examples/huddle` additionally standalone for its
+  project-local `target/` dir), path-depending on the `clean-signals` core
+  crate at the same **sibling checkout** (`../../../clean-signals-rs`,
+  branch `master` — not git+rev-pinned, so every consumer must resolve it
+  the same way; mixing `path`/`git`+`rev` builds two distinct identities
+  whose controller/glue types fail to unify, so swap every consumer
+  together once it gains a remote). Neither manifest can use
+  `{ workspace = true }` — every dependency is a literal spec kept in sync
+  by hand; gate each from its own directory (`cargo test` + `cargo clippy
+  --all-targets -- -D warnings`).
+- **Never run a blind `cargo update`.** After any pinned-dependency manifest
+  change, run `cargo generate-lockfile` then confirm `cargo build
+  --workspace --locked` still succeeds before committing.
 - Use `cargo tree -d` to check for duplicate/divergent versions of a crate
   across the dependency graph after any manifest change.
 - Android deps (`jni`, `ndk`, `ndk-sys`, `android_logger`) are target-gated
@@ -482,18 +480,18 @@ export the same key/value pairs in the build shell's environment before
 
 ### vello bitmap color-emoji decode (desktop confirmed safe; Android CBDT at risk)
 
-vello 0.9's bitmap-glyph decode path (`sbix`/COLR bitmap strikes) errors and
-skips any glyph whose PNG isn't `(RGBA, 8-bit)` — pinned, unfixed upstream
+vello 0.9's bitmap-glyph decode path (`sbix`/COLR strikes) errors and skips
+any glyph whose PNG isn't `(RGBA, 8-bit)` — pinned, unfixed upstream
 ([linebender/vello#1031](https://github.com/linebender/vello/issues/1031),
 open as of 2026-07-16; not addressable under the Version-Pin Policy without
 vendoring). **Safe** for huddle's desktop emoji set (every reaction-emoji's
 Apple Color Emoji `sbix` strike is uniformly RGBA8); the **unverified,
 at-risk** path is Android's CBDT strikes (see `docs/ARCHITECTURE.md`'s
 `frust-text` row) — legacy Noto Color Emoji CBDT strikes are known to use
-palette-indexed PNGs at smaller sizes, which would trigger this defect, and
-no device/emulator has confirmed either way. If an on-device check finds a
-broken glyph, revisit vendoring the one-line `Transformations::EXPAND` fix
-before a future vello major bump. The desktop logger suppresses known-noisy
-vello `Error`/`Warn` messages (e.g. "Unsupported `output_color_type`",
-"Invalid PNG in font") below `debug` (*Instrumentation*'s `FRUST_LOG` row);
-other vello errors still surface at the default level.
+palette-indexed PNGs at smaller sizes, triggering this defect, unconfirmed
+on any device/emulator. If an on-device check finds a broken glyph, revisit
+vendoring the one-line `Transformations::EXPAND` fix before a future vello
+major bump. The desktop logger suppresses known-noisy vello `Error`/`Warn`
+messages (e.g. "Unsupported `output_color_type`", "Invalid PNG in font")
+below `debug` (*Instrumentation*'s `FRUST_LOG` row); other vello errors
+still surface at the default level.
