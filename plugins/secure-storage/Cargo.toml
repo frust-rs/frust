@@ -1,0 +1,23 @@
+[package]
+name = "frust-secure-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# SecureStorageError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# The file backend's on-disk JSON map encoding.
+serde_json = { workspace = true }
+
+# Platform-FFI dependencies are added with their backends in later phases,
+# target-gated exactly like `frust-shared-preferences` (platform-plugin
+# charter — see `docs/ARCHITECTURE.md`'s Module Structure):
+#   - Phase 2 (Apple Keychain): `objc2` / `objc2-security`
+#     under `cfg(any(target_os = "ios", target_os = "macos"))`.
+#   - Phase 3 (Android Keystore): `frust-plugin` + `jni`
+#     under `cfg(target_os = "android")`.
+#   - Phase 4 (desktop keyring): `keyring-core` + platform store crates
+#     under `cfg(any(target_os = "linux", target_os = "windows"))`.
+# This phase ships only the `file` backend, so no FFI deps exist yet.

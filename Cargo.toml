@@ -4,7 +4,7 @@ resolver = "2"
 # doesn't cover `plugins/`) — a platform plugin (frust-plugin + FFI crates
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
-members = ["crates/*", "examples/*", "plugins/shared-preferences"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage"]
 # examples/huddle (renamed from its prior directory name, task 09) is the
 # sole example (phase 8 examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
