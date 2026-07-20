@@ -146,7 +146,9 @@ fn stub_scenario_renders_a_placeholder() {
     let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();
     let mut state = BenchState::new();
     let mut tcx = TextContext::new();
-    let mut logic = scenario_logic(1); // s2 stub
+    // s3 is still a compiling stub (task 04's scope); s2/s5 are implemented
+    // by task 03 below.
+    let mut logic = scenario_logic(2);
 
     let (scene, live) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
     assert!(
@@ -154,6 +156,40 @@ fn stub_scenario_renders_a_placeholder() {
         "a stub paints its labeled placeholder"
     );
     assert!(!live, "a static placeholder requests no further frames");
+}
+
+#[test]
+fn s2_long_list_scrolls_and_keeps_requesting_frames() {
+    let _owner = setup();
+    let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();
+    let mut state = BenchState::new();
+    let mut tcx = TextContext::new();
+    let mut logic = scenario_logic(1); // s2
+
+    let (scene, live) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    assert!(
+        scene.glyph_runs > 0,
+        "S2 paints row title/subtitle text for the materialized window"
+    );
+    assert!(
+        live,
+        "S2's scripted auto-scroll keeps requesting frames (see s2_list's module doc)"
+    );
+}
+
+#[test]
+fn s5_image_pipeline_keeps_requesting_frames() {
+    let _owner = setup();
+    let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();
+    let mut state = BenchState::new();
+    let mut tcx = TextContext::new();
+    let mut logic = scenario_logic(4); // s5
+
+    let (_scene, live) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    assert!(
+        live,
+        "S5's scripted auto-scroll keeps requesting frames while decodes stream in"
+    );
 }
 
 #[test]
