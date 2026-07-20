@@ -62,6 +62,14 @@ mod apple;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod desktop;
 
+// Pure-Rust (FFI-free) helpers for the Android Keystore backend — Base64, IV
+// framing, and store-id/alias derivation. Split out of `android` (which is
+// `jni`-gated and so host-uncompilable) precisely so these are **host-tested**
+// (task S03 requirement 6). Compiled only where used or tested — on Android, or
+// in any `cargo test` build — so it is never dead code in a host non-test build.
+#[cfg(any(target_os = "android", test))]
+mod framing;
+
 #[cfg(test)]
 mod conformance;
 
