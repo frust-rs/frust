@@ -2,11 +2,10 @@
 //!
 //! A 4-tab, [`Router`]-driven app: Home (channels + DMs) · Search · Activity ·
 //! You (settings). Channel → message feed → thread flow, a settings stack, and
-//! a workspace switcher, all over the shared mock dataset in [`mock`]. This is
-//! the **skeleton** (task 10): every hub file is finalized here — [`lib`](self),
-//! [`shell`], [`routes`], [`mock`], and [`ui`] — and Phase C screen tasks each
-//! edit ONLY their own `screens/<name>.rs` + `features/<name>/**` (see
-//! `src/README-phase-c.md`).
+//! a workspace switcher, all over the shared mock dataset in
+//! [`data::store`]. Each feature is a `{domain, data, presentation}` slice
+//! under [`features`] (the huddle clean-architecture refactor); [`lib`](self),
+//! [`shell`], [`routes`], and [`ui`] remain the shared hub files.
 //!
 //! # Overlay slot
 //!
@@ -33,7 +32,6 @@
 pub mod data;
 pub mod failure;
 pub mod features;
-pub mod mock;
 pub mod ui;
 
 mod routes;

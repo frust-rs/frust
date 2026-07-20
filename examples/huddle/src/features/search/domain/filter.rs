@@ -1,7 +1,8 @@
 //! [`filter`] — the pure, synchronous search-query filter (huddle
 //! clean-architecture refactor, task 04). Moved verbatim from the former flat
 //! `features/search/mod.rs` apart from reading through the injected
-//! [`SearchRepository`] instead of `crate::mock` directly.
+//! [`SearchRepository`] instead of the shared dataset ([`crate::data::store`])
+//! directly.
 
 use crate::features::messages::domain::MessageBody;
 

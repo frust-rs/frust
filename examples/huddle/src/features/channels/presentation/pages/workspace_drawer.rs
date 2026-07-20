@@ -63,10 +63,10 @@ use crate::ui::sheet::drag_up_dismiss;
 
 /// One row in the switcher: an initials tile, a name, and an unread/active
 /// hint. Mock data local to this screen — there is no "workspace" concept in
-/// the shared [`crate::mock`] dataset (a single-workspace app per PLAN.md),
-/// so multi-workspace switching here is mock-only (see [`workspace_row`]'s
-/// tap handler): no real multi-workspace state exists anywhere else in the
-/// app.
+/// the shared [`crate::data::store`] dataset (a single-workspace app per
+/// PLAN.md), so multi-workspace switching here is mock-only (see
+/// [`workspace_row`]'s tap handler): no real multi-workspace state exists
+/// anywhere else in the app.
 struct Workspace {
     name: &'static str,
     initials: &'static str,

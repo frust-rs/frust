@@ -23,8 +23,9 @@ use frust_reactive::ReactiveRuntime;
 use frust_text::TextContext;
 use kurbo::Size;
 
+use huddle::data::store;
 use huddle::features::messages::{MessagesController, PAGE_SIZE};
-use huddle::{HuddleApp, HuddleState, mock};
+use huddle::{HuddleApp, HuddleState};
 
 mod support;
 use support::{W, center, char_key, frame, named_key, serial, setup, tap};
@@ -48,7 +49,7 @@ async fn load_populates_the_channel_feed() {
 
     assert_eq!(
         controller.snapshot().len(),
-        mock::messages_for("general").len(),
+        store::messages_for("general").len(),
         "a normal channel loads whole",
     );
     assert!(
@@ -125,7 +126,7 @@ async fn reaction_toggle_updates_the_count() {
 
 #[tokio::test]
 async fn firehose_pagination_extends_the_feed() {
-    let controller = fast(mock::FIREHOSE_ID);
+    let controller = fast(store::FIREHOSE_ID);
     controller.load().await;
     assert_eq!(
         controller.snapshot().len(),
@@ -145,7 +146,7 @@ async fn firehose_pagination_extends_the_feed() {
     }
     assert_eq!(
         controller.snapshot().len(),
-        mock::FIREHOSE_COUNT as usize,
+        store::FIREHOSE_COUNT as usize,
         "load_older walks back to the whole firehose",
     );
     controller.as_ref().dispose();
