@@ -48,6 +48,16 @@ pub fn run_in(
     let info = BuildInfo::from_args(build_args.into_drive(), BuildMode::Debug)
         .map_err(|err| anyhow::anyhow!(err))?;
 
+    // `--watch` always means the desktop preview (the bail above already
+    // rejected the genuine `-d` + `--watch` contradiction) — short-circuit
+    // here, before device discovery runs, so an attached-but-unselected
+    // device (e.g. a charging phone) never makes `--watch`'s target
+    // non-deterministic. Reaches the exact call the `Desktop` arm below
+    // would make anyway, just one step earlier.
+    if watch {
+        return run_desktop_fallback(runner, &info, render_tier, watch);
+    }
+
     let discoverers = devices::default_discoverers();
     let (found, notes) = devices::discover_all(runner, &discoverers);
     if verbose {
@@ -104,9 +114,13 @@ fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) 
     }
 }
 
-/// No Android device connected and no `-d`: run the desktop preview shell
-/// exactly like a bare `cargo run` (spec §12.9's dev loop), streaming its
-/// output rather than buffering it until exit.
+/// Runs the desktop preview shell exactly like a bare `cargo run` (spec
+/// §12.9's dev loop), streaming its output rather than buffering it until
+/// exit. Reached either because no Android device is connected and no `-d`
+/// was passed (the `DeviceSelection::Desktop` arm below), or because
+/// `run_in` short-circuited here directly on seeing `--watch` — which
+/// always means the desktop preview, skipping device discovery entirely so
+/// an attached-but-unselected device never changes what `--watch` does.
 ///
 /// Threads the resolved [`BuildInfo`] through to the spawn (verified
 /// pre-extraction gap — the old fallback ignored `--profile` and dropped
@@ -500,6 +514,35 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("--watch"), "{message}");
         assert!(message.contains("device"), "{message}");
+    }
+
+    /// F4 regression: `--watch` must short-circuit to the desktop preview
+    /// *before* device discovery runs, so an attached-but-unselected device
+    /// never changes what `--watch` does. `adb devices -l` is scripted to
+    /// report a connected emulator — device discovery WOULD select it if it
+    /// ran — while `cargo run` is deliberately left unregistered; reaching
+    /// the desktop/watch path therefore fails with `spawn_streaming`'s
+    /// distinct "No such file or directory ... cargo" error, not the Android
+    /// pipeline's very different first-failure message ("missing Rust
+    /// target ...", from `android_run`'s preflight `rustup target list
+    /// --installed` check) — proving discovery was never consulted.
+    #[test]
+    fn run_in_with_watch_skips_device_discovery_even_when_a_device_is_present() {
+        let runner = FakeProcessRunner::new().with(
+            "adb devices -l",
+            Output {
+                success: true,
+                stdout: "List of devices attached\n\
+                         emulator-5554  device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 device:emulator64_arm64 transport_id:1\n"
+                    .to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let err = run_in(&runner, BuildArgs::default(), None, None, true, false).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("cargo"), "{message}");
+        assert!(!message.contains("Rust target"), "{message}");
     }
 
     /// A raw change tick kills the running child and relaunches a fresh
