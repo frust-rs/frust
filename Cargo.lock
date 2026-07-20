@@ -1391,6 +1391,8 @@ dependencies = [
  "anyhow",
  "clap",
  "frust-drive",
+ "frust-tui",
+ "tokio",
 ]
 
 [[package]]

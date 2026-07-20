@@ -6,6 +6,7 @@ pub mod create;
 pub mod devices;
 pub mod doctor;
 pub mod run;
+pub mod tui;
 
 use crate::cli::{Cli, Command};
 use anyhow::{Context, Result};
@@ -50,6 +51,7 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             let cwd = std::env::current_dir().context("reading current directory")?;
             clean::run_in(&runner, &cwd)
         }
+        Command::Tui => tui::run(),
         Command::Run { build, render_tier } => {
             run::run_in(&runner, build, cli.device_id, render_tier, verbose)
         }

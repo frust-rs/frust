@@ -17,6 +17,9 @@ anyhow.workspace = true
 # is the thin clap front-end over it. All non-clap CLI deps (serde, toml,
 # minijinja, include_dir, ctrlc, thiserror) followed their modules there.
 frust-drive = { path = "../frust-drive" }
+frust-tui = { path = "../frust-tui" }
+# Tokio runtime for executing `frust tui`'s async entry point.
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [dev-dependencies]
 # The command-handler tests drive their `run_in` cores with

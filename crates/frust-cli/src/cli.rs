@@ -84,6 +84,9 @@ pub enum Command {
     Devices,
     /// Remove build outputs (cargo target dirs + Gradle/Xcode build dirs).
     Clean,
+    /// Launch the TUI workbench: an advanced interactive interface for
+    /// managing Frust projects.
+    Tui,
     /// Build → install → launch → stream logs on a connected device
     /// (spec §12.4); no Android device selected → `cargo run` passthrough.
     Run {
@@ -543,5 +546,11 @@ mod tests {
     fn parses_clean() {
         let cli = Cli::parse_from(["frust", "clean"]);
         assert!(matches!(cli.command, Command::Clean));
+    }
+
+    #[test]
+    fn parses_tui() {
+        let cli = Cli::parse_from(["frust", "tui"]);
+        assert!(matches!(cli.command, Command::Tui));
     }
 }
