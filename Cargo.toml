@@ -93,6 +93,12 @@ toml = "1"
 anyhow = "1"
 thiserror = "2"
 ctrlc = "3"
+# `frust run --watch`'s desktop rebuild-relaunch loop (PLAN.md Phase 9.D step
+# 2) — file-watcher backing the loop's change-detection seam. Pinned to
+# minor per the Version-Pin Policy; `frust-cli`-only (see its Cargo.toml
+# comment for why this is a targeted exception, direct precedent: `ctrlc`
+# above).
+notify = "8"
 log = "0.4"
 # android shell (JNI bridge) — target-gated; land in Cargo.lock but only
 # compile for `--target *-linux-android` (see frust-shell-android/Cargo.toml)

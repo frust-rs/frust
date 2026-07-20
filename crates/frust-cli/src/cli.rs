@@ -103,6 +103,17 @@ pub enum Command {
         /// probe still runs regardless, it just can't be forced from here.
         #[arg(long = "render-tier", value_name = "TIER")]
         render_tier: Option<RenderTierArg>,
+
+        /// Desktop-only rebuild-relaunch dev loop (PLAN.md Phase 9.D step
+        /// 2): watches the project's `src/` tree and `Cargo.toml`, and on
+        /// any change kills the running `cargo run` child and relaunches a
+        /// fresh one, streaming its output the whole time. This is
+        /// explicitly a relaunch loop, not state-preserving hot reload —
+        /// app state resets on every relaunch. **Desktop-preview only**:
+        /// combining `--watch` with `-d <device>` is a hard error (the
+        /// watch loop has no device-side kill/rebuild/relaunch story yet).
+        #[arg(long)]
+        watch: bool,
     },
     /// Produce a distributable artifact (spec §12.5/12.6) — release-signed
     /// APK/AAB via Gradle, or an iOS app/IPA via `xcodebuild`. Defaults to
@@ -367,12 +378,26 @@ mod tests {
     fn parses_run_with_defaults() {
         let cli = Cli::parse_from(["frust", "run"]);
         match cli.command {
-            Command::Run { build, render_tier } => {
+            Command::Run {
+                build,
+                render_tier,
+                watch,
+            } => {
                 assert!(!build.debug);
                 assert!(!build.profile);
                 assert!(!build.release);
                 assert_eq!(render_tier, None);
+                assert!(!watch);
             }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_with_watch_flag() {
+        let cli = Cli::parse_from(["frust", "run", "--watch"]);
+        match cli.command {
+            Command::Run { watch, .. } => assert!(watch),
             other => panic!("expected Run, got {other:?}"),
         }
     }
