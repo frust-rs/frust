@@ -21,6 +21,17 @@
 //!   there is no `read_cached` vs `read_crossing` split to make (unlike the
 //!   Flutter side, which must separate the two). This divergence is noted in the
 //!   task's completion summary.
+//! - **Error accounting.** `write_one`'s `Result` is no longer discarded: a
+//!   failed write increments a running `write_errors` count and marks that
+//!   key as write-failed so the read phase never double-counts it. Every
+//!   read verifies its value against the deterministic value `write_one`
+//!   should have written, counting an unexpectedly-absent key
+//!   (`read_unexpected_none`) or a present-but-wrong value
+//!   (`read_value_mismatch`) separately — skipping verification (not the
+//!   timing) for a key whose write already failed. Each per-op `bench_emit`
+//!   line carries an `err=0|1` field; a nonzero total across any of the
+//!   three counters emits one parseable `s8-errors` marker line so the
+//!   harness can flag the run.
 //!
 //! The whole loop runs on a blocking-pool thread (`spawn_blocking`), so the
 //! optional burst-during-animation variant's UI-thread animation keeps running
@@ -95,6 +106,56 @@ impl PrefType {
             PrefType::StrList => "string_list",
         }
     }
+
+    /// A stable, dense index into a per-type slot (write-success tracking) —
+    /// order matches [`PrefType::ALL`].
+    fn index(self) -> usize {
+        match self {
+            PrefType::Bool => 0,
+            PrefType::I64 => 1,
+            PrefType::F64 => 2,
+            PrefType::Str => 3,
+            PrefType::StrList => 4,
+        }
+    }
+}
+
+/// The deterministic value `write_one` writes (and `read_and_verify` expects
+/// back) for `(ty, i)` — factored out so the write and read-verify paths can
+/// never drift from each other.
+#[derive(Clone, PartialEq, Debug)]
+enum ExpectedValue {
+    Bool(bool),
+    I64(i64),
+    F64(f64),
+    Str(String),
+    StrList(Vec<String>),
+}
+
+fn expected_value(ty: PrefType, i: usize) -> ExpectedValue {
+    match ty {
+        PrefType::Bool => ExpectedValue::Bool(i.is_multiple_of(2)),
+        PrefType::I64 => ExpectedValue::I64(i as i64),
+        PrefType::F64 => ExpectedValue::F64(i as f64 * 1.5),
+        PrefType::Str => ExpectedValue::Str(format!("value_{i}")),
+        PrefType::StrList => {
+            ExpectedValue::StrList(vec![format!("a{i}"), format!("b{i}"), format!("c{i}")])
+        }
+    }
+}
+
+/// The outcome of verifying one read against its [`expected_value`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReadCheck {
+    /// The stored value matched exactly.
+    Match,
+    /// The key had no value at all, though its write was never marked
+    /// failed — a real plugin-boundary problem (or a store that silently
+    /// dropped the write).
+    UnexpectedNone,
+    /// The key had a value, but not the one `write_one` should have
+    /// written for `(ty, i)`.
+    ValueMismatch,
 }
 
 /// The outcome of one S8 run, surfaced as the status readout.
@@ -102,6 +163,16 @@ impl PrefType {
 pub struct S8Report {
     writes: usize,
     reads: usize,
+    /// Writes whose `write_one` call returned `Err` (per-type + total counts
+    /// are recoverable from the per-op `bench_emit` lines' `type=`/`err=`
+    /// fields; this is the summed total).
+    write_errors: usize,
+    /// Reads that found no value at a key whose write wasn't already
+    /// counted as failed.
+    read_unexpected_none: usize,
+    /// Reads that found a value not matching [`expected_value`] at a key
+    /// whose write wasn't already counted as failed.
+    read_value_mismatch: usize,
     /// A note when the backend was unavailable (e.g. an old scaffold with no
     /// `nativeInitPlatform` on Android) — S8 then reports zero ops rather than
     /// crashing, per the graceful-error contract.
@@ -138,16 +209,31 @@ impl Component for S8Prefs {
             }
             AsyncValue::Ready(report) => match report.error {
                 Some(msg) => format!("S8 backend unavailable: {msg}"),
-                None => format!(
-                    "S8 complete — {} writes, {} reads ({})",
-                    report.writes,
-                    report.reads,
-                    if state.burst {
-                        "burst-during-animation"
-                    } else {
-                        "quiescent"
-                    },
-                ),
+                None => {
+                    let errors = report.write_errors
+                        + report.read_unexpected_none
+                        + report.read_value_mismatch;
+                    format!(
+                        "S8 complete — {} writes, {} reads ({}){}",
+                        report.writes,
+                        report.reads,
+                        if state.burst {
+                            "burst-during-animation"
+                        } else {
+                            "quiescent"
+                        },
+                        if errors > 0 {
+                            format!(
+                                " — {errors} error(s): write={} unexpected_none={} mismatch={}",
+                                report.write_errors,
+                                report.read_unexpected_none,
+                                report.read_value_mismatch
+                            )
+                        } else {
+                            String::new()
+                        },
+                    )
+                }
             },
             AsyncValue::Error(_) => "S8 run task failed".to_string(),
         };
@@ -176,101 +262,171 @@ fn run_prefs_bench() -> S8Report {
             return S8Report {
                 writes: 0,
                 reads: 0,
+                write_errors: 0,
+                read_unexpected_none: 0,
+                read_value_mismatch: 0,
                 error: Some(e.to_string()),
             };
         }
     };
 
+    // Per-key write-success tracking (flat, `ty.index() * KEYS_PER_TYPE + i`)
+    // so the read phase can skip verification — never the timing — for a key
+    // whose write already failed, per this scenario's no-double-counting
+    // contract.
+    let mut write_ok = vec![true; PrefType::ALL.len() * KEYS_PER_TYPE];
+
     // --- writes (every setX crosses the boundary — the headline number) ---
     frust_shell_common::perf::mark_scenario_start("s8-write");
     let mut write_total_us: u128 = 0;
     let mut writes = 0;
+    let mut write_errors = 0;
     for ty in PrefType::ALL {
         for i in 0..KEYS_PER_TYPE {
             let key = format!("s8_{}_{i}", ty.tag());
             let t = Instant::now();
-            let _ = write_one(&prefs, ty, &key, i);
+            let result = write_one(&prefs, ty, &key, i);
             let us = t.elapsed().as_micros();
             write_total_us += us;
             writes += 1;
+            let err = result.is_err();
+            if err {
+                write_errors += 1;
+                write_ok[ty.index() * KEYS_PER_TYPE + i] = false;
+            }
             frust_shell_common::perf::bench_emit(&format!(
-                "frust-perf plugin op=write type={} n={i} us={us}",
-                ty.tag()
+                "frust-perf plugin op=write type={} n={i} us={us} err={}",
+                ty.tag(),
+                err as u8
             ));
         }
     }
     frust_shell_common::perf::bench_emit(&format!(
-        "frust-perf plugin op=write type=total n={writes} us={write_total_us}"
+        "frust-perf plugin op=write type=total n={writes} us={write_total_us} errors={write_errors}"
     ));
     frust_shell_common::perf::mark_scenario_end("s8-write");
 
-    // --- reads (a real in-process backend call each — no cache layer) ---
+    // --- reads (a real in-process backend call each — no cache layer),
+    // each verified against the value write_one should have written ---
     frust_shell_common::perf::mark_scenario_start("s8-read");
     let mut read_total_us: u128 = 0;
     let mut reads = 0;
+    let mut read_unexpected_none = 0;
+    let mut read_value_mismatch = 0;
     for ty in PrefType::ALL {
         for i in 0..KEYS_PER_TYPE {
             let key = format!("s8_{}_{i}", ty.tag());
             let t = Instant::now();
-            read_one(&prefs, ty, &key);
+            let check = read_and_verify(&prefs, ty, &key, i);
             let us = t.elapsed().as_micros();
             read_total_us += us;
             reads += 1;
+            // Skip attributing a mismatch/none to this key if its write
+            // already failed — that failure is already counted above, and
+            // charging it again here would double-count the same root
+            // cause.
+            let write_already_failed = !write_ok[ty.index() * KEYS_PER_TYPE + i];
+            let err = !write_already_failed && check != ReadCheck::Match;
+            if err {
+                match check {
+                    ReadCheck::UnexpectedNone => read_unexpected_none += 1,
+                    ReadCheck::ValueMismatch => read_value_mismatch += 1,
+                    ReadCheck::Match => unreachable!("err is only true for a non-Match check"),
+                }
+            }
             frust_shell_common::perf::bench_emit(&format!(
-                "frust-perf plugin op=read type={} n={i} us={us}",
-                ty.tag()
+                "frust-perf plugin op=read type={} n={i} us={us} err={}",
+                ty.tag(),
+                err as u8
             ));
         }
     }
     frust_shell_common::perf::bench_emit(&format!(
-        "frust-perf plugin op=read type=total n={reads} us={read_total_us}"
+        "frust-perf plugin op=read type=total n={reads} us={read_total_us} errors={}",
+        read_unexpected_none + read_value_mismatch
     ));
     frust_shell_common::perf::mark_scenario_end("s8-read");
+
+    let total_errors = write_errors + read_unexpected_none + read_value_mismatch;
+    if total_errors > 0 {
+        frust_shell_common::perf::bench_emit(&format!(
+            "frust-perf plugin s8-errors write_errors={write_errors} \
+             read_unexpected_none={read_unexpected_none} read_value_mismatch={read_value_mismatch}"
+        ));
+    }
 
     S8Report {
         writes,
         reads,
+        write_errors,
+        read_unexpected_none,
+        read_value_mismatch,
         error: None,
     }
 }
 
 /// Write one value of `ty` under `key`, deriving a deterministic value from `i`
-/// (matching the Flutter side's per-type value shapes).
+/// via [`expected_value`] (matching the Flutter side's per-type value shapes).
 fn write_one(
     prefs: &SharedPreferences,
     ty: PrefType,
     key: &str,
     i: usize,
 ) -> Result<(), frust_shared_preferences::PrefsError> {
-    match ty {
-        PrefType::Bool => prefs.set_bool(key, i.is_multiple_of(2)),
-        PrefType::I64 => prefs.set_i64(key, i as i64),
-        PrefType::F64 => prefs.set_f64(key, i as f64 * 1.5),
-        PrefType::Str => prefs.set_string(key, format!("value_{i}")),
-        PrefType::StrList => {
-            prefs.set_string_list(key, vec![format!("a{i}"), format!("b{i}"), format!("c{i}")])
-        }
+    match expected_value(ty, i) {
+        ExpectedValue::Bool(v) => prefs.set_bool(key, v),
+        ExpectedValue::I64(v) => prefs.set_i64(key, v),
+        ExpectedValue::F64(v) => prefs.set_f64(key, v),
+        ExpectedValue::Str(v) => prefs.set_string(key, v),
+        ExpectedValue::StrList(v) => prefs.set_string_list(key, v),
     }
 }
 
-/// Read one value of `ty` under `key`; the result is `black_box`ed so the
-/// optimizer can't elide the boundary call.
-fn read_one(prefs: &SharedPreferences, ty: PrefType, key: &str) {
+/// Read one value of `ty` under `key` and verify it against
+/// [`expected_value`]`(ty, i)`; the raw read is `black_box`ed so the optimizer
+/// can't elide the boundary call.
+fn read_and_verify(prefs: &SharedPreferences, ty: PrefType, key: &str, i: usize) -> ReadCheck {
+    let expected = expected_value(ty, i);
     match ty {
         PrefType::Bool => {
-            black_box(prefs.get_bool(key));
+            let got = black_box(prefs.get_bool(key));
+            match (got, expected) {
+                (None, _) => ReadCheck::UnexpectedNone,
+                (Some(v), ExpectedValue::Bool(e)) if v == e => ReadCheck::Match,
+                _ => ReadCheck::ValueMismatch,
+            }
         }
         PrefType::I64 => {
-            black_box(prefs.get_i64(key));
+            let got = black_box(prefs.get_i64(key));
+            match (got, expected) {
+                (None, _) => ReadCheck::UnexpectedNone,
+                (Some(v), ExpectedValue::I64(e)) if v == e => ReadCheck::Match,
+                _ => ReadCheck::ValueMismatch,
+            }
         }
         PrefType::F64 => {
-            black_box(prefs.get_f64(key));
+            let got = black_box(prefs.get_f64(key));
+            match (got, expected) {
+                (None, _) => ReadCheck::UnexpectedNone,
+                (Some(v), ExpectedValue::F64(e)) if v == e => ReadCheck::Match,
+                _ => ReadCheck::ValueMismatch,
+            }
         }
         PrefType::Str => {
-            black_box(prefs.get_string(key));
+            let got = black_box(prefs.get_string(key));
+            match (got, expected) {
+                (None, _) => ReadCheck::UnexpectedNone,
+                (Some(v), ExpectedValue::Str(e)) if v == e => ReadCheck::Match,
+                _ => ReadCheck::ValueMismatch,
+            }
         }
         PrefType::StrList => {
-            black_box(prefs.get_string_list(key));
+            let got = black_box(prefs.get_string_list(key));
+            match (got, expected) {
+                (None, _) => ReadCheck::UnexpectedNone,
+                (Some(v), ExpectedValue::StrList(e)) if v == e => ReadCheck::Match,
+                _ => ReadCheck::ValueMismatch,
+            }
         }
     }
 }
@@ -313,5 +469,93 @@ mod tests {
         write_one(&prefs, PrefType::I64, "s8_test_roundtrip", 7).unwrap();
         assert_eq!(prefs.get_i64("s8_test_roundtrip"), Some(7));
         let _ = prefs.remove("s8_test_roundtrip");
+    }
+
+    #[test]
+    fn pref_type_index_is_dense_and_unique() {
+        // `write_ok`'s flat indexing (`ty.index() * KEYS_PER_TYPE + i`)
+        // depends on `index()` being a bijection onto `0..PrefType::ALL.len()`.
+        let mut seen: Vec<usize> = PrefType::ALL.iter().map(|t| t.index()).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2, 3, 4]);
+    }
+
+    // The error/mismatch counters can't be exercised via an injected failing
+    // store — `SharedPreferences::standard()` is the crate's sole public
+    // constructor and its `Backend` trait is crate-private (see
+    // `plugins/shared-preferences/src/lib.rs`), so there is no seam from this
+    // out-of-tree bench crate to force a write failure. Per this task's
+    // acceptance criteria, the counters are instead exercised via the
+    // derived-value mismatch path: `read_and_verify` is called against a
+    // deliberately wrong `i` (or an absent key) on the real desktop backend,
+    // so the *verification logic* — the actual new behavior this task adds —
+    // is directly covered even though a genuine backend I/O failure isn't
+    // reproducible here.
+
+    #[test]
+    fn read_and_verify_matches_a_faithful_roundtrip() {
+        let Ok(prefs) = SharedPreferences::standard() else {
+            return;
+        };
+        let key = "s8_test_verify_match";
+        write_one(&prefs, PrefType::Str, key, 42).unwrap();
+        assert_eq!(
+            read_and_verify(&prefs, PrefType::Str, key, 42),
+            ReadCheck::Match
+        );
+        let _ = prefs.remove(key);
+    }
+
+    #[test]
+    fn read_and_verify_detects_value_mismatch() {
+        let Ok(prefs) = SharedPreferences::standard() else {
+            return;
+        };
+        let key = "s8_test_verify_mismatch";
+        // Write the value expected for i=7, but verify against i=8's expected
+        // value — a stand-in for a backend that silently stored/returned the
+        // wrong value, without needing an injectable failing store.
+        write_one(&prefs, PrefType::I64, key, 7).unwrap();
+        assert_eq!(
+            read_and_verify(&prefs, PrefType::I64, key, 8),
+            ReadCheck::ValueMismatch
+        );
+        let _ = prefs.remove(key);
+    }
+
+    #[test]
+    fn read_and_verify_detects_unexpected_none() {
+        let Ok(prefs) = SharedPreferences::standard() else {
+            return;
+        };
+        let key = "s8_test_verify_unexpected_none";
+        // Never written (or already removed) — a stand-in for a backend that
+        // silently dropped the write.
+        let _ = prefs.remove(key);
+        assert_eq!(
+            read_and_verify(&prefs, PrefType::Bool, key, 3),
+            ReadCheck::UnexpectedNone
+        );
+    }
+
+    #[test]
+    fn read_and_verify_covers_every_pref_type() {
+        // One faithful roundtrip per type, so the per-variant match arms in
+        // `read_and_verify` (bool/i64/f64/string/string_list) are each
+        // exercised, not just the i64/string cases above.
+        let Ok(prefs) = SharedPreferences::standard() else {
+            return;
+        };
+        for ty in PrefType::ALL {
+            let key = format!("s8_test_verify_all_{}", ty.tag());
+            write_one(&prefs, ty, &key, 5).unwrap();
+            assert_eq!(
+                read_and_verify(&prefs, ty, &key, 5),
+                ReadCheck::Match,
+                "type {} failed to roundtrip",
+                ty.tag()
+            );
+            let _ = prefs.remove(&key);
+        }
     }
 }

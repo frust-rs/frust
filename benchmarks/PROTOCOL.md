@@ -328,6 +328,13 @@ via a launch arg / deep link so one binary drives the whole matrix):
   the plugin plan's Design Decision 4) — S8 never compares file formats,
   only round-trip call latency for equivalent logical operations across
   all five value types (`bool`/`i64`/`f64`/`String`/`Vec<String>`).
+- **Errors are counted, not swallowed.** Both sides carry an `err=0|1`
+  field per op line and count write failures plus round-trip-verification
+  failures (an unexpectedly-absent key or a value not matching what was
+  written) into a `write_errors`/`read_unexpected_none`/`read_value_mismatch`
+  tally, emitting one `s8-errors` marker line when any is nonzero so a run
+  with a silent boundary failure is flagged rather than reported as a clean
+  latency number.
 
 ## 9. Reporting
 

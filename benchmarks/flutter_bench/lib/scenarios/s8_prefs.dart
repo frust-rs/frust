@@ -18,9 +18,23 @@
 /// A `--dart-define=S8_BURST=1` run drives an S1-style animation concurrently
 /// to measure UI-thread impact (PLAN's burst-during-animation variant).
 ///
-/// Per-op lines: `flutter-perf plugin op=<phase> type=<t> n=<i> us=<micros>`;
+/// Per-op lines: ```flutter-perf plugin op=<phase> type=<t> n=<i> us=<micros> err=0|1```
 /// phase windows are also bracketed by `s8-write` / `s8-read-cached` /
 /// `s8-read-crossing` markers for wall-time slicing.
+///
+/// **Error accounting** (mirroring the frust side's `s8_prefs.rs`): a write
+/// whose `Future` throws increments `write_errors` and marks that key
+/// write-failed so a read never double-counts the same root cause. Every
+/// cached read verifies its value against the deterministic value `_write`
+/// should have stored, counting an unexpectedly-absent key
+/// (`read_unexpected_none`) or a present-but-wrong value
+/// (`read_value_mismatch`) — skipped for a key whose write already failed.
+/// `reload()` (the crossing-read phase) has no per-key value to verify, so a
+/// thrown exception there counts toward `read_crossing_errors` instead (a
+/// field the frust side has no analog of, since it has no separate
+/// crossing-read phase). A nonzero total across any of these four counters
+/// emits one parseable `s8-errors` marker line, matching the frust side's
+/// field names where a concept is shared.
 library;
 
 import 'package:flutter/material.dart';
@@ -65,40 +79,101 @@ class _PluginOverheadViewState extends State<PluginOverheadView>
   Future<void> _run() async {
     final prefs = await SharedPreferences.getInstance();
 
+    // Per-key write-success tracking so the read phase can skip
+    // verification — never the timing — for a key whose write already
+    // failed (no double-counting the same root cause).
+    final writeOk = <String, bool>{};
+    var writeErrors = 0;
+    var readUnexpectedNone = 0;
+    var readValueMismatch = 0;
+    var readCrossingErrors = 0;
+
     // --- writes (every setX crosses the channel) ---
     markScenarioStart('s8-write');
     for (final type in _PrefType.values) {
       for (var i = 0; i < _keysPerType; i++) {
         final key = 's8_${type.name}_$i';
-        final us = await _timeMicros(() => _write(prefs, type, key, i));
-        benchEmit('flutter-perf plugin op=write type=${type.name} n=$i us=$us');
+        var err = false;
+        final us = await _timeMicros(() async {
+          try {
+            await _write(prefs, type, key, i);
+          } catch (_) {
+            err = true;
+          }
+        });
+        if (err) writeErrors++;
+        writeOk[key] = !err;
+        benchEmit('flutter-perf plugin op=write type=${type.name} n=$i '
+            'us=$us err=${err ? 1 : 0}');
       }
     }
     markScenarioEnd('s8-write');
 
-    // --- cached reads (Dart-memory cache, no channel crossing) ---
+    // --- cached reads (Dart-memory cache, no channel crossing), each
+    // verified against the value _write should have stored ---
     markScenarioStart('s8-read-cached');
     for (final type in _PrefType.values) {
       for (var i = 0; i < _keysPerType; i++) {
         final key = 's8_${type.name}_$i';
-        final us = _timeMicrosSync(() => _read(prefs, type, key));
-        benchEmit(
-            'flutter-perf plugin op=read_cached type=${type.name} n=$i us=$us');
+        Object? got;
+        final us = _timeMicrosSync(() {
+          got = _read(prefs, type, key);
+        });
+        // Skip attributing a mismatch/none to this key if its write
+        // already failed — that failure is already counted above.
+        var err = false;
+        if (writeOk[key] ?? true) {
+          final expected = _expectedValue(type, i);
+          if (got == null) {
+            readUnexpectedNone++;
+            err = true;
+          } else if (!_valuesEqual(got, expected)) {
+            readValueMismatch++;
+            err = true;
+          }
+        }
+        benchEmit('flutter-perf plugin op=read_cached type=${type.name} '
+            'n=$i us=$us err=${err ? 1 : 0}');
       }
     }
     markScenarioEnd('s8-read-cached');
 
-    // --- channel-crossing reads (reload() is the only crossing read path) ---
+    // --- channel-crossing reads (reload() is the only crossing read path;
+    // there is no per-key value to verify here, so a thrown exception is
+    // the only error signal) ---
     markScenarioStart('s8-read-crossing');
     for (var i = 0; i < _keysPerType; i++) {
-      final us = await _timeMicros(prefs.reload);
-      benchEmit('flutter-perf plugin op=read_crossing type=reload n=$i us=$us');
+      var err = false;
+      final us = await _timeMicros(() async {
+        try {
+          await prefs.reload();
+        } catch (_) {
+          err = true;
+        }
+      });
+      if (err) readCrossingErrors++;
+      benchEmit('flutter-perf plugin op=read_crossing type=reload n=$i '
+          'us=$us err=${err ? 1 : 0}');
     }
     markScenarioEnd('s8-read-crossing');
 
+    final totalErrors = writeErrors +
+        readUnexpectedNone +
+        readValueMismatch +
+        readCrossingErrors;
+    if (totalErrors > 0) {
+      benchEmit('flutter-perf plugin s8-errors write_errors=$writeErrors '
+          'read_unexpected_none=$readUnexpectedNone '
+          'read_value_mismatch=$readValueMismatch '
+          'read_crossing_errors=$readCrossingErrors');
+    }
+
     if (!mounted) return;
     setState(() => _status = 'S8 complete '
-        '(${_burst ? 'burst-during-animation' : 'quiescent'})');
+        '(${_burst ? 'burst-during-animation' : 'quiescent'})'
+        '${totalErrors > 0 ? ' — $totalErrors error(s): '
+            'write=$writeErrors unexpected_none=$readUnexpectedNone '
+            'mismatch=$readValueMismatch crossing=$readCrossingErrors' : ''}');
   }
 
   Future<int> _timeMicros(Future<void> Function() op) async {
@@ -115,19 +190,53 @@ class _PluginOverheadViewState extends State<PluginOverheadView>
     return sw.elapsedMicroseconds;
   }
 
-  Future<void> _write(
-      SharedPreferences prefs, _PrefType type, String key, int i) {
+  /// The deterministic value `_write` stores (and cached-read verification
+  /// expects back) for `(type, i)` — factored out so the write and
+  /// read-verify paths can never drift from each other, mirroring the frust
+  /// side's `expected_value`.
+  Object _expectedValue(_PrefType type, int i) {
     switch (type) {
       case _PrefType.boolT:
-        return prefs.setBool(key, i.isEven);
+        return i.isEven;
       case _PrefType.intT:
-        return prefs.setInt(key, i);
+        return i;
       case _PrefType.doubleT:
-        return prefs.setDouble(key, i * 1.5);
+        return i * 1.5;
       case _PrefType.stringT:
-        return prefs.setString(key, 'value_$i');
+        return 'value_$i';
       case _PrefType.stringListT:
-        return prefs.setStringList(key, ['a$i', 'b$i', 'c$i']);
+        return ['a$i', 'b$i', 'c$i'];
+    }
+  }
+
+  /// Value equality for a verified read — `List` needs elementwise
+  /// comparison since Dart's `==` on two distinct `List` instances is
+  /// identity, not content, equality.
+  bool _valuesEqual(Object? got, Object expected) {
+    if (got is List && expected is List) {
+      if (got.length != expected.length) return false;
+      for (var i = 0; i < got.length; i++) {
+        if (got[i] != expected[i]) return false;
+      }
+      return true;
+    }
+    return got == expected;
+  }
+
+  Future<void> _write(
+      SharedPreferences prefs, _PrefType type, String key, int i) {
+    final value = _expectedValue(type, i);
+    switch (type) {
+      case _PrefType.boolT:
+        return prefs.setBool(key, value as bool);
+      case _PrefType.intT:
+        return prefs.setInt(key, value as int);
+      case _PrefType.doubleT:
+        return prefs.setDouble(key, value as double);
+      case _PrefType.stringT:
+        return prefs.setString(key, value as String);
+      case _PrefType.stringListT:
+        return prefs.setStringList(key, value as List<String>);
     }
   }
 
