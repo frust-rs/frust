@@ -120,7 +120,7 @@ impl PrefType {
     }
 }
 
-/// The deterministic value `write_one` writes (and `read_and_verify` expects
+/// The deterministic value `write_one` writes (and `verify_read` expects
 /// back) for `(ty, i)` — factored out so the write and read-verify paths can
 /// never drift from each other.
 #[derive(Clone, PartialEq, Debug)]
@@ -317,8 +317,11 @@ fn run_prefs_bench() -> S8Report {
         for i in 0..KEYS_PER_TYPE {
             let key = format!("s8_{}_{i}", ty.tag());
             let t = Instant::now();
-            let check = read_and_verify(&prefs, ty, &key, i);
+            let got = read_one(&prefs, ty, &key);
             let us = t.elapsed().as_micros();
+            // verification deliberately excluded from the timed window — do
+            // not reintroduce
+            let check = verify_read(ty, i, got);
             read_total_us += us;
             reads += 1;
             // Skip attributing a mismatch/none to this key if its write
@@ -382,52 +385,53 @@ fn write_one(
     }
 }
 
-/// Read one value of `ty` under `key` and verify it against
-/// [`expected_value`]`(ty, i)`; the raw read is `black_box`ed so the optimizer
-/// can't elide the boundary call.
-fn read_and_verify(prefs: &SharedPreferences, ty: PrefType, key: &str, i: usize) -> ReadCheck {
-    let expected = expected_value(ty, i);
+/// The raw value read back for a key, one variant per [`PrefType`] — captured
+/// inside the timed window by [`read_one`]; compared against
+/// [`expected_value`] only in [`verify_read`], called after the timed window
+/// has already closed.
+enum ReadValue {
+    Bool(Option<bool>),
+    I64(Option<i64>),
+    F64(Option<f64>),
+    Str(Option<String>),
+    StrList(Option<Vec<String>>),
+}
+
+/// Read one value of `ty` under `key` — the raw backend call only, `black_box`ed
+/// so the optimizer can't elide the boundary call.
+///
+/// Verification deliberately excluded from the timed window — do not
+/// reintroduce. Comparing the result against `expected_value` is CPU work
+/// unrelated to the backend boundary being measured; see [`verify_read`],
+/// called only once `Instant::elapsed` has already captured `us` in
+/// `run_prefs_bench`.
+fn read_one(prefs: &SharedPreferences, ty: PrefType, key: &str) -> ReadValue {
     match ty {
-        PrefType::Bool => {
-            let got = black_box(prefs.get_bool(key));
-            match (got, expected) {
-                (None, _) => ReadCheck::UnexpectedNone,
-                (Some(v), ExpectedValue::Bool(e)) if v == e => ReadCheck::Match,
-                _ => ReadCheck::ValueMismatch,
-            }
-        }
-        PrefType::I64 => {
-            let got = black_box(prefs.get_i64(key));
-            match (got, expected) {
-                (None, _) => ReadCheck::UnexpectedNone,
-                (Some(v), ExpectedValue::I64(e)) if v == e => ReadCheck::Match,
-                _ => ReadCheck::ValueMismatch,
-            }
-        }
-        PrefType::F64 => {
-            let got = black_box(prefs.get_f64(key));
-            match (got, expected) {
-                (None, _) => ReadCheck::UnexpectedNone,
-                (Some(v), ExpectedValue::F64(e)) if v == e => ReadCheck::Match,
-                _ => ReadCheck::ValueMismatch,
-            }
-        }
-        PrefType::Str => {
-            let got = black_box(prefs.get_string(key));
-            match (got, expected) {
-                (None, _) => ReadCheck::UnexpectedNone,
-                (Some(v), ExpectedValue::Str(e)) if v == e => ReadCheck::Match,
-                _ => ReadCheck::ValueMismatch,
-            }
-        }
-        PrefType::StrList => {
-            let got = black_box(prefs.get_string_list(key));
-            match (got, expected) {
-                (None, _) => ReadCheck::UnexpectedNone,
-                (Some(v), ExpectedValue::StrList(e)) if v == e => ReadCheck::Match,
-                _ => ReadCheck::ValueMismatch,
-            }
-        }
+        PrefType::Bool => ReadValue::Bool(black_box(prefs.get_bool(key))),
+        PrefType::I64 => ReadValue::I64(black_box(prefs.get_i64(key))),
+        PrefType::F64 => ReadValue::F64(black_box(prefs.get_f64(key))),
+        PrefType::Str => ReadValue::Str(black_box(prefs.get_string(key))),
+        PrefType::StrList => ReadValue::StrList(black_box(prefs.get_string_list(key))),
+    }
+}
+
+/// Verify a [`read_one`] result against [`expected_value`]`(ty, i)` — called
+/// after the timed window has already closed, so verification cost never
+/// inflates the reported read latency (see `read_one`'s guard comment).
+fn verify_read(ty: PrefType, i: usize, got: ReadValue) -> ReadCheck {
+    let expected = expected_value(ty, i);
+    match (got, expected) {
+        (ReadValue::Bool(None), _)
+        | (ReadValue::I64(None), _)
+        | (ReadValue::F64(None), _)
+        | (ReadValue::Str(None), _)
+        | (ReadValue::StrList(None), _) => ReadCheck::UnexpectedNone,
+        (ReadValue::Bool(Some(v)), ExpectedValue::Bool(e)) if v == e => ReadCheck::Match,
+        (ReadValue::I64(Some(v)), ExpectedValue::I64(e)) if v == e => ReadCheck::Match,
+        (ReadValue::F64(Some(v)), ExpectedValue::F64(e)) if v == e => ReadCheck::Match,
+        (ReadValue::Str(Some(v)), ExpectedValue::Str(e)) if v == e => ReadCheck::Match,
+        (ReadValue::StrList(Some(v)), ExpectedValue::StrList(e)) if v == e => ReadCheck::Match,
+        _ => ReadCheck::ValueMismatch,
     }
 }
 
@@ -486,11 +490,19 @@ mod tests {
     // `plugins/shared-preferences/src/lib.rs`), so there is no seam from this
     // out-of-tree bench crate to force a write failure. Per this task's
     // acceptance criteria, the counters are instead exercised via the
-    // derived-value mismatch path: `read_and_verify` is called against a
+    // derived-value mismatch path: `read_and_verify` (the test-only
+    // `read_one` + `verify_read` composition below) is called against a
     // deliberately wrong `i` (or an absent key) on the real desktop backend,
     // so the *verification logic* — the actual new behavior this task adds —
     // is directly covered even though a genuine backend I/O failure isn't
     // reproducible here.
+
+    /// Test-only composition mirroring `run_prefs_bench`'s two-step
+    /// read-then-verify shape (`read_one` timed, `verify_read` after) without
+    /// needing a real `Instant` in these assertions.
+    fn read_and_verify(prefs: &SharedPreferences, ty: PrefType, key: &str, i: usize) -> ReadCheck {
+        verify_read(ty, i, read_one(prefs, ty, key))
+    }
 
     #[test]
     fn read_and_verify_matches_a_faithful_roundtrip() {
@@ -541,8 +553,8 @@ mod tests {
     #[test]
     fn read_and_verify_covers_every_pref_type() {
         // One faithful roundtrip per type, so the per-variant match arms in
-        // `read_and_verify` (bool/i64/f64/string/string_list) are each
-        // exercised, not just the i64/string cases above.
+        // `verify_read` (bool/i64/f64/string/string_list) are each exercised,
+        // not just the i64/string cases above.
         let Ok(prefs) = SharedPreferences::standard() else {
             return;
         };

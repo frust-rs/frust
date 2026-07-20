@@ -119,6 +119,8 @@ class _PluginOverheadViewState extends State<PluginOverheadView>
         final us = _timeMicrosSync(() {
           got = _read(prefs, type, key);
         });
+        // verification deliberately excluded from the timed window — do not
+        // reintroduce
         // Skip attributing a mismatch/none to this key if its write
         // already failed — that failure is already counted above.
         var err = false;
