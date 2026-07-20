@@ -1,18 +1,20 @@
 //! Architecture conformance test (huddle clean-architecture refactor, task 06
 //! — `workflow/plans/features/huddle-clean-architecture/`; hardened by
 //! followups/fix-1 task F1 against review r0's three demonstrated bypass
-//! vectors — see the "What this is NOT" section below).
+//! vectors, then followups/fix-2 task F2 against review r1's two
+//! reproduced gaps in that hardening — see the "What this is NOT" section
+//! below).
 //!
 //! A plain `std::fs` source scan over `src/`, run as an ordinary `cargo test`
 //! (this repo has no lint-plugin/static-analysis tooling — see
 //! `docs/CODE_STANDARDS.md`), enforcing the per-feature layering rules PLAN's
 //! Design Decisions 2/3/7 established:
 //!
-//! (a) a `features/*/domain/**` file never mentions `frust::`, or any
-//!     `::presentation`/`::data` use-form needle below (which subsumes
-//!     `crate::data::store`) — domain is the framework- and layer-free core;
-//! (b) a `features/*/presentation/**` file never mentions any `::data`
-//!     use-form needle below — a presentation file reaches the shared
+//! (a) a `features/*/domain/**` file never mentions `frust::`, or a
+//!     `data`/`presentation` path segment banned below (see
+//!     [`has_exact_segment`]) — domain is the framework- and layer-free core;
+//! (b) a `features/*/presentation/**` file never mentions a `data` path
+//!     segment banned below — a presentation file reaches the shared
 //!     dataset through an injected repository trait, never the store or a
 //!     sibling feature's `data/` module, directly;
 //! (c) only a `*/data/**` file (or `src/data/` itself) mentions
@@ -48,22 +50,24 @@
 //! `profile/domain/entities.rs`'s task-01-inherited link) that names, not
 //! imports, the thing it's talking about. Checks (a)/(b)/(e) additionally
 //! run over `production_lines`' *use-joined* output (see
-//! [`join_use_statements`]) so a needle can't be split across lines; checks
-//! (c)/(d)/(f) don't need this (see each check's own comment).
+//! [`join_use_statements`]) so a `use` tree can't be split across lines to
+//! dodge detection; checks (c)/(d)/(f) don't need this (see each check's own
+//! comment).
 //!
-//! # What this is NOT (review r0's boundary note)
+//! # What this is NOT (review r0/r1's boundary notes)
 //!
-//! This is a **substring scan, not a parser** — it has no `syn`/AST
+//! This is a **substring/token scan, not a parser** — it has no `syn`/AST
 //! understanding of Rust `use` trees, paths, or types. Review r0 (round 0)
-//! demonstrated three concrete ways a substring scan can be defeated; this
-//! hardening pass closes exactly those three, and no more:
+//! demonstrated three concrete ways a substring scan can be defeated; fix-1
+//! closed those three, but review r1's adversarial re-review reproduced two
+//! more gaps *in that hardening itself* (both closed here, by fix-2):
 //!
-//! 1. **Alias/use-form bypass — CLOSED.** A single `"::data::"`/
+//! 1. **Alias/use-form bypass — CLOSED (fix-1).** A single `"::data::"`/
 //!    `"::presentation::"` needle missed `use ...::data as msgdata;` (no
-//!    trailing `::`). [`DATA_NEEDLES`]/[`PRESENTATION_NEEDLES`] enumerate
-//!    every use-statement terminator form (`;`, ` as `, `}`, `,`) a banned
-//!    segment can end a `use` tree with.
-//! 2. **Concrete-repo-name bypass — CLOSED.** A facade re-export
+//!    trailing `::`). Superseded by fix-2's segment tokenizer (gap B below),
+//!    which makes every use-form terminator (`;`, ` as `, `}`, `,`, a
+//!    brace-list member, …) irrelevant — see [`has_exact_segment`].
+//! 2. **Concrete-repo-name bypass — CLOSED (fix-1).** A facade re-export
 //!    (`pub use data::repositories::StoreChannelRepository;` from a feature
 //!    `mod.rs`) never matched the old `::data::`/`::presentation::` needles
 //!    at all — the banned type crosses the layer boundary by name, not by
@@ -71,13 +75,33 @@
 //!    `Store[A-Za-z]*Repository`/`InMemory[A-Za-z]*Repository` name pattern
 //!    itself anywhere outside the data layer/composition root/allowlist (see
 //!    check (e)), covering both direct construction and a re-export.
-//! 3. **Split-use bypass — CLOSED.** A `use` tree spanning multiple physical
-//!    lines could put a banned segment on a different physical line than the
-//!    rest of the path, defeating a needle scanned line-by-line.
+//! 3. **Split-use bypass — CLOSED (fix-1).** A `use` tree spanning multiple
+//!    physical lines could put a banned segment on a different physical line
+//!    than the rest of the path, defeating a needle scanned line-by-line.
 //!    [`join_use_statements`] concatenates a `use ...;` statement's physical
-//!    lines into one logical line before any needle check runs.
+//!    lines into one logical line before any check runs.
+//! 4. **Gap A — `pub use` join trigger — CLOSED (fix-2).** Fix-1's
+//!    [`join_use_statements`] only recognized a joinable statement by the
+//!    literal `"use "` prefix, so a split `pub use`/`pub(crate) use`/
+//!    `pub(super) use` re-export (the exact facade-re-export shape check (e)
+//!    exists to police) was never joined at all, reopening the split-use
+//!    bypass for the join-trigger's own blind spot. [`is_use_trigger_line`]
+//!    now recognizes bare `use `, and any `pub`/`pub(...)`-prefixed `use `,
+//!    as a join trigger — see its doc comment for the exact accepted forms.
+//! 5. **Gap B — brace-list membership forms — CLOSED (fix-2).** Every fix-1
+//!    needle required a `::` immediately before the banned segment; a
+//!    rustfmt-produced grouped import puts a segment straight after `{`, `, `,
+//!    or inside a nested `{self, ...}` group with no `::` prefix at all
+//!    (`use x::{domain::Foo, data::Bar};` — the `data` member sits right
+//!    after `, `, not `::`) — none of fix-1's needles matched. [`has_exact_segment`]
+//!    replaces the whole needle-list approach: a joined `use` line is split on
+//!    every non-identifier delimiter (`::`, `{`, `}`, `,`, `;`, whitespace,
+//!    `(`, `)` — see [`tokenize_segments`]) and an *exact* `data`/`presentation`
+//!    segment token is banned regardless of which punctuation surrounds it, so
+//!    no enumeration of use-form terminators is needed at all — the r1
+//!    reviewers' own recommended fix shape.
 //!
-//! **Residual, accepted limitations** (not closed by this pass — a real
+//! **Residual, accepted limitations** (not closed by either pass — a real
 //! `syn`-based checker would be the fix, judged not worth the dependency for
 //! a single-example conformance ratchet):
 //!
@@ -203,41 +227,74 @@ fn production_lines(contents: &str) -> Vec<Line> {
     join_use_statements(out)
 }
 
+/// True if `trimmed` (a line's start-trimmed text) opens a joinable `use`
+/// statement — the trigger [`join_use_statements`] looks for before it starts
+/// accumulating physical lines into one logical line. Recognizes bare
+/// `"use "`, and any visibility-qualified form — `"pub use "`,
+/// `"pub(crate) use "`, `"pub(super) use "`, `"pub(self) use "`, or
+/// `"pub(in <path>) use "` — i.e. `pub` optionally followed by one
+/// parenthesized visibility qualifier, then `"use "`. A prefix check, not a
+/// full attribute/visibility parser (deliberately: this crate's `use`/
+/// `pub use` style never carries an attribute or doc comment on the same
+/// physical line as the keyword itself), but it closes review r1's **gap
+/// A**: fix-1's join trigger matched only the literal `"use "` prefix, so a
+/// split `pub use`/`pub(crate) use` facade re-export — exactly the shape
+/// check (e) exists to police — was never joined at all, reopening the
+/// split-use bypass for that one form (see the module header's "What this is
+/// NOT" section).
+fn is_use_trigger_line(trimmed: &str) -> bool {
+    if trimmed.starts_with("use ") {
+        return true;
+    }
+    let Some(after_pub) = trimmed.strip_prefix("pub") else {
+        return false;
+    };
+    let after_pub = after_pub.trim_start();
+    let after_vis = match after_pub.strip_prefix('(') {
+        Some(rest) => match rest.find(')') {
+            Some(close) => rest[close + 1..].trim_start(),
+            None => return false, // unterminated `pub(...)` — not a use trigger
+        },
+        None => after_pub,
+    };
+    after_vis.starts_with("use ")
+}
+
 /// Join a `use ...;` statement's physical lines into one logical [`Line`] so
-/// a banned needle can't straddle a line break (review r0's third
+/// a banned segment can't straddle a line break (review r0's third
 /// demonstrated bypass — a `use` tree split across lines, with the banned
 /// segment on a different physical line than where a line-by-line scan would
 /// expect it). Deliberately simple and deterministic, not a real `use`-tree
 /// parser: any non-comment line (comments are already stripped by the time
-/// this runs) whose trimmed text starts with the literal `"use "` is treated
-/// as opening a `use` statement, and subsequent lines are appended (each
-/// trimmed) until the accumulated text contains a `;` — the one character
-/// every `use` statement in this codebase's style (one item per statement,
-/// `rustfmt`-formatted) ends on. A `use` statement already complete on one
-/// line (the common case) round-trips through this unchanged. A
-/// malformed/truncated accumulation (statement never closes before the file
-/// — or the pre-truncated `#[cfg(test)]` region — ends) just stops
-/// accumulating rather than panicking; the resulting text is scanned as-is
-/// like anything else.
+/// this runs) whose trimmed text opens a `use` statement (see
+/// [`is_use_trigger_line`] — broadened to `pub`-prefixed forms by fix-2's gap
+/// A closure) has subsequent lines appended (each trimmed) until the
+/// accumulated text contains a `;` — the one character every `use` statement
+/// in this codebase's style (one item per statement, `rustfmt`-formatted)
+/// ends on. A `use` statement already complete on one line (the common case)
+/// round-trips through this unchanged. A malformed/truncated accumulation
+/// (statement never closes before the file — or the pre-truncated
+/// `#[cfg(test)]` region — ends) just stops accumulating rather than
+/// panicking; the resulting text is scanned as-is like anything else.
 ///
 /// **No blind space-insertion at the join point** — deliberately, not an
 /// oversight. A rustfmt-produced (or hand-written) `use` tree only ever
 /// breaks at a punctuation boundary that already supplies its own
 /// separation (`::`, `{`, `,`, `}`) or at a whitespace-delimited keyword
 /// (`as`) that needs one. [`needs_space_at_join`] tells the two cases apart:
-/// a needle like `"::data::"` must reconstruct with **no** space when a
+/// a banned segment like `data` must reconstruct with **no** space when a
 /// split lands right after the last `::` (`activity::` / `data::...` must
-/// rejoin as `activity::data::...`, not `activity:: data::...` — a stray
-/// space there would silently defeat the very needle this join exists to
-/// protect), while `"::data as msgdata;"` split right before `as` must
-/// rejoin **with** one (`data` / `as msgdata;` must become `data as
-/// msgdata;`, not `dataas msgdata;`).
+/// rejoin as `activity::data::...`, not `activity:: data::...`), while
+/// `"::data as msgdata;"` split right before `as` must rejoin **with** one
+/// (`data` / `as msgdata;` must become `data as msgdata;`, not `dataas
+/// msgdata;` — which would fuse into one non-matching token under
+/// [`tokenize_segments`]' delimiter-based split).
 fn join_use_statements(lines: Vec<Line>) -> Vec<Line> {
     let mut out = Vec::new();
     let mut iter = lines.into_iter().peekable();
     while let Some(line) = iter.next() {
         let trimmed = line.text.trim_start();
-        if !trimmed.starts_with("use ") || line.text.contains(';') {
+        if !is_use_trigger_line(trimmed) || line.text.contains(';') {
             out.push(line);
             continue;
         }
@@ -295,32 +352,64 @@ fn is_data_layer_file(relp: &str) -> bool {
     relp.starts_with("data/") || relp.contains("/data/")
 }
 
-/// The needle forms a domain/presentation file mentioning the `data` module
-/// is banned from containing (checks a/b), broadened beyond the plain
-/// `"::data::"` substring to close the alias/use-form bypass review r0
-/// demonstrated: `use ...::data as msgdata;` has no `"::data::"` substring at
-/// all, since nothing follows the segment but the alias. Each entry is one
-/// way a `use` tree (already [`join_use_statements`]-joined onto one logical
-/// line by the time these run) can end the `data` segment:
-const DATA_NEEDLES: &[&str] = &[
-    "::data::",   // a further path segment follows: `::data::repositories::...`
-    "::data;",    // the module itself is the whole import: `use ...::data;`
-    "::data as ", // the alias-form bypass review r0 demonstrated: `use ...::data as x;`
-    "::data}",    // last item in a brace-list `use` tree: `use ...::{foo, data};`
-    "::data,",    // mid-list item in a brace-list `use` tree: `use ...::{data, foo};`
-];
+/// Split `text` on every non-identifier delimiter — `::`, `{`, `}`, `,`,
+/// `;`, `(`, `)`, and whitespace — into bare identifier-ish segments, empty
+/// segments dropped. `::` splits cleanly under a single-char-class split
+/// (`:` is one of the delimiter chars, so `"a::b"` yields `["a", "", "b"]`
+/// before empty segments are filtered).
+///
+/// This is fix-2's answer to review r1's **gap B**: fix-1's needle list
+/// required a `::` immediately before a banned segment, which a brace-list
+/// member (`use x::{domain::Foo, data::Bar};` — `data` sits right after
+/// `", "`, not `"::"`) or a nested `{self, ...}` group never supplies. Once
+/// split into segments, *where* `data` sits relative to punctuation stops
+/// mattering — every use-form terminator (`;`, ` as `, `}`, `,`, a brace-list
+/// position, self-form nesting, …) reduces to the same exact-token
+/// comparison. See [`has_exact_segment`].
+fn tokenize_segments(text: &str) -> Vec<&str> {
+    text.split(|c: char| {
+        c == ':'
+            || c == '{'
+            || c == '}'
+            || c == ','
+            || c == ';'
+            || c == '('
+            || c == ')'
+            || c.is_whitespace()
+    })
+    .filter(|s| !s.is_empty())
+    .collect()
+}
 
-/// Same treatment as [`DATA_NEEDLES`], for the `::presentation` segment
+/// True if any [`tokenize_segments`] token of `text` is EXACTLY `segment`.
+/// Applied only to a [`join_use_statements`]-joined `use`-statement line (see
+/// checks (a)/(b) below) — restricting the segment check to `use` lines is
+/// the false-positive guard: a plain local variable or field named `data`
+/// (e.g. `let data = ...;`, `struct Foo { data: Bar }`) is never a `use`
+/// line, so it never reaches this function and never trips the scan, even
+/// though it contains the bare identifier `data` too.
+fn has_exact_segment(text: &str, segment: &str) -> bool {
+    tokenize_segments(text).into_iter().any(|s| s == segment)
+}
+
+/// Path-expression needle for a **non**-`use` line — an inline fully
+/// qualified expression like
+/// `crate::features::messages::data::repositories::Foo::new()` that isn't
+/// part of a `use` tree at all, so has no `use`-statement structure for
+/// [`has_exact_segment`] to apply to. Reduced from fix-1's five-entry
+/// use-form needle list (`DATA_NEEDLES`/`PRESENTATION_NEEDLES`, deleted by
+/// fix-2): every `use`-line termination form that list enumerated is now
+/// covered by [`has_exact_segment`] instead, so only the plain
+/// fully-qualified-path form — a leading and trailing `::` around the banned
+/// segment — remains here. This is also part of the false-positive guard:
+/// requiring both surrounding `::`s means a bare `data`/`presentation`
+/// identifier used as a local name in an expression never matches.
+const DATA_EXPR_NEEDLE: &str = "::data::";
+/// Same treatment as [`DATA_EXPR_NEEDLE`], for the `presentation` segment
 /// domain files ban (check a only — presentation files obviously mention
-/// `presentation` themselves, e.g. their own `mod.rs` path, so this is never
+/// `presentation` themselves, e.g. their own module path, so this is never
 /// applied to presentation files).
-const PRESENTATION_NEEDLES: &[&str] = &[
-    "::presentation::",
-    "::presentation;",
-    "::presentation as ",
-    "::presentation}",
-    "::presentation,",
-];
+const PRESENTATION_EXPR_NEEDLE: &str = "::presentation::";
 
 /// True if `text` contains the concrete-repository-type-name pattern
 /// `Store[A-Za-z]*Repository` or `InMemory[A-Za-z]*Repository` — a concrete
@@ -410,10 +499,10 @@ fn assert_all_used(check: &str, exemptions: &[Exemption], used: &[bool]) {
 /// `set_app_theme`/`clear_app_theme` calls — the app's single theming
 /// side-effect site (pre-existing behavior, preserved verbatim per PLAN
 /// Design Decision 5). This exemption covers ONLY the `frust::` needle for
-/// exactly these three files — every other domain ban (`::presentation`,
-/// `::data`, in any use-form) still applies to settings' domain like every
-/// other feature's (asserted below: the loop applies every needle uniformly,
-/// and only the `frust::` needle consults this table).
+/// exactly these three files — every other domain ban (`presentation`,
+/// `data`, in any form the segment tokenizer or expression needle covers)
+/// still applies to settings' domain like every other feature's; only the
+/// `frust::` needle consults this table.
 #[test]
 fn domain_never_imports_frust_presentation_or_data() {
     let frust_exemptions = [
@@ -440,42 +529,62 @@ fn domain_never_imports_frust_presentation_or_data() {
     ];
     let mut used = vec![false; frust_exemptions.len()];
 
-    let needles: Vec<&str> = std::iter::once("frust::")
-        .chain(PRESENTATION_NEEDLES.iter().copied())
-        .chain(DATA_NEEDLES.iter().copied())
-        .collect();
-
     let mut failures = Vec::new();
     for path in domain_files() {
         let relp = rel(&path);
         let contents =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         for line in production_lines(&contents) {
-            for &needle in &needles {
-                if !line.text.contains(needle) {
-                    continue;
-                }
-                if needle == "frust::"
-                    && let Some(idx) = frust_exemptions
-                        .iter()
-                        .position(|e| e.file == relp && line.text.contains(e.needle))
+            let is_use = is_use_trigger_line(line.text.trim_start());
+
+            // `frust::` — a plain substring needle, unaffected by the
+            // segment tokenizer: it legitimately appears in non-use
+            // expression contexts too (e.g. `frust::run(...)`), not just
+            // `use` lines, so there is no use/non-use split to make here.
+            if line.text.contains("frust::") {
+                if let Some(idx) = frust_exemptions
+                    .iter()
+                    .position(|e| e.file == relp && line.text.contains(e.needle))
                 {
                     used[idx] = true;
-                    continue;
+                } else {
+                    failures.push(format!(
+                        "{relp}:{}: domain file mentions banned `frust::` — {}",
+                        line.number,
+                        line.text.trim()
+                    ));
                 }
-                failures.push(format!(
-                    "{relp}:{}: domain file mentions banned `{needle}` — {}",
-                    line.number,
-                    line.text.trim()
-                ));
+            }
+
+            // `presentation` / `data` path segments — gap-B segment
+            // tokenizer on a joined `use` line (any brace-list/terminator
+            // form), the reduced expression needle otherwise (a
+            // fully-qualified non-use path expression) — see
+            // has_exact_segment's and DATA_EXPR_NEEDLE's doc comments.
+            for (segment, expr_needle) in [
+                ("presentation", PRESENTATION_EXPR_NEEDLE),
+                ("data", DATA_EXPR_NEEDLE),
+            ] {
+                let hit = if is_use {
+                    has_exact_segment(&line.text, segment)
+                } else {
+                    line.text.contains(expr_needle)
+                };
+                if hit {
+                    failures.push(format!(
+                        "{relp}:{}: domain file mentions banned `{segment}` segment — {}",
+                        line.number,
+                        line.text.trim()
+                    ));
+                }
             }
         }
     }
     assert!(
         failures.is_empty(),
         "domain layering ban violated ({} file:line hit(s)) — a domain file must not mention \
-         `frust::` (except the settings allowlist above), `::presentation` (any use-form), or \
-         `::data` (any use-form):\n{}",
+         `frust::` (except the settings allowlist above), or a `presentation`/`data` path \
+         segment in a use tree or fully-qualified expression:\n{}",
         failures.len(),
         failures.join("\n"),
     );
@@ -519,29 +628,36 @@ fn presentation_never_imports_data_directly() {
         let contents =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         for line in production_lines(&contents) {
-            for &needle in DATA_NEEDLES {
-                if !line.text.contains(needle) {
-                    continue;
-                }
-                if let Some(idx) = exemptions
-                    .iter()
-                    .position(|e| e.file == relp && line.text.contains(e.needle))
-                {
-                    used[idx] = true;
-                    continue;
-                }
-                failures.push(format!(
-                    "{relp}:{}: presentation file reaches into a `data` module — {}",
-                    line.number,
-                    line.text.trim()
-                ));
+            // Same use/non-use split as check (a): the gap-B segment
+            // tokenizer on a joined `use` line, the reduced expression
+            // needle otherwise.
+            let hit = if is_use_trigger_line(line.text.trim_start()) {
+                has_exact_segment(&line.text, "data")
+            } else {
+                line.text.contains(DATA_EXPR_NEEDLE)
+            };
+            if !hit {
+                continue;
             }
+            if let Some(idx) = exemptions
+                .iter()
+                .position(|e| e.file == relp && line.text.contains(e.needle))
+            {
+                used[idx] = true;
+                continue;
+            }
+            failures.push(format!(
+                "{relp}:{}: presentation file reaches into a `data` module — {}",
+                line.number,
+                line.text.trim()
+            ));
         }
     }
     assert!(
         failures.is_empty(),
         "presentation layering ban violated ({} file:line hit(s)) — a presentation file must \
-         not mention `::data` (any use-form) outside the resolve_repo allowlist above:\n{}",
+         not mention a `data` path segment (in a use tree or fully-qualified expression) \
+         outside the resolve_repo allowlist above:\n{}",
         failures.len(),
         failures.join("\n"),
     );
@@ -560,8 +676,8 @@ fn presentation_never_imports_data_directly() {
 /// complete path ending in a real segment (`store`), not a bare module name
 /// an alias can strand mid-path — `use crate::data::store as s;` still
 /// contains the full `"crate::data::store"` substring before ` as s;`, so
-/// this check doesn't need [`DATA_NEEDLES`]' use-form broadening the way
-/// checks (a)/(b) do.
+/// this check doesn't need [`has_exact_segment`]'s segment-tokenizer
+/// treatment the way checks (a)/(b) do.
 #[test]
 fn only_data_layer_reads_the_shared_store_directly() {
     let mut failures = Vec::new();
