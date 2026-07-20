@@ -28,6 +28,43 @@ match this table's chipset-tier shape (one mid-tier Android, one headline
 Android with a fast GPU, one iPhone) for a result to be comparable against
 history.
 
+### Physical-iPhone automation (iOS 17+, `devicectl`)
+
+`benchmarks/harness/run.sh --platform ios` drives a physical iPhone via
+`xcrun devicectl` (validated on the iPhone SE, 2026-07-21). There is **no
+CLI deep-link trigger** for a physical iOS device, so scenario selection and
+trace capture use a different mechanism per app — both fully automatic (no
+manual taps), both documented in the harness header:
+
+- **Frust — runtime env var, one signed build.** `devicectl device process
+  launch -e '{"FRUST_BENCH_SCENARIO":"<sN>",...}'` delivers the env var to
+  the process; the bench app's existing `resolve_initial()` fallback reads it
+  for a **cold** scenario selection (no warm-switch flash — matters for S7's
+  cold start). The app's raw `frust-perf`/`bench-scenario` stdout is captured
+  live off `--console`. `FRUST_TRACE`/`FRUST_TRACE_RAW` are baked at
+  compile time via `frust build ios --define` (the generated iOS build
+  run-script exports `FRUST_DEFINES` before `cargo build`, so `option_env!`
+  reads them).
+- **Flutter — compile-time define, one profile build per scenario.** Dart's
+  `String.fromEnvironment('SCENARIO')` is compile-time only, so each scenario
+  is a separate `flutter build ios --profile --dart-define=SCENARIO=<sN>`
+  (8 builds). Flutter's `print` routes to os_log, which neither
+  `devicectl --console` nor the (empty on modern iOS) legacy syslog relay
+  surfaces, so `flutter_bench` also writes its trace to a file in its `tmp/`
+  container that the harness pulls with `devicectl device copy from
+  --domain-type appDataContainer` after each run. Both transports are sliced
+  by the same `stats.py` from identical `*-perf raw`/`bench-scenario` lines,
+  so the transport choice affects no computed number.
+
+Two metric caveats are iOS-specific and recorded per-run in `RESULTS.md`:
+Flutter's `FrameTiming.totalSpan` is unreliable (negative under load) on iOS,
+so its frame total is reported as the `build+raster` work-sum; and Frust's
+`total_us` folds in the CADisplayLink present-to-vsync idle wait, so its
+per-frame percentiles are a cadence wall-time, not a pure render cost. iOS
+also exposes no brightness/battery/thermal or external-cold-start/CPU/RSS CLI,
+so those environmental controls and S7 metrics are uncontrolled/unavailable
+(cooldown is a fixed inter-scenario wait).
+
 ## 2. Framework build-config asymmetry (declared and justified)
 
 - **Flutter runs in profile mode.** Flutter's own documentation requires

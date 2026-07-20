@@ -44,6 +44,9 @@
 /// runner — the same place `log::info!` lands on the frust side.
 library;
 
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/scheduler.dart';
 
 /// Uptime since `main()` entry — started by `main` before `runApp`, read by
@@ -57,16 +60,50 @@ const String rawFramePrefix = 'flutter-perf raw';
 /// Log-line prefix for the one-shot startup span line (S7).
 const String startupPrefix = 'flutter-perf startup';
 
-/// Emit one benchmark trace line to the platform log.
+/// The on-device trace file path (iOS only), under the app's temporary
+/// directory (`NSTemporaryDirectory()` → the appDataContainer's `tmp/`), the
+/// harness pulls after each run with `xcrun devicectl device copy from
+/// --domain-type appDataContainer`.
+final String benchTracePath =
+    '${Directory.systemTemp.path}/flutter_bench_trace.log';
+
+IOSink? _traceSink;
+// Retained so the periodic flush Timer is not garbage-collected mid-capture.
+// ignore: unused_element
+Timer? _flushTimer;
+
+void _ensureSink() {
+  if (_traceSink != null) return;
+  // FileMode.write truncates any prior run's file so each capture is clean.
+  _traceSink = File(benchTracePath).openWrite(mode: FileMode.write);
+  // Flush on a cadence so a mid-run `devicectl process terminate` (SIGTERM,
+  // which does not run Dart finalizers) loses at most ~1s of buffered frames.
+  _flushTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _traceSink?.flush();
+  });
+}
+
+/// Emit one benchmark trace line to the platform's capture sink.
 ///
-/// Uses `print` deliberately (not `debugPrint`, which throttles high-volume
-/// output and can drop per-frame lines): `print` reaches logcat / stdout in
-/// profile mode on device, which is exactly what the harness scrapes. Callers
-/// pass a single already-formatted line.
+/// On **Android/desktop** this is `print` (not `debugPrint`, which throttles
+/// high-volume output and can drop per-frame lines): `print` reaches logcat /
+/// stdout in profile mode, which is what the Android harness scrapes.
+///
+/// On a physical **iOS** device neither `print` (routes to os_log, which the
+/// modern-iOS syslog relay / `devicectl --console` does not surface) nor
+/// `stdout.writeln` from the engine's post-frame `addTimingsCallback`
+/// reliably reaches the host, so the same line is additionally appended to a
+/// file in the app's `tmp/` container ([benchTracePath]) that the harness
+/// pulls afterward. The file write lives off the measured path (the engine
+/// captures each [FrameTiming] independent of when we serialize it), so the
+/// sink choice does not affect any reported percentile. Callers pass a single
+/// already-formatted line.
 void benchEmit(String line) {
-  // The harness parses this from the device log; see the library doc for why
-  // `print` (not `debugPrint`) is the correct sink here.
   print(line); // ignore: avoid_print
+  if (Platform.isIOS) {
+    _ensureSink();
+    _traceSink!.writeln(line);
+  }
 }
 
 /// Whether frame capture and markers are active. On by default (this is a

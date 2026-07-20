@@ -5,18 +5,52 @@
 #
 # Usage: run.sh <scenario> --app frust|flutter --device <serial> [--runs N]
 #                [--duration <secs>] [--out <dir>] [--pkg <package>]
-#                [--scheme <uri-scheme>] [--skip-device-state]
-#                [--skip-stats]
+#                [--scheme <uri-scheme>] [--platform android|ios]
+#                [--install <app-path>] [--bundle-id <id>]
+#                [--skip-device-state] [--skip-stats]
 #
 #   <scenario>              scenario id (e.g. s1..s8 — see PLAN Phase 9.E's
 #                           scenario table); passed through as the deep-link
 #                           path and the marker name stats.py slices by.
 #   --app frust|flutter     which bench app to drive.
-#   --device <serial>       adb device serial (`adb devices`), or the
-#                           literal string `ios` to print the manual iOS
-#                           capture flow instead of driving anything (iOS
-#                           automation is a declared non-goal this phase —
-#                           see PLAN Future Enhancements).
+#   --device <serial>       adb device serial (`adb devices`) for Android, or
+#                           the iOS device UDID for `--platform ios`.
+#   --platform android|ios  target platform (default android). See the iOS
+#                           automation block below for the physical-iPhone
+#                           (iOS 17+ / `devicectl`) capture path — it replaces
+#                           the earlier manual-flow stub.
+#   --install <app-path>    iOS only: `xcrun devicectl device install app`
+#                           the given `.app` bundle once before the run loop
+#                           (omit if already installed).
+#   --bundle-id <id>        iOS only: bundle id override (default
+#                           it.f0x.frustbench / it.f0x.flutterBench).
+#
+# --- iOS automation (--platform ios) ---------------------------------------
+#
+# Physical iPhone (iOS 17+), driven via `xcrun devicectl`. Per app the
+# scenario-selection + trace-capture mechanism differs (both validated on an
+# iPhone SE, 2026-07-20 — see benchmarks/PROTOCOL.md's device matrix):
+#
+#   frust:   `devicectl device process launch --console --terminate-existing
+#            -e '{"FRUST_BENCH_SCENARIO":"<scn>",...}'`. The env dict is
+#            delivered to the process, so `resolve_initial()` cold-selects the
+#            scenario (no s1→scenario warm-switch flash), and the app's raw
+#            `frust-perf`/`bench-scenario` stdout is captured live off
+#            `--console`. A single signed release build serves every scenario.
+#   flutter: scenario is baked at build time (`--dart-define=SCENARIO=<scn>`,
+#            one profile build per scenario — Dart `String.fromEnvironment` is
+#            compile-time). Flutter's `print` routes to os_log, which neither
+#            `devicectl --console` nor the (empty on iOS 17) legacy syslog
+#            relay surfaces, so the bench app also writes its trace to a file
+#            in its `tmp/` container (see flutter_bench/lib/bench/perf.dart)
+#            that this script pulls with `devicectl device copy from
+#            --domain-type appDataContainer` after each run.
+#
+# Both captures are grep-filtered to `*-perf`/`bench-scenario` lines only
+# before landing in the run log (privacy: device console captures never enter
+# git — benchmarks/raw/ is gitignored, and only perf/marker lines are kept).
+# iOS has no CLI brightness/battery/thermal control; cooldown is a fixed wait
+# and those environmental controls are recorded as uncontrolled in RESULTS.md.
 #   --runs N                number of runs to capture (default: 12 — enough
 #                           for the protocol's "first 2 discarded, >=10 kept"
 #                           convention with zero extra headroom removed).
@@ -66,9 +100,12 @@ PKG_OVERRIDE=""
 SCHEME_OVERRIDE=""
 SKIP_DEVICE_STATE=0
 SKIP_STATS=0
+PLATFORM="android"
+INSTALL_PATH=""
+BUNDLE_OVERRIDE=""
 
 usage() {
-  sed -n '2,53p' "$0"
+  sed -n '2,87p' "$0"
 }
 
 # --- Arg parsing ------------------------------------------------------
@@ -149,6 +186,33 @@ while [ $# -gt 0 ]; do
       SCHEME_OVERRIDE="${1#--scheme=}"
       shift
       ;;
+    --platform)
+      [ $# -ge 2 ] || { echo "error: --platform requires a value" >&2; exit 2; }
+      PLATFORM="$2"
+      shift 2
+      ;;
+    --platform=*)
+      PLATFORM="${1#--platform=}"
+      shift
+      ;;
+    --install)
+      [ $# -ge 2 ] || { echo "error: --install requires an app path" >&2; exit 2; }
+      INSTALL_PATH="$2"
+      shift 2
+      ;;
+    --install=*)
+      INSTALL_PATH="${1#--install=}"
+      shift
+      ;;
+    --bundle-id)
+      [ $# -ge 2 ] || { echo "error: --bundle-id requires a value" >&2; exit 2; }
+      BUNDLE_OVERRIDE="$2"
+      shift 2
+      ;;
+    --bundle-id=*)
+      BUNDLE_OVERRIDE="${1#--bundle-id=}"
+      shift
+      ;;
     --skip-device-state)
       SKIP_DEVICE_STATE=1
       shift
@@ -189,10 +253,18 @@ case "${APP}" in
 esac
 
 if [ -z "${DEVICE}" ]; then
-  echo "error: --device <serial> (or --device ios) is required" >&2
+  echo "error: --device <serial|udid> is required" >&2
   usage >&2
   exit 2
 fi
+
+case "${PLATFORM}" in
+  android|ios) ;;
+  *)
+    echo "error: --platform must be 'android' or 'ios', got '${PLATFORM}'" >&2
+    exit 2
+    ;;
+esac
 
 if ! [[ "${RUNS}" =~ ^[0-9]+$ ]] || [ "${RUNS}" -lt 1 ]; then
   echo "error: --runs must be a positive integer, got '${RUNS}'" >&2
@@ -204,33 +276,141 @@ if ! [[ "${DURATION}" =~ ^[0-9]+$ ]] || [ "${DURATION}" -lt 1 ]; then
   exit 2
 fi
 
-# --- iOS stub: document the manual capture flow, drive nothing ---------
+# --- iOS path (--platform ios): physical iPhone via devicectl -----------
 
-if [ "${DEVICE}" = "ios" ]; then
-  cat <<EOF
-iOS automation is a declared non-goal this phase (see PLAN Phase 9.E's
-Future Enhancements) — capture manually instead:
+ios_default_bundle() {
+  if [ "${APP}" = "frust" ]; then
+    echo "it.f0x.frustbench"
+  else
+    echo "it.f0x.flutterBench"
+  fi
+}
 
-1. Install the ${APP} bench app on the device/Simulator (Xcode run, or
-   'frust run -d <udid>' for the frust side).
-2. Launch the scenario via its deep link:
-     - frust:   frustbench://${SCENARIO}
-     - flutter: flutterbench://${SCENARIO}
-   (Simulator: 'xcrun simctl openurl booted "<scheme>://${SCENARIO}"';
-   physical device: tap a link, or use the app's own scenario-select UI.)
-3. Stream the console for the capture window and redirect it to a file:
-     - Physical device (iOS 17+): 'xcrun devicectl device console --device
-       <udid> > run.log' (Ctrl-C after ${DURATION}s+).
-     - Simulator: 'xcrun simctl launch --console-pty booted <bundle-id>
-       > run.log' captures stdout/stderr directly from launch.
-4. Confirm 'bench-scenario-start ${SCENARIO}' / 'bench-scenario-end
-   ${SCENARIO}' markers and 'frust-perf raw'/'flutter-perf raw' lines
-   appear in run.log (frust: only under FRUST_TRACE=1 FRUST_TRACE_RAW=1 —
-   set via --define at build/run time).
-5. Repeat for ${RUNS} runs (protocol: discard the first 2), then run:
-     python3 ${SCRIPT_DIR}/stats.py --scenario ${SCENARIO} run1.log run2.log ...
-EOF
-  exit 0
+# Terminate any running instance of the app (best-effort — a not-running app
+# is not an error).
+ios_terminate() {
+  xcrun devicectl device process terminate --device "${DEVICE}" \
+    --pid-of "$1" >/dev/null 2>&1 || true
+}
+
+# frust capture: launch with the scenario+trace env dict delivered to the
+# process (cold scenario selection via `resolve_initial()`), attach `--console`
+# to capture the app's raw `frust-perf`/`bench-scenario` stdout, hold the
+# window open ${DURATION}s, then terminate. Filters to perf/marker lines only.
+ios_capture_frust() {
+  local bundle="$1" run_log="$2" raw env_json launch_pid
+  raw="${run_log%.log}.console.txt"
+  env_json="{\"FRUST_BENCH_SCENARIO\":\"${SCENARIO}\",\"FRUST_TRACE\":\"1\",\"FRUST_TRACE_RAW\":\"1\"}"
+  xcrun devicectl device process launch --device "${DEVICE}" --console \
+    --terminate-existing -e "${env_json}" "${bundle}" >"${raw}" 2>&1 &
+  launch_pid=$!
+  sleep "${DURATION}"
+  ios_terminate "${bundle}"
+  kill "${launch_pid}" >/dev/null 2>&1 || true
+  wait "${launch_pid}" 2>/dev/null || true
+  grep -aE 'frust-perf|flutter-perf|bench-scenario' "${raw}" >"${run_log}" 2>/dev/null || true
+  rm -f "${raw}"
+}
+
+# flutter capture: the scenario is baked at build time (--dart-define), so the
+# installed build already targets ${SCENARIO}; launch it, hold ${DURATION}s,
+# terminate, then pull the on-device trace file the bench app wrote to its
+# tmp/ container (Flutter `print` does not reach the host on iOS — see the
+# header). Filters to perf/marker lines only.
+ios_capture_flutter() {
+  local bundle="$1" run_log="$2" raw
+  raw="${run_log%.log}.container.txt"
+  xcrun devicectl device process launch --device "${DEVICE}" \
+    --terminate-existing "${bundle}" >/dev/null 2>&1
+  sleep "${DURATION}"
+  ios_terminate "${bundle}"
+  # Let the bench app's ~1s-cadence flush land before pulling the file.
+  sleep 2
+  rm -f "${raw}"
+  xcrun devicectl device copy from --device "${DEVICE}" \
+    --domain-type appDataContainer --domain-identifier "${bundle}" \
+    --source tmp/flutter_bench_trace.log --destination "${raw}" >/dev/null 2>&1 || true
+  if [ -f "${raw}" ]; then
+    grep -aE 'flutter-perf|bench-scenario' "${raw}" >"${run_log}" 2>/dev/null || true
+    rm -f "${raw}"
+  else
+    : >"${run_log}"
+  fi
+}
+
+ios_run_matrix() {
+  local bundle run_log frames i
+  RUN_LOGS=()
+
+  if [ -n "${BUNDLE_OVERRIDE}" ]; then
+    bundle="${BUNDLE_OVERRIDE}"
+  else
+    bundle="$(ios_default_bundle)"
+  fi
+
+  if ! command -v xcrun >/dev/null 2>&1; then
+    echo "error: xcrun not found — Xcode command-line tools required for --platform ios" >&2
+    return 1
+  fi
+
+  if ! xcrun devicectl device info details --device "${DEVICE}" >/dev/null 2>&1; then
+    echo "error: iOS device '${DEVICE}' not reachable via devicectl — check pairing/trust/Developer Mode" >&2
+    return 1
+  fi
+
+  if [ -n "${INSTALL_PATH}" ]; then
+    echo "Installing ${INSTALL_PATH} on ${DEVICE} ..."
+    if ! xcrun devicectl device install app --device "${DEVICE}" "${INSTALL_PATH}" >/dev/null; then
+      echo "error: 'devicectl device install app' failed for ${INSTALL_PATH}" >&2
+      return 1
+    fi
+  fi
+
+  if [ -z "${OUT_DIR}" ]; then
+    mkdir -p "${SCRIPT_DIR}/.runs"
+    OUT_DIR="$(mktemp -d "${SCRIPT_DIR}/.runs/${APP}-${SCENARIO}-XXXXXX")"
+  else
+    mkdir -p "${OUT_DIR}"
+  fi
+  echo "Output directory: ${OUT_DIR}"
+
+  if [ "${SKIP_DEVICE_STATE}" -eq 0 ]; then
+    echo "note: iOS has no CLI brightness/battery/thermal gate (device_state.sh" >&2
+    echo "      is Android-only) — those controls are uncontrolled on this run;" >&2
+    echo "      cooldown is a fixed inter-block wait. See RESULTS.md deviations." >&2
+  fi
+
+  for i in $(seq 1 "${RUNS}"); do
+    echo "== ${APP} / ${SCENARIO} / run ${i} of ${RUNS} (ios) =="
+    # Deterministic run-log names (avoids BSD mktemp's no-suffix-after-XXXX
+    # limitation — OUT_DIR already scopes uniqueness per invocation).
+    run_log="${OUT_DIR}/run-$(printf '%02d' "${i}").log"
+    RUN_LOGS+=("${run_log}")
+    if [ "${APP}" = "frust" ]; then
+      ios_capture_frust "${bundle}" "${run_log}"
+    else
+      ios_capture_flutter "${bundle}" "${run_log}"
+    fi
+    frames="$(grep -c -e 'frust-perf raw' -e 'flutter-perf raw' "${run_log}" 2>/dev/null || true)"
+    echo "  captured ${run_log} (${frames:-0} raw frame lines)"
+  done
+
+  echo
+  echo "Captured ${RUNS} runs for ${APP}/${SCENARIO} in ${OUT_DIR}"
+
+  if [ "${SKIP_STATS}" -eq 0 ]; then
+    echo
+    echo "-- stats.py (discarding first 2 runs, per protocol convention) --"
+    python3 "${SCRIPT_DIR}/stats.py" --scenario "${SCENARIO}" \
+      --label "${APP} ${SCENARIO}" "${RUN_LOGS[@]}"
+  else
+    echo "note: --skip-stats given — run stats.py yourself over ${OUT_DIR}/run-*.log"
+  fi
+}
+
+if [ "${PLATFORM}" = "ios" ]; then
+  ios_run_matrix
+  exit $?
 fi
 
 # --- Package / deep-link scheme -----------------------------------------
