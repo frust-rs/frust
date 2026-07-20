@@ -15,6 +15,13 @@
 //!   summarized into one log line.
 //! - [`enabled`] — the process-wide on/off switch every recording API is a
 //!   no-op behind (see its own docs).
+//! - [`raw_enabled`] (Phase 9.C) — a second dial that, alongside
+//!   [`enabled`], makes [`FrameStats::record`] additionally emit one
+//!   `frust-perf raw` line per recorded frame (instead of only the
+//!   rate-limited ~2s `frust-perf frame` summary [`FrameStats::emit_log`]
+//!   already produces), plus [`mark_scenario_start`]/[`mark_scenario_end`]
+//!   for a benchmark harness to slice that per-frame series into named
+//!   scenarios.
 //!
 //! # Layering choice
 //!
@@ -103,6 +110,30 @@ fn trace_switch(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
     is_set_non_zero(compile_time) || is_set_non_zero(runtime)
 }
 
+/// The process-wide raw-per-frame-export switch (Phase 9.C), cached after
+/// the first call — parsed exactly the same compile-time-or-runtime way as
+/// [`enabled`] (via the same [`trace_switch`] decision), but reading
+/// `FRUST_TRACE_RAW` instead of `FRUST_TRACE`. This is a **second dial**,
+/// not a replacement: `FRUST_TRACE_RAW` being set implies nothing on its own
+/// — [`FrameStats::record`]'s raw per-frame line only fires when [`enabled`]
+/// is *also* true (a benchmark harness sets both `FRUST_TRACE=1` and
+/// `FRUST_TRACE_RAW=1`; see [`FrameStats::new`]).
+pub fn raw_enabled() -> bool {
+    static RAW_ENABLED: OnceLock<bool> = OnceLock::new();
+    *RAW_ENABLED.get_or_init(|| {
+        trace_switch(
+            option_env!("FRUST_TRACE_RAW"),
+            runtime_trace_raw_var().as_deref(),
+        )
+    })
+}
+
+/// Reads the runtime `FRUST_TRACE_RAW` env var, isolated for the same reason
+/// [`runtime_trace_var`] is.
+fn runtime_trace_raw_var() -> Option<String> {
+    std::env::var("FRUST_TRACE_RAW").ok()
+}
+
 // ---------------------------------------------------------------------
 // FrameStats
 // ---------------------------------------------------------------------
@@ -167,6 +198,15 @@ pub struct FrameSummary {
 #[derive(Debug)]
 pub struct FrameStats {
     enabled: bool,
+    /// Raw-per-frame-export mode (Phase 9.C, see [`raw_enabled`]) — always
+    /// `false` when `enabled` is `false` (the two-dial contract
+    /// [`Self::with_capacity_enabled_and_raw`] enforces).
+    raw: bool,
+    /// Reused, cleared-and-rewritten each call so [`Self::record`]'s raw
+    /// line never grows the allocation once its capacity settles —
+    /// formatting only, no per-frame allocation growth (see
+    /// `docs/CODE_STANDARDS.md`'s Instrumentation conventions).
+    raw_buf: String,
     ring_capacity: usize,
     ring: VecDeque<FramePasses>,
     total_frames: u64,
@@ -180,26 +220,50 @@ pub struct FrameStats {
 }
 
 impl FrameStats {
-    /// A recorder honoring the process-wide [`enabled`] switch — what every
-    /// shell constructs.
+    /// A recorder honoring the process-wide [`enabled`]/[`raw_enabled`]
+    /// switches — what every shell constructs.
     pub fn new() -> Self {
-        Self::new_enabled(enabled())
+        let is_enabled = enabled();
+        Self::with_capacity_enabled_and_raw(RING_CAPACITY, is_enabled, is_enabled && raw_enabled())
     }
 
     /// Test/advanced seam: construct with an explicit enabled flag,
     /// bypassing [`enabled`]'s cache. Every shell should prefer [`Self::new`];
     /// this exists so tests can exercise both the enabled and disabled paths
     /// deterministically in the same process (`enabled()`'s `OnceLock` can
-    /// only ever resolve once per process).
+    /// only ever resolve once per process). Raw-export mode is left off; use
+    /// [`Self::with_capacity_enabled_and_raw`] to exercise it.
     pub fn new_enabled(is_enabled: bool) -> Self {
         Self::with_capacity_enabled(RING_CAPACITY, is_enabled)
     }
 
     /// Test seam: a smaller ring capacity, so eviction behavior is
-    /// exercisable without pushing [`RING_CAPACITY`] frames.
+    /// exercisable without pushing [`RING_CAPACITY`] frames. Raw-export mode
+    /// is left off; use [`Self::with_capacity_enabled_and_raw`] to exercise
+    /// it.
     pub fn with_capacity_enabled(capacity: usize, is_enabled: bool) -> Self {
+        Self::with_capacity_enabled_and_raw(capacity, is_enabled, false)
+    }
+
+    /// Test/advanced seam: construct with explicit enabled and raw-export
+    /// flags, bypassing both [`enabled`]'s and [`raw_enabled`]'s caches (see
+    /// [`Self::new_enabled`]'s docs for why a test needs to bypass the
+    /// cache). `is_raw` only takes effect when `is_enabled` is also `true` —
+    /// the same two-dial contract [`Self::new`] applies to the real
+    /// `FRUST_TRACE`/`FRUST_TRACE_RAW` switches.
+    pub fn with_capacity_enabled_and_raw(capacity: usize, is_enabled: bool, is_raw: bool) -> Self {
+        let raw = is_enabled && is_raw;
         Self {
             enabled: is_enabled,
+            raw,
+            // Disabled: never reserve — nothing will ever be formatted into
+            // it, mirroring the ring buffer's own no-reserve-when-disabled
+            // reasoning below.
+            raw_buf: if raw {
+                String::with_capacity(160)
+            } else {
+                String::new()
+            },
             ring_capacity: capacity,
             // Disabled: never reserve — nothing will ever be pushed, and
             // "allocates nothing after init" (acceptance criterion 2) holds
@@ -220,6 +284,11 @@ impl FrameStats {
 
     /// Record one frame's pass durations. A cheap no-op (no allocation, no
     /// clock read — the caller already measured `passes`) when disabled.
+    /// When raw-export mode is on (see [`raw_enabled`]), additionally
+    /// formats and logs one `frust-perf raw` line for this frame — a skipped
+    /// frame (`passes.skipped`) still gets a line (all-zero pass durations,
+    /// `skipped=1`) so a harness can compute honest frame pacing across the
+    /// mobile frame gate.
     pub fn record(&mut self, passes: FramePasses) {
         if !self.enabled {
             return;
@@ -238,6 +307,11 @@ impl FrameStats {
             self.over_120hz += 1;
         }
         self.since_last_emit += total;
+
+        if self.raw {
+            format_raw_frame_line(&mut self.raw_buf, self.total_frames, &passes);
+            log::info!("{}", self.raw_buf);
+        }
 
         if self.ring.len() == self.ring_capacity {
             self.ring.pop_front();
@@ -347,6 +421,88 @@ fn nearest_rank_percentile(sorted: &[Duration], p: u32) -> Duration {
     let rank = (p * n).div_ceil(100);
     let rank = rank.clamp(1, n);
     sorted[(rank - 1) as usize]
+}
+
+// ---------------------------------------------------------------------
+// Raw per-frame export + scenario markers (Phase 9.C)
+// ---------------------------------------------------------------------
+
+/// Log-line prefix for [`FrameStats::record`]'s raw per-frame export line —
+/// parallels the `frust-perf frame`/`frust-perf startup` prefixes
+/// [`FrameStats::emit_log`]/[`StartupSpans::emit_log`] already use.
+const RAW_FRAME_PREFIX: &str = "frust-perf raw";
+
+/// Formats one `frust-perf raw` line into `buf` (cleared first) for frame
+/// index `n` (1-indexed — [`FrameStats::record`] passes its running
+/// `total_frames` counter, post-increment) and `passes`. Kept separate from
+/// `record`'s logging call so the line shape is directly unit-testable
+/// without a log-capture harness, and so the caller can reuse one
+/// growth-free buffer across every frame instead of formatting a fresh
+/// `String` per call (see `docs/CODE_STANDARDS.md`'s Instrumentation
+/// conventions — formatting only, no allocation growth on the hot path).
+/// Field order: `n`, `total_us`, `rebuild_us`, `layout_us`, `paint_us`,
+/// `encode_present_us`, `skipped` (`0`/`1`) — microsecond resolution so a
+/// sub-millisecond pass still shows nonzero.
+fn format_raw_frame_line(buf: &mut String, n: u64, passes: &FramePasses) {
+    use std::fmt::Write as _;
+    buf.clear();
+    let _ = write!(
+        buf,
+        "{RAW_FRAME_PREFIX} n={n} total_us={} rebuild_us={} layout_us={} paint_us={} \
+         encode_present_us={} skipped={}",
+        passes.total().as_micros(),
+        passes.rebuild.as_micros(),
+        passes.layout.as_micros(),
+        passes.paint.as_micros(),
+        passes.encode_present.as_micros(),
+        u8::from(passes.skipped),
+    );
+}
+
+/// Which edge of a benchmark scenario window [`mark_scenario_start`]/
+/// [`mark_scenario_end`] stamps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkerEdge {
+    Start,
+    End,
+}
+
+impl MarkerEdge {
+    const fn prefix(self) -> &'static str {
+        match self {
+            MarkerEdge::Start => "bench-scenario-start",
+            MarkerEdge::End => "bench-scenario-end",
+        }
+    }
+}
+
+/// Formats one scenario-marker line — separated from the `mark_scenario_*`
+/// functions' logging call for the same directly-unit-testable reason
+/// [`format_raw_frame_line`] is.
+fn format_scenario_marker(edge: MarkerEdge, name: &str) -> String {
+    format!("{} {name}", edge.prefix())
+}
+
+/// Stamps a `bench-scenario-start <name>` marker into the same raw-export
+/// stream [`FrameStats::record`]'s per-frame lines land in, so an external
+/// benchmark harness can slice the per-frame series into named scenarios
+/// without needing to hold a [`FrameStats`] handle itself (a marker is a
+/// scenario-boundary event, not a per-frame one, so it is a free function
+/// rather than a method). A no-op unless both [`enabled`] and
+/// [`raw_enabled`] are `true` — the same two-dial gating
+/// [`FrameStats::new`]'s raw path uses.
+pub fn mark_scenario_start(name: &str) {
+    if enabled() && raw_enabled() {
+        log::info!("{}", format_scenario_marker(MarkerEdge::Start, name));
+    }
+}
+
+/// Stamps a `bench-scenario-end <name>` marker — see
+/// [`mark_scenario_start`]'s docs (gating and rationale are identical).
+pub fn mark_scenario_end(name: &str) {
+    if enabled() && raw_enabled() {
+        log::info!("{}", format_scenario_marker(MarkerEdge::End, name));
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -683,6 +839,154 @@ mod tests {
 
         stats.emit_log();
         assert!(!stats.should_emit(), "emit_log resets the accumulator");
+    }
+
+    // ---------------------------------------------------------------
+    // Raw per-frame export + scenario markers (Phase 9.C)
+    // ---------------------------------------------------------------
+
+    /// A raw per-frame line's parsed fields — this module's own round-trip
+    /// check that [`format_raw_frame_line`]'s shape is exactly what a
+    /// `key=value`-splitting harness would expect; not part of the crate's
+    /// public API (the real harness is a separate process parsing
+    /// `stdout`/`logcat` text, not a Rust consumer of this module).
+    struct ParsedRawFrameLine {
+        n: u64,
+        total_us: u128,
+        rebuild_us: u128,
+        layout_us: u128,
+        paint_us: u128,
+        encode_present_us: u128,
+        skipped: bool,
+    }
+
+    fn parse_raw_frame_line(line: &str) -> Option<ParsedRawFrameLine> {
+        let rest = line.strip_prefix(RAW_FRAME_PREFIX)?.trim_start();
+        let mut n = None;
+        let mut total_us = None;
+        let mut rebuild_us = None;
+        let mut layout_us = None;
+        let mut paint_us = None;
+        let mut encode_present_us = None;
+        let mut skipped = None;
+        for field in rest.split_whitespace() {
+            let (key, value) = field.split_once('=')?;
+            match key {
+                "n" => n = value.parse().ok(),
+                "total_us" => total_us = value.parse().ok(),
+                "rebuild_us" => rebuild_us = value.parse().ok(),
+                "layout_us" => layout_us = value.parse().ok(),
+                "paint_us" => paint_us = value.parse().ok(),
+                "encode_present_us" => encode_present_us = value.parse().ok(),
+                "skipped" => skipped = value.parse::<u8>().ok().map(|v| v != 0),
+                _ => {}
+            }
+        }
+        Some(ParsedRawFrameLine {
+            n: n?,
+            total_us: total_us?,
+            rebuild_us: rebuild_us?,
+            layout_us: layout_us?,
+            paint_us: paint_us?,
+            encode_present_us: encode_present_us?,
+            skipped: skipped?,
+        })
+    }
+
+    #[test]
+    fn raw_frame_line_format_round_trips() {
+        let mut buf = String::new();
+        let p = FramePasses {
+            rebuild: Duration::from_micros(1234),
+            layout: Duration::from_micros(200),
+            paint: Duration::from_micros(300),
+            encode_present: Duration::from_micros(50),
+            skipped: false,
+        };
+        format_raw_frame_line(&mut buf, 42, &p);
+        assert!(buf.starts_with(RAW_FRAME_PREFIX));
+
+        let parsed = parse_raw_frame_line(&buf).expect("line must parse");
+        assert_eq!(parsed.n, 42);
+        assert_eq!(parsed.total_us, p.total().as_micros());
+        assert_eq!(parsed.rebuild_us, 1234);
+        assert_eq!(parsed.layout_us, 200);
+        assert_eq!(parsed.paint_us, 300);
+        assert_eq!(parsed.encode_present_us, 50);
+        assert!(!parsed.skipped);
+    }
+
+    #[test]
+    fn raw_frame_line_represents_skipped_flag() {
+        let mut buf = String::new();
+        let p = FramePasses {
+            skipped: true,
+            ..Default::default()
+        };
+        format_raw_frame_line(&mut buf, 7, &p);
+
+        let parsed = parse_raw_frame_line(&buf).expect("line must parse");
+        assert!(parsed.skipped, "skipped frame must still be represented");
+        assert_eq!(parsed.total_us, 0);
+        assert_eq!(parsed.n, 7);
+    }
+
+    #[test]
+    fn raw_enabled_record_formats_one_line_per_frame() {
+        let mut stats = FrameStats::with_capacity_enabled_and_raw(4, true, true);
+        stats.record(passes(10, 2, 2, 2));
+        let parsed = parse_raw_frame_line(&stats.raw_buf).expect("line must parse");
+        assert_eq!(parsed.n, 1);
+
+        stats.record(passes(5, 1, 1, 1));
+        let parsed = parse_raw_frame_line(&stats.raw_buf).expect("line must parse");
+        assert_eq!(parsed.n, 2, "frame index advances per recorded frame");
+    }
+
+    #[test]
+    fn raw_disabled_record_never_touches_raw_line_buffer() {
+        let mut stats = FrameStats::with_capacity_enabled_and_raw(4, true, false);
+        for _ in 0..5 {
+            stats.record(passes(1, 1, 1, 1));
+        }
+        assert!(
+            stats.raw_buf.is_empty(),
+            "raw-export off must never format into the raw line buffer"
+        );
+        assert_eq!(stats.total_frames(), 5, "non-raw recording still happens");
+    }
+
+    #[test]
+    fn raw_requires_enabled_too() {
+        // enabled=false + is_raw=true: the whole recorder (including raw)
+        // stays off — enabled() gates raw_enabled(), not the other way
+        // around.
+        let mut stats = FrameStats::with_capacity_enabled_and_raw(4, false, true);
+        stats.record(passes(10, 2, 2, 2));
+        assert_eq!(stats.total_frames(), 0, "disabled recorder still no-ops");
+        assert!(stats.raw_buf.is_empty());
+    }
+
+    #[test]
+    fn scenario_marker_format_start_and_end() {
+        assert_eq!(
+            format_scenario_marker(MarkerEdge::Start, "cold_start"),
+            "bench-scenario-start cold_start"
+        );
+        assert_eq!(
+            format_scenario_marker(MarkerEdge::End, "cold_start"),
+            "bench-scenario-end cold_start"
+        );
+    }
+
+    #[test]
+    fn mark_scenario_functions_do_not_panic_when_disabled() {
+        // Process env has neither FRUST_TRACE nor FRUST_TRACE_RAW set in a
+        // normal test run, so these are no-ops; the assertion here is just
+        // that calling them is safe (no capture harness to check the log
+        // line against — see format_scenario_marker's direct test above).
+        mark_scenario_start("smoke");
+        mark_scenario_end("smoke");
     }
 
     #[test]
