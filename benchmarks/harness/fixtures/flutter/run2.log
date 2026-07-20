@@ -1,0 +1,7 @@
+I/flutter (5678): bench-scenario-start s1
+I/flutter (5678): flutter-perf raw n=1 build_us=8800 raster_us=11200 total_us=20000
+I/flutter (5678): flutter-perf raw n=2 build_us=8700 raster_us=11100 total_us=19800
+I/flutter (5678): flutter-perf raw n=3 build_us=8900 raster_us=11300 total_us=20200
+I/flutter (5678): flutter-perf raw n=4 build_us=8800 raster_us=11100 total_us=19900
+I/flutter (5678): flutter-perf raw n=5 build_us=8700 raster_us=11000 total_us=19700
+I/flutter (5678): bench-scenario-end s1

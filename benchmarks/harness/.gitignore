@@ -1,0 +1,9 @@
+# run.sh's per-invocation output directories (raw per-run logs, PSS
+# snapshots) — never fixed paths, always mktemp'd, never committed here;
+# a real matrix run's kept output lands in benchmarks/raw/ instead (see
+# task 07-run-matrix).
+.runs/
+
+# Python bytecode cache from running stats.py/test_stats.py directly.
+__pycache__/
+*.pyc

@@ -1,0 +1,9 @@
+01-01 12:00:00.100  1234  1234 I frust_app: some unrelated logcat noise line
+01-01 12:00:00.150  1234  1234 I frust_app: frust-perf startup init_entry=12ms adapter_ready=40ms device_ready=55ms renderer_ready=70ms first_rebuild_done=80ms first_frame_presented=95ms
+01-01 12:00:01.000  1234  1234 I frust_app: bench-scenario-start s1
+01-01 12:00:01.020  1234  1234 I frust_app: frust-perf raw n=1 total_us=20250 rebuild_us=6000 layout_us=4000 paint_us=8000 encode_present_us=2250 skipped=0
+01-01 12:00:01.037  1234  1234 I frust_app: frust-perf raw n=2 total_us=21100 rebuild_us=6200 layout_us=4200 paint_us=8300 encode_present_us=2400 skipped=0
+01-01 12:00:01.054  1234  1234 I frust_app: frust-perf raw n=3 total_us=19800 rebuild_us=5800 layout_us=3900 paint_us=7900 encode_present_us=2200 skipped=0
+01-01 12:00:01.071  1234  1234 I frust_app: frust-perf raw n=4 total_us=20950 rebuild_us=6100 layout_us=4100 paint_us=8250 encode_present_us=2500 skipped=0
+01-01 12:00:01.088  1234  1234 I frust_app: frust-perf raw n=5 total_us=20500 rebuild_us=6000 layout_us=4000 paint_us=8200 encode_present_us=2300 skipped=0
+01-01 12:00:01.400  1234  1234 I frust_app: bench-scenario-end s1
