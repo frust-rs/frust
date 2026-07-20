@@ -33,6 +33,57 @@
 //! keeps the channel near-empty in practice, so an overflow only happens under
 //! a pathological flood against a wedged consumer.
 //!
+//! # Terminal-state delivery guarantee (D1)
+//!
+//! A **terminal** [`SessionState`] ([`Killed`](SessionState::Killed)/
+//! [`Exited`](SessionState::Exited)) is the one event that must never be lost
+//! to overflow: a dropped terminal leaves the engine showing a dead session as
+//! "Running" forever. It is therefore **exempt from the drop-newest policy**.
+//! Every non-terminal event (a `Lines` batch, an intermediate phase change, a
+//! `Dropped` count) is best-effort `try_send` — dropping one is transient and
+//! self-corrects (a later batch/phase, or the terminal state itself, brings the
+//! engine back in sync). The single terminal state each session emits at the
+//! end of its drain loop instead goes through [`SessionSender::send_terminal_state`],
+//! a **bounded blocking send**: it retries a momentarily-full channel with a
+//! short backoff until the channel accepts it or [`TERMINAL_SEND_TIMEOUT`]
+//! elapses. This delivers the terminal state as long as the engine drains it
+//! within that bound (which it always does — the runner's `select!` loop is
+//! never idle while the receiver lives), yet **cannot reintroduce the
+//! never-block wedge**: the retry is bounded, happens exactly once per session
+//! lifetime, and returns immediately the moment the receiver is dropped
+//! (`TrySendError::Closed`), so [`Supervisor`]'s `Drop` join stays prompt even
+//! against a genuinely wedged-but-alive consumer.
+//!
+//! # Shared-channel noisy-neighbor tradeoff (D2)
+//!
+//! **All** sessions feed one shared [`SESSION_CHANNEL_CAP`]-slot channel, not a
+//! channel per session. The upside is a single `select!` seam in the runner and
+//! a single bounded memory budget across every concurrent session; the
+//! **downside is cross-session interference** — a single flooding session (a
+//! runaway `logcat`) can fill the shared slots and cause an *unrelated*
+//! session's `Lines` batch to be dropped-newest, even though that quiet session
+//! produced almost nothing. In practice this is rare: burst coalescing keeps
+//! the channel near-empty, and the drop-newest-per-sender policy already has a
+//! mild self-fairness property — the loudest sender calls `try_send` far more
+//! often, so it hits the full channel (and drops its *own* batches) far more
+//! often than a quiet neighbor does.
+//!
+//! A stronger per-session fairness policy — a hard cap on the slots any one
+//! session may occupy in flight — is **deliberately not implemented in this
+//! batch**. A correct in-flight cap needs the engine to *return* a permit (or
+//! decrement a per-session counter) as it consumes each batch, so the drain
+//! thread knows how many of its batches are still queued; carrying that permit
+//! on the event would break [`SessionEvent`]'s `Clone`/`PartialEq`/`Eq` derives
+//! (an `OwnedSemaphorePermit`/`Arc<AtomicU64>` is neither `Eq` nor cheaply
+//! `Clone`) and ripple into the engine's event handling and every event-
+//! comparing test — too invasive to justify against a rare, self-limiting
+//! interference. The cheap sender-only variants (a per-session token bucket)
+//! don't actually help: throttling by time drops a session's lines even when
+//! the shared channel has room, trading one unfairness for another. The
+//! **terminal-state guarantee (D1) is independent of this decision** — a
+//! terminal state is exempt from the drop-newest policy and from any future
+//! per-session cap, so it is delivered regardless of which session is flooding.
+//!
 //! # Kill boundary (PLAN D3's known limitation)
 //!
 //! `stop` is prompt for anything spawned through `spawn_streaming` (the
@@ -56,6 +107,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use frust_drive::devices::{Kind, Platform};
@@ -77,8 +129,28 @@ use super::session::{
 /// enough to absorb many concurrent sessions' bursts against a momentarily
 /// behind engine, small enough that a wedged consumer can't let memory grow
 /// without limit. Overflow is drop-newest + counted, never a blocking send
-/// (see the module docs' overflow policy).
+/// (see the module docs' overflow policy) — except a **terminal** state, which
+/// is exempt and delivered under a bounded blocking send (see
+/// [`TERMINAL_SEND_TIMEOUT`] and the module docs' terminal-state guarantee).
 const SESSION_CHANNEL_CAP: usize = 256;
+
+/// Upper bound on how long a session's drain thread will retry delivering its
+/// one terminal [`SessionState`] into a momentarily-full channel before giving
+/// up (D1 — see the module docs' terminal-state guarantee).
+///
+/// Generous relative to how fast the runner's `select!` loop actually drains
+/// (microseconds while the receiver lives), so a real, briefly-behind engine
+/// always receives the terminal state; bounded well under the supervisor's
+/// prompt-shutdown expectation so a genuinely wedged-but-alive consumer can
+/// never stall [`Supervisor`]'s `Drop` join past this. Overridable per
+/// [`SessionSender`] for tests (which use a short bound to exercise the wedged
+/// path quickly).
+const TERMINAL_SEND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Backoff between retries of a blocked terminal-state send — short enough that
+/// delivery is prompt once the channel drains, long enough not to spin the CPU
+/// while waiting.
+const TERMINAL_SEND_RETRY: Duration = Duration::from_millis(2);
 
 /// One live (or terminated) session's supervisor-side bookkeeping.
 struct SessionEntry {
@@ -378,6 +450,10 @@ struct SessionSender {
     /// The last `dropped` value actually delivered as a
     /// [`SessionEventKind::Dropped`], so we only re-report an increase.
     reported: u64,
+    /// How long [`send_terminal_state`](Self::send_terminal_state) will retry a
+    /// full channel before giving up (D1). Defaults to [`TERMINAL_SEND_TIMEOUT`];
+    /// tests override it to a short bound to exercise the wedged path quickly.
+    terminal_timeout: Duration,
 }
 
 impl SessionSender {
@@ -387,6 +463,7 @@ impl SessionSender {
             id,
             dropped: 0,
             reported: 0,
+            terminal_timeout: TERMINAL_SEND_TIMEOUT,
         }
     }
 
@@ -412,13 +489,22 @@ impl SessionSender {
         }
     }
 
-    /// Send a lifecycle state change. Like every send it is non-blocking
-    /// (`try_send`); a state lost to a full channel is possible only under the
-    /// pathological flood the module docs describe (batch coalescing keeps the
-    /// channel near-empty otherwise), and is preferred over ever blocking the
-    /// drain thread — which would stall `Drop`'s join. `Err(())` once the
-    /// receiver is gone.
+    /// Send a **non-terminal** lifecycle state change (an intermediate build
+    /// phase). Like every non-terminal send it is best-effort and non-blocking
+    /// (`try_send`); a phase change lost to a full channel is transient and
+    /// self-corrects (a later phase, or the terminal state, resyncs the engine),
+    /// and dropping it is preferred over ever blocking the drain thread — which
+    /// would stall `Drop`'s join. `Err(())` once the receiver is gone.
+    ///
+    /// **Terminal** states ([`Killed`](SessionState::Killed)/
+    /// [`Exited`](SessionState::Exited)) must not be dropped — route those
+    /// through [`send_terminal_state`](Self::send_terminal_state) instead
+    /// (debug-asserted below).
     fn send_state(&mut self, state: SessionState) -> Result<(), ()> {
+        debug_assert!(
+            !state.is_terminal(),
+            "terminal states must go through send_terminal_state (D1)"
+        );
         match self.tx.try_send(SessionEvent {
             id: self.id,
             kind: SessionEventKind::State(state),
@@ -426,6 +512,54 @@ impl SessionSender {
             Ok(()) => self.flush_dropped(),
             Err(TrySendError::Full(_)) => Ok(()),
             Err(TrySendError::Closed(_)) => Err(()),
+        }
+    }
+
+    /// Deliver a session's single **terminal** state ([`Killed`](SessionState::Killed)/
+    /// [`Exited`](SessionState::Exited)) with a delivery guarantee, exempt from
+    /// the drop-newest overflow policy every other send obeys (D1 — see the
+    /// module docs' terminal-state guarantee).
+    ///
+    /// A full channel is retried with a short [`TERMINAL_SEND_RETRY`] backoff
+    /// until it is accepted or [`terminal_timeout`](Self::terminal_timeout)
+    /// elapses — so a briefly-behind but live engine always receives it, while a
+    /// genuinely wedged-but-alive consumer bounds the wait rather than wedging
+    /// [`Supervisor`]'s `Drop` join forever. A dropped receiver
+    /// (`TrySendError::Closed`) returns immediately: there is nothing left to
+    /// deliver to. Called exactly once per session lifetime, as the last act of
+    /// the drain loop, so the bounded block can never sit on a tokio worker or
+    /// delay any further work.
+    fn send_terminal_state(&mut self, state: SessionState) {
+        debug_assert!(
+            state.is_terminal(),
+            "send_terminal_state is for terminal states only (D1)"
+        );
+        // Best-effort flush of any pending dropped count first (non-blocking);
+        // never let it hold up the guaranteed terminal delivery below.
+        let _ = self.flush_dropped();
+
+        let mut event = SessionEvent {
+            id: self.id,
+            kind: SessionEventKind::State(state),
+        };
+        let deadline = Instant::now() + self.terminal_timeout;
+        loop {
+            match self.tx.try_send(event) {
+                // Delivered — the guarantee is met.
+                Ok(()) => return,
+                // The engine dropped the receiver; nothing left to deliver to.
+                Err(TrySendError::Closed(_)) => return,
+                // Full: retry with the batch handed back, until the bound.
+                Err(TrySendError::Full(returned)) => {
+                    if Instant::now() >= deadline {
+                        // Bounded: give up rather than wedge Drop's join against
+                        // a consumer that never drains.
+                        return;
+                    }
+                    event = returned;
+                    thread::sleep(TERMINAL_SEND_RETRY);
+                }
+            }
         }
     }
 
@@ -525,7 +659,7 @@ fn drain_session(
     } else {
         SessionState::Exited(success)
     };
-    let _ = sender.send_state(terminal);
+    sender.send_terminal_state(terminal);
 }
 
 /// Lock a device session's logcat slot, recovering from a poisoned mutex the
@@ -600,7 +734,7 @@ fn run_device_session(
             SessionState::Exited(false)
         }
     };
-    let _ = sender.send_state(terminal);
+    sender.send_terminal_state(terminal);
 }
 
 /// Dispatch the drive's cancellable device pipeline by the plan's device
@@ -1170,5 +1304,96 @@ mod tests {
         drop(rx);
         assert_eq!(sender.send_lines(vec!["x".into()]), Err(()));
         assert_eq!(sender.send_state(SessionState::Running), Err(()));
+    }
+
+    // ── D1: terminal-state delivery guarantee ───────────────────────────────
+
+    /// The core D1 guarantee: a terminal state emitted into a **full** channel
+    /// is *not* dropped (unlike a `Lines` batch) — the drain thread's bounded
+    /// blocking send retries until the consumer drains a slot, and the terminal
+    /// state then reaches the engine. This is what stops a dead session from
+    /// displaying "Running" forever after a full-channel overflow.
+    #[test]
+    fn a_terminal_state_is_delivered_once_a_full_channel_drains() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut sender = SessionSender::new(tx, SessionId(9));
+        // Fill both slots so the terminal send below finds the channel full.
+        sender.send_lines(vec!["a".into()]).expect("connected");
+        sender.send_lines(vec!["b".into()]).expect("connected");
+
+        // The terminal send blocks (bounded) while full; run it on its own
+        // thread so this thread can make room, mirroring the real drain thread
+        // vs. engine split.
+        let worker = thread::spawn(move || sender.send_terminal_state(SessionState::Killed));
+
+        // Let the sender hit the full channel and begin retrying.
+        thread::sleep(Duration::from_millis(20));
+
+        // Drain the two buffered batches — now there is room.
+        assert!(matches!(
+            rx.try_recv().expect("first batch queued").kind,
+            SessionEventKind::Lines(_)
+        ));
+        assert!(matches!(
+            rx.try_recv().expect("second batch queued").kind,
+            SessionEventKind::Lines(_)
+        ));
+
+        // The terminal state slips in and reaches us — never lost to overflow.
+        let ev = rx.blocking_recv().expect("terminal delivered");
+        assert_eq!(ev.kind, SessionEventKind::State(SessionState::Killed));
+        worker.join().expect("terminal-send thread joins");
+    }
+
+    /// The bound half of D1: a terminal send against a receiver that stays
+    /// alive but never drains must still **return** (within a small multiple of
+    /// its timeout), proving it can't wedge [`Supervisor`]'s `Drop` join. Uses
+    /// a short per-sender timeout so the wedged path is exercised quickly.
+    #[test]
+    fn a_terminal_state_send_is_bounded_against_a_wedged_consumer() {
+        // `_rx` stays alive (so `try_send` sees Full, not Closed) but is never
+        // drained — the wedged-but-alive consumer.
+        let (tx, _rx) = mpsc::channel(2);
+        let mut sender = SessionSender::new(tx, SessionId(9));
+        sender.terminal_timeout = Duration::from_millis(150);
+        sender.send_lines(vec!["a".into()]).expect("connected");
+        sender.send_lines(vec!["b".into()]).expect("connected"); // full, stays full
+
+        let started = Instant::now();
+        sender.send_terminal_state(SessionState::Exited(false));
+        let elapsed = started.elapsed();
+
+        // It retried up to (roughly) the timeout, then gave up …
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "a wedged terminal send should retry up to its timeout, took {elapsed:?}"
+        );
+        // … and crucially it RETURNED — a wedged consumer never blocks the
+        // drain thread (and thus Drop's join) past the bound.
+        assert!(
+            elapsed < PROMPT_STOP,
+            "a wedged consumer must not block the terminal send past the bound, took {elapsed:?}"
+        );
+    }
+
+    /// A dropped receiver short-circuits the bounded retry immediately: a
+    /// terminal send never spends its timeout budget when there is nothing to
+    /// deliver to (engine gone), keeping Drop's join prompt in the common
+    /// shutdown case.
+    #[test]
+    fn a_terminal_state_send_returns_at_once_when_the_receiver_is_gone() {
+        let (tx, rx) = mpsc::channel(2);
+        let mut sender = SessionSender::new(tx, SessionId(9));
+        // A generous timeout that we must NOT spend, since the receiver is gone.
+        sender.terminal_timeout = Duration::from_secs(30);
+        drop(rx);
+
+        let started = Instant::now();
+        sender.send_terminal_state(SessionState::Killed);
+        assert!(
+            started.elapsed() < PROMPT_STOP,
+            "a closed receiver must short-circuit the terminal send, took {:?}",
+            started.elapsed()
+        );
     }
 }
