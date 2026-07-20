@@ -31,6 +31,7 @@ use frust_reactive::{ReactiveRuntime, TrackedScope, provide_context};
 use frust_render::{EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
+use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, ThemeOverrideWatcher,
     effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
@@ -176,6 +177,38 @@ pub struct AndroidAppHandle {
     /// gated on the drained [`ChangeFlags`](frust_core::view::ChangeFlags)
     /// (or a surface resize).
     first_layout_done: bool,
+    /// Pointer-event resampler (plan phase 10.C.1): buffers raw touch samples and
+    /// emits frame-boundary-interpolated `Move`s (Down/Up/Cancel pass through
+    /// losslessly). When disabled (the `FRUST_NO_RESAMPLE` kill switch, resolved
+    /// once at construction) [`Self::dispatch_touch`] delivers touches directly,
+    /// matching pre-resampling behavior verbatim. Its buffered-input signal ORs
+    /// into the frame gate's `events_since_last_frame` so a too-new sample never
+    /// starves the gate (see [`PointerResampler::has_pending`]).
+    resampler: PointerResampler,
+    /// The monotonic epoch every resampler timestamp is measured from — the raw
+    /// samples ([`Self::dispatch_touch`]) and the per-frame sample query
+    /// ([`Self::frame`]) are both stamped from this one `Instant`, so they share
+    /// a clock domain (see `resample`'s *Clock domain* note). Deliberately
+    /// decoupled from the Choreographer vsync clock threaded into [`FrameTime`]:
+    /// resampling only differences timestamps, so a single consistent source is
+    /// all it needs, and Choreographer's opaque `frameTimeNanos` is not exposed
+    /// as an absolute `Instant`-comparable value.
+    resample_clock: Instant,
+    /// Scratch buffer the resampler drains into each frame, reused across frames
+    /// (cleared, not reallocated) so a drag's per-frame resample allocates
+    /// nothing on the hot path.
+    pointer_scratch: Vec<PointerEvent>,
+    /// The previous Choreographer tick's `frameTimeNanos`, for the deadline-
+    /// aware pacing estimate (plan phase 10.C.2): the tick-to-tick delta is this
+    /// frame's deadline budget (see [`resample::frame_interval_nanos`]). `None`
+    /// before the first frame.
+    last_frame_time_nanos: Option<u64>,
+    /// Running count of frames whose measured work (rebuild+layout+paint+encode,
+    /// excluding the vsync present wait) overran the frame-target deadline
+    /// (plan phase 10.C.2). **Instrumentation only** — accumulated and logged
+    /// (`frust-perf deadline`) behind [`perf::enabled`]; it never drops or
+    /// reshapes work.
+    deadline_overruns: u64,
 }
 
 /// Per-handle accessibility state (phase 6d D3): the injecting accesskit Android
@@ -366,6 +399,11 @@ impl AndroidAppHandle {
             appearance_dirty: false,
             last_needs_frame: false,
             first_layout_done: false,
+            resampler: PointerResampler::new(),
+            resample_clock: Instant::now(),
+            pointer_scratch: Vec::new(),
+            last_frame_time_nanos: None,
+            deadline_overruns: 0,
         }
     }
 
@@ -621,17 +659,33 @@ impl AndroidAppHandle {
             TouchPhase::Up => PointerPhase::Up,
             TouchPhase::Cancel => PointerPhase::Cancel,
         };
-        let event = InputEvent::Pointer(PointerEvent {
-            phase: core_phase,
-            position,
-            button: PointerButton::Primary,
-        });
         // Frame-gate latch (task 17): an event between frames must force the
         // next frame to run so the tree reflects the dispatch. Set even on a
         // no-op dispatch — correctness beats savings, and the gate defaults to
         // "must run" when in doubt.
         self.events_since_last_frame = true;
-        let _ = self.app.event(&event);
+
+        // Pointer resampling (plan phase 10.C.1): buffer the raw sample (stamped
+        // on the shared resample clock) so [`Self::frame`] can emit a
+        // frame-boundary-interpolated position; Down/Up/Cancel still pass through
+        // losslessly. When the kill switch disabled the resampler, deliver
+        // directly instead — pre-resampling behavior verbatim.
+        if self.resampler.is_enabled() {
+            let time_nanos = self.resample_clock.elapsed().as_nanos() as u64;
+            self.resampler.push(RawPointerSample {
+                phase: core_phase,
+                position,
+                button: PointerButton::Primary,
+                time_nanos,
+            });
+        } else {
+            let event = InputEvent::Pointer(PointerEvent {
+                phase: core_phase,
+                position,
+                button: PointerButton::Primary,
+            });
+            let _ = self.app.event(&event);
+        }
     }
 
     /// Apply a whole editing state pushed by the platform IME (`nativeImeApply`),
@@ -792,7 +846,12 @@ impl AndroidAppHandle {
         // frame (they converge one event pass later by contract).
         let inputs = FrameInputs {
             signals_dirty,
-            events_since_last_frame: std::mem::take(&mut self.events_since_last_frame),
+            // Pending buffered pointer samples (a sample too new for this tick's
+            // instant) must keep frames running until drained — the resampler's
+            // pending signal ORs into the events input (plan phase 10.C.1's
+            // "never starves the gate" contract; default-to-run rule).
+            events_since_last_frame: std::mem::take(&mut self.events_since_last_frame)
+                || self.resampler.has_pending(),
             pointer_capture_active: self.app.is_pointer_captured(),
             focus_or_ime_active: self.app.is_focus_active() || self.app.ime_state().is_some(),
             last_needs_frame: self.last_needs_frame,
@@ -825,6 +884,15 @@ impl AndroidAppHandle {
         // hot path (guard first, per this module's perf convention).
         let perf_on = perf::enabled();
 
+        // Deadline-aware pacing (plan phase 10.C.2): estimate this frame's
+        // target budget from the tick-to-tick delta, updating the stored tick
+        // every frame (skip or run) so the estimate always reflects one refresh
+        // interval rather than a gap across skipped ticks.
+        let frame_interval = resample::frame_interval_nanos(
+            self.last_frame_time_nanos.replace(frame_time_nanos),
+            frame_time_nanos,
+        );
+
         if self.frame_gate.decide(inputs).is_skip() {
             // Skip path (task 17): nothing changed — return before rebuild, so
             // CPU/GPU stay near idle. Record a `skipped` FramePasses (all-zero
@@ -845,6 +913,26 @@ impl AndroidAppHandle {
         // Run path: rebuild -> (layout iff needed) -> paint -> encode/present,
         // timed as before (task 08's instrumentation preserved).
         // ---------------------------------------------------------------
+
+        // Pointer resampling (plan phase 10.C.1): drain buffered samples up to
+        // this frame's sample instant and feed the interpolated events into the
+        // tree BEFORE the rebuild, so the rebuild reflects this frame's
+        // resampled input. Uses the same `resample_clock` domain the raw samples
+        // were stamped in. A no-op when the resampler is disabled (touches were
+        // delivered directly in `dispatch_touch`). `PointerEvent` is `Copy`, so
+        // indexing the scratch buffer avoids holding its borrow across the
+        // `self.app.event` call.
+        if self.resampler.is_enabled() {
+            let now_nanos = self.resample_clock.elapsed().as_nanos() as u64;
+            self.pointer_scratch.clear();
+            self.resampler
+                .resample(now_nanos, &mut self.pointer_scratch);
+            let n = self.pointer_scratch.len();
+            for i in 0..n {
+                let event = InputEvent::Pointer(self.pointer_scratch[i]);
+                let _ = self.app.event(&event);
+            }
+        }
 
         // Rebuild under the root `Owner` AND inside the persistent
         // [`TrackedScope`] so every signal read this frame subscribes the scope:
@@ -999,6 +1087,24 @@ impl AndroidAppHandle {
         });
         if self.frame_stats.should_emit() {
             self.frame_stats.emit_log();
+        }
+
+        // Deadline-aware pacing overrun (plan phase 10.C.2): this frame's *work*
+        // (everything but the vsync `present` wait, which is expected to block)
+        // overrunning the tick-to-tick budget is counted and logged. Gated
+        // behind `perf_on` so a non-perf build reads no clocks and logs nothing;
+        // instrumentation only — no work is dropped on the strength of this.
+        if perf_on {
+            let work = rebuild_time + layout_time + paint_time + encode_time;
+            if resample::deadline_overrun(work, frame_interval) {
+                self.deadline_overruns += 1;
+                log::info!(
+                    "frust-perf deadline overrun_work_us={} budget_us={} total_overruns={}",
+                    work.as_micros(),
+                    frame_interval / 1_000,
+                    self.deadline_overruns,
+                );
+            }
         }
     }
 }

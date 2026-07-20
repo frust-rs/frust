@@ -42,6 +42,7 @@ use frust_reactive::{ReactiveRuntime, TrackedScope, provide_context};
 use frust_render::{EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
+use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, ThemeOverrideWatcher,
     effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
@@ -181,6 +182,34 @@ pub struct IosAppHandle {
     /// [`Self::latch_first_frame_presented`]), then dropped. `None` before
     /// that stash call and after the summary has been emitted once.
     startup_spans: Option<StartupSpans>,
+    /// Pointer-event resampler (plan phase 10.C.1) — the iOS counterpart to the
+    /// Android shell's field: buffers raw touch samples and emits
+    /// frame-boundary-interpolated `Move`s while Down/Up/Cancel pass through
+    /// losslessly. Disabled by the `FRUST_NO_RESAMPLE` kill switch (resolved
+    /// once at construction), in which case [`Self::dispatch_touch`] delivers
+    /// touches directly. Its pending-input signal ORs into the frame gate's
+    /// `events_since_last_frame` so a too-new sample never starves the gate.
+    resampler: PointerResampler,
+    /// The monotonic epoch every resampler timestamp is measured from — both the
+    /// raw samples ([`Self::dispatch_touch`]) and the per-frame sample query
+    /// ([`Self::frame`]) are stamped from this one `Instant`, sharing a clock
+    /// domain (see `resample`'s *Clock domain* note). Decoupled from the
+    /// `CADisplayLink` vsync clock threaded into [`FrameTime`]: resampling only
+    /// differences timestamps, so one consistent source suffices.
+    resample_clock: Instant,
+    /// Scratch buffer the resampler drains into each frame, reused (cleared, not
+    /// reallocated) so a drag's per-frame resample allocates nothing.
+    pointer_scratch: Vec<PointerEvent>,
+    /// The previous `CADisplayLink` tick timestamp (ns), for the deadline-aware
+    /// pacing estimate (plan phase 10.C.2): the tick-to-tick delta is this
+    /// frame's deadline budget (see [`resample::frame_interval_nanos`]). `None`
+    /// before the first frame.
+    last_frame_time_nanos: Option<u64>,
+    /// Running count of frames whose measured work (rebuild+layout+paint+encode,
+    /// excluding the vsync present wait) overran the frame-target deadline
+    /// (plan phase 10.C.2). **Instrumentation only** — accumulated and logged
+    /// (`frust-perf deadline`) behind [`perf::enabled`]; never drops work.
+    deadline_overruns: u64,
 }
 
 impl IosAppHandle {
@@ -246,6 +275,11 @@ impl IosAppHandle {
             // Stashed by `ffi_glue::create_handle` right after this call
             // returns (see `Self::set_startup_spans`).
             startup_spans: None,
+            resampler: PointerResampler::new(),
+            resample_clock: Instant::now(),
+            pointer_scratch: Vec::new(),
+            last_frame_time_nanos: None,
+            deadline_overruns: 0,
         }
     }
 
@@ -499,15 +533,31 @@ impl IosAppHandle {
             TouchPhase::Ended => PointerPhase::Up,
             TouchPhase::Cancelled => PointerPhase::Cancel,
         };
-        let event = InputEvent::Pointer(PointerEvent {
-            phase: core_phase,
-            position,
-            button: PointerButton::Primary,
-        });
-        let _ = self.app.event(&event);
         // Latch for the frame gate: a touch between frames must force the next
         // frame to run so the mutated state is reflected (spec §14 phase 7).
         self.events_since_last_frame = true;
+
+        // Pointer resampling (plan phase 10.C.1): buffer the raw sample (stamped
+        // on the shared resample clock) for [`Self::frame`] to emit a
+        // frame-boundary-interpolated position; Down/Up/Cancel still pass
+        // through losslessly. When the kill switch disabled the resampler,
+        // deliver directly instead — pre-resampling behavior verbatim.
+        if self.resampler.is_enabled() {
+            let time_nanos = self.resample_clock.elapsed().as_nanos() as u64;
+            self.resampler.push(RawPointerSample {
+                phase: core_phase,
+                position,
+                button: PointerButton::Primary,
+                time_nanos,
+            });
+        } else {
+            let event = InputEvent::Pointer(PointerEvent {
+                phase: core_phase,
+                position,
+                button: PointerButton::Primary,
+            });
+            let _ = self.app.event(&event);
+        }
     }
 
     /// Push a whole editing state from the platform IME mirror into the focused
@@ -660,7 +710,11 @@ impl IosAppHandle {
         let signals_dirty = ReactiveRuntime::get().is_some_and(|rt| rt.take_signals_dirty());
         let inputs = FrameInputs {
             signals_dirty,
-            events_since_last_frame: self.events_since_last_frame,
+            // Pending buffered pointer samples (too new for this tick's instant)
+            // keep frames running until drained — the resampler's pending signal
+            // ORs into the events input (plan phase 10.C.1's "never starves the
+            // gate" contract; default-to-run rule).
+            events_since_last_frame: self.events_since_last_frame || self.resampler.has_pending(),
             // Both read straight from the retained tree's `RenderRoot` state: a
             // mid-drag gesture or a focused/IME-active field must keep painting.
             // `ime_state().is_some()` is OR'd in as belt-and-braces, exactly as
@@ -691,6 +745,15 @@ impl IosAppHandle {
         // so the next frame only sees events that arrive from here on.
         self.events_since_last_frame = false;
 
+        // Deadline-aware pacing (plan phase 10.C.2): estimate this frame's target
+        // budget from the tick-to-tick delta, updating the stored tick every
+        // frame (skip or run) so the estimate reflects one refresh interval
+        // rather than a gap across skipped ticks.
+        let frame_interval = resample::frame_interval_nanos(
+            self.last_frame_time_nanos.replace(timestamp_ns),
+            timestamp_ns,
+        );
+
         if self.frame_gate.decide(inputs).is_skip() {
             // Nothing changed: skip rebuild/layout/paint/encode entirely. Record a
             // skipped-frame stat (ZERO pass durations; counts toward `skipped=` in
@@ -719,6 +782,25 @@ impl IosAppHandle {
         // are the actual hot-path cost the task's acceptance criteria call
         // out).
         let perf_on = perf::enabled();
+
+        // Pointer resampling (plan phase 10.C.1): drain buffered samples up to
+        // this frame's sample instant and feed the interpolated events into the
+        // tree BEFORE the rebuild, so the rebuild reflects this frame's resampled
+        // input (same `resample_clock` domain the raw samples were stamped in). A
+        // no-op when disabled (touches went straight through in `dispatch_touch`).
+        // `PointerEvent` is `Copy`, so indexing the scratch avoids holding its
+        // borrow across the `self.app.event` call.
+        if self.resampler.is_enabled() {
+            let now_nanos = self.resample_clock.elapsed().as_nanos() as u64;
+            self.pointer_scratch.clear();
+            self.resampler
+                .resample(now_nanos, &mut self.pointer_scratch);
+            let n = self.pointer_scratch.len();
+            for i in 0..n {
+                let event = InputEvent::Pointer(self.pointer_scratch[i]);
+                let _ = self.app.event(&event);
+            }
+        }
 
         // Rebuild under the root `Owner` AND inside the persistent
         // [`TrackedScope`] so every signal read this frame subscribes the scope:
@@ -837,6 +919,24 @@ impl IosAppHandle {
         });
         if self.frame_stats.should_emit() {
             self.frame_stats.emit_log();
+        }
+
+        // Deadline-aware pacing overrun (plan phase 10.C.2): this frame's *work*
+        // (everything but the vsync `present` wait, which is expected to block)
+        // overrunning the tick-to-tick budget is counted and logged. Gated behind
+        // `perf_on` so a non-perf build logs nothing; instrumentation only — no
+        // work is dropped on the strength of this.
+        if perf_on {
+            let work = rebuild + layout + paint + encode;
+            if resample::deadline_overrun(work, frame_interval) {
+                self.deadline_overruns += 1;
+                log::info!(
+                    "frust-perf deadline overrun_work_us={} budget_us={} total_overruns={}",
+                    work.as_micros(),
+                    frame_interval / 1_000,
+                    self.deadline_overruns,
+                );
+            }
         }
 
         match render_result {
