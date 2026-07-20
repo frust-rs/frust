@@ -151,9 +151,12 @@ impl ReactiveRuntime {
         waker();
     }
 
-    /// The background runtime handle. `pub(crate)` for the test that asserts a
-    /// repeated executor install is benign.
-    #[cfg(test)]
+    /// The background runtime handle. `pub(crate)` so the heavy-work idiom
+    /// ([`crate::task`]) can `spawn`/`spawn_blocking` onto the background
+    /// runtime, and so the test that asserts a repeated executor install is
+    /// benign can rebuild the executor. Deliberately not part of the public
+    /// API — app code routes through `spawn`/`spawn_local`/`spawn_blocking`
+    /// rather than naming a raw `tokio::runtime::Handle`.
     pub(crate) fn handle(&self) -> Handle {
         self.handle.clone()
     }
@@ -186,6 +189,48 @@ impl ReactiveRuntime {
     pub fn signals_dirty(&self) -> bool {
         self.signals_dirty.load(Ordering::SeqCst)
     }
+}
+
+/// Runs a one-off, blocking CPU workload on the background runtime's blocking
+/// thread pool, returning a [`JoinHandle`](tokio::task::JoinHandle) to `.await`
+/// its result (phase 9.A).
+///
+/// This is the CPU-bound entry point of the heavy-work routing convention:
+///
+/// | Call | Use for |
+/// |---|---|
+/// | `frust::spawn` | `Send` async IO-bound work |
+/// | `frust::spawn_local` | `!Send` work that must stay on the UI thread |
+/// | `frust::spawn_blocking` | one-off **CPU-bound** blocking work (JSON parse, decode, hashing) |
+/// | `rayon` | data-parallel compute — an **app-level** choice, deliberately not bundled |
+///
+/// The pool already exists (the runtime is built `rt-multi-thread`), so this
+/// is a thin facade over [`tokio::runtime::Handle::spawn_blocking`]. Compose it
+/// inside a [`use_task`](crate::use_task) fetcher —
+/// `use_task(|| async { spawn_blocking(parse).await })` — to get load/error
+/// states and cancellation for free.
+///
+/// **Cancellation limitation:** dropping/aborting the returned handle stops the
+/// result from being delivered, but a blocking closure *already running*
+/// cannot be interrupted (there is no safe way to unwind arbitrary blocking
+/// code) — the same limitation every runtime has.
+///
+/// # Panics
+///
+/// Panics if [`ReactiveRuntime::init`] has not run yet — the same
+/// wiring-bug-not-runtime-condition contract as `spawn_local` off the UI
+/// thread.
+pub fn spawn_blocking<F, R>(f: F) -> tokio::task::JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let rt = ReactiveRuntime::get().expect(
+        "frust-reactive: spawn_blocking called before ReactiveRuntime::init — \
+         this is a wiring bug: initialize the reactive runtime (the shell does \
+         this on startup) before spawning work",
+    );
+    rt.handle.spawn_blocking(f)
 }
 
 #[cfg(test)]

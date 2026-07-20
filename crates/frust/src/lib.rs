@@ -317,6 +317,16 @@ pub fn spawn_local(fut: impl std::future::Future<Output = ()> + 'static) {
     any_spawner::Executor::spawn_local(fut);
 }
 
+/// The heavy-work idiom (phase 9.A): [`AsyncValue`] state,
+/// [`use_task`] (the blessed load/compute helper), [`UseTask`] handle, and
+/// [`spawn_blocking`] (the CPU-bound entry point) — Frust's counterpart to
+/// Flutter's `compute()`/`FutureBuilder`, with explicit cancellation on
+/// component teardown. `spawn_blocking` joins the existing
+/// [`spawn`]/[`spawn_local`] routing pair (async IO / UI-thread `!Send` /
+/// one-off CPU work). App crates need no new dependency: this is the whole
+/// heavy-work surface. See `frust_reactive::task` for the threading contract.
+pub use frust_reactive::{AsyncValue, TaskError, UseTask, spawn_blocking, use_task};
+
 // Re-export the Android JNI-bridge macro so generated apps write
 // `frust::android_app!(AppState, app_logic)` (spec §10.1). `pub use` of a
 // `#[macro_export]` macro re-exports it on edition 2021+; the macro only expands

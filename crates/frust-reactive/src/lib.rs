@@ -22,6 +22,7 @@ mod back;
 mod deep_link;
 mod executor;
 mod runtime;
+mod task;
 mod tracked;
 
 pub use back::{
@@ -29,7 +30,8 @@ pub use back::{
     push_back_press, set_can_pop_provider, set_handles_back,
 };
 pub use deep_link::{DeepLink, DeepLinks, deep_links, push_deep_link};
-pub use runtime::{FrameWaker, ReactiveRuntime};
+pub use runtime::{FrameWaker, ReactiveRuntime, spawn_blocking};
+pub use task::{AsyncValue, TaskError, UseTask, use_task};
 pub use tracked::TrackedScope;
 
 pub use reactive_graph::owner::{Owner, on_cleanup, provide_context, use_context};
