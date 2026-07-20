@@ -1390,6 +1390,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ctrlc",
  "frust-drive",
  "frust-tui",
  "notify",

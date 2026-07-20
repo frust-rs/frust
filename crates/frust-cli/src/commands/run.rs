@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -182,8 +182,42 @@ fn run_desktop_watch(
         "Watching `{}` for changes (Ctrl-C to exit)…",
         root.display()
     );
+
+    // The streamed `cargo run` child is now spawned into its own process
+    // group (`frust_drive::process::spawn_streaming`), so a kill reaches the
+    // compiled preview binary it forks too — the orphaned-preview fix. That
+    // same arrangement removes the child from this terminal's foreground
+    // process group, so a bare Ctrl-C's SIGINT no longer reaches it: without
+    // an explicit handler, exiting the watch loop would just orphan the live
+    // preview (trading a kill-on-relaunch orphan for a Ctrl-C-to-exit orphan).
+    // Share the live handle with a Ctrl-C handler that group-kills the current
+    // child before exiting. Unlike `android_run`/`ios_run`'s handlers (whose
+    // device-side child is unaffected by this group), this one MUST kill
+    // before `exit`.
+    let current: Arc<Mutex<Option<StreamHandle>>> = Arc::new(Mutex::new(None));
+    let handler_slot = Arc::clone(&current);
+    ctrlc::set_handler(move || {
+        if let Some(mut handle) = handler_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            handle.kill();
+        }
+        std::process::exit(0);
+    })
+    .context("failed to install Ctrl-C handler")?;
+
     let mut on_line = |line: &str| println!("{line}");
-    watch_loop(runner, args, env, &raw_rx, WATCH_DEBOUNCE, &mut on_line)
+    watch_loop_with_slot(
+        runner,
+        args,
+        env,
+        &raw_rx,
+        WATCH_DEBOUNCE,
+        &current,
+        &mut on_line,
+    )
 }
 
 /// Starts a real [`notify`] watcher over `root`'s `src/` tree (recursive) and
@@ -237,11 +271,19 @@ fn spawn_fs_watcher(root: &Path, tx: mpsc::Sender<()>) -> Result<notify::Recomme
 /// process running until the next change ticks a fresh attempt. The loop
 /// itself only returns when `raw_changes` disconnects (the real watcher
 /// dropped, or a test drops its sender) — in real usage that never happens
-/// before Ctrl-C tears down the whole process (the default SIGINT
-/// disposition reaches the foreground process group, killing the streamed
-/// `cargo run` child right along with this process — no extra `ctrlc`
-/// handler is needed here, unlike `android_run`/`ios_run`'s device-side
-/// processes which live outside this terminal's process group).
+/// before Ctrl-C tears down the whole process.
+///
+/// **Ctrl-C is no longer self-handling.** The streamed `cargo run` child now
+/// runs in its own process group (`frust_drive::process::spawn_streaming`, so a
+/// kill reaches the compiled preview binary it forks too), which also means the
+/// terminal's SIGINT no longer reaches it — [`run_desktop_watch`] installs a
+/// Ctrl-C handler over a shared handle slot to group-kill the current child
+/// before exiting. This standalone `watch_loop` owns a private slot (no shared
+/// handler); production drives [`watch_loop_with_slot`] with the shared one.
+///
+/// Test-only: it exists purely as the fixed-signature entry the loop's unit
+/// tests drive; the shipped binary always goes through `watch_loop_with_slot`.
+#[cfg(test)]
 fn watch_loop(
     runner: &dyn ProcessRunner,
     args: &[&str],
@@ -250,15 +292,36 @@ fn watch_loop(
     debounce: Duration,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<u8> {
-    let mut current: Option<StreamHandle> = Some(runner.spawn_streaming("cargo", args, None, env)?);
+    let current: Arc<Mutex<Option<StreamHandle>>> = Arc::new(Mutex::new(None));
+    watch_loop_with_slot(runner, args, env, raw_changes, debounce, &current, on_line)
+}
+
+/// [`watch_loop`]'s body, parameterized on a shared `current`-handle slot so a
+/// Ctrl-C handler installed by [`run_desktop_watch`] can group-kill the live
+/// child before the process exits (see [`watch_loop`]'s doc). Holds the slot's
+/// lock only for the brief drain/kill/respawn steps — never across the blocking
+/// `recv_timeout` — so the handler can always acquire it promptly.
+fn watch_loop_with_slot(
+    runner: &dyn ProcessRunner,
+    args: &[&str],
+    env: &[(&str, &str)],
+    raw_changes: &mpsc::Receiver<()>,
+    debounce: Duration,
+    current: &Arc<Mutex<Option<StreamHandle>>>,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<u8> {
+    lock_slot(current).replace(runner.spawn_streaming("cargo", args, None, env)?);
 
     loop {
-        if drain_available_lines(&mut current, on_line) {
-            let success = current.take().expect("handle present in this arm").wait();
-            if success {
-                on_line("`cargo run` exited; waiting for a source change to relaunch…");
-            } else {
-                on_line("`cargo run` failed; watching for a source change to retry…");
+        {
+            let mut slot = lock_slot(current);
+            if drain_available_lines(&mut slot, on_line) {
+                let success = slot.take().expect("handle present in this arm").wait();
+                if success {
+                    on_line("`cargo run` exited; waiting for a source change to relaunch…");
+                } else {
+                    on_line("`cargo run` failed; watching for a source change to retry…");
+                }
             }
         }
 
@@ -267,25 +330,35 @@ fn watch_loop(
                 // Trailing-edge debounce: keep consuming ticks that arrive
                 // within `debounce` of the previous one before acting.
                 while raw_changes.recv_timeout(debounce).is_ok() {}
+                let mut slot = lock_slot(current);
                 // Flush whatever the about-to-be-killed process already
                 // produced before killing it, so a burst of output right
                 // before the kill isn't silently dropped.
-                drain_available_lines(&mut current, on_line);
+                drain_available_lines(&mut slot, on_line);
                 on_line("Change detected; rebuilding and relaunching…");
-                if let Some(mut handle) = current.take() {
+                if let Some(mut handle) = slot.take() {
                     handle.kill();
                 }
-                current = Some(runner.spawn_streaming("cargo", args, None, env)?);
+                slot.replace(runner.spawn_streaming("cargo", args, None, env)?);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if let Some(mut handle) = current.take() {
+                if let Some(mut handle) = lock_slot(current).take() {
                     handle.kill();
                 }
                 return Ok(0);
             }
         }
     }
+}
+
+/// Locks the shared `current`-handle slot, recovering from poisoning rather
+/// than propagating a panic (a poisoned lock just means a prior holder panicked
+/// mid-update; the loop can still drive the handle inside).
+fn lock_slot(
+    slot: &Arc<Mutex<Option<StreamHandle>>>,
+) -> std::sync::MutexGuard<'_, Option<StreamHandle>> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Drains every line currently available from `current`'s child (if any),

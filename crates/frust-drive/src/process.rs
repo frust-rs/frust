@@ -150,6 +150,48 @@ fn decode_stream_line(mut raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
 
+// POSIX `kill(2)`, declared directly rather than taking a `libc` dependency
+// for this one syscall (target-gated behind `#[cfg(unix)]` all the same).
+// Used by `group_kill_unix` to signal a whole process group; the tests
+// additionally use it with signal `0` to probe a grandchild's liveness.
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// `SIGKILL`s the entire Unix process group whose id equals `child_pid`.
+///
+/// [`ProcessRunner::spawn_streaming`] places each streamed child in its own
+/// process group (`pgid == child pid`, via `CommandExt::process_group(0)`), so
+/// the compiled preview binary a `cargo run` child forks is a *grandchild* in
+/// that same group. `std::process::Child::kill` signals only the direct child,
+/// orphaning the grandchild — the visible bug this fixes (a killed/relaunched
+/// `cargo run` left its preview window alive). Signalling the *negative* pgid
+/// reaches every process in the group at once.
+///
+/// **Unix-only.** Windows has no process-group signal; a job-object equivalent
+/// is a tracked fast-follow, so today's Windows path keeps the pre-existing
+/// direct-child-only `Child::kill` (same gap it already had).
+#[cfg(unix)]
+fn group_kill_unix(child_pid: u32) {
+    // SIGKILL is 9 across every Unix target Frust builds for (Linux, macOS,
+    // the BSDs) — a stable kernel-ABI number, not a libc-version detail.
+    const SIGKILL: i32 = 9;
+    // pgid == the child's own pid (set by `process_group(0)`); the negative
+    // sign turns "this pid" into "this whole process group".
+    let pgid = child_pid as i32;
+
+    // # Safety
+    // `kill` is a thin POSIX syscall wrapper: it takes two `int`s by value and
+    // returns an `int`, touching no caller-owned memory, so the call is always
+    // memory-safe. A pgid whose group has already exited yields `-1`/`ESRCH` —
+    // a defined, benign result, never UB — so a race against the group dying on
+    // its own is a harmless no-op (best-effort, hence the ignored return).
+    unsafe {
+        kill(-pgid, SIGKILL);
+    }
+}
+
 /// Shells out for real via [`std::process::Command`].
 pub struct RealProcessRunner;
 
@@ -259,11 +301,27 @@ impl ProcessRunner for RealProcessRunner {
             command.env(key, value);
         }
 
+        // Put the child in its own process group so a later [`kill`] can reach
+        // the whole tree (`cargo run` + the compiled preview binary it forks),
+        // not just the direct child — see [`group_kill_unix`]. Windows has no
+        // equivalent here yet (tracked job-object fast-follow); it keeps the
+        // pre-existing direct-child-only kill below.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn `{cmd}`"))?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        // Captured now (before the child moves into the shared `Arc<Mutex>`)
+        // so the group kill below can derive the pgid. On Unix the pgid equals
+        // this pid, set by `process_group(0)` above.
+        #[cfg(unix)]
+        let child_pid = child.id();
         // The child itself is shared: the reader thread below waits on
         // (reaps) it once stdout hits EOF, while `kill` locks it briefly
         // just to send the kill signal. Killing can only ever contend for
@@ -321,6 +379,19 @@ impl ProcessRunner for RealProcessRunner {
         });
 
         let kill_child = Arc::clone(&child);
+        // Unix: group-kill first so the whole process group dies (`cargo run`
+        // + the preview binary it forks), then reap the direct child through
+        // std for pid-reuse-safe cleanup. Non-Unix keeps today's
+        // direct-child-only `Child::kill` (the tracked Windows job-object gap).
+        #[cfg(unix)]
+        let kill_action: Box<dyn FnOnce() + Send> = Box::new(move || {
+            group_kill_unix(child_pid);
+            let _ = kill_child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .kill();
+        });
+        #[cfg(not(unix))]
         let kill_action: Box<dyn FnOnce() + Send> = Box::new(move || {
             let _ = kill_child
                 .lock()
@@ -854,5 +925,93 @@ mod tests {
         );
         // A killed process is not "successful".
         assert!(!handle.wait());
+    }
+
+    /// Regression for the orphaned-preview bug: `kill()` must terminate the
+    /// whole process *group*, not just the direct child. Mirrors `cargo run`
+    /// forking the compiled preview binary — the shell (direct child) forks a
+    /// `sleep` (grandchild) into the background, records its pid, then blocks
+    /// in `wait`. Group-killing the shell must also reap the grandchild;
+    /// before this fix a bare `Child::kill` left it (the preview window) alive.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_streaming_real_kill_terminates_the_whole_process_group() {
+        // Unique tmp path for the grandchild-pid handoff (mktemp-style: pid +
+        // a nanosecond nonce so parallel test runs never collide).
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pid_file = std::env::temp_dir().join(format!(
+            "frust-grandchild-pid-{}-{nonce}.tmp",
+            std::process::id()
+        ));
+        let pid_file_str = pid_file.to_string_lossy().to_string();
+
+        let script = format!("sleep 12345 & echo $! > {pid_file_str}; wait");
+        let runner = RealProcessRunner;
+        let mut handle = runner
+            .spawn_streaming("/bin/sh", &["-c", &script], None, &[])
+            .unwrap();
+
+        // Bounded poll (no fixed sleep) for the grandchild pid to be written.
+        let grandchild_pid = read_pid_when_ready(&pid_file, Duration::from_secs(5))
+            .expect("grandchild pid file should be written within the timeout");
+
+        // Sanity: the grandchild is alive before the kill.
+        assert!(
+            !grandchild_is_dead(grandchild_pid),
+            "grandchild (pid {grandchild_pid}) should be alive before the kill"
+        );
+
+        handle.kill();
+
+        // Group-kill must reach the grandchild: assert it is gone within a
+        // bounded poll (it reparents to init and is reaped once its parent
+        // shell dies, so there is a brief settle window).
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut dead = false;
+        while std::time::Instant::now() < deadline {
+            if grandchild_is_dead(grandchild_pid) {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(
+            dead,
+            "grandchild (pid {grandchild_pid}) still alive 2s after group kill — \
+             kill did not reach the process group"
+        );
+    }
+
+    /// Bounded-poll read of a pid written to `path` by a child shell, returning
+    /// the parsed pid once the file exists and holds a full integer (avoids a
+    /// fixed sleep racing the shell's `echo $!`).
+    #[cfg(unix)]
+    fn read_pid_when_ready(path: &Path, timeout: Duration) -> Option<i32> {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if let Ok(contents) = std::fs::read_to_string(path)
+                && let Ok(pid) = contents.trim().parse::<i32>()
+            {
+                return Some(pid);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    /// Probes whether `pid` is gone via `kill(pid, 0)` (delivers no signal,
+    /// only checks existence/permission): dead iff the call fails with `ESRCH`.
+    #[cfg(unix)]
+    fn grandchild_is_dead(pid: i32) -> bool {
+        // ESRCH ("no such process") is 3 on Linux and macOS.
+        const ESRCH: i32 = 3;
+        // # Safety: same contract as `group_kill_unix` — `kill` touches no
+        // caller memory; signal `0` only probes the target without signalling.
+        let rc = unsafe { kill(pid, 0) };
+        rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(ESRCH)
     }
 }

@@ -27,6 +27,14 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # CLI-loop orchestration over `frust-drive`'s existing `spawn_streaming`
 # seam, not a new drive pipeline of its own.
 notify.workspace = true
+# `frust run --watch` moves the streamed `cargo run` child into its own
+# process group (so a kill reaches the compiled preview binary it forks — the
+# orphaned-preview fix in `frust-drive::process`), which also takes it out of
+# this terminal's foreground group. A Ctrl-C handler in `commands::run`'s watch
+# loop must therefore group-kill the live child explicitly before exiting,
+# rather than relying on the default SIGINT reaching it (direct precedent:
+# `frust-drive`'s own `ctrlc` use for the device-side log-stream path).
+ctrlc.workspace = true
 
 [dev-dependencies]
 # The command-handler tests drive their `run_in` cores with
