@@ -905,10 +905,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 09: `--arch clean-signals` renders the variant `Cargo.toml`/
-    /// `src/lib.rs` content in place of the default notes-app demo, while
-    /// every arch-agnostic file (frust.toml, assets, android/ios trees)
-    /// still lands exactly once.
+    /// Task 07 (v2): `--arch clean-signals` renders the variant `Cargo.toml`/
+    /// full `greeting` feature-slice tree in place of the retired
+    /// single-file demo, while every arch-agnostic file (frust.toml,
+    /// assets, android/ios trees) still lands exactly once.
     #[test]
     fn generate_with_clean_signals_arch_renders_variant_content_in_place_of_defaults() {
         let dest = unique_temp_dir("clean-signals-arch");
@@ -952,20 +952,101 @@ mod tests {
             "{cargo_toml}"
         );
 
+        // The full `greeting` feature-slice tree lands (task 07 acceptance
+        // criterion 2 — the single-file demo is retired from the manifest).
+        let expected_files = [
+            "src/lib.rs",
+            "src/failure.rs",
+            "src/features/mod.rs",
+            "src/features/greeting/mod.rs",
+            "src/features/greeting/domain/mod.rs",
+            "src/features/greeting/domain/repositories.rs",
+            "src/features/greeting/domain/use_cases/mod.rs",
+            "src/features/greeting/domain/use_cases/load_greeting.rs",
+            "src/features/greeting/data/mod.rs",
+            "src/features/greeting/data/sources.rs",
+            "src/features/greeting/data/repositories.rs",
+            "src/features/greeting/presentation/mod.rs",
+            "src/features/greeting/presentation/controllers.rs",
+            "src/features/greeting/presentation/pages.rs",
+        ];
+        for f in expected_files {
+            assert!(
+                written.iter().any(|p| p == Path::new(f)),
+                "expected `{f}` in written paths: {written:?}"
+            );
+            assert!(dest.join(f).exists(), "expected `{f}` to exist on disk");
+        }
+
+        // lib.rs shrinks to module decls + `app!` wiring + the composition
+        // root — no `GreetingController`/`use_controller`/`async_view`
+        // details leak into it anymore (those moved into the feature
+        // slice).
         let lib_rs = fs::read_to_string(dest.join("src/lib.rs")).unwrap();
-        assert!(lib_rs.contains("GreetingController"), "{lib_rs}");
-        assert!(lib_rs.contains("use_controller"), "{lib_rs}");
-        assert!(lib_rs.contains("async_view"), "{lib_rs}");
+        assert!(lib_rs.contains("pub mod failure;"), "{lib_rs}");
+        assert!(lib_rs.contains("pub mod features;"), "{lib_rs}");
         assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
         assert!(lib_rs.contains("frust::app!(MyAppApp)"), "{lib_rs}");
+        // The controller's construction/rendering detail moved into the
+        // feature slice; lib.rs only names the type as its `State`.
+        assert!(!lib_rs.contains("ControllerCore"), "{lib_rs}");
+        assert!(!lib_rs.contains("use_controller"), "{lib_rs}");
+        assert!(!lib_rs.contains("async_view"), "{lib_rs}");
         // The notes-app demo's own shape doesn't leak into this variant.
         assert!(!lib_rs.contains("SharedPreferences"), "{lib_rs}");
         assert!(!lib_rs.contains("text_input("), "{lib_rs}");
+
+        // The moved pieces land in their expected layer files.
+        let failure_rs = fs::read_to_string(dest.join("src/failure.rs")).unwrap();
+        assert!(failure_rs.contains("pub enum AppFailure"), "{failure_rs}");
+        assert!(failure_rs.contains("Network(String)"), "{failure_rs}");
+        assert!(failure_rs.contains("Validation(String)"), "{failure_rs}");
+
+        let domain_repo =
+            fs::read_to_string(dest.join("src/features/greeting/domain/repositories.rs")).unwrap();
+        assert!(
+            domain_repo.contains("pub trait GreetingRepository"),
+            "{domain_repo}"
+        );
+
+        let use_case = fs::read_to_string(
+            dest.join("src/features/greeting/domain/use_cases/load_greeting.rs"),
+        )
+        .unwrap();
+        assert!(use_case.contains("pub struct LoadGreeting"), "{use_case}");
+        assert!(use_case.contains("NoParams"), "{use_case}");
+
+        let data_repo =
+            fs::read_to_string(dest.join("src/features/greeting/data/repositories.rs")).unwrap();
+        assert!(
+            data_repo.contains("pub struct InMemoryGreetingRepository"),
+            "{data_repo}"
+        );
+        assert!(data_repo.contains("fn map_source_error"), "{data_repo}");
+
+        let controllers =
+            fs::read_to_string(dest.join("src/features/greeting/presentation/controllers.rs"))
+                .unwrap();
+        assert!(
+            controllers.contains("pub struct GreetingController"),
+            "{controllers}"
+        );
+
+        let pages =
+            fs::read_to_string(dest.join("src/features/greeting/presentation/pages.rs")).unwrap();
+        assert!(pages.contains("use_controller"), "{pages}");
+        assert!(pages.contains("async_view"), "{pages}");
 
         // No `.clean-signals.` leftover in any written path, and no stray
         // `Cargo.toml.clean-signals`/`src/lib.rs.clean-signals` files.
         assert!(!dest.join("Cargo.toml.clean-signals").exists());
         assert!(!dest.join("src/lib.rs.clean-signals").exists());
+        assert!(
+            written
+                .iter()
+                .all(|p| !p.to_string_lossy().contains(".clean-signals.")),
+            "{written:?}"
+        );
 
         // Arch-agnostic files still land untouched.
         assert!(dest.join("frust.toml").exists());
