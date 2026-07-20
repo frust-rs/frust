@@ -7,19 +7,19 @@ expression: "render_to_string(100, 30, &state)"
                                                                                                     
  PROJECTS                │                                                                          
   ▸ huddle               │  Dashboard                                                               
-                         │  ━━━━━━━━━━                                                              
- DEVICES ↻ r             ╭ Keyboard Shortcuts ────────────────────────────╮                         
-   none found            │                                                │▓▓b here.                
-                         │  r       Run on device(s)…                     │▓▓                       
- SESSIONS                │  x       Stop session                          │▓▓                       
-   none running          │  b       Build…                                │▓▓                       
-                         │  c       Clean…                                │▓▓                       
- ACTIONS                 │  d       Doctor                                │▓▓                       
-   New project · n       │  i       Toolchain setup…                      │▓▓                       
-   Doctor · d            │  n       New project…                          │▓▓                       
-   Build · b             │  ^O      Switch project…                       │▓▓                       
-   Clean · c             │  R       Refresh devices                       │▓▓                       
-                         │  ⌥m      Toggle mouse capture                  │▓▓                       
+                         ╭ Keyboard Shortcuts ────────────────────────────╮                         
+ DEVICES ↻ r             │                                                │▓▓                       
+   none found            │  r       Run on device(s)…                     │▓▓b here.                
+                         │  x       Stop session                          │▓▓                       
+ SESSIONS                │  b       Build…                                │▓▓                       
+   none running          │  c       Clean…                                │▓▓                       
+                         │  d       Doctor                                │▓▓                       
+ ACTIONS                 │  i       Toolchain setup…                      │▓▓                       
+   New project · n       │  n       New project…                          │▓▓                       
+   Add plugin · a        │  a       Add plugin…                           │▓▓                       
+   Doctor · d            │  ^O      Switch project…                       │▓▓                       
+   Build · b             │  R       Refresh devices                       │▓▓                       
+   Clean · c             │  ⌥m      Toggle mouse capture                  │▓▓                       
                          │  f       Toggle follow-tail                    │▓▓                       
                          │  /       Search logs…                          │▓▓                       
                          │  q       Quit                                  │▓▓                       

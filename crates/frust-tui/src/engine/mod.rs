@@ -7,6 +7,7 @@
 //! emits `Message`s but never mutates the model; `crate::runner` owns the
 //! terminal lifecycle and drives the loop.
 
+mod add_plugin;
 mod bootstrap;
 mod build_launcher;
 mod context_menu;
@@ -23,6 +24,9 @@ mod state;
 mod toast;
 mod update;
 
+pub use add_plugin::{
+    AddPluginAdvance, AddPluginDialog, AddPluginStep, AddReport, FeatureToggle, PluginEntry,
+};
 pub use bootstrap::{BootstrapNode, BootstrapState, BootstrapWizard};
 pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, BuildTargetSpec};
 pub use context_menu::{ContextMenu, MenuEntry};

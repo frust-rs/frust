@@ -16,10 +16,10 @@ expression: "render_to_string(100, 30, &bootstrap_state(partial_report(), 2))"
              │     ✓ iOS                                                              │▓▓           
  ACTIONS     │     ✓ Desktop           FIX IT — one command per confirm               │▓▓           
    New projec│   ! Doctor rollup       ▶ cargo install cargo-ndk                      │▓▓           
-   Doctor · d│                           Install a JDK 17+                            │▓▓           
-   Build · b │                                                                        │▓▓           
-   Clean · c │                          ▶ Run in session    c copy                    │▓▓           
-             │                                                                        │▓▓           
+   Add plugin│                           Install a JDK 17+                            │▓▓           
+   Doctor · d│                                                                        │▓▓           
+   Build · b │                          ▶ Run in session    c copy                    │▓▓           
+   Clean · c │                                                                        │▓▓           
              │                                                                        │▓▓           
              │                                                                        │▓▓           
              │                                                                        │▓▓           

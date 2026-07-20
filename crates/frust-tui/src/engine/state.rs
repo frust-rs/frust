@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::add_plugin::AddPluginDialog;
 use super::bootstrap::{BootstrapState, BootstrapWizard};
 use super::build_launcher::BuildLauncher;
 use super::context_menu::ContextMenu;
@@ -151,6 +152,11 @@ pub struct AppState {
     /// toolchain-chip click). While `Some`, it captures input and suppresses
     /// background mouse regions like the other modals.
     pub bootstrap_wizard: Option<BootstrapWizard>,
+    /// The Add Plugin dialog, when open (`a`, the sidebar "Add plugin" action,
+    /// or the palette — `frust-secure-storage` Phase 7). While `Some`, it
+    /// captures input and suppresses background mouse regions like the other
+    /// modals.
+    pub add_plugin: Option<AddPluginDialog>,
     /// The sidebar width (columns), drag-resizable via the splitter (T04 / D4).
     /// Clamped to [`SIDEBAR_MIN_WIDTH`]..=[`SIDEBAR_MAX_WIDTH`]. In-memory only
     /// for now — persistence is T05's settings task (see its requirement 3).
@@ -248,6 +254,7 @@ impl AppState {
             clean_confirm: None,
             bootstrap: BootstrapState::default(),
             bootstrap_wizard: None,
+            add_plugin: None,
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
             mouse_capture: true,
             active_drag: None,
@@ -372,6 +379,7 @@ impl Default for AppState {
             clean_confirm: None,
             bootstrap: BootstrapState::default(),
             bootstrap_wizard: None,
+            add_plugin: None,
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
             mouse_capture: true,
             active_drag: None,

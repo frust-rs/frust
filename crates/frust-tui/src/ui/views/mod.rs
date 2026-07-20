@@ -1,6 +1,7 @@
 //! Screen views: each renders `&AppState` into a frame area and (where
 //! interactive) registers mouse regions. Views never mutate the engine.
 
+pub mod add_plugin;
 pub mod bootstrap;
 pub mod build_launcher;
 pub mod clean_confirm;

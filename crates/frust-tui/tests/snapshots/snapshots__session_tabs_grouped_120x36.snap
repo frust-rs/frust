@@ -21,10 +21,10 @@ expression: "render_to_string(120, 36, &multi_session_state())"
                          │                                                                                              
  ACTIONS                 │                                                                                              
    New project · n       │                                                                                              
+   Add plugin · a        │                                                                                              
    Doctor · d            │                                                                                              
    Build · b             │                                                                                              
    Clean · c             │                                                                                              
-                         │                                                                                              
                          │                                                                                              
                          │                                                                                              
                          │                                                                                              

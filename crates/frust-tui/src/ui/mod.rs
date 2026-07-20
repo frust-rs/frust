@@ -169,6 +169,18 @@ fn render_modal(
             }
             views::bootstrap::render(frame, area, wizard, theme, mouse);
         }
+        // The Add Plugin dialog can appear over either screen (reachable via the
+        // welcome-screen `a`/palette, though it needs an open project to open).
+        ActiveModal::AddPlugin(dialog) => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::add_plugin::render(frame, area, dialog, theme, mouse);
+        }
         ActiveModal::RunConfig(modal) => {
             let mut suppressed = MouseCtx::suppressed();
             views::workbench::render(frame, area, state, theme, &mut suppressed);
@@ -232,7 +244,7 @@ fn render_welcome(
 
 fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let left = Line::from(Span::styled(
-        "? help · ⌘ palette · q quit",
+        "? help · ⌘ palette · a add plugin · q quit",
         Style::default().fg(theme.muted()),
     ));
     frame.render_widget(

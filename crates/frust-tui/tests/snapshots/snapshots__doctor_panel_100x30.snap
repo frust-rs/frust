@@ -16,10 +16,10 @@ expression: "render_to_string(100, 30, &state)"
                  │  ✓ Rust toolchain                                              │▓▓               
  ACTIONS         │  ! Android SDK/NDK                                             │▓▓               
    New project · │      ANDROID_NDK_HOME not set                                  │▓▓               
-   Doctor · d    │  ✗ Xcode                                                       │▓▓               
-   Build · b     │      Xcode not found. Run: xcode-select --install              │▓▓               
-   Clean · c     │                                                                │▓▓               
-                 │   Re-run     Close                                             │▓▓               
+   Add plugin · a│  ✗ Xcode                                                       │▓▓               
+   Doctor · d    │      Xcode not found. Run: xcode-select --install              │▓▓               
+   Build · b     │                                                                │▓▓               
+   Clean · c     │   Re-run     Close                                             │▓▓               
                  │  r re-run · Esc close                                          │▓▓               
                  ╰────────────────────────────────────────────────────────────────╯▓▓               
                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓               

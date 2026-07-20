@@ -16,10 +16,10 @@ expression: "render_to_string(100, 30, &bootstrap_state(missing_core_report(), 0
              │     ✓ iOS               ▶ Install Rust via rustup                      │▓▓           
  ACTIONS     │     ✓ Desktop                                                          │▓▓           
    New projec│   ✗ Doctor rollup        ▶ Run in session    c copy                    │▓▓           
+   Add plugin│                                                                        │▓▓           
    Doctor · d│                                                                        │▓▓           
    Build · b │                                                                        │▓▓           
    Clean · c │                                                                        │▓▓           
-             │                                                                        │▓▓           
              │                                                                        │▓▓           
              │                                                                        │▓▓           
              │                                                                        │▓▓           

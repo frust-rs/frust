@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, false, 0))"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │                                                                          
+  ▸ huddle               │  Dashboard                                                               
+                         │  ━━━━━━━━━━                                                              
+ DEVICES ↻ r             │                                                                          
+   none found            │  No session running — start a run to open a log tab here.                
+                  ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+ SESSIONS         │                                                              │▓▓                
+   none running   │  Choose a plugin to add to this project                      │▓▓                
+                  │  ▸ (o) shared-preferences                                    │▓▓                
+ ACTIONS          │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
+   New project · n│    ( ) secure-storage                                        │▓▓                
+   Add plugin · a │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
+   Doctor · d     │    ( ) clean-signals-frust                                   │▓▓                
+   Build · b      │        ✗ needs a sibling checkout (dev-machine only)         │▓▓                
+   Clean · c      │                                                              │▓▓                
+                  │   Back    Next    Cancel                                     │▓▓                
+                  │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
+                  ╰──────────────────────────────────────────────────────────────╯▓▓                
+                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

@@ -140,6 +140,13 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
         always("Toolchain setup…", "i", Message::OpenBootstrapWizard),
         always("New project…", "n", Message::OpenCreateWizard),
         gated(
+            "Add plugin…",
+            "a",
+            Message::OpenAddPlugin,
+            has_project,
+            "open a project first",
+        ),
+        gated(
             "Switch project…",
             "^O",
             Message::ToggleProjectSwitcher,

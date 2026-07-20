@@ -25,4 +25,4 @@ expression: "render_to_string(80, 24, &state)"
                                                                                 
                                                                                 
                                                                                 
-? help · ⌘ palette · q quit                                            [mouse ✓]
+? help · ⌘ palette · a add plugin · q quit                             [mouse ✓]

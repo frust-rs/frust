@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 
+use super::add_plugin::{AddPluginAdvance, AddPluginDialog};
 use super::bootstrap::BootstrapWizard;
 use super::build_launcher::{BuildLauncher, BuildSpec};
 use super::context_menu::ContextMenu;
@@ -99,6 +100,18 @@ pub enum Effect {
     /// Persist the follow-tail default — the runner's enactment of a
     /// follow-tail toggle on the active session (T05 settings persistence).
     SaveFollowTailDefault(bool),
+    /// Apply a registry plugin's contributions to `project_root` off-thread via
+    /// [`frust_drive::plugin::add_plugin`], posting
+    /// [`Message::AddPluginSucceeded`]/[`Message::AddPluginFailed`] back — the
+    /// Add Plugin dialog's apply step (`frust-secure-storage` Phase 7).
+    AddPlugin {
+        /// The generated project root the edits are applied to.
+        project_root: PathBuf,
+        /// The registry plugin id (`"secure-storage"`, …).
+        id: String,
+        /// The checked optional-feature ids.
+        features: Vec<String>,
+    },
 }
 
 /// What the loop must do after a transition.
@@ -470,7 +483,18 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             None => Outcome::idle(),
         },
         Message::CleanSignalsProbed(available) => {
-            with_wizard(state, |w| w.set_clean_signals_available(available))
+            // The one sibling probe gates both the create wizard's clean-signals
+            // arch card and the Add Plugin dialog's facade-tier plugin card.
+            let mut dirty = false;
+            if let Some(w) = state.create_wizard.as_mut() {
+                w.set_clean_signals_available(available);
+                dirty = true;
+            }
+            if let Some(d) = state.add_plugin.as_mut() {
+                d.set_sibling_available(available);
+                dirty = true;
+            }
+            Outcome::dirty(dirty)
         }
         Message::ScaffoldSucceeded { project_root } => {
             state.create_wizard = None;
@@ -481,6 +505,74 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             open_project(state, project_root)
         }
         Message::ScaffoldFailed(message) => with_wizard(state, |w| w.fail(message)),
+
+        // ── Add plugin dialog (frust-secure-storage Phase 7) ────────────────
+        Message::OpenAddPlugin => open_add_plugin(state),
+        Message::CloseAddPlugin => {
+            if state.add_plugin.take().is_some() {
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::AddPluginSelectMove(delta) => with_add_plugin(state, |d| d.select_move(delta)),
+        Message::AddPluginSelectAt(i) => with_add_plugin(state, |d| d.select_at(i)),
+        Message::AddPluginFeatureMove(delta) => with_add_plugin(state, |d| d.feature_move(delta)),
+        Message::AddPluginToggleFeature => with_add_plugin(state, AddPluginDialog::toggle_feature),
+        Message::AddPluginToggleFeatureAt(i) => with_add_plugin(state, |d| d.toggle_feature_at(i)),
+        Message::AddPluginBack => match state.add_plugin.as_mut() {
+            Some(dialog) => {
+                if dialog.back() {
+                    state.add_plugin = None;
+                }
+                Outcome::redraw()
+            }
+            None => Outcome::idle(),
+        },
+        Message::AddPluginAdvance => match state.add_plugin.as_mut() {
+            Some(dialog) => match dialog.advance() {
+                AddPluginAdvance::Apply { id, features } => Outcome {
+                    redraw: true,
+                    effect: Some(Effect::AddPlugin {
+                        project_root: dialog.project_root.clone(),
+                        id,
+                        features,
+                    }),
+                },
+                AddPluginAdvance::Done => {
+                    state.add_plugin = None;
+                    Outcome::redraw()
+                }
+                AddPluginAdvance::Stepped | AddPluginAdvance::Blocked => Outcome::redraw(),
+            },
+            None => Outcome::idle(),
+        },
+        Message::AddPluginSucceeded(report) => match state.add_plugin.as_mut() {
+            Some(dialog) => {
+                let (applied, already) = report.counts();
+                let id = report.plugin_id.clone();
+                dialog.succeed(report);
+                state.toasts.push(
+                    ToastKind::Success,
+                    format!("Added {id} · {applied} applied, {already} already present"),
+                );
+                Outcome::redraw()
+            }
+            // The dialog was closed before the apply finished — the edits still
+            // landed, so surface a toast rather than silently dropping it.
+            None => {
+                let (applied, already) = report.counts();
+                state.toasts.push(
+                    ToastKind::Success,
+                    format!(
+                        "Added {} · {applied} applied, {already} already present",
+                        report.plugin_id
+                    ),
+                );
+                Outcome::redraw()
+            }
+        },
+        Message::AddPluginFailed(message) => with_add_plugin(state, |d| d.fail(message)),
 
         // ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────
         Message::RunDoctor => {
@@ -936,6 +1028,44 @@ fn open_project(state: &mut AppState, root: PathBuf) -> Outcome {
     Outcome {
         redraw: true,
         effect: Some(Effect::RecordRecentProject(root)),
+    }
+}
+
+/// Open the Add Plugin dialog for the active project and request the off-thread
+/// sibling probe that gates a facade-tier plugin card (shared with the create
+/// wizard's clean-signals gating). A no-op — with a warn toast — when no
+/// project is open (the dialog edits a *generated* project; there's nothing to
+/// add to otherwise).
+fn open_add_plugin(state: &mut AppState) -> Outcome {
+    if state.add_plugin.is_some() {
+        return Outcome::idle();
+    }
+    let Some(root) = state
+        .project_root
+        .clone()
+        .or_else(|| state.projects.first().cloned())
+    else {
+        state
+            .toasts
+            .push(ToastKind::Warn, "Open a project first to add a plugin");
+        return Outcome::redraw();
+    };
+    state.add_plugin = Some(AddPluginDialog::new(root));
+    Outcome {
+        redraw: true,
+        effect: Some(Effect::ProbeCleanSignals),
+    }
+}
+
+/// Apply `f` to the open Add Plugin dialog (if any) and redraw; idle when
+/// closed.
+fn with_add_plugin(state: &mut AppState, f: impl FnOnce(&mut AddPluginDialog)) -> Outcome {
+    match state.add_plugin.as_mut() {
+        Some(dialog) => {
+            f(dialog);
+            Outcome::redraw()
+        }
+        None => Outcome::idle(),
     }
 }
 
@@ -1984,6 +2114,121 @@ mod tests {
         // Enter retries from the arch step.
         update(&mut st, Message::CreateWizardAdvance);
         assert_eq!(st.create_wizard.as_ref().unwrap().step, WizardStep::Arch);
+    }
+
+    // ── Add plugin dialog (frust-secure-storage Phase 7) ────────────────────
+
+    use crate::engine::AddPluginStep;
+
+    #[test]
+    fn open_add_plugin_probes_when_a_project_is_open() {
+        let mut st = workbench_with_project();
+        let out = update(&mut st, Message::OpenAddPlugin);
+        assert!(st.add_plugin.is_some());
+        assert_eq!(out.effect, Some(Effect::ProbeCleanSignals));
+        // A second open is a no-op.
+        assert!(!update(&mut st, Message::OpenAddPlugin).redraw);
+        // Close dismisses it.
+        assert!(update(&mut st, Message::CloseAddPlugin).redraw);
+        assert!(st.add_plugin.is_none());
+    }
+
+    #[test]
+    fn open_add_plugin_with_no_project_toasts_the_reason() {
+        let mut st = welcome();
+        let out = update(&mut st, Message::OpenAddPlugin);
+        assert!(st.add_plugin.is_none(), "no project → dialog does not open");
+        assert!(out.redraw, "a warn toast is pushed");
+        assert_eq!(out.effect, None);
+        assert!(!st.toasts.items.is_empty());
+    }
+
+    #[test]
+    fn add_plugin_probe_gates_the_sibling_card_through_update() {
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenAddPlugin);
+        update(&mut st, Message::CleanSignalsProbed(true));
+        let gated = st
+            .add_plugin
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.sibling_gated)
+            .unwrap();
+        assert!(gated.enabled);
+    }
+
+    #[test]
+    fn add_plugin_advance_emits_the_apply_effect_with_selected_features() {
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenAddPlugin);
+        // Select secure-storage.
+        let idx = st
+            .add_plugin
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .position(|e| e.id == "secure-storage")
+            .unwrap();
+        update(&mut st, Message::AddPluginSelectAt(idx));
+        update(&mut st, Message::AddPluginAdvance); // Select -> Options
+        assert_eq!(st.add_plugin.as_ref().unwrap().step, AddPluginStep::Options);
+        // Check the biometric gate, then apply.
+        update(&mut st, Message::AddPluginToggleFeature);
+        let out = update(&mut st, Message::AddPluginAdvance);
+        assert_eq!(
+            out.effect,
+            Some(Effect::AddPlugin {
+                project_root: PathBuf::from("/tmp/huddle"),
+                id: "secure-storage".to_string(),
+                features: vec!["biometric-gate".to_string()],
+            })
+        );
+        assert_eq!(
+            st.add_plugin.as_ref().unwrap().step,
+            AddPluginStep::Applying
+        );
+    }
+
+    #[test]
+    fn add_plugin_success_shows_report_and_toasts() {
+        use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
+
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenAddPlugin);
+        update(&mut st, Message::AddPluginAdvance); // into Options
+        update(&mut st, Message::AddPluginAdvance); // into Applying (emits effect)
+        let report = AddReport {
+            plugin_id: "shared-preferences".to_string(),
+            items: vec![AddItem {
+                description: "Cargo.toml dependency `frust-shared-preferences`".to_string(),
+                outcome: AddOutcome::Applied,
+            }],
+        };
+        update(&mut st, Message::AddPluginSucceeded(report));
+        assert_eq!(st.add_plugin.as_ref().unwrap().step, AddPluginStep::Report);
+        assert!(!st.toasts.items.is_empty());
+        // Enter on the report closes the dialog.
+        update(&mut st, Message::AddPluginAdvance);
+        assert!(st.add_plugin.is_none());
+    }
+
+    #[test]
+    fn add_plugin_failure_lands_on_the_error_step() {
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenAddPlugin);
+        update(&mut st, Message::AddPluginAdvance);
+        update(&mut st, Message::AddPluginAdvance);
+        update(
+            &mut st,
+            Message::AddPluginFailed("no `frust` dependency".to_string()),
+        );
+        assert_eq!(st.add_plugin.as_ref().unwrap().step, AddPluginStep::Error);
+        // Enter retries from the options step.
+        update(&mut st, Message::AddPluginAdvance);
+        assert_eq!(st.add_plugin.as_ref().unwrap().step, AddPluginStep::Options);
     }
 
     #[test]

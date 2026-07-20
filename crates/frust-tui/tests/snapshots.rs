@@ -12,10 +12,11 @@ use ratatui::layout::Position;
 
 use frust_drive::devices::{Device, Kind, Platform};
 use frust_drive::doctor::{Area, Component, ComponentStatus, DoctorReport, FixCommand, Status};
+use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
 use frust_tui::engine::{
-    AppState, BootstrapState, BootstrapWizard, BuildLauncher, ContextTarget, CreateWizard,
-    DeviceRow, DoctorCheck, DoctorState, Message, Palette, RegionId, RunConfig, RunFocus, Screen,
-    Scroll, SessionView, ToastKind, WizardStep, update,
+    AddPluginDialog, AddPluginStep, AppState, BootstrapState, BootstrapWizard, BuildLauncher,
+    ContextTarget, CreateWizard, DeviceRow, DoctorCheck, DoctorState, Message, Palette, RegionId,
+    RunConfig, RunFocus, Screen, Scroll, SessionView, ToastKind, WizardStep, update,
 };
 use frust_tui::supervise::{SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -365,6 +366,78 @@ fn wizard_arch_step_sibling_present_80x24() {
         24,
         &wizard_state(WizardStep::Arch, "my_app", true, 1)
     ));
+}
+
+// ── Add plugin dialog (frust-secure-storage Phase 7) ─────────────────────────
+
+/// An Add Plugin dialog over a workbench, on `step`, with the sibling probe
+/// resolved to `sibling_available` and the given `cursor`.
+fn add_plugin_state(step: AddPluginStep, sibling_available: bool, cursor: usize) -> AppState {
+    let mut dialog = AddPluginDialog::new(PathBuf::from("/tmp/huddle"));
+    dialog.set_sibling_available(sibling_available);
+    dialog.cursor = cursor;
+    dialog.step = step;
+    let mut state = workbench_state();
+    state.add_plugin = Some(dialog);
+    state
+}
+
+/// The select step with the facade-tier (sibling-gated) plugin card disabled —
+/// it renders disabled-with-explanation.
+#[test]
+fn add_plugin_select_disabled_card_100x30() {
+    insta::assert_snapshot!(render_to_string(
+        100,
+        30,
+        &add_plugin_state(AddPluginStep::Select, false, 0)
+    ));
+}
+
+/// The options step for secure-storage, showing its `[ ]` biometric-gate
+/// feature checkbox.
+#[test]
+fn add_plugin_options_checkboxes_100x30() {
+    let mut state = workbench_state();
+    let mut dialog = AddPluginDialog::new(PathBuf::from("/tmp/huddle"));
+    dialog.set_sibling_available(true);
+    // Select secure-storage and advance into its options step.
+    let idx = dialog
+        .entries
+        .iter()
+        .position(|e| e.id == "secure-storage")
+        .unwrap();
+    dialog.cursor = idx;
+    dialog.advance();
+    dialog.toggle_feature(); // check the biometric gate so a `[✓]` shows
+    state.add_plugin = Some(dialog);
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The report step, a mix of Applied / AlreadyPresent line items.
+#[test]
+fn add_plugin_report_100x30() {
+    let mut state = workbench_state();
+    let mut dialog = AddPluginDialog::new(PathBuf::from("/tmp/huddle"));
+    dialog.succeed(AddReport {
+        plugin_id: "secure-storage".to_string(),
+        items: vec![
+            AddItem {
+                description: "Cargo.toml dependency `frust-secure-storage`".to_string(),
+                outcome: AddOutcome::Applied,
+            },
+            AddItem {
+                description: "AndroidManifest.xml permission `android.permission.USE_BIOMETRIC`"
+                    .to_string(),
+                outcome: AddOutcome::Applied,
+            },
+            AddItem {
+                description: "Info.plist key `NSFaceIDUsageDescription`".to_string(),
+                outcome: AddOutcome::AlreadyPresent,
+            },
+        ],
+    });
+    state.add_plugin = Some(dialog);
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
 // ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────────────

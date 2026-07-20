@@ -17,10 +17,10 @@ expression: "render_to_string(100, 30, &state)"
                          │line 44                                                                   
  ACTIONS                 │line 45                                                                   
    New project · n       │line 46                                                                   
-   Doctor · d            │line 47                                                                   
-   Build · b             │line 48                                                                   
-   Clean · c             │line 49                                                                   
-                         │line 50                                                                   
+   Add plugin · a        │line 47                                                                   
+   Doctor · d            │line 48                                                                   
+   Build · b             │line 49                                                                   
+   Clean · c             │line 50                                                                   
                          │line 51                                                                   
                          │line 52                                                                   
                          │line 53                                                                   

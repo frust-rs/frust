@@ -29,8 +29,9 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{
-    ActiveModal, AppState, BootstrapNode, BootstrapWizard, BuildFocus, BuildSpec, BuildTargetSpec,
-    DoctorCheck, Effect, Engine, Message, RegionId, RunFocus, Screen, WizardStep,
+    ActiveModal, AddPluginDialog, AddPluginStep, AppState, BootstrapNode, BootstrapWizard,
+    BuildFocus, BuildSpec, BuildTargetSpec, DoctorCheck, Effect, Engine, Message, RegionId,
+    RunFocus, Screen, WizardStep,
 };
 use crate::supervise::{
     DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor,
@@ -199,6 +200,11 @@ fn apply_effect(
             let id = next_adhoc_session_id(next_adhoc_id);
             launch_bootstrap_fix_session(program, args, label, id, tx.clone());
         }
+        Some(Effect::AddPlugin {
+            project_root,
+            id,
+            features,
+        }) => spawn_add_plugin(project_root, id, features, tx.clone()),
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
         Some(Effect::SaveFollowTailDefault(on)) => crate::engine::save_follow_tail_default(on),
@@ -546,6 +552,27 @@ fn probe_clean_signals(tx: UnboundedSender<Message>) {
     });
 }
 
+/// Apply a registry plugin's contributions to `project_root` off the UI thread
+/// via [`frust_drive::plugin::add_plugin`] (format-preserving file edits, so
+/// cheap), posting [`Message::AddPluginSucceeded`] with the per-edit report, or
+/// [`Message::AddPluginFailed`] with the typed error rendered — the Add Plugin
+/// dialog's apply step (`frust-secure-storage` Phase 7).
+fn spawn_add_plugin(
+    project_root: PathBuf,
+    id: String,
+    features: Vec<String>,
+    tx: UnboundedSender<Message>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+        let msg = match frust_drive::plugin::add_plugin(&project_root, &id, &feature_refs) {
+            Ok(report) => Message::AddPluginSucceeded(report),
+            Err(e) => Message::AddPluginFailed(e.to_string()),
+        };
+        let _ = tx.send(msg);
+    });
+}
+
 /// The `../clean-signals-rs` sibling directory (next to this Frust checkout),
 /// derived from `frust-tui`'s compile-time manifest dir
 /// (`<repo>/crates/frust-tui`).
@@ -809,6 +836,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             ActiveModal::Palette(palette) => translate_palette_key(code, mods, palette),
             ActiveModal::CreateWizard(wizard) => translate_wizard_key(code, mods, wizard.step),
             ActiveModal::Bootstrap(wizard) => translate_bootstrap_key(code, wizard),
+            ActiveModal::AddPlugin(dialog) => translate_add_plugin_key(code, dialog),
             ActiveModal::RunConfig(modal) => translate_modal_key(code, mods, modal),
             ActiveModal::ProjectSwitcher => translate_switcher_key(code, state),
             // D4-style modal exclusivity — see `crate::ui::render`'s
@@ -880,6 +908,11 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // `i` opens the toolchain bootstrap wizard from either screen (mouse
         // parity: the titlebar toolchain chip) — D6a's fresh-machine flow.
         KeyCode::Char('i') => vec![Message::OpenBootstrapWizard],
+
+        // `a` opens the Add Plugin dialog from either screen (mouse parity: the
+        // sidebar "Add plugin" action / the palette). Gated on an open project
+        // in `update` (a warn toast surfaces the reason on the welcome screen).
+        KeyCode::Char('a') => vec![Message::OpenAddPlugin],
 
         // `:` opens the command palette from either screen (the `Ctrl+P`
         // shorthand above).
@@ -1070,6 +1103,45 @@ fn translate_bootstrap_key(code: KeyCode, wizard: &BootstrapWizard) -> Vec<Messa
         KeyCode::Char('r') => vec![Message::BootstrapRunFix],
         KeyCode::Char('c') => vec![Message::BootstrapCopyFix],
         _ => vec![],
+    }
+}
+
+/// Translate one key press while the Add Plugin dialog is open, honoring the
+/// current step (`frust-secure-storage` Phase 7). `Esc` steps back / closes
+/// everywhere; the select step moves the card highlight and `Enter` chooses;
+/// the options step moves the feature cursor, `Space` toggles the focused
+/// feature, and `Enter` applies; the report/error steps advance on `Enter`.
+/// During the off-thread apply only `Esc` (a no-op back) is live — the create
+/// wizard's `Scaffolding` precedent. Mouse parity: the view registers a click
+/// region per card, per feature row, and for the Back/Apply/Cancel/close
+/// affordances.
+fn translate_add_plugin_key(code: KeyCode, dialog: &AddPluginDialog) -> Vec<Message> {
+    match dialog.step {
+        AddPluginStep::Select => match code {
+            KeyCode::Esc => vec![Message::AddPluginBack],
+            KeyCode::Enter => vec![Message::AddPluginAdvance],
+            KeyCode::Up | KeyCode::Left => vec![Message::AddPluginSelectMove(-1)],
+            KeyCode::Down | KeyCode::Right => vec![Message::AddPluginSelectMove(1)],
+            _ => vec![],
+        },
+        AddPluginStep::Options => match code {
+            KeyCode::Esc => vec![Message::AddPluginBack],
+            KeyCode::Enter => vec![Message::AddPluginAdvance],
+            KeyCode::Char(' ') => vec![Message::AddPluginToggleFeature],
+            KeyCode::Up => vec![Message::AddPluginFeatureMove(-1)],
+            KeyCode::Down => vec![Message::AddPluginFeatureMove(1)],
+            _ => vec![],
+        },
+        AddPluginStep::Report | AddPluginStep::Error => match code {
+            KeyCode::Esc => vec![Message::AddPluginBack],
+            KeyCode::Enter => vec![Message::AddPluginAdvance],
+            _ => vec![],
+        },
+        // The off-thread apply is running — only Esc (a no-op back) is live.
+        AddPluginStep::Applying => match code {
+            KeyCode::Esc => vec![Message::AddPluginBack],
+            _ => vec![],
+        },
     }
 }
 

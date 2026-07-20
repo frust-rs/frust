@@ -16,10 +16,10 @@ expression: "render_to_string(100, 30, &state)"
                       ╭ Clean ───────────────────────────────────────────────╮                      
  ACTIONS              │                                                      │▓▓                    
    New project · n    │  Remove build output for huddle?                     │▓▓                    
-   Doctor · d         │  cargo clean · android/app/build · android/.gradle   │▓▓                    
-   Build · b          │                                                      │▓▓                    
-   Clean · c          │   Clean     Cancel                                   │▓▓                    
-                      │  Enter/y clean · Esc cancel                          │▓▓                    
+   Add plugin · a     │  cargo clean · android/app/build · android/.gradle   │▓▓                    
+   Doctor · d         │                                                      │▓▓                    
+   Build · b          │   Clean     Cancel                                   │▓▓                    
+   Clean · c          │  Enter/y clean · Esc cancel                          │▓▓                    
                       ╰──────────────────────────────────────────────────────╯▓▓                    
                         ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                    
                          │                                                                          

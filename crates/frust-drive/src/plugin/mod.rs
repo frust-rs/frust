@@ -126,7 +126,7 @@ pub enum AddOutcome {
 }
 
 /// One line of an [`AddReport`]: what the edit was and whether it applied.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddItem {
     /// Human-readable target (see [`Contribution::describe`]).
     pub description: String,
@@ -137,7 +137,7 @@ pub struct AddItem {
 /// The result of [`add_plugin`]: the plugin added and a per-edit line item
 /// list. Re-running `add_plugin` with the same arguments yields the same items
 /// all reporting [`AddOutcome::AlreadyPresent`] (the idempotency contract).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddReport {
     /// The plugin id that was added.
     pub plugin_id: String,

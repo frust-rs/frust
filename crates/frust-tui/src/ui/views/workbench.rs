@@ -286,6 +286,8 @@ fn render_sidebar(
     lines.push(heading("ACTIONS"));
     let new_project_row = lines.len();
     lines.push(item("New project · n"));
+    let add_plugin_row = lines.len();
+    lines.push(item("Add plugin · a"));
     let doctor_row = lines.len();
     lines.push(item("Doctor · d"));
     let build_row = lines.len();
@@ -326,6 +328,9 @@ fn render_sidebar(
     }
     if let Some(rect) = row_rect(new_project_row) {
         mouse.click(rect, RegionId::NewProjectAction, Message::OpenCreateWizard);
+    }
+    if let Some(rect) = row_rect(add_plugin_row) {
+        mouse.click(rect, RegionId::AddPluginAction, Message::OpenAddPlugin);
     }
 }
 

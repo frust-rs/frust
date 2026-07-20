@@ -11,6 +11,7 @@
 
 use std::path::Path;
 
+use super::add_plugin::AddPluginDialog;
 use super::bootstrap::BootstrapWizard;
 use super::build_launcher::BuildLauncher;
 use super::create_wizard::CreateWizard;
@@ -37,6 +38,10 @@ pub enum ActiveModal<'a> {
     /// create wizard, it can appear over either top-level screen (the
     /// titlebar chip shows on both).
     Bootstrap(&'a BootstrapWizard),
+    /// The Add Plugin dialog (`state.add_plugin`) — like the wizards above, it
+    /// can appear over either top-level screen (though it needs an open project
+    /// to reach — see `crate::engine::update`'s `OpenAddPlugin`).
+    AddPlugin(&'a AddPluginDialog),
     /// The keyboard/help overlay (`state.help_open`, `?` — T05 / D5) — like
     /// the wizards above, reachable from either top-level screen (both
     /// status bars carry the `? help` hint).
@@ -67,6 +72,8 @@ impl AppState {
             Some(ActiveModal::CreateWizard(wizard))
         } else if let Some(wizard) = &self.bootstrap_wizard {
             Some(ActiveModal::Bootstrap(wizard))
+        } else if let Some(dialog) = &self.add_plugin {
+            Some(ActiveModal::AddPlugin(dialog))
         } else if self.help_open {
             Some(ActiveModal::HelpOverlay)
         } else if let Some(modal) = &self.run_config {

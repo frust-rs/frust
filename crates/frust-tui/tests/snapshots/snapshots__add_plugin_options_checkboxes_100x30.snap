@@ -11,19 +11,19 @@ expression: "render_to_string(100, 30, &state)"
  DEVICES ↻ r             │                                                                          
    none found            │  No session running — start a run to open a log tab here.                
                          │                                                                          
- SESSIONS          ╭ Build · huddle ────────────────────────────────────────────╮                   
-   none running    │                                                            │▓▓                 
-                   │  Kind     ‹ apk ›                                          │▓▓                 
- ACTIONS           │  Mode     ‹ release ›                                      │▓▓                 
-   New project · n │  Flavor   paid                                             │▓▓                 
-   Add plugin · a  │  Defines  KEY=VALUE …                                      │▓▓                 
-   Doctor · d      │  Split per ABI [x]                                         │▓▓                 
-   Build · b       │                                                            │▓▓                 
-   Clean · c       │   Build     Cancel                                         │▓▓                 
-                   │  Space toggle · ←/→ cycle · Tab next · Enter build · Esc   │▓▓                 
-                   │                                                            │▓▓                 
-                   ╰────────────────────────────────────────────────────────────╯▓▓                 
-                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                 
+ SESSIONS                │                                                                          
+   none running   ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+                  │                                                              │▓▓                
+ ACTIONS          │  Optional features  ·  secure-storage                        │▓▓                
+   New project · n│  ▸ [✓] biometric-gate                                        │▓▓                
+   Add plugin · a │        Per-store Face ID / Touch ID / BiometricPrompt gate:  │▓▓                
+   Doctor · d     │                                                              │▓▓                
+   Build · b      │   Back    Apply    Cancel                                    │▓▓                
+   Clean · c      │  ↑/↓ move · Space toggle · Enter apply · Esc back            │▓▓                
+                  ╰──────────────────────────────────────────────────────────────╯▓▓                
+                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
+                         │                                                                          
+                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

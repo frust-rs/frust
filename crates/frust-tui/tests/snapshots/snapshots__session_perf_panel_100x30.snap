@@ -17,10 +17,10 @@ expression: "render_to_string(100, 30, &state)"
                          │frust-perf raw n=28 total_us=3036 rebuild_us=200 layout_us=300 paint_us=40
  ACTIONS                 │frust-perf raw n=29 total_us=3073 rebuild_us=200 layout_us=300 paint_us=40
    New project · n       │frust-perf raw n=30 total_us=3110 rebuild_us=200 layout_us=300 paint_us=40
-   Doctor · d            │frust-perf raw n=31 total_us=3147 rebuild_us=200 layout_us=300 paint_us=40
-   Build · b             │frust-perf raw n=32 total_us=3184 rebuild_us=200 layout_us=300 paint_us=40
-   Clean · c             │frust-perf raw n=33 total_us=3221 rebuild_us=200 layout_us=300 paint_us=40
-                         │frust-perf raw n=34 total_us=3258 rebuild_us=200 layout_us=300 paint_us=40
+   Add plugin · a        │frust-perf raw n=31 total_us=3147 rebuild_us=200 layout_us=300 paint_us=40
+   Doctor · d            │frust-perf raw n=32 total_us=3184 rebuild_us=200 layout_us=300 paint_us=40
+   Build · b             │frust-perf raw n=33 total_us=3221 rebuild_us=200 layout_us=300 paint_us=40
+   Clean · c             │frust-perf raw n=34 total_us=3258 rebuild_us=200 layout_us=300 paint_us=40
                          │frust-perf raw n=35 total_us=3295 rebuild_us=200 layout_us=300 paint_us=40
                          │frust-perf raw n=36 total_us=3332 rebuild_us=200 layout_us=300 paint_us=40
                          │frust-perf raw n=37 total_us=3369 rebuild_us=200 layout_us=300 paint_us=40

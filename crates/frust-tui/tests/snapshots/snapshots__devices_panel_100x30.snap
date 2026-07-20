@@ -18,10 +18,10 @@ expression: "render_to_string(100, 30, &devices_panel_state())"
                          │                                                                          
  ACTIONS                 │                                                                          
    New project · n       │                                                                          
+   Add plugin · a        │                                                                          
    Doctor · d            │                                                                          
    Build · b             │                                                                          
    Clean · c             │                                                                          
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

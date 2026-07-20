@@ -18,10 +18,10 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
                    │    [ ] iPhone SE                                           │▓▓                 
  ACTIONS           │                                                            │▓▓                 
    New project · n │  Mode     ‹ release ›                                      │▓▓                 
-   Doctor · d      │  Flavor   paid                                             │▓▓                 
-   Build · b       │  Defines  FRUST_TRACE=1█                                   │▓▓                 
-   Clean · c       │                                                            │▓▓                 
-                   │   Launch (1)     Cancel                                    │▓▓                 
+   Add plugin · a  │  Flavor   paid                                             │▓▓                 
+   Doctor · d      │  Defines  FRUST_TRACE=1█                                   │▓▓                 
+   Build · b       │                                                            │▓▓                 
+   Clean · c       │   Launch (1)     Cancel                                    │▓▓                 
                    │  Space toggle · ←/→ mode · Tab next · Enter launch · Esc   │▓▓                 
                    ╰────────────────────────────────────────────────────────────╯▓▓                 
                      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                 

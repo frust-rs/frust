@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use frust_drive::devices::Device;
 use frust_drive::doctor::DoctorReport;
+use frust_drive::plugin::AddReport;
 
 use super::build_launcher::BuildFocus;
 use super::doctor::DoctorCheck;
@@ -90,6 +91,24 @@ pub enum RegionId {
     /// The bootstrap wizard's close affordance (the `[Esc] Close` title
     /// button).
     BootstrapClose,
+    /// A plugin selection card in the Add Plugin dialog (0-based index into the
+    /// dialog's `entries`); click highlights it (a disabled card can be
+    /// highlighted to read its reason but not chosen).
+    AddPluginCard(usize),
+    /// An optional-feature checkbox row in the Add Plugin dialog (0-based index
+    /// into the dialog's `features`); click toggles it.
+    AddPluginFeature(usize),
+    /// The Add Plugin dialog's primary button (Next on Select, Apply on
+    /// Options, Retry on Error, Done on Report).
+    AddPluginApply,
+    /// The Add Plugin dialog's Back button (steps back).
+    AddPluginBack,
+    /// The Add Plugin dialog's Cancel button (closes it).
+    AddPluginCancel,
+    /// The Add Plugin dialog's `[Esc] Close` title affordance.
+    AddPluginClose,
+    /// The sidebar "Add plugin" action row; click opens the Add Plugin dialog.
+    AddPluginAction,
     /// The sidebar "Doctor" action row; click opens the doctor panel.
     DoctorAction,
     /// The doctor panel's re-run affordance.
@@ -409,6 +428,37 @@ pub enum Message {
     /// Copy the selected fix's command (or its doc link) to the clipboard (`c`
     /// / the "copy" affordance) — routed as [`super::Effect::Copy`].
     BootstrapCopyFix,
+
+    // ── Add plugin dialog (frust-secure-storage Phase 7) ────────────────────
+    /// Open the Add Plugin dialog for the active project (`a`, the sidebar
+    /// "Add plugin" action, or the palette). Primes an off-thread sibling
+    /// probe (shared with the create wizard's clean-signals gating). A no-op
+    /// (with a warn toast) when no project is open.
+    OpenAddPlugin,
+    /// Close the dialog without applying (the Cancel button / Esc on the first
+    /// step).
+    CloseAddPlugin,
+    /// Move the selection-card highlight by `delta` (`↑`/`↓`).
+    AddPluginSelectMove(isize),
+    /// Highlight a selection card by index (mouse click parity).
+    AddPluginSelectAt(usize),
+    /// Move the optional-feature cursor by `delta` (`↑`/`↓` on the options step).
+    AddPluginFeatureMove(isize),
+    /// Toggle the focused optional feature (`Space`).
+    AddPluginToggleFeature,
+    /// Toggle an optional feature by index (mouse click parity).
+    AddPluginToggleFeatureAt(usize),
+    /// Advance the dialog (Enter / the primary button): step forward, request
+    /// the off-thread apply, retry, or close (on the report step).
+    AddPluginAdvance,
+    /// Step the dialog back (Esc / the Back button); closes it on the first or
+    /// report step.
+    AddPluginBack,
+    /// The off-thread apply succeeded; the dialog shows the per-edit report.
+    AddPluginSucceeded(AddReport),
+    /// The off-thread apply failed; the dialog shows the error and offers a
+    /// retry.
+    AddPluginFailed(String),
 
     // ── Build launcher (TUI2-07) ────────────────────────────────────────────
     /// Open the build launcher, primed for the active project (`b` from the

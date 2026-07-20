@@ -4,7 +4,6 @@ expression: "render_to_string(80, 24, &state)"
 ---
                                                            toolchain ◌ checking…
                                                                                 
-                                                                                
                ╭ Keyboard Shortcuts ────────────────────────────╮               
                │                                                │▓▓             
                │  r       Run on device(s)…                     │▓▓             
@@ -14,6 +13,7 @@ expression: "render_to_string(80, 24, &state)"
                │  d       Doctor                                │▓▓             
                │  i       Toolchain setup…                      │▓▓             
                │  n       New project…                          │▓▓             
+               │  a       Add plugin…                           │▓▓             
                │  ^O      Switch project…                       │▓▓             
                │  R       Refresh devices                       │▓▓             
                │  ⌥m      Toggle mouse capture                  │▓▓             
@@ -25,4 +25,4 @@ expression: "render_to_string(80, 24, &state)"
                ╰────────────────────────────────────────────────╯▓▓             
                  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓             
                                                                                 
-? help · ⌘ palette · q quit                                            [mouse ✓]
+? help · ⌘ palette · a add plugin · q quit                             [mouse ✓]

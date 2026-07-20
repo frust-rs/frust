@@ -25,4 +25,4 @@ expression: "render_to_string(80, 24, &wizard_state(WizardStep::Name, \"my_app\"
                                                                                 
                                                                                 
                                                                                 
-? help · ⌘ palette · q quit                                            [mouse ✓]
+? help · ⌘ palette · a add plugin · q quit                             [mouse ✓]
