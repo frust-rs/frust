@@ -14,7 +14,7 @@
 //! `frust-plugin` is a **leaf** (like `frust-reactive`): it has **no
 //! `frust-*` dependencies**, and its only platform dep (`jni` +
 //! `ndk-context`) is Android-target-gated. The Android **shell** *writes* the
-//! handles into [`ndk-context`](ndk_context)'s process-wide slot (it owns the
+//! handles into `ndk-context`'s process-wide slot (it owns the
 //! JNI boundary — see `frust-shell-android`'s `nativeInitPlatform` export);
 //! plugins *read* them back through [`android`]. Using `ndk-context` as the
 //! storage slot (rather than a private static) also makes any third-party

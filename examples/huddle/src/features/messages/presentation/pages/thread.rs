@@ -19,7 +19,7 @@
 //!
 //! # Why a thread-local composer, not a `Component` (mirrors `search`)
 //!
-//! `src/routes.rs`'s `/thread/:id` entry (a frozen hub file, see
+//! `src/routes.rs`'s `/thread/:id` entry (a shared hub file, see
 //! `src/README-phase-c.md`) calls [`thread_screen`] with only the route
 //! param, no `NavigatorController` — unlike `/channel/:id`, which gets one
 //! (see `src/routes.rs`) — so, exactly like
@@ -73,8 +73,8 @@ use crate::ui::swipeable::press_pop;
 // Flat-row metrics (device-parity-round2 task R2b) — duplicated with the same
 // names from `screens::channel_feed`'s own R2 constants rather than shared
 // through a new module (R2b's spec: "prefer whatever is cleanest without
-// creating a new module"); each screen owns its own visual helpers per
-// `src/README-phase-c.md`'s Phase C disjointness convention (see this
+// creating a new module"); each feature's presentation owns its own visual
+// helpers per `src/README-phase-c.md`'s feature-slice convention (see this
 // module's own `avatar` doc below).
 // ---------------------------------------------------------------------------
 
@@ -522,8 +522,8 @@ fn reaction_chips(
 }
 
 /// A 40px circular initials avatar — duplicated locally rather than shared
-/// with `channel_feed`'s own copy (each Phase C screen owns its own visual
-/// helpers, keeping the two files disjoint per `src/README-phase-c.md`), but
+/// with `channel_feed`'s own copy (each feature's presentation owns its own
+/// visual helpers, keeping the two files disjoint per `src/README-phase-c.md`), but
 /// now built off the same `fill_box` disc + `SizedBox+Align` monogram idiom
 /// as `channel_feed::avatar` (task R2b) rather than a `filled_card` tile.
 /// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap opening

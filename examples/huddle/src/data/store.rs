@@ -1,12 +1,14 @@
 //! The shared mock dataset the whole Huddle app renders (PLAN.md's
 //! "All data mocked/static").
 //!
-//! This is a **hub file finalized in the skeleton (task 10)** — Phase C screen
-//! tasks READ this dataset through the accessor functions below but never edit
-//! this module (see `src/README-phase-c.md`). It is plain `&'static`/const data
-//! plus accessor `fn`s that materialize owned [`User`]/[`Channel`]/[`Dm`]/
-//! [`Message`]/[`ActivityItem`] values; there is **no reactive state here** —
-//! controllers (Phase C) own the signals, seeding them from these accessors.
+//! This is a hub file: only a feature's `data/` layer reads it directly
+//! (through the accessor functions below), never `domain`/`presentation` (see
+//! `src/README-phase-c.md`'s feature-slice convention, enforced by
+//! `tests/architecture.rs`). It is plain `&'static`/const data plus accessor
+//! `fn`s that materialize owned [`User`]/[`Channel`]/[`Dm`]/[`Message`]/
+//! [`ActivityItem`] values; there is **no reactive state here** — controllers
+//! own the signals, seeding them from these accessors via the feature's
+//! repository.
 //!
 //! Entity struct definitions live in their owning feature's `domain::entities`
 //! (huddle clean-architecture refactor, task 01); this module owns only the

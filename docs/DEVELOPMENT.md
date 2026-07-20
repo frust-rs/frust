@@ -413,13 +413,13 @@ deliberately, not floating:
   API, isolated behind the `SceneSink` encode seam so a breaking bump never
   reaches the default GPU path. See *Test* below for its tripwire command.
 - `ndk-context = "0.1"` (`frust-plugin`'s Android platform-handle slot,
-  written by the Android shell's `nativeInitPlatform` and read by every
-  plugin) is pinned to minor; `cargo check --target aarch64-linux-android -p
-  frust-plugin` is the tripwire for a breaking bump. `objc2 = "0.6"` /
-  `objc2-foundation = "0.3"` (the Apple ObjC runtime bridge, consumed by
-  `frust-shared-preferences`'s `NSUserDefaults` backend) are pinned to
-  minor; `cargo check --target aarch64-apple-ios-sim -p
-  frust-shared-preferences` is the tripwire.
+  written via `frust_plugin::android::initialize`, called by the Android
+  shell's `nativeInitPlatform`, and read by every plugin) is pinned to minor;
+  `cargo check --target aarch64-linux-android -p frust-plugin` is the tripwire
+  for a breaking bump. `objc2 = "0.6"` / `objc2-foundation = "0.3"` (the Apple
+  ObjC runtime bridge, consumed by `frust-shared-preferences`'s
+  `NSUserDefaults` backend) are pinned to minor; `cargo check --target
+  aarch64-apple-ios-sim -p frust-shared-preferences` is the tripwire.
 - `examples/huddle` and `plugins/clean-signals-frust` are each a
   **standalone package** (own `[workspace]` root and `Cargo.lock`,
   `exclude`d from the root `[workspace]`). Both depend on the

@@ -4,10 +4,10 @@
 //! # Pre-init detection is an atomic flag, checked first
 //!
 //! This module owns the process-wide "handles installed" state: a single
-//! [`AtomicBool`] ([`INITIALIZED`]) that Android's [`initialize`] flips to
+//! [`AtomicBool`] ([`INITIALIZED`]) that Android's `initialize` flips to
 //! `true` — *after* it has handed the `(JavaVM, application Context)` pointers
-//! to [`ndk-context`](ndk_context) — and that every accessor
-//! ([`vm`]/[`context`]/[`with_jni_env`], via [`android_context`]) reads
+//! to `ndk-context` — and that every accessor
+//! (`vm`/`context`/[`with_jni_env`], via `android_context`) reads
 //! **first**. Before init the flag is `false`, so a plugin call returns
 //! [`PlatformHandleError::NotInitialized`] on a path that never touches
 //! `ndk_context::android_context` or `catch_unwind` — the pre-init decision is
@@ -18,17 +18,17 @@
 //! gate-before-`Err` logic is host-testable.
 //!
 //! On Android, once the flag is set, the accessors read the `(JavaVM,
-//! application Context)` pair the shell installed and hand a live [`jni::Env`]
-//! plus the context [`JObject`] to a caller closure. The only `unsafe` here is
-//! the raw-pointer work: [`initialize`] forwarding the shell's opaque pointers to
-//! `ndk-context`, and the *reconstruction* of a [`JavaVM`] / borrowed
-//! [`JObject`] from the pointers `ndk-context` stores — each isolated in one
+//! application Context)` pair the shell installed and hand a live `jni::Env`
+//! plus the context `JObject` to a caller closure. The only `unsafe` here is
+//! the raw-pointer work: `initialize` forwarding the shell's opaque pointers to
+//! `ndk-context`, and the *reconstruction* of a `JavaVM` / borrowed
+//! `JObject` from the pointers `ndk-context` stores — each isolated in one
 //! `unsafe` block with a `SAFETY:` comment stating the contract the shell
 //! upholds (the pointers are the live VM and a process-lifetime `Global`
 //! context reference).
 //!
 //! On every non-Android target this module is inert: no JNI types exist,
-//! [`initialize`] does not exist, so the flag can never be set and
+//! `initialize` does not exist, so the flag can never be set and
 //! [`with_jni_env`] always reports [`PlatformHandleError::NotInitialized`] —
 //! keeping the crate an unconditional dependency for plugins on every platform.
 

@@ -1,6 +1,6 @@
-//! Huddle's full route table — a **hub file finalized in the skeleton (task
-//! 10)**. Phase C screen tasks fill their own `screens/<name>.rs`, never this
-//! file (see `src/README-phase-c.md`).
+//! Huddle's full route table — a hub file: each page builder lives in its
+//! owning feature's `presentation/pages/` module (see `src/README-phase-c.md`
+//! for the feature-slice convention this crate follows).
 //!
 //! Twelve routes covering every destination in the plan:
 //! `/` (Home tab), `/search`, `/activity`, `/you`, `/channel/:id`,

@@ -19,7 +19,7 @@
 //!
 //! [`crate::features::activity::presentation::pages::activity`]'s module docs
 //! spell out why the screen is a **plain** function rather than a
-//! `Component`: `src/routes.rs`'s `/activity` entry (a frozen hub file, see
+//! `Component`: `src/routes.rs`'s `/activity` entry (a shared hub file, see
 //! `src/README-phase-c.md`) gives the screen no `NavigatorController`, so a
 //! row tap's `on_press` needs `&mut HuddleState` directly to reach
 //! `state.nav.router().push(..)` — a `Component`'s inner event handlers only

@@ -16,7 +16,7 @@
 //!
 //! # Why a thread-local instance, not a `Component`
 //!
-//! The `/search` route (`src/routes.rs`, a frozen hub file per
+//! The `/search` route (`src/routes.rs`, a shared hub file per
 //! `src/README-phase-c.md`) calls
 //! [`crate::features::search::presentation::pages::search::search_screen`]
 //! with **no arguments**, and the navigator re-runs that zero-arg page

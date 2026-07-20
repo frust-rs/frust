@@ -27,10 +27,10 @@
     handle, the call into `on_surface_created_from_metal_layer`) — plus the
     `#[unsafe(no_mangle)]` attributes the `ios_app!` macro emits on its
     generated exports.
-  - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/
-    `jobject` plugins need from `ndk-context`-stored handles
-    (`with_jni_env`), one sanctioned-`unsafe` module, scoped `AttachGuard`
-    per call.
+  - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/`jobject`
+    plugins need from `ndk-context`-stored handles (the shell-called
+    `initialize` entry and `with_jni_env`'s raw JavaVM/jobject reconstruction),
+    one sanctioned-`unsafe` module, scoped `AttachGuard` per call.
   - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:`
     calls (`objc2` marks the untyped Foundation setter unsafe;
     `NSString`/`NSArray` are property-list-safe values), each

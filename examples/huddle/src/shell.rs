@@ -2,8 +2,8 @@
 //! (Home / Search / Activity / You) and the shared [`Tab`] enum every tab
 //! routes on.
 //!
-//! This is a **hub file finalized in the skeleton (task 10)** — Phase C screen
-//! tasks never edit it (see `src/README-phase-c.md`). The shell is the app's
+//! This is a hub file shared by every feature (see `src/README-phase-c.md`
+//! for the feature-slice convention). The shell is the app's
 //! first real [`icon`](frust::icon) consumer: each tab carries an
 //! [`icons`](frust::icons) glyph. The bottom bar branches its
 //! Material/Cupertino chrome on the active [`DesignLanguage`] (the settings
