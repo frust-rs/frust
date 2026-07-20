@@ -13,6 +13,8 @@ use std::thread;
 #[cfg(any(test, feature = "test-util"))]
 use std::collections::HashMap;
 #[cfg(any(test, feature = "test-util"))]
+use std::path::PathBuf;
+#[cfg(any(test, feature = "test-util"))]
 use std::sync::mpsc;
 #[cfg(any(test, feature = "test-util"))]
 use std::time::Duration;
@@ -699,6 +701,13 @@ enum StreamExit {
 pub struct FakeProcessRunner {
     responses: HashMap<String, FakeOutcome>,
     streams: HashMap<String, ScriptedStream>,
+    /// The `cwd` passed to the most recent `run_streaming`/`spawn_streaming`
+    /// call, if any — see [`recorded_cwd`](Self::recorded_cwd). `Mutex`-backed
+    /// (not a plain `Cell`/`RefCell`) because a `FakeProcessRunner` is
+    /// routinely shared as `Arc<dyn ProcessRunner>` across a `spawn_blocking`
+    /// boundary (e.g. `frust-tui`'s ad-hoc clean/build sessions), which
+    /// requires `Sync`.
+    recorded_cwd: Mutex<Option<PathBuf>>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -802,6 +811,25 @@ impl FakeProcessRunner {
         self.responses.insert(key.into(), FakeOutcome::Missing);
         self
     }
+
+    /// The `cwd` argument passed to the most recent
+    /// [`run_streaming`](ProcessRunner::run_streaming)/
+    /// [`spawn_streaming`](ProcessRunner::spawn_streaming) call, `None` if
+    /// none has been made yet (or the caller passed `None`). Lets a test
+    /// assert a caller actually routed a project-dir argument through rather
+    /// than relying on the process's own current directory.
+    pub fn recorded_cwd(&self) -> Option<PathBuf> {
+        self.recorded_cwd
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Records `cwd` for [`recorded_cwd`](Self::recorded_cwd) — called by both
+    /// `run_streaming` and `spawn_streaming` below.
+    fn record_cwd(&self, cwd: Option<&Path>) {
+        *self.recorded_cwd.lock().unwrap_or_else(|p| p.into_inner()) = cwd.map(Path::to_path_buf);
+    }
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -846,17 +874,19 @@ impl ProcessRunner for FakeProcessRunner {
 
     /// Fakes streaming by resolving the invocation exactly as [`run`](Self::run)
     /// does, then replaying its `stdout` one line at a time through
-    /// `on_line` before returning the same [`Output`]. `cwd`/`env` are
-    /// ignored — invocation matching is keyed on `cmd`/`args` only, same as
-    /// `run`.
+    /// `on_line` before returning the same [`Output`]. `cwd` is recorded (see
+    /// [`recorded_cwd`](Self::recorded_cwd)) but doesn't affect matching;
+    /// `env` is ignored — invocation matching is keyed on `cmd`/`args` only,
+    /// same as `run`.
     fn run_streaming(
         &self,
         cmd: &str,
         args: &[&str],
-        _cwd: Option<&Path>,
+        cwd: Option<&Path>,
         _env: &[(&str, &str)],
         on_line: &mut dyn FnMut(&str),
     ) -> Result<Output> {
+        self.record_cwd(cwd);
         let out = self.run(cmd, args)?;
         for line in out.stdout.lines() {
             on_line(line);
@@ -868,17 +898,19 @@ impl ProcessRunner for FakeProcessRunner {
     /// [`with_stream_delayed`](FakeProcessRunner::with_stream_delayed)/
     /// [`with_hanging_stream`](FakeProcessRunner::with_hanging_stream) script,
     /// keyed on exact `"<cmd> <args...>"` (no prefix fallback, unlike `run`).
-    /// A background thread sends the scripted lines (respecting any
-    /// per-line delay), then exits per the script's [`StreamExit`] — `Hang`
-    /// blocks on a real channel `recv`, so [`StreamHandle::kill`] unblocks
-    /// it immediately, no polling.
+    /// `cwd` is recorded (see [`recorded_cwd`](Self::recorded_cwd)) but
+    /// doesn't affect matching. A background thread sends the scripted lines
+    /// (respecting any per-line delay), then exits per the script's
+    /// [`StreamExit`] — `Hang` blocks on a real channel `recv`, so
+    /// [`StreamHandle::kill`] unblocks it immediately, no polling.
     fn spawn_streaming(
         &self,
         cmd: &str,
         args: &[&str],
-        _cwd: Option<&Path>,
+        cwd: Option<&Path>,
         _env: &[(&str, &str)],
     ) -> Result<StreamHandle> {
+        self.record_cwd(cwd);
         let full = invocation_key(cmd, args);
         let scripted = self
             .streams

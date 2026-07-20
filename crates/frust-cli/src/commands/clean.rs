@@ -21,6 +21,14 @@ const REMOVED_DIRS: &[&str] = &["android/app/build", "android/.gradle", "build"]
 /// project directory. `commands::dispatch` constructs the real runner and
 /// current directory and calls this (the CLI's one `Real` construction
 /// site).
+///
+/// Runs `cargo clean` through [`ProcessRunner::run_streaming`] with `cwd` set
+/// to `project_dir` — `run` has no `cwd` argument and would run against the
+/// CLI process's own working directory instead of `project_dir` if the two
+/// ever differ (e.g. a future `frust clean --project <dir>` from elsewhere).
+/// The streaming path's `on_line` sink prints each line as it arrives —
+/// byte-compatible with the prior behavior since `cargo clean` emits nothing
+/// to stdout by default.
 pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path) -> Result<u8> {
     if !project_dir.join("frust.toml").exists() {
         println!(
@@ -31,7 +39,13 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path) -> Result<u8> {
     }
 
     let out = runner
-        .run("cargo", &["clean"])
+        .run_streaming(
+            "cargo",
+            &["clean"],
+            Some(project_dir),
+            &[],
+            &mut |line: &str| println!("{line}"),
+        )
         .context("failed to run `cargo clean`")?;
     if out.success {
         println!("Removed cargo build artifacts (`cargo clean`).");
@@ -93,6 +107,25 @@ mod tests {
         let runner = FakeProcessRunner::new().with("cargo clean", ok());
         let code = run_in(&runner, &dir).unwrap();
         assert_eq!(code, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for the clean-runs-in-the-wrong-directory bug: `run_in`
+    /// must route `cargo clean` through `project_dir`, not the CLI process's
+    /// own `cwd` — asserted via `FakeProcessRunner::recorded_cwd`, parallel to
+    /// `frust-tui`'s `run_clean_runs_cargo_clean_in_the_project_dir_not_the_process_cwd`.
+    #[test]
+    fn runs_cargo_clean_in_the_project_dir_not_the_process_cwd() {
+        let dir = unique_project_dir("cargo-clean-cwd");
+        fs::write(dir.join("frust.toml"), "[app]\nname = \"x\"\norg = \"y\"\n").unwrap();
+        // Sanity: the fixture directory is not the process's own cwd — proves
+        // a bare (cwd-agnostic) `run` couldn't have hit this directory.
+        assert_ne!(dir, std::env::current_dir().unwrap());
+
+        let runner = FakeProcessRunner::new().with("cargo clean", ok());
+        let code = run_in(&runner, &dir).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(runner.recorded_cwd(), Some(dir.clone()));
         let _ = fs::remove_dir_all(&dir);
     }
 
