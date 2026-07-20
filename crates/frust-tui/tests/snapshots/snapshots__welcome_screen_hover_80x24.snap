@@ -1,0 +1,28 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(80, 24, &state)"
+---
+                                                               toolchain ✓ ready
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                               █▀▀ █▀█ █░█ █▀ ▀█▀                               
+                               █▀░ █▀▄ █▄█ ▄█ ░█░                               
+                               ━━━━━━━━━━━━━━━━━━                               
+                                                                                
+                               FEARLESS UI IN RUST                              
+                                                                                
+                    No Frust project found in this directory.                   
+                                                                                
+                 ╭────────────────────────────────────────────╮                 
+                 │                                            │                 
+                 │     ▸  ⚒  Create a new Frust project  ◂    │                 
+                 │                                            │                 
+                 ╰────────────────────────────────────────────╯                 
+                                                                                
+                                Enter · or click                                
+                                                                                
+                                                                                
+                                                                                
+? help · ⌘ palette · q quit                                            [mouse ✓]

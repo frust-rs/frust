@@ -75,6 +75,14 @@ pollster = "0.4"
 # rendering-stack pins in docs/DEVELOPMENT.md's Version-Pin Policy, do not
 # bump this independently without re-verifying the MSRV.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
+# frust-tui terminal UI (Phase 1) — ratatui 0.30 / crossterm 0.29, pinned to
+# minor per the Version-Pin Policy (pre-1.0 ratatui churn). These pins are used
+# ONLY by `frust-tui`, which is isolated from the framework render stack (it
+# depends on `frust-drive`, never on `frust-core`/`vello`/`wgpu`). `insta` is a
+# dev-only snapshot harness for the TUI's TestBackend render tests.
+ratatui = "0.30"
+crossterm = "0.29"
+insta = "1"
 # cli
 clap = { version = "4.6", features = ["derive"] }
 minijinja = "2.21"

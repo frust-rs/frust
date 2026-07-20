@@ -1,0 +1,43 @@
+[package]
+name = "frust-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# A library + a standalone binary. `frust-cli` gains a `frust tui` subcommand
+# (task 04) that calls into the library; users also get the `frust-tui` binary
+# directly. Neither depends on the framework crates (same isolation charter as
+# `frust-cli`/`frust-drive` — see docs/ARCHITECTURE.md).
+[lib]
+name = "frust_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "frust-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Shared drive pipelines (devices/doctor/run/build/scaffold). Declared now so
+# Phase 2's project detection / session supervision consume the same pipelines
+# the `frust` CLI does; the skeleton links it but does not yet drive it.
+frust-drive = { path = "../frust-drive" }
+anyhow.workspace = true
+ratatui.workspace = true
+# `event-stream` gives the async `EventStream` the tokio `select!` loop polls.
+crossterm = { workspace = true, features = ["event-stream"] }
+# The workspace `tokio` pin is `default-features = false`; the TUI crate enables
+# exactly the features its async event loop needs (nothing reaches the
+# framework's `tokio` usage).
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "sync",
+] }
+# `StreamExt::next` for the crossterm `EventStream` in the `select!` loop.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# TestBackend + insta snapshot harness for the render suite.
+insta.workspace = true
