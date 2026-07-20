@@ -14,11 +14,15 @@ Every table below must be reproducible from `benchmarks/raw/<device>/<scenario>/
 
 **Status:** run 2026-07-20 (short-form: 5 runs × 30s, first 2 discarded — see
 run-count deviation). **Frust = RELEASE build; Flutter = profile (per protocol
-§2).** Flutter columns are the original profile pass; the Frust column is a
-post-fix RELEASE re-run (commit `ade0d87`). Raw series under
-`raw/oneplus9/frust_release/<scenario>/runN.log` (Frust release) and
-`raw/oneplus9/<app>/<scenario>/runN.log` (original pass; gitignored — full-device
-logcat is not committed).
+§2).** S2/S4/S5/S6/S7/S8 below are the `ade0d87` release re-run (unaffected by
+the later S1/S3 spec changes); **S1 and S3 are a further, final re-run from
+commit `73fa17f`** (S1 spec v3 count-derivation + S3 continuous op cycling —
+both apps rebuilt fresh, keystore/trace-env recipe unchanged from `ade0d87`).
+Raw series under `raw/oneplus9/frust_release/<scenario>/runN.log` (Frust
+release; S1/S3 additionally under `.../s1_final/` and `.../s3_final/` for the
+final re-run) and `raw/oneplus9/<app>/<scenario>/runN.log` (Flutter profile,
+same `s1_final`/`s3_final` subfolders for the final re-run; gitignored —
+full-device logcat is not committed).
 
 - Chipset: Snapdragon 888 / Adreno 660
 - OS version: Android 15 (build.version.release 15)
@@ -51,24 +55,64 @@ logcat is not committed).
 
 ### S1 — Animation storm
 
-> **⚠️ S1 PARITY-SUSPECT (both apps) — NO WINNER DECLARED.** The two apps are not
-> running an identical workload: the user observed Frust's bubbles render much
-> larger than Flutter's (so Frust has constant collisions / churn while Flutter's
-> quickly settle), and Frust renders edge-to-edge so its layout bounds differ.
-> Until the bubble size/physics/bounds are matched and re-run, these numbers do
-> not compare like for like — recorded for reference only. A parity fix + re-run
-> is queued.
+> **RESOLVED — 2026-07-20 final re-run under S1 spec v3 (commit `89ca8e8`).**
+> The parity chain that produced the PARITY-SUSPECT banner above is now
+> fully closed: v1's absolute-pixel bubble sizes → v2's fraction-of-play-area
+> sizes (commit `166812b`) → v3's count-derived-for-~50%-coverage field
+> (commit `89ca8e8`, user-calibrated after v2 still visually over-packed on
+> device). Both apps rebuilt fresh from commit `73fa17f` (HEAD at run time;
+> includes v3 + the S3 continuous-cycling commit, S1-irrelevant) and re-run:
+> **Frust = `--release`** (huddle keystore, `FRUST_TRACE`/`FRUST_TRACE_RAW`
+> exported at build time + a `perf.rs` mtime touch to force the recompile —
+> confirmed emitting `frust-perf raw`/`bench-scenario-start s1` on-device
+> before scoring), **Flutter = `flutter build apk --profile`** (3.44.2
+> stable, confirmed emitting `flutter-perf raw` before scoring). 5 runs ×
+> 30s each app, first 2 discarded (short-form — see run-count deviation),
+> interleaved with S3 below. A winner is declared this time — see below.
 
-| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms |
-|---|---|---|---|---|---|---|
-| Frust (release) — parity-suspect | 19.55 | 23.64 | 24.92 | 56.00 | 2778 | 3733 |
-| Flutter (profile) — parity-suspect | 9.24 | 16.99 | 20.53 | 49.65 | 516 | 7771 |
+| App | p50 (ms) | p95 (ms) | p99 (ms) | worst (ms) | missed @16.67ms | missed @8.33ms | active frames (90s, 3 kept runs) |
+|---|---|---|---|---|---|---|---|
+| Frust (release, v3) | 9.75 | **12.41** | **15.79** | **55.60** | **52 (0.9%)** | 4489 (77.2%) | 5812 (~64.6 fps avg) |
+| Flutter (profile, v3) | **9.27** | 16.87 | 19.25 | 38.60 | 459 (5.1%) | **7872 (87.5%)** | 9000 (~100.0 fps avg) |
 
-Numbers show Frust ~19.6ms median vs Flutter ~9.2ms, but **because the workloads
-differ (see banner) this is not a valid comparison** — no winner. (Release did not
-move Frust's S1 vs the earlier profile pass: 19.55 vs 19.58ms — S1 is GPU-raster
-bound, where LTO doesn't help.) The plan's S1 vello-vs-Impeller claim, proven on
-the headline Adreno 840, remains untested here pending a parity-matched re-run.
+**Split result — no single winner; Frust wins on tail/jank, Flutter wins on
+median and raw frame count.** Medians are within noise of each other (Frust
+9.75ms vs Flutter 9.27ms), but the two apps diverge sharply past p50: Frust's
+p95/p99/worst are all tighter (12.41/15.79/55.60ms vs Flutter's
+16.87/19.25/38.60ms — Frust's single worst outlier is higher, but its whole
+p95+ band sits lower), and Frust drops the 60Hz budget far less often, both
+in absolute count (52 vs 459) and as a share of frames rendered (0.9% vs
+5.1% — **Flutter drops the 60Hz budget ~5.7× more often per frame attempted**).
+Flutter's higher missed-120Hz *share* (87.5% vs 77.2%) is a direct consequence
+of rendering far more total frames (100fps avg vs Frust's ~64.6fps avg) at the
+same workload — pushing more frames into the tight 8.33ms budget's reach in
+the first place, not necessarily worse per-frame cost. Net honest read: at
+this settle-capable, area-matched workload, **Frust is the smoother/less
+janky renderer (fewer, more consistent budget misses)**; **Flutter achieves a
+marginally faster typical frame and a higher sustained frame rate**. Framing
+this as a clean win either way would overstate the data — recorded as a split,
+consistent with this doc's existing convention for S4/S5.
+
+**Settled-tail handling (as requested — no post-settle idle observed this
+pass):** neither app's kept runs recorded a *single* `skipped=1`/idle frame
+(0/5812 Frust, 0/9000 Flutter) — the field never reached
+`is_fully_settled`/its Flutter equivalent within any 30s capture window at
+this device's phone-sized play area and ~50%-coverage bubble count (dense
+enough that collisions keep re-energizing the field faster than
+`FRICTION=0.90`/frame damps it out, per `physics.rs`). This is a genuine,
+honest finding, not a missing measurement: **there is no settled tail to
+report in this dataset.** The mechanism that would handle one if it appeared
+is already in place and already exercised elsewhere in this file (S3, below,
+and the frust-side `FrameStats::record` contract) — a frame the mobile
+frame-gate skips still emits a full `frust-perf raw ... skipped=1` line
+(all-zero pass durations), so `stats.py`'s `compute_stats` counts it in
+`n_total`/`skipped` while excluding it from the percentile/`worst` math
+(mirroring `FrameStats::summary`'s own semantics) — an absent/idle frame is
+never silently dropped from the reported totals, only from the latency
+distribution it would otherwise (and wrongly) drag toward zero. If a future
+longer capture or a smaller/denser play area does settle mid-window, the same
+`n_total`/`n_active`/`skipped` triple already reported for every table in
+this file (see S3's per-scenario line) is where that would show up.
 
 ### S2 — Long-list scroll (10k rows)
 
@@ -91,28 +135,85 @@ the @16.67ms drops are the primary comparison.)
 
 ### S3 — Table ops (js-framework-benchmark subset)
 
-> **⚠️ Frust S3 SUSPECT.** The user observed S3 visually glitching on the Frust
-> side; a fix is under investigation. Numbers below are kept but should be treated
-> as provisional until that fix lands and S3 is re-run.
+> **RESOLVED (health) — 2026-07-20 final re-run under S3 continuous cycling
+> (commit `73fa17f`).** The original SUSPECT finding root-caused to the op
+> sequence running once and legitimately going blank at `clear` for the rest
+> of the capture window (not rendering occlusion) — see the prior root-cause
+> note preserved in git history. Both apps now cycle the five-op sequence
+> (`create1k→create10k→update→swap→clear`, 300ms settle gap between ops and
+> before each cycle's restart) continuously for the whole window; both
+> rebuilt fresh from commit `73fa17f` (same build config as S1 above) and
+> re-run, 5×30s, first 2 discarded, interleaved with S1. **Health confirmed
+> on both apps**: every kept run shows 18–21 repeats of all five `s3-*`
+> sub-markers (`bench-scenario-start s3-create1k` reopening after
+> `s3-clear` closes, repeatedly — see counts below), and the table is
+> non-empty throughout except the intentional inter-op/inter-cycle settle
+> gaps. No visual-glitch/occlusion signature in the raw series. A firm
+> per-op winner could not be declared for Flutter this pass — see below.
 
-Per-op reconcile-frame total time (`s3-*` sub-markers), Frust = release. **Frust
-captured all five ops; Flutter's per-op sub-marker windows captured only `create1k`
-reliably** (the other ops' reconcile frames landed outside their marker windows —
-see deviations). Frust's first op (`create1k`) carries first-frame/warmup cost.
+**Cycle-count health check** (kept runs 3–5, count of `bench-scenario-start
+s3-<op>` occurrences per 30s run — confirms continuous cycling, not a
+run-once sequence):
 
-| Op | Frust (ms, release) | Flutter (ms) |
-|---|---|---|
-| create 1k | 52.88 | 19.28 |
-| create 10k (setup for update) | 7.03 | not captured |
-| update every 10th of 10k | 7.18 | not captured |
-| swap | 8.50 | not captured |
-| clear | 13.02 | not captured |
+| App | create1k | create10k | update | swap | clear |
+|---|---|---|---|---|---|
+| Frust (release) | 20 / 20 / 21 | 20 / 19 / 21 | 20 / 19 / 21 | 19 / 19 / 20 | 19 / 19 / 20 |
+| Flutter (profile) | 19 / 19 / 19 | 18 / 18 / 18 | 18 / 18 / 18 | 18 / 18 / 18 | 18 / 18 / 18 |
 
-Overall S3 frame series (marker `s3`): Frust release p50 7.63ms / p95 19.98ms (246
-active, 6469 frame-gate-skipped); Flutter p50 15.51ms / p95 29.35ms (19 active).
-Frust's steady-state reconciles (7–13ms) look faster than Flutter's overall p50,
-but with the SUSPECT flag above and incomplete Flutter per-op capture, S3 is
-**inconclusive** — no winner declared.
+**Per-op reconcile-frame timing** (`s3-*` sub-markers, aggregated across all
+cycles' occurrences in the 3 kept runs — `stats.py`'s marker-toggle logic
+folds every repeat of a marker name into one combined series, verified by
+`test_stats.py`'s `test_repeated_marker_pairs_aggregate_across_cycles`):
+
+| Op | Frust p50/p95/p99/worst (ms, release) | n frames | Flutter |
+|---|---|---|---|
+| create 1k | 12.48 / 24.43 / 62.67 / 62.67 | 61 | **not captured** |
+| create 10k | 24.02 / 26.75 / 27.42 / 27.42 | 60 | **not captured** |
+| update every 10th of 10k | 19.31 / 22.48 / 24.03 / 24.03 | 59 | **not captured** |
+| swap | 17.81 / 20.95 / 22.03 / 22.03 | 58 | **not captured** |
+| clear | 17.91 / 20.81 / 21.04 / 21.04 | 58 | **not captured** |
+
+**Flutter per-op capture landed zero frames in any of the five sub-marker
+windows, across all three kept runs** (worse than the earlier one-shot
+pass, which caught one `create1k` frame by luck) — confirmed by direct
+inspection: every `bench-scenario-start s3-<op>` / `bench-scenario-end
+s3-<op>` pair in the Flutter logs is immediately adjacent (the end marker
+fires on the very next line, before any `flutter-perf raw` line), because
+Flutter's `SchedulerBinding.addTimingsCallback` delivers each frame's timing
+data asynchronously, on a later event-loop turn — always after the
+synchronous marker-close call the op itself makes. This is a structural
+instrumentation gap on the Flutter side (marker placement vs callback
+delivery timing), not a Frust defect, and not something this task's scope
+covers fixing (would need a Flutter-side code change to move the `end`
+marker to actually run inside `addTimingsCallback`, out of scope here) —
+flagged as a deviation and a follow-up.
+
+**Overall S3 frame series** (marker `s3`, whole capture including settle
+gaps): Frust p50 9.02ms / p95 12.44ms / p99 22.44ms / worst 62.67ms (5900
+active of 5900 total, 0 skipped, ~65.6 fps avg — `Ticker` stays
+`active: true` continuously per the redesign, so Frust paints every tick
+including the 300ms settle gaps, not only at op transitions); Flutter p50
+19.40ms / p95 34.89ms / p99 39.49ms / worst 40.55ms (275 active of 275
+total, 0 skipped, ~3.1 fps avg — Flutter only renders a frame when an op
+actually triggers a rebuild, staying idle the rest of the time by its own
+event-driven default, no continuous ticker).
+
+**No overall winner declared from the whole-series numbers** — they are not
+an apples-to-apples comparison: Frust's series is dominated by cheap,
+continuous idle-gap repaints (5900 frames, most doing nothing but redraw a
+static table) that pull its percentiles down, while Flutter's sparse series
+(275 frames) contains *only* the substantive op-transition frames, which
+should if anything read *heavier* per frame, not lighter — the two series
+measure different things by construction (continuous-paint vs
+event-driven-paint), not a fair reconcile-cost comparison. **The only clean,
+comparable numbers this pass are Frust's per-op table above**, which show
+reconcile cost rising from ~12.5ms (create 1k) to ~24ms (create 10k, the
+heaviest op) and settling to ~18–20ms for update/swap/clear — all comfortably
+inside a single 60Hz frame's budget except the create-1k tail
+(p99/worst 62.67ms, likely a cold-glyph-cache/JIT-warmup first-occurrence
+outlier diluted across cycles, consistent with the desktop smoke test's own
+note on `create1k`'s first-cycle cost). No Flutter per-op figure exists to
+compare against this pass.
 
 ### S4 — Heavy-work responsiveness (~50MB JSON parse + concurrent animation)
 
@@ -239,17 +340,31 @@ included in this short-form pass (deviation).
    locally (not committed — see #12).
 3. **Flutter release-mode in-app cross-check (PROTOCOL §2) not captured** — only
    the profile-mode headline series was taken.
-4b. **S1 PARITY-SUSPECT (both apps) — no winner.** The two apps' S1 workloads are
-   not identical (Frust's bubbles are visibly larger → constant collisions vs
-   Flutter's quick settle; Frust renders edge-to-edge → different bounds). Numbers
-   are recorded for reference only; a parity fix + re-run is queued.
-4c. **S3 SUSPECT (Frust).** Visual glitching observed on the Frust side; a fix is
-   under investigation. S3 numbers are kept but provisional; no winner declared.
-4. **S3 per-op: Flutter capture incomplete.** Only `s3-create1k` landed a frame
-   inside its sub-marker window on the Flutter side; `create10k`/`update`/`swap`/
-   `clear` reconcile frames fell outside their windows (marker/frame-timing
-   granularity), so those Flutter per-op cells read "not captured." Frust captured
-   all five.
+4b. **RESOLVED — S1 PARITY-SUSPECT.** The v1→v2→v3 parity chain (see the S1
+   section above) closed the workload-mismatch gap; both apps re-run under v3
+   (commit `89ca8e8`) produced a **split result** (Frust wins tail/jank
+   consistency, Flutter wins median/raw fps) — see the S1 section's full table
+   and narrative. No numbers from the original PARITY-SUSPECT pass are used
+   in the split verdict.
+4c. **RESOLVED (health) — S3 SUSPECT.** Root-caused to the op sequence running
+   once and legitimately emptying at `clear` (not occlusion/glitching); the
+   continuous-cycling redesign (commit `73fa17f`) fixed it, and a fresh re-run
+   confirms healthy, non-empty, repeatedly-cycling behavior on both apps — see
+   the S3 section above. No overall winner is declared (see #4 below, now
+   worse than originally recorded), but Frust's per-op numbers are usable.
+4. **WORSENED — S3 per-op: Flutter capture failed entirely this pass.** The
+   original short-form pass caught one `s3-create1k` frame inside its
+   sub-marker window by luck; the final continuous-cycling re-run caught
+   **zero** frames in any of the five per-op windows, across all three kept
+   runs — confirmed structural, not incidental: every Flutter
+   `bench-scenario-end s3-<op>` line is immediately preceded by its `start`
+   with no `flutter-perf raw` line between them, because
+   `SchedulerBinding.addTimingsCallback` delivers timing data on a later
+   event-loop turn than the synchronous marker calls. Frust captured all five
+   ops cleanly both times. A real fix needs the Flutter bench app's marker
+   placement reworked to fire `end` from inside the async timing callback
+   itself — out of this task's scope (would be a `flutter_bench` source
+   change, not a benchmark-running task).
 5. **S4 parse wall-time not recoverable** — the harness captures logcat `-v raw`
    (no timestamps) and neither app emits an explicit parse-duration line. Only the
    animation-during-parse frame percentiles are reported.
@@ -294,6 +409,30 @@ included in this short-form pass (deviation).
     release scenarios' kept runs (3–5) show consistent, healthy frame counts with no
     screen-off signature (near-zero/gap). Only discarded run1s were low (e.g. S3
     run1=0). No re-run needed. `svc power stayon` restored to `false` at the end.
+15. **S1/S3 final re-run build note.** Both apps rebuilt fresh from commit
+    `73fa17f` for this pass (S1 v3 + S3 continuous cycling, superseding the
+    `ade0d87`-era S1/S3 builds S2/S4/S5/S6/S7/S8 above still reflect — those six
+    scenarios are unaffected by the S1/S3-only spec changes and were not
+    re-run). Same recipe as the original release pass: JBR JAVA_HOME, NDK
+    27.0.12077973, `FRUST_TRACE=1 FRUST_TRACE_RAW=1` exported at build time plus
+    a `crates/frust-shell-common/src/perf.rs` mtime-only touch (confirmed empty
+    `git diff`) to force the recompile past Gradle's `--define` release-mode gap
+    (deviation #13, unchanged). Raw-line emission (`frust-perf raw`/
+    `bench-scenario-start`, and `flutter-perf raw`) was directly confirmed
+    on-device for both S1 and S3 before any run was scored, per this task's
+    explicit gate.
+16. **S1/S3 final re-run device-state note.** Airplane mode on
+    (`settings put global airplane_mode_on 1`, confirmed `1` on read-back),
+    Wi-Fi disabled (`svc wifi disable`, confirmed "Wi-Fi is disabled"),
+    `dumpsys battery unplug` presented an on-battery state identically for both
+    apps (USB stayed physically connected for adb), `svc power stayon true` set
+    for the duration and restored to `false` afterward. Brightness fixed at 128
+    via `device_state.sh`. Thermal: 31.8–33.7°C throughout this session (ceiling
+    38°C never approached; no forced cooldown wait triggered). No screen-lock/
+    dream taint observed (`dumpsys window`'s `mDreamingLockscreen=false`,
+    `dumpsys power`'s `mWakefulness=Awake` checked mid-session). Same `gmktemp`
+    PATH-shim workaround as before (deviation #10, unchanged) — `run.sh` itself
+    still not modified.
 
 ---
 
@@ -421,18 +560,32 @@ short form (5×30s), **Frust = release** (huddle keystore), **Flutter = profile*
   heavier).
 - **Roughly even / split:** **S4** (heavy-work — both hold frame rate off-thread,
   Flutter marginally smoother tail); **S5** (image pipeline, valid post-fix — Flutter
-  lower median 6.2 vs 9.9ms, Frust tighter p95/p99 and fewer drops).
-- **No winner (workload/behavior suspect):** **S1** (animation storm — PARITY-SUSPECT:
-  Frust bubbles larger + edge-to-edge, so not the same workload; a parity fix + re-run
-  is queued); **S3** (table ops — Frust visually glitching, SUSPECT, fix under
-  investigation). Both are recorded but not scored.
+  lower median 6.2 vs 9.9ms, Frust tighter p95/p99 and fewer drops); **S1**
+  (animation storm, now under the fair v3 settled spec — medians within noise
+  of each other, Frust far fewer 60Hz-budget drops (52 vs 459, 0.9% vs 5.1% of
+  frames rendered) and tighter p95/p99, Flutter a higher sustained frame rate
+  and marginally lower median — see S1 section for the full split rationale).
+- **No overall winner (per-op capture gap, one side only):** **S3** (table ops,
+  now continuously cycling and health-confirmed on both apps — Frust's per-op
+  reconcile costs are cleanly measured (~12.5–24ms depending on op, all but a
+  create-1k tail outlier inside a 60Hz budget), but Flutter's per-op sub-marker
+  capture landed zero frames this pass (an `addTimingsCallback` async-delivery
+  gap, not a Frust deficiency), so no head-to-head per-op number exists; the
+  whole-series totals aren't comparable either, since Frust paints continuously
+  through the settle gaps while Flutter only paints at op transitions).
 
 The honest headline for this device: **Frust's demonstrated advantages are at the
 plugin boundary (S8), in long-list scroll (S2), and in cold-start/idle-footprint
 (S7); Flutter's mature text pipeline wins S6 and reaches its own first frame
-sooner.** S1 (animation storm) and S3 (table ops) are not yet comparable — S1 needs
-a workload-parity fix, S3 a rendering fix — and the plan's marquee S1
-vello-vs-Impeller claim is Adreno-840-specific, to be re-measured on the OnePlus 15.
-Moving Frust from profile to a true `--release` build changed the per-frame and
-plugin numbers only within noise (S1/S4/S6/S7/S8) — the wins/losses are structural,
-not a build-mode artifact.
+sooner.** S1 (animation storm) is now a fair, workload-matched comparison under
+the v3 settled spec, and reads as a genuine split rather than an open question:
+Frust is the smoother/less-janky renderer at this workload, Flutter the
+higher-throughput one — the plan's marquee S1 vello-vs-Impeller claim remains
+Adreno-840-specific and unconfirmed here either way, to be re-measured on the
+OnePlus 15. S3 (table ops) is now health-confirmed correct on both apps
+(continuous cycling, no glitching) but still has no cross-app per-op number
+because of a Flutter-side instrumentation gap, not a workload problem — a real
+fix (Flutter marker placement) is a follow-up, not a re-run. Moving Frust from
+profile to a true `--release` build changed the per-frame and plugin numbers
+only within noise (S1/S4/S6/S7/S8) — the wins/losses are structural, not a
+build-mode artifact.
