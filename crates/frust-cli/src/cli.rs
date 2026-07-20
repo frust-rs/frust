@@ -2,7 +2,7 @@
 
 use clap::{Parser, Subcommand};
 
-use crate::build_info::BuildArgs;
+use crate::build_args::BuildArgs;
 
 #[derive(Parser, Debug)]
 #[command(name = "frust", version, about = "Tooling for Frust apps (spec §12)")]

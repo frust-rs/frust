@@ -38,13 +38,17 @@ const MANIFEST_FILE: &str = "template_manifest.json";
 /// the default template and is skipped only if a same-arch-tagged variant
 /// overrides its exact logical path — see [`generate`]'s manifest loop.
 /// Only one tag exists today; a future variant adds another entry here plus
-/// a matching `crate::cli::ArchArg` arm and template files.
-const KNOWN_ARCHES: &[&str] = &["clean-signals"];
+/// a matching `frust-cli` `--arch` value arm and template files.
+///
+/// Public so a front-end (the `frust-tui` create wizard, PLAN.md D6b) can
+/// enumerate the available architectures without hardcoding them — a new
+/// variant appears in the UI with no front-end change.
+pub const KNOWN_ARCHES: &[&str] = &["clean-signals"];
 
 /// Splits a mode-stripped logical path into `(base, tag)` if it carries a
 /// recognized [`KNOWN_ARCHES`] suffix (see that const's doc for the
 /// convention). `None` for a default-template entry.
-fn split_arch_tag(logical: &str) -> Option<(&str, &str)> {
+pub fn split_arch_tag(logical: &str) -> Option<(&str, &str)> {
     KNOWN_ARCHES.iter().find_map(|tag| {
         logical
             .strip_suffix(&format!(".{tag}"))

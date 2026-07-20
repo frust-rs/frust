@@ -1,8 +1,11 @@
-//! `BuildInfo` funnel between clap flags and platform builders (spec §12.1/12.2).
+//! `BuildInfo` funnel between build flags and platform builders (spec §12.1/12.2).
 //!
-//! `run` (`Command::Run`, debug-default) and `build` (`Command::Build`,
-//! release-default) both `#[command(flatten)]` [`BuildArgs`] into their clap
-//! structs and call [`BuildInfo::from_args`] with their own `default_mode`.
+//! `run` (debug-default) and `build` (release-default) both resolve their
+//! flags into a plain [`BuildArgs`] and call [`BuildInfo::from_args`] with
+//! their own `default_mode`. The clap layer lives in `frust-cli`
+//! (`build_args::BuildArgs`, `#[derive(clap::Args)]`) and converts into this
+//! crate's [`BuildArgs`] at the command-handler boundary — `frust-drive`
+//! itself has no clap dependency (`docs/ARCHITECTURE.md`).
 
 use std::collections::HashMap;
 
@@ -49,30 +52,25 @@ impl BuildMode {
     }
 }
 
-/// `#[command(flatten)]`-able flags shared by every command that produces a build.
-#[derive(clap::Args, Debug, Clone, Default)]
+/// Plain (clap-free) build flags shared by every command that produces a
+/// build. The `frust-cli` clap layer's `build_args::BuildArgs` mirrors this
+/// struct field-for-field and converts into it (`BuildArgs::into_drive`).
+#[derive(Debug, Clone, Default)]
 pub struct BuildArgs {
     /// Build in debug mode (`dev` cargo profile).
-    #[arg(long)]
     pub debug: bool,
     /// Build in profile mode (release opts + debug symbols + tracing).
-    #[arg(long)]
     pub profile: bool,
     /// Build in release mode (LTO, stripped, `panic=abort`).
-    #[arg(long)]
     pub release: bool,
     /// Product flavor to build (maps to a Gradle flavor / Xcode scheme).
-    #[arg(long)]
     pub flavor: Option<String>,
     /// Compile-time app config, `KEY=VALUE`; repeatable.
-    #[arg(long = "define", value_name = "KEY=VALUE")]
     pub defines: Vec<String>,
     /// Semantic version string embedded in the build (e.g. `1.2.3`).
-    #[arg(long = "build-name", value_name = "VER")]
     pub build_name: Option<String>,
     /// Monotonically increasing build number embedded in the build; must be
     /// `>= 1`.
-    #[arg(long = "build-number", value_name = "N")]
     pub build_number: Option<u32>,
 }
 

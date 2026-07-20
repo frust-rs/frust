@@ -1,0 +1,25 @@
+[package]
+name = "frust-drive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Exposes `process::FakeProcessRunner` (and its scripted-response builders) to
+# downstream test crates (e.g. `frust-cli`'s command-handler tests). Off by
+# default so the fake never compiles into a release build; frust-drive's own
+# unit tests reach it via `#[cfg(any(test, feature = "test-util"))]`.
+test-util = []
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+minijinja.workspace = true
+include_dir.workspace = true
+# `frust run`'s Android/desktop log-streaming path needs a clean Ctrl-C →
+# exit-0 hook (default SIGINT disposition exits 130, spec §12.4 wants 0).
+ctrlc.workspace = true

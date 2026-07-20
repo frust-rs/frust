@@ -12,14 +12,14 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-toml.workspace = true
-thiserror.workspace = true
-minijinja.workspace = true
-include_dir.workspace = true
-# `frust run`'s Android log-streaming path needs a clean Ctrl-C → exit-0
-# hook (default SIGINT disposition exits 130, spec §12.4 wants 0). `ctrlc`
-# is a tiny, dependency-light wrapper over signal-hook; nothing else in the
-# CLI needs process-signal handling.
-ctrlc.workspace = true
+# The shared drive logic (process/devices/doctor/build_info/scaffold +
+# android/ios run/build pipelines) now lives in `frust-drive`; `frust-cli`
+# is the thin clap front-end over it. All non-clap CLI deps (serde, toml,
+# minijinja, include_dir, ctrlc, thiserror) followed their modules there.
+frust-drive = { path = "../frust-drive" }
+
+[dev-dependencies]
+# The command-handler tests drive their `run_in` cores with
+# `frust_drive::process::FakeProcessRunner`, exposed behind frust-drive's
+# `test-util` feature (off in the shipped binary).
+frust-drive = { path = "../frust-drive", features = ["test-util"] }

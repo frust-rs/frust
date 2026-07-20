@@ -1,0 +1,23 @@
+//! `frust-drive`: the shared drive logic behind the `frust` CLI (spec §12) —
+//! project scaffolding, environment doctor, device discovery, and the
+//! `run`/`build`/`clean` drive pipelines for Android and iOS.
+//!
+//! Extracted from `frust-cli` so a second front-end (the `frust-tui`
+//! terminal UI) can consume the same pipelines without a package cycle
+//! (`frust-cli` → `frust-tui` → `frust-drive`, acyclic). This crate holds
+//! no clap surface — the `#[derive(clap::Args)]` layer stays in `frust-cli`
+//! and converts into [`build_info::BuildArgs`] at the command-handler
+//! boundary — and, like `frust-cli`, depends on none of the framework
+//! crates (`docs/ARCHITECTURE.md`).
+
+pub mod android_build;
+pub mod android_id;
+pub mod android_run;
+pub mod build_info;
+pub mod devices;
+pub mod doctor;
+pub mod ios_build;
+pub mod ios_id;
+pub mod ios_run;
+pub mod process;
+pub mod scaffold;

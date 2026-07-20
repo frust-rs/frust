@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::scaffold::{self, TemplateContext};
+use frust_drive::scaffold::{self, TemplateContext};
 
 /// Parsed + defaulted arguments for `frust create` (mirrors
 /// `cli::Command::Create`; kept separate so `scaffold` stays decoupled

@@ -1,13 +1,14 @@
-use crate::devices::{self, Device, Kind, Platform};
-use crate::process::RealProcessRunner;
 use anyhow::Result;
+use frust_drive::devices::{self, Device, Kind, Platform};
+use frust_drive::process::ProcessRunner;
 
 /// Discovers and prints connected devices/emulators/simulators. Always exits
-/// `0` — an empty result is a valid state, not a failure.
-pub fn run(verbose: bool) -> Result<u8> {
-    let runner = RealProcessRunner;
+/// `0` — an empty result is a valid state, not a failure. The process runner
+/// is injected by `commands::dispatch` (the CLI's one `Real` construction
+/// site).
+pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
     let discoverers = devices::default_discoverers();
-    let (devices, notes) = devices::discover_all(&runner, &discoverers);
+    let (devices, notes) = devices::discover_all(runner, &discoverers);
 
     if devices.is_empty() {
         println!("No devices found.");

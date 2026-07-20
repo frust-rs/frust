@@ -1094,13 +1094,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "ctrlc",
- "include_dir",
- "minijinja",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "toml",
+ "frust-drive",
 ]
 
 [[package]]
@@ -1113,6 +1107,20 @@ dependencies = [
  "peniko",
  "reactive_graph",
  "tree_arena",
+]
+
+[[package]]
+name = "frust-drive"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ctrlc",
+ "include_dir",
+ "minijinja",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml",
 ]
 
 [[package]]

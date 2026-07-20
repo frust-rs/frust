@@ -5,15 +5,15 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
-use crate::android_build::{self, AndroidArtifact};
-use crate::android_run;
-use crate::build_info::{BuildInfo, BuildMode};
 use crate::cli::BuildTarget;
-use crate::ios_build::{self, IosArtifact};
-use crate::ios_run;
-use crate::process::{ProcessRunner, RealProcessRunner};
+use frust_drive::android_build::{self, AndroidArtifact};
+use frust_drive::android_run;
+use frust_drive::build_info::{BuildInfo, BuildMode};
+use frust_drive::ios_build::{self, IosArtifact};
+use frust_drive::ios_run;
+use frust_drive::process::ProcessRunner;
 
 /// `--target-platform` value -> Gradle ABI name (spec §12.5).
 const TARGET_PLATFORMS: &[(&str, &str)] = &[
@@ -30,16 +30,12 @@ const EXPORT_METHODS: &[&str] = &[
     "enterprise",
 ];
 
-/// Entry point `commands::dispatch` calls: resolves the real process runner
-/// and current directory, then hands off to [`run_in`].
-pub fn run(target: BuildTarget) -> Result<u8> {
-    let cwd = std::env::current_dir().context("reading current directory")?;
-    run_in(&RealProcessRunner, &cwd, target)
-}
-
 /// The testable core of `build`, taking an injected [`ProcessRunner`] and
-/// project directory so it can be exercised with a [`crate::process::FakeProcessRunner`]
-/// and a tempdir rather than the real toolchain/cwd.
+/// project directory so it can be exercised with a
+/// [`frust_drive::process::FakeProcessRunner`] and a tempdir rather than the
+/// real toolchain/cwd. `commands::dispatch` constructs the real runner and
+/// current directory and calls this (the CLI's one `Real` construction
+/// site).
 pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarget) -> Result<u8> {
     match target {
         BuildTarget::Apk {
@@ -47,7 +43,7 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             split_per_abi,
             target_platform,
         } => {
-            let info = BuildInfo::from_args(build, BuildMode::Release)
+            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             let abis = resolve_abis(target_platform.as_deref())?;
             build_android(
@@ -64,7 +60,7 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             build,
             target_platform,
         } => {
-            let info = BuildInfo::from_args(build, BuildMode::Release)
+            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             // Validated for a clear error even though `Appbundle` doesn't
             // carry the resolved ABI list itself (spec §12.5: Gradle's
@@ -78,7 +74,7 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             no_codesign,
         } => {
             require_macos_host("build ios")?;
-            let info = BuildInfo::from_args(build, BuildMode::Release)
+            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_ios(
                 runner,
@@ -96,7 +92,7 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
         } => {
             require_macos_host("build ipa")?;
             validate_export_method(&export_method)?;
-            let info = BuildInfo::from_args(build, BuildMode::Release)
+            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             build_ios(
                 runner,
@@ -202,8 +198,8 @@ fn validate_export_method(method: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_info::BuildArgs;
-    use crate::process::FakeProcessRunner;
+    use crate::build_args::BuildArgs;
+    use frust_drive::process::FakeProcessRunner;
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
 

@@ -5,12 +5,13 @@ use std::io::{BufRead, Write};
 
 use anyhow::{Context, Result, bail};
 
-use crate::android_run::{self, DeviceSelection};
-use crate::build_info::{BuildArgs, BuildInfo, BuildMode};
+use crate::build_args::BuildArgs;
 use crate::cli::RenderTierArg;
-use crate::devices::{self, Device, Kind, Platform};
-use crate::ios_run;
-use crate::process::{ProcessRunner, RealProcessRunner};
+use frust_drive::android_run::{self, DeviceSelection};
+use frust_drive::build_info::{BuildInfo, BuildMode};
+use frust_drive::devices::{self, Device, Kind, Platform};
+use frust_drive::ios_run;
+use frust_drive::process::ProcessRunner;
 
 /// Env var `frust-render`'s `RenderContext` reads at startup
 /// (`frust_render::RENDER_TIER_ENV_VAR`) — kept as a literal here rather
@@ -18,18 +19,21 @@ use crate::process::{ProcessRunner, RealProcessRunner};
 /// why `frust-cli` stays independent of the rendering stack).
 const RENDER_TIER_ENV_VAR: &str = "FRUST_RENDER_TIER";
 
-pub fn run(
+/// The testable core of `run`, taking an injected [`ProcessRunner`].
+/// `commands::dispatch` constructs the real runner and calls this (the CLI's
+/// one `Real` construction site).
+pub fn run_in(
+    runner: &dyn ProcessRunner,
     build_args: BuildArgs,
     device_id: Option<String>,
     render_tier: Option<RenderTierArg>,
     verbose: bool,
 ) -> Result<u8> {
-    let info =
-        BuildInfo::from_args(build_args, BuildMode::Debug).map_err(|err| anyhow::anyhow!(err))?;
+    let info = BuildInfo::from_args(build_args.into_drive(), BuildMode::Debug)
+        .map_err(|err| anyhow::anyhow!(err))?;
 
-    let runner = RealProcessRunner;
     let discoverers = devices::default_discoverers();
-    let (found, notes) = devices::discover_all(&runner, &discoverers);
+    let (found, notes) = devices::discover_all(runner, &discoverers);
     if verbose {
         for note in &notes {
             println!("[note] {note}");
@@ -37,14 +41,14 @@ pub fn run(
     }
 
     match android_run::select_device(&found, device_id.as_deref()) {
-        DeviceSelection::Desktop => run_desktop_fallback(&runner, render_tier),
+        DeviceSelection::Desktop => run_desktop_fallback(runner, &info, render_tier),
         DeviceSelection::Auto(device) => {
             warn_render_tier_not_plumbed(render_tier);
-            run_on_device(&runner, &device, &info)
+            run_on_device(runner, &device, &info)
         }
         DeviceSelection::Ambiguous(candidates) => {
             warn_render_tier_not_plumbed(render_tier);
-            select_from_prompt(&runner, &candidates, &info)
+            select_from_prompt(runner, &candidates, &info)
         }
         DeviceSelection::Error(message) => bail!(message),
     }
@@ -86,33 +90,61 @@ fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) 
 
 /// No Android device connected and no `-d`: run the desktop preview shell
 /// exactly like a bare `cargo run` (spec §12.9's dev loop), streaming its
-/// output rather than buffering it until exit. A `--render-tier` override
-/// sets [`RENDER_TIER_ENV_VAR`] for the spawned `cargo run` process only —
-/// this is the one path the flag is actually plumbed to in v1 (see
+/// output rather than buffering it until exit.
+///
+/// Threads the resolved [`BuildInfo`] through to the spawn (verified
+/// pre-extraction gap — the old fallback ignored `--profile` and dropped
+/// every `--define`): the build mode selects the cargo profile arg
+/// (`--release`/`--profile profile`) and every define is passed as an
+/// environment variable to the launched process. A `--profile` run therefore
+/// reaches the desktop preview with `FRUST_TRACE=1` set (the define
+/// `BuildInfo::from_args` auto-injects), which is what makes desktop perf
+/// tracing work. A `--render-tier` override adds [`RENDER_TIER_ENV_VAR`] on
+/// top — the one path that flag is actually plumbed to in v1 (see
 /// `Command::Run`'s doc comment).
 fn run_desktop_fallback(
     runner: &dyn ProcessRunner,
+    info: &BuildInfo,
     render_tier: Option<RenderTierArg>,
 ) -> Result<u8> {
     println!("No Android device connected; falling back to `cargo run` (desktop preview).");
     let mut on_line = |line: &str| println!("{line}");
-    let env = desktop_render_tier_env(render_tier);
-    let out = runner.run_streaming("cargo", &["run"], None, &env, &mut on_line)?;
+    let args = desktop_cargo_run_args(info);
+    let env = desktop_cargo_run_env(info, render_tier);
+    let out = runner.run_streaming("cargo", &args, None, &env, &mut on_line)?;
     Ok(if out.success { 0 } else { 1 })
 }
 
-/// Pure construction of the env pairs [`run_desktop_fallback`]'s `cargo run`
-/// is spawned with — split out from the process-spawning call so the
-/// `--render-tier` → env mapping is unit-testable without a fake runner that
+/// The `cargo run` argv the desktop fallback spawns: always `run`, plus the
+/// build mode's cargo profile arg (`[]`/`--profile profile`/`--release`) so
+/// a `frust run --release`/`--profile` desktop preview builds in the
+/// requested profile instead of always debug.
+fn desktop_cargo_run_args(info: &BuildInfo) -> Vec<&'static str> {
+    let mut args = vec!["run"];
+    args.extend_from_slice(info.mode.cargo_profile_arg());
+    args
+}
+
+/// The env pairs [`run_desktop_fallback`]'s `cargo run` is spawned with:
+/// every `--define KEY=VALUE` as `KEY=VALUE` (so e.g. a profile run's
+/// auto-injected `FRUST_TRACE=1` reaches the preview process), plus a
+/// `--render-tier` override as [`RENDER_TIER_ENV_VAR`]. Split out from the
+/// spawning call so the mapping is unit-testable without a fake runner that
 /// would otherwise ignore the `env` argument entirely (see
-/// [`crate::process::FakeProcessRunner::run_streaming`]).
-fn desktop_render_tier_env(
+/// [`frust_drive::process::FakeProcessRunner::run_streaming`]).
+fn desktop_cargo_run_env(
+    info: &BuildInfo,
     render_tier: Option<RenderTierArg>,
-) -> Vec<(&'static str, &'static str)> {
-    match render_tier {
-        Some(tier) => vec![(RENDER_TIER_ENV_VAR, tier.env_value())],
-        None => Vec::new(),
+) -> Vec<(&str, &str)> {
+    let mut env: Vec<(&str, &str)> = info
+        .defines
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    if let Some(tier) = render_tier {
+        env.push((RENDER_TIER_ENV_VAR, tier.env_value()));
     }
+    env
 }
 
 fn select_from_prompt(
@@ -156,7 +188,7 @@ fn run_android(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::FakeProcessRunner;
+    use frust_drive::process::{FakeProcessRunner, Output};
 
     fn ios_physical_device() -> Device {
         Device {
@@ -170,7 +202,19 @@ mod tests {
     }
 
     fn debug_info() -> BuildInfo {
-        BuildInfo::from_args(BuildArgs::default(), BuildMode::Debug).unwrap()
+        BuildInfo::from_args(BuildArgs::default().into_drive(), BuildMode::Debug).unwrap()
+    }
+
+    fn profile_info() -> BuildInfo {
+        BuildInfo::from_args(
+            BuildArgs {
+                profile: true,
+                ..Default::default()
+            }
+            .into_drive(),
+            BuildMode::Debug,
+        )
+        .unwrap()
     }
 
     /// The Phase-5 sentinel `run_on_device` used to bail a physical iOS
@@ -192,24 +236,47 @@ mod tests {
     }
 
     #[test]
-    fn desktop_render_tier_env_is_empty_without_override() {
-        assert_eq!(desktop_render_tier_env(None), Vec::<(&str, &str)>::new());
+    fn desktop_cargo_run_env_is_empty_without_defines_or_override() {
+        assert_eq!(
+            desktop_cargo_run_env(&debug_info(), None),
+            Vec::<(&str, &str)>::new()
+        );
     }
 
     #[test]
-    fn desktop_render_tier_env_sets_the_var_for_gpu() {
+    fn desktop_cargo_run_env_sets_the_var_for_gpu() {
         assert_eq!(
-            desktop_render_tier_env(Some(RenderTierArg::Gpu)),
+            desktop_cargo_run_env(&debug_info(), Some(RenderTierArg::Gpu)),
             vec![(RENDER_TIER_ENV_VAR, "gpu")]
         );
     }
 
     #[test]
-    fn desktop_render_tier_env_sets_the_var_for_cpu() {
+    fn desktop_cargo_run_env_sets_the_var_for_cpu() {
         assert_eq!(
-            desktop_render_tier_env(Some(RenderTierArg::Cpu)),
+            desktop_cargo_run_env(&debug_info(), Some(RenderTierArg::Cpu)),
             vec![(RENDER_TIER_ENV_VAR, "cpu")]
         );
+    }
+
+    /// Regression for the verified desktop-fallback gap (PLAN.md Phase 1
+    /// step 1): a `--profile` desktop preview must (a) build in the profile
+    /// cargo profile and (b) receive the auto-injected `FRUST_TRACE=1` as an
+    /// environment variable, not silently drop both.
+    #[test]
+    fn desktop_fallback_threads_profile_mode_into_args_and_defines_into_env() {
+        let info = profile_info();
+        assert_eq!(
+            desktop_cargo_run_args(&info),
+            vec!["run", "--profile", "profile"]
+        );
+        let env = desktop_cargo_run_env(&info, None);
+        assert!(env.contains(&("FRUST_TRACE", "1")), "{env:?}");
+    }
+
+    #[test]
+    fn desktop_cargo_run_args_default_debug_is_bare_run() {
+        assert_eq!(desktop_cargo_run_args(&debug_info()), vec!["run"]);
     }
 
     #[test]
@@ -217,17 +284,17 @@ mod tests {
         // FakeProcessRunner's run_streaming ignores its env argument (keyed
         // only on cmd/args — see its doc comment), so this proves the
         // desktop fallback still reaches `cargo run` with a render-tier
-        // override set; desktop_render_tier_env's own tests above cover the
+        // override set; desktop_cargo_run_env's own tests above cover the
         // env-pair construction itself.
         let runner = FakeProcessRunner::new().with(
             "cargo run",
-            crate::process::Output {
+            Output {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
             },
         );
-        let out = run_desktop_fallback(&runner, Some(RenderTierArg::Cpu)).unwrap();
+        let out = run_desktop_fallback(&runner, &debug_info(), Some(RenderTierArg::Cpu)).unwrap();
         assert_eq!(out, 0);
     }
 }

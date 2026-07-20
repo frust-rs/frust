@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 use std::collections::HashMap;
 
 /// Captured result of a process invocation.
@@ -157,7 +157,7 @@ impl ProcessRunner for RealProcessRunner {
 }
 
 /// A canned response for [`FakeProcessRunner`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Debug, Clone)]
 enum FakeOutcome {
     /// Return this `Output` for the matching invocation.
@@ -174,13 +174,13 @@ enum FakeOutcome {
 /// the longest registered key that is a prefix of the full invocation — this
 /// lets a single registration match invocations with a dynamic trailing
 /// argument (e.g. a temp-file path for `devicectl --json-output`).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Default)]
 pub struct FakeProcessRunner {
     responses: HashMap<String, FakeOutcome>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl FakeProcessRunner {
     pub fn new() -> Self {
         Self::default()
@@ -218,7 +218,7 @@ impl FakeProcessRunner {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 fn invocation_key(cmd: &str, args: &[&str]) -> String {
     std::iter::once(cmd)
         .chain(args.iter().copied())
@@ -226,7 +226,7 @@ fn invocation_key(cmd: &str, args: &[&str]) -> String {
         .join(" ")
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl ProcessRunner for FakeProcessRunner {
     fn run(&self, cmd: &str, args: &[&str]) -> Result<Output> {
         let full = invocation_key(cmd, args);

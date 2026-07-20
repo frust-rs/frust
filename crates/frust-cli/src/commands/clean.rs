@@ -8,7 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::process::{ProcessRunner, RealProcessRunner};
+use frust_drive::process::ProcessRunner;
 
 /// Build-output directories removed relative to the project root, beyond
 /// `cargo clean`'s own `target/`: the Gradle app-module build dir, the
@@ -17,15 +17,10 @@ use crate::process::{ProcessRunner, RealProcessRunner};
 /// Keep in sync with `templates/app/.gitignore`'s build-output patterns.
 const REMOVED_DIRS: &[&str] = &["android/app/build", "android/.gradle", "build"];
 
-/// Entry point `commands::dispatch` calls: resolves the real process runner
-/// and current directory, then hands off to [`run_in`].
-pub fn run() -> Result<u8> {
-    let cwd = std::env::current_dir().context("reading current directory")?;
-    run_in(&RealProcessRunner, &cwd)
-}
-
 /// The testable core of `clean`, taking an injected [`ProcessRunner`] and
-/// project directory.
+/// project directory. `commands::dispatch` constructs the real runner and
+/// current directory and calls this (the CLI's one `Real` construction
+/// site).
 pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path) -> Result<u8> {
     if !project_dir.join("frust.toml").exists() {
         println!(
@@ -59,7 +54,7 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::{FakeProcessRunner, Output};
+    use frust_drive::process::{FakeProcessRunner, Output};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn unique_project_dir(tag: &str) -> std::path::PathBuf {

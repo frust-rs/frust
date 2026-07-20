@@ -1,14 +1,15 @@
-use crate::doctor::{self, DoctorCtx, RealEnv, Status, Validation};
-use crate::process::RealProcessRunner;
 use anyhow::Result;
+use frust_drive::doctor::{self, DoctorCtx, RealEnv, Status, Validation};
+use frust_drive::process::ProcessRunner;
 
 /// Runs all doctor validators and prints their results. Returns the process
-/// exit code: `1` if any validator is `Fail`, else `0`.
-pub fn run(verbose: bool) -> Result<u8> {
-    let runner = RealProcessRunner;
+/// exit code: `1` if any validator is `Fail`, else `0`. The process runner
+/// is injected by `commands::dispatch` (the CLI's one `Real` construction
+/// site); the env lookup seam stays [`RealEnv`] here.
+pub fn run_in(runner: &dyn ProcessRunner, verbose: bool) -> Result<u8> {
     let env = RealEnv;
     let ctx = DoctorCtx {
-        runner: &runner,
+        runner,
         env: &env,
         is_macos: cfg!(target_os = "macos"),
     };

@@ -8,14 +8,21 @@ pub mod doctor;
 pub mod run;
 
 use crate::cli::{Cli, Command};
-use anyhow::Result;
+use anyhow::{Context, Result};
+use frust_drive::process::RealProcessRunner;
 
 /// Runs the selected subcommand, returning the process exit code.
+///
+/// The real [`RealProcessRunner`] is constructed here, in one place, and
+/// injected into every drive-touching handler's `run_in` core (the CLI's
+/// sole `Real` construction site — see PLAN.md's injection-normalization
+/// note); `create` takes no runner (it only writes files).
 pub fn dispatch(cli: Cli) -> Result<u8> {
     let verbose = cli.verbose > 0;
+    let runner = RealProcessRunner;
     match cli.command {
-        Command::Doctor => doctor::run(verbose),
-        Command::Devices => devices::run(verbose),
+        Command::Doctor => doctor::run_in(&runner, verbose),
+        Command::Devices => devices::run_in(&runner, verbose),
         Command::Create {
             dir,
             org,
@@ -39,8 +46,16 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             deeplink_host,
             arch: arch.map(|a| a.as_str().to_string()),
         }),
-        Command::Clean => clean::run(),
-        Command::Run { build, render_tier } => run::run(build, cli.device_id, render_tier, verbose),
-        Command::Build { target } => build::run(target),
+        Command::Clean => {
+            let cwd = std::env::current_dir().context("reading current directory")?;
+            clean::run_in(&runner, &cwd)
+        }
+        Command::Run { build, render_tier } => {
+            run::run_in(&runner, build, cli.device_id, render_tier, verbose)
+        }
+        Command::Build { target } => {
+            let cwd = std::env::current_dir().context("reading current directory")?;
+            build::run_in(&runner, &cwd, target)
+        }
     }
 }
