@@ -2,40 +2,36 @@
 
 ## Language Idioms
 
-- **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.**
-  Every other crate (`frust-core`, `frust-scene`, `frust-text`,
-  `frust-widgets`, `frust-shell-common`, `frust-shell-desktop`,
-  `frust`) stays `unsafe`-free — where Masonry/xilem-style code would
-  reach for `unsafe` downcasting, use trait upcasting instead: bound a trait
-  on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`. The
-  sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot
-  avoid, each isolated in one function/module with a `# Safety` doc comment
-  stating the caller contract:
+- **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.** Every other
+  crate (`frust-core`, `frust-scene`, `frust-text`, `frust-widgets`, `frust-shell-common`,
+  `frust-shell-desktop`, `frust`) stays `unsafe`-free — where Masonry/xilem-style code would
+  reach for `unsafe` downcasting, use trait upcasting instead: bound a trait on `Any` (e.g.
+  `Widget: Any`) and downcast through `&mut dyn Any`. The sanctioned zones are raw-pointer
+  boundaries a GPU/platform shell cannot avoid, each isolated in one function/module with a
+  `# Safety` doc comment stating the caller contract:
   - `frust-render`'s `create_android_surface`/`create_metal_surface`
     (`lifecycle.rs`) and `on_surface_created_from_android_window`/
     `on_surface_created_from_metal_layer` (`renderer.rs`) — turn a
     caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`.
   - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary
-    (`extern "system"` exports, `Box::into_raw`/`from_raw` for the opaque
-    handle, `ANativeWindow_fromSurface`, `nativeInitPlatform`'s `JavaVM`
-    stash/`Global` context ref) — plus the `#[unsafe(no_mangle)]` attrs
-    `android_app!` emits on its generated exports.
+    (`extern "system"` exports, `Box::into_raw`/`from_raw`, `ANativeWindow_fromSurface`,
+    `nativeInitPlatform`'s `JavaVM` stash/`Global` context ref) — plus the
+    `#[unsafe(no_mangle)]` attrs `android_app!` emits on its generated exports.
   - `frust-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary
-    (`extern "C"` exports, `Box::into_raw`/`from_raw` for the opaque handle,
-    the call into `on_surface_created_from_metal_layer`) — plus the
-    `#[unsafe(no_mangle)]` attrs `ios_app!` emits on its generated exports.
-  - `frust-plugin`'s `android` module — reconstructs the raw
-    `JavaVM`/`jobject` plugins need from `ndk-context`-stored handles
-    (`initialize`/`with_jni_env`), one sanctioned module, scoped
-    `AttachGuard` per call.
+    (`extern "C"` exports, `Box::into_raw`/`from_raw`, the call into
+    `on_surface_created_from_metal_layer`) — plus the `#[unsafe(no_mangle)]`
+    attrs `ios_app!` emits on its generated exports.
+  - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/`jobject`
+    plugins need from `ndk-context`-stored handles (`initialize`/
+    `with_jni_env`), one sanctioned module, scoped `AttachGuard` per call.
   - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:`
     calls (`objc2` marks the untyped Foundation setter unsafe;
     `NSString`/`NSArray` are property-list-safe), each `# Safety`-noted.
   - `frust-render`'s `RenderContext::create_pipeline_cache` — one `unsafe
-    { device.create_pipeline_cache(..) }` call building a
-    `wgpu::PipelineCache` from a shell-persisted, `unframe`d and
-    adapter-fingerprint-validated blob; wgpu's `fallback: true` backstops
-    any residual mismatch — see `docs/ARCHITECTURE.md`'s GPU pipeline cache.
+    { device.create_pipeline_cache(..) }` call building a `wgpu::PipelineCache`
+    from a shell-persisted, `unframe`d and adapter-fingerprint-validated blob;
+    wgpu's `fallback: true` backstops any residual mismatch — see
+    `docs/ARCHITECTURE.md`'s GPU pipeline cache.
   - `frust-drive`'s `process` module — a `kill(2)` FFI shim (`unsafe extern
     "C" { fn kill(pid, sig) -> i32; }`, since std exposes no `killpg`) that
     group-kills a streamed child's whole Unix process group; one scoped
@@ -44,15 +40,14 @@
   `frust-shell-common`'s `guard` helper (`catch_unwind` + log, returning a
   benign default) rather than unwinding into JVM-/Swift-owned stack frames
   — a panic crossing the FFI boundary is undefined behavior, not a bug.
-- **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS
-  platform text input doesn't send individual keystrokes across the FFI
-  boundary — the platform owns composition (Gboard, CJK marked text) against
-  a local mirror (Kotlin `Editable`/Swift `NSMutableString`), then hands the
-  framework a whole reconciled `EditingState` (`nativeImeApply`/
-  `frust_ime_apply`) and reads one back (`nativeImeState`/
-  `frust_ime_state_json`) to keep its own IME machinery
-  (`InputConnection`/`UITextInput`) synchronized — never add a per-keystroke
-  op-forwarding path; it fights the platform's own composition machine.
+- **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text
+  input doesn't send individual keystrokes across the FFI boundary — the platform owns
+  composition (Gboard, CJK marked text) against a local mirror (Kotlin `Editable`/Swift
+  `NSMutableString`), then hands the framework a whole reconciled `EditingState`
+  (`nativeImeApply`/`frust_ime_apply`) and reads one back (`nativeImeState`/
+  `frust_ime_state_json`) to keep its own IME machinery (`InputConnection`/`UITextInput`)
+  synchronized — never add a per-keystroke op-forwarding path; it fights the platform's own
+  composition machine.
 - **UTF-16 at the FFI seam, bytes inside.** `EditingState`'s
   `selection_*`/`composing_*` indices are UTF-16 code-unit indexed
   everywhere they cross a shell boundary (JNI, C-ABI, `AppTree`) — the
@@ -189,9 +184,8 @@ fn validate(&self, ctx: &DoctorCtx) -> Validation {
 }
 ```
 Every external tool invocation (`rustc`, `adb`, `xcrun`, `cargo ndk`, …) goes
-through the `ProcessRunner` trait, so `doctor`/`devices` logic is exercised
-in `cargo test` with `FakeProcessRunner` and never shells out during a test
-run.
+through the `ProcessRunner` trait, so `doctor`/`devices` logic is exercised in
+`cargo test` with `FakeProcessRunner` and never shells out during a test run.
 
 ### Leaking `vello`/`wgpu` types outside `frust-render`
 
@@ -201,6 +195,18 @@ returning a `vello::*`/`wgpu::*` type.
 **GOOD:** public APIs above `frust-render` speak only `kurbo`/`peniko`;
 this is what lets the GPU backend be swapped later without touching widget
 or text code.
+
+### Printing directly from a `frust-drive` build/run core
+
+**BAD:** a `println!`/`print!` inside `android_build`/`ios_build`/
+`android_run`/`ios_run` — reaches the caller's stdout unconditionally,
+garbling a TUI session's raw-mode terminal with raw pipeline output.
+
+**GOOD:** thread an `on_line: &mut dyn FnMut(&str)` sink through the core
+instead — the CLI passes `&mut |line| println!("{line}")`, the TUI routes it
+into a session's log tab. `frust-drive/tests/print_free_cores.rs` (a
+source-scan conformance test) enforces this against every drive core
+outside a small CLI-entry allowlist.
 
 ## Interaction Semantics
 
@@ -214,9 +220,7 @@ interactive widget in `frust-widgets`:
 
   ```rust
   PointerPhase::Up => {
-      if inside(p.position, ctx.size()) {
-          (self.on_press)(ctx);
-      }
+      if inside(p.position, ctx.size()) { (self.on_press)(ctx); }
       self.pressed = false;
   }
   ```
@@ -294,13 +298,9 @@ interactive widget in `frust-widgets`:
   ```rust
   fn cancel_top(&mut self) {
       if let Some(top) = self.pages.last_mut() {
-          if top.pod.is_active() {
-              crate::cancel_pod(&mut top.pod); // synthetic Cancel first
-              top.pod.set_active(false);
-          }
-          if top.pod.is_focused() {
-              top.pod.set_focused(false); // then focus
-          }
+          // synthetic Cancel first, then focus
+          if top.pod.is_active() { crate::cancel_pod(&mut top.pod); top.pod.set_active(false); }
+          if top.pod.is_focused() { top.pod.set_focused(false); }
       }
       // then: publish a cleared ImeState on the next paint
   }
@@ -325,9 +325,7 @@ Semantics pass):
   `semantics` impl even a transparent one that just forwards:
 
   ```rust
-  fn semantics(&self, ctx: &mut SemanticsCtx) {
-      self.child.semantics_child(ctx);
-  }
+  fn semantics(&self, ctx: &mut SemanticsCtx) { self.child.semantics_child(ctx); }
   ```
 
 - **Keep it minimal: role, label, state, and bounds only.** This gives the
@@ -382,20 +380,18 @@ Semantics pass):
   `Cancel` crossing a component boundary carries real state (unlike the
   throwaway `()` at the root), but the contract not to reach for it is
   identical.
-- **Heavy work routes by shape: `spawn` (async IO) / `spawn_local` (UI-thread
-  `!Send`) / `spawn_blocking` (one-off CPU) / rayon (an app-level choice, not
-  bundled).** Calling `spawn_local` off the UI thread is a wiring bug, not a
-  runtime-data condition, and panics saying so (the `downcast_mut` convention
-  above); a backgrounded iOS app pauses `CADisplayLink`, so a `spawn_local`
-  timer stalls until `frust_resume`'s next pump. `use_task` composes
-  `AsyncValue<T>` over this routing as the blessed load/compute-a-value idiom
-  (see `docs/ARCHITECTURE.md`'s Key Types): a UI-thread coordinator, run under
-  the calling component's `Owner`, hands work to `spawn`/`spawn_blocking` and
-  is the sole signal writer, ruling out a cross-thread write race by
-  construction rather than discipline. Cancellation is layered: owner cleanup
-  aborts the coordinator; the coordinator aborts the background `JoinHandle`
-  via a registered `AbortHandle`; an already-running `spawn_blocking` closure
-  can't be interrupted — only its result delivery is dropped.
+- **Heavy work routes by shape: `spawn` (async IO) / `spawn_local` (UI-thread `!Send`) /
+  `spawn_blocking` (one-off CPU) / rayon (an app-level choice, not bundled).** Calling
+  `spawn_local` off the UI thread is a wiring bug, not a runtime-data condition, and panics
+  saying so (the `downcast_mut` convention above); a backgrounded iOS app pauses
+  `CADisplayLink`, so a `spawn_local` timer stalls until `frust_resume`'s next pump.
+  `use_task` composes `AsyncValue<T>` over this routing as the blessed load/compute-a-value
+  idiom (see `docs/ARCHITECTURE.md`'s Key Types): a UI-thread coordinator, run under the
+  calling component's `Owner`, hands work to `spawn`/`spawn_blocking` and is the sole signal
+  writer, ruling out a cross-thread write race by construction rather than discipline.
+  Cancellation is layered: owner cleanup aborts the coordinator; the coordinator aborts the
+  background `JoinHandle` via a registered `AbortHandle`; an already-running `spawn_blocking`
+  closure can't be interrupted — only its result delivery is dropped.
 - **`Component::State` holds `RwSignal`s directly; app code depends on the
   `frust` facade only, never `reactive_graph`/`any_spawner`/`frust-reactive`
   directly.** A reactive field is typed `RwSignal<T>`, read/written through
@@ -407,19 +403,16 @@ Semantics pass):
   `frust-core`/`kurbo`/`peniko` escape hatch (its `Cargo.toml` comment) for
   custom widgets no facade widget covers yet — check whether a gap belongs
   in the facade before reaching for it again.
-- **A rebuild must run inside a `TrackedScope` for a signal write to wake it
-  later — an untracked read is a silent wake hazard, not a stale value.**
-  `.get()` subscribes only when called from *inside* a live
-  `TrackedScope::track` closure; both shells now guarantee this for their
-  per-frame rebuild (desktop's `scope.track(|| root.rebuild(..))`, mirrored
-  on mobile by a persistent per-`AppHandle` `TrackedScope` — see
-  `docs/ARCHITECTURE.md`'s Signal-driven wake). A render-relevant read taken
-  via `*_untracked`/`get_untracked` anywhere in that path never subscribes,
-  so a later write flips no dirty flag and the shell may never repaint
-  until an unrelated input forces a frame. Reserve `*_untracked` for
-  genuine non-rendering reads — a disposal/liveness probe, an imperative
-  event-handler one-shot, a test assertion — never for a value a `build`
-  return depends on.
+- **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
+  untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only
+  when called from *inside* a live `TrackedScope::track` closure; both shells now guarantee
+  this for their per-frame rebuild (desktop's `scope.track(|| root.rebuild(..))`, mirrored
+  on mobile by a persistent per-`AppHandle` `TrackedScope` — see `docs/ARCHITECTURE.md`'s
+  Signal-driven wake). A render-relevant read taken via `*_untracked`/`get_untracked`
+  anywhere in that path never subscribes, so a later write flips no dirty flag and the shell
+  may never repaint until an unrelated input forces a frame. Reserve `*_untracked` for
+  genuine non-rendering reads — a disposal/liveness probe, an imperative event-handler
+  one-shot, a test assertion — never for a value a `build` return depends on.
 
 ## Theming & Animation Conventions
 
@@ -485,11 +478,18 @@ Semantics pass):
   `ProcessRunner`/`EnvLookup` responses keyed by the exact invocation, then
   assert the resulting `Status`/`Validation` (`frust-cli`'s `doctor`/
   `devices` validators).
+- **Injectable hook seams for process-global side effects**: a function
+  installing a real handler in production (`ctrlc::set_handler`, a
+  filesystem watcher) takes a small `Hooks` struct defaulted to the real
+  installers (`::real()`), with a `::fake()` (`#[cfg(test)]`) no-op pair a
+  test injects instead — exercising the exact dispatch logic without ever
+  installing a real process-wide handler (`frust-cli`'s
+  `WatchHooks`/`run_desktop_watch`).
 - **`#[ignore = "<reason>"]` for GPU-dependent or slow end-to-end tests.**
-  The reason string must say how to run it (`cargo test -p ... --
-  --ignored`) and why it's excluded by default (needs a real GPU; compiles a
-  full generated dependency graph; etc.) — see
-  `frust-render/tests/gpu_smoke.rs`, `frust-cli/tests/create_e2e.rs`.
+  The reason string must say how to run it (`cargo test -p ... --ignored`)
+  and why it's excluded by default (needs a real GPU; compiles a full
+  generated dependency graph; etc.) — see `frust-render/tests/gpu_smoke.rs`,
+  `frust-cli/tests/create_e2e.rs`.
 - **Recording fakes for paint assertions**: a minimal `PaintScene`
   implementation that pushes `(origin, size)`/`(origin, text)` tuples into
   `Vec`s lets widget `layout`/`paint` behavior be asserted without any GPU

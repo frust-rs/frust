@@ -124,10 +124,16 @@ a 30–120Hz `preferredFrameRateRange`; Android calls `Surface.setFrameRate()`
 achieved rate is device/OEM/thermal-state dependent and unverifiable on the
 iOS Simulator (see *Known Issues*) or most Android emulators (60Hz-only).
 
-**TUI workbench.** `frust tui` opens the ratatui workbench; `q`/`Ctrl+Q`
-quits and restores the terminal. `cargo test -p frust-tui` covers
-engine/render logic; live-terminal hover/click and panic-restore are a
-**manual gate**.
+**TUI workbench.** `frust tui` opens the ratatui workbench: `n` scaffolds a
+project (create wizard); the devices panel launches concurrent sessions
+(desktop plus multi-device, `r`/`Enter` on a selection); `d`/`b`/`c` run
+doctor/build/clean as supervised sessions with their own log tab; `Ctrl+O`/
+`p` opens the project switcher. Recent projects persist to
+`$XDG_CONFIG_HOME/frust/tui.toml` (`~/.config` fallback) via `toml_edit`'s
+format-preserving edits, so switching never needs a fresh `cd`. `q`/
+`Ctrl+Q` quits and restores the terminal. `cargo test -p frust-tui` covers
+engine/render logic; live-terminal hover/click, OSC-52 copy, and
+panic-restore are a **manual gate**.
 
 ## Dev Loop
 
@@ -268,39 +274,30 @@ cannot provide.
 
 ### Deep-link manual test (Android)
 
-A device/emulator gate for `nativeOnDeepLink` (see
-`docs/ARCHITECTURE.md#data-flow`'s Deep-link flow), against a project
-scaffolded with `frust create --deeplink-scheme <scheme>
+A device/emulator gate for `nativeOnDeepLink` (`docs/ARCHITECTURE.md`'s Deep-link
+flow) against a project scaffolded with `frust create --deeplink-scheme <scheme>
 [--deeplink-host <host>]` and installed (`frust run -d <device>`):
 
 ```bash
-# Cold start: app not running — the link launches it and the deep link
-# resolves once the native handle exists (queued until then).
+# Cold start (app not running; queues until the native handle exists):
 adb shell am force-stop <package>
-adb shell am start -a android.intent.action.VIEW \
-  -d "<scheme>://<path>" <package>
+adb shell am start -a android.intent.action.VIEW -d "<scheme>://<path>" <package>
 
-# Warm: app already foregrounded — android:launchMode="singleTop" routes
-# this through MainActivity.onNewIntent (not a fresh onCreate).
-adb shell am start -a android.intent.action.VIEW \
-  -d "<scheme>://<other-path>" <package>
+# Warm (already foregrounded; singleTop routes via onNewIntent):
+adb shell am start -a android.intent.action.VIEW -d "<scheme>://<other-path>" <package>
 ```
 
 Confirm the app navigates to the linked route both times. The iOS
-equivalent (`frust_on_deep_link`, delivered via `SceneDelegate`'s
-`scene(_:openURLContexts:)`) has a Simulator-only CLI trigger:
-
-```bash
-xcrun simctl openurl booted "<scheme>://<path>"
-```
-
-A physical device has no CLI trigger — test by tapping a link to the
-registered `CFBundleURLSchemes` scheme (e.g. from Notes) instead.
+equivalent (`frust_on_deep_link`, via `SceneDelegate`'s
+`scene(_:openURLContexts:)`) has a Simulator-only CLI trigger
+(`xcrun simctl openurl booted "<scheme>://<path>"`); a physical device has
+no CLI trigger — test by tapping a registered `CFBundleURLSchemes` link
+(e.g. from Notes) instead.
 
 `frust.toml`'s `[deeplink]` section (written by `--deeplink-scheme`/
-`--deeplink-host`) is informational only — editing it does not re-render
-the Android manifest intent filter or iOS `Info.plist` it documents; use
-`--overwrite` or edit the platform files directly to change the scheme.
+`--deeplink-host`) is informational only — it doesn't re-render the Android
+manifest intent filter or iOS `Info.plist`; use `--overwrite` or edit the
+platform files directly to change the scheme.
 
 ### Safe-area / keyboard / back manual test (Android + iOS)
 
@@ -309,18 +306,16 @@ A device/emulator gate for the inset and back contracts (see
 app (`frust run -d <device>`) — no CLI trigger like the deep-link gate
 above, so each is a person-driven check:
 
-- **Safe-area:** rotate the device and confirm top/bottom-anchored content
-  reflows around the status bar/notch/gesture-nav insets in both
-  orientations.
-- **Keyboard:** focus a text field near the bottom of the screen and
-  confirm surrounding content shifts to stay clear of the on-screen
-  keyboard, then dismiss it and confirm the layout returns.
-- **Back:** press the hardware/gesture back control on a pushed route and
-  confirm it pops one level; at the root route, confirm it falls through
-  to the platform's own default (app exit/backgrounding) rather than a
-  no-op.
+- **Safe-area:** rotate the device; confirm top/bottom-anchored content
+  reflows around the status bar/notch/gesture-nav insets in both orientations.
+- **Keyboard:** focus a text field near the bottom of the screen; confirm
+  content shifts clear of the on-screen keyboard, then dismiss it and
+  confirm the layout returns.
+- **Back:** press hardware/gesture back on a pushed route; confirm it pops
+  one level. At the root route, confirm it falls through to the platform's
+  own default (app exit/backgrounding) rather than a no-op.
 - **Density refresh:** move a running app between displays of different
-  density (or a rescaled emulator window) and confirm inset/scale-dependent
+  density (or a rescaled emulator window); confirm inset/scale-dependent
   layout rescales rather than sticking to the launch-time density.
 
 ### Shared-preferences manual test (desktop + Android + iOS)
@@ -330,19 +325,17 @@ A kill-and-relaunch persistence gate for `frust-shared-preferences`
 (`frust create`'s default `lib.rs.tmpl`, persisting its notes list + draft):
 
 - **Persistence:** add a note (and/or edit the draft), kill the app, relaunch
-  it, and confirm the note/draft survived — on the desktop preview (`cargo
-  run` from a scaffolded project), an installed Android device, and an
-  installed iPhone.
+  it, and confirm it survived — on the desktop preview (`cargo run` from a
+  scaffolded project), an installed Android device, and an installed iPhone.
 - **Old-scaffold graceful error:** a project scaffolded *before* the plugin
   existed (no `nativeInitPlatform` call on Android) must still boot with
-  empty state rather than crash — `SharedPreferences::standard()` surfaces
-  a typed `PrefsError::PlatformNotInitialized` in that case, which the
-  template's load path catches and falls back to defaults for.
-- **macOS storage-location caveat:** the desktop preview is an unbundled
-  binary (no `CFBundleIdentifier`), so its `NSUserDefaults` writes land in
-  the global defaults domain rather than an app-specific plist — a
-  storage-location difference from a bundled app, not a behavioral one (the
-  plugin's `frust.`-prefixed keys keep it isolated regardless).
+  empty state rather than crash — `SharedPreferences::standard()` surfaces a
+  typed `PrefsError::PlatformNotInitialized`, which the template's load path
+  catches and falls back to defaults for.
+- **macOS storage-location caveat:** the unbundled desktop preview (no
+  `CFBundleIdentifier`) writes `NSUserDefaults` to the global defaults
+  domain rather than an app-specific plist — a storage-location difference,
+  not a behavioral one (the plugin's `frust.`-prefixed keys stay isolated).
 
 ### Template development
 
@@ -375,12 +368,12 @@ carries this caveat.
 summaries while interacting with the window.
 
 `scripts/size-report.sh [--app <dir>]` (default `examples/huddle`) builds
-the arm64-v8a release `.so` via `cargo ndk`, reports its unstripped/stripped
-size (auto-discovering the NDK's `llvm-strip`), an APK/AAB per-ABI `.so` +
-dex breakdown when Gradle output already exists (no Gradle build
-triggered), and a desktop `cargo bloat --release -n 20` breakdown when
-`cargo-bloat` is installed — every missing-tool/artifact path degrades to a
-printed note rather than failing; only a build failure exits non-zero. See
+the arm64-v8a release `.so` via `cargo ndk`, reporting unstripped/stripped
+size (auto-discovering the NDK's `llvm-strip`), an APK/AAB per-ABI `.so`+dex
+breakdown when Gradle output already exists (no build triggered), and a
+desktop `cargo bloat --release -n 20` breakdown when installed — every
+missing-tool/artifact path degrades to a printed note; only a build failure
+exits non-zero. See
 `workflow/plans/features/frust-phase-7-performance/research/BASELINE.md`
 for recorded baselines.
 
@@ -407,41 +400,40 @@ deliberately, not floating:
 - `accesskit = "0.24"` (`frust-core`'s semantics-pass vocabulary, spec §9)
   is pinned to minor; `cargo test -p frust-core semantics` is the tripwire.
   The three per-shell adapters unify on this pin: `accesskit_winit = "0.33"`
-  (desktop) and `accesskit_android = "0.7"` are pinned to minor;
-  `accesskit_ios = "=0.1.2"` is exact-pinned (younger/less proven — see
-  *Test* below for its compile-gate status).
+  (desktop)/`accesskit_android = "0.7"` pinned to minor, `accesskit_ios =
+  "=0.1.2"` exact-pinned (younger/less proven — see *Test* for its
+  compile-gate status).
 - `vello_cpu = "=0.0.9"` (the experimental CPU render tier, `frust-render`'s
   non-default `cpu-tier` feature) is pinned exact — pre-1.0 with an unstable
   API, isolated behind the `SceneSink` encode seam so a breaking bump never
   reaches the default GPU path. See *Test* below for its tripwire command.
 - `ndk-context = "0.1"` (`frust-plugin`'s Android platform-handle slot,
-  written by `nativeInitPlatform`, read by every plugin) is pinned to
-  minor; `cargo check --target aarch64-linux-android -p frust-plugin` is
-  the tripwire. `objc2 = "0.6"` / `objc2-foundation = "0.3"` (the Apple ObjC
-  bridge, `frust-shared-preferences`'s `NSUserDefaults` backend) are pinned
-  to minor; `cargo check --target aarch64-apple-ios-sim
-  -p frust-shared-preferences` is the tripwire.
+  written by `nativeInitPlatform`, read by every plugin) is pinned to minor;
+  `cargo check --target aarch64-linux-android -p frust-plugin` is the
+  tripwire. `objc2 = "0.6"` / `objc2-foundation = "0.3"` (the Apple ObjC
+  bridge, `frust-shared-preferences`'s `NSUserDefaults` backend) are
+  minor-pinned; `cargo check --target aarch64-apple-ios-sim -p
+  frust-shared-preferences` is the tripwire.
 - `notify = "8"` (`frust run --watch`'s filesystem-watch dependency) is a
-  `frust-cli`-only targeted-exception pin, minor-pinned; `cargo test -p
-  frust-cli` is the tripwire. `ctrlc` is a floating workspace dependency
-  consumed by both `frust-drive` and `frust-cli` (not pinned here).
+  `frust-cli`-only pin, minor-pinned; `cargo test -p frust-cli` is the
+  tripwire. `ctrlc` is a floating workspace dependency consumed by both
+  `frust-drive` and `frust-cli` (not pinned here).
 - `ratatui = "0.30"` / `crossterm = "0.29"` (`frust-tui`'s render/terminal
-  stack) are pinned to minor — pre-1.0 churn expected; `cargo test -p
-  frust-tui` is the tripwire.
+  stack) are pinned to minor — pre-1.0 churn expected. `ansi-to-tui = "8.0.1"`
+  (log-view ANSI parsing) and `toml_edit = "0.25"` (recent-projects
+  persistence) are pinned alongside them, `frust-tui`-only; `cargo test -p
+  frust-tui` is the shared tripwire for all four.
 - `examples/huddle` and `plugins/clean-signals-frust` are each a
-  **standalone package** (own `[workspace]` root and `Cargo.lock`,
-  `exclude`d from the root `[workspace]`). Both path-depend on the
-  `clean-signals` core crate at the same **sibling checkout**
-  (`../../../clean-signals-rs`, branch `master`) — not git+rev-pinned yet,
-  so every consumer must resolve it the same way (all by path); mixing
-  `path`/`git`+`rev` would build two distinct `clean-signals` identities
-  and its controller/glue types would fail to unify, so swap every
-  consumer together, never one at a time, once it gains a remote.
-  `examples/huddle` is additionally standalone for its project-local
-  `target/` dir (generated Android/iOS projects). Neither manifest can use
-  `{ workspace = true }` — every dependency is a literal spec kept in sync
-  by hand. Gate each from its own directory (`cargo test` + `cargo clippy
-  --all-targets -- -D warnings`).
+  **standalone package** (own `[workspace]` root/`Cargo.lock`, excluded from
+  the root `[workspace]`), path-depending on the `clean-signals` core crate
+  at the same **sibling checkout** (`../../../clean-signals-rs`, branch
+  `master` — not git+rev-pinned, so every consumer must resolve it the same
+  way; mixing `path`/`git`+`rev` builds two distinct identities whose
+  controller/glue types fail to unify, so swap every consumer together once
+  it gains a remote). `examples/huddle` is additionally standalone for its
+  project-local `target/` dir. Neither manifest can use `{ workspace = true
+  }` — every dependency is a literal spec kept in sync by hand; gate each
+  from its own directory (`cargo test` + `cargo clippy --all-targets -- -D warnings`).
 - **Never run a blind `cargo update`.** If a manifest changes any pinned
   dependency, run `cargo generate-lockfile` and then confirm
   `cargo build --workspace --locked` still succeeds before committing.
@@ -475,25 +467,33 @@ fixable under the version pin (see *Version-Pin Policy*). `frust-render`
 detects it and fails fast with a clear diagnostic instead of a per-frame
 panic; `frust run` still builds/installs/launches, but the window stays
 black. **Physical iOS devices are unaffected** (Apple7+ GPUs expose the
-flag; verified on an iPhone 13 mini) — use one for a pixel-accurate check
-until a future wgpu/vello upgrade closes the gap.
+flag, verified on an iPhone 13 mini; an iPhone SE's Apple6/A13 GPU renders
+correctly too, extending the known-good range below Apple7) — use one for
+a pixel-accurate check until a future wgpu/vello upgrade closes the gap.
+
+### Android release build may not pick up `--define`
+
+A `--release` Android build threads `--define`s into the `cargo ndk` compile
+via Gradle's `environment(...)` (the mechanism a `--profile`/debug build
+uses successfully), but has been observed not to receive them, so a value
+like `FRUST_TRACE=1` can be missing from the compiled artifact. Workaround:
+export the same key/value pairs in the build shell's environment before
+`frust build apk --release`. Fix pending.
 
 ### vello bitmap color-emoji decode (desktop confirmed safe; Android CBDT at risk)
 
-vello 0.9's bitmap-glyph decode path (`sbix`/COLR bitmap strikes) errors
-and skips any glyph whose PNG isn't `(RGBA, 8-bit)` — pinned, unfixed
-upstream ([linebender/vello#1031](https://github.com/linebender/vello/issues/1031),
+vello 0.9's bitmap-glyph decode path (`sbix`/COLR bitmap strikes) errors and
+skips any glyph whose PNG isn't `(RGBA, 8-bit)` — pinned, unfixed upstream
+([linebender/vello#1031](https://github.com/linebender/vello/issues/1031),
 open as of 2026-07-16; not addressable under the Version-Pin Policy without
-vendoring). **Safe** for huddle's current desktop emoji set (every
-reaction-emoji glyph's Apple Color Emoji `sbix` strike is uniformly RGBA8
-at every size); the one **unverified, at-risk** path is Android's CBDT
-bitmap strikes (see `docs/ARCHITECTURE.md`'s `frust-text` row) — legacy
-Noto Color Emoji CBDT strikes are known to use palette-indexed PNGs at
-smaller sizes, which would trigger this defect, and no Android
-device/emulator has confirmed either way. If an on-device check finds a
+vendoring). **Safe** for huddle's desktop emoji set (every reaction-emoji's
+Apple Color Emoji `sbix` strike is uniformly RGBA8); the **unverified,
+at-risk** path is Android's CBDT strikes (see `docs/ARCHITECTURE.md`'s
+`frust-text` row) — legacy Noto Color Emoji CBDT strikes are known to use
+palette-indexed PNGs at smaller sizes, which would trigger this defect, and
+no device/emulator has confirmed either way. If an on-device check finds a
 broken glyph, revisit vendoring the one-line `Transformations::EXPAND` fix
-before a future vello major bump. The desktop logger suppresses
-known-noisy vello `Error`/`Warn` messages (e.g. "Unsupported
-`output_color_type`", "Invalid PNG in font") below `debug`
-(*Instrumentation*'s `FRUST_LOG` row); other vello errors still surface at
-the default level.
+before a future vello major bump. The desktop logger suppresses known-noisy
+vello `Error`/`Warn` messages (e.g. "Unsupported `output_color_type`",
+"Invalid PNG in font") below `debug` (*Instrumentation*'s `FRUST_LOG` row);
+other vello errors still surface at the default level.
