@@ -39,6 +39,13 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFDictionary",
     "CFData",
     "CFError",
+    # S02 (Apple Keychain CRUD): `CFArray` types the `kSecMatchLimitAll`
+    # result `keys()` enumerates; `CFNumber` provides `CFBoolean`/
+    # `kCFBooleanTrue`, the value for `SecItem*` boolean query flags
+    # (`kSecReturnData`/`kSecReturnAttributes`). Apple-arm only — disjoint
+    # from the android/desktop sections, so this narrows nothing S03/S04 own.
+    "CFArray",
+    "CFNumber",
 ] }
 objc2-security = { version = "0.3", default-features = false, features = [
     "std",
