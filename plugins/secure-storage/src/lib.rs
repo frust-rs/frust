@@ -55,12 +55,9 @@
 #[cfg(test)]
 mod file;
 
-// Backend stub modules (task S01b, Plan Phases 2-4 preamble): compiling,
-// `#[cfg]`-gated `Backend` impls that every op `Err`s
-// `NotAvailable(UnsupportedPlatform)`, added now so the platform-FFI deps
-// below compile on every real target ahead of S02/S03/S04's work. None is
-// constructed yet — `open_with`'s selection point below still routes every
-// arm to `file::FileStore` until each task flips its own one line.
+// Platform backends (Plan Phases 2-5, all landed): every real target routes
+// to its own `#[cfg]`-gated `Backend` impl via `open_with`'s selection point
+// below — Apple Keychain, Android Keystore, Linux/Windows keyring.
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_vendor = "apple")]
