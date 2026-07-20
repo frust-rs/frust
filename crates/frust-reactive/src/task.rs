@@ -304,12 +304,11 @@ where
     Fut: Future<Output = Result<T, E>> + Send + 'static,
     F: Fn() -> Fut + 'static,
 {
-    let rt = match ReactiveRuntime::get() {
-        Some(rt) => rt,
-        // No runtime installed (init never ran). Nothing to do — the state
-        // stays `Idle` rather than panicking.
-        None => return,
-    };
+    let rt = ReactiveRuntime::get().expect(
+        "frust-reactive: use_task called before ReactiveRuntime::init — \
+         this is a wiring bug: initialize the reactive runtime (the shell does \
+         this on startup) before mounting components that use use_task",
+    );
 
     // Abort the previous in-flight background task (restart supersedes it).
     if let Some(handle) = coord.bg_abort.lock().expect("bg_abort poisoned").take() {
