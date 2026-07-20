@@ -1,0 +1,35 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+assertion_line: 123
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ bubblebench ▾ · frust 0.1.0 · ✓ toolchain                                ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+╭────────────────────────╮                                                                          
+│   bubblebench          │  Dashboard                                                               
+│ ▸ huddle               │  ━━━━━━━━━━                                                              
+╰────────────────────────╯                                                                          
+ DEVICES ↻ r             │  No session running — start a run to open a log tab here.                
+   none found            │                                                                          
+                         │                                                                          
+ SESSIONS                │                                                                          
+   none running          │                                                                          
+                         │                                                                          
+ ACTIONS                 │                                                                          
+   Doctor · Settings     │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

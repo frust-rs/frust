@@ -45,6 +45,12 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
                 let mut suppressed = MouseCtx::suppressed();
                 views::workbench::render(frame, area, state, theme, &mut suppressed);
                 views::run_config::render(frame, area, modal, theme, mouse);
+            } else if state.project_switcher_open {
+                // Same D4 base-layer suppression as the run-config modal above,
+                // for the titlebar project-switcher dropdown.
+                let mut suppressed = MouseCtx::suppressed();
+                views::workbench::render(frame, area, state, theme, &mut suppressed);
+                views::project_switcher::render(frame, area, state, theme, mouse);
             } else {
                 views::workbench::render(frame, area, state, theme, mouse);
             }

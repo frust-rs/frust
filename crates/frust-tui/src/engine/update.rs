@@ -7,6 +7,8 @@
 //! clipboard). It performs no I/O and reads no clock, so every transition is
 //! unit-testable without a terminal (see the tests below).
 
+use std::path::PathBuf;
+
 use super::message::Message;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
@@ -27,6 +29,10 @@ pub enum Effect {
     /// Launch one supervised session per spec (the run-config modal's checked
     /// targets), registering each returned id back into the model.
     LaunchSessions(Vec<SessionSpec>),
+    /// Persist `path` as the most-recently-opened project (`toml_edit`
+    /// format-preserving save to `~/.config/frust/tui.toml`) — the runner
+    /// performs the actual file I/O; the pure engine only requests it.
+    RecordRecentProject(PathBuf),
 }
 
 /// What the loop must do after a transition.
@@ -297,6 +303,65 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // Modal open but nothing checked, or no modal: nothing to launch.
             _ => Outcome::idle(),
         },
+
+        // ── Project switcher + recent-projects persistence (F5 / D6b) ───────
+        Message::ToggleProjectSwitcher => {
+            if state.project_switcher_open {
+                state.project_switcher_open = false;
+            } else {
+                state.project_switcher_open = true;
+                state.project_switcher_cursor = state.active_project_index();
+            }
+            Outcome::redraw()
+        }
+        Message::CloseProjectSwitcher => {
+            if state.project_switcher_open {
+                state.project_switcher_open = false;
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::ProjectSwitcherCursorUp => move_project_switcher_cursor(state, -1),
+        Message::ProjectSwitcherCursorDown => move_project_switcher_cursor(state, 1),
+        Message::SwitchProject(index) => switch_project(state, index),
+    }
+}
+
+/// Move the switcher's highlighted row by `delta`, clamped to `projects`;
+/// redraw only on a real move. A no-op while the switcher is closed or
+/// `projects` is empty.
+fn move_project_switcher_cursor(state: &mut AppState, delta: isize) -> Outcome {
+    if !state.project_switcher_open || state.projects.is_empty() {
+        return Outcome::idle();
+    }
+    let n = state.projects.len();
+    let cur = state.project_switcher_cursor.min(n - 1) as isize;
+    let next = (cur + delta).clamp(0, n as isize - 1) as usize;
+    if next == state.project_switcher_cursor {
+        Outcome::idle()
+    } else {
+        state.project_switcher_cursor = next;
+        Outcome::redraw()
+    }
+}
+
+/// Switch the active project to `state.projects[index]`: closes the
+/// switcher, re-focuses `active_session` to the first session under the new
+/// project (`None` — the dashboard — if it has none, so the active project
+/// really does drive which sessions group is focused), and requests the
+/// runner persist it as the most-recently-opened project. An out-of-range
+/// index (a stale click after the list changed) is a no-op.
+fn switch_project(state: &mut AppState, index: usize) -> Outcome {
+    let Some(target) = state.projects.get(index).cloned() else {
+        return Outcome::idle();
+    };
+    state.project_root = Some(target.clone());
+    state.project_switcher_open = false;
+    state.active_session = state.sessions.iter().position(|s| s.project_root == target);
+    Outcome {
+        redraw: true,
+        effect: Some(Effect::RecordRecentProject(target)),
     }
 }
 
@@ -843,5 +908,92 @@ mod tests {
             out.effect,
             Some(Effect::Copy("line 2\nline 3\nline 4".to_string()))
         );
+    }
+
+    // ── Project switcher + recent-projects persistence (F5 / D6b) ───────────
+
+    fn multi_project_workbench() -> AppState {
+        let a = PathBuf::from("/tmp/a");
+        let b = PathBuf::from("/tmp/b");
+        let c = PathBuf::from("/tmp/c");
+        AppState {
+            screen: crate::engine::Screen::Workbench,
+            project_root: Some(a.clone()),
+            projects: vec![a, b, c],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn toggle_opens_and_closes_seeding_the_cursor_at_the_active_project() {
+        let mut st = multi_project_workbench();
+        assert!(update(&mut st, Message::ToggleProjectSwitcher).redraw);
+        assert!(st.project_switcher_open);
+        assert_eq!(st.project_switcher_cursor, 0); // /tmp/a is active
+        assert!(update(&mut st, Message::ToggleProjectSwitcher).redraw);
+        assert!(!st.project_switcher_open);
+    }
+
+    #[test]
+    fn close_is_a_noop_when_already_closed() {
+        let mut st = multi_project_workbench();
+        assert!(!update(&mut st, Message::CloseProjectSwitcher).redraw);
+    }
+
+    #[test]
+    fn cursor_moves_clamp_and_only_apply_while_open() {
+        let mut st = multi_project_workbench();
+        // Closed: cursor messages are a no-op.
+        assert!(!update(&mut st, Message::ProjectSwitcherCursorDown).redraw);
+        update(&mut st, Message::ToggleProjectSwitcher); // cursor -> 0
+        assert!(update(&mut st, Message::ProjectSwitcherCursorDown).redraw);
+        assert_eq!(st.project_switcher_cursor, 1);
+        update(&mut st, Message::ProjectSwitcherCursorDown);
+        assert_eq!(st.project_switcher_cursor, 2);
+        assert!(!update(&mut st, Message::ProjectSwitcherCursorDown).redraw); // at bottom
+        assert!(update(&mut st, Message::ProjectSwitcherCursorUp).redraw);
+        assert_eq!(st.project_switcher_cursor, 1);
+    }
+
+    #[test]
+    fn switch_project_updates_active_root_closes_switcher_and_records_effect() {
+        let mut st = multi_project_workbench();
+        update(&mut st, Message::ToggleProjectSwitcher);
+        let out = update(&mut st, Message::SwitchProject(1));
+        assert!(out.redraw);
+        assert_eq!(
+            out.effect,
+            Some(Effect::RecordRecentProject(PathBuf::from("/tmp/b")))
+        );
+        assert_eq!(st.project_root, Some(PathBuf::from("/tmp/b")));
+        assert!(!st.project_switcher_open, "switching closes the dropdown");
+    }
+
+    #[test]
+    fn switch_project_out_of_range_is_a_noop() {
+        let mut st = multi_project_workbench();
+        let out = update(&mut st, Message::SwitchProject(99));
+        assert!(!out.redraw);
+        assert_eq!(out.effect, None);
+        assert_eq!(st.project_root, Some(PathBuf::from("/tmp/a")));
+    }
+
+    #[test]
+    fn switch_project_focuses_the_new_projects_first_session_or_falls_back_to_none() {
+        let mut st = multi_project_workbench();
+        register(&mut st, 0, "/tmp/b", "desktop");
+        register(&mut st, 1, "/tmp/b", "Pixel 7");
+        // Registering auto-selected session 0 (project /tmp/b) as active even
+        // though /tmp/a is still the nominal active project.
+        assert_eq!(st.active_session, Some(0));
+
+        // Switching to /tmp/a (no sessions there) drives the focused session
+        // group to None — the dashboard, not a stale /tmp/b tab.
+        update(&mut st, Message::SwitchProject(0));
+        assert_eq!(st.active_session, None);
+
+        // Switching to /tmp/b (which has sessions) focuses its first one.
+        update(&mut st, Message::SwitchProject(1));
+        assert_eq!(st.active_session, Some(0));
     }
 }

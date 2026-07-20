@@ -8,12 +8,14 @@
 //! terminal lifecycle and drives the loop.
 
 mod message;
+mod persist;
 mod run_config;
 mod session_view;
 mod state;
 mod update;
 
 pub use message::{Message, RegionId};
+pub use persist::{load_recent_projects, merge_recent_and_detected, record_recent_project};
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
 pub use session_view::{
     LineSelection, LogBuffer, LogLevel, Scroll, SessionView, detect_level, line_matches, strip_ansi,

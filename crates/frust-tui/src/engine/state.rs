@@ -91,15 +91,38 @@ pub struct AppState {
     /// The run-config modal, when open (`r`/`Enter` from the devices panel).
     /// While `Some`, it captures input and suppresses background mouse regions.
     pub run_config: Option<RunConfig>,
+    /// Whether the titlebar project-switcher dropdown is open (F5 + D6b).
+    /// While `true`, it captures input and suppresses background mouse
+    /// regions, the same D4 base-layer suppression the run-config modal uses.
+    pub project_switcher_open: bool,
+    /// The highlighted row while the switcher is open (`↑`/`↓` move it,
+    /// `Enter` switches to it); meaningless while closed.
+    pub project_switcher_cursor: usize,
 }
 
 impl AppState {
-    /// Build the initial model from the current working directory: zero
-    /// `frust.toml` project markers found within the bounded walk opens the
-    /// welcome screen, one or more opens the workbench with the list.
+    /// Build the initial model from the current working directory, merged
+    /// with the persisted recent-projects list (PLAN.md D6b): a bounded walk
+    /// (see [`Self::detect`]) finds every `frust.toml` marker under the cwd,
+    /// then [`super::persist::merge_recent_and_detected`] prepends any
+    /// still-existing recently-opened project not already found, deduped —
+    /// "recent first, deduped". A cwd-detected project stays the active one
+    /// (unsurprising `cd`-into-a-project-then-run behavior); with none
+    /// detected, the most-recently-opened project opens instead of the
+    /// welcome screen — "from any directory" per PLAN.md D6b. Only the
+    /// welcome screen (no active project either way) skips persistence
+    /// entirely.
     pub fn new() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self::detect(&cwd)
+        let mut state = Self::detect(&cwd);
+        let detected_active = state.project_root.clone();
+        let recent = super::persist::load_recent_projects();
+        state.projects = super::persist::merge_recent_and_detected(&recent, &state.projects);
+        state.project_root = detected_active.or_else(|| state.projects.first().cloned());
+        if state.project_root.is_some() {
+            state.screen = Screen::Workbench;
+        }
+        state
     }
 
     /// Detection core (testable without touching the process cwd/reading a
@@ -129,6 +152,8 @@ impl AppState {
             device_cursor: 0,
             devices_refreshing: false,
             run_config: None,
+            project_switcher_open: false,
+            project_switcher_cursor: 0,
         }
     }
 
@@ -178,6 +203,26 @@ impl AppState {
         self.devices.iter().filter(|d| d.selected).count()
     }
 
+    /// Clamp `project_switcher_cursor` into range after `projects` changes
+    /// (an empty list parks it at 0) — mirrors `clamp_device_cursor`.
+    pub fn clamp_project_switcher_cursor(&mut self) {
+        if self.projects.is_empty() {
+            self.project_switcher_cursor = 0;
+        } else if self.project_switcher_cursor >= self.projects.len() {
+            self.project_switcher_cursor = self.projects.len() - 1;
+        }
+    }
+
+    /// The index of the active project in `projects` (defaults to 0 when the
+    /// active root isn't found there, e.g. the welcome screen) — seeds the
+    /// switcher's cursor when it opens.
+    pub fn active_project_index(&self) -> usize {
+        self.project_root
+            .as_deref()
+            .and_then(|root| self.projects.iter().position(|p| p == root))
+            .unwrap_or(0)
+    }
+
     /// The sessions grouped by project, preserving first-seen project order and
     /// each project's session order — the tab-bar / sidebar grouping (D5). Each
     /// group is `(project_root, [(flat tab index, &session)])`, where the flat
@@ -216,6 +261,8 @@ impl Default for AppState {
             device_cursor: 0,
             devices_refreshing: false,
             run_config: None,
+            project_switcher_open: false,
+            project_switcher_cursor: 0,
         }
     }
 }

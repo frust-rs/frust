@@ -112,6 +112,17 @@ fn workbench_multi_project_sidebar_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &multi_project_workbench_state()));
 }
 
+/// F5 + D6b: the titlebar project-switcher dropdown open over a multi-project
+/// workbench, the second project (bubblebench's sibling, huddle) highlighted
+/// by the switcher cursor while bubblebench stays the active (accented) one.
+#[test]
+fn project_switcher_open_100x30() {
+    let mut state = multi_project_workbench_state();
+    state.project_switcher_open = true;
+    state.project_switcher_cursor = 1;
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
 #[test]
 fn too_small_terminal_40x10() {
     let state = AppState::default();

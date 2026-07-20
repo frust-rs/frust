@@ -91,6 +91,15 @@ crossterm = "0.29"
 # view uses, keeping the dependency graph lean.
 ansi-to-tui = { version = "8.0.1", default-features = false }
 insta = "1"
+# Format-preserving TOML editing for `frust-tui`'s recent-projects store
+# (`~/.config/frust/tui.toml`, PLAN.md D6b's project switcher) — a document
+# edit (not a deserialize-mutate-reserialize round trip) so a user's
+# hand-added comments/keys in the file survive a save. Pinned to minor per
+# the Version-Pin Policy (pre-1.0, alongside the ratatui/crossterm pins
+# above); `cargo test -p frust-tui` is the tripwire. `frust-tui`-only — the
+# plain `toml = "1"` pin below (frust-cli's `frust.toml`/scaffold templates)
+# needs no format preservation and stays untouched.
+toml_edit = "0.25"
 # cli
 clap = { version = "4.6", features = ["derive"] }
 minijinja = "2.21"

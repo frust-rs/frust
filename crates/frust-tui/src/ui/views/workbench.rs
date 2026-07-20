@@ -24,7 +24,7 @@ pub fn render(
     mouse: &mut MouseCtx,
 ) {
     let shell = Shell::split(area);
-    titlebar(frame, shell.titlebar, state, theme);
+    titlebar(frame, shell.titlebar, state, theme, mouse);
 
     let (sidebar, main) = sidebar_main(shell.body);
     render_sidebar(frame, sidebar, state, theme, mouse);
@@ -38,7 +38,7 @@ pub fn render(
     status(frame, shell.status, state, theme);
 }
 
-fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, mouse: &mut MouseCtx) {
     let project = state
         .project_root
         .as_ref()
@@ -47,24 +47,68 @@ fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
         .unwrap_or_else(|| "project".to_string());
 
     let row0 = Rect::new(area.x, area.y, area.width, 1);
-    let left = Line::from(vec![
-        Span::styled(
-            format!("{} Frust ", theme.icons.gear()),
-            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("│ ", Style::default().fg(theme.border())),
-        Span::styled(
-            project,
-            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ▾ ", Style::default().fg(theme.accent())),
-        Span::styled("· frust 0.1.0 · ", Style::default().fg(theme.muted())),
-        Span::styled(
-            format!("{} toolchain", theme.icons.ok()),
-            Style::default().fg(theme.success()),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(left), row0);
+
+    // Built with a running column cursor (mirrors the tab-bar / run-config
+    // field patterns) so the project-name + `▾` chevron's click rect lands
+    // exactly on its rendered columns.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut col: u16 = 0;
+    let push = |spans: &mut Vec<Span<'static>>, col: &mut u16, text: String, style: Style| {
+        *col += text.chars().count() as u16;
+        spans.push(Span::styled(text, style));
+    };
+
+    push(
+        &mut spans,
+        &mut col,
+        format!("{} Frust ", theme.icons.gear()),
+        Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
+    );
+    push(
+        &mut spans,
+        &mut col,
+        "│ ".to_string(),
+        Style::default().fg(theme.border()),
+    );
+
+    let switcher_x = area.x + col;
+    push(
+        &mut spans,
+        &mut col,
+        project,
+        Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
+    );
+    push(
+        &mut spans,
+        &mut col,
+        " ▾ ".to_string(),
+        Style::default().fg(theme.accent()),
+    );
+    let switcher_w = col - (switcher_x - area.x);
+
+    push(
+        &mut spans,
+        &mut col,
+        "· frust 0.1.0 · ".to_string(),
+        Style::default().fg(theme.muted()),
+    );
+    push(
+        &mut spans,
+        &mut col,
+        format!("{} toolchain", theme.icons.ok()),
+        Style::default().fg(theme.success()),
+    );
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), row0);
+
+    if switcher_x < area.right() {
+        let w = switcher_w.min(area.right().saturating_sub(switcher_x));
+        mouse.click(
+            Rect::new(switcher_x, area.y, w, 1),
+            RegionId::ProjectSwitcherToggle,
+            Message::ToggleProjectSwitcher,
+        );
+    }
 
     let actions = Line::from(vec![
         Span::styled(
@@ -121,6 +165,10 @@ fn render_sidebar(
     // are interactive device rows (and the refresh affordance) so their
     // single-row click rects can be registered after layout.
     let mut lines = vec![heading("PROJECTS")];
+    let project_rows_start = lines.len();
+    // `project_lines` collapses to a single "(none detected)" placeholder
+    // when empty (never clickable); otherwise it's one line per project.
+    let project_row_count = state.projects.len();
     lines.extend(project_lines(state, theme));
     lines.push(Line::from(""));
 
@@ -156,6 +204,11 @@ fn render_sidebar(
         let y = inner.y + row as u16;
         (y < inner.bottom()).then(|| Rect::new(inner.x, y, inner.width, 1))
     };
+    for i in 0..project_row_count {
+        if let Some(rect) = row_rect(project_rows_start + i) {
+            mouse.click(rect, RegionId::ProjectRow(i), Message::SwitchProject(i));
+        }
+    }
     if let Some(rect) = row_rect(devices_header_row) {
         mouse.click(rect, RegionId::RefreshDevices, Message::RefreshDevices);
     }

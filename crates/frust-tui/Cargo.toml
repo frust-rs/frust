@@ -33,6 +33,9 @@ ratatui.workspace = true
 ansi-to-tui.workspace = true
 # `event-stream` gives the async `EventStream` the tokio `select!` loop polls.
 crossterm = { workspace = true, features = ["event-stream"] }
+# Format-preserving recent-projects store (`~/.config/frust/tui.toml`, PLAN.md
+# D6b's project switcher) — pin lives in the root manifest (Version-Pin Policy).
+toml_edit.workspace = true
 # The workspace `tokio` pin is `default-features = false`; the TUI crate enables
 # exactly the features its async event loop needs (nothing reaches the
 # framework's `tokio` usage).

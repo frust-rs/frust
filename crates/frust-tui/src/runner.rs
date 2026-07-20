@@ -74,6 +74,13 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
 
     // Kick an initial device discovery so the panel populates on open.
     let _ = msg_tx.send(Message::RefreshDevices);
+    // Record whichever project came up active at startup (cwd-detected, or
+    // the persisted most-recently-opened one — see `AppState::new`) as the
+    // most-recently-opened, so opening the TUI itself counts as a "use" for
+    // the recency ordering, not just an explicit switch.
+    if let Some(root) = engine.state.project_root.clone() {
+        crate::engine::record_recent_project(&root);
+    }
 
     while !engine.state.should_quit {
         if needs_redraw {
@@ -138,6 +145,7 @@ fn apply_effect(
         Some(Effect::Copy(text)) => copy_to_clipboard(&text),
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
         Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx),
+        Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
         None => {}
     }
 }
@@ -285,6 +293,11 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         return translate_modal_key(code, mods, modal);
     }
 
+    // While the project switcher is open it captures every other key.
+    if state.project_switcher_open {
+        return translate_switcher_key(code, state);
+    }
+
     // While the search overlay is open, keys edit the query.
     if state.search.open {
         return match code {
@@ -311,6 +324,12 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     }
 
     let workbench = matches!(state.screen, Screen::Workbench);
+    // `Ctrl+O` opens the titlebar project switcher (mouse parity: the ▾
+    // chevron). Only meaningful once a workbench is open — the welcome
+    // screen has no project to switch away from.
+    if ctrl && matches!(code, KeyCode::Char('o')) && workbench {
+        return vec![Message::ToggleProjectSwitcher];
+    }
     // Keyboard focus heuristic (a full focus system is Phase 3): with no
     // session open the devices panel owns the arrows/Space/Enter; once a
     // session is running the log view owns them (devices stay mouse- and
@@ -325,7 +344,11 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('c') if matches!(state.screen, Screen::Welcome) => activate_create(state),
         KeyCode::Enter if matches!(state.screen, Screen::Welcome) => activate_create(state),
 
-        // ── Devices panel + run-config (workbench) ──
+        // ── Project switcher + devices panel + run-config (workbench) ──
+        // `p` toggles the titlebar project switcher (mouse parity: the ▾
+        // chevron / a sidebar project-row click carries `SwitchProject`
+        // directly — see `translate_switcher_key` for the open-dropdown keys).
+        KeyCode::Char('p') if workbench => vec![Message::ToggleProjectSwitcher],
         // `r`/`Enter` open the run-config modal primed with the panel
         // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance).
         KeyCode::Char('r') if workbench => vec![Message::OpenRunConfig],
@@ -392,6 +415,21 @@ fn translate_modal_key(
         // (where it's a literal character — `defines` is space-separated).
         KeyCode::Char(' ') if !text_field => vec![Message::RunConfigToggleTarget],
         KeyCode::Char(c) if text_field && !ctrl => vec![Message::RunConfigInput(c)],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the titlebar project switcher is open.
+/// `Esc` closes it, `↑`/`↓` move the highlighted row, `Enter` switches to the
+/// highlighted row, and digits `1`-`9` jump straight to a project by index
+/// (mouse parity: a dropdown item / sidebar project-row click).
+fn translate_switcher_key(code: KeyCode, state: &AppState) -> Vec<Message> {
+    match code {
+        KeyCode::Esc => vec![Message::CloseProjectSwitcher],
+        KeyCode::Up => vec![Message::ProjectSwitcherCursorUp],
+        KeyCode::Down => vec![Message::ProjectSwitcherCursorDown],
+        KeyCode::Enter => vec![Message::SwitchProject(state.project_switcher_cursor)],
+        KeyCode::Char(c @ '1'..='9') => vec![Message::SwitchProject(c as usize - '1' as usize)],
         _ => vec![],
     }
 }

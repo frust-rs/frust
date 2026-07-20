@@ -48,6 +48,14 @@ pub enum RegionId {
     RunLaunch,
     /// The run-config modal's cancel button.
     RunCancel,
+    /// The titlebar project-switcher toggle (the project name + `▾` chevron).
+    ProjectSwitcherToggle,
+    /// A project row in the sidebar PROJECTS section (0-based index into
+    /// `AppState::projects`); click switches the active project directly.
+    ProjectRow(usize),
+    /// A row inside the open titlebar switcher dropdown (0-based index into
+    /// `AppState::projects`); click switches and closes the dropdown.
+    ProjectMenuItem(usize),
 }
 
 /// A TEA message: the only way `AppState` ever changes.
@@ -174,4 +182,21 @@ pub enum Message {
     /// the launch affordance) — routed to the runner as
     /// [`super::Effect::LaunchSessions`].
     RunConfigLaunch,
+
+    // ── Project switcher + recent-projects persistence (F5 / D6b) ──────────
+    /// Toggle the titlebar `▾` project-switcher dropdown open/closed (click,
+    /// or `Ctrl+O`/`p` from the workbench).
+    ToggleProjectSwitcher,
+    /// Close the switcher dropdown without switching (`Esc`).
+    CloseProjectSwitcher,
+    /// Move the switcher's highlighted row up (`↑` while open).
+    ProjectSwitcherCursorUp,
+    /// Move the switcher's highlighted row down (`↓` while open).
+    ProjectSwitcherCursorDown,
+    /// Switch the active project to `AppState::projects[index]` — from a
+    /// sidebar project-row click, a switcher dropdown item click, `Enter`/a
+    /// digit key while the switcher is open. Also requests the runner
+    /// persist it as the most-recently-opened project
+    /// ([`super::Effect::RecordRecentProject`]).
+    SwitchProject(usize),
 }
