@@ -7,6 +7,7 @@
 //! emits `Message`s but never mutates the model; `crate::runner` owns the
 //! terminal lifecycle and drives the loop.
 
+mod create_wizard;
 mod message;
 mod persist;
 mod run_config;
@@ -14,13 +15,14 @@ mod session_view;
 mod state;
 mod update;
 
+pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
 pub use message::{Message, RegionId};
 pub use persist::{load_recent_projects, merge_recent_and_detected, record_recent_project};
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
 pub use session_view::{
     LineSelection, LogBuffer, LogLevel, Scroll, SessionView, detect_level, line_matches, strip_ansi,
 };
-pub use state::{AppState, CREATE_TOAST, Screen, SearchState};
+pub use state::{AppState, Screen, SearchState};
 pub use update::{Effect, Outcome, update};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};

@@ -22,9 +22,20 @@ use crate::supervise::{SessionEvent, SessionId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegionId {
     /// The single large "Create a new Frust project" button on the welcome
-    /// screen (D6b). The wizard it opens is Phase 2 — the skeleton emits a
-    /// toast.
+    /// screen (D6b); opens the create wizard.
     CreateButton,
+    /// The workbench "New project" action (sidebar ACTIONS row); opens the
+    /// create wizard.
+    NewProjectAction,
+    /// An architecture card in the create wizard (0-based index into the
+    /// wizard's `arches`); click highlights it.
+    WizardArchCard(usize),
+    /// The create wizard's Next / Create button (advances / scaffolds).
+    WizardNext,
+    /// The create wizard's Back button (steps back).
+    WizardBack,
+    /// The create wizard's Cancel button (closes it).
+    WizardCancel,
     /// A session tab in the main-area tab bar (0-based index into the ordered
     /// session list); click selects it.
     SessionTab(usize),
@@ -75,11 +86,43 @@ pub enum Message {
     /// chrome).
     CreatePressed,
     /// A primary-button release landed on the Create button, or `Enter`/`c`
-    /// activated it — opens the create flow (Phase 2; toast for now).
+    /// activated it — opens the create wizard.
     CreateActivate,
     /// A press that started on the Create button was released elsewhere —
     /// clears the pressed chrome without activating.
     CreateCancel,
+
+    // ── Create-project wizard (D6b) ─────────────────────────────────────────
+    /// Open the create wizard (the workbench "New project" action / `n`, or
+    /// the palette). Primes an off-thread clean-signals sibling probe.
+    OpenCreateWizard,
+    /// Close the wizard without scaffolding (the Cancel button).
+    CloseCreateWizard,
+    /// Type a character into the wizard's focused text field (name/directory).
+    CreateWizardInput(char),
+    /// Delete the last character of the wizard's focused text field.
+    CreateWizardBackspace,
+    /// Advance the wizard (Enter / the Next-or-Create button): validate and
+    /// step forward, or — on the arch step — request the off-thread scaffold.
+    CreateWizardAdvance,
+    /// Step the wizard back (Esc / the Back button); closes it on the first
+    /// step.
+    CreateWizardBack,
+    /// Move the arch-card highlight by `delta` (`←`/`→`/`↑`/`↓`).
+    CreateWizardArchMove(isize),
+    /// Highlight an arch card by index (mouse click parity).
+    CreateWizardSelectArchAt(usize),
+    /// The off-thread sibling probe finished: whether the `../clean-signals-rs`
+    /// sibling checkout is present (gates the clean-signals arch card).
+    CleanSignalsProbed(bool),
+    /// The off-thread scaffold succeeded; open the new project in place.
+    ScaffoldSucceeded {
+        /// The absolute root of the freshly scaffolded project.
+        project_root: PathBuf,
+    },
+    /// The off-thread scaffold failed; the wizard shows the error and offers a
+    /// retry.
+    ScaffoldFailed(String),
 
     // ── Sessions (D2/D6b): the supervisor feeds `Session`; the rest are
     //    user-driven tab/log-view interactions. ──────────────────────────────

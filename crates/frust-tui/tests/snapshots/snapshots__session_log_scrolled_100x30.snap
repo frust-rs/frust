@@ -16,8 +16,8 @@ expression: "render_to_string(100, 30, &state)"
    ▸ ▶ desktop           │                                                                          
                          │                                                                          
  ACTIONS                 │                                                                          
+   New project           │                                                                          
    Doctor · Settings     │                                                                          
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

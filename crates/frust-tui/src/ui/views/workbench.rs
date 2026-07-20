@@ -195,6 +195,8 @@ fn render_sidebar(
     lines.extend(sessions::sidebar_lines(state, theme));
     lines.push(Line::from(""));
     lines.push(heading("ACTIONS"));
+    let new_project_row = lines.len();
+    lines.push(item("New project"));
     lines.push(item("Doctor · Settings"));
     frame.render_widget(Paragraph::new(lines), inner);
 
@@ -216,6 +218,9 @@ fn render_sidebar(
         if let Some(rect) = row_rect(row) {
             mouse.click(rect, RegionId::DeviceRow(i), Message::SelectDeviceAt(i));
         }
+    }
+    if let Some(rect) = row_rect(new_project_row) {
+        mouse.click(rect, RegionId::NewProjectAction, Message::OpenCreateWizard);
     }
 }
 

@@ -9,10 +9,11 @@
 
 use std::path::PathBuf;
 
+use super::create_wizard::{CreateWizard, WizardAdvance};
 use super::message::Message;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
-use super::state::{AppState, CREATE_TOAST};
+use super::state::{AppState, Screen};
 use crate::supervise::{SessionEvent, SessionEventKind, SessionId, SessionSpec};
 
 /// A side effect the (terminal/supervisor-owning) runner performs after a
@@ -33,6 +34,24 @@ pub enum Effect {
     /// format-preserving save to `~/.config/frust/tui.toml`) — the runner
     /// performs the actual file I/O; the pure engine only requests it.
     RecordRecentProject(PathBuf),
+    /// Probe (off-thread) whether the `../clean-signals-rs` sibling checkout
+    /// is present, posting the result back as
+    /// [`Message::CleanSignalsProbed`] — gates the create wizard's
+    /// clean-signals arch card.
+    ProbeCleanSignals,
+    /// Scaffold a new project off-thread via `frust_drive::scaffold::generate`,
+    /// posting [`Message::ScaffoldSucceeded`]/[`Message::ScaffoldFailed`] back.
+    /// The runner resolves `directory` against the process cwd and fills the
+    /// template context (org/description/frust path+version).
+    ScaffoldProject {
+        /// The target directory as typed in the wizard (cwd-relative or
+        /// absolute).
+        directory: String,
+        /// The validated project (crate) name.
+        project_name: String,
+        /// The selected architecture tag (`None` = default template).
+        arch: Option<String>,
+    },
 }
 
 /// What the loop must do after a transition.
@@ -108,8 +127,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         }
         Message::CreateActivate => {
             state.create_pressed = false;
-            state.toast = Some(CREATE_TOAST.to_string());
-            Outcome::redraw()
+            open_create_wizard(state)
         }
         Message::CreateCancel => {
             if state.create_pressed {
@@ -325,6 +343,96 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::ProjectSwitcherCursorUp => move_project_switcher_cursor(state, -1),
         Message::ProjectSwitcherCursorDown => move_project_switcher_cursor(state, 1),
         Message::SwitchProject(index) => switch_project(state, index),
+
+        // ── Create-project wizard (D6b) ─────────────────────────────────────
+        Message::OpenCreateWizard => {
+            if state.create_wizard.is_some() {
+                Outcome::idle()
+            } else {
+                open_create_wizard(state)
+            }
+        }
+        Message::CloseCreateWizard => {
+            if state.create_wizard.take().is_some() {
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::CreateWizardInput(c) => with_wizard(state, |w| w.input_char(c)),
+        Message::CreateWizardBackspace => with_wizard(state, CreateWizard::backspace),
+        Message::CreateWizardArchMove(delta) => with_wizard(state, |w| w.arch_move(delta)),
+        Message::CreateWizardSelectArchAt(i) => with_wizard(state, |w| w.select_arch_at(i)),
+        Message::CreateWizardBack => match state.create_wizard.as_mut() {
+            Some(wizard) => {
+                if wizard.back() {
+                    state.create_wizard = None;
+                }
+                Outcome::redraw()
+            }
+            None => Outcome::idle(),
+        },
+        Message::CreateWizardAdvance => match state.create_wizard.as_mut() {
+            Some(wizard) => match wizard.advance() {
+                WizardAdvance::Scaffold { arch } => Outcome {
+                    redraw: true,
+                    effect: Some(Effect::ScaffoldProject {
+                        directory: wizard.directory.trim().to_string(),
+                        project_name: wizard.name.clone(),
+                        arch,
+                    }),
+                },
+                WizardAdvance::Stepped | WizardAdvance::Blocked => Outcome::redraw(),
+            },
+            None => Outcome::idle(),
+        },
+        Message::CleanSignalsProbed(available) => {
+            with_wizard(state, |w| w.set_clean_signals_available(available))
+        }
+        Message::ScaffoldSucceeded { project_root } => {
+            state.create_wizard = None;
+            open_project(state, project_root)
+        }
+        Message::ScaffoldFailed(message) => with_wizard(state, |w| w.fail(message)),
+    }
+}
+
+/// Open the create wizard and request the off-thread clean-signals sibling
+/// probe that gates its arch card.
+fn open_create_wizard(state: &mut AppState) -> Outcome {
+    state.create_wizard = Some(CreateWizard::new());
+    Outcome {
+        redraw: true,
+        effect: Some(Effect::ProbeCleanSignals),
+    }
+}
+
+/// Open `root` as the active project in place (a freshly scaffolded project, or
+/// a switch): register it in `projects` (front, recent-first), make it active,
+/// show the workbench, focus its first session (if any), and request the
+/// runner persist it as most-recently-opened.
+fn open_project(state: &mut AppState, root: PathBuf) -> Outcome {
+    if !state.projects.contains(&root) {
+        state.projects.insert(0, root.clone());
+    }
+    state.project_root = Some(root.clone());
+    state.screen = Screen::Workbench;
+    state.active_session = state.sessions.iter().position(|s| s.project_root == root);
+    state.clamp_project_switcher_cursor();
+    Outcome {
+        redraw: true,
+        effect: Some(Effect::RecordRecentProject(root)),
+    }
+}
+
+/// Apply `f` to the open create wizard (if any) and redraw; idle when closed.
+fn with_wizard(state: &mut AppState, f: impl FnOnce(&mut CreateWizard)) -> Outcome {
+    match state.create_wizard.as_mut() {
+        Some(wizard) => {
+            f(wizard);
+            Outcome::redraw()
+        }
+        None => Outcome::idle(),
     }
 }
 
@@ -499,14 +607,17 @@ mod tests {
     }
 
     #[test]
-    fn press_then_activate_shows_toast_and_clears_pressed() {
+    fn press_then_activate_opens_the_wizard_and_clears_pressed() {
         let mut s = welcome();
         assert!(update(&mut s, Message::CreatePressed).redraw);
         assert!(s.create_pressed);
         assert!(!update(&mut s, Message::CreatePressed).redraw);
-        assert!(update(&mut s, Message::CreateActivate).redraw);
+        let out = update(&mut s, Message::CreateActivate);
+        assert!(out.redraw);
         assert!(!s.create_pressed);
-        assert_eq!(s.toast.as_deref(), Some(CREATE_TOAST));
+        // Activating the Create button opens the wizard and primes the probe.
+        assert!(s.create_wizard.is_some());
+        assert_eq!(out.effect, Some(Effect::ProbeCleanSignals));
     }
 
     #[test]
@@ -976,6 +1087,164 @@ mod tests {
         assert!(!out.redraw);
         assert_eq!(out.effect, None);
         assert_eq!(st.project_root, Some(PathBuf::from("/tmp/a")));
+    }
+
+    // ── Create-project wizard (D6b) ─────────────────────────────────────────
+
+    use crate::engine::WizardStep;
+
+    fn type_str(state: &mut AppState, s: &str) {
+        for c in s.chars() {
+            update(state, Message::CreateWizardInput(c));
+        }
+    }
+
+    #[test]
+    fn open_wizard_probes_and_close_dismisses() {
+        let mut st = welcome();
+        let out = update(&mut st, Message::OpenCreateWizard);
+        assert!(st.create_wizard.is_some());
+        assert_eq!(out.effect, Some(Effect::ProbeCleanSignals));
+        // A second open while already open is a no-op.
+        assert!(!update(&mut st, Message::OpenCreateWizard).redraw);
+        // Close dismisses it.
+        assert!(update(&mut st, Message::CloseCreateWizard).redraw);
+        assert!(st.create_wizard.is_none());
+    }
+
+    #[test]
+    fn esc_steps_back_then_closes_from_the_first_step() {
+        let mut st = welcome();
+        update(&mut st, Message::OpenCreateWizard);
+        type_str(&mut st, "my_app");
+        update(&mut st, Message::CreateWizardAdvance); // Name -> Directory
+        assert_eq!(
+            st.create_wizard.as_ref().unwrap().step,
+            WizardStep::Directory
+        );
+        update(&mut st, Message::CreateWizardBack); // Directory -> Name
+        assert_eq!(st.create_wizard.as_ref().unwrap().step, WizardStep::Name);
+        update(&mut st, Message::CreateWizardBack); // Name -> close
+        assert!(st.create_wizard.is_none());
+    }
+
+    #[test]
+    fn probe_result_gates_the_clean_signals_card_through_update() {
+        let mut st = welcome();
+        update(&mut st, Message::OpenCreateWizard);
+        update(&mut st, Message::CleanSignalsProbed(true));
+        let clean = st
+            .create_wizard
+            .as_ref()
+            .unwrap()
+            .arches
+            .iter()
+            .find(|c| c.tag.as_deref() == Some("clean-signals"))
+            .unwrap();
+        assert!(clean.enabled);
+        // A probe that arrives after the wizard closed is a harmless no-op.
+        update(&mut st, Message::CloseCreateWizard);
+        assert!(!update(&mut st, Message::CleanSignalsProbed(false)).redraw);
+    }
+
+    /// Acceptance path (engine level): from an empty temp dir, the wizard
+    /// drives to a real `scaffold::generate` (the runner's off-thread work,
+    /// simulated inline here), and the resulting `ScaffoldSucceeded` opens the
+    /// new project in the workbench.
+    #[test]
+    fn wizard_scaffolds_a_real_project_and_opens_it() {
+        use frust_drive::scaffold::{self, TemplateContext};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base =
+            std::env::temp_dir().join(format!("frust-tui-wizard-e2e-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let dest = base.join("my_app");
+
+        let mut st = welcome();
+        update(&mut st, Message::OpenCreateWizard);
+        update(&mut st, Message::CleanSignalsProbed(false));
+        type_str(&mut st, "my_app");
+        update(&mut st, Message::CreateWizardAdvance); // Name -> Directory
+        update(&mut st, Message::CreateWizardAdvance); // Directory -> Arch
+        assert_eq!(st.create_wizard.as_ref().unwrap().step, WizardStep::Arch);
+
+        // The default card scaffolds; assert the effect carries the right args.
+        let out = update(&mut st, Message::CreateWizardAdvance);
+        let Some(Effect::ScaffoldProject {
+            directory,
+            project_name,
+            arch,
+        }) = out.effect
+        else {
+            panic!("expected a ScaffoldProject effect, got {:?}", out.effect);
+        };
+        assert_eq!(project_name, "my_app");
+        assert_eq!(directory, "my_app");
+        assert_eq!(arch, None);
+        assert_eq!(
+            st.create_wizard.as_ref().unwrap().step,
+            WizardStep::Scaffolding
+        );
+
+        // Simulate the runner performing the real scaffold off-thread into the
+        // temp dir (the template is embedded, so this is cheap).
+        let ctx = TemplateContext {
+            title_case_name: scaffold::title_case(&project_name),
+            project_name: project_name.clone(),
+            org: "dev.f0x".to_string(),
+            description: "A new Frust application.".to_string(),
+            frust_version: "0.1.0".to_string(),
+            frust_path: "/path/to/frust".to_string(),
+            deeplink_scheme: None,
+            deeplink_host: None,
+        };
+        scaffold::generate(&dest, &ctx, None, false, arch.as_deref())
+            .expect("real scaffold into the temp dir");
+        assert!(
+            dest.join("Cargo.toml").is_file(),
+            "scaffold wrote the project"
+        );
+
+        // The runner posts the absolute root back; the wizard closes and the
+        // project opens in the workbench.
+        let root = dest.canonicalize().unwrap();
+        let out = update(
+            &mut st,
+            Message::ScaffoldSucceeded {
+                project_root: root.clone(),
+            },
+        );
+        assert!(st.create_wizard.is_none(), "success closes the wizard");
+        assert_eq!(st.screen, Screen::Workbench);
+        assert_eq!(st.project_root, Some(root.clone()));
+        assert!(st.projects.contains(&root));
+        assert_eq!(out.effect, Some(Effect::RecordRecentProject(root)));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scaffold_failure_lands_on_the_error_step() {
+        let mut st = welcome();
+        update(&mut st, Message::OpenCreateWizard);
+        type_str(&mut st, "my_app");
+        update(&mut st, Message::CreateWizardAdvance);
+        update(&mut st, Message::CreateWizardAdvance);
+        update(&mut st, Message::CreateWizardAdvance); // -> Scaffolding
+        update(
+            &mut st,
+            Message::ScaffoldFailed("destination not empty".to_string()),
+        );
+        let w = st.create_wizard.as_ref().unwrap();
+        assert_eq!(w.step, WizardStep::Error);
+        assert_eq!(w.error.as_deref(), Some("destination not empty"));
+        // Enter retries from the arch step.
+        update(&mut st, Message::CreateWizardAdvance);
+        assert_eq!(st.create_wizard.as_ref().unwrap().step, WizardStep::Arch);
     }
 
     #[test]

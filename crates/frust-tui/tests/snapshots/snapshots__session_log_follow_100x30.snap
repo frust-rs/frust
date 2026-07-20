@@ -16,8 +16,8 @@ expression: "render_to_string(100, 30, &single_session_state())"
    ▸ ▶ desktop           │app: recovering                                                           
                          │                                                                          
  ACTIONS                 │                                                                          
+   New project           │                                                                          
    Doctor · Settings     │                                                                          
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

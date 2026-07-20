@@ -8,6 +8,7 @@
 //! animating).
 
 use std::io::{self, Stdout, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,11 +20,12 @@ use crossterm::event::{
 };
 use frust_drive::devices::{default_discoverers, discover_all};
 use frust_drive::process::RealProcessRunner;
+use frust_drive::scaffold::{self, TemplateContext};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::{AppState, Effect, Engine, Message, RegionId, RunFocus, Screen};
+use crate::engine::{AppState, Effect, Engine, Message, RegionId, RunFocus, Screen, WizardStep};
 use crate::supervise::{DeviceTarget, SessionSpec, Supervisor};
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -146,8 +148,97 @@ fn apply_effect(
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
         Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
+        Some(Effect::ProbeCleanSignals) => probe_clean_signals(tx.clone()),
+        Some(Effect::ScaffoldProject {
+            directory,
+            project_name,
+            arch,
+        }) => scaffold_project(directory, project_name, arch, tx.clone()),
         None => {}
     }
+}
+
+/// Probe (off the UI thread) whether the `../clean-signals-rs` sibling
+/// checkout — which the clean-signals arch variant path-deps into — is present
+/// next to this Frust checkout, posting the result back as
+/// [`Message::CleanSignalsProbed`] to gate the wizard's clean-signals card.
+fn probe_clean_signals(tx: UnboundedSender<Message>) {
+    tokio::task::spawn_blocking(move || {
+        let available = clean_signals_sibling().is_some_and(|p| p.is_dir());
+        let _ = tx.send(Message::CleanSignalsProbed(available));
+    });
+}
+
+/// The `../clean-signals-rs` sibling directory (next to this Frust checkout),
+/// derived from `frust-tui`'s compile-time manifest dir
+/// (`<repo>/crates/frust-tui`).
+fn clean_signals_sibling() -> Option<PathBuf> {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?;
+    Some(repo.parent()?.join("clean-signals-rs"))
+}
+
+/// Scaffold a new project off the UI thread via
+/// `frust_drive::scaffold::generate` (the template is embedded, so this is
+/// cheap), posting [`Message::ScaffoldSucceeded`] with the new project's
+/// absolute root, or [`Message::ScaffoldFailed`] with a rendered error chain.
+fn scaffold_project(
+    directory: String,
+    project_name: String,
+    arch: Option<String>,
+    tx: UnboundedSender<Message>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let msg = match do_scaffold(&directory, &project_name, arch.as_deref()) {
+            Ok(project_root) => Message::ScaffoldSucceeded { project_root },
+            Err(e) => Message::ScaffoldFailed(format!("{e:#}")),
+        };
+        let _ = tx.send(msg);
+    });
+}
+
+/// The blocking scaffold: resolve `directory` against the process cwd, render
+/// the embedded template with a default org/description and the dev-time
+/// `frust` path/version, and return the new project's absolute root.
+fn do_scaffold(directory: &str, project_name: &str, arch: Option<&str>) -> Result<PathBuf> {
+    let dest = resolve_dest(directory)?;
+    let ctx = TemplateContext {
+        title_case_name: scaffold::title_case(project_name),
+        project_name: project_name.to_string(),
+        // The wizard doesn't collect org/description yet — use the same
+        // defaults the CLI's `frust create` applies.
+        org: "com.example".to_string(),
+        description: "A new Frust application.".to_string(),
+        frust_version: env!("CARGO_PKG_VERSION").to_string(),
+        frust_path: resolve_frust_path(),
+        deeplink_scheme: None,
+        deeplink_host: None,
+    };
+    scaffold::generate(&dest, &ctx, None, false, arch)
+        .with_context(|| format!("scaffolding into `{}`", dest.display()))?;
+    Ok(dest.canonicalize().unwrap_or(dest))
+}
+
+/// Resolve the wizard's directory string against the process cwd (an absolute
+/// path is used as-is).
+fn resolve_dest(directory: &str) -> Result<PathBuf> {
+    let dir = Path::new(directory);
+    if dir.is_absolute() {
+        Ok(dir.to_path_buf())
+    } else {
+        let cwd = std::env::current_dir().context("reading current directory")?;
+        Ok(cwd.join(dir))
+    }
+}
+
+/// The dev-time path to the `frust` facade crate (`<repo>/crates/frust`),
+/// mirroring `frust create`'s default (spec §12.3's temporary `frust_path`
+/// mechanism until the crates are published).
+fn resolve_frust_path() -> String {
+    let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
+    raw.canonicalize()
+        .unwrap_or(raw)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Discover devices off the UI thread (the `frust-drive` discoverer set is
@@ -288,6 +379,11 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         return vec![Message::Quit];
     }
 
+    // While the create wizard is open it captures every other key.
+    if let Some(wizard) = &state.create_wizard {
+        return translate_wizard_key(code, mods, wizard.step);
+    }
+
     // While the run-config modal is open it captures every other key.
     if let Some(modal) = &state.run_config {
         return translate_modal_key(code, mods, modal);
@@ -349,6 +445,9 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // chevron / a sidebar project-row click carries `SwitchProject`
         // directly — see `translate_switcher_key` for the open-dropdown keys).
         KeyCode::Char('p') if workbench => vec![Message::ToggleProjectSwitcher],
+        // `n` opens the create wizard from the workbench (mouse parity: the
+        // sidebar ACTIONS "New project" row).
+        KeyCode::Char('n') if workbench => vec![Message::OpenCreateWizard],
         // `r`/`Enter` open the run-config modal primed with the panel
         // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance).
         KeyCode::Char('r') if workbench => vec![Message::OpenRunConfig],
@@ -416,6 +515,41 @@ fn translate_modal_key(
         KeyCode::Char(' ') if !text_field => vec![Message::RunConfigToggleTarget],
         KeyCode::Char(c) if text_field && !ctrl => vec![Message::RunConfigInput(c)],
         _ => vec![],
+    }
+}
+
+/// Translate one key press while the create wizard is open, honoring the
+/// current step: the text steps (name/directory) edit their field, the arch
+/// step moves the card highlight, and `Enter`/`Esc` advance/step-back
+/// everywhere. Mouse parity: the wizard registers Next/Back/Cancel buttons and
+/// a click region per arch card.
+fn translate_wizard_key(code: KeyCode, mods: KeyModifiers, step: WizardStep) -> Vec<Message> {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match step {
+        WizardStep::Name | WizardStep::Directory => match code {
+            KeyCode::Esc => vec![Message::CreateWizardBack],
+            KeyCode::Enter | KeyCode::Tab => vec![Message::CreateWizardAdvance],
+            KeyCode::Backspace => vec![Message::CreateWizardBackspace],
+            KeyCode::Char(c) if !ctrl => vec![Message::CreateWizardInput(c)],
+            _ => vec![],
+        },
+        WizardStep::Arch => match code {
+            KeyCode::Esc => vec![Message::CreateWizardBack],
+            KeyCode::Enter => vec![Message::CreateWizardAdvance],
+            KeyCode::Left | KeyCode::Up => vec![Message::CreateWizardArchMove(-1)],
+            KeyCode::Right | KeyCode::Down => vec![Message::CreateWizardArchMove(1)],
+            _ => vec![],
+        },
+        WizardStep::Error => match code {
+            KeyCode::Esc => vec![Message::CreateWizardBack],
+            KeyCode::Enter => vec![Message::CreateWizardAdvance],
+            _ => vec![],
+        },
+        // The off-thread scaffold is running — only Esc (a no-op back) is live.
+        WizardStep::Scaffolding => match code {
+            KeyCode::Esc => vec![Message::CreateWizardBack],
+            _ => vec![],
+        },
     }
 }
 

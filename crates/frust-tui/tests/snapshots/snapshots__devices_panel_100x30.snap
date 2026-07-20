@@ -17,8 +17,8 @@ expression: "render_to_string(100, 30, &devices_panel_state())"
    none running          │                                                                          
                          │                                                                          
  ACTIONS                 │                                                                          
+   New project           │                                                                          
    Doctor · Settings     │                                                                          
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

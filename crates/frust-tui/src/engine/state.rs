@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::create_wizard::CreateWizard;
 use super::message::RegionId;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
@@ -26,10 +27,6 @@ pub enum Screen {
     /// The titlebar/sidebar/main/status workbench shell (static in Phase 1).
     Workbench,
 }
-
-/// The toast shown when the (Phase 2) create wizard is requested from the
-/// skeleton.
-pub const CREATE_TOAST: &str = "Create wizard arrives in Phase 2";
 
 /// The log search/filter overlay state (D5's log-view search/filter).
 ///
@@ -98,6 +95,11 @@ pub struct AppState {
     /// The highlighted row while the switcher is open (`↑`/`↓` move it,
     /// `Enter` switches to it); meaningless while closed.
     pub project_switcher_cursor: usize,
+    /// The create-project wizard, when open (the welcome Create button, or the
+    /// workbench "New project" action / `n`). While `Some`, it captures input
+    /// and suppresses background mouse regions — the same D4 base-layer
+    /// suppression the run-config modal uses.
+    pub create_wizard: Option<CreateWizard>,
 }
 
 impl AppState {
@@ -154,6 +156,7 @@ impl AppState {
             run_config: None,
             project_switcher_open: false,
             project_switcher_cursor: 0,
+            create_wizard: None,
         }
     }
 
@@ -263,6 +266,7 @@ impl Default for AppState {
             run_config: None,
             project_switcher_open: false,
             project_switcher_cursor: 0,
+            create_wizard: None,
         }
     }
 }

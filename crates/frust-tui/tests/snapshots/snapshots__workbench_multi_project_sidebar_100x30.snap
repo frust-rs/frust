@@ -16,8 +16,8 @@ expression: "render_to_string(100, 30, &multi_project_workbench_state())"
    none running          │                                                                          
                          │                                                                          
  ACTIONS                 │                                                                          
+   New project           │                                                                          
    Doctor · Settings     │                                                                          
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

@@ -12,7 +12,8 @@ use ratatui::layout::Position;
 
 use frust_drive::devices::{Device, Kind, Platform};
 use frust_tui::engine::{
-    AppState, DeviceRow, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView,
+    AppState, CreateWizard, DeviceRow, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView,
+    WizardStep,
 };
 use frust_tui::supervise::{SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -311,4 +312,55 @@ fn run_config_modal_state() -> AppState {
 #[test]
 fn run_config_modal_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &run_config_modal_state()));
+}
+
+// ── Create-project wizard (D6b) ─────────────────────────────────────────────
+
+/// A wizard with a probe already resolved to `clean_signals` availability, on
+/// `step`, with `name`/`directory` filled and `arch_cursor` set.
+fn wizard_state(step: WizardStep, name: &str, clean_signals: bool, arch_cursor: usize) -> AppState {
+    let mut wizard = CreateWizard::new();
+    wizard.set_clean_signals_available(clean_signals);
+    for c in name.chars() {
+        wizard.input_char(c);
+    }
+    wizard.step = step;
+    wizard.arch_cursor = arch_cursor;
+    AppState {
+        screen: Screen::Welcome,
+        create_wizard: Some(wizard),
+        ..Default::default()
+    }
+}
+
+/// The wizard's name step over the welcome screen, mid-typing a valid name.
+#[test]
+fn wizard_name_step_80x24() {
+    insta::assert_snapshot!(render_to_string(
+        80,
+        24,
+        &wizard_state(WizardStep::Name, "my_app", false, 0)
+    ));
+}
+
+/// The architecture step with the clean-signals sibling ABSENT — the
+/// clean-signals card renders disabled-with-explanation.
+#[test]
+fn wizard_arch_step_sibling_absent_80x24() {
+    insta::assert_snapshot!(render_to_string(
+        80,
+        24,
+        &wizard_state(WizardStep::Arch, "my_app", false, 1)
+    ));
+}
+
+/// The architecture step with the sibling PRESENT — the clean-signals card is
+/// selectable.
+#[test]
+fn wizard_arch_step_sibling_present_80x24() {
+    insta::assert_snapshot!(render_to_string(
+        80,
+        24,
+        &wizard_state(WizardStep::Arch, "my_app", true, 1)
+    ));
 }

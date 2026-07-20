@@ -17,8 +17,8 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
    none running    │    [ ] Pixel 7                                             │▓▓                 
                    │    [ ] iPhone SE                                           │▓▓                 
  ACTIONS           │                                                            │▓▓                 
-   Doctor · Setting│  Mode     ‹ release ›                                      │▓▓                 
-                   │  Flavor   paid                                             │▓▓                 
+   New project     │  Mode     ‹ release ›                                      │▓▓                 
+   Doctor · Setting│  Flavor   paid                                             │▓▓                 
                    │  Defines  FRUST_TRACE=1█                                   │▓▓                 
                    │                                                            │▓▓                 
                    │   Launch (1)     Cancel                                    │▓▓                 

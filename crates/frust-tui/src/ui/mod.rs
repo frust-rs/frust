@@ -35,6 +35,21 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
         return;
     }
 
+    // The create wizard is the top-priority modal and can appear over either
+    // screen: the base layer draws suppressed (no live regions), the wizard on
+    // top with the live ctx — the D4 base-layer suppression.
+    if let Some(wizard) = &state.create_wizard {
+        let mut suppressed = MouseCtx::suppressed();
+        match state.screen {
+            Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+            Screen::Workbench => {
+                views::workbench::render(frame, area, state, theme, &mut suppressed)
+            }
+        }
+        views::create_wizard::render(frame, area, wizard, theme, mouse);
+        return;
+    }
+
     match state.screen {
         Screen::Welcome => render_welcome(frame, area, state, theme, mouse),
         Screen::Workbench => {
