@@ -14,15 +14,18 @@ Every table below must be reproducible from `benchmarks/raw/<device>/<scenario>/
 
 **Status:** run 2026-07-20 (short-form: 5 runs × 30s, first 2 discarded — see
 run-count deviation). **Frust = RELEASE build; Flutter = profile (per protocol
-§2).** S2/S4/S5/S6/S7/S8 below are the `ade0d87` release re-run (unaffected by
-the later S1/S3 spec changes); **S1 and S3 are a further, final re-run from
-commit `73fa17f`** (S1 spec v3 count-derivation + S3 continuous op cycling —
-both apps rebuilt fresh, keystore/trace-env recipe unchanged from `ade0d87`).
+§2).** S2/S4/S5/S6/S7 below are the `ade0d87` release re-run (unaffected by
+the later S1/S3 spec changes); S1 and S3 are a further re-run from commit
+`73fa17f` (S1 spec v3 count-derivation + S3 continuous op cycling — both apps
+rebuilt fresh, keystore/trace-env recipe unchanged from `ade0d87`); **S8 is a
+further, final re-run from commit `bfd6fd4` (2026-07-21)** — the S8
+error-accounting + read-timing-symmetry fixes (see S8's own banner below).
 Raw series under `raw/oneplus9/frust_release/<scenario>/runN.log` (Frust
-release; S1/S3 additionally under `.../s1_final/` and `.../s3_final/` for the
-final re-run) and `raw/oneplus9/<app>/<scenario>/runN.log` (Flutter profile,
-same `s1_final`/`s3_final` subfolders for the final re-run; gitignored —
-full-device logcat is not committed).
+release; S1/S3 additionally under `.../s1_final/` and `.../s3_final/`, S8
+under `.../s8_reval/`, for each's final re-run) and
+`raw/oneplus9/<app>/<scenario>/runN.log` (Flutter profile, same
+`s1_final`/`s3_final`/`s8_reval` subfolders; gitignored — full-device logcat is
+not committed).
 
 - Chipset: Snapdragon 888 / Adreno 660
 - OS version: Android 15 (build.version.release 15)
@@ -289,32 +292,68 @@ vs profile was within noise on both cold start (~215 vs ~198ms) and idle PSS
 
 ### S8 — Plugin-call overhead (shared preferences)
 
+> **REVALIDATED 2026-07-21** under the error-accounting fix (commit `3a02cd6`
+> — every write's `Result` checked, every read verified against its
+> deterministic expected value, a per-op `err=0|1` field and a summary
+> `s8-errors` marker line added) **and** the read-timing-symmetry fix
+> (commit `bfd6fd4` — verification moved outside the timed window on both
+> apps, so a read's reported `us` is the raw backend call only, matching the
+> write side's always-boundary-crossing timing). Both apps rebuilt fresh from
+> HEAD (`bfd6fd4`) — Frust: `frust build apk --release` (huddle keystore,
+> `FRUST_TRACE`/`FRUST_TRACE_RAW` exported at build time + a `perf.rs`
+> mtime-only touch to force the recompile past the release `--define` gap,
+> confirmed emitting `err=0|1` fields on-device before scoring); Flutter:
+> `flutter build apk --profile`. 5 runs × 30s each app, first 2 discarded
+> (kept runs 3–5, 199 keys/type × 3 runs = 597 samples/type below). **Zero
+> errors observed**: `grep -c s8-errors` across every kept (and discarded) raw
+> log, both apps, is 0 — no write ever returned `Err`, no read was
+> unexpectedly absent, no read's value mismatched its expected value. This
+> directly answers the post-publication integrity concern below: the
+> then-current code that produced the original numbers discarded write
+> `Result`s and never verified reads, so a swallowed failure could not have
+> been ruled out; it now can be, and none occurred.
+
 Per-op median latency over kept runs (µs/call), Frust = release, computed from each
-app's `*-perf plugin op=… us=…` lines. Frust value types `bool`/`i64`/`f64`/
+app's `*-perf plugin op=… us=… err=…` lines. Frust value types `bool`/`i64`/`f64`/
 `String`/`Vec<String>` map to Flutter `bool`/`int`/`double`/`String`/`List<String>`.
 
 | Op | Frust (µs/call, release) | Flutter, channel-crossing (µs/call) | Flutter, cached-read (µs/call) |
 |---|---|---|---|
-| write bool | **101** | 290 | n/a |
-| write i64 | **96** | 285 | n/a |
-| write f64 | **69** | 316 | n/a |
-| write String | **67** | 261 | n/a |
-| write Vec\<String\> | **69** | 285 | n/a |
-| read (unique key, forces channel) bool | **18** | 4644† | ~0 |
-| read (unique key, forces channel) i64 | **18** | 4644† | ~0 |
-| read (unique key, forces channel) f64 | **18** | 4644† | ~0 |
-| read (unique key, forces channel) String | **18** | 4644† | ~0 |
-| read (unique key, forces channel) Vec\<String\> | **19** | 4644† | ~0 |
+| write bool | **106** | 290 | n/a |
+| write i64 | **102** | 288 | n/a |
+| write f64 | **69** | 309 | n/a |
+| write String | **67** | 288 | n/a |
+| write Vec\<String\> | **69** | 300 | n/a |
+| read (unique key, forces channel) bool | **18** | 4372† | ~0 |
+| read (unique key, forces channel) i64 | **18** | 4372† | ~0 |
+| read (unique key, forces channel) f64 | **18** | 4372† | ~0 |
+| read (unique key, forces channel) String | **18** | 4372† | ~0 |
+| read (unique key, forces channel) Vec\<String\> | **18** | 4372† | ~0 |
 
-**Frust wins S8 decisively** — the clearest and most robust Rust-advantage result.
-Writes (which always cross the boundary on both sides): Frust ~67–101µs vs Flutter
-~261–316µs — a **~2.6–4.6× advantage** for direct in-process FFI (`jni`, zero
-codec) over Flutter's `StandardMethodCodec` MethodChannel round-trip. †Flutter's
-only channel-crossing *read* is the package's `reload()` path, which re-reads the
-**entire** store in one hop (median 4644µs, p95 ~16.6ms) — not a per-type single
-read, so the same figure is shown for every read row; Frust's read is a real
-per-key backend call at ~17µs (no Dart-style cache). Flutter's cached read is a
-Dart-memory map lookup (~0µs) — genuinely fast, but not a boundary crossing.
+**Frust wins S8 decisively** — the clearest and most robust Rust-advantage result,
+and it holds up unchanged under the error-accounting + timing-symmetry fixes.
+Writes (which always cross the boundary on both sides): Frust ~67–106µs vs Flutter
+~288–309µs — a **~2.7–4.6× advantage** for direct in-process FFI (`jni`, zero
+codec) over Flutter's `StandardMethodCodec` MethodChannel round-trip (essentially
+the same margin as the original ~2.6–4.6×; per-type medians moved by low
+single-digit µs run-to-run, well within measurement noise — see the "did timing
+move" note below). †Flutter's only channel-crossing *read* is the package's
+`reload()` path, which re-reads the **entire** store in one hop (median 4372µs
+this pass vs 4644µs originally, both within this op's run-to-run variance) — not
+a per-type single read, so the same figure is shown for every read row; Frust's
+read is a real per-key backend call, still ~18µs (no Dart-style cache). Flutter's
+cached read is a Dart-memory map lookup (~0µs) — genuinely fast, but not a
+boundary crossing.
+
+**Did the corrected (symmetric, verification-outside-window) timing move Frust's
+read numbers?** No — Frust's read median is 18µs both before and after the
+`bfd6fd4` fix (min/max also unchanged, 14–17µs to 62µs tail either way). This is
+the expected result: `bfd6fd4`'s whole point was to make sure verification cost
+(a cheap enum-match + scalar/string/`Vec` equality check) never entered the timed
+window in the first place, on both apps — so a correctly-implemented fix should
+reproduce the pre-verification (original) numbers almost exactly, not shift them.
+Flutter's read (`reload()`) similarly held (4644→4372µs, within run-to-run noise
+for this op — see its own p50/p95 spread above).
 
 | Burst-during-animation variant | Frust | Flutter |
 |---|---|---|
@@ -322,7 +361,8 @@ Dart-memory map lookup (~0µs) — genuinely fast, but not a boundary crossing.
 | Animation missed-budget count during S8 burst | not run this pass | not run this pass |
 
 The burst variant (`FRUST_BENCH_S8_BURST=1` / `--dart-define=S8_BURST=1`) was not
-included in this short-form pass (deviation).
+included in this short-form pass (deviation) — unchanged by this revalidation,
+which was scoped to the base S8 quiescent path only.
 
 ### Methodology deviations (this device)
 
@@ -433,6 +473,24 @@ included in this short-form pass (deviation).
     `dumpsys power`'s `mWakefulness=Awake` checked mid-session). Same `gmktemp`
     PATH-shim workaround as before (deviation #10, unchanged) — `run.sh` itself
     still not modified.
+17. **S8 final re-run build/device-state note (2026-07-21, commit `bfd6fd4`).**
+    Both apps rebuilt fresh: Frust `frust build apk --release` (huddle keystore,
+    JBR `JAVA_HOME`, NDK `27.0.12077973`, `FRUST_TRACE=1 FRUST_TRACE_RAW=1`
+    exported at build time + a `crates/frust-shell-common/src/perf.rs`
+    mtime-only touch — confirmed empty `git diff` — to force the recompile past
+    the release `--define` gap (deviation #13, unchanged)); Flutter
+    `flutter build apk --profile`. Confirmed `err=0|1` fields present on-device
+    for both apps before scoring. Package id `it.f0x.flutter_bench` (not the
+    harness's `it.f0x.flutterbench` default — passed via `--pkg`, same note as
+    the original pass). Device state: airplane mode on, Wi-Fi disabled,
+    `dumpsys battery unplug`, brightness 128, `svc power stayon true` for the
+    duration — all restored afterward (confirmed via read-back). Thermal
+    ~29.5–30°C throughout (well under the 38°C ceiling). `run.sh`'s `mktemp`
+    bug (deviation #10) no longer reproduces — a prior commit
+    (`0684e56`, "h4-harness-mktemp") already fixed the run-log naming to a
+    deterministic `run-NN.log` scheme, so no `gmktemp` PATH shim was needed
+    this pass; noted here since it resolves that long-standing workaround note
+    for any future S8 (or other-scenario) re-run on this macOS host.
 
 ---
 
@@ -442,9 +500,13 @@ included in this short-form pass (deviation).
 run-count deviation). **Frust = RELEASE build; Flutter = profile (per protocol
 §2).** All eight scenarios captured on the physical iPhone SE via `xcrun
 devicectl` (iOS 17+ automation, `benchmarks/harness/run.sh --platform ios`).
-Raw series under `raw/iphone_se/<app>/<scenario>/run-0N.log` (gitignored —
-device console/container captures never enter git, filtered to perf/marker
-lines only).
+**S8 was additionally re-run 2026-07-21 from commit `bfd6fd4`** (the
+error-accounting + read-timing-symmetry fixes — see S8's own banner below);
+S1–S7 below are unaffected and reflect the original same-day pass.
+Raw series under `raw/iphone_se/<app>/<scenario>/run-0N.log` (S8's final
+re-run additionally under `.../s8_reval/run-0N.log`; gitignored — device
+console/container captures never enter git, filtered to perf/marker lines
+only).
 
 **Read the two iOS instrumentation deviations (below) before the frame
 tables** — they materially change how S1/S2/S4/S5/S6 per-frame numbers must be
@@ -610,17 +672,29 @@ absent here. Idle CPU/memory (RSS) likewise have no cheap devicectl readout.
 
 ### S8 — Plugin-call overhead (shared preferences)
 
+> **REVALIDATED 2026-07-21** under the same error-accounting (`3a02cd6`) +
+> read-timing-symmetry (`bfd6fd4`) fixes as the OnePlus 9 re-run above — see
+> that section's banner for the full mechanism description. Both apps rebuilt
+> fresh from HEAD (`bfd6fd4`): Frust `frust build ios --release`
+> (`FRUST_IOS_TEAM=87MFQ5L648`, `FRUST_TRACE`/`FRUST_TRACE_RAW` baked via
+> `--define`, confirmed emitting `err=0|1` fields via a `devicectl --console`
+> smoke launch before scoring); Flutter `flutter build ios --profile
+> --dart-define=SCENARIO=s8`. Same 5×30s/first-2-discarded short form, same
+> `devicectl` env-launch (Frust) / on-device trace-file-pull (Flutter) capture
+> mechanism as the original iPhone SE pass. **Zero errors observed** — no
+> `s8-errors` marker line in any kept (or discarded) raw log on either app.
+
 Per-op median latency over kept runs (µs/call, first call per type excluded as
 warmup). Frust `bool`/`i64`/`f64`/`String`/`Vec<String>` ↔ Flutter
 `bool`/`int`/`double`/`String`/`List<String>`.
 
 | Op | Frust (µs/call, release) | Flutter, channel-crossing (µs/call) | Flutter, cached-read (µs/call) |
 |---|---|---|---|
-| write bool | **4** | 123 | n/a |
-| write i64 | **4** | 59 | n/a |
-| write f64 | **4** | 52 | n/a |
-| write String | **3** | 52 | n/a |
-| write Vec\<String\> | **5** | 60 | n/a |
+| write bool | **3** | 106 | n/a |
+| write i64 | **3** | 80 | n/a |
+| write f64 | **3** | 54 | n/a |
+| write String | **3** | 56 | n/a |
+| write Vec\<String\> | **5** | 57 | n/a |
 | read (unique key, forces channel) bool | **1** | 2674† | ~0 |
 | read (unique key, forces channel) i64 | **1** | 2674† | ~0 |
 | read (unique key, forces channel) f64 | **1** | 2674† | ~0 |
@@ -628,22 +702,33 @@ warmup). Frust `bool`/`i64`/`f64`/`String`/`Vec<String>` ↔ Flutter
 | read (unique key, forces channel) Vec\<String\> | **1** | 2674† | ~0 |
 
 **Frust wins S8 decisively** — the clearest cross-comparable Rust-advantage
-result on this device, matching the OnePlus 9. Writes (always cross the
-boundary on both sides): Frust ~3–5µs vs Flutter ~52–123µs — a **~13–30×
-advantage** for direct in-process FFI (`objc2`/`NSUserDefaults`, zero codec)
-over Flutter's `StandardMethodCodec` MethodChannel round-trip. †Flutter's only
+result on this device, matching the OnePlus 9, and it holds up unchanged under
+the fixes. Writes (always cross the boundary on both sides): Frust ~3–5µs vs
+Flutter ~54–106µs — a **~14–29× advantage** for direct in-process FFI
+(`objc2`/`NSUserDefaults`, zero codec) over Flutter's `StandardMethodCodec`
+MethodChannel round-trip (essentially the same margin as the original
+~13–30×; the write medians moved a few µs run-to-run on the Flutter side,
+noise typical of this device's smaller sample). †Flutter's only
 channel-crossing *read* is the package's `reload()` path (re-reads the entire
-store in one hop, median 2674µs) — shown for every read row since it isn't a
-per-type read; Frust's read is a real per-key backend call at **~1µs**. Flutter
-cached reads are Dart-memory map lookups (~0µs — fast, but not a boundary
-crossing).
+store in one hop) — its median landed at **exactly 2674µs again**, unchanged
+to the µs, not a per-type read, shown for every read row; Frust's read is a
+real per-key backend call, still **~1µs**. Flutter cached reads are
+Dart-memory map lookups (~0µs — fast, but not a boundary crossing).
+
+**Did the corrected timing move Frust's read numbers?** No — Frust's read
+median stayed at 1µs before and after `bfd6fd4`, same as the OnePlus 9 finding:
+moving read verification outside the timed window (on both apps) reproduces
+the original numbers rather than shifting them, because the verification cost
+it removed was never large enough to register at this device's already-tiny
+per-key latency.
 
 | Burst-during-animation variant | Frust | Flutter |
 |---|---|---|
 | Animation p95 during S8 burst (ms) | not run this pass | not run this pass |
 | Animation missed-budget count during S8 burst | not run this pass | not run this pass |
 
-The burst variant was not included in this short-form pass (deviation 7).
+The burst variant was not included in this short-form pass (deviation 7) —
+unchanged by this revalidation, scoped to the base S8 quiescent path only.
 
 ### Methodology deviations (this device)
 
@@ -700,6 +785,15 @@ The burst variant was not included in this short-form pass (deviation 7).
     transport does not affect any computed number. Two Flutter runs (S1 run2,
     S6 run1) returned an empty file (a launch/pull hiccup) — both were discarded
     warm-up runs (run 1/2), so no kept run was affected.
+11. **S8 final re-run build/device-state note (2026-07-21, commit `bfd6fd4`).**
+    Same recipe as the original iPhone SE pass: Frust `frust build ios --release`
+    (`FRUST_IOS_TEAM=87MFQ5L648`), Flutter `flutter build ios --profile
+    --dart-define=SCENARIO=s8`; both confirmed emitting `err=0|1` fields via a
+    manual `devicectl --console`/container-pull smoke launch before any scored
+    run. Environmental controls (brightness/charger/airplane/thermal) remain
+    uncontrolled per deviation 8, unchanged. Both bench apps force-quit and
+    confirmed not running (`devicectl device info processes`) after the pass;
+    no other device state to restore on iOS.
 
 ---
 
@@ -734,8 +828,10 @@ Frust's *render work* is a flat ~1.2ms CPU + ~4ms GPU every run. Because the two
 available per-frame metrics measure different things on iOS, **no per-frame
 render winner is declared for S1/S2/S4/S5/S6** — both simply have ample 60Hz
 headroom. The two cleanly cross-comparable results:
-- **Frust wins S8 decisively** (plugin-call overhead): writes ~3–5µs vs
-  Flutter's ~52–123µs (**~13–30×**), and a forced-channel read of ~1µs vs
+- **Frust wins S8 decisively** (plugin-call overhead; revalidated 2026-07-21
+  under the error-accounting + timing-symmetry fixes, zero errors, numbers
+  unchanged from the original pass to within noise): writes ~3–5µs vs
+  Flutter's ~54–106µs (**~14–29×**), and a forced-channel read of ~1µs vs
   Flutter's whole-store `reload()` at ~2674µs — the same robust Rust-advantage
   seen on the OnePlus 9, via `objc2`/`NSUserDefaults` direct FFI vs the
   MethodChannel `StandardMethodCodec` round-trip.
@@ -756,9 +852,11 @@ On this **mid-tier** device, in short form (5×30s), **Frust = release** (huddle
 keystore), **Flutter = profile**:
 
 - **Frust wins:** **S2** (long-list scroll — valid post-fix release re-run: ~11.0ms
-  vs ~15.3ms median, 104 vs 666 dropped-60Hz frames); **S8** (plugin-call overhead —
-  writes ~2.6–4.6× faster, channel-crossing reads 18µs vs 4644µs — the clearest,
-  most robust Rust-advantage result); **S7 external cold start** (`am start -W`
+  vs ~15.3ms median, 104 vs 666 dropped-60Hz frames); **S8** (plugin-call overhead
+  — revalidated 2026-07-21 under the error-accounting + timing-symmetry fixes,
+  zero errors, writes ~2.7–4.6× faster, channel-crossing reads 18µs vs 4372µs —
+  the clearest, most robust Rust-advantage result, unchanged from the original
+  pass to within noise); **S7 external cold start** (`am start -W`
   ~215ms vs ~417ms) and **idle memory** (~98MB vs ~126MB PSS).
 - **Flutter wins:** **S6** (text shaping — ~8.3ms vs ~10.7ms median); **S7
   framework-reported first-frame** (84ms vs ~147ms — Frust's GPU/renderer init is
@@ -797,18 +895,25 @@ build-mode artifact.
 
 ---
 
-## Post-publication integrity note (2026-07-21)
+## Post-publication integrity note — RESOLVED 2026-07-21
 
-The S8 latency numbers in both device sections were captured BEFORE the
-S8 error-accounting fix (commit 3a02cd6) existed: the then-current code
-discarded per-op write Results, so silently-failed ops cannot be
-retroactively ruled out of the published series (no err= field existed in
-those captures). The headline S8 direction is corroborated independently
-on two devices at large margins, but the specific numbers are unverified
-against swallowed failures until an S8 re-run under the fixed binaries at
-the next device session. A read-timing-window asymmetry introduced by the
-same fix (Rust timed read+verify vs Flutter read-only) is queued for
-correction BEFORE any such re-run.
+**Resolution.** The S8 sections above (both devices) are now the revalidated
+series, captured under the fixed binaries (error-accounting `3a02cd6` +
+read-timing-symmetry `bfd6fd4`), superseding the pre-fix numbers this note
+originally flagged. Every write's `Result` is now checked and every read
+verified against its deterministic expected value, with a per-op `err=0|1`
+field and a summary `s8-errors` marker exposing any failure; **zero errors
+were observed across both devices, both apps, all five value types, both
+write and read ops** (no `s8-errors` marker in any kept — or discarded — raw
+log). The read-timing-window asymmetry (Rust previously timed read+verify vs
+Flutter's read-only) is also corrected: verification now runs after the timed
+window closes on both apps, so the timed `us` is the raw backend call only on
+both sides. The corrected numbers track the original pre-fix numbers closely
+(Frust reads unchanged at 18µs/Android and 1µs/iOS; writes moved by low
+single-digit-to-low-tens of µs, consistent with ordinary run-to-run variance —
+see each device's S8 section for the full before/after breakdown), so the
+original headline direction and margins were not an artifact of the
+swallowed-failure/timing-asymmetry gaps this note flagged.
 
 ## App size (release)
 
