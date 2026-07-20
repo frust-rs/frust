@@ -40,6 +40,18 @@ pass breakdown (e.g. Frust's `rebuild_us`).
 - `bench-scenario-start <name>` / `bench-scenario-end <name>` — identical
   marker strings on both sides (see `perf::mark_scenario_start`/
   `mark_scenario_end`).
+
+# Repeated same-name marker pairs (S3 continuous cycling)
+
+`slice_scenario` toggles an `active` flag purely off the *last-seen* marker
+matching the requested name — it has no notion of "already saw this
+scenario once" — so a marker name that opens and closes more than once in
+the same log (S3's continuous-cycling redesign: `s3-create1k`/`s3-update`/
+etc. repeat once per cycle, see `benchmarks/PROTOCOL.md`'s S3 row) just
+accumulates frames from every bracketed window into one combined series,
+the same as if the caller had run each op once for a very long single
+window. No special-casing was needed for this — verified by
+`test_stats.py`'s `test_repeated_marker_pairs_aggregate_across_cycles`.
 """
 
 from __future__ import annotations

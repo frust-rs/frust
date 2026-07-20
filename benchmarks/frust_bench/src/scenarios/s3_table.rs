@@ -8,19 +8,39 @@
 //! Flutter bench's `s3_table.dart`, whose op sequence, row labels, and
 //! sub-marker names this file mirrors byte-for-byte (the PLAN 9.E fairness
 //! gate; the addendum's "datasets.dart wins" rule does not reach here — S3's
-//! contract lives in `s3_table.dart`, not `datasets.dart`).
+//! op-sequence contract lives in `s3_table.dart`, mirrored here; the
+//! continuous-cycling constant below is canonically homed in `datasets.dart`'s
+//! `s3SettleGapMs`).
+//!
+//! # Continuous cycling (user-directed 2026-07-20)
+//!
+//! The op sequence CYCLES continuously for the whole capture window instead
+//! of running once: the prior single-pass design legitimately emptied the
+//! table at the terminal `clear` within the first few seconds, then sat blank
+//! for the rest of a 30s capture (a real emptiness, not the "occlusion" bug
+//! originally suspected — device data showed healthy per-op layouts
+//! throughout). After `clear` closes and [`SETTLE_FRAMES`] elapses, the script
+//! wraps back to [`Op::Create1k`] and repeats — forever, until the hosting
+//! `S3Table` component itself is torn down (switching to another scenario).
+//! No per-cycle RNG reseed is needed: S3 draws no randomness (each row's
+//! label is a pure function of a monotonically-increasing `id`), and
+//! [`Op::Create10k`] deterministically resets the id counter to 1 at the start
+//! of every cycle — identically on both apps — so cycle N reproduces the
+//! byte-identical row/label sequence cycle 1 did.
 //!
 //! # How the script is driven
 //!
-//! A [`Ticker`] widget requests a frame every paint while the script is live,
-//! so `S3Table::build` re-runs each frame; the build advances a small per-op
-//! state machine. Each op's window is exactly one reconcile frame wide: the
-//! build stamps `mark_scenario_start(op)` and mutates the row set on the frame
-//! that op starts (the mutation reconciles into the [`ListView`] during that
-//! frame's layout/paint), then stamps `mark_scenario_end(op)` on the next
-//! frame, with a short settle gap before the next op so the per-op windows
-//! stay cleanly separable in the trace — mirroring the Flutter side's
-//! `mark → setState → await nextFrame → mark → 300ms delay` shape.
+//! A [`Ticker`] widget requests a frame every paint (continuously — the
+//! script never goes idle now that it cycles forever), so `S3Table::build`
+//! re-runs each frame; the build advances a small per-op state machine. Each
+//! op's window is exactly one reconcile frame wide: the build stamps
+//! `mark_scenario_start(op)` and mutates the row set on the frame that op
+//! starts (the mutation reconciles into the [`ListView`] during that frame's
+//! layout/paint), then stamps `mark_scenario_end(op)` on the next frame, with
+//! a short settle gap before the next op (or, after `clear`, before the next
+//! cycle's `create1k`) so the per-op windows stay cleanly separable in the
+//! trace — mirroring the Flutter side's
+//! `mark → setState → await nextFrame → mark → settle-gap delay` shape.
 //!
 //! Rows render through the real virtualized `ListView` (the same
 //! `ListView.builder` virtualization the Flutter side uses), so the reconcile
@@ -63,8 +83,10 @@ impl Scenario for S3 {
 /// Flutter side's `itemExtent: 40`).
 const ROW_EXTENT: f64 = 40.0;
 
-/// Frames to idle between two ops so their trace windows don't overlap. ~300ms
-/// at 60fps, matching the Flutter side's `Duration(milliseconds: 300)` settle.
+/// Frames to idle between two ops (or, after `clear`, before the next
+/// cycle's `create1k`) so their trace windows don't overlap. ~300ms at 60fps,
+/// matching the canonical `s3SettleGapMs` constant homed in the Flutter side's
+/// `datasets.dart`.
 const SETTLE_FRAMES: u32 = 18;
 
 /// The jsfb label word banks — verbatim from the Flutter side's `s3_table.dart`
@@ -81,7 +103,8 @@ const NOUNS: [&str; 13] = [
     "pizza", "mouse", "keyboard",
 ];
 
-/// The scripted ops, in run order.
+/// The scripted ops, in run order — repeated continuously, cycle after
+/// cycle (see the module doc's continuous-cycling contract), not run once.
 const OPS: [Op; 5] = [Op::Create1k, Op::Create10k, Op::Update, Op::Swap, Op::Clear];
 
 /// One scripted table op.
@@ -133,13 +156,23 @@ pub struct S3Table;
 pub struct S3State {
     rows: Rc<Vec<TableRow>>,
     next_id: u64,
-    /// Index into [`OPS`] of the op to run next; `== OPS.len()` once done.
+    /// Index into [`OPS`] of the op to run next within the current cycle.
+    /// Wraps back to `0` immediately after the terminal `Clear` closes (see
+    /// [`S3State::advance_script`]) — the script never sits at `OPS.len()`
+    /// (that would mean "done", which S3 no longer ever is).
     op_index: usize,
-    /// Frames left to idle before starting the next op.
+    /// Frames left to idle before starting the next op (or, after `Clear`
+    /// wraps, before the next cycle's `Create1k`).
     settle: u32,
     /// Whether the currently-open op's closing marker is still pending (its
     /// mutation reconciled last frame; close it this frame).
     awaiting_end: bool,
+    /// Number of full op-sequence cycles completed so far (0 during the
+    /// first cycle, incremented every time `Clear` closes and the script
+    /// wraps back to `Create1k`) — bookkeeping/observability only; no
+    /// dataset value depends on it (see the module doc's continuous-cycling
+    /// contract for why no per-cycle reseed is needed).
+    cycle: u32,
 }
 
 impl Component for S3Table {
@@ -152,13 +185,13 @@ impl Component for S3Table {
             op_index: 0,
             settle: 0,
             awaiting_end: false,
+            cycle: 0,
         }
     }
 
     fn build(&self, state: &mut S3State) -> AnyView<S3State> {
         state.advance_script();
 
-        let done = state.op_index >= OPS.len();
         let rows = state.rows.clone();
         let count = rows.len();
 
@@ -177,24 +210,28 @@ impl Component for S3Table {
             ))
         });
 
-        // The ticker keeps frames coming while the script is live, then goes
-        // silent so the app idles once the last op has closed.
-        any(Stack(vec![any(table), any(Ticker { active: !done })]))
+        // The script cycles continuously for the whole capture window (see
+        // the module doc), so the ticker stays active forever — it never
+        // goes idle the way a run-once script would.
+        any(Stack(vec![any(table), any(Ticker { active: true })]))
     }
 }
 
 impl S3State {
-    /// Advance the per-op state machine by one frame. Called once per rebuild.
+    /// Advance the per-op state machine by one frame. Called once per
+    /// rebuild. The script cycles forever: after `Clear`'s closing marker,
+    /// `op_index` wraps back to `0` and `cycle` increments instead of the
+    /// script going idle.
     fn advance_script(&mut self) {
-        if self.op_index >= OPS.len() {
-            return; // script complete — nothing more to drive.
-        }
-
         if self.awaiting_end {
             // The op mutated last frame and its change reconciled; close it.
             frust_shell_common::perf::mark_scenario_end(OPS[self.op_index].marker());
             self.awaiting_end = false;
             self.op_index += 1;
+            if self.op_index >= OPS.len() {
+                self.op_index = 0;
+                self.cycle += 1;
+            }
             self.settle = SETTLE_FRAMES;
             return;
         }
@@ -257,9 +294,11 @@ fn append(rows: &mut Vec<TableRow>, next_id: &mut u64, count: usize) {
 // ---------------------------------------------------------------------------
 
 /// A paint-only widget that requests a frame every paint while `active`, so the
-/// hosting component rebuilds each frame and its script advances. When `active`
-/// is `false` it requests nothing, letting the app go idle (desktop
-/// `ControlFlow::Wait`, mobile frame-gate `Skip`) once the script completes.
+/// hosting component rebuilds each frame and its script advances. `S3Table`
+/// always passes `active: true` now that its script cycles continuously (see
+/// the module doc) — `active: false` remains available for a future
+/// run-once-then-idle consumer (desktop `ControlFlow::Wait`, mobile
+/// frame-gate `Skip`), but S3 itself never goes idle.
 pub struct Ticker {
     active: bool,
 }
@@ -314,16 +353,49 @@ mod tests {
     }
 
     #[test]
-    fn script_runs_to_completion_and_clears() {
+    fn script_cycles_continuously_clearing_and_repopulating() {
+        // Regression/behavior lock for the continuous-cycling redesign: the
+        // script no longer stops at `OPS.len()` (that state is now
+        // unreachable — `advance_script` wraps `op_index` back to `0` in the
+        // same call that closes the terminal `Clear`). Drive it for several
+        // cycles' worth of frames and confirm the table clears AND
+        // repopulates more than once, with the cycle counter advancing.
         let mut s = S3Table.init();
-        // Advance frame-by-frame until the script completes.
-        let mut guard = 0;
-        while s.op_index < OPS.len() && guard < 10_000 {
+        let mut prev_empty = s.rows.is_empty(); // true initially (no rows yet)
+        let mut empty_episodes = 0usize;
+        let mut refills = 0usize;
+        let mut max_cycle_seen = 0u32;
+        for _ in 0..300 {
             s.advance_script();
-            guard += 1;
+            assert!(
+                s.op_index < OPS.len(),
+                "op_index must never sit at OPS.len() — it wraps in the same call that closes the terminal op"
+            );
+            max_cycle_seen = max_cycle_seen.max(s.cycle);
+            let now_empty = s.rows.is_empty();
+            if now_empty && !prev_empty {
+                empty_episodes += 1;
+            }
+            if !now_empty && prev_empty {
+                refills += 1;
+            }
+            prev_empty = now_empty;
         }
-        assert_eq!(s.op_index, OPS.len(), "script must complete");
-        assert!(s.rows.is_empty(), "the final op clears the table");
+        assert!(
+            empty_episodes >= 2,
+            "the table must clear at the end of every cycle — at least twice \
+             over this run window, got {empty_episodes}"
+        );
+        assert!(
+            refills >= 2,
+            "the table must repopulate after each cycle's clear — the next \
+             cycle's create1k must refill the row set, got {refills}"
+        );
+        assert!(
+            max_cycle_seen >= 2,
+            "the cycle counter must advance past the first cycle over this \
+             run window, got {max_cycle_seen}"
+        );
     }
 
     #[test]

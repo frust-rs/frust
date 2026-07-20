@@ -8,12 +8,18 @@
 /// The `s3-create10k` step is included so the "every 10th of 10k" update has a
 /// 10k dataset to act on (the canonical jsfb sequence); both apps run the same
 /// steps in the same order.
+///
+/// **Continuous cycling (see `datasets.dart`'s [s3SettleGapMs] doc).** The
+/// sequence repeats — after `clear` closes and its settle gap elapses, the
+/// script restarts from `create1k` — for the whole time this widget stays
+/// mounted, rather than running once and going idle.
 library;
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../bench/datasets.dart';
 import '../bench/perf.dart';
 
 /// One table row — the classic jsfb `{id, label}`.
@@ -52,18 +58,29 @@ class _TableOpsViewState extends State<TableOpsView> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _runScript());
   }
 
-  /// Run each op, stamping its sub-marker and waiting for the resulting frame
-  /// to settle before the next op so per-op windows don't overlap.
+  /// Run the op sequence, stamping each op's sub-marker and waiting for the
+  /// resulting frame to settle before the next op so per-op windows don't
+  /// overlap — then, once `clear` closes and its settle gap elapses, restart
+  /// from `create1k` and repeat for as long as this widget stays mounted (see
+  /// the module doc's continuous-cycling contract).
   Future<void> _runScript() async {
-    await _op('s3-create1k', () => _append(1000));
-    await _op('s3-create10k', () {
-      _rows.clear();
-      _nextId = 1;
-      _append(10000);
-    });
-    await _op('s3-update', _updateEveryTenth);
-    await _op('s3-swap', _swapRows);
-    await _op('s3-clear', _rows.clear);
+    while (mounted) {
+      await _op('s3-create1k', () => _append(1000));
+      if (!mounted) return;
+      await _op('s3-create10k', () {
+        _rows.clear();
+        _nextId = 1;
+        _append(10000);
+      });
+      if (!mounted) return;
+      await _op('s3-update', _updateEveryTenth);
+      if (!mounted) return;
+      await _op('s3-swap', _swapRows);
+      if (!mounted) return;
+      await _op('s3-clear', _rows.clear);
+      // `_op`'s trailing settle gap (below) already provides the post-clear
+      // pause before the next cycle's `create1k` — the loop simply restarts.
+    }
   }
 
   Future<void> _op(String marker, VoidCallback mutate) async {
@@ -72,8 +89,10 @@ class _TableOpsViewState extends State<TableOpsView> {
     setState(mutate);
     await _nextFrame();
     markScenarioEnd(marker);
-    // Small settle gap so the op windows are cleanly separable in the trace.
-    await Future<void>.delayed(const Duration(milliseconds: 300));
+    // Small settle gap so the op windows are cleanly separable in the trace
+    // (also serves as the post-clear, pre-next-cycle pause — see the module
+    // doc's continuous-cycling contract).
+    await Future<void>.delayed(const Duration(milliseconds: s3SettleGapMs));
   }
 
   Future<void> _nextFrame() {

@@ -99,6 +99,42 @@ int s1BubbleCountFor(double playWidth, double playHeight) {
 }
 
 // ---------------------------------------------------------------------------
+// S3 — table ops (continuous-cycling contract)
+// ---------------------------------------------------------------------------
+
+/// **S3 continuous-cycling spec (canonical, user-directed 2026-07-20).**
+///
+/// Root cause of the prior "table disappears" report: S3's classic jsfb op
+/// sequence (`create1k → create10k → update → swap → clear`) ran ONCE, so the
+/// table legitimately emptied at the terminal `clear` within the first few
+/// seconds and then sat blank for the rest of a 30s capture — a real
+/// emptiness, not the "occlusion" bug originally suspected (device data
+/// showed healthy per-op layouts throughout).
+///
+/// Both apps now CYCLE the op sequence continuously for the whole capture
+/// window: run the five ops in the existing order, each separated by
+/// [s3SettleGapMs]'s fixed settle gap (keeping per-op trace windows cleanly
+/// separable, same purpose as every other scripted scenario's settle
+/// framing); after `clear` closes, wait the same [s3SettleGapMs] gap and
+/// restart from `create1k` — repeating until the scenario itself is torn
+/// down (navigating away, or the harness ending the capture). The `s3-*`
+/// sub-marker names are unchanged and stamp once per op **per cycle**; see
+/// `benchmarks/harness/stats.py`'s scenario-slicing docs for why repeated
+/// same-name marker pairs across cycles aggregate into one series rather
+/// than breaking.
+///
+/// No explicit per-cycle RNG reseed is needed: S3 draws no randomness at all
+/// (each row's label is a pure function of a monotonically-increasing `id`
+/// against the three fixed word banks each scenario file keeps verbatim), and
+/// `id` assignment is already cycle-index-free by construction — `create10k`
+/// deterministically resets the id counter to 1 at the start of every cycle,
+/// identically on both apps, so cycle N reproduces the byte-identical
+/// row/label sequence cycle 1 did. Both `flutter_bench`'s `s3_table.dart` and
+/// the frust side's `scenarios/s3_table.rs` implement this loop and mirror
+/// this one constant.
+const int s3SettleGapMs = 300;
+
+// ---------------------------------------------------------------------------
 // S5 — image pipeline
 // ---------------------------------------------------------------------------
 

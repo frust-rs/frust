@@ -125,6 +125,40 @@ class SliceScenarioTests(unittest.TestCase):
         frames = stats.slice_scenario(lines, None)
         self.assertEqual([f.n for f in frames], [1, 2])
 
+    def test_repeated_marker_pairs_aggregate_across_cycles(self):
+        # S3's continuous-cycling redesign (benchmarks/PROTOCOL.md's S3 row)
+        # stamps the same `s3-create1k` marker name once per cycle rather
+        # than once total — this locks in that `slice_scenario` aggregates
+        # every occurrence of a repeated start/end pair into one combined
+        # series instead of only picking up the first (or breaking).
+        lines = [
+            "bench-scenario-start s3-create1k",
+            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 encode_present_us=70 skipped=0",
+            "bench-scenario-end s3-create1k",
+            # An unrelated op's window in between must not leak in.
+            "bench-scenario-start s3-create10k",
+            "frust-perf raw n=2 total_us=999 rebuild_us=10 layout_us=10 paint_us=10 encode_present_us=969 skipped=0",
+            "bench-scenario-end s3-create10k",
+            # Cycle 2's create1k window — same marker name, repeats.
+            "bench-scenario-start s3-create1k",
+            "frust-perf raw n=3 total_us=200 rebuild_us=20 layout_us=20 paint_us=20 encode_present_us=140 skipped=0",
+            "bench-scenario-end s3-create1k",
+            # Cycle 3's create1k window — a third repeat.
+            "bench-scenario-start s3-create1k",
+            "frust-perf raw n=4 total_us=300 rebuild_us=30 layout_us=30 paint_us=30 encode_present_us=210 skipped=0",
+            "bench-scenario-end s3-create1k",
+        ]
+        frames = stats.slice_scenario(lines, "s3-create1k")
+        self.assertEqual(
+            [f.n for f in frames],
+            [1, 3, 4],
+            "every cycle's create1k window must be included, and the "
+            "interleaved create10k window must be excluded",
+        )
+        s = stats.compute_stats(frames)
+        self.assertEqual(s.n_total, 3)
+        self.assertEqual(s.p50_us, 200)
+
 
 class DiscardFirstRunsTests(unittest.TestCase):
     def _run(self, *ns: int) -> list[stats.FrameRecord]:
