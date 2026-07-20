@@ -480,7 +480,11 @@ trap cleanup EXIT
 for i in $(seq 1 "${RUNS}"); do
   echo "== ${APP} / ${SCENARIO} / run ${i} of ${RUNS} =="
 
-  run_log="$(mktemp "${OUT_DIR}/run-XXXXXX.log")"
+  run_log="${OUT_DIR}/run-$(printf '%02d' "${i}").log"
+  if [ -f "${run_log}" ]; then
+    echo "error: run log already exists: ${run_log} — collision/stale file detected" >&2
+    exit 1
+  fi
   pss_before="${run_log%.log}.pss_before.txt"
   pss_after="${run_log%.log}.pss_after.txt"
   RUN_LOGS+=("${run_log}")
@@ -523,6 +527,14 @@ done
 
 echo
 echo "Captured ${RUNS} runs for ${APP}/${SCENARIO} in ${OUT_DIR}"
+
+# --- Verify captured runs -----------------------------------------------
+
+unique_run_log_count=$(printf '%s\n' "${RUN_LOGS[@]}" | sort -u | wc -l)
+if [ "${unique_run_log_count}" -ne "${RUNS}" ]; then
+  echo "error: unique run-log count (${unique_run_log_count}) != expected runs (${RUNS})" >&2
+  exit 1
+fi
 
 # --- Stats ----------------------------------------------------------------
 
