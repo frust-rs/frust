@@ -44,18 +44,41 @@
 //! branches — every Keystore exception is handled tolerantly (research §2:
 //! OEM quirks are unconfirmed anecdotes, so we map, not special-case).
 //!
-//! # Storage-only in this phase
+//! # Biometric gate (S05, Plan Phase 5)
 //!
-//! `AuthPolicy::Required` never reaches this backend: `lib.rs`'s `open_with`
-//! rejects it with `NotAvailable(UnsupportedPlatform)` before any backend is
-//! constructed (S05 adds the biometric gate). So this module implements plain
-//! secure storage only.
+//! When a store is opened with [`AuthPolicy::Required`](crate::AuthPolicy) the
+//! [`AuthOptions`](crate::AuthOptions) travel in as [`AndroidStore::auth`] and
+//! three things change:
+//!
+//! 1. **Key binding** — [`generate_key`] adds
+//!    `setUserAuthenticationRequired(true)`,
+//!    `setInvalidatedByBiometricEnrollment(invalidate_on_enrollment)`, and
+//!    `setUserAuthenticationParameters(validity, AUTH_BIOMETRIC_STRONG [|
+//!    AUTH_DEVICE_CREDENTIAL])` so the AES key is released only by a fresh
+//!    biometric (or, per [`AuthOptions::allow_device_credential`](crate::AuthOptions::allow_device_credential),
+//!    device-credential) authentication.
+//! 2. **Per-op prompt** — a gated `get`/`set` initializes the `Cipher`, wraps
+//!    it in a `BiometricPrompt.CryptoObject`, and blocks on
+//!    [`authenticate`] (the framework `BiometricPrompt`, rendered by the
+//!    system) before `doFinal`.
+//! 3. **The Kotlin helper** — the framework `AuthenticationCallback` is an
+//!    abstract class JNI cannot subclass, so the app must ship
+//!    `dev.frust.FrustBiometric` (the plugin's canonical
+//!    `platform/FrustBiometric.kt`; see the plugin `README.md`). It is looked
+//!    up through the **application `Context`'s classloader** (a bare
+//!    `FindClass` on a JNI worker thread sees only the bootstrap loader, never
+//!    app classes). Absent → [`SecureStorageError::NotAvailable`]`(`[`Unavailability::HelperMissing`](crate::Unavailability::HelperMissing)`)`.
+//!
+//! The framework `BiometricPrompt` path is API 28+; a gated open on API < 28
+//! fails with [`Unavailability::UnsupportedApiLevel`](crate::Unavailability::UnsupportedApiLevel).
+//! All of this compiles on the Android gate but is exercised only by a
+//! physical-device manual gate; a plain (`auth: None`) store is unchanged.
 
 use jni::objects::{JByteArray, JMap, JObject, JString, JValue};
 use jni::{Env, jni_sig, jni_str};
 
 use crate::framing;
-use crate::{Backend, SecureStorageError};
+use crate::{AuthOptions, Backend, CanAuthenticate, SecureStorageError, Unavailability};
 
 // --- Framework constants (documented, stable — not looked up reflectively) ---
 
@@ -84,29 +107,86 @@ const BLOCK_MODE_GCM: &str = "GCM";
 /// `KeyProperties.ENCRYPTION_PADDING_NONE`.
 const ENCRYPTION_PADDING_NONE: &str = "NoPadding";
 
+// --- Biometric gate (S05) ---------------------------------------------------
+
+/// The framework `BiometricPrompt` requires API 28 (`Build.VERSION_CODES.P`);
+/// a gated open below this fails with [`Unavailability::UnsupportedApiLevel`].
+const MIN_BIOMETRIC_API: i32 = 28;
+/// `setUserAuthenticationParameters` (validity + auth-type flags) requires
+/// API 30 (`Build.VERSION_CODES.R`); on 28–29 we fall back to the deprecated
+/// `setUserAuthenticationValidityDurationSeconds`.
+const AUTH_PARAMETERS_API: i32 = 30;
+/// `KeyProperties.AUTH_BIOMETRIC_STRONG` (= 1<<1) — Class 3 biometrics.
+const AUTH_BIOMETRIC_STRONG: i32 = 0x2;
+/// `KeyProperties.AUTH_DEVICE_CREDENTIAL` (= 1<<0) — PIN/pattern/password.
+const AUTH_DEVICE_CREDENTIAL: i32 = 0x1;
+/// `BiometricManager.Authenticators.BIOMETRIC_STRONG` (= 0x000000F).
+const AUTHENTICATOR_BIOMETRIC_STRONG: i32 = 0x0000_000F;
+/// `BiometricManager.Authenticators.DEVICE_CREDENTIAL` (= 0x8000).
+const AUTHENTICATOR_DEVICE_CREDENTIAL: i32 = 0x0000_8000;
+/// `BiometricManager.BIOMETRIC_SUCCESS` (= 0).
+const BIOMETRIC_SUCCESS: i32 = 0;
+/// The sentinel [`FrustBiometric.authenticate`](../../platform/FrustBiometric.kt)
+/// returns on success (any other value is a framework `BiometricPrompt`
+/// `ERROR_*` code — see [`map_prompt_error`]).
+const HELPER_SUCCESS: i32 = 0;
+
+/// The app-supplied Kotlin helper's fully-qualified class name (binary/dotted
+/// form, as `ClassLoader.loadClass` expects — **not** the slash form
+/// `FindClass` wants). Ships as the plugin's canonical
+/// `platform/FrustBiometric.kt`, copied into the app per the plugin
+/// `README.md`; looked up through the application classloader (see
+/// [`find_helper_class`]).
+const HELPER_CLASS_BINARY: &str = "dev.frust.FrustBiometric";
+
 /// A `frust.ss.<store>`-namespaced Android secure store: one Keystore AES-GCM
 /// key + one `SharedPreferences` file, both keyed by [`Self::store_id`].
 pub(crate) struct AndroidStore {
     /// `frust.ss.<store>` — used for **both** the Keystore key alias and the
     /// `SharedPreferences` file name (see the module doc).
     store_id: String,
+    /// The per-store biometric policy: `None` for a plain store, `Some` for a
+    /// gated one (S05). Held as plain data so [`AndroidStore`] stays
+    /// `Send + Sync` — the `Cipher`/`CryptoObject`/`BiometricPrompt` objects
+    /// are all frame-scoped locals inside a fresh JNI attachment per op.
+    auth: Option<AuthOptions>,
 }
 
 impl AndroidStore {
-    /// Open the named Android secure store.
+    /// Open the named Android secure store, optionally behind a biometric gate.
     ///
     /// # Errors
     /// [`SecureStorageError::PlatformNotInitialized`] if the host shell never
     /// installed the `(JavaVM, Context)` handles (an old scaffold predating
     /// `nativeInitPlatform`) — probed here so the failure is loud and early
     /// rather than on the first read (matching `frust-shared-preferences`'
-    /// `AndroidStore::standard`).
-    pub(crate) fn open(name: &str) -> Result<Self, SecureStorageError> {
-        // No-op handle probe: `with_context` maps a missing platform handle to
-        // `PlatformNotInitialized` without doing any JNI work.
-        with_context(|_env, _ctx| Ok(()))?;
+    /// `AndroidStore::standard`). For a **gated** store (S05):
+    /// [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedApiLevel`]`)`
+    /// on API < 28 (the framework `BiometricPrompt` floor), or
+    /// `NotAvailable(`[`Unavailability::HelperMissing`]`)` if the app's
+    /// `dev.frust.FrustBiometric` helper class is absent — both probed here so
+    /// a misconfigured gate fails at open, not mid-read.
+    pub(crate) fn open(name: &str, auth: Option<AuthOptions>) -> Result<Self, SecureStorageError> {
+        with_context(|env, context| {
+            if auth.is_some() {
+                // Fail fast on the two static preconditions the gate needs.
+                let api = device_api_level(env)?;
+                if api < MIN_BIOMETRIC_API {
+                    return Err(SecureStorageError::NotAvailable(
+                        Unavailability::UnsupportedApiLevel,
+                    ));
+                }
+                if find_helper_class(env, context)?.is_none() {
+                    return Err(SecureStorageError::NotAvailable(
+                        Unavailability::HelperMissing,
+                    ));
+                }
+            }
+            Ok(())
+        })?;
         Ok(Self {
             store_id: framing::store_id(name),
+            auth,
         })
     }
 }
@@ -139,9 +219,9 @@ fn with_context<T>(
 /// **pending** — undefined behaviour for the next JNI call — so we always
 /// check/clear it here before returning, whatever `f` reported. A non-exception
 /// `jni` error (e.g. a null return) maps to [`SecureStorageError::Storage`].
-fn run_jni<T>(
-    env: &mut Env,
-    f: impl FnOnce(&mut Env) -> Result<T, jni::errors::Error>,
+fn run_jni<'local, T>(
+    env: &mut Env<'local>,
+    f: impl FnOnce(&mut Env<'local>) -> Result<T, jni::errors::Error>,
 ) -> Result<T, SecureStorageError> {
     let result = f(env);
     if env.exception_check() {
@@ -200,6 +280,7 @@ fn take_pending_exception(env: &mut Env) -> SecureStorageError {
 fn get_or_create_key<'local>(
     env: &mut Env<'local>,
     alias: &str,
+    auth: Option<&AuthOptions>,
 ) -> Result<JObject<'local>, jni::errors::Error> {
     let keystore = load_keystore(env)?;
     let alias_jstr = env.new_string(alias)?;
@@ -224,7 +305,7 @@ fn get_or_create_key<'local>(
         )?
         .l()
     } else {
-        generate_key(env, alias)
+        generate_key(env, alias, auth)
     }
 }
 
@@ -252,10 +333,14 @@ fn load_keystore<'local>(env: &mut Env<'local>) -> Result<JObject<'local>, jni::
 }
 
 /// Generate the store's AES-256-GCM key directly in `AndroidKeyStore` via
-/// `KeyGenParameterSpec` (no RSA wrap).
+/// `KeyGenParameterSpec` (no RSA wrap). When `auth` is `Some` the key is bound
+/// to a fresh authentication (S05): `setUserAuthenticationRequired(true)` plus
+/// enrollment-invalidation and validity/auth-type per the options (see
+/// [`apply_auth_binding`]).
 fn generate_key<'local>(
     env: &mut Env<'local>,
     alias: &str,
+    auth: Option<&AuthOptions>,
 ) -> Result<JObject<'local>, jni::errors::Error> {
     // KeyGenerator.getInstance("AES", "AndroidKeyStore")
     let algorithm = env.new_string("AES")?;
@@ -316,6 +401,13 @@ fn generate_key<'local>(
         )?
         .l()?;
 
+    // Gated store (S05): bind the key to a fresh authentication. `builder` is
+    // rebound to the (same) builder the auth setters return.
+    let builder = match auth {
+        Some(opts) => apply_auth_binding(env, builder, opts)?,
+        None => builder,
+    };
+
     // .build()
     let spec = env
         .call_method(
@@ -357,17 +449,318 @@ fn string_array<'local>(
     Ok(array.into())
 }
 
+// --- Biometric gate (S05) ---------------------------------------------------
+
+/// `Build.VERSION.SDK_INT` — the device's API level. Read reflectively via a
+/// static field so the backend needs no compile-time SDK constant.
+fn device_api_level(env: &mut Env) -> Result<i32, SecureStorageError> {
+    run_jni(env, |env| {
+        env.get_static_field(
+            jni_str!("android/os/Build$VERSION"),
+            jni_str!("SDK_INT"),
+            jni_sig!("I"),
+        )?
+        .i()
+    })
+}
+
+/// The application `Context`'s classloader — the only loader that can see
+/// app-defined classes (a JNI worker thread's `FindClass` sees the bootstrap
+/// loader only). `context.getClassLoader()`.
+fn context_class_loader<'local>(
+    env: &mut Env<'local>,
+    context: &JObject,
+) -> Result<JObject<'local>, jni::errors::Error> {
+    env.call_method(
+        context,
+        jni_str!("getClassLoader"),
+        jni_sig!("()Ljava/lang/ClassLoader;"),
+        &[],
+    )?
+    .l()
+}
+
+/// Look the app's `dev.frust.FrustBiometric` helper class up through the
+/// application classloader. Returns `Ok(None)` — never an error — when the
+/// class is absent (`ClassNotFoundException`), which the gate maps to
+/// [`Unavailability::HelperMissing`]; a genuine JNI failure is a
+/// [`SecureStorageError::Storage`].
+fn find_helper_class<'local>(
+    env: &mut Env<'local>,
+    context: &JObject,
+) -> Result<Option<JObject<'local>>, SecureStorageError> {
+    let loader = run_jni(env, |env| context_class_loader(env, context))?;
+    let name = run_jni(env, |env| env.new_string(HELPER_CLASS_BINARY))?;
+    // classLoader.loadClass("dev.frust.FrustBiometric") — throws
+    // ClassNotFoundException if the app didn't ship the helper.
+    let class = env.call_method(
+        &loader,
+        jni_str!("loadClass"),
+        jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
+        &[JValue::Object(&name)],
+    );
+    if env.exception_check() {
+        // The expected "helper not shipped" signal — clear and report absent.
+        env.exception_clear();
+        return Ok(None);
+    }
+    match class {
+        Ok(value) => match value.l() {
+            Ok(obj) if !obj.is_null() => Ok(Some(obj)),
+            Ok(_) => Ok(None),
+            Err(e) => Err(SecureStorageError::Storage(format!(
+                "loading biometric helper class: {e}"
+            ))),
+        },
+        Err(e) => Err(SecureStorageError::Storage(format!(
+            "loading biometric helper class: {e}"
+        ))),
+    }
+}
+
+/// Chain the auth-binding setters onto a `KeyGenParameterSpec.Builder` for a
+/// gated key (S05): `setUserAuthenticationRequired(true)`,
+/// `setInvalidatedByBiometricEnrollment(invalidate_on_enrollment)`, and the
+/// validity/auth-type binding — `setUserAuthenticationParameters` on API 30+,
+/// the deprecated `setUserAuthenticationValidityDurationSeconds` on 28–29.
+fn apply_auth_binding<'local>(
+    env: &mut Env<'local>,
+    builder: JObject<'local>,
+    opts: &AuthOptions,
+) -> Result<JObject<'local>, jni::errors::Error> {
+    // .setUserAuthenticationRequired(true)
+    let builder = env
+        .call_method(
+            &builder,
+            jni_str!("setUserAuthenticationRequired"),
+            jni_sig!("(Z)Landroid/security/keystore/KeyGenParameterSpec$Builder;"),
+            &[JValue::Bool(true)],
+        )?
+        .l()?;
+
+    // .setInvalidatedByBiometricEnrollment(invalidate_on_enrollment)
+    let builder = env
+        .call_method(
+            &builder,
+            jni_str!("setInvalidatedByBiometricEnrollment"),
+            jni_sig!("(Z)Landroid/security/keystore/KeyGenParameterSpec$Builder;"),
+            &[JValue::Bool(opts.invalidate_on_enrollment)],
+        )?
+        .l()?;
+
+    // `validity: None` → 0 seconds → a fresh auth for every use.
+    let seconds = opts
+        .validity
+        .map(|d| d.as_secs().min(i32::MAX as u64) as i32)
+        .unwrap_or(0);
+
+    let api = env
+        .get_static_field(
+            jni_str!("android/os/Build$VERSION"),
+            jni_str!("SDK_INT"),
+            jni_sig!("I"),
+        )?
+        .i()?;
+    if api >= AUTH_PARAMETERS_API {
+        // .setUserAuthenticationParameters(seconds, BIOMETRIC_STRONG [| DEVICE_CREDENTIAL])
+        let mut types = AUTH_BIOMETRIC_STRONG;
+        if opts.allow_device_credential {
+            types |= AUTH_DEVICE_CREDENTIAL;
+        }
+        env.call_method(
+            &builder,
+            jni_str!("setUserAuthenticationParameters"),
+            jni_sig!("(II)Landroid/security/keystore/KeyGenParameterSpec$Builder;"),
+            &[JValue::Int(seconds), JValue::Int(types)],
+        )?
+        .l()
+    } else {
+        // Legacy (API 28–29): duration only. `-1` = biometric-only, every use;
+        // a non-negative window additionally permits the device credential.
+        #[allow(deprecated)]
+        let legacy = if opts.allow_device_credential {
+            seconds
+        } else {
+            -1
+        };
+        env.call_method(
+            &builder,
+            jni_str!("setUserAuthenticationValidityDurationSeconds"),
+            jni_sig!("(I)Landroid/security/keystore/KeyGenParameterSpec$Builder;"),
+            &[JValue::Int(legacy)],
+        )?
+        .l()
+    }
+}
+
+/// Block on the framework `BiometricPrompt` for one gated cipher operation
+/// (S05): wrap `cipher` in a `BiometricPrompt.CryptoObject`, then call the
+/// app's `dev.frust.FrustBiometric.authenticate(...)` static helper, which
+/// posts the prompt to the main executor, subclasses the abstract
+/// `AuthenticationCallback`, and latches the result on this background thread.
+/// Returns the authenticated `Cipher` (`CryptoObject.getCipher()`) ready for
+/// `doFinal`.
+fn authenticate<'local>(
+    env: &mut Env<'local>,
+    context: &JObject,
+    opts: &AuthOptions,
+    cipher: &JObject,
+) -> Result<JObject<'local>, SecureStorageError> {
+    let helper = match find_helper_class(env, context)? {
+        Some(class) => class,
+        None => {
+            return Err(SecureStorageError::NotAvailable(
+                Unavailability::HelperMissing,
+            ));
+        }
+    };
+
+    // new BiometricPrompt.CryptoObject(cipher)
+    let crypto = run_jni(env, |env| {
+        env.new_object(
+            jni_str!("android/hardware/biometrics/BiometricPrompt$CryptoObject"),
+            jni_sig!("(Ljavax/crypto/Cipher;)V"),
+            &[JValue::Object(cipher)],
+        )
+    })?;
+
+    let title = run_jni(env, |env| env.new_string(&opts.prompt.title))?;
+    let subtitle = run_jni(env, |env| env.new_string(&opts.prompt.subtitle))?;
+    let negative = run_jni(env, |env| env.new_string(&opts.prompt.negative_button))?;
+
+    // FrustBiometric.authenticate(context, title, subtitle, negative,
+    //   allowDeviceCredential, cryptoObject) -> int (0 = success; else a
+    //   BiometricPrompt ERROR_* code — see `map_prompt_error`).
+    let helper_class = env
+        .cast_local::<jni::objects::JClass>(helper)
+        .map_err(|e| SecureStorageError::Storage(format!("biometric helper class cast: {e}")))?;
+    let result = run_jni(env, |env| {
+        env.call_static_method(
+            &helper_class,
+            jni_str!("authenticate"),
+            jni_sig!(
+                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLandroid/hardware/biometrics/BiometricPrompt$CryptoObject;)I"
+            ),
+            &[
+                JValue::Object(context),
+                JValue::Object(&title),
+                JValue::Object(&subtitle),
+                JValue::Object(&negative),
+                JValue::Bool(opts.allow_device_credential),
+                JValue::Object(&crypto),
+            ],
+        )?
+        .i()
+    })?;
+
+    if result != HELPER_SUCCESS {
+        return Err(map_prompt_error(result));
+    }
+
+    // On success the authenticated cipher is `cryptoObject.getCipher()`.
+    run_jni(env, |env| {
+        env.call_method(
+            &crypto,
+            jni_str!("getCipher"),
+            jni_sig!("()Ljavax/crypto/Cipher;"),
+            &[],
+        )?
+        .l()
+    })
+}
+
+/// Map a framework `BiometricPrompt.BIOMETRIC_ERROR_*` code (as the Kotlin
+/// helper returns it) to a typed [`SecureStorageError`] — the S05 exception
+/// taxonomy. Codes per `android.hardware.biometrics.BiometricPrompt`.
+fn map_prompt_error(code: i32) -> SecureStorageError {
+    match code {
+        // ERROR_USER_CANCELED (10), ERROR_NEGATIVE_BUTTON (13).
+        10 | 13 => SecureStorageError::UserCanceled,
+        // ERROR_CANCELED (5) — the system canceled (e.g. app backgrounded).
+        5 => SecureStorageError::SystemCanceled,
+        // ERROR_LOCKOUT (7) — too many attempts, retry after a cooldown.
+        7 => SecureStorageError::LockoutTemporary,
+        // ERROR_LOCKOUT_PERMANENT (9) — needs a strong-auth unlock.
+        9 => SecureStorageError::LockoutPermanent,
+        // ERROR_NO_BIOMETRICS (11) — none enrolled.
+        11 => SecureStorageError::NotAvailable(Unavailability::NotEnrolled),
+        // ERROR_HW_NOT_PRESENT (12).
+        12 => SecureStorageError::NotAvailable(Unavailability::NoHardware),
+        // ERROR_HW_UNAVAILABLE (1).
+        1 => SecureStorageError::NotAvailable(Unavailability::HardwareUnavailable),
+        // ERROR_NO_DEVICE_CREDENTIAL (14) — passcode not set.
+        14 => SecureStorageError::NotAvailable(Unavailability::PasscodeNotSet),
+        // Everything else (timeout, vendor, unable-to-process, …): the auth
+        // ran but did not succeed.
+        _ => SecureStorageError::AuthFailed,
+    }
+}
+
+/// Probe whether biometric authentication is available on this device without
+/// prompting — [`crate::SecureStorage::can_authenticate`]'s Android arm.
+/// `BiometricManager.canAuthenticate(BIOMETRIC_STRONG)` (API 30+) /
+/// `canAuthenticate()` (API 29). A missing platform handle, API < 29, or any
+/// probe failure yields the closest [`Unavailability`] rather than an error
+/// (the probe never panics).
+pub(crate) fn can_authenticate() -> CanAuthenticate {
+    let outcome = with_context(|env, context| {
+        let api = device_api_level(env)?;
+        if api < MIN_BIOMETRIC_API {
+            return Ok(CanAuthenticate::Unavailable(
+                Unavailability::UnsupportedApiLevel,
+            ));
+        }
+        let status = run_jni(env, |env| {
+            // (BiometricManager) context.getSystemService("biometric")
+            let service_name = env.new_string("biometric")?;
+            let class = env
+                .call_method(
+                    context,
+                    jni_str!("getSystemService"),
+                    jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                    &[JValue::Object(&service_name)],
+                )?
+                .l()?;
+            if class.is_null() {
+                return Ok(None);
+            }
+            let mut authenticators = AUTHENTICATOR_BIOMETRIC_STRONG;
+            authenticators |= AUTHENTICATOR_DEVICE_CREDENTIAL;
+            let status = env
+                .call_method(
+                    &class,
+                    jni_str!("canAuthenticate"),
+                    jni_sig!("(I)I"),
+                    &[JValue::Int(authenticators)],
+                )?
+                .i()?;
+            Ok::<Option<i32>, jni::errors::Error>(Some(status))
+        })?;
+        Ok(match status {
+            Some(BIOMETRIC_SUCCESS) => CanAuthenticate::Available,
+            Some(11) => CanAuthenticate::Unavailable(Unavailability::NotEnrolled),
+            Some(12) => CanAuthenticate::Unavailable(Unavailability::NoHardware),
+            Some(1) => CanAuthenticate::Unavailable(Unavailability::HardwareUnavailable),
+            _ => CanAuthenticate::Unavailable(Unavailability::HardwareUnavailable),
+        })
+    });
+    outcome.unwrap_or(CanAuthenticate::Unavailable(
+        Unavailability::HardwareUnavailable,
+    ))
+}
+
 // --- Encrypt / decrypt ------------------------------------------------------
 
-/// Encrypt `plaintext` under `key`, returning `(iv, ciphertext)`. GCM in
-/// `AndroidKeyStore` generates a fresh random IV per encryption
-/// (`setRandomizedEncryptionRequired` defaults on), read back via
-/// `Cipher.getIV()`.
-fn encrypt(
-    env: &mut Env,
+/// Initialize an encrypt `Cipher` under `key`, returning `(cipher, iv)`
+/// **without** calling `doFinal`. GCM in `AndroidKeyStore` generates a fresh
+/// random IV at init (`setRandomizedEncryptionRequired` defaults on), read
+/// back via `Cipher.getIV()`. Split from the final step so a gated store can
+/// interpose the biometric prompt ([`authenticate`]) between init and
+/// `doFinal` (S05); a plain store runs the two back to back.
+fn init_encrypt<'local>(
+    env: &mut Env<'local>,
     key: &JObject,
-    plaintext: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), jni::errors::Error> {
+) -> Result<(JObject<'local>, Vec<u8>), jni::errors::Error> {
     let cipher = cipher_instance(env)?;
     env.call_method(
         &cipher,
@@ -382,28 +775,16 @@ fn encrypt(
     let iv_array = env.cast_local::<JByteArray>(iv_obj)?;
     let iv = env.convert_byte_array(&iv_array)?;
 
-    let plaintext_array = env.byte_array_from_slice(plaintext)?;
-    let ciphertext_obj = env
-        .call_method(
-            &cipher,
-            jni_str!("doFinal"),
-            jni_sig!("([B)[B"),
-            &[JValue::Object(&plaintext_array)],
-        )?
-        .l()?;
-    let ciphertext_array = env.cast_local::<JByteArray>(ciphertext_obj)?;
-    let ciphertext = env.convert_byte_array(&ciphertext_array)?;
-
-    Ok((iv, ciphertext))
+    Ok((cipher, iv))
 }
 
-/// Decrypt `ciphertext` under `key` with the stored `iv`.
-fn decrypt(
-    env: &mut Env,
+/// Initialize a decrypt `Cipher` under `key` with the stored `iv`, **without**
+/// calling `doFinal` (see [`init_encrypt`] for the split rationale).
+fn init_decrypt<'local>(
+    env: &mut Env<'local>,
     key: &JObject,
     iv: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, jni::errors::Error> {
+) -> Result<JObject<'local>, jni::errors::Error> {
     let cipher = cipher_instance(env)?;
 
     // new GCMParameterSpec(128, iv)
@@ -425,17 +806,26 @@ fn decrypt(
         ],
     )?;
 
-    let ciphertext_array = env.byte_array_from_slice(ciphertext)?;
-    let plaintext_obj = env
+    Ok(cipher)
+}
+
+/// `cipher.doFinal(input)` — the authenticated final step for both directions.
+fn cipher_final(
+    env: &mut Env,
+    cipher: &JObject,
+    input: &[u8],
+) -> Result<Vec<u8>, jni::errors::Error> {
+    let input_array = env.byte_array_from_slice(input)?;
+    let output_obj = env
         .call_method(
-            &cipher,
+            cipher,
             jni_str!("doFinal"),
             jni_sig!("([B)[B"),
-            &[JValue::Object(&ciphertext_array)],
+            &[JValue::Object(&input_array)],
         )?
         .l()?;
-    let plaintext_array = env.cast_local::<JByteArray>(plaintext_obj)?;
-    env.convert_byte_array(&plaintext_array)
+    let output_array = env.cast_local::<JByteArray>(output_obj)?;
+    env.convert_byte_array(&output_array)
 }
 
 /// `Cipher.getInstance("AES/GCM/NoPadding")`.
@@ -586,12 +976,20 @@ impl Backend for AndroidStore {
                 )
             })?;
             // Decrypt (JNI). The key must already exist to read an existing
-            // value; `get_or_create_key` returns it, and GCM tag verification
-            // in `doFinal` surfaces any tampering as a mapped exception.
-            let plaintext = run_jni(env, |env| {
-                let cipher_key = get_or_create_key(env, &self.store_id)?;
-                decrypt(env, &cipher_key, iv, ciphertext)
+            // value; `get_or_create_key` returns it. A gated store (S05)
+            // interposes the biometric prompt between cipher init and
+            // `doFinal`, unlocking the auth-bound key via the `CryptoObject`;
+            // a plain store runs the two back to back. GCM tag verification in
+            // `doFinal` surfaces any tampering as a mapped exception.
+            let cipher = run_jni(env, |env| {
+                let cipher_key = get_or_create_key(env, &self.store_id, self.auth.as_ref())?;
+                init_decrypt(env, &cipher_key, iv)
             })?;
+            let cipher = match &self.auth {
+                Some(opts) => authenticate(env, context, opts, &cipher)?,
+                None => cipher,
+            };
+            let plaintext = run_jni(env, |env| cipher_final(env, &cipher, ciphertext))?;
             let text = String::from_utf8(plaintext).map_err(|e| {
                 SecureStorageError::Storage(format!("decrypted value is not valid UTF-8: {e}"))
             })?;
@@ -601,11 +999,18 @@ impl Backend for AndroidStore {
 
     fn set(&self, key: &str, value: &str) -> Result<(), SecureStorageError> {
         with_context(|env, context| {
-            // Encrypt (JNI) — a fresh random IV per write.
-            let (iv, ciphertext) = run_jni(env, |env| {
-                let cipher_key = get_or_create_key(env, &self.store_id)?;
-                encrypt(env, &cipher_key, value.as_bytes())
+            // Encrypt (JNI) — a fresh random IV per write. As in `get`, a
+            // gated store (S05) interposes the biometric prompt between cipher
+            // init and `doFinal`; a plain store runs them back to back.
+            let (cipher, iv) = run_jni(env, |env| {
+                let cipher_key = get_or_create_key(env, &self.store_id, self.auth.as_ref())?;
+                init_encrypt(env, &cipher_key)
             })?;
+            let cipher = match &self.auth {
+                Some(opts) => authenticate(env, context, opts, &cipher)?,
+                None => cipher,
+            };
+            let ciphertext = run_jni(env, |env| cipher_final(env, &cipher, value.as_bytes()))?;
             // Frame + Base64 in pure Rust.
             let encoded = framing::b64_encode(&framing::frame(&iv, &ciphertext));
             // Persist the Base64 string (JNI).

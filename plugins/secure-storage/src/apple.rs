@@ -29,12 +29,38 @@
 //! added; a later overwrite updates only the value data, leaving the
 //! item's original accessibility in place.
 //!
-//! # Biometric gate — not in this phase
+//! # Biometric gate (S05, Plan Phase 5)
 //!
-//! `AuthPolicy::Required` is refused *before* a backend is ever constructed
-//! (see `lib.rs`'s `open_with`), so this backend only ever serves
-//! unauthenticated storage. The `SecAccessControl` biometric gate is Plan
-//! Phase 5 (task S05).
+//! When a store is opened with [`AuthPolicy::Required`](crate::AuthPolicy)
+//! the [`AuthOptions`] travel in as [`AppleStore::auth`]. A gated store's
+//! items are created with a `kSecAttrAccessControl` object instead of a plain
+//! `kSecAttrAccessible` value: [`SecAccessControl::with_flags`] over the same
+//! accessibility protection, with flags derived from the options —
+//! [`BiometryCurrentSet`](SecAccessControlCreateFlags::BiometryCurrentSet)
+//! when [`AuthOptions::invalidate_on_enrollment`] (the safe default: a
+//! re-enrollment invalidates the item), else
+//! [`BiometryAny`](SecAccessControlCreateFlags::BiometryAny), plus
+//! `… | Or | DevicePasscode` when
+//! [`AuthOptions::allow_device_credential`] permits the passcode fallback.
+//! A gated **read** then attaches an [`LAContext`] to the
+//! `SecItemCopyMatching` query (`kSecUseAuthenticationContext`, with
+//! `kSecUseOperationPrompt` as the pre-context-era fallback): the context
+//! carries [`PromptSpec::title`](crate::PromptSpec::title) as its
+//! `localizedReason` and [`AuthOptions::validity`] as its
+//! `touchIDAuthenticationAllowableReuseDuration` (the re-prompt window), so
+//! the call **blocks while the system renders the Face ID/Touch ID dialog**.
+//! [`can_authenticate`] probes availability without prompting via
+//! [`LAContext::canEvaluatePolicy_error`], mapping the `LAError` code to an
+//! [`Unavailability`]. All of this is compiled on the iOS/macOS gates but
+//! only exercised by a **physical-device manual gate** — the Simulator
+//! cannot render the biometric prompt (`docs/DEVELOPMENT.md`), and an
+//! unauthenticated (`auth: None`) store is unaffected (host conformance).
+//!
+//! A gated LAContext value is an Objective-C object, not a CoreFoundation
+//! type; passing it into the CF keychain query dictionary needs one confined,
+//! `# Safety`-noted pointer bridge ([`as_cf`]) — objc objects are
+//! CFTypeRef-compatible at the ABI level (the "thin confined CF shim" the S05
+//! task budgets).
 //!
 //! # macOS unbundled-preview caveat
 //!
@@ -71,16 +97,23 @@ use std::ptr::NonNull;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFData, CFDictionary, CFRetained, CFString, CFType, kCFBooleanTrue,
 };
+use objc2_foundation::NSString;
+use objc2_local_authentication::{LAContext, LAError, LAPolicy};
 use objc2_security::{
-    SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate, errSecAuthFailed, errSecDecode,
-    errSecDuplicateItem, errSecInteractionNotAllowed, errSecItemNotFound, errSecMissingEntitlement,
-    errSecNotAvailable, errSecParam, errSecSuccess, errSecUserCanceled, kSecAttrAccessible,
+    SecAccessControl, SecAccessControlCreateFlags, SecItemAdd, SecItemCopyMatching, SecItemDelete,
+    SecItemUpdate, errSecAuthFailed, errSecDecode, errSecDuplicateItem,
+    errSecInteractionNotAllowed, errSecItemNotFound, errSecMissingEntitlement, errSecNotAvailable,
+    errSecParam, errSecSuccess, errSecUserCanceled, kSecAttrAccessControl, kSecAttrAccessible,
     kSecAttrAccessibleAfterFirstUnlock, kSecAttrAccessibleWhenUnlocked, kSecAttrAccount,
     kSecAttrService, kSecClass, kSecClassGenericPassword, kSecMatchLimit, kSecMatchLimitAll,
-    kSecMatchLimitOne, kSecReturnAttributes, kSecReturnData, kSecValueData,
+    kSecMatchLimitOne, kSecReturnAttributes, kSecReturnData, kSecUseAuthenticationContext,
+    kSecValueData,
 };
 
-use crate::{Accessibility, Backend, KEY_NAMESPACE_PREFIX, SecureStorageError};
+use crate::{
+    Accessibility, AuthOptions, Backend, CanAuthenticate, KEY_NAMESPACE_PREFIX, SecureStorageError,
+    Unavailability,
+};
 
 /// A Keychain-backed secure store, scoped to one `frust.ss.<store>` service.
 pub(crate) struct AppleStore {
@@ -91,21 +124,35 @@ pub(crate) struct AppleStore {
     service: String,
     /// The `kSecAttrAccessible` posture applied to items this store adds.
     accessibility: Accessibility,
+    /// The per-store biometric policy: `None` for a plain store, `Some` for a
+    /// gated one (S05). Held as plain data (a Rust struct of `bool`/`Option`/
+    /// `String`s) so [`AppleStore`] stays `Send + Sync` — the `SecAccessControl`
+    /// and `LAContext` objects are rebuilt per operation, never held across
+    /// calls (mirroring `service`).
+    auth: Option<AuthOptions>,
 }
 
 impl AppleStore {
-    /// Open the Keychain store `store` with the given [`Accessibility`].
+    /// Open the Keychain store `store` with the given [`Accessibility`] and an
+    /// optional biometric [`AuthOptions`] gate (S05).
     ///
     /// `store` is the caller's store name; its service attribute is
     /// `frust.ss.<store>`.
-    pub(crate) fn new(store: &str, accessibility: Accessibility) -> Self {
+    pub(crate) fn new(
+        store: &str,
+        accessibility: Accessibility,
+        auth: Option<AuthOptions>,
+    ) -> Self {
         Self {
             service: format!("{KEY_NAMESPACE_PREFIX}{store}"),
             accessibility,
+            auth,
         }
     }
 
-    /// The `kSecAttrAccessible` constant for this store's [`Accessibility`].
+    /// The `kSecAttrAccessible` constant for this store's [`Accessibility`] —
+    /// the "protection" both a plain `kSecAttrAccessible` value and a gated
+    /// item's [`SecAccessControl`] are built from.
     fn accessible(&self) -> &'static CFString {
         // SAFETY: reading `extern` Security-framework constant statics
         // (edition-2024 unsafe); each is a linker-provided, non-null
@@ -115,6 +162,52 @@ impl AppleStore {
                 Accessibility::WhenUnlocked => kSecAttrAccessibleWhenUnlocked,
                 Accessibility::AfterFirstUnlock => kSecAttrAccessibleAfterFirstUnlock,
             }
+        }
+    }
+
+    /// The `SecAccessControl` object for this store's [`AuthOptions`], built
+    /// per-write over the accessibility protection (see the module doc's
+    /// *Biometric gate* for the flag mapping). Only called when
+    /// [`Self::auth`] is `Some`.
+    fn access_control(
+        &self,
+        opts: &AuthOptions,
+    ) -> Result<CFRetained<SecAccessControl>, SecureStorageError> {
+        let flags = access_flags(opts);
+        let protection = as_type(self.accessible());
+        let mut error: *mut objc2_core_foundation::CFError = std::ptr::null_mut();
+        // SAFETY: `protection` is a valid `kSecAttrAccessible*` CFString (the
+        // correct type this call requires); `error` is a valid out-pointer.
+        // On failure the call returns `None` (and may set `*error`); on
+        // success a +1-retained `SecAccessControl` we own.
+        let control =
+            unsafe { SecAccessControl::with_flags(None, protection, flags, &mut error as *mut _) };
+        control.ok_or_else(|| {
+            SecureStorageError::Storage(format!(
+                "SecAccessControlCreateWithFlags failed for flags {:#x}",
+                flags.0
+            ))
+        })
+    }
+
+    /// An [`LAContext`] configured for this store's gated **reads**: its
+    /// `localizedReason` is the prompt title and its
+    /// `touchIDAuthenticationAllowableReuseDuration` is the options' re-prompt
+    /// window (`0` when [`AuthOptions::validity`] is `None`, i.e. prompt every
+    /// time). Kept alive by the caller for the duration of the keychain call
+    /// it is attached to. Only called when [`Self::auth`] is `Some`.
+    fn auth_context(&self, opts: &AuthOptions) -> objc2::rc::Retained<LAContext> {
+        let reason = NSString::from_str(&opts.prompt.title);
+        let reuse = opts.validity.map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        // SAFETY: `LAContext::new` returns a fresh, valid retained context;
+        // `reason` is a valid `NSString`; both setters are plain property
+        // writes with in-range args (`objc2` marks the allocation and setters
+        // unsafe).
+        unsafe {
+            let context = LAContext::new();
+            context.setLocalizedReason(&reason);
+            context.setTouchIDAuthenticationAllowableReuseDuration(reuse);
+            context
         }
     }
 }
@@ -136,18 +229,46 @@ impl Backend for AppleStore {
                 kSecMatchLimitOne,
             )
         };
-        let query = dict(&[
+        let mut pairs: Vec<(&CFType, &CFType)> = vec![
             (as_type(class), as_type(generic_pw)),
             (as_type(service_k), as_type(&*service)),
             (as_type(account_k), as_type(&*account)),
             (as_type(return_data_k), cf_true()),
             (as_type(match_limit_k), as_type(match_one)),
-        ]);
+        ];
+
+        // A gated read attaches the biometric prompt context: `LAContext`
+        // (reuse-duration + reason) under `kSecUseAuthenticationContext`, plus
+        // the pre-context-era `kSecUseOperationPrompt` message. Both the
+        // context and the prompt CFString must outlive the keychain call, so
+        // they are bound here and referenced (never moved) into `pairs`.
+        let context;
+        let op_prompt;
+        if let Some(opts) = &self.auth {
+            // `kSecUseOperationPrompt` is deprecated in favor of the
+            // `LAContext.localizedReason` we also set, but is kept as the
+            // pre-context-era fallback the S05 task specifies; the scoped allow
+            // covers exactly that one deliberate use.
+            #[allow(deprecated)]
+            // SAFETY: reading `extern` Security-framework constant statics.
+            let (auth_ctx_k, op_prompt_k) = unsafe {
+                (
+                    kSecUseAuthenticationContext,
+                    objc2_security::kSecUseOperationPrompt,
+                )
+            };
+            context = self.auth_context(opts);
+            op_prompt = CFString::from_str(&opts.prompt.title);
+            pairs.push((as_type(auth_ctx_k), as_cf(&context)));
+            pairs.push((as_type(op_prompt_k), as_type(&*op_prompt)));
+        }
+        let query = dict(&pairs);
 
         let mut result: *const CFType = std::ptr::null();
         // SAFETY: `query` is a valid CFDictionary of CF values; `result` is a
         // valid out-pointer. On `errSecSuccess` with a `kSecReturnData` query
-        // it is set to a +1-retained CFData (or left null for empty data).
+        // it is set to a +1-retained CFData (or left null for empty data). A
+        // gated read blocks here while the system renders the biometric prompt.
         let status = unsafe { SecItemCopyMatching(as_dict(&query), &mut result) };
         match status {
             errSecItemNotFound => Ok(None),
@@ -175,24 +296,37 @@ impl Backend for AppleStore {
         let service = CFString::from_str(&self.service);
         let account = CFString::from_str(key);
         let data = CFData::from_bytes(value.as_bytes());
-        let accessible = self.accessible();
         // SAFETY: reading `extern` Security-framework constant statics.
-        let (class, generic_pw, service_k, account_k, accessible_k, value_k) = unsafe {
+        let (class, generic_pw, service_k, account_k, accessible_k, access_control_k, value_k) = unsafe {
             (
                 kSecClass,
                 kSecClassGenericPassword,
                 kSecAttrService,
                 kSecAttrAccount,
                 kSecAttrAccessible,
+                kSecAttrAccessControl,
                 kSecValueData,
             )
+        };
+
+        // A gated store protects the item with a `SecAccessControl` object
+        // (`kSecAttrAccessControl`); a plain store uses a `kSecAttrAccessible`
+        // value. The two are mutually exclusive, so build exactly one — held
+        // in `control` (kept alive across the add) only in the gated case.
+        let control = match &self.auth {
+            Some(opts) => Some(self.access_control(opts)?),
+            None => None,
+        };
+        let protection_pair = match &control {
+            Some(control) => (as_type(access_control_k), as_type(&**control)),
+            None => (as_type(accessible_k), as_type(self.accessible())),
         };
 
         let add = dict(&[
             (as_type(class), as_type(generic_pw)),
             (as_type(service_k), as_type(&*service)),
             (as_type(account_k), as_type(&*account)),
-            (as_type(accessible_k), as_type(accessible)),
+            protection_pair,
             (as_type(value_k), as_type(&*data)),
         ]);
         // SAFETY: `add` is a valid CFDictionary of CF values; null result
@@ -393,6 +527,108 @@ fn dict(pairs: &[(&CFType, &CFType)]) -> CFRetained<CFDictionary<CFType, CFType>
     CFDictionary::from_slices(&keys, &values)
 }
 
+/// Borrow an [`LAContext`] (an Objective-C object) as a `&CFType` so it can be
+/// a value in the CoreFoundation keychain query dictionary
+/// (`kSecUseAuthenticationContext`). This is the single confined CF bridge the
+/// S05 task budgets: an Objective-C `id` and a `CFTypeRef` are the same thing
+/// at the ABI level, so an `LAContext` pointer *is* a valid `CFType` pointer.
+///
+/// # Safety
+/// The returned reference borrows `context`; the caller keeps `context` alive
+/// for at least as long as the returned `&CFType` is used (here, until the
+/// `SecItemCopyMatching` call that reads the query completes). No ownership is
+/// transferred — the reference is non-owning, matching every other `&CFType`
+/// value placed in the query dictionary.
+fn as_cf(context: &LAContext) -> &CFType {
+    // SAFETY: `LAContext` is an Objective-C object, hence a valid CFTypeRef;
+    // reinterpreting `&LAContext` as `&CFType` is sound (identical ABI, same
+    // lifetime), and the CF query only ever *reads* it (no CF mutation).
+    unsafe { &*(std::ptr::from_ref(context).cast::<CFType>()) }
+}
+
+/// The [`SecAccessControlCreateFlags`] for a gated store's [`AuthOptions`]
+/// (see the module doc's *Biometric gate* and the S05 mapping table): a
+/// biometry constraint, current-set (auto-invalidating on re-enrollment) when
+/// [`AuthOptions::invalidate_on_enrollment`] else any-enrollment, widened with
+/// a device-passcode fallback when [`AuthOptions::allow_device_credential`].
+fn access_flags(opts: &AuthOptions) -> SecAccessControlCreateFlags {
+    let base = if opts.invalidate_on_enrollment {
+        SecAccessControlCreateFlags::BiometryCurrentSet
+    } else {
+        SecAccessControlCreateFlags::BiometryAny
+    };
+    if opts.allow_device_credential {
+        base | SecAccessControlCreateFlags::Or | SecAccessControlCreateFlags::DevicePasscode
+    } else {
+        base
+    }
+}
+
+/// Probe whether biometric authentication can be evaluated on this device,
+/// **without** prompting — [`crate::SecureStorage::can_authenticate`]'s Apple
+/// arm. Uses [`LAContext::canEvaluatePolicy_error`] with
+/// `DeviceOwnerAuthenticationWithBiometrics`; a failure's `LAError` code maps
+/// to an [`Unavailability`] (see [`la_unavailability`]).
+pub(crate) fn can_authenticate() -> CanAuthenticate {
+    // SAFETY: `LAContext::new` returns a fresh, valid retained context;
+    // `canEvaluatePolicy_error` does not prompt — it only reports whether the
+    // policy *could* be evaluated, returning `Ok(())` when it can or an
+    // `NSError` (carrying an `LAError` code) when it cannot.
+    let result = unsafe {
+        let context = LAContext::new();
+        context.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics)
+    };
+    match result {
+        Ok(()) => CanAuthenticate::Available,
+        Err(error) => CanAuthenticate::Unavailable(la_unavailability(LAError(error.code()))),
+    }
+}
+
+/// Map an [`LAError`] from a `canEvaluatePolicy` failure to the
+/// [`Unavailability`] reason [`can_authenticate`] reports.
+fn la_unavailability(code: LAError) -> Unavailability {
+    match code {
+        LAError::BiometryNotAvailable => Unavailability::HardwareUnavailable,
+        LAError::BiometryNotEnrolled => Unavailability::NotEnrolled,
+        LAError::PasscodeNotSet => Unavailability::PasscodeNotSet,
+        LAError::BiometryNotPaired | LAError::BiometryDisconnected => Unavailability::NoHardware,
+        // Lockout / any other probe failure: biometrics exist but can't be
+        // used right now. No `Unavailability` lockout variant exists (that is a
+        // per-call `SecureStorageError`), so this is the closest availability
+        // answer.
+        _ => Unavailability::HardwareUnavailable,
+    }
+}
+
+/// Map an [`LAError`] to a typed [`SecureStorageError`] — the reference
+/// taxonomy for the gate's failure modes. The gated *keychain* path surfaces
+/// these as `OSStatus` codes through [`map_status`] rather than `LAError`, so
+/// this is used where an `LAContext` policy evaluation itself reports an
+/// `NSError` (retained here for completeness and to document the mapping the
+/// S05 task locks in).
+///
+/// Not wired into the gated keychain read path (which surfaces `OSStatus`
+/// through [`map_status`]), so it is dead in a non-test build — kept as the
+/// canonical, test-verified `LAError` taxonomy the task's completion summary
+/// enumerates, hence the explicit allow.
+#[allow(dead_code)]
+fn map_la_error(code: LAError) -> SecureStorageError {
+    match code {
+        LAError::UserCancel | LAError::UserFallback => SecureStorageError::UserCanceled,
+        LAError::SystemCancel | LAError::AppCancel => SecureStorageError::SystemCanceled,
+        LAError::AuthenticationFailed => SecureStorageError::AuthFailed,
+        LAError::PasscodeNotSet => SecureStorageError::NotAvailable(Unavailability::PasscodeNotSet),
+        LAError::BiometryNotAvailable => {
+            SecureStorageError::NotAvailable(Unavailability::HardwareUnavailable)
+        }
+        LAError::BiometryNotEnrolled => {
+            SecureStorageError::NotAvailable(Unavailability::NotEnrolled)
+        }
+        LAError::BiometryLockout => SecureStorageError::LockoutTemporary,
+        other => SecureStorageError::Storage(format!("LAError {}", other.0)),
+    }
+}
+
 /// Map a non-success `OSStatus` to a typed [`SecureStorageError`].
 ///
 /// The two unambiguously authentication-domain statuses map to their typed
@@ -457,14 +693,14 @@ mod tests {
             let factory = |name: &str| -> Box<dyn Backend> {
                 let store = format!("{run}.{name}");
                 opened.lock().unwrap().push(store.clone());
-                Box::new(AppleStore::new(&store, Accessibility::WhenUnlocked))
+                Box::new(AppleStore::new(&store, Accessibility::WhenUnlocked, None))
             };
             crate::conformance::run_conformance_suite(&factory);
         }
         // Belt-and-braces: service-scoped clear of every store the suite
         // opened (the suite leaves some entries behind by design).
         for store in opened.lock().unwrap().iter() {
-            let _ = AppleStore::new(store, Accessibility::WhenUnlocked).clear();
+            let _ = AppleStore::new(store, Accessibility::WhenUnlocked, None).clear();
         }
     }
 
@@ -474,7 +710,7 @@ mod tests {
     #[test]
     fn after_first_unlock_round_trips() {
         let store = format!("{}.afu", unique_run());
-        let backend = AppleStore::new(&store, Accessibility::AfterFirstUnlock);
+        let backend = AppleStore::new(&store, Accessibility::AfterFirstUnlock, None);
         backend.clear().unwrap();
 
         backend.set("token", "value").unwrap();
@@ -508,6 +744,82 @@ mod tests {
         // An unrecognized status still carries its raw code.
         match map_status(-99999) {
             SecureStorageError::Storage(msg) => assert!(msg.contains("-99999")),
+            other => panic!("expected Storage, got {other:?}"),
+        }
+    }
+
+    /// The `AuthOptions` → `SecAccessControlCreateFlags` mapping the S05 gate
+    /// locks in (pure logic — no Keychain access, runs everywhere). Bit
+    /// values per `objc2-security`: BiometryAny = 1<<1, BiometryCurrentSet =
+    /// 1<<3, DevicePasscode = 1<<4, Or = 1<<14.
+    #[test]
+    fn access_flags_mapping() {
+        let f = |allow_device_credential, invalidate_on_enrollment| {
+            access_flags(&AuthOptions {
+                allow_device_credential,
+                invalidate_on_enrollment,
+                ..AuthOptions::default()
+            })
+        };
+        // Default safe posture: current-set biometry only (auto-invalidating).
+        assert_eq!(
+            f(false, true),
+            SecAccessControlCreateFlags::BiometryCurrentSet
+        );
+        // Opt out of enrollment invalidation: any enrolled biometry.
+        assert_eq!(f(false, false), SecAccessControlCreateFlags::BiometryAny);
+        // Passcode fallback widens with `Or | DevicePasscode`.
+        assert_eq!(
+            f(true, true),
+            SecAccessControlCreateFlags::BiometryCurrentSet
+                | SecAccessControlCreateFlags::Or
+                | SecAccessControlCreateFlags::DevicePasscode
+        );
+        assert_eq!(
+            f(true, false),
+            SecAccessControlCreateFlags::BiometryAny
+                | SecAccessControlCreateFlags::Or
+                | SecAccessControlCreateFlags::DevicePasscode
+        );
+    }
+
+    /// The `LAError` → availability / error taxonomy the S05 gate locks in
+    /// (pure logic — no LocalAuthentication call, runs everywhere).
+    #[test]
+    fn la_error_mapping() {
+        // Availability probe reasons.
+        assert_eq!(
+            la_unavailability(LAError::BiometryNotEnrolled),
+            Unavailability::NotEnrolled
+        );
+        assert_eq!(
+            la_unavailability(LAError::PasscodeNotSet),
+            Unavailability::PasscodeNotSet
+        );
+        assert_eq!(
+            la_unavailability(LAError::BiometryNotAvailable),
+            Unavailability::HardwareUnavailable
+        );
+
+        // Per-call error taxonomy.
+        assert!(matches!(
+            map_la_error(LAError::UserCancel),
+            SecureStorageError::UserCanceled
+        ));
+        assert!(matches!(
+            map_la_error(LAError::SystemCancel),
+            SecureStorageError::SystemCanceled
+        ));
+        assert!(matches!(
+            map_la_error(LAError::BiometryLockout),
+            SecureStorageError::LockoutTemporary
+        ));
+        assert!(matches!(
+            map_la_error(LAError::AuthenticationFailed),
+            SecureStorageError::AuthFailed
+        ));
+        match map_la_error(LAError::InvalidContext) {
+            SecureStorageError::Storage(msg) => assert!(msg.contains("LAError")),
             other => panic!("expected Storage, got {other:?}"),
         }
     }

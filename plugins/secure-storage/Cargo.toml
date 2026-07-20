@@ -60,6 +60,19 @@ objc2-local-authentication = { version = "0.3", default-features = false, featur
     "LAContext",
     "LAError",
 ] }
+# S05 (Phase 5 biometric gate): the `LAContext` probe and gated reads need
+# `NSString` (the prompt's `localizedReason`) and `NSError` (the
+# `canEvaluatePolicy` failure carries an `LAError` code as `NSError.code`).
+# Minimal feature list, `default-features = false` like the objc2 crates above
+# (same workspace-inheritance/`default-features` restriction — the version is
+# hand-synced to `[workspace.dependencies]`'s `objc2-foundation = "0.3"` per the
+# Version-Pin Policy). `objc2-foundation` is already compiled transitively by
+# `objc2-local-authentication`; this only makes its types nameable here.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSError",
+] }
 
 # Android Keystore (Phase 3 storage, Phase 5 biometric gate) — matches
 # `frust-shared-preferences`' Android arm: `frust-plugin` is the only

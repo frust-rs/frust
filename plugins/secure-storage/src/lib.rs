@@ -18,13 +18,15 @@
 //! public API, a [`file`] fallback backend, and a conformance suite, with
 //! **no platform FFI**. Later phases route [`SecureStorage::open`] to native
 //! backends behind the same API by `#[cfg(target_os = ...)]` (Phase 2 Apple
-//! Keychain, Phase 3 Android Keystore, **Phase 4 desktop keyring — landed**:
-//! Linux/Windows now route to [`desktop`]), and add the biometric gate
-//! (Phase 5). The Apple/Android arms still resolve to [`file`] pending their
-//! own tasks; any store opened with [`AuthPolicy::Required`] fails with
+//! Keychain, Phase 3 Android Keystore, Phase 4 desktop keyring — all landed:
+//! Apple targets route to [`apple`], Android to [`android`], Linux/Windows to
+//! [`desktop`]). **Phase 5 (task S05) — landed**: the biometric gate is real
+//! on the Apple ([`apple`], `SecAccessControl` + `LAContext`) and Android
+//! ([`android`], framework `BiometricPrompt` + an app-supplied Kotlin helper)
+//! backends; a store opened with [`AuthPolicy::Required`] there gates every
+//! call on the system biometric prompt. On Linux/Windows the gate stays
 //! [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`
-//! everywhere (permanently on Linux/Windows — no platform biometric
-//! primitive exists there).
+//! permanently — no platform biometric primitive exists there.
 //!
 //! # Named-store-handle model
 //!
@@ -115,8 +117,10 @@ pub enum AuthPolicy {
     None,
     /// Every gated call blocks on the system biometric prompt.
     ///
-    /// **Phase 1:** no platform backend implements the gate yet, so opening a
-    /// store with this policy fails with
+    /// Honored on the Apple (`SecAccessControl` + `LAContext`) and Android
+    /// (framework `BiometricPrompt`) backends (S05). On Linux/Windows — no
+    /// platform biometric primitive — opening a store with this policy fails
+    /// with
     /// [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`.
     Required(AuthOptions),
 }
@@ -340,37 +344,44 @@ impl SecureStorage {
     /// Open the named secure store with explicit [`StoreOptions`].
     ///
     /// # Errors
-    /// As [`Self::open`], plus — in this phase — every store opened with
-    /// [`AuthPolicy::Required`] fails with
-    /// [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`,
-    /// because no platform backend implements the biometric gate yet.
+    /// As [`Self::open`], plus — for a store opened with
+    /// [`AuthPolicy::Required`] — a platform without a biometric primitive
+    /// (Linux/Windows) fails with
+    /// [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`.
+    /// On the Apple and Android backends the gate is honored per store
+    /// (S05): the `Required` options travel into the backend, and every
+    /// subsequent gated call blocks on the system biometric prompt.
     pub fn open_with(name: &str, options: StoreOptions) -> Result<Self, SecureStorageError> {
-        if matches!(options.auth, AuthPolicy::Required(_)) {
-            // Storage core (Phase 1): the biometric gate has no platform
-            // implementation yet — a typed, non-panicking refusal, not a
-            // silent downgrade to unauthenticated storage.
-            return Err(SecureStorageError::NotAvailable(
-                Unavailability::UnsupportedPlatform,
-            ));
-        }
+        // The per-store biometric policy (S05): `None` for a plain store,
+        // `Some(opts)` for a gated one. Cloned out of `options` here so each
+        // platform arm below can move it into (or, on Linux/Windows, refuse
+        // it before constructing) its backend.
+        let auth: Option<AuthOptions> = match options.auth {
+            AuthPolicy::None => None,
+            AuthPolicy::Required(ref opts) => Some(opts.clone()),
+        };
 
-        // FINAL backend routing (task S01b, Plan Phases 2-4 preamble): apple
-        // targets -> `apple`, android -> `android`, linux/windows ->
-        // `desktop`. This is the single, clearly-marked selection point each
-        // task flips its own one line of, and no other line in this file (or
-        // any other shared file) needs to change to land a platform backend:
-        //   - S02 flips the apple arm to `Arc::new(apple::AppleStore)`.
-        //   - S03 flips the android arm to `Arc::new(android::AndroidStore)`.
-        //   - S04 flips the linux/windows arm to
-        //     `Arc::new(desktop::DesktopStore)` (and demotes `file.rs` to
-        //     `#[cfg(test)]`-only) — DONE.
+        // FINAL backend routing: apple targets -> `apple`, android ->
+        // `android`, linux/windows -> `desktop`. Each backend now takes the
+        // optional biometric policy directly (S05); the Apple/Android arms
+        // implement the gate, the Linux/Windows arm has no platform primitive
+        // to back it and so refuses a gated open with a typed, non-panicking
+        // `NotAvailable(UnsupportedPlatform)` (never a silent downgrade to
+        // unauthenticated storage).
         #[cfg(target_vendor = "apple")]
         let backend: Arc<dyn Backend> =
-            Arc::new(apple::AppleStore::new(name, options.accessibility));
+            Arc::new(apple::AppleStore::new(name, options.accessibility, auth));
         #[cfg(target_os = "android")]
-        let backend: Arc<dyn Backend> = Arc::new(android::AndroidStore::open(name)?);
+        let backend: Arc<dyn Backend> = Arc::new(android::AndroidStore::open(name, auth)?);
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        let backend: Arc<dyn Backend> = Arc::new(desktop::DesktopStore::standard(name)?);
+        let backend: Arc<dyn Backend> = {
+            if auth.is_some() {
+                return Err(SecureStorageError::NotAvailable(
+                    Unavailability::UnsupportedPlatform,
+                ));
+            }
+            Arc::new(desktop::DesktopStore::standard(name)?)
+        };
 
         Ok(Self { backend })
     }
@@ -378,10 +389,25 @@ impl SecureStorage {
     /// Probe whether biometric (or allowed device-credential) authentication
     /// is available on this device, **without** showing a prompt.
     ///
-    /// In this phase no platform backend implements the gate, so this always
-    /// reports [`CanAuthenticate::Unavailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`.
+    /// On the Apple backend this is `LAContext.canEvaluatePolicy`
+    /// (`DeviceOwnerAuthenticationWithBiometrics`), on Android a
+    /// `BiometricManager.canAuthenticate` probe; both map their
+    /// unavailability reason to an [`Unavailability`]. On Linux/Windows (no
+    /// platform biometric primitive) it always reports
+    /// [`CanAuthenticate::Unavailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`.
     pub fn can_authenticate() -> CanAuthenticate {
-        CanAuthenticate::Unavailable(Unavailability::UnsupportedPlatform)
+        #[cfg(target_vendor = "apple")]
+        {
+            apple::can_authenticate()
+        }
+        #[cfg(target_os = "android")]
+        {
+            android::can_authenticate()
+        }
+        #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
+        {
+            CanAuthenticate::Unavailable(Unavailability::UnsupportedPlatform)
+        }
     }
 
     /// The stored value at `key`, or `None` if absent.
