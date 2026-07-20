@@ -4,13 +4,16 @@
 //! shelling out during `cargo test`.
 
 use anyhow::{Context, Result};
+use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 #[cfg(any(test, feature = "test-util"))]
 use std::collections::HashMap;
+#[cfg(any(test, feature = "test-util"))]
+use std::sync::mpsc;
 #[cfg(any(test, feature = "test-util"))]
 use std::time::Duration;
 
@@ -62,6 +65,175 @@ pub trait ProcessRunner {
     ) -> Result<StreamHandle>;
 }
 
+/// Cap on the number of buffered stdout lines a [`StreamHandle`] retains
+/// before dropping the oldest — bounds memory for a long-running streamed
+/// child (`adb logcat`, a `--watch`ed `cargo run`) whose consumer falls
+/// behind or never drains at all. Chosen generously (a `logcat`/build log is
+/// rarely anywhere near this deep between drains) rather than tuned tightly;
+/// revisit if a real session's `dropped_lines()` ever reports non-zero.
+const LINE_BUFFER_CAP: usize = 10_000;
+
+/// Shared state behind a [`StreamHandle`]'s [`LineReceiver`]: a bounded ring
+/// buffer plus a closed flag the reader thread sets once the child's stdout
+/// hits EOF (or, for [`FakeProcessRunner`], once its scripted lines are
+/// exhausted).
+struct LineBuffer {
+    queue: VecDeque<String>,
+    closed: bool,
+    dropped: u64,
+}
+
+/// The `Mutex`+`Condvar` pair a [`LineReceiver`] blocks on and a producer
+/// (the reader thread) pushes into — never blocks the producer: a push at
+/// [`LINE_BUFFER_CAP`] drops the oldest buffered line instead of waiting for
+/// a consumer to make room, and the lock itself is only ever held for a
+/// short, constant-time critical section (never across a blocking read or
+/// wait), so [`StreamHandle::kill`] can never deadlock against it either.
+struct LineBufferShared {
+    state: Mutex<LineBuffer>,
+    ready: Condvar,
+}
+
+impl LineBufferShared {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(LineBuffer {
+                queue: VecDeque::new(),
+                closed: false,
+                dropped: 0,
+            }),
+            ready: Condvar::new(),
+        })
+    }
+
+    /// Producer side: pushes `line`, dropping the oldest buffered line
+    /// (incrementing [`dropped_lines`](LineReceiver::dropped_lines)) if the
+    /// buffer is already at [`LINE_BUFFER_CAP`]. Never blocks.
+    fn push(&self, line: String) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.queue.len() >= LINE_BUFFER_CAP {
+            state.queue.pop_front();
+            state.dropped += 1;
+        }
+        state.queue.push_back(line);
+        drop(state);
+        self.ready.notify_one();
+    }
+
+    /// Producer side: marks the buffer closed — no more lines are coming.
+    /// Called exactly once, after the reader thread's stdout loop ends.
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.closed = true;
+        drop(state);
+        self.ready.notify_all();
+    }
+}
+
+/// Mirrors [`std::sync::mpsc::RecvError`]'s single "closed with nothing left
+/// buffered" case — [`LineReceiver::recv`]'s error type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("stream closed with no lines left buffered")]
+pub struct RecvError;
+
+/// Mirrors [`std::sync::mpsc::TryRecvError`] — [`LineReceiver::try_recv`]'s
+/// error type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TryRecvError {
+    /// Nothing buffered right now, but the producer may still send more.
+    #[error("no line buffered right now")]
+    Empty,
+    /// Closed (producer done) with nothing left buffered.
+    #[error("stream closed with no lines left buffered")]
+    Disconnected,
+}
+
+/// A bounded, drop-oldest receive handle over a [`StreamHandle`]'s buffered
+/// stdout lines (see [`LINE_BUFFER_CAP`]) — replaces the previous unbounded
+/// `std::sync::mpsc::Receiver<String>`. Shape-compatible with the subset of
+/// `mpsc::Receiver`'s API this crate's consumers use: `recv`, `try_recv`,
+/// `iter`/`IntoIterator`.
+pub struct LineReceiver {
+    shared: Arc<LineBufferShared>,
+}
+
+impl LineReceiver {
+    /// Blocks until a line is available, or returns `Err` once the buffer is
+    /// closed with nothing left queued.
+    pub fn recv(&self) -> Result<String, RecvError> {
+        let mut state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if let Some(line) = state.queue.pop_front() {
+                return Ok(line);
+            }
+            if state.closed {
+                return Err(RecvError);
+            }
+            state = self
+                .shared
+                .ready
+                .wait(state)
+                .unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    /// Non-blocking: the next buffered line, [`TryRecvError::Empty`] if none
+    /// are buffered right now but the producer is still alive, or
+    /// [`TryRecvError::Disconnected`] if closed with nothing left.
+    pub fn try_recv(&self) -> Result<String, TryRecvError> {
+        let mut state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(line) = state.queue.pop_front() {
+            return Ok(line);
+        }
+        if state.closed {
+            Err(TryRecvError::Disconnected)
+        } else {
+            Err(TryRecvError::Empty)
+        }
+    }
+
+    /// Blocking iterator over every remaining line, ending once the buffer
+    /// closes with nothing left queued — mirrors
+    /// `mpsc::Receiver::iter`/`into_iter`.
+    pub fn iter(&self) -> LineIter<'_> {
+        LineIter { receiver: self }
+    }
+
+    /// The number of buffered lines dropped so far because the ring buffer
+    /// was at [`LINE_BUFFER_CAP`] when a new line arrived. Additive — never
+    /// resets — so a caller can watch it stay at `0` for a healthy session
+    /// or notice it climb for one whose consumer can't keep up.
+    pub fn dropped_lines(&self) -> u64 {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .dropped
+    }
+}
+
+/// [`LineReceiver::iter`]'s iterator type.
+pub struct LineIter<'a> {
+    receiver: &'a LineReceiver,
+}
+
+impl Iterator for LineIter<'_> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        self.receiver.recv().ok()
+    }
+}
+
+impl<'a> IntoIterator for &'a LineReceiver {
+    type Item = String;
+    type IntoIter = LineIter<'a>;
+
+    fn into_iter(self) -> LineIter<'a> {
+        self.iter()
+    }
+}
+
 /// A running (or hung/exited) process spawned by
 /// [`ProcessRunner::spawn_streaming`].
 ///
@@ -75,18 +247,19 @@ pub trait ProcessRunner {
 /// abandoned) must call [`kill`](Self::kill) explicitly — the TUI
 /// supervisor's job on session close/quit, not this seam's.
 ///
-/// The line channel (`lines`) is an unbounded `std::sync::mpsc`, so a
-/// producer that outruns a slow/absent consumer never blocks the reader
-/// thread trying to send — `send` only ever fails (cheaply, non-blocking)
-/// once the receiver is dropped, at which point the reader thread stops
-/// forwarding lines but still drains to EOF and reaps the child. This is
-/// also why `kill` can never deadlock against a full channel: there is no
-/// bound to fill.
+/// The line buffer (`lines`) is a bounded, drop-oldest ring buffer (see
+/// [`LINE_BUFFER_CAP`]), so a producer that outruns a slow/absent consumer
+/// never blocks the reader thread trying to push a line — a push at
+/// capacity drops the oldest buffered line and increments
+/// [`dropped_lines`](Self::dropped_lines) instead. This is also why `kill`
+/// can never deadlock against a full buffer: nothing ever blocks trying to
+/// fill it.
 pub struct StreamHandle {
     /// Each line of the process's stdout, in arrival order, as it streams
-    /// in. Closes (further `recv` calls return `Err`) once the process's
-    /// stdout has hit EOF.
-    pub lines: mpsc::Receiver<String>,
+    /// in, bounded to the last [`LINE_BUFFER_CAP`] lines. Closes (further
+    /// `recv`/`try_recv` calls return `Err`) once the process's stdout has
+    /// hit EOF.
+    pub lines: LineReceiver,
     kill_action: Option<Box<dyn FnOnce() + Send>>,
     worker: Option<thread::JoinHandle<bool>>,
     result: Option<bool>,
@@ -115,6 +288,12 @@ impl StreamHandle {
     pub fn wait(&mut self) -> bool {
         self.join_worker();
         self.result.unwrap_or(false)
+    }
+
+    /// The number of stdout lines dropped so far because the buffer was at
+    /// [`LINE_BUFFER_CAP`] when a new line arrived — see [`LineReceiver::dropped_lines`].
+    pub fn dropped_lines(&self) -> u64 {
+        self.lines.dropped_lines()
     }
 
     fn join_worker(&mut self) {
@@ -330,7 +509,8 @@ impl ProcessRunner for RealProcessRunner {
         // child has actually exited (which killing it just caused).
         let child = Arc::new(Mutex::new(child));
 
-        let (line_tx, line_rx) = mpsc::channel();
+        let shared = LineBufferShared::new();
+        let shared_producer = Arc::clone(&shared);
 
         let wait_child = Arc::clone(&child);
         let worker = thread::spawn(move || {
@@ -354,13 +534,11 @@ impl ProcessRunner for RealProcessRunner {
                         Ok(0) | Err(_) => break,
                         Ok(_) => {
                             let line = decode_stream_line(&raw);
-                            if line_tx.send(line).is_err() {
-                                // Receiver dropped: stop forwarding lines,
-                                // but keep draining to EOF below so the
-                                // child still gets reaped (see
-                                // `StreamHandle`'s drop-behavior doc).
-                                continue;
-                            }
+                            // Bounded, drop-oldest push — never blocks even
+                            // if the consumer has fallen behind or the
+                            // `StreamHandle` itself was dropped (see
+                            // `LineBufferShared::push`).
+                            shared_producer.push(line);
                         }
                     }
                 }
@@ -370,12 +548,22 @@ impl ProcessRunner for RealProcessRunner {
                 let _ = handle.join();
             }
 
-            wait_child
+            let success = wait_child
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .wait()
                 .map(|status| status.success())
-                .unwrap_or(false)
+                .unwrap_or(false);
+            // Close only now, mirroring the old unbounded-mpsc sender's
+            // implicit drop at the end of this closure: `drain_available_lines`
+            // (`crates/frust-cli/src/commands/run.rs`) treats a `Disconnected`
+            // buffer as "the child is already reaped", then calls
+            // `StreamHandle::wait`, which must never block. Stdout hitting EOF
+            // well before the process is actually reaped (e.g. a child that
+            // closes its own stdout early but keeps running) must NOT close
+            // the buffer early, or that `wait` call deadlocks.
+            shared_producer.close();
+            success
         });
 
         let kill_child = Arc::clone(&child);
@@ -400,7 +588,7 @@ impl ProcessRunner for RealProcessRunner {
         });
 
         Ok(StreamHandle {
-            lines: line_rx,
+            lines: LineReceiver { shared },
             kill_action: Some(kill_action),
             worker: Some(worker),
             result: None,
@@ -640,7 +828,8 @@ impl ProcessRunner for FakeProcessRunner {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("No such file or directory (os error 2): {cmd}"))?;
 
-        let (line_tx, line_rx) = mpsc::channel();
+        let shared = LineBufferShared::new();
+        let shared_producer = Arc::clone(&shared);
         let (kill_tx, kill_rx) = mpsc::channel::<()>();
 
         let worker = thread::spawn(move || {
@@ -648,12 +837,12 @@ impl ProcessRunner for FakeProcessRunner {
                 if !delay.is_zero() {
                     thread::sleep(delay);
                 }
-                if line_tx.send(line).is_err() {
-                    // Receiver dropped; nothing left to script toward.
-                    return false;
-                }
+                // Bounded, drop-oldest push — mirrors the real runner's
+                // producer, which never blocks either (see
+                // `LineBufferShared::push`).
+                shared_producer.push(line);
             }
-            match scripted.exit {
+            let success = match scripted.exit {
                 StreamExit::Exit(success) => success,
                 StreamExit::Hang => {
                     // Blocks until `kill` sends, then reports "not
@@ -661,11 +850,19 @@ impl ProcessRunner for FakeProcessRunner {
                     let _ = kill_rx.recv();
                     false
                 }
-            }
+            };
+            // Close only now — not right after the scripted lines are sent —
+            // mirroring the real runner's timing (see its own close-site
+            // comment): a `Hang` script must keep the buffer open (so
+            // `drain_available_lines` never sees a premature `Disconnected`
+            // and calls `StreamHandle::wait` before `kill` has run) until the
+            // fake process has actually "exited".
+            shared_producer.close();
+            success
         });
 
         Ok(StreamHandle {
-            lines: line_rx,
+            lines: LineReceiver { shared },
             kill_action: Some(Box::new(move || {
                 let _ = kill_tx.send(());
             })),
@@ -896,6 +1093,85 @@ mod tests {
             .spawn_streaming("adb", &["logcat"], None, &[])
             .unwrap();
         drop(handle);
+    }
+
+    #[test]
+    fn line_buffer_cap_enforced_and_oldest_lines_dropped() {
+        // Push `LINE_BUFFER_CAP + 5` lines directly at the ring buffer (no
+        // process/thread involved — this is the buffer's own bookkeeping,
+        // exercised in isolation for speed and determinism).
+        let shared = LineBufferShared::new();
+        for i in 0..(LINE_BUFFER_CAP + 5) {
+            shared.push(format!("line {i}"));
+        }
+        shared.close();
+        let receiver = LineReceiver {
+            shared: Arc::clone(&shared),
+        };
+
+        let seen: Vec<String> = receiver.iter().collect();
+        assert_eq!(seen.len(), LINE_BUFFER_CAP, "buffer must stay capped");
+        // The oldest 5 lines (0..5) were dropped; the buffer starts at line 5.
+        assert_eq!(seen.first(), Some(&"line 5".to_string()));
+        assert_eq!(seen.last(), Some(&format!("line {}", LINE_BUFFER_CAP + 4)));
+    }
+
+    #[test]
+    fn line_buffer_dropped_lines_counter_is_accurate() {
+        let shared = LineBufferShared::new();
+        let overflow = 37;
+        for i in 0..(LINE_BUFFER_CAP + overflow) {
+            shared.push(format!("line {i}"));
+        }
+        let receiver = LineReceiver { shared };
+        assert_eq!(receiver.dropped_lines(), overflow as u64);
+    }
+
+    #[test]
+    fn line_buffer_producer_never_blocks_even_far_past_capacity() {
+        // A push at (or well past) capacity must never block the producer —
+        // this is the no-deadlock guarantee `StreamHandle::kill` depends on
+        // (see `LineBufferShared::push`'s doc). Bound the whole loop's
+        // wall-clock time as a regression tripwire: a blocking push would
+        // hang this test instead of finishing near-instantly.
+        let shared = LineBufferShared::new();
+        let start = std::time::Instant::now();
+        for i in 0..(LINE_BUFFER_CAP * 2) {
+            shared.push(format!("line {i}"));
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "pushing 2x capacity should never block; took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Acceptance criterion: `kill()` must terminate promptly even while the
+    /// stream's ring buffer sits at/over [`LINE_BUFFER_CAP`] and has never
+    /// been drained — proving the drop-oldest push (not a bounded, blocking
+    /// channel) really is what backs `spawn_streaming`.
+    #[test]
+    fn spawn_streaming_fake_kill_under_full_buffer_terminates_promptly() {
+        let lines: Vec<String> = (0..(LINE_BUFFER_CAP + 20))
+            .map(|i| format!("line {i}"))
+            .collect();
+        let runner = FakeProcessRunner::new().with_hanging_stream("adb logcat", lines);
+        let mut handle = runner
+            .spawn_streaming("adb", &["logcat"], None, &[])
+            .unwrap();
+
+        // Deliberately never drain `handle.lines` before killing — the
+        // buffer fills past capacity and starts dropping while this thread
+        // is elsewhere, exactly the scenario the no-deadlock guarantee
+        // covers.
+        let start = std::time::Instant::now();
+        handle.kill();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "kill() must not wait on a full/overflowing buffer, took {:?}",
+            start.elapsed()
+        );
+        assert!(!handle.wait());
     }
 
     #[test]

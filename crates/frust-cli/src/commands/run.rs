@@ -15,7 +15,7 @@ use frust_drive::android_run::{self, DeviceSelection};
 use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::devices::{self, Device, Kind, Platform};
 use frust_drive::ios_run;
-use frust_drive::process::{ProcessRunner, StreamHandle};
+use frust_drive::process::{ProcessRunner, StreamHandle, TryRecvError};
 
 /// Env var `frust-render`'s `RenderContext` reads at startup
 /// (`frust_render::RENDER_TIER_ENV_VAR`) — kept as a literal here rather
@@ -25,7 +25,8 @@ const RENDER_TIER_ENV_VAR: &str = "FRUST_RENDER_TIER";
 
 /// The testable core of `run`, taking an injected [`ProcessRunner`].
 /// `commands::dispatch` constructs the real runner and calls this (the CLI's
-/// one `Real` construction site).
+/// one `Real` construction site). A thin wrapper over [`run_in_with_hooks`],
+/// always passing the real [`WatchHooks`] — the production default.
 pub fn run_in(
     runner: &dyn ProcessRunner,
     build_args: BuildArgs,
@@ -33,6 +34,30 @@ pub fn run_in(
     render_tier: Option<RenderTierArg>,
     watch: bool,
     verbose: bool,
+) -> Result<u8> {
+    run_in_with_hooks(
+        runner,
+        build_args,
+        device_id,
+        render_tier,
+        watch,
+        verbose,
+        WatchHooks::real(),
+    )
+}
+
+/// [`run_in`]'s actual body, parameterized on [`WatchHooks`] so a test can
+/// reach every branch `run_in` reaches (including the `--watch` desktop-only
+/// short-circuit) without ever installing a real, process-global Ctrl-C
+/// handler or filesystem watcher — see [`WatchHooks`]'s doc.
+fn run_in_with_hooks(
+    runner: &dyn ProcessRunner,
+    build_args: BuildArgs,
+    device_id: Option<String>,
+    render_tier: Option<RenderTierArg>,
+    watch: bool,
+    verbose: bool,
+    hooks: WatchHooks,
 ) -> Result<u8> {
     // `--watch` (PLAN.md Phase 9.D step 2) is desktop-preview only — its
     // kill/rebuild/relaunch loop only knows how to drive a local `cargo
@@ -55,7 +80,7 @@ pub fn run_in(
     // non-deterministic. Reaches the exact call the `Desktop` arm below
     // would make anyway, just one step earlier.
     if watch {
-        return run_desktop_fallback(runner, &info, render_tier, watch);
+        return run_desktop_fallback(runner, &info, render_tier, watch, hooks);
     }
 
     let discoverers = devices::default_discoverers();
@@ -67,7 +92,7 @@ pub fn run_in(
     }
 
     match android_run::select_device(&found, device_id.as_deref()) {
-        DeviceSelection::Desktop => run_desktop_fallback(runner, &info, render_tier, watch),
+        DeviceSelection::Desktop => run_desktop_fallback(runner, &info, render_tier, watch, hooks),
         DeviceSelection::Auto(device) => {
             warn_render_tier_not_plumbed(render_tier);
             run_on_device(runner, &device, &info)
@@ -137,6 +162,7 @@ fn run_desktop_fallback(
     info: &BuildInfo,
     render_tier: Option<RenderTierArg>,
     watch: bool,
+    hooks: WatchHooks,
 ) -> Result<u8> {
     println!("No Android device connected; falling back to `cargo run` (desktop preview).");
     let args = desktop_cargo_run_args(info);
@@ -144,12 +170,85 @@ fn run_desktop_fallback(
 
     if watch {
         let cwd = std::env::current_dir().context("reading current directory")?;
-        return run_desktop_watch(runner, &args, &env, &cwd);
+        return run_desktop_watch(runner, &args, &env, &cwd, hooks);
     }
 
     let mut on_line = |line: &str| println!("{line}");
     let out = runner.run_streaming("cargo", &args, None, &env, &mut on_line)?;
     Ok(if out.success { 0 } else { 1 })
+}
+
+/// Injectable seams for [`run_desktop_watch`]'s two process-wide side
+/// effects — installing a Ctrl-C handler and starting a filesystem watcher —
+/// each of which is a process-global, install-once resource: `ctrlc::set_handler`
+/// outright errors on a second call anywhere in the same process, and a real
+/// [`notify`] watcher touches the actual filesystem under the caller's cwd.
+/// Production always uses [`WatchHooks::real`] (installed exactly once, by
+/// `run_desktop_watch`, per `frust run --watch` process); a test injects a
+/// no-op pair instead of ever reaching either real side effect — see
+/// `run_in_with_hooks`.
+type InstallCtrlcHook = Box<dyn FnOnce(Arc<Mutex<Option<StreamHandle>>>) -> Result<()>>;
+type SpawnWatcherHook = Box<dyn FnOnce(&Path, mpsc::Sender<()>) -> Result<Box<dyn std::any::Any>>>;
+
+struct WatchHooks {
+    /// Installs the Ctrl-C handler that group-kills the shared `current`
+    /// slot's live child before exiting.
+    install_ctrlc: InstallCtrlcHook,
+    /// Starts a filesystem watcher over `root`, forwarding a `()` tick into
+    /// the given sender for every raw change. The returned box is a
+    /// keep-alive handle only — the caller holds it for the watch loop's
+    /// duration and never inspects it (dropping a real `notify` watcher
+    /// stops it).
+    spawn_watcher: SpawnWatcherHook,
+}
+
+impl WatchHooks {
+    /// The production defaults: a real [`install_real_ctrlc_handler`] and a
+    /// real [`spawn_fs_watcher`].
+    fn real() -> Self {
+        Self {
+            install_ctrlc: Box::new(install_real_ctrlc_handler),
+            spawn_watcher: Box::new(|root, tx| {
+                spawn_fs_watcher(root, tx).map(|w| Box::new(w) as Box<dyn std::any::Any>)
+            }),
+        }
+    }
+
+    /// A no-op pair for tests: skips the real Ctrl-C install and hands back
+    /// an inert keep-alive handle instead of starting a real filesystem
+    /// watcher — reaching `run_desktop_watch` in a test must never touch
+    /// either real process-global side effect.
+    #[cfg(test)]
+    fn fake() -> Self {
+        Self {
+            install_ctrlc: Box::new(|_current| Ok(())),
+            spawn_watcher: Box::new(|_root, _tx| Ok(Box::new(()) as Box<dyn std::any::Any>)),
+        }
+    }
+}
+
+/// Installs the real, process-wide Ctrl-C handler that group-kills
+/// `current`'s live child before exiting `frust run --watch`.
+///
+/// **Warning: one handler per process.** `ctrlc::set_handler` can only be
+/// installed once per process — a second call anywhere (e.g. a second
+/// `--watch` invocation reached in the same process) errors outright. This
+/// function is reached only through [`WatchHooks::real`], which
+/// [`run_desktop_watch`] calls exactly once per production `--watch`
+/// invocation; a test must go through [`WatchHooks::fake`] instead of ever
+/// calling this directly (see [`run_in_with_hooks`]'s F4 regression test).
+fn install_real_ctrlc_handler(current: Arc<Mutex<Option<StreamHandle>>>) -> Result<()> {
+    ctrlc::set_handler(move || {
+        if let Some(mut handle) = current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            handle.kill();
+        }
+        std::process::exit(0);
+    })
+    .context("failed to install Ctrl-C handler")
 }
 
 /// Poll cadence for [`watch_loop`]'s inner loop — bounds both output latency
@@ -167,17 +266,22 @@ const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// `frust run --watch`'s desktop-only file-watch → rebuild → relaunch loop
 /// (PLAN.md Phase 9.D step 2). Watches `<root>/src` (recursive) and
-/// `<root>/Cargo.toml`; wires the real filesystem watcher's every raw event
+/// `<root>/Cargo.toml` via `hooks.spawn_watcher`, wiring its every raw event
 /// straight into [`watch_loop`], the testable core that owns debouncing,
-/// spawning, and kill+relaunch.
+/// spawning, and kill+relaunch; `hooks.install_ctrlc` installs the Ctrl-C
+/// handler described below. Production always calls this with
+/// [`WatchHooks::real`] (via [`run_in`]/`run_desktop_fallback`); a test
+/// drives it with [`WatchHooks::fake`] instead so neither process-global
+/// side effect is ever touched by `cargo test`.
 fn run_desktop_watch(
     runner: &dyn ProcessRunner,
     args: &[&str],
     env: &[(&str, &str)],
     root: &Path,
+    hooks: WatchHooks,
 ) -> Result<u8> {
     let (raw_tx, raw_rx) = mpsc::channel();
-    let _watcher = spawn_fs_watcher(root, raw_tx)?;
+    let _watcher = (hooks.spawn_watcher)(root, raw_tx)?;
     println!(
         "Watching `{}` for changes (Ctrl-C to exit)…",
         root.display()
@@ -195,18 +299,7 @@ fn run_desktop_watch(
     // device-side child is unaffected by this group), this one MUST kill
     // before `exit`.
     let current: Arc<Mutex<Option<StreamHandle>>> = Arc::new(Mutex::new(None));
-    let handler_slot = Arc::clone(&current);
-    ctrlc::set_handler(move || {
-        if let Some(mut handle) = handler_slot
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            handle.kill();
-        }
-        std::process::exit(0);
-    })
-    .context("failed to install Ctrl-C handler")?;
+    (hooks.install_ctrlc)(Arc::clone(&current))?;
 
     let mut on_line = |line: &str| println!("{line}");
     watch_loop_with_slot(
@@ -378,8 +471,8 @@ fn drain_available_lines(
     loop {
         match handle.lines.try_recv() {
             Ok(line) => on_line(&line),
-            Err(mpsc::TryRecvError::Empty) => return false,
-            Err(mpsc::TryRecvError::Disconnected) => return true,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => return true,
         }
     }
 }
@@ -563,8 +656,14 @@ mod tests {
                 stderr: String::new(),
             },
         );
-        let out =
-            run_desktop_fallback(&runner, &debug_info(), Some(RenderTierArg::Cpu), false).unwrap();
+        let out = run_desktop_fallback(
+            &runner,
+            &debug_info(),
+            Some(RenderTierArg::Cpu),
+            false,
+            WatchHooks::fake(),
+        )
+        .unwrap();
         assert_eq!(out, 0);
     }
 
@@ -599,6 +698,13 @@ mod tests {
     /// pipeline's very different first-failure message ("missing Rust
     /// target ...", from `android_run`'s preflight `rustup target list
     /// --installed` check) — proving discovery was never consulted.
+    ///
+    /// Drives [`run_in_with_hooks`] directly (the exact dispatch logic
+    /// [`run_in`] delegates to) with [`WatchHooks::fake`] instead of calling
+    /// public `run_in` — this test genuinely reaches `run_desktop_watch`
+    /// (`--watch` always does), and a real `ctrlc::set_handler`/`notify`
+    /// watcher has no place running during `cargo test` (the former is also
+    /// process-global and install-once, so a second such test would error).
     #[test]
     fn run_in_with_watch_skips_device_discovery_even_when_a_device_is_present() {
         let runner = FakeProcessRunner::new().with(
@@ -612,7 +718,16 @@ mod tests {
             },
         );
 
-        let err = run_in(&runner, BuildArgs::default(), None, None, true, false).unwrap_err();
+        let err = run_in_with_hooks(
+            &runner,
+            BuildArgs::default(),
+            None,
+            None,
+            true,
+            false,
+            WatchHooks::fake(),
+        )
+        .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("cargo"), "{message}");
         assert!(!message.contains("Rust target"), "{message}");

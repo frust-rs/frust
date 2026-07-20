@@ -9,11 +9,14 @@
 //!
 //! # Layering (PLAN.md D2)
 //!
-//! `engine` is pure and terminal-free (unit-tested without a TTY); `ui` renders
-//! `&AppState` and only ever *registers* interaction as mouse regions — it
-//! never mutates the model; `runner` owns the terminal and is the single place
-//! raw events become `Message`s. This crate depends on `frust-drive` (the
-//! shared drive pipelines) and never on the framework render stack
+//! `engine::update` is pure and terminal-free (unit-tested without a TTY) —
+//! `AppState::new`/`detect` do bounded filesystem I/O by design (project
+//! detection), so "pure" scopes to the message-driven state transition, not
+//! every `engine` function. `ui` renders `&AppState` and only ever
+//! *registers* interaction as mouse regions — it never mutates the model;
+//! `runner` owns the terminal and is the single place raw events become
+//! `Message`s. This crate depends on `frust-drive` (the shared drive
+//! pipelines) and never on the framework render stack
 //! (`frust-core`/`vello`/`wgpu`) — same isolation charter as `frust-cli`.
 
 // `frust-drive` is the drive backend Phase 2's project detection and session
