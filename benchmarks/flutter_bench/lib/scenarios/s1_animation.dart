@@ -1,10 +1,12 @@
 /// S1 — animation storm. The bubblebench workload (flutter/flutter#180958):
-/// 60 radial-gradient bubbles + two shaped text runs each, repainted every
-/// frame with per-frame physics. A 1:1 port of the frust side's
+/// radial-gradient bubbles + two shaped text runs each, repainted every frame
+/// with per-frame physics. A 1:1 port of the frust side's
 /// `examples/bubblebench` physics + paint (same constants, same phase order,
-/// same seed), so both apps render identical content.
+/// same seed), so both apps render identical content. Bubble **count** is
+/// derived per play area (spec v3, [s1BubbleCountFor]) so the field settles
+/// instead of staying jam-packed — capped at [s1BubbleCountCap].
 ///
-/// "Perpetual" per PLAN 9.E: the physics steps and the full 60-bubble scene
+/// "Perpetual" per PLAN 9.E: the physics steps and the full bubble scene
 /// repaints every frame for the entire run window (the harness controls
 /// duration) — the settle gate the interactive bubblebench uses is deliberately
 /// NOT applied here, so the per-frame gradient-fill + text-shaping cost is
@@ -24,7 +26,6 @@ import '../bench/rng.dart';
 /// `datasets.dart`, the contract home): radius + cluster spread are fractions
 /// of `min(playWidth, playHeight)`, the SafeArea-inset play region.
 class BubblePhysics {
-  static const int bubbleCount = s1BubbleCount;
   static const int seed = s1BubbleSeed;
 
   static const double _friction = 0.90;
@@ -232,8 +233,10 @@ class _AnimationStormViewState extends State<AnimationStormView>
         if (!_initialized &&
             constraints.maxWidth > 0 &&
             constraints.maxHeight > 0) {
-          _physics.initializeBubbles(
-              BubblePhysics.bubbleCount, BubblePhysics.seed);
+          // Count derived per play area (spec v3) — see [s1BubbleCountFor].
+          final count = s1BubbleCountFor(
+              constraints.maxWidth, constraints.maxHeight);
+          _physics.initializeBubbles(count, BubblePhysics.seed);
           _initialized = true;
         }
         return GestureDetector(

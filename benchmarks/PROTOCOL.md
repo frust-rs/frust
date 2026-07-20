@@ -208,7 +208,7 @@ via a launch arg / deep link so one binary drives the whole matrix):
 
 | ID | Scenario | What it stresses | Rust-advantage claim under test |
 |----|----------|------------------|-------------------------------|
-| S1 | **Animation storm** — the bubblebench workload (60 gradient bubbles + text, perpetual physics; bubble sizes normalized to the play area — see S1-specific notes) | per-frame paint, gradient/state-change behavior | vello single-dispatch vs Impeller per-primitive state churn (proven on Adreno 840; now formalized) |
+| S1 | **Animation storm** — the bubblebench workload (gradient bubbles + text, perpetual physics; bubble sizes normalized to the play area, count derived for ~50% area coverage of the safe-area play region, cap 60 — settle-capable field, user-calibrated 2026-07-20 — see S1-specific notes) | per-frame paint, gradient/state-change behavior | vello single-dispatch vs Impeller per-primitive state churn (proven on Adreno 840; now formalized) |
 | S2 | **Long-list scroll** — 10k rows, text + thumbnail + icons, scripted fling + steady scroll | virtualization, reconciliation, shaping cache | no-GC frame stability at 120Hz |
 | S3 | **Table ops** — js-framework-benchmark subset: create 1k, update every 10th of 10k, swap, clear (scripted, timed per op) | build/diff/reconcile throughput | view-diff + arena rebuild vs Element tree |
 | S4 | **Heavy-work responsiveness** — parse a ~50MB JSON (or synthetic equivalent) while an animation runs; measure animation percentiles during the work + total wall time | the heavy-work idiom end-to-end | `use_task`+`spawn_blocking` (move) vs `compute()`/`Isolate.run` (copy) |
@@ -219,15 +219,27 @@ via a launch arg / deep link so one binary drives the whole matrix):
 
 ### S1-specific notes
 
-- **Bubble sizes are normalized to the play area** (both apps re-run after this
-  parity fix): bubble radius and initial cluster spread are fractions of
-  `min(playWidth, playHeight)` rather than absolute logical pixels, so the
-  bubble-size-to-play-area ratio (and thus collision density / settle behavior)
-  is identical across the two apps regardless of each shell's reported logical
-  size. The **play area = the safe-area-inset region on both sides** (Flutter
-  hosts under `Scaffold > SafeArea`; the frust app wraps its scenario host in
-  `SafeArea`). Seeds/counts and the velocity/physics constants stay
-  byte-identical. The canonical spec lives in
+- **Bubble sizes are normalized to the play area** (v2): bubble radius and
+  initial cluster spread are fractions of `min(playWidth, playHeight)` rather
+  than absolute logical pixels, so the bubble-size-to-play-area ratio (and
+  thus collision density / settle behavior) is identical across the two apps
+  regardless of each shell's reported logical size. The **play area = the
+  safe-area-inset region on both sides** (Flutter hosts under
+  `Scaffold > SafeArea`; the frust app wraps its scenario host in
+  `SafeArea`).
+- **Bubble count derived for ~50% area coverage of the safe-area play region,
+  cap 60 — settle-capable field, user-calibrated 2026-07-20 (v3).** v2's
+  fixed 60-bubble count, even at fractional radii, still summed to more than
+  a phone's play area, so the field stayed jam-packed with constant
+  collisions and never settled (confirmed on-device). v3 instead derives the
+  bubble **count** at scenario init — `N = floor(0.5 * playW * playH /
+  E[bubbleArea])`, `E[bubbleArea]` computed analytically (not sampled) over
+  the v2 radius distribution — capped at the original 60 so a wide desktop
+  window doesn't explode the count. Radii, seeds, and the velocity/physics
+  constants stay byte-identical between the two apps, and the per-bubble RNG
+  draw order (performance, radius, x, y) is unchanged, so `N` only truncates
+  the same deterministic sequence — an identical play area yields an
+  identical `N` on both apps. The canonical spec lives in
   `flutter_bench/lib/bench/datasets.dart` (mirrored in the frust side's
   `s1_animation/physics.rs`).
 

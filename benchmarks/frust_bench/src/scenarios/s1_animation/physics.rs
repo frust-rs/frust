@@ -9,6 +9,11 @@
 //! Pure data + math: no Frust, no clock. One [`BubblePhysics::update`] call
 //! is one frame's step, exactly like the repro's per-vsync `Ticker` callback —
 //! the chart widget calls it once per painted frame.
+//!
+//! Bubble **count** is derived per play area rather than fixed (spec v3,
+//! user-calibrated 2026-07-20; see [`bubble_count_for`]) — the original fixed
+//! 60-bubble field (v1/v2) over-fills a phone-sized play area and never
+//! settles.
 
 use kurbo::Point;
 
@@ -72,6 +77,69 @@ const SETTLED_FRAME_COUNT: u32 = 30;
 const RADIUS_MIN_FRAC: f64 = 0.05;
 const RADIUS_SPAN_FRAC: f64 = 0.10;
 const CLUSTER_SPAN_FRAC: f64 = 0.5;
+
+// --- S1 count-derivation spec v3 (canonical, user-calibrated 2026-07-20) --
+//
+// Contract home: `benchmarks/flutter_bench/lib/bench/datasets.dart`'s S1
+// section — these mirror it byte-for-byte.
+//
+// v2 (above) fixed the bubble COUNT at [`BUBBLE_COUNT_CAP`] while making
+// radii fractions of the play area — but 60 bubbles at
+// `RADIUS_MIN_FRAC`..`RADIUS_MIN_FRAC + RADIUS_SPAN_FRAC` still sum to more
+// than a phone's play area, so the field stayed jam-packed with constant
+// collisions rather than settling (confirmed visually on-device). v3
+// instead derives the bubble COUNT so total bubble area is
+// ~[`TARGET_AREA_COVERAGE`] of the play area, capped at
+// [`BUBBLE_COUNT_CAP`] so a wide desktop window doesn't explode the count —
+// a settle-capable field.
+//
+// The count is computed analytically, not sampled: bubble radius is
+// `S * (RADIUS_MIN_FRAC + u * RADIUS_SPAN_FRAC)` for `u` uniform in
+// `[0, 1)`, so for the linear function `f(u) = a + u*span` (`a` =
+// `RADIUS_MIN_FRAC`, `span` = `RADIUS_SPAN_FRAC`), the exact expectation
+// `E[f(u)^2] = a^2 + a*span + span^2/3` (the closed-form integral of
+// `f(u)^2` over `u in [0, 1]`), so `E[bubble_area] = pi * S^2 * E[f(u)^2]`.
+// Both apps compute this exact formula (see `bubble_count_for` below,
+// mirrored in the Dart side's `datasets.dart::s1BubbleCountFor`), so an
+// identical play area yields an identical `N` — the per-bubble RNG draw
+// order (performance, radius, x, y) is unchanged, so `N` only truncates the
+// same deterministic sequence rather than reordering it.
+/// Cap on the derived bubble count — the original v1/v2 fixed count, still
+/// the ceiling so a wide desktop window doesn't explode the population.
+pub const BUBBLE_COUNT_CAP: usize = 60;
+/// Target fraction of the play area's total area covered by total bubble
+/// area.
+pub const TARGET_AREA_COVERAGE: f64 = 0.5;
+
+/// The analytic mean bubble area (`E[bubble_area]`) for a play region whose
+/// `S = min(play_width, play_height)` — see `TARGET_AREA_COVERAGE`'s
+/// derivation above.
+fn mean_bubble_area(s: f64) -> f64 {
+    let a = RADIUS_MIN_FRAC;
+    let span = RADIUS_SPAN_FRAC;
+    let mean_r_squared = a * a + a * span + span * span / 3.0;
+    std::f64::consts::PI * s * s * mean_r_squared
+}
+
+/// Derive the S1 bubble count for a `play_width` x `play_height` play area
+/// (the SafeArea-inset region on both apps), so total bubble area is
+/// ~[`TARGET_AREA_COVERAGE`] of the play area — capped at
+/// [`BUBBLE_COUNT_CAP`]. See the spec above for the exact formula and the
+/// Dart-side mirror.
+pub fn bubble_count_for(play_width: f64, play_height: f64) -> usize {
+    if play_width <= 0.0 || play_height <= 0.0 {
+        return 0;
+    }
+    let s = play_width.min(play_height);
+    let mean_area = mean_bubble_area(s);
+    let play_area = play_width * play_height;
+    let n = (TARGET_AREA_COVERAGE * play_area / mean_area).floor();
+    if n > BUBBLE_COUNT_CAP as f64 {
+        BUBBLE_COUNT_CAP
+    } else {
+        n as usize
+    }
+}
 
 /// splitmix64 — a tiny deterministic PRNG so `seed 42` reproduces the same
 /// layout every run (the repro seeds Dart's `Random(42)`; the exact sequence
@@ -401,5 +469,64 @@ mod tests {
             p.bubbles[0].vx > 0.0 || p.bubbles[0].x > 400.0,
             "a touch just left of the bubble must push it right"
         );
+    }
+
+    // --- S1 count-derivation spec v3 -------------------------------------
+
+    #[test]
+    fn bubble_count_for_desktop_window() {
+        // 800x600 desktop-preview window (matches the driver test's `W`/`H`):
+        // S = 600, mean bubble area ≈ 0.0340339 * 600² ≈ 12252.2, play area
+        // 480000, target 240000 → floor(240000 / 12252.2) = 19.
+        assert_eq!(bubble_count_for(800.0, 600.0), 19);
+    }
+
+    #[test]
+    fn bubble_count_for_phone_like_play_area() {
+        // A phone-like 393x750 logical play area: far fewer than the v1/v2
+        // fixed 60, so total bubble area is roughly halved rather than
+        // over-filling the field.
+        let n = bubble_count_for(393.0, 750.0);
+        assert_eq!(n, 28);
+        assert!(
+            n < BUBBLE_COUNT_CAP,
+            "a phone-sized play area must derive substantially fewer than the \
+             {BUBBLE_COUNT_CAP}-bubble cap"
+        );
+
+        // Confirm the derived count actually targets ~50% area coverage: sum
+        // the *actual* per-bubble areas (not just the analytic mean) for a
+        // deterministic seeded field of this size, and check the total lands
+        // near half the play area.
+        let mut p = BubblePhysics::default();
+        p.set_size(393.0, 750.0);
+        p.initialize_bubbles(n, 42);
+        let total_area: f64 = p
+            .bubbles
+            .iter()
+            .map(|b| std::f64::consts::PI * b.radius * b.radius)
+            .sum();
+        let play_area = 393.0 * 750.0;
+        let coverage = total_area / play_area;
+        assert!(
+            (0.35..0.65).contains(&coverage),
+            "derived count {n} should cover roughly half the {play_area} play \
+             area (got {:.3} actual coverage) — a seeded sample varies around \
+             the analytic 0.5 target",
+            coverage
+        );
+    }
+
+    #[test]
+    fn bubble_count_for_caps_at_original_sixty() {
+        // A wide desktop window (uncapped formula would yield 73 here) must
+        // still cap at the original v1/v2 fixed count.
+        assert_eq!(bubble_count_for(3000.0, 600.0), BUBBLE_COUNT_CAP);
+    }
+
+    #[test]
+    fn bubble_count_for_zero_play_area_is_zero() {
+        assert_eq!(bubble_count_for(0.0, 600.0), 0);
+        assert_eq!(bubble_count_for(800.0, 0.0), 0);
     }
 }

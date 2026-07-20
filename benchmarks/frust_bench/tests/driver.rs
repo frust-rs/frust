@@ -10,7 +10,7 @@ use frust_reactive::ReactiveRuntime;
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
 use frustbench::BenchApp;
-use frustbench::scenarios::{self, BenchState, SCENARIOS, s1_animation::chart::BUBBLE_COUNT};
+use frustbench::scenarios::{self, BenchState, SCENARIOS, s1_animation::physics::bubble_count_for};
 use kurbo::{BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
 use reactive_graph::owner::Owner;
@@ -136,13 +136,20 @@ fn s1_paints_the_full_bubble_workload() {
     let mut tcx = TextContext::new();
     let mut logic = scenario_logic(0);
 
+    // The bubble count is derived per play area (spec v3), not fixed — this
+    // harness lays out at the driver's `W`x`H` (no SafeArea deflation here),
+    // so the expected count is the same formula's output at that exact size.
+    let expected_count = bubble_count_for(W, H);
     let (scene, live) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
     assert_eq!(
-        scene.gradient_fills, BUBBLE_COUNT,
+        scene.gradient_fills, expected_count,
         "one gradient fill per bubble"
     );
-    assert_eq!(scene.strokes, BUBBLE_COUNT, "one stroked border per bubble");
-    assert!(scene.glyph_runs >= BUBBLE_COUNT, "shaped text per bubble");
+    assert_eq!(
+        scene.strokes, expected_count,
+        "one stroked border per bubble"
+    );
+    assert!(scene.glyph_runs >= expected_count, "shaped text per bubble");
     assert!(live, "a live animation storm keeps requesting frames");
 }
 

@@ -3,10 +3,12 @@
 //! hatch, the same pattern as huddle's `FillBox`/`Shimmer`).
 //!
 //! Per frame it paints exactly what the Flutter repro's `CustomPainter` does:
-//! 60 radial-gradient circle fills + 60 stroked circle borders + two shaped
-//! text runs per bubble. Physics advance during **paint** on the shell-fed
-//! frame clock ([`PaintCtx::frame_time`]'s pass), one step per painted frame —
-//! the same cadence as the repro's per-vsync `Ticker` — and the widget calls
+//! one radial-gradient circle fill + one stroked circle border + two shaped
+//! text runs per bubble. The bubble **count** is derived per play area (spec
+//! v3, see `physics::bubble_count_for`), not fixed. Physics advance during
+//! **paint** on the shell-fed frame clock ([`PaintCtx::frame_time`]'s pass),
+//! one step per painted frame — the same cadence as the repro's per-vsync
+//! `Ticker` — and the widget calls
 //! [`PaintCtx::request_frame`] while the simulation is live, so frames keep
 //! coming with no external input and stop entirely (frame-gate `Skip` on
 //! mobile, `ControlFlow::Wait` idle on desktop) once every bubble settles.
@@ -27,8 +29,6 @@ use kurbo::{BezPath, Circle, Point, Shape, Size};
 use peniko::color::DynamicColor;
 use peniko::{Brush, Color, ColorStop, Gradient};
 
-/// How many bubbles the benchmark runs — the repro's count.
-pub const BUBBLE_COUNT: usize = 60;
 /// The fixed seed, matching the repro's `Random(42)`.
 pub const SEED: u64 = 42;
 
@@ -45,7 +45,7 @@ const FILL_EDGE_OPACITY: f32 = 0.3;
 const BORDER_OPACITY: f32 = 0.6;
 const BORDER_WIDTH: f64 = 2.0;
 
-use super::physics::BubblePhysics;
+use super::physics::{BubblePhysics, bubble_count_for};
 
 /// The view descriptor: benchmark controls in, measured FPS out.
 pub struct BubbleChart {
@@ -173,8 +173,12 @@ impl BubbleChartWidget {
 
     /// Reseed the field and rebuild the per-bubble visual cache (circle paths
     /// + shaped text). Runs inside layout, the pass that owns `TextContext`.
+    ///
+    /// Requires `self.size` to already be set — the bubble count is derived
+    /// from it (spec v3, see `physics::bubble_count_for`).
     fn init(&mut self, text_ctx: &mut TextContext) {
-        self.physics.initialize_bubbles(BUBBLE_COUNT, SEED);
+        let count = bubble_count_for(self.size.width, self.size.height);
+        self.physics.initialize_bubbles(count, SEED);
         self.visuals = self
             .physics
             .bubbles

@@ -1,6 +1,6 @@
 //! S1 — Animation storm (the bubblebench workload).
 //!
-//! A 1:1 embedded copy of `examples/bubblebench`'s S1 workload: 60
+//! A 1:1 embedded copy of `examples/bubblebench`'s S1 workload:
 //! physics-driven gradient bubbles (seed 42) with shaped text runs, repainted
 //! every frame, plus a Pause/Play + Reset + FPS HUD. The physics
 //! ([`physics`]) and canvas widget ([`chart`]) are **copied** into this
@@ -11,12 +11,14 @@
 //! The copy keeps `frust_bench` self-contained; the shared physics constants
 //! and per-frame paint workload stay byte-identical to the repro (see
 //! `physics.rs`'s own module doc for the flutter/flutter#180958 provenance),
-//! **except** bubble geometry: radius and initial cluster spread are now
-//! fractions of the SafeArea-inset play area's `min(width, height)` per the
-//! canonical S1 size-parity spec (contract home:
-//! `benchmarks/flutter_bench/lib/bench/datasets.dart`; see `physics.rs`), so
-//! the bubble-to-play-area ratio matches the Flutter side exactly. The scenario
-//! host is wrapped in the facade's `SafeArea` in `crate::BenchApp::build`.
+//! **except** bubble geometry: radius and initial cluster spread are
+//! fractions of the SafeArea-inset play area's `min(width, height)`, and
+//! bubble **count** is derived from the play area (not fixed) so the field
+//! can settle instead of staying jam-packed — per the canonical S1 spec
+//! (contract home: `benchmarks/flutter_bench/lib/bench/datasets.dart`; see
+//! `physics.rs`), so both the bubble-to-play-area ratio and the derived
+//! count match the Flutter side exactly. The scenario host is wrapped in the
+//! facade's `SafeArea` in `crate::BenchApp::build`.
 //!
 //! Scenario markers: the driver's default [`Scenario::on_start`]/
 //! [`on_end`](Scenario::on_end) bracket the whole animation window as `s1`;
@@ -48,7 +50,7 @@ impl Scenario for S1 {
     }
 
     fn title(&self) -> &'static str {
-        "Animation storm (60 bubbles, perpetual physics)"
+        "Animation storm (bubble count derived per play area, perpetual physics)"
     }
 
     fn build(&self, state: &mut BenchState) -> AnyView<BenchState> {
@@ -81,9 +83,10 @@ impl Scenario for S1 {
         );
 
         let info = text(
-            "S1 Animation storm — 60 bubbles with radial-gradient fills and \
-             shaped text runs, repainted every frame. Touch to interact. \
-             Frust port of the flutter/flutter#180958 Impeller repro.",
+            "S1 Animation storm — physics-driven bubbles (count derived per \
+             play area) with radial-gradient fills and shaped text runs, \
+             repainted every frame. Touch to interact. Frust port of the \
+             flutter/flutter#180958 Impeller repro.",
         )
         .size(12.0)
         .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xB3));

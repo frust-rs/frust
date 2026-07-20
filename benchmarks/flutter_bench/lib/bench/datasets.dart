@@ -10,6 +10,7 @@
 /// content* — stated per generator.
 library;
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'rng.dart';
@@ -21,8 +22,10 @@ import 'rng.dart';
 /// PRNG seed for the S1 bubble field (both apps seed the same [SplitMix64]).
 const int s1BubbleSeed = 42;
 
-/// Number of bubbles in the S1 field.
-const int s1BubbleCount = 60;
+/// Cap on the derived S1 bubble count (spec v3, see [s1BubbleCountFor]) — the
+/// original v1/v2 fixed count, still the ceiling so a wide desktop window
+/// doesn't explode the population.
+const int s1BubbleCountCap = 60;
 
 /// **S1 size-parity spec (canonical).** Bubble radius and the initial cluster
 /// spread are FRACTIONS of `S = min(playWidth, playHeight)` — the *safe-area
@@ -48,6 +51,52 @@ const int s1BubbleCount = 60;
 const double s1RadiusMinFrac = 0.05;
 const double s1RadiusSpanFrac = 0.10;
 const double s1ClusterSpanFrac = 0.5;
+
+/// **S1 count-derivation spec v3 (canonical, user-calibrated 2026-07-20).**
+/// v2 (above) fixed the bubble *count* at [s1BubbleCountCap] while making
+/// radii fractions of the play area — but 60 bubbles at
+/// `s1RadiusMinFrac`..`s1RadiusMinFrac + s1RadiusSpanFrac` still sum to more
+/// than a phone's play area, so the field stayed jam-packed with constant
+/// collisions rather than settling (confirmed visually on-device). v3 instead
+/// derives the bubble **count** so the bubbles' total area is
+/// ~[s1TargetAreaCoverage] of the play area, capped at [s1BubbleCountCap] so
+/// a wide desktop window doesn't explode the count — a settle-capable field.
+///
+/// The count is computed analytically, not sampled: bubble radius is
+/// `S * (s1RadiusMinFrac + u * s1RadiusSpanFrac)` for `u` uniform in
+/// `[0, 1)`, so for the linear function `f(u) = a + u*span` (`a` =
+/// [s1RadiusMinFrac], `span` = [s1RadiusSpanFrac]), the exact expectation
+/// `E[f(u)^2] = a^2 + a*span + span^2/3` (the closed-form integral of
+/// `f(u)^2` over `u in [0, 1]`), so `E[bubbleArea] = pi * S^2 * E[f(u)^2]`.
+/// Both apps compute this exact formula (see [s1BubbleCountFor] here, mirrored
+/// in the frust side's `s1_animation/physics.rs::bubble_count_for`), so an
+/// identical play area yields an identical `N` — the per-bubble RNG draw
+/// order (performance, radius, x, y) is unchanged, so `N` only truncates the
+/// same deterministic sequence rather than reordering it.
+const double s1TargetAreaCoverage = 0.5;
+
+/// The analytic mean bubble area (`E[bubbleArea]`) for a play region whose
+/// `S = min(playWidth, playHeight)` — see [s1TargetAreaCoverage]'s derivation.
+double _s1MeanBubbleArea(double s) {
+  const a = s1RadiusMinFrac;
+  const span = s1RadiusSpanFrac;
+  final meanRSquared = a * a + a * span + span * span / 3.0;
+  return math.pi * s * s * meanRSquared;
+}
+
+/// Derive the S1 bubble count for a `playWidth` x `playHeight` play area (the
+/// SafeArea-inset region on both apps), so total bubble area is
+/// ~[s1TargetAreaCoverage] of the play area — capped at [s1BubbleCountCap].
+/// See the spec above [s1TargetAreaCoverage] for the exact formula and the
+/// frust-side mirror.
+int s1BubbleCountFor(double playWidth, double playHeight) {
+  if (playWidth <= 0 || playHeight <= 0) return 0;
+  final s = math.min(playWidth, playHeight);
+  final meanArea = _s1MeanBubbleArea(s);
+  final playArea = playWidth * playHeight;
+  final n = (s1TargetAreaCoverage * playArea / meanArea).floor();
+  return n > s1BubbleCountCap ? s1BubbleCountCap : n;
+}
 
 // ---------------------------------------------------------------------------
 // S5 — image pipeline
