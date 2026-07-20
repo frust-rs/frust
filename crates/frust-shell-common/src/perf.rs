@@ -505,6 +505,24 @@ pub fn mark_scenario_end(name: &str) {
     }
 }
 
+/// Emit one already-formatted benchmark trace line (Phase 9.E) into the same
+/// `log::info!` stream the per-frame `frust-perf raw` lines and the
+/// `bench-scenario-*` markers land in.
+///
+/// This is the frust counterpart to the Flutter bench's `benchEmit`
+/// (`benchmarks/flutter_bench/lib/bench/perf.dart`): a benchmark scenario that
+/// records a per-operation measurement (e.g. S8's
+/// `frust-perf plugin op=write type=bool n=0 us=12` per-op latency lines) hands
+/// this an already-formatted single line, which the harness parses alongside
+/// the frame series. Centralizing every bench line behind one gated sink keeps
+/// per-op emission on the same two-dial switch the markers use — a no-op unless
+/// both [`enabled`] and [`raw_enabled`] are `true`.
+pub fn bench_emit(line: &str) {
+    if enabled() && raw_enabled() {
+        log::info!("{line}");
+    }
+}
+
 // ---------------------------------------------------------------------
 // StartupSpans
 // ---------------------------------------------------------------------
