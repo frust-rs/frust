@@ -20,6 +20,11 @@ toml.workspace = true
 thiserror.workspace = true
 minijinja.workspace = true
 include_dir.workspace = true
+# Format-preserving Cargo.toml editing for `plugin::add_plugin` — a document
+# edit (not a deserialize-mutate-reserialize round trip) so a project's
+# hand-added comments/keys survive an idempotent plugin dependency insert.
+# Shared with `frust-tui`'s recent-projects store (workspace pin 0.25).
+toml_edit.workspace = true
 # `frust run`'s Android/desktop log-streaming path needs a clean Ctrl-C →
 # exit-0 hook (default SIGINT disposition exits 130, spec §12.4 wants 0).
 ctrlc.workspace = true
