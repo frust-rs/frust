@@ -36,6 +36,10 @@
     `wgpu::PipelineCache` from a shell-persisted, `unframe`d and
     adapter-fingerprint-validated blob; wgpu's `fallback: true` backstops
     any residual mismatch — see `docs/ARCHITECTURE.md`'s GPU pipeline cache.
+  - `frust-drive`'s `process` module — a `kill(2)` FFI shim (`unsafe extern
+    "C" { fn kill(pid, sig) -> i32; }`, since std exposes no `killpg`) that
+    group-kills a streamed child's whole Unix process group; one scoped
+    declaration with a `# Safety` comment stating the syscall's contract.
 - **No unwind across FFI.** Every platform export routes through
   `frust-shell-common`'s `guard` helper (`catch_unwind` + log, returning a
   benign default) rather than unwinding into JVM-/Swift-owned stack frames
@@ -282,11 +286,10 @@ interactive widget in `frust-widgets`:
 
 - **A container that suppresses routing to its children must cancel their
   capture, clear their focus, and publish a cleared IME surface — in that
-  order — before the block takes effect; there is no bypass.** This binds any
-  container that can stop forwarding events to an already-interactive child
-  (the navigator's mid-transition input block is the reference
-  implementation — see `docs/ARCHITECTURE.md`'s Navigation flow), not just
-  `Navigator`:
+  order, with no bypass.** This binds any container that stops forwarding
+  events to an already-interactive child (the navigator's mid-transition
+  input block is the reference impl — see `docs/ARCHITECTURE.md`'s
+  Navigation flow), not just `Navigator`:
 
   ```rust
   fn cancel_top(&mut self) {
@@ -328,11 +331,10 @@ Semantics pass):
   ```
 
 - **Keep it minimal: role, label, state, and bounds only.** This gives the
-  per-shell platform adapter (`accesskit_winit`/`accesskit_android`/
-  `accesskit_ios` — see `docs/ARCHITECTURE.md`'s Semantics pass) just enough
-  to build on — no live-region announcements, no custom actions, and no
-  adapter wiring belong here; that integration lives in a shell, not
-  `frust-core`.
+  per-shell adapter (`accesskit_winit`/`accesskit_android`/`accesskit_ios`
+  — see `docs/ARCHITECTURE.md`'s Semantics pass) just enough to build on —
+  no live-region announcements, custom actions, or adapter wiring belong
+  here; that integration lives in a shell, not `frust-core`.
 - **A platform adapter gates its pushes on `semantics_generation`/
   `semantics_if_changed`, not on pushing every frame unconditionally.** All
   three shipping adapters (desktop, Android, iOS) compare the last-seen
@@ -354,13 +356,11 @@ Semantics pass):
   string literals, so every shell logs the same names; a milestone with no
   `perf::SPAN_*` const may pass a `&'static str` literal directly.
 - **Frame-gate inputs default to must-run, never to skip.** A `FrameInputs`
-  field a shell doesn't have a precise signal for should stay `true`/be
-  fed conservatively rather than guessed `false` — over-running costs a
-  wasted frame, over-skipping drops real work (see
-  `docs/ARCHITECTURE.md`'s Frame gate). `FRUST_NO_FRAME_GATE=1` (parsed
-  the same compile-time-or-runtime way as `FRUST_TRACE`) forces every
-  tick to `Run`; reach for it first when diagnosing a suspected stuck-UI
-  report before assuming a widget bug.
+  field with no precise signal should stay `true`/fed conservatively rather
+  than guessed `false` — over-running costs a wasted frame, over-skipping
+  drops real work (see `docs/ARCHITECTURE.md`'s Frame gate).
+  `FRUST_NO_FRAME_GATE=1` (parsed like `FRUST_TRACE`) forces every tick to
+  `Run`; reach for it first when diagnosing a suspected stuck-UI report.
 
 ## State & Reactivity Conventions
 

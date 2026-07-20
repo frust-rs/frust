@@ -137,9 +137,12 @@ frust run --watch
 
 Desktop only: watches `src/` and `Cargo.toml`, killing and relaunching
 (`cargo run`, incremental) on change, debouncing a save-burst into one
-relaunch; Ctrl-C exits the loop. A **relaunch loop, not state-preserving
-hot reload** — app state resets every rebuild. `--watch` + `-d <device>` is
-a hard error (device-side watch isn't implemented).
+relaunch. Kill/relaunch and Ctrl-C exit both group-kill on Unix, reaching
+the compiled preview binary `cargo run` forks too (Windows stays
+direct-child-only; a job-object equivalent is a tracked fast-follow). A
+**relaunch loop, not state-preserving hot reload** — app state resets every
+rebuild. `--watch` + `-d <device>` is a hard error (device-side watch isn't
+implemented).
 
 **Measured baseline** (methodology/hardware:
 `workflow/plans/features/frust-phase-9-rust-advantage/research/DEVLOOP_BASELINE.md`):
@@ -173,13 +176,12 @@ frust clean
 `--flavor <name>` needs a matching Gradle product flavor / Xcode
 scheme+configuration already declared in the generated project.
 
-**Android release minification.** A generated app's `release` (and
-`profile`) Gradle build type runs R8 (`isMinifyEnabled`/`isShrinkResources
-= true`) against `proguard-rules.pro` (ships two keep rules: the Frust
-JNI surface and the vendored `accesskit_android` delegate); `frust build
-apk --debug` is unaffected. NDK r27+ already links `.so`s with 16KB-aligned
-`LOAD` segments by default, so no linker-flag change was needed for Android
-15's page-size requirement.
+**Android release minification.** A generated app's `release`/`profile`
+Gradle build type runs R8 (`isMinifyEnabled`/`isShrinkResources = true`)
+against `proguard-rules.pro` (keeps the Frust JNI surface and the vendored
+`accesskit_android` delegate); `frust build apk --debug` is unaffected. NDK
+r27+ already 16KB-aligns `.so` `LOAD` segments by default, so Android 15's
+page-size requirement needed no linker-flag change.
 
 ## Test
 
@@ -209,9 +211,9 @@ directory rather than `-p` from the repo root because both are standalone
 workspaces excluded from the root one (see *Version-Pin Policy*). No sibling
 checkout? Do not run these commands — record "huddle/clean-signals-frust
 gate not run — no clean-signals-rs sibling checkout" instead, and do not
-touch either directory without the sibling in place. There is no CI for
-this repo, so this doc is the only enforcement. This gate is separate from
-`frust build apk`/`run`'s Android/iOS pipeline gate (see *Run*).
+touch either directory without the sibling in place (no CI exists for this
+repo — see *Prerequisites* — so this doc is the only enforcement). This
+gate is separate from `frust build apk`/`run`'s pipeline gate (see *Run*).
 
 The `cpu-tier` feature (experimental `vello_cpu` render backend, non-default
 — see *Version-Pin Policy*) is headless and needs no GPU, but isn't compiled
@@ -393,38 +395,36 @@ deliberately, not floating:
   `vello` breaks the build. See `docs/spec.md` §8/§15 for the ecosystem
   status this pin is tracking.
 - `image = "=0.25.10"` (the `Image` widget's PNG/JPEG decoder,
-  `default-features = false`, `png`/`jpeg` features only) is pinned exact,
-  not a caret range: it is the only 0.25.x release whose MSRV is exactly the
-  workspace's `rust-version` (1.88), not lower — bumping it needs a fresh
-  MSRV check, not just `cargo update`.
+  `default-features = false`, `png`/`jpeg` only) is exact-pinned: the only
+  0.25.x release whose MSRV equals the workspace's `rust-version` (1.88), not
+  lower — bumping it needs a fresh MSRV check, not just `cargo update`.
 - `reactive_graph = "0.2"` / `any_spawner = "0.3"` / `tokio = { version = "1",
   default-features = false }` (the `frust-reactive` substrate, spec §5.5)
-  are pinned to minor, not exact — a pre-1.0 Leptos-ecosystem stack expected
-  to churn; `cargo test -p frust-reactive` is the tripwire for a breaking
-  bump. Never enable `reactive_graph`'s `effects` feature (the frame path is
-  a custom subscriber, not `RenderEffect` — see `docs/ARCHITECTURE.md`'s Key
-  Types).
+  are pinned to minor — a pre-1.0 Leptos-ecosystem stack expected to churn;
+  `cargo test -p frust-reactive` is the tripwire. Never enable
+  `reactive_graph`'s `effects` feature (the frame path is a custom
+  subscriber, not `RenderEffect` — see `docs/ARCHITECTURE.md`'s Key Types).
 - `accesskit = "0.24"` (`frust-core`'s semantics-pass vocabulary, spec §9)
-  is pinned to minor; `cargo test -p frust-core semantics` is the tripwire
-  for a breaking bump. The three per-shell platform adapters unify on this
-  pin: `accesskit_winit = "0.33"` (desktop) and `accesskit_android = "0.7"`
-  are pinned to minor; `accesskit_ios = "=0.1.2"` is pinned exact (its 0.1.x
-  line is younger/less proven — see *Test* below for its compile-gate
-  status).
+  is pinned to minor; `cargo test -p frust-core semantics` is the tripwire.
+  The three per-shell adapters unify on this pin: `accesskit_winit = "0.33"`
+  (desktop) and `accesskit_android = "0.7"` are pinned to minor;
+  `accesskit_ios = "=0.1.2"` is exact-pinned (younger/less proven — see
+  *Test* below for its compile-gate status).
 - `vello_cpu = "=0.0.9"` (the experimental CPU render tier, `frust-render`'s
   non-default `cpu-tier` feature) is pinned exact — pre-1.0 with an unstable
   API, isolated behind the `SceneSink` encode seam so a breaking bump never
   reaches the default GPU path. See *Test* below for its tripwire command.
 - `ndk-context = "0.1"` (`frust-plugin`'s Android platform-handle slot,
-  written by the Android shell's `nativeInitPlatform`, read by every
-  plugin) is pinned to minor; `cargo check --target aarch64-linux-android
-  -p frust-plugin` is the tripwire. `objc2 = "0.6"` / `objc2-foundation =
-  "0.3"` (the Apple ObjC bridge, `frust-shared-preferences`'s
-  `NSUserDefaults` backend) are pinned to minor; `cargo check --target
-  aarch64-apple-ios-sim -p frust-shared-preferences` is the tripwire.
-- `notify = "8"` (`frust run --watch`'s filesystem-watch dependency,
-  `frust-cli`-only like `ctrlc` above) is pinned to minor; `cargo test -p
-  frust-cli` is the tripwire for a breaking bump.
+  written by `nativeInitPlatform`, read by every plugin) is pinned to
+  minor; `cargo check --target aarch64-linux-android -p frust-plugin` is
+  the tripwire. `objc2 = "0.6"` / `objc2-foundation = "0.3"` (the Apple ObjC
+  bridge, `frust-shared-preferences`'s `NSUserDefaults` backend) are pinned
+  to minor; `cargo check --target aarch64-apple-ios-sim
+  -p frust-shared-preferences` is the tripwire.
+- `notify = "8"` (`frust run --watch`'s filesystem-watch dependency) is a
+  `frust-cli`-only targeted-exception pin, minor-pinned; `cargo test -p
+  frust-cli` is the tripwire. `ctrlc` is a floating workspace dependency
+  consumed by both `frust-drive` and `frust-cli` (not pinned here).
 - `ratatui = "0.30"` / `crossterm = "0.29"` (`frust-tui`'s render/terminal
   stack) are pinned to minor — pre-1.0 churn expected; `cargo test -p
   frust-tui` is the tripwire.
