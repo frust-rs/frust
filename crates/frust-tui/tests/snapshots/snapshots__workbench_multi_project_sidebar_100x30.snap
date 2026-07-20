@@ -1,22 +1,22 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-expression: "render_to_string(100, 30, &workbench_state())"
+expression: "render_to_string(100, 30, &multi_project_workbench_state())"
 ---
-⚙ Frust │ huddle ▾ · frust 0.1.0 · ✓ toolchain                                     ▶ Run    ⚒ Build 
+⚙ Frust │ bubblebench ▾ · frust 0.1.0 · ✓ toolchain                                ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │                                                                          
-  ▸ huddle               │  Dashboard                                                               
-                         │  ━━━━━━━━━━                                                              
- DEVICES                 │                                                                          
-   (refresh in Phase 2)  │  Workbench shell — sessions, devices, and run flows arrive in Phase 2.   
+  ▸ bubblebench          │  Dashboard                                                               
+    huddle               │  ━━━━━━━━━━                                                              
+                         │                                                                          
+ DEVICES                 │  Workbench shell — sessions, devices, and run flows arrive in Phase 2.   
+   (refresh in Phase 2)  │                                                                          
                          │                                                                          
  SESSIONS                │                                                                          
    none running          │                                                                          
                          │                                                                          
  ACTIONS                 │                                                                          
    Doctor · Settings     │                                                                          
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

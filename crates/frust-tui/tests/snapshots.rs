@@ -46,9 +46,24 @@ fn buffer_to_string(buf: &Buffer) -> String {
 }
 
 fn workbench_state() -> AppState {
+    let root = PathBuf::from("/tmp/huddle");
     AppState {
         screen: Screen::Workbench,
-        project_root: Some(PathBuf::from("/tmp/huddle")),
+        project_root: Some(root.clone()),
+        projects: vec![root],
+        ..Default::default()
+    }
+}
+
+/// F5: multiple detected projects — the sidebar lists every one, the active
+/// (first) one highlighted with the hover chevron.
+fn multi_project_workbench_state() -> AppState {
+    let bubblebench = PathBuf::from("/tmp/frust/examples/bubblebench");
+    let huddle = PathBuf::from("/tmp/frust/examples/huddle");
+    AppState {
+        screen: Screen::Workbench,
+        project_root: Some(bubblebench.clone()),
+        projects: vec![bubblebench, huddle],
         ..Default::default()
     }
 }
@@ -86,6 +101,11 @@ fn workbench_shell_80x24() {
 #[test]
 fn workbench_shell_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &workbench_state()));
+}
+
+#[test]
+fn workbench_multi_project_sidebar_100x30() {
+    insta::assert_snapshot!(render_to_string(100, 30, &multi_project_workbench_state()));
 }
 
 #[test]

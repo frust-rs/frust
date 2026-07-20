@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     titlebar(frame, shell.titlebar, state, theme);
 
     let (sidebar, main) = sidebar_main(shell.body);
-    render_sidebar(frame, sidebar, theme);
+    render_sidebar(frame, sidebar, state, theme);
     render_main(frame, main, state, theme);
     status(frame, shell.status, theme);
 }
@@ -77,7 +77,7 @@ fn titlebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     }
 }
 
-fn render_sidebar(frame: &mut Frame, area: Rect, theme: &Theme) {
+fn render_sidebar(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(Style::default().fg(theme.border()))
@@ -96,20 +96,51 @@ fn render_sidebar(frame: &mut Frame, area: Rect, theme: &Theme) {
     };
     let item = |s: &str| Line::styled(format!("  {s}"), Style::default().fg(theme.muted()));
 
-    let lines = vec![
-        heading("PROJECTS"),
-        item("(none detected)"),
-        Line::from(""),
-        heading("DEVICES"),
-        item("(refresh in Phase 2)"),
-        Line::from(""),
-        heading("SESSIONS"),
-        item("none running"),
-        Line::from(""),
-        heading("ACTIONS"),
-        item("Doctor · Settings"),
-    ];
+    let mut lines = vec![heading("PROJECTS")];
+    lines.extend(project_lines(state, theme));
+    lines.push(Line::from(""));
+    lines.push(heading("DEVICES"));
+    lines.push(item("(refresh in Phase 2)"));
+    lines.push(Line::from(""));
+    lines.push(heading("SESSIONS"));
+    lines.push(item("none running"));
+    lines.push(Line::from(""));
+    lines.push(heading("ACTIONS"));
+    lines.push(item("Doctor · Settings"));
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// One line per detected project (F5 bounded-walk detection); the active one
+/// (`state.project_root`, first found for now — a full switcher is Phase 2)
+/// gets the hover chevron and accent color, the rest render muted.
+fn project_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
+    if state.projects.is_empty() {
+        return vec![Line::styled(
+            "  (none detected)",
+            Style::default().fg(theme.muted()),
+        )];
+    }
+    state
+        .projects
+        .iter()
+        .map(|project| {
+            let name = project
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| project.to_string_lossy().to_string());
+            let active = state.project_root.as_deref() == Some(project.as_path());
+            if active {
+                Line::styled(
+                    format!(" {} {name}", theme.icons.chevron()),
+                    Style::default()
+                        .fg(theme.accent())
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Line::styled(format!("   {name}"), Style::default().fg(theme.muted()))
+            }
+        })
+        .collect()
 }
 
 fn render_main(frame: &mut Frame, area: Rect, _state: &AppState, theme: &Theme) {
