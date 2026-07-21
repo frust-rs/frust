@@ -1036,7 +1036,9 @@ where
                 // paint/encode vs present. Its own latch (not `first_frame_recorded`)
                 // because a first encode can precede the first present across an
                 // intervening `Redraw` reconfigure frame.
-                if matches!(encode_outcome, Ok(EncodeOutcome::Encoded)) && !self.first_encode_recorded {
+                if matches!(encode_outcome, Ok(EncodeOutcome::Encoded))
+                    && !self.first_encode_recorded
+                {
                     self.startup_spans.record(SPAN_FIRST_ENCODE_DONE);
                     self.first_encode_recorded = true;
                 }
