@@ -460,9 +460,10 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     first_rebuild_recorded: bool,
     /// Whether `SPAN_FIRST_ENCODE_DONE` has already been recorded - the shell
     /// encodes every redraw-requested frame, but the first-frame-decomposition
-    /// span (task 10.A) is only meaningful once, for the app's first encode.
-    /// Distinct from `first_frame_recorded` because a first encode can precede
-    /// the first successful present (an intervening `Redraw` reconfigure frame).
+    /// span (task 10.A) is only meaningful once, for the app's first encode when
+    /// something was actually encoded. Distinct from `first_frame_recorded`
+    /// because a first encode can precede the first successful present
+    /// (an intervening `Redraw` reconfigure frame).
     first_encode_recorded: bool,
     /// Whether `SPAN_FIRST_FRAME_PRESENTED` has already been recorded (and
     /// `StartupSpans::emit_log` fired) - set on the first
@@ -1030,11 +1031,12 @@ where
                 let encode_dur = encode_start.elapsed();
 
                 // First-frame decomposition (task 10.A): stamp the first frame's
-                // encode-complete boundary once, so the startup line splits the
-                // first frame into paint/encode vs present. Its own latch (not
-                // `first_frame_recorded`) because a first encode can precede the
-                // first present across an intervening `Redraw` reconfigure frame.
-                if !self.first_encode_recorded {
+                // encode-complete boundary once (only when something was actually
+                // encoded), so the startup line splits the first frame into
+                // paint/encode vs present. Its own latch (not `first_frame_recorded`)
+                // because a first encode can precede the first present across an
+                // intervening `Redraw` reconfigure frame.
+                if matches!(encode_outcome, Ok(EncodeOutcome::Encoded)) && !self.first_encode_recorded {
                     self.startup_spans.record(SPAN_FIRST_ENCODE_DONE);
                     self.first_encode_recorded = true;
                 }
