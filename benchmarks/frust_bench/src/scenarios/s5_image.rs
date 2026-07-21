@@ -100,6 +100,22 @@ const TOTAL_ITEMS: usize = S5_IMAGE_COUNT as usize * CYCLES;
 const ITEM_EXTENT: f64 = S5_IMAGE_SIZE as f64 + 16.0;
 /// Padding around each cell's image (matches Flutter's `Padding(all: 8)`).
 const CELL_PAD: f64 = 8.0;
+/// Fixed cell height (the vertical-axis half of the layout-parity contract
+/// below; the width half is computed from the live viewport in `layout`).
+const CELL_HEIGHT: f64 = S5_IMAGE_SIZE as f64;
+
+// # Layout parity (v2, 2026-07-21)
+//
+// The Flutter side's `_ImageCell` *asks* for a `SizedBox(width: s5ImageSize,
+// height: s5ImageSize)`, but a vertical `ListView` imposes **tight cross-axis
+// constraints** on its children, so the `SizedBox`'s width request is
+// overridden: the cell actually renders `(viewportWidth − 16) × 256` with
+// `BoxFit.cover` — edge-to-edge. This module previously rendered the literal
+// 256×256 (≈66% width on a ~390dp phone), compositing ~⅓ fewer pixels than
+// Flutter per frame — an unfair advantage. The parity target is Flutter's
+// *actual rendered geometry*: cell = `(viewport.width − 2·CELL_PAD) ×
+// CELL_HEIGHT`, `ImageFit::Cover`. Results captured before this date used
+// the narrow frust cell and are not comparable for S5.
 /// Extra items materialized above/below the viewport.
 const BUFFER_ITEMS: isize = 1;
 
@@ -359,6 +375,11 @@ struct ImageStreamWidget {
     image_widgets: HashMap<u64, Box<dyn Widget>>,
     offset: f64,
     viewport: Size,
+    /// The current per-cell image box — `(viewport.width − 2·CELL_PAD) ×
+    /// CELL_HEIGHT`, per the layout-parity contract above. Recomputed in
+    /// `layout` (cached widgets are re-laid-out when it changes) and read by
+    /// `paint`.
+    cell_size: Size,
     window: (usize, usize),
     script_ms: f64,
     last_frame: Option<FrameTime>,
@@ -442,6 +463,7 @@ impl<State: 'static> View<State> for ImageStream {
             image_widgets: HashMap::new(),
             offset: 0.0,
             viewport: Size::ZERO,
+            cell_size: Size::ZERO,
             window: (0, 0),
             script_ms: 0.0,
             last_frame: None,
@@ -494,7 +516,17 @@ impl Widget for ImageStreamWidget {
         let (start, end) = self.desired_window();
         self.window = (start, end);
 
-        let cell_size = Size::new(S5_IMAGE_SIZE as f64, S5_IMAGE_SIZE as f64);
+        // Layout-parity contract (see the constants above): the image box is
+        // full viewport width minus the padding, not the image's natural size.
+        let cell_size = Size::new((vw - 2.0 * CELL_PAD).max(0.0), CELL_HEIGHT);
+        if cell_size != self.cell_size {
+            self.cell_size = cell_size;
+            // Viewport width changed (or first layout): re-lay-out every
+            // cached image widget to the new tight cell box.
+            for w in self.image_widgets.values_mut() {
+                w.layout(ctx, &BoxConstraints::tight(cell_size));
+            }
+        }
         for index in start..end {
             let id = (index as u64) % S5_IMAGE_COUNT;
             if !self.image_widgets.contains_key(&id)
@@ -525,7 +557,7 @@ impl Widget for ImageStreamWidget {
         self.advance_script(ctx.frame_time());
 
         let (start, end) = self.window;
-        let cell_size = Size::new(S5_IMAGE_SIZE as f64, S5_IMAGE_SIZE as f64);
+        let cell_size = self.cell_size;
         for index in start..end {
             let y = index as f64 * ITEM_EXTENT - self.offset;
             if y + ITEM_EXTENT < 0.0 || y > self.viewport.height {

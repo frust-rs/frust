@@ -1,4 +1,12 @@
-raw/oneplus9/
-raw/iphone_se/
+# Raw per-run series under raw/<device>/... ARE committed (they back every
+# RESULTS.md table). run.sh sanitizes each runN.log at capture time to ONLY
+# the perf/marker lines stats.py parses (frust-perf / flutter-perf /
+# bench-scenario-*) — full-device logcat never persists. Before committing a
+# new batch, verify the whitelist held:
+#   grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^$' raw/  (expect no output)
+# Transient capture scratch (pre-sanitize) — never committed:
+*.unfiltered
+*.console.txt
+*.container.txt
 .pss_before.txt
 .pss_after.txt

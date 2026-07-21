@@ -510,11 +510,18 @@ for i in $(seq 1 "${RUNS}"); do
   # `logcat -v raw` emits bare messages (no timestamp/pid/tag), matching
   # what a Rust `log::info!`/Dart print call actually wrote, which is what
   # stats.py's raw-line parser expects to find.
-  adb -s "${DEVICE}" logcat -v raw >"${run_log}" 2>/dev/null &
+  adb -s "${DEVICE}" logcat -v raw >"${run_log}.unfiltered" 2>/dev/null &
   logcat_pid=$!
   sleep "${DURATION}"
   kill "${logcat_pid}" >/dev/null 2>&1 || true
   wait "${logcat_pid}" 2>/dev/null || true
+  # Sanitize before anything persists: full-device logcat can carry other
+  # apps'/system lines (a privacy leak if committed). Keep ONLY the
+  # perf/marker lines stats.py parses — same whitelist the iOS capture
+  # paths already apply — so runN.log is always safe to commit to git.
+  grep -aE 'frust-perf|flutter-perf|bench-scenario' "${run_log}.unfiltered" \
+    >"${run_log}" 2>/dev/null || : >"${run_log}"
+  rm -f "${run_log}.unfiltered"
 
   adb_shell dumpsys meminfo "${PKG}" >"${pss_after}" 2>/dev/null \
     || echo "note: could not capture post-run PSS — non-fatal" >&2

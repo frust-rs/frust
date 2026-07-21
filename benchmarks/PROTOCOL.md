@@ -295,6 +295,18 @@ via a launch arg / deep link so one binary drives the whole matrix):
   `flutter_bench/lib/bench/datasets.dart` (mirrored in the frust side's
   `s1_animation/physics.rs`).
 
+### S5-specific notes
+
+- **Cell layout parity is v2 (2026-07-21).** The reference geometry is what
+  Flutter *actually renders*: a vertical `ListView` imposes tight cross-axis
+  constraints, overriding `_ImageCell`'s `SizedBox(width: 256)` — each image
+  paints `(viewportWidth − 16) × 256` (`BoxFit.cover`), edge-to-edge. The
+  frust scenario originally painted the literal 256×256 (≈66% width),
+  compositing ~⅓ fewer pixels per frame; from v2 it mirrors the full-width
+  geometry (`(viewport.width − 2·pad) × 256`, `ImageFit::Cover`). S5 numbers
+  captured before this date are not cross-app comparable and were retired
+  with the 2026-07-21 results reset.
+
 ### S7-specific notes
 
 - Frust's own `StartupSpans` (`native_lib_load`, `init_entry`,
