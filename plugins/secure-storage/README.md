@@ -171,6 +171,19 @@ prompt) — safe to call anywhere to decide whether to offer a gated flow.
 - **Physical device required.** The iOS Simulator cannot render the biometric
   prompt and the Android emulator needs an enrolled fingerprint; the gate is a
   physical-device feature.
+- **Apple `set()` overwrite protection is asymmetric by store kind.** A
+  **plain** store's overwrite can never downgrade an existing item's
+  protection — it updates only the value data, leaving a pre-existing
+  gated item's `SecAccessControl` (or a plain item's accessibility) exactly
+  as it was. A **gated** store's overwrite instead re-asserts protection on
+  every write (Keychain delete + re-add, since `kSecAttrAccessControl`
+  can't be mutated in place) — so a key first written while the store was
+  plain gets the gate the moment it's rewritten through a gated store. The
+  residual limitation: a key that is only ever **read**, never rewritten,
+  after switching a store from plain to gated keeps its old, unprotected
+  posture indefinitely — the gate only re-asserts on a write. Retroactively
+  protecting an existing store means rewriting (`get` + `set`) every key,
+  not just reopening it gated.
 
 ---
 

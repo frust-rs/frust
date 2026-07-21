@@ -25,9 +25,29 @@
 //! ([`WhenUnlocked`](Accessibility::WhenUnlocked) →
 //! `kSecAttrAccessibleWhenUnlocked`, the flutter_secure_storage-parity
 //! default; [`AfterFirstUnlock`](Accessibility::AfterFirstUnlock) →
-//! `kSecAttrAccessibleAfterFirstUnlock`). It is applied when an item is first
-//! added; a later overwrite updates only the value data, leaving the
-//! item's original accessibility in place.
+//! `kSecAttrAccessibleAfterFirstUnlock`). It is applied when an item is
+//! first added; an overwrite's handling of the protection posture is
+//! **asymmetric by store kind**, deliberately:
+//!
+//! - A **plain** (`auth: None`) store's overwrite updates only the value
+//!   data (`SecItemUpdate`), leaving the item's original accessibility (or
+//!   a pre-existing gated item's `SecAccessControl`) untouched — a plain
+//!   `set` must never silently strip a gated item's protection.
+//! - A **gated** (`auth: Some`) store's overwrite instead deletes and
+//!   re-adds the item, re-using the freshly built protection pair — Keychain
+//!   does not reliably support mutating `kSecAttrAccessControl` via
+//!   `SecItemUpdate` (write-once-at-creation), so delete+re-add is the
+//!   ecosystem-wide convention. This is what lets a key first written while
+//!   the store was plain (or under stale gate flags) pick up the *current*
+//!   `AuthOptions`-derived protection the moment it's rewritten through a
+//!   gated store, rather than keeping whatever posture it was created
+//!   under. See [`Backend::set`]'s `errSecDuplicateItem` arm.
+//!
+//! The residual limitation: a key only ever **read** (never rewritten)
+//! after a plain→gated switch keeps its old, unprotected posture — the
+//! re-assertion above only fires on a write. Retroactive protection for an
+//! existing store requires rewriting (`get` + `set`) every key, not just
+//! reopening the store gated.
 //!
 //! # Biometric gate (S05, Plan Phase 5)
 //!
@@ -55,6 +75,15 @@
 //! only exercised by a **physical-device manual gate** — the Simulator
 //! cannot render the biometric prompt (`docs/DEVELOPMENT.md`), and an
 //! unauthenticated (`auth: None`) store is unaffected (host conformance).
+//! The write side of the gate has the same host limitation, one step
+//! further: on an unsigned/ad-hoc-signed host binary (no `TeamIdentifier`,
+//! e.g. a plain `cargo test`/`cargo run`), `SecItemAdd`ing *any*
+//! `kSecAttrAccessControl`-protected item — not just a gated read —
+//! fails `errSecMissingEntitlement` (-34018), confirmed independent of any
+//! particular code path here. A gated store's `set()` is host-conformance-
+//! tested only up to that documented, expected failure (see
+//! `apple::tests::gated_set_reprotects_plain_item`); a real gated write is
+//! a signed-app-or-physical-device feature like the read side.
 //!
 //! A gated LAContext value is an Objective-C object, not a CoreFoundation
 //! type; passing it into the CF keychain query dictionary needs one confined,
@@ -334,8 +363,52 @@ impl Backend for AppleStore {
         let status = unsafe { SecItemAdd(as_dict(&add), std::ptr::null_mut()) };
         match status {
             errSecSuccess => Ok(()),
-            // The item already exists — update only its value data, leaving
-            // the original accessibility posture untouched.
+            // The item already exists. A gated store re-asserts protection
+            // (delete + re-add — see below); a plain store keeps the
+            // existing value-only update.
+            errSecDuplicateItem if self.auth.is_some() => {
+                // Keychain does not reliably support mutating
+                // `kSecAttrAccessControl` via `SecItemUpdate` — it's a
+                // write-once-at-creation attribute, so the ecosystem-wide
+                // convention (and this store's) is delete-then-re-add,
+                // re-using `add` above (it already carries the correct
+                // protection pair: a fresh `SecAccessControl` built from
+                // this store's current `AuthOptions`). This is how a plain
+                // item written before the store was reopened gated (or a
+                // stale-flags gated item) picks up the current protection
+                // on every write, rather than keeping whatever posture it
+                // was created under.
+                let query = dict(&[
+                    (as_type(class), as_type(generic_pw)),
+                    (as_type(service_k), as_type(&*service)),
+                    (as_type(account_k), as_type(&*account)),
+                ]);
+                // SAFETY: `query` is a valid CFDictionary of CF values.
+                let del_status = unsafe { SecItemDelete(as_dict(&query)) };
+                if del_status != errSecSuccess && del_status != errSecItemNotFound {
+                    return Err(map_status(del_status));
+                }
+                // SAFETY: `add` is a valid CFDictionary of CF values; null
+                // result pointer (we don't need a reference to the added
+                // item).
+                let add_status = unsafe { SecItemAdd(as_dict(&add), std::ptr::null_mut()) };
+                if add_status == errSecSuccess {
+                    Ok(())
+                } else {
+                    // Distinct from `map_status`: the delete already
+                    // succeeded, so this is no longer a value-preserving
+                    // update — the item may now be entirely absent rather
+                    // than left at its old value.
+                    Err(SecureStorageError::Storage(format!(
+                        "keychain re-add after delete failed during gated set — item may now be absent: {}",
+                        describe(add_status)
+                    )))
+                }
+            }
+            // Plain store: update only the value data, leaving the
+            // original accessibility posture untouched. A plain-store
+            // overwrite must never delete-and-strip a pre-existing gated
+            // item's protection — only a gated store (above) re-asserts it.
             errSecDuplicateItem => {
                 let query = dict(&[
                     (as_type(class), as_type(generic_pw)),
@@ -716,6 +789,87 @@ mod tests {
         backend.set("token", "value").unwrap();
         assert_eq!(backend.get("token").unwrap(), Some("value".to_string()));
         assert!(backend.contains("token").unwrap());
+
+        backend.clear().unwrap();
+        assert_eq!(backend.get("token").unwrap(), None);
+    }
+
+    /// Fix F2 (review M2): a value written while a store is **plain** gets
+    /// its Keychain protection re-asserted the moment it's overwritten
+    /// through a **gated** store opened on the same service — exercising
+    /// the `errSecDuplicateItem` arm's gated delete+re-add path. Host-safe:
+    /// `set()` never attaches an `LAContext` (only a gated `get()` does —
+    /// see the module doc's *Biometric gate*), so this triggers no prompt
+    /// either way.
+    ///
+    /// This host (an unsigned/ad-hoc-signed `cargo test` binary, no
+    /// `TeamIdentifier`) cannot actually create a `kSecAttrAccessControl`
+    /// item at all — even a fresh, non-duplicate `SecItemAdd` with an
+    /// access-control pair fails `errSecMissingEntitlement` (-34018),
+    /// confirmed independent of this fix (same failure on the unmodified
+    /// success-path `SecItemAdd` a few lines above the `errSecDuplicateItem`
+    /// arm this fix touches) — a stronger, write-side sibling of the
+    /// module doc's already-documented gated-*read* physical-device-only
+    /// caveat. So the exact outcome this test can assert on *this* host is
+    /// that the gated overwrite exercises the delete+re-add branch to
+    /// completion (the prior plain item is gone either way) and fails with
+    /// exactly that documented, expected status — not a panic, not a
+    /// different error, and not a silent success that skipped the branch.
+    /// On a properly entitled/signed host (or a real device) the same
+    /// assertions accept `Ok(())` instead. The ACL contents themselves are
+    /// never assertable through any public API (per the task's constraint).
+    #[test]
+    fn gated_set_reprotects_plain_item() {
+        let store = format!("{}.gate-reprotect", unique_run());
+        let plain = AppleStore::new(&store, Accessibility::WhenUnlocked, None);
+        plain.clear().unwrap();
+
+        // Write while plain — a normal, unprotected-accessibility item.
+        plain.set("token", "v1").unwrap();
+
+        // Reopen the same service gated and overwrite: this must hit the
+        // `errSecDuplicateItem` arm's gated branch (delete the plain item,
+        // re-add with the fresh `SecAccessControl`).
+        let gated = AppleStore::new(
+            &store,
+            Accessibility::WhenUnlocked,
+            Some(AuthOptions::default()),
+        );
+        match gated.set("token", "v2") {
+            Ok(()) => {}
+            Err(SecureStorageError::Storage(msg)) => {
+                assert!(
+                    msg.contains("missing keychain entitlement") || msg.contains("-34018"),
+                    "expected the documented missing-entitlement failure for a \
+                     `SecAccessControl` item on this unsigned host, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Ok or a Storage(missing entitlement), got: {other:?}"),
+        }
+
+        // Either way the delete already ran — the plain item is gone.
+        // Belt-and-braces cleanup via the plain handle's service-scoped
+        // clear (delete-by-query needs no authentication context).
+        plain.clear().unwrap();
+    }
+
+    /// Regression guard for the asymmetry above: a **plain** store's
+    /// overwrite must still be the original value-only `SecItemUpdate` path
+    /// (never delete+re-add) — i.e. the plain conformance arm stays green
+    /// after the gated-arm change. `conformance` above already exercises a
+    /// plain-store `set`-then-overwrite via [`crate::conformance`]'s
+    /// generic suite; this asserts the same directly against a repeated
+    /// `set` on one plain-store key.
+    #[test]
+    fn plain_set_overwrite_still_value_only_update() {
+        let store = format!("{}.plain-overwrite", unique_run());
+        let backend = AppleStore::new(&store, Accessibility::WhenUnlocked, None);
+        backend.clear().unwrap();
+
+        backend.set("token", "v1").unwrap();
+        assert_eq!(backend.get("token").unwrap(), Some("v1".to_string()));
+        backend.set("token", "v2").unwrap();
+        assert_eq!(backend.get("token").unwrap(), Some("v2".to_string()));
 
         backend.clear().unwrap();
         assert_eq!(backend.get("token").unwrap(), None);
