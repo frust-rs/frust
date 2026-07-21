@@ -1,0 +1,296 @@
+bench-scenario-start s3
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=5 build_us=256 raster_us=14686 total_us=11373
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=7 build_us=3237 raster_us=3508 total_us=3204
+flutter-perf raw n=9 build_us=266 raster_us=3727 total_us=469
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=11 build_us=2472 raster_us=1719 total_us=2922
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=13 build_us=3516 raster_us=2530 total_us=2760
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=15 build_us=1423 raster_us=897 total_us=-1081
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=17 build_us=8473 raster_us=1224 total_us=6081
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=19 build_us=8257 raster_us=1423 total_us=6248
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=21 build_us=3184 raster_us=1762 total_us=1602
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=23 build_us=2912 raster_us=1925 total_us=1550
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=25 build_us=1428 raster_us=968 total_us=-1013
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=27 build_us=6557 raster_us=1328 total_us=4373
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=29 build_us=7053 raster_us=1103 total_us=4750
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=31 build_us=2990 raster_us=1853 total_us=1442
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=33 build_us=2650 raster_us=1864 total_us=1257
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=35 build_us=1466 raster_us=973 total_us=-904
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=37 build_us=9608 raster_us=1140 total_us=7376
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=39 build_us=7766 raster_us=1238 total_us=5582
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=41 build_us=1513 raster_us=882 total_us=-1256
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=43 build_us=3109 raster_us=1804 total_us=1513
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=45 build_us=1686 raster_us=1212 total_us=-444
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=47 build_us=9594 raster_us=1268 total_us=7538
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=49 build_us=7264 raster_us=1258 total_us=5046
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=51 build_us=2810 raster_us=1790 total_us=1206
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=53 build_us=2958 raster_us=1723 total_us=1241
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=55 build_us=1473 raster_us=1021 total_us=-944
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=57 build_us=4984 raster_us=948 total_us=2470
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=59 build_us=5793 raster_us=1173 total_us=6217
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=61 build_us=3151 raster_us=1840 total_us=1609
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=63 build_us=2894 raster_us=1641 total_us=1083
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=65 build_us=1470 raster_us=926 total_us=-1004
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=67 build_us=11287 raster_us=1292 total_us=9164
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=69 build_us=8204 raster_us=1380 total_us=6216
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=71 build_us=3026 raster_us=1926 total_us=1598
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=73 build_us=3152 raster_us=1864 total_us=1661
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=75 build_us=1430 raster_us=903 total_us=-1077
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=77 build_us=10532 raster_us=1382 total_us=8450
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=79 build_us=9558 raster_us=1319 total_us=7419
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=81 build_us=3007 raster_us=1748 total_us=1403
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=83 build_us=2967 raster_us=1945 total_us=1610
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=85 build_us=1475 raster_us=953 total_us=-938
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=87 build_us=10503 raster_us=1275 total_us=8342
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=89 build_us=7627 raster_us=1071 total_us=5291
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=91 build_us=2887 raster_us=1786 total_us=1223
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=93 build_us=3030 raster_us=1965 total_us=1647
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=95 build_us=1427 raster_us=970 total_us=-908
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=97 build_us=10574 raster_us=1365 total_us=8460
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=99 build_us=6443 raster_us=1145 total_us=4033
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=101 build_us=3023 raster_us=1806 total_us=1393
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=103 build_us=2671 raster_us=1717 total_us=973
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=105 build_us=1498 raster_us=999 total_us=-683
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=107 build_us=10681 raster_us=1356 total_us=8520
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=109 build_us=6883 raster_us=1259 total_us=4793
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=111 build_us=3216 raster_us=1763 total_us=1636
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=113 build_us=3133 raster_us=1997 total_us=1733
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=115 build_us=1336 raster_us=865 total_us=-1207
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=117 build_us=10655 raster_us=1387 total_us=8745
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=119 build_us=4153 raster_us=969 total_us=3938
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=121 build_us=3079 raster_us=1853 total_us=1514
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=123 build_us=3112 raster_us=1746 total_us=1512
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=125 build_us=1496 raster_us=936 total_us=-987
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=127 build_us=11137 raster_us=1252 total_us=8923
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=129 build_us=8889 raster_us=1454 total_us=6935
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=131 build_us=3211 raster_us=1976 total_us=3396
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=133 build_us=2952 raster_us=1785 total_us=1564
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=135 build_us=1488 raster_us=904 total_us=-1000
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=137 build_us=10944 raster_us=1284 total_us=8771
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=139 build_us=6981 raster_us=1160 total_us=4696
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=141 build_us=3190 raster_us=1797 total_us=1709
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=143 build_us=2812 raster_us=1855 total_us=1323
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=145 build_us=1525 raster_us=993 total_us=-903
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=147 build_us=5783 raster_us=954 total_us=3294
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=149 build_us=5476 raster_us=1078 total_us=6411
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=151 build_us=3127 raster_us=1756 total_us=1481
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=153 build_us=2790 raster_us=1843 total_us=1356
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=155 build_us=1475 raster_us=1001 total_us=-881
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=157 build_us=4315 raster_us=902 total_us=1819
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=159 build_us=5848 raster_us=1103 total_us=6130
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=161 build_us=3104 raster_us=1766 total_us=1506
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=163 build_us=2893 raster_us=1939 total_us=1434
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=165 build_us=1185 raster_us=788 total_us=-1483
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=167 build_us=10641 raster_us=1398 total_us=8796
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=169 build_us=6945 raster_us=1313 total_us=8296
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=171 build_us=1659 raster_us=1852 total_us=-179
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=173 build_us=2898 raster_us=1713 total_us=1183
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=175 build_us=1470 raster_us=1015 total_us=-936
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=177 build_us=10136 raster_us=1376 total_us=8194
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=179 build_us=7667 raster_us=1249 total_us=5528
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=181 build_us=3005 raster_us=1956 total_us=1652
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=183 build_us=2860 raster_us=1833 total_us=1252
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=185 build_us=1439 raster_us=908 total_us=-1065
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=187 build_us=10975 raster_us=1355 total_us=8898
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=189 build_us=6930 raster_us=1122 total_us=4556
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=191 build_us=3103 raster_us=1912 total_us=1613
+bench-scenario-start s3-swap
+bench-scenario-end s3-swap
+flutter-perf raw n=193 build_us=3081 raster_us=1899 total_us=1619
+bench-scenario-start s3-clear
+bench-scenario-end s3-clear
+flutter-perf raw n=195 build_us=1433 raster_us=882 total_us=-1111
+bench-scenario-start s3-create1k
+bench-scenario-end s3-create1k
+flutter-perf raw n=197 build_us=4214 raster_us=837 total_us=1388
+bench-scenario-start s3-create10k
+bench-scenario-end s3-create10k
+flutter-perf raw n=199 build_us=4117 raster_us=900 total_us=1410
+bench-scenario-start s3-update
+bench-scenario-end s3-update
+flutter-perf raw n=201 build_us=3079 raster_us=1778 total_us=1509

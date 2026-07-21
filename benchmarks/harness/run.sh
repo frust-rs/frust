@@ -287,10 +287,37 @@ ios_default_bundle() {
 }
 
 # Terminate any running instance of the app (best-effort — a not-running app
-# is not an error).
+# is not an error). Xcode 26's devicectl dropped `terminate --pid-of <bundle>`
+# (it now requires `--pid <pid>`), so resolve the app's pid by matching the
+# running process's executable URL against the bundle's installation URL
+# (`device info apps` / `device info processes` JSON output).
 ios_terminate() {
-  xcrun devicectl device process terminate --device "${DEVICE}" \
-    --pid-of "$1" >/dev/null 2>&1 || true
+  local bundle="$1" apps_json procs_json pid
+  apps_json="$(mktemp)"
+  procs_json="$(mktemp)"
+  xcrun devicectl device info apps --device "${DEVICE}" \
+    --bundle-id "${bundle}" --json-output "${apps_json}" >/dev/null 2>&1 || true
+  xcrun devicectl device info processes --device "${DEVICE}" \
+    --json-output "${procs_json}" >/dev/null 2>&1 || true
+  pid="$(python3 - "${apps_json}" "${procs_json}" <<'PY' 2>/dev/null
+import json, sys
+try:
+    apps = json.load(open(sys.argv[1]))["result"]["apps"]
+    procs = json.load(open(sys.argv[2]))["result"]["runningProcesses"]
+    url = apps[0]["url"]  # file:///private/var/containers/Bundle/Application/<UUID>/X.app/
+    for p in procs:
+        if p.get("executable", "").startswith(url):
+            print(p["processIdentifier"])
+            break
+except Exception:
+    pass
+PY
+)"
+  if [ -n "${pid}" ]; then
+    xcrun devicectl device process terminate --device "${DEVICE}" \
+      --pid "${pid}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${apps_json}" "${procs_json}"
 }
 
 # frust capture: launch with the scenario+trace env dict delivered to the
@@ -306,6 +333,13 @@ ios_capture_frust() {
   launch_pid=$!
   sleep "${DURATION}"
   ios_terminate "${bundle}"
+  # Give the `--console` stream time to drain its buffered tail and exit
+  # naturally once the app dies (an immediate kill truncates the capture);
+  # fall back to kill only if it hasn't exited after the grace window.
+  for _ in $(seq 1 15); do
+    kill -0 "${launch_pid}" 2>/dev/null || break
+    sleep 1
+  done
   kill "${launch_pid}" >/dev/null 2>&1 || true
   wait "${launch_pid}" 2>/dev/null || true
   grep -aE 'frust-perf|flutter-perf|bench-scenario' "${raw}" >"${run_log}" 2>/dev/null || true
