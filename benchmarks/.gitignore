@@ -1,12 +1,15 @@
-# Raw per-run series under raw/<device>/... ARE committed (they back every
-# RESULTS.md table). run.sh sanitizes each runN.log at capture time to ONLY
-# the perf/marker lines stats.py parses (frust-perf / flutter-perf /
-# bench-scenario-*) — full-device logcat never persists. Before committing a
-# new batch, verify the whitelist held:
-#   grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^$' raw/  (expect no output)
+# Raw per-run artifacts under raw/<device>/... ARE committed (they back every
+# RESULTS.md table):
+#   runN.log        — sanitized by run.sh at capture time to ONLY the
+#                     perf/marker lines stats.py parses (frust-perf /
+#                     flutter-perf / bench-scenario-*). Full-device logcat
+#                     never persists.
+#   *.pss_*.txt     — `dumpsys meminfo <our bench pkg>` snapshots (S7 memory
+#                     axis); scoped to our own app's process only.
+# Pre-commit verification (conductor runs both):
+#   grep -rlvE 'frust-perf|flutter-perf|bench-scenario|^[[:space:]]*$' raw/ --include='*.log'   (expect no output)
+#   scan *.pss_*.txt for any package identifier other than it.f0x.*bench     (expect none)
 # Transient capture scratch (pre-sanitize) — never committed:
 *.unfiltered
 *.console.txt
 *.container.txt
-.pss_before.txt
-.pss_after.txt

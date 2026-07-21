@@ -1,0 +1,58 @@
+Applications Memory Usage (in Kilobytes):
+Uptime: 130092511 Realtime: 1359004171
+
+** MEMINFO in pid 7870 [it.f0x.flutter_bench] **
+                   Pss  Private  Private  SwapPss      Rss     Heap     Heap     Heap
+                 Total    Dirty    Clean    Dirty    Total     Size    Alloc     Free
+                ------   ------   ------   ------   ------   ------   ------   ------
+  Native Heap    13495    13480        0       18    14816    22272    16033     2372
+  Dalvik Heap     1195     1184        0       60     2240    27069     2493    24576
+ Dalvik Other     7782     1876        0        0    14008                           
+        Stack     1164     1164        0        0     1168                           
+       Ashmem       10        0        0        0      768                           
+      Gfx dev      556      556        0        0      560                           
+    Other dev      188        0       20        0      908                           
+     .so mmap     7103      232     4444        4    41748                           
+    .jar mmap     2032        0      524        0    45372                           
+    .apk mmap    13402      428    12804        0    14628                           
+    .ttf mmap     7615        0     6980        0     8576                           
+    .dex mmap    10656    10648        0        0    11552                           
+    .oat mmap       16        0        0        0     1644                           
+    .art mmap    11084     8904     1772       67    25224                           
+   Other mmap     3678        4     3344        0     4928                           
+      Unknown    14154    14044       84        4    14884                           
+        TOTAL    94283    52520    29972      153   203024    49341    18526    26948
+ 
+ App Summary
+                       Pss(KB)                        Rss(KB)
+                        ------                         ------
+           Java Heap:    11860                          27464
+         Native Heap:    13480                          14816
+                Code:    36132                         135400
+               Stack:     1164                           1168
+            Graphics:      556                            560
+       Private Other:    19300
+              System:    11791
+             Unknown:                                   23616
+ 
+           TOTAL PSS:    94283            TOTAL RSS:   203024       TOTAL SWAP PSS:      153
+ 
+ Objects
+               Views:        6         ViewRootImpl:        1
+         AppContexts:        5           Activities:        1
+              Assets:       33        AssetManagers:        0
+       Local Binders:       19        Proxy Binders:       58
+       Parcel memory:        5         Parcel count:       20
+    Death Recipients:        0             WebViews:        0
+ 
+ Native Allocations
+                         Count                       Total(kB)
+                        ------                         ------
+    Other (malloced):      360                             32
+ Other (nonmalloced):       82                             60
+ 
+ SQL
+         MEMORY_USED:        0
+  PAGECACHE_OVERFLOW:        0          MALLOC_SIZE:        0
+ 
+ 
