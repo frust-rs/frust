@@ -1,10 +1,15 @@
 # Frust - Development Guide
 
+The canonical test-tier, golden-image, headless GPU, and Android emulator
+runbook is `docs/TESTING.md`. This guide retains the concise build/test commands
+and platform prerequisites used during ordinary development.
+
 ## Prerequisites
 
 - Rust 1.88+ (workspace `rust-version`), edition 2024.
-- macOS with Metal for the GPU smoke gate (`frust-render`'s `--ignored`
-  test); other platforms can build and run the non-GPU suite.
+- A real Metal or Vulkan adapter for the GPU smoke gate (`frust-render`'s
+  `--ignored` test). Headless Vulkan needs no display server; see
+  `docs/TESTING.md`. Other hosts can build and run the non-GPU suite.
 - **Android** (only needed for `frust run`/`build`/`create`'s Android output):
   `rustup target add aarch64-linux-android`; `cargo install cargo-ndk`
   (tested with 4.x); JDK 17+ on `JAVA_HOME` (Android Studio's bundled JBR is
@@ -460,8 +465,9 @@ The codebase is formatted with `rustfmt` using default settings (no
 
 An Apple-Silicon Android emulator's default (hardware) GPU path segfaults on
 `vkQueueSubmit` in the emulator's gfxstream/MoltenVK Vulkan driver (an
-emulator/driver limitation, not a Frust bug). Use a physical device, or
-boot with `-gpu swiftshader_indirect` (software Vulkan; slower but correct).
+emulator/driver limitation, not a Frust bug). Use a physical device, or boot
+with `-gpu swiftshader` (software Vulkan; slower but correct). The older
+`swiftshader_indirect` spelling is deprecated by current emulator releases.
 
 ### iOS Simulator cannot render (vello 0.9 / wgpu 29)
 
