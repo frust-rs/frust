@@ -26,6 +26,27 @@ frust = { path = "{{ frust_path }}" }
 # the repo root and down into the plugin's own directory).
 frust-shared-preferences = { path = "{{ frust_path }}/../../plugins/shared-preferences" }
 
+# `log` facade dependency, present only so the release-only `lean` feature
+# below can raise the compiled-in log ceiling (release-lean build mode).
+# `frust-perf` instrumentation rides `log::info!`, so the ceiling MUST be a
+# release-only opt-in and never an always-on `features = [...]` line:
+# `release_max_level_*` keys off `debug_assertions`, which the
+# `[profile.profile]` inherits-release profile has OFF, so an unconditional
+# ceiling would also silence PROFILE-mode perf output — exactly the mode that
+# must keep it. The `frust` CLI enables `--features lean` for `--release`
+# builds only (riding the same features plumbing that turns on
+# `frust/perf-trace` for debug/profile), so release strips stray info/debug
+# log lines while keeping warn/error crash diagnostics, and profile keeps its
+# `frust-perf` output.
+log = "0.4"
+
+[features]
+# Release-lean log ceiling — see the `log` dependency above for why this is a
+# release-only opt-in rather than an unconditional manifest feature. The CLI
+# passes `--features lean` for `--release` builds; debug/profile builds omit
+# it (and enable `frust/perf-trace` instead).
+lean = ["log/release_max_level_warn"]
+
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
 # store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
 # (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`

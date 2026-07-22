@@ -480,10 +480,18 @@ fn drain_available_lines(
 /// The `cargo run` argv the desktop fallback spawns: always `run`, plus the
 /// build mode's cargo profile arg (`[]`/`--profile profile`/`--release`) so
 /// a `frust run --release`/`--profile` desktop preview builds in the
-/// requested profile instead of always debug.
+/// requested profile instead of always debug, plus the mode's cargo features
+/// (`--features frust/perf-trace` for debug/profile, `--features lean` for
+/// release — release-lean plan, task 04) so the desktop preview matches the
+/// device pipelines: instrumentation compiled IN for debug/profile, the log
+/// ceiling for release.
 fn desktop_cargo_run_args(info: &BuildInfo) -> Vec<&'static str> {
     let mut args = vec!["run"];
     args.extend_from_slice(info.mode.cargo_profile_arg());
+    for feature in info.mode.cargo_features() {
+        args.push("--features");
+        args.push(feature);
+    }
     args
 }
 
@@ -630,15 +638,43 @@ mod tests {
         let info = profile_info();
         assert_eq!(
             desktop_cargo_run_args(&info),
-            vec!["run", "--profile", "profile"]
+            vec![
+                "run",
+                "--profile",
+                "profile",
+                "--features",
+                "frust/perf-trace"
+            ]
         );
         let env = desktop_cargo_run_env(&info, None);
         assert!(env.contains(&("FRUST_TRACE", "1")), "{env:?}");
     }
 
     #[test]
-    fn desktop_cargo_run_args_default_debug_is_bare_run() {
-        assert_eq!(desktop_cargo_run_args(&debug_info()), vec!["run"]);
+    fn desktop_cargo_run_args_default_debug_carries_perf_trace_feature() {
+        // Debug desktop preview compiles instrumentation in via
+        // `--features frust/perf-trace` (release-lean plan, task 04).
+        assert_eq!(
+            desktop_cargo_run_args(&debug_info()),
+            vec!["run", "--features", "frust/perf-trace"]
+        );
+    }
+
+    #[test]
+    fn desktop_cargo_run_args_release_carries_lean_not_perf_trace() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                release: true,
+                ..Default::default()
+            }
+            .into_drive(),
+            BuildMode::Debug,
+        )
+        .unwrap();
+        assert_eq!(
+            desktop_cargo_run_args(&info),
+            vec!["run", "--release", "--features", "lean"]
+        );
     }
 
     #[test]
@@ -649,7 +685,7 @@ mod tests {
         // override set; desktop_cargo_run_env's own tests above cover the
         // env-pair construction itself.
         let runner = FakeProcessRunner::new().with(
-            "cargo run",
+            "cargo run --features frust/perf-trace",
             Output {
                 success: true,
                 stdout: String::new(),

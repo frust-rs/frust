@@ -36,11 +36,16 @@ fn capitalize(s: &str) -> String {
 
 /// Assembles the `-P` properties template 62's `build.gradle.kts.tmpl`
 /// consumes: `-Pfrust.targetPlatforms=<abi,csv>` (always),
-/// `-Pfrust.splitPerAbi=true|false` (APK only), and
-/// `-Pfrust.defines=<base64("K=V;K=V")>` when `defines` is non-empty.
+/// `-Pfrust.splitPerAbi=true|false` (APK only),
+/// `-Pfrust.defines=<base64("K=V;K=V")>` when `defines` is non-empty, and
+/// `-Pfrust.cargoFeatures=<base64("feat,feat")>` selecting `mode`'s cargo
+/// features (release-lean plan, task 04) — the exact seam `-Pfrust.defines`
+/// rides, so a feature flag can never fall foul of the Android release
+/// env-drop Known Issue (it's a build arg, not an environment variable).
 pub fn gradle_properties(
     target: &AndroidArtifact,
     defines: &HashMap<String, String>,
+    mode: BuildMode,
 ) -> Vec<String> {
     let mut props = Vec::new();
 
@@ -61,6 +66,10 @@ pub fn gradle_properties(
         props.push(format!("-Pfrust.defines={}", encode_defines(defines)));
     }
 
+    if let Some(features_b64) = encode_features(mode) {
+        props.push(format!("-Pfrust.cargoFeatures={features_b64}"));
+    }
+
     props
 }
 
@@ -77,6 +86,19 @@ fn encode_defines(defines: &HashMap<String, String>) -> String {
         .collect::<Vec<_>>()
         .join(";");
     base64_encode(joined.as_bytes())
+}
+
+/// Encodes `mode`'s cargo features (`BuildMode::cargo_features`) as
+/// `base64("feat,feat")` — the exact value template 62's `build.gradle.kts.tmpl`
+/// decodes with `Base64.getDecoder()` and appends to the cargo-ndk invocation
+/// as `--features <csv>`. `None` when the mode selects no features (never
+/// today — every mode selects at least one, but the caller stays tolerant).
+fn encode_features(mode: BuildMode) -> Option<String> {
+    let features = mode.cargo_features();
+    if features.is_empty() {
+        return None;
+    }
+    Some(base64_encode(features.join(",").as_bytes()))
 }
 
 const BASE64_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -192,29 +214,38 @@ mod tests {
     #[test]
     fn gradle_properties_apk_includes_target_platforms_and_split_per_abi() {
         let target = apk(&["arm64-v8a", "x86_64"], true);
-        let props = gradle_properties(&target, &HashMap::new());
+        let props = gradle_properties(&target, &HashMap::new(), BuildMode::Debug);
         assert_eq!(
             props,
             vec![
                 "-Pfrust.targetPlatforms=arm64-v8a,x86_64".to_string(),
                 "-Pfrust.splitPerAbi=true".to_string(),
+                // debug selects `frust/perf-trace`, base64-encoded.
+                "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ==".to_string(),
             ]
         );
     }
 
     #[test]
     fn gradle_properties_appbundle_always_requests_all_abis_and_omits_split_flag() {
-        let props = gradle_properties(&AndroidArtifact::Appbundle, &HashMap::new());
+        let props = gradle_properties(
+            &AndroidArtifact::Appbundle,
+            &HashMap::new(),
+            BuildMode::Debug,
+        );
         assert_eq!(
             props,
-            vec!["-Pfrust.targetPlatforms=arm64-v8a,armeabi-v7a,x86_64".to_string()]
+            vec![
+                "-Pfrust.targetPlatforms=arm64-v8a,armeabi-v7a,x86_64".to_string(),
+                "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ==".to_string(),
+            ]
         );
     }
 
     #[test]
     fn gradle_properties_omits_defines_prop_when_empty() {
         let target = apk(&["arm64-v8a"], false);
-        let props = gradle_properties(&target, &HashMap::new());
+        let props = gradle_properties(&target, &HashMap::new(), BuildMode::Debug);
         assert!(props.iter().all(|p| !p.starts_with("-Pfrust.defines=")));
     }
 
@@ -224,7 +255,7 @@ mod tests {
         let mut defines = HashMap::new();
         defines.insert("A".to_string(), "1".to_string());
         defines.insert("B".to_string(), "2".to_string());
-        let props = gradle_properties(&target, &defines);
+        let props = gradle_properties(&target, &defines, BuildMode::Debug);
         let defines_prop = props
             .iter()
             .find(|p| p.starts_with("-Pfrust.defines="))
@@ -232,6 +263,35 @@ mod tests {
         // "A=1;B=2" (sorted by key) base64-encoded — verified by hand
         // against the standard RFC 4648 alphabet.
         assert_eq!(defines_prop, "-Pfrust.defines=QT0xO0I9Mg==");
+    }
+
+    #[test]
+    fn gradle_properties_debug_and_profile_carry_perf_trace_feature() {
+        let target = apk(&["arm64-v8a"], false);
+        for mode in [BuildMode::Debug, BuildMode::Profile] {
+            let props = gradle_properties(&target, &HashMap::new(), mode);
+            // base64("frust/perf-trace")
+            assert!(
+                props.contains(&"-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ==".to_string()),
+                "mode {mode:?}: {props:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gradle_properties_release_carries_lean_not_perf_trace() {
+        let target = apk(&["arm64-v8a"], false);
+        let props = gradle_properties(&target, &HashMap::new(), BuildMode::Release);
+        let feature_prop = props
+            .iter()
+            .find(|p| p.starts_with("-Pfrust.cargoFeatures="))
+            .expect("cargoFeatures prop present");
+        // base64("lean") — the log ceiling, NOT perf-trace.
+        assert_eq!(feature_prop, "-Pfrust.cargoFeatures=bGVhbg==");
+        assert_ne!(
+            feature_prop,
+            "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ=="
+        );
     }
 
     #[test]

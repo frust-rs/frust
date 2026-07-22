@@ -56,6 +56,15 @@ val splitPerAbi = prop("frust.splitPerAbi", "false").toBoolean()
 // so the Rust side's `option_env!("K")` can read them at compile time.
 val definesB64 = prop("frust.defines", "")
 
+// Cargo `--features` selected by the CLI per build mode (release-lean plan):
+// base64(`feat,feat`), decoded and appended to the cargo-ndk build below as
+// `--features <csv>`. The CLI passes `frust/perf-trace` for debug/profile
+// (instrumentation compiled IN) and `lean` for release (the log ceiling);
+// empty default so an Android-Studio-driven build (no CLI) adds no features.
+// Rides a `-P` property — NOT an env var — so a feature flag can never fall
+// foul of the release env-drop Known Issue by construction.
+val cargoFeaturesB64 = prop("frust.cargoFeatures", "")
+
 android {
     namespace = "{{ android_identifier }}"
     compileSdk = 36
@@ -216,6 +225,14 @@ val cargoProfileArgs: List<String> = run {
 }
 val cargoTargetArgs: List<String> = abis.flatMap { listOf("-t", it) }
 
+// Decode the base64 `--features` CSV (empty → no extra features).
+val cargoFeatureArgs: List<String> =
+    if (cargoFeaturesB64.isEmpty()) {
+        emptyList()
+    } else {
+        listOf("--features", String(Base64.getDecoder().decode(cargoFeaturesB64)))
+    }
+
 val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
     workingDir = file("../..")
     commandLine(
@@ -226,6 +243,7 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
             add("-o")
             add(file("src/main/jniLibs").absolutePath)
             addAll(cargoProfileArgs)
+            addAll(cargoFeatureArgs)
         },
     )
     // Thread `--define`s through as env vars so `option_env!("K")` sees them.

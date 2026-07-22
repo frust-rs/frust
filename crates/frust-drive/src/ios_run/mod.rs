@@ -120,10 +120,18 @@ fn prepare_simulator_session(
     }
 
     let configuration = info.mode.xcode_configuration();
+    let features_b64 = crate::ios_build::encode_features(info.mode);
 
     on_line(&format!("Building `{}`…", project.bundle_id));
     let build_start = Instant::now();
-    let build_out = xcodebuild::build(runner, &project.root, &device.id, configuration, on_line)?;
+    let build_out = xcodebuild::build(
+        runner,
+        &project.root,
+        &device.id,
+        configuration,
+        features_b64.as_deref(),
+        on_line,
+    )?;
     if !build_out.success {
         bail!("{}", xcodebuild_failure_message(&build_out));
     }
@@ -494,7 +502,7 @@ mod tests {
             .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
             .with(
                 format!(
-                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== build",
                     host_sim_arch()
                 ),
                 Output {
@@ -561,7 +569,7 @@ mod tests {
             .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
             .with(
                 format!(
-                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== build",
                     host_sim_arch()
                 ),
                 ok("Build succeeded"),
@@ -658,7 +666,7 @@ mod tests {
                 ok(PHYSICAL_LIST_JSON),
             )
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
                 ok("Build succeeded"),
             )
     }

@@ -94,6 +94,7 @@ fn build_with_env(
     schemes::verify(runner, project_dir, &sc)?;
 
     let defines_b64 = encode_defines(&info.defines);
+    let features_b64 = encode_features(info.mode);
 
     match target {
         IosArtifact::App {
@@ -120,6 +121,7 @@ fn build_with_env(
                 marketing_version: info.build_name.as_deref(),
                 current_project_version: info.build_number,
                 defines_b64: defines_b64.as_deref(),
+                features_b64: features_b64.as_deref(),
             };
             run_xcodebuild(runner, project_dir, &inv.build_argv(), on_line)?;
 
@@ -147,6 +149,7 @@ fn build_with_env(
                 marketing_version: info.build_name.as_deref(),
                 current_project_version: info.build_number,
                 defines_b64: defines_b64.as_deref(),
+                features_b64: features_b64.as_deref(),
             };
             run_xcodebuild(runner, project_dir, &inv.archive_argv(), on_line)?;
 
@@ -272,6 +275,21 @@ fn encode_defines(defines: &HashMap<String, String>) -> Option<String> {
     Some(base64_encode(joined.as_bytes()))
 }
 
+/// base64-encodes `mode`'s cargo features (`BuildMode::cargo_features`) as
+/// `feat,feat` for the `FRUST_FEATURES` build setting, matching the template
+/// run-script's `base64 -d` decode into `--features <csv>` (release-lean
+/// plan, task 04). `None` when the mode selects no features (never today —
+/// every mode selects at least one, but the caller stays tolerant). Shared
+/// with the simulator run path (`ios_run::xcodebuild`) so the mode → feature
+/// encoding has one source.
+pub(crate) fn encode_features(mode: crate::build_info::BuildMode) -> Option<String> {
+    let features = mode.cargo_features();
+    if features.is_empty() {
+        return None;
+    }
+    Some(base64_encode(features.join(",").as_bytes()))
+}
+
 /// Standard base64 (with `=` padding) — a small hand-rolled encoder so this
 /// crate needs no `base64` dependency for one build setting.
 fn base64_encode(input: &[u8]) -> String {
@@ -391,7 +409,7 @@ mod tests {
                 ok(r#"  1) H "Apple Development: Ada (TEAMID1234)""#),
             )
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
                 ok("Build succeeded"),
             );
         let env = FakeEnv::new();
@@ -421,7 +439,7 @@ mod tests {
         // No `security find-identity` fixture registered: if team detection
         // ran, the invocation would error via the missing-binary path.
         let runner = base_runner().with(
-            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build",
+            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build",
             ok("Build succeeded"),
         );
         let env = FakeEnv::new();
@@ -446,7 +464,7 @@ mod tests {
         let dir = temp_project("simulator");
         plant_products(&dir, "Release", true, "Runner.app");
         let runner = base_runner().with(
-            format!("xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination generic/platform=iOS Simulator -derivedDataPath build/ios ARCHS={} build", xcodebuild::host_sim_arch()),
+            format!("xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination generic/platform=iOS Simulator -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=bGVhbg== build", xcodebuild::host_sim_arch()),
             ok("Build succeeded"),
         );
         let env = FakeEnv::new();
@@ -479,7 +497,7 @@ mod tests {
                 ok(r#"  1) H "Apple Development: Ada (TEAMID1234)""#),
             )
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios MARKETING_VERSION=2.0.1 CURRENT_PROJECT_VERSION=7 DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios MARKETING_VERSION=2.0.1 CURRENT_PROJECT_VERSION=7 FRUST_FEATURES=bGVhbg== DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
                 ok("Build succeeded"),
             );
         let env = FakeEnv::new();
@@ -515,7 +533,7 @@ mod tests {
                 ok(r#"  1) H "Apple Development: Ada (TEAMID1234)""#),
             )
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath build/ios/archive/Runner.xcarchive archive",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath build/ios/archive/Runner.xcarchive archive",
                 ok("Archive succeeded"),
             )
             .with(
@@ -565,7 +583,7 @@ mod tests {
                     ok(r#"  1) H "Apple Development: Ada (TEAMID1234)""#),
                 )
                 .with(
-                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath build/ios/archive/Runner.xcarchive archive",
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath build/ios/archive/Runner.xcarchive archive",
                     ok("Archive succeeded"),
                 )
                 .with(
@@ -621,7 +639,7 @@ mod tests {
     fn build_ios_surfaces_xcodebuild_failure_with_doctor_hint() {
         let dir = temp_project("build-fail");
         let runner = base_runner().with(
-            format!("xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination generic/platform=iOS Simulator -derivedDataPath build/ios ARCHS={} build", xcodebuild::host_sim_arch()),
+            format!("xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination generic/platform=iOS Simulator -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=bGVhbg== build", xcodebuild::host_sim_arch()),
             Output {
                 success: false,
                 stdout: "error: No signing certificate found".to_string(),

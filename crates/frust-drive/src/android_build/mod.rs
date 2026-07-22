@@ -102,7 +102,7 @@ fn build_with_env(
     signing::check_release_signing(&android_dir, info.mode)?;
 
     let task = tasks::task_name(target, info.mode, info.flavor.as_deref());
-    let props = tasks::gradle_properties(target, &info.defines);
+    let props = tasks::gradle_properties(target, &info.defines, info.mode);
 
     let mut args: Vec<&str> = Vec::with_capacity(1 + props.len());
     args.push(task.as_str());

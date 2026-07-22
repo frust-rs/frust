@@ -218,7 +218,7 @@ fn prepare_session(
         abis: vec![abi],
     };
     let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
-    let props = crate::android_build::tasks::gradle_properties(&target, &info.defines);
+    let props = crate::android_build::tasks::gradle_properties(&target, &info.defines, info.mode);
 
     on_line(&format!("Building `{}`…", project.app_id));
     let build_start = Instant::now();
