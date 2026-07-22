@@ -24,12 +24,19 @@ use std::sync::OnceLock;
 struct ImageIdentityProbe {
     /// Blob IDs seen in the previous frame.
     last_frame_ids: HashSet<u64>,
+    /// Every Blob ID ever seen (monotone). For a scrolling workload the
+    /// previous-frame delta counts stable images re-entering the window as
+    /// "new", so identity stability is judged by THIS set's growth instead:
+    /// stable identity plateaus at the workload's distinct-image population;
+    /// per-frame Blob re-creation grows it without bound.
+    ever_seen: HashSet<u64>,
 }
 
 impl ImageIdentityProbe {
     fn new() -> Self {
         Self {
             last_frame_ids: HashSet::new(),
+            ever_seen: HashSet::new(),
         }
     }
 
@@ -41,12 +48,19 @@ impl ImageIdentityProbe {
             .iter()
             .filter(|id| !self.last_frame_ids.contains(id))
             .count();
+        let new_ever = current_ids
+            .iter()
+            .filter(|id| !self.ever_seen.contains(id))
+            .count();
+        self.ever_seen.extend(current_ids.iter().copied());
 
         if new_this_frame > 0 {
             log::info!(
-                "frust-perf image-ids frame_unique={} new_this_frame={}",
+                "frust-perf image-ids frame_unique={} new_this_frame={} new_ever={} distinct_total={}",
                 frame_unique,
-                new_this_frame
+                new_this_frame,
+                new_ever,
+                self.ever_seen.len()
             );
         }
 
