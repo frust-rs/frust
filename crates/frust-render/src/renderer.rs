@@ -15,7 +15,7 @@ use core::ffi::c_void;
 
 use anyhow::{Result, anyhow};
 
-use crate::context::RenderContext;
+use crate::context::{DetachedSurface, RenderContext};
 use crate::convert;
 use crate::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
@@ -204,6 +204,42 @@ impl SurfaceRenderer {
             )
             .await
             .map_err(|e| anyhow!("frust-render: failed to create render surface: {e}"))?;
+        self.install_surface(ctx, surface)
+    }
+
+    /// Brings the surface online from a [`DetachedSurface`] that was created on
+    /// the windowing/main thread via
+    /// [`RenderContext::surface_factory`](crate::RenderContext::surface_factory),
+    /// transitioning to [`SurfacePhase::SurfaceReady`] (plan phase 11.B, the
+    /// render-thread split).
+    ///
+    /// The desktop counterpart of [`on_surface_created`](Self::on_surface_created)
+    /// for the split: `on_surface_created` reads the window handle *and*
+    /// configures on one thread, but winit only yields that handle on the main
+    /// thread — so the split creates the surface there
+    /// ([`SurfaceFactory::create_detached_surface`](crate::SurfaceFactory::create_detached_surface))
+    /// and hands the `Send` surface here, where the render thread that owns this
+    /// renderer/context does the device + swapchain + blitter work. Presentation
+    /// uses vsync (`PresentMode::AutoVsync`), matching `on_surface_created`.
+    ///
+    /// Valid from any phase (recreation after `SurfaceLost`/resume replaces the
+    /// old surface — dropped first).
+    pub async fn on_surface_installed(
+        &mut self,
+        ctx: &mut RenderContext,
+        surface: DetachedSurface,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let surface = ctx
+            .create_render_surface(
+                surface.into_surface(),
+                width.max(1),
+                height.max(1),
+                wgpu::PresentMode::AutoVsync,
+            )
+            .await
+            .map_err(|e| anyhow!("frust-render: failed to configure detached surface: {e}"))?;
         self.install_surface(ctx, surface)
     }
 

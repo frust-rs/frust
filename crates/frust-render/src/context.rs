@@ -157,6 +157,73 @@ impl Default for RenderContext {
     }
 }
 
+/// A cheap, cloneable handle to a [`RenderContext`]'s wgpu `Instance`, used to
+/// create a surface on a *different* thread than the one that owns the context
+/// (plan phase 11.B, the render-thread split).
+///
+/// # Why this exists
+///
+/// wgpu `Surface` creation reads the platform window handle, which several
+/// windowing backends (notably winit on macOS/AppKit) only make available on
+/// the main/UI thread. The render-thread split therefore cannot create the
+/// surface where the renderer lives; instead the UI thread creates a
+/// [`DetachedSurface`] via this factory and hands it across to the render
+/// thread, which installs it with
+/// [`SurfaceRenderer::on_surface_installed`](crate::SurfaceRenderer::on_surface_installed).
+/// A `wgpu::Instance` is `Send + Sync + Clone` (Arc-backed) and a `Surface` it
+/// produces stays compatible with any adapter/device the cloned instance
+/// requests, so the two threads share one instance with no `unsafe`.
+///
+/// The mobile shells are unaffected: they receive a platform-created surface
+/// pointer (`ANativeWindow`/`CAMetalLayer`) and keep using
+/// [`SurfaceRenderer::on_surface_created_from_android_window`](crate::SurfaceRenderer::on_surface_created_from_android_window)
+/// / `on_surface_created_from_metal_layer`.
+#[derive(Clone)]
+pub struct SurfaceFactory {
+    instance: wgpu::Instance,
+}
+
+impl SurfaceFactory {
+    /// Create a [`DetachedSurface`] from a window handle **on the calling
+    /// thread** — call this on the thread the windowing backend requires
+    /// (the main/UI thread for winit). The returned surface is `Send` and may
+    /// then be moved to the render thread for
+    /// [`install`](crate::SurfaceRenderer::on_surface_installed).
+    ///
+    /// This performs *only* the window-handle-dependent step (surface creation);
+    /// the device, swapchain configuration, and blitter are all built later, on
+    /// the installing thread, so nothing here touches the GPU device.
+    pub fn create_detached_surface(
+        &self,
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+    ) -> Result<DetachedSurface> {
+        let surface = self
+            .instance
+            .create_surface(target)
+            .map_err(|e| anyhow!("frust-render: failed to create surface: {e}"))?;
+        Ok(DetachedSurface { surface })
+    }
+}
+
+/// A created-but-not-yet-installed wgpu `Surface`, produced by
+/// [`SurfaceFactory::create_detached_surface`] on the windowing thread and
+/// installed on the render thread via
+/// [`SurfaceRenderer::on_surface_installed`](crate::SurfaceRenderer::on_surface_installed)
+/// (plan phase 11.B). Opaque so the `wgpu` type stays confined to this crate; a
+/// shell only moves it across a thread boundary. `Send` (a `wgpu::Surface` is
+/// `Send + Sync`), which is the whole point.
+pub struct DetachedSurface {
+    surface: wgpu::Surface<'static>,
+}
+
+impl DetachedSurface {
+    /// Consume the wrapper, yielding the raw surface for installation. Crate-
+    /// private so the `wgpu` type never escapes `frust-render`.
+    pub(crate) fn into_surface(self) -> wgpu::Surface<'static> {
+        self.surface
+    }
+}
+
 /// Given the build-config-derived instance flags and whether the process is
 /// currently running on an Android emulator, decides the flags wgpu's
 /// `Instance` should actually be created with.
@@ -349,6 +416,18 @@ impl RenderContext {
             instance,
             device: None,
             selected_tier: crate::tier::RenderTier::Gpu,
+        }
+    }
+
+    /// A cloneable [`SurfaceFactory`] sharing this context's wgpu `Instance`,
+    /// for creating a [`DetachedSurface`] on the windowing/main thread when the
+    /// context itself lives on the render thread (plan phase 11.B, the
+    /// render-thread split). The surface a clone produces stays compatible with
+    /// the device this context creates, since both share one Arc-backed
+    /// instance.
+    pub fn surface_factory(&self) -> SurfaceFactory {
+        SurfaceFactory {
+            instance: self.instance.clone(),
         }
     }
 

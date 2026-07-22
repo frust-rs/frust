@@ -32,7 +32,7 @@ mod pipeline_cache;
 mod renderer;
 mod tier;
 
-pub use context::RenderContext;
+pub use context::{DetachedSurface, RenderContext, SurfaceFactory};
 pub use convert::encode_scene;
 pub use lifecycle::{AcquireOutcome, EncodeOutcome, FrameOutcome, SurfacePhase};
 pub use renderer::SurfaceRenderer;

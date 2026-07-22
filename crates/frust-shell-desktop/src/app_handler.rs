@@ -2,10 +2,14 @@
 //! preview window (spec §12.9).
 //!
 //! Ownership mirrors the shared platform bootstrap (spec §10.3): the shell owns
-//! the [`RenderContext`], per-window [`SurfaceRenderer`], the shared
-//! [`TextContext`], the [`RenderRoot`], and the application `State`/`app_logic`.
-//! Each on-demand frame runs the framework passes in Masonry order (the v0
-//! subset): rebuild → layout → paint → render.
+//! the shared [`TextContext`], the [`RenderRoot`], the application
+//! `State`/`app_logic`, and a [`FrameExecutor`](crate::render::FrameExecutor).
+//! The executor owns the render stack — either on this (the UI) thread (the
+//! single-thread fallback) or on a dedicated render thread (the plan phase 11.B
+//! split, chosen by the `FRUST_NO_RENDER_THREAD` kill switch — see
+//! [`crate::render`]). Each on-demand frame runs the UI passes in Masonry order
+//! (the v0 subset) on this thread — rebuild → layout → paint — then hands the
+//! finished scene to the executor for encode → acquire → submit.
 //!
 //! It also owns an `accesskit_winit` [`Adapter`] (phase 6d D3): created in
 //! `resumed` with the same [`EventLoopProxy`](winit::event_loop::EventLoopProxy)
@@ -30,7 +34,7 @@ use std::time::Instant;
 use accesskit_winit::{
     Adapter, Event as AccessibilityEvent, WindowEvent as AccessibilityWindowEvent,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use frust_core::FrameTime;
 use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
@@ -41,16 +45,12 @@ use frust_core::event::{
 };
 use frust_core::view::View;
 use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
-use frust_render::{
-    AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
-};
 use frust_scene::{Scene, SceneBuilder};
-use frust_shell_common::perf::{
-    FramePasses, FrameStats, SPAN_ADAPTER_READY, SPAN_DEVICE_READY, SPAN_FIRST_ENCODE_DONE,
-    SPAN_FIRST_FRAME_PRESENTED, SPAN_FIRST_REBUILD_DONE, SPAN_INIT_ENTRY,
-    SPAN_PIPELINE_CACHE_RESTORED, SPAN_RENDERER_READY, StartupSpans,
+use frust_shell_common::perf::UiSpans;
+use frust_shell_common::{
+    SurfaceSize, ThemeOverrideWatcher, effective_brightness_for_platform_change,
+    render_thread_enabled,
 };
-use frust_shell_common::{ThemeOverrideWatcher, effective_brightness_for_platform_change};
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
@@ -60,6 +60,8 @@ use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
 use winit::window::{Theme as WinitTheme, Window, WindowAttributes, WindowId};
+
+use crate::render::FrameExecutor;
 
 /// Initial preview-window size, in logical pixels.
 const INITIAL_SIZE: LogicalSize<u32> = LogicalSize::new(800, 600);
@@ -83,7 +85,7 @@ const WINDOW_TITLE: &str = "Frust";
 /// derive those either — every existing use already matched/constructed it by
 /// value, so nothing downstream needed to change.
 #[derive(Debug)]
-enum ShellUserEvent {
+pub(crate) enum ShellUserEvent {
     /// One or more tracked signals became dirty since the last frame — pump the
     /// UI-thread local task queue and request a redraw.
     SignalsDirty,
@@ -91,6 +93,22 @@ enum ShellUserEvent {
     /// accessibility action request, or a deactivation notice — see
     /// [`ShellHandler::handle_accessibility_event`].
     Accessibility(AccessibilityEvent),
+    /// The render thread (split path) needs another frame — a stale-swapchain
+    /// reconfigure consumed the last handed-off scene, so the UI thread must
+    /// repaint and re-hand one off. Routed through the proxy (rather than a
+    /// direct `request_redraw` from the render thread) so winit's dirty-driven
+    /// `ControlFlow::Wait` model is preserved.
+    RenderNeedsRedraw,
+    /// The render thread lost the surface and needs it re-created (split path).
+    /// Re-creation reads the window handle, which winit only yields on the main
+    /// thread, so the render thread routes the request here and the UI thread
+    /// re-runs the detached surface creation and hands a fresh one across, then
+    /// requests a repaint.
+    RenderRecreateSurface,
+    /// The render thread hit an unrecoverable init error (surface creation
+    /// failed). Surfaced back so `run_desktop` returns it as `Err`, mirroring the
+    /// inline path's fatal handling.
+    RenderFatal(anyhow::Error),
 }
 
 impl From<AccessibilityEvent> for ShellUserEvent {
@@ -116,13 +134,11 @@ where
     // (desktop had no logger at all before this — see `logger`'s module docs).
     crate::logger::init_once();
 
-    // Perf instrumentation (spec §14 phase 7.A, task 10): `run_desktop` is the
-    // desktop shell's init-entry point, mirroring the mobile shells'
-    // `nativeInit`/`frust_init` span (see `frust_shell_common::perf`'s
-    // module docs). A no-op recorder unless `FRUST_TRACE` is set (compile-
-    // or runtime-side) — see `perf::enabled`'s docs.
-    let mut startup_spans = StartupSpans::begin();
-    startup_spans.record(SPAN_INIT_ENTRY);
+    // The shell-owned monotonic epoch every per-frame `FrameTime` is measured
+    // from (spec §8: time enters from the shell). Captured before any GPU/thread
+    // setup so the render thread's startup line and the UI thread's frame clock
+    // share one origin.
+    let epoch = Instant::now();
 
     // winit 0.30 has no `EventLoop::<T>::new()` — the typed-user-event loop is
     // built through the builder only.
@@ -144,6 +160,18 @@ where
     });
     let runtime = ReactiveRuntime::init(waker);
 
+    // Pick the frame executor once at startup from the `FRUST_NO_RENDER_THREAD`
+    // kill switch (plan phase 11.B). The split path spawns a dedicated render
+    // thread that owns the `RenderContext` + `SurfaceRenderer` wholesale (both
+    // `Send`); the inline path keeps them on this (the UI) thread — the fallback
+    // preserved until 11.E validates the split.
+    let executor = if render_thread_enabled() {
+        let render_proxy = event_loop.create_proxy();
+        FrameExecutor::Split(crate::render::spawn_render_thread(render_proxy))
+    } else {
+        FrameExecutor::Inline(Box::default())
+    };
+
     let mut handler = ShellHandler {
         state,
         app_logic,
@@ -151,7 +179,7 @@ where
         scope: TrackedScope::new(),
         root: RenderRoot::new(),
         text_ctx: TextContext::new(),
-        render_cx: RenderContext::new(),
+        executor,
         scene: Scene::new(),
         cursor: Point::ZERO,
         modifiers: Modifiers::default(),
@@ -166,22 +194,13 @@ where
         // first post-layout `semantics_if_changed` check below is guaranteed to
         // see a change and push the initial tree.
         semantics_seen: 0,
-        // Starts in `NoSurface`; the surface is created in `resumed` once the
-        // window exists, and driven through the §8.1 lifecycle from there.
-        renderer: SurfaceRenderer::new(),
         fatal: None,
-        epoch: Instant::now(),
+        epoch,
         // M3 baseline, Light until `resumed` seeds the window's real preference.
         theme: Theme::m3_baseline(),
         theme_seeded: false,
         theme_override: ThemeOverrideWatcher::new(),
         theme_override_active: false,
-        startup_spans,
-        renderer_spans_recorded: false,
-        first_rebuild_recorded: false,
-        first_encode_recorded: false,
-        first_frame_recorded: false,
-        frame_stats: FrameStats::new(),
     };
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
@@ -373,8 +392,18 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     scope: TrackedScope,
     root: RenderRoot<State, V>,
     text_ctx: TextContext,
-    render_cx: RenderContext,
-    /// Reused across frames; `reset()` each frame rather than reallocated.
+    /// The frame executor (plan phase 11.B): either the render-thread split or
+    /// the single-thread fallback, chosen once at startup from the
+    /// `FRUST_NO_RENDER_THREAD` kill switch. Owns the `RenderContext` +
+    /// `SurfaceRenderer` (inline) or the render-thread handle (split), and all
+    /// the encode→present + perf recording that used to live inline here (see
+    /// [`crate::render`]). Declared before `window` so its `Drop` (which joins
+    /// the render thread) runs while the shell still holds a window `Arc`, so the
+    /// window is destroyed on the main thread.
+    executor: FrameExecutor,
+    /// Reused across frames; `reset()` each frame rather than reallocated. In the
+    /// split path a finished scene is moved out (replaced with a fresh one) to
+    /// cross the handoff channel; inline reuses it in place (spec §7).
     scene: Scene,
     /// Last known cursor position in logical pixels, updated on every
     /// `CursorMoved`. `MouseInput` (button press/release) carries no position of
@@ -408,9 +437,6 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// via [`RenderRoot::semantics_if_changed`] so an unchanged tree is never
     /// re-walked/re-pushed.
     semantics_seen: u64,
-    /// The §8.1 surface lifecycle machine; empty (`NoSurface`) until `resumed()`
-    /// creates the surface, and torn down on `suspended()`.
-    renderer: SurfaceRenderer,
     /// Set when `resumed` hits an unrecoverable init error; `event_loop.exit()`
     /// only stops the loop (it can't return an `Err`), so the error is stashed
     /// here and re-raised by `run_desktop` once `run_app` returns.
@@ -441,43 +467,6 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// the override wins entirely until `clear_app_theme` runs (see
     /// `effective_brightness_for_platform_change`).
     theme_override_active: bool,
-    /// Perf instrumentation (spec §14 phase 7.A, task 10): named startup
-    /// milestones from `run_desktop`'s entry epoch, emitted once as a single
-    /// summary line after the first frame presents. A no-op recorder unless
-    /// `FRUST_TRACE` is set - see `frust_shell_common::perf`'s module
-    /// docs.
-    startup_spans: StartupSpans,
-    /// Whether `SPAN_ADAPTER_READY`/`SPAN_DEVICE_READY`/`SPAN_RENDERER_READY`
-    /// have already been recorded. Desktop has no finer-grained visibility
-    /// into `on_surface_created`'s internals than "it returned" (adapter,
-    /// device, and renderer creation all happen inside that one async call -
-    /// see `frust-render::RenderContext::ensure_device`/`install_surface`),
-    /// so all three spans are recorded together at that single observable
-    /// boundary, on the first successful surface creation only - a later
-    /// suspend/resume surface recreation must not re-record them.
-    renderer_spans_recorded: bool,
-    /// Whether `SPAN_FIRST_REBUILD_DONE` has already been recorded - the
-    /// desktop shell rebuilds every redraw-requested frame, but the span is
-    /// only meaningful once, for the app's first rebuild.
-    first_rebuild_recorded: bool,
-    /// Whether `SPAN_FIRST_ENCODE_DONE` has already been recorded - the shell
-    /// encodes every redraw-requested frame, but the first-frame-decomposition
-    /// span (task 10.A) is only meaningful once, for the app's first encode when
-    /// something was actually encoded. Distinct from `first_frame_recorded`
-    /// because a first encode can precede the first successful present
-    /// (an intervening `Redraw` reconfigure frame).
-    first_encode_recorded: bool,
-    /// Whether `SPAN_FIRST_FRAME_PRESENTED` has already been recorded (and
-    /// `StartupSpans::emit_log` fired) - set on the first
-    /// `FrameOutcome::Rendered`.
-    first_frame_recorded: bool,
-    /// Perf instrumentation (task 10): per-pass frame timings
-    /// (rebuild/layout/paint/encode/present), aggregated into rolling
-    /// percentiles and emitted periodically while frames are actually being
-    /// produced - desktop is dirty-driven (spec §8), so this piggybacks on
-    /// `RedrawRequested` rather than a timer; see `FrameStats::should_emit`'s
-    /// docs for the emit cadence.
-    frame_stats: FrameStats,
 }
 
 impl<State, Logic, V> ShellHandler<State, Logic, V>
@@ -619,15 +608,43 @@ where
     /// re-tracks. The waker can fire before the window exists (an early
     /// background spawn), so a redraw is only requested when a window is present
     /// — the first rebuild after `resumed` re-tracks regardless.
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: ShellUserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ShellUserEvent) {
         self.runtime.pump_local();
         match event {
-            ShellUserEvent::SignalsDirty => {
+            // A signal write, or a render-thread redraw request (stale-swapchain
+            // reconfigure / SurfaceLost recovery in the split path) — both mean
+            // "repaint" and both go through the proxy so the `Wait` loop stays
+            // dirty-driven (idle CPU near zero).
+            ShellUserEvent::SignalsDirty | ShellUserEvent::RenderNeedsRedraw => {
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
             }
             ShellUserEvent::Accessibility(event) => self.handle_accessibility_event(event),
+            // The render thread lost its surface (split path): re-create it here
+            // on the main thread (where winit yields the window handle), hand a
+            // fresh surface across, and repaint. Rare path — correctness over
+            // elegance.
+            ShellUserEvent::RenderRecreateSurface => {
+                if let Some(window) = self.window.clone() {
+                    let size = window.inner_size();
+                    self.executor.recreate_surface(
+                        &window,
+                        SurfaceSize {
+                            width: size.width.max(1),
+                            height: size.height.max(1),
+                            scale: window.scale_factor(),
+                        },
+                    );
+                    window.request_redraw();
+                }
+            }
+            // The render thread hit a fatal init error: stash it and stop the
+            // loop, mirroring the inline path's `resumed` fatal handling.
+            ShellUserEvent::RenderFatal(err) => {
+                self.fatal = Some(err);
+                event_loop.exit();
+            }
         }
     }
 
@@ -669,63 +686,23 @@ where
             .clone()
             .expect("window was just created or already present");
 
-        if self.renderer.phase() != SurfacePhase::SurfaceReady {
+        // Bring the surface online if it is not already (a redundant `resumed`
+        // is a no-op). Where the renderer lives (UI thread inline, render thread
+        // in the split) decides where the pipeline-cache load/persist and the
+        // adapter/device/renderer startup spans are recorded — the executor owns
+        // that. Inline surface-creation failure is fatal here; a split failure is
+        // reported back through the proxy (`RenderFatal`).
+        if !self.executor.has_surface() {
             let size = window.inner_size();
-            let (width, height) = (size.width.max(1), size.height.max(1));
-
-            // Load the persisted pipeline cache before surface creation (task 14).
-            // On macOS (Metal) `pipeline_cache_data()` will be `None`, so this is
-            // a no-op there; on Linux/Windows (Vulkan) it seeds the shader-pipeline
-            // compilation to near-zero on warm starts.
-            let cache_data = crate::cache::load_cache();
-            // Warm-start signal for the first-frame decomposition (task 10.A):
-            // a restored cache blob is a hit; its absence a cold miss.
-            let pipeline_cache_hit = cache_data.is_some();
-            if cache_data.is_some() {
-                self.renderer.set_initial_pipeline_cache_data(cache_data);
-            }
-
-            // spec §11: single-threaded here — the CPU/GPU render-thread split
-            // lands in a later phase; for the preview shell one thread suffices.
-            if let Err(err) = pollster::block_on(self.renderer.on_surface_created(
-                &mut self.render_cx,
-                window.clone(),
-                width,
-                height,
-            ))
-            .context("frust: failed to create render surface")
-            {
+            let surface_size = SurfaceSize {
+                width: size.width.max(1),
+                height: size.height.max(1),
+                scale: window.scale_factor(),
+            };
+            if let Err(err) = self.executor.ensure_surface(&window, surface_size) {
                 self.fatal = Some(err);
                 event_loop.exit();
                 return;
-            }
-
-            // Save the updated pipeline cache on a background thread (task 14).
-            // All failures are logged-and-ignored; cache is best-effort.
-            if let Some(cache) = self.renderer.pipeline_cache_data() {
-                std::thread::spawn(move || {
-                    crate::cache::save_cache(&cache);
-                });
-            }
-
-            // Perf instrumentation (task 10): adapter/device/renderer creation
-            // all happen inside the single `on_surface_created` call above -
-            // see `renderer_spans_recorded`'s docs for why all three spans land
-            // at this one boundary. Only the first surface creation counts as
-            // "startup"; a later suspend/resume recreation is not re-recorded.
-            if !self.renderer_spans_recorded {
-                self.startup_spans.record(SPAN_ADAPTER_READY);
-                self.startup_spans.record(SPAN_DEVICE_READY);
-                // First-frame decomposition (task 10.A): record the pipeline-cache
-                // milestone only on a warm-start hit — its presence/absence in the
-                // startup line attributes a slow first frame to shader-pipeline
-                // compilation vs a warm cache (the `RENDERER_READY` delta that
-                // follows brackets the surface/pipeline build cost).
-                if pipeline_cache_hit {
-                    self.startup_spans.record(SPAN_PIPELINE_CACHE_RESTORED);
-                }
-                self.startup_spans.record(SPAN_RENDERER_READY);
-                self.renderer_spans_recorded = true;
             }
         }
 
@@ -745,8 +722,10 @@ where
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         // Drop the surface on suspend (spec §8.1): rare on macOS, but keeps the
-        // NoSurface path exercised on desktop and matches Android's lifecycle.
-        self.renderer.on_surface_destroyed();
+        // NoSurface path exercised on desktop and matches Android's lifecycle. In
+        // the split path this is a barriered `SurfaceDestroyed` — the shell
+        // blocks until the render thread has released its surface resources.
+        self.executor.destroy_surface();
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
@@ -779,9 +758,13 @@ where
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
-                // A resize with no live surface is dropped by the machine.
-                self.renderer
-                    .on_surface_changed(&self.render_cx, size.width, size.height);
+                // A resize with no live surface is dropped by the machine
+                // (inline) or by the render thread's phase gate (split).
+                self.executor.resize_surface(SurfaceSize {
+                    width: size.width,
+                    height: size.height,
+                    scale: window.scale_factor(),
+                });
                 window.request_redraw();
             }
 
@@ -940,11 +923,10 @@ where
                 let _flags = runtime.with_owner(|| scope.track(|| root.rebuild(app_logic, state)));
                 let rebuild_dur = rebuild_start.elapsed();
                 // Perf instrumentation (task 10): the app's first-ever rebuild,
-                // recorded once.
-                if !self.first_rebuild_recorded {
-                    self.startup_spans.record(SPAN_FIRST_REBUILD_DONE);
-                    self.first_rebuild_recorded = true;
-                }
+                // recorded once. Inline records it here; in the split path the
+                // render thread owns the startup line, so this is a no-op there
+                // (it records the milestone when the first scene arrives).
+                self.executor.record_first_rebuild();
                 // A rebuild can change which widget is focused / what it
                 // publishes without an intervening event (e.g. state-driven
                 // focus), so re-sync the platform IME here too (task 54).
@@ -1011,120 +993,35 @@ where
                     window.request_redraw();
                 }
 
-                window.pre_present_notify();
-                // Deliberately log-and-continue rather than fatal: a single
-                // frame's render failure is most often a transient GPU/surface
-                // hiccup, and killing the whole app on one bad frame would be
-                // worse than skipping it. Turning *persistent* per-frame
-                // failures into a fatal error is future work — see `fatal`.
-                // Clear to the live theme's surface color rather than a
-                // hardcoded white, so a dark-scheme app doesn't render its
-                // dark-themed widgets over a white canvas (6e Finding 6).
-                // Two-phase render seam (Phase 10.A): time the GPU/CPU encode
-                // and the swapchain-acquire (vsync) present separately so the
-                // render-thread-split decision has an encode-only number. Each
-                // span is its own `Instant` read; desktop's frame budget is
-                // generous enough not to gate them behind `perf::enabled()` (see
-                // docs/CODE_STANDARDS.md Instrumentation conventions).
-                let encode_start = Instant::now();
-                let encode_outcome =
-                    self.renderer
-                        .encode(&self.render_cx, &self.scene, self.theme.scheme().surface);
-                let encode_dur = encode_start.elapsed();
-
-                // First-frame decomposition (task 10.A): stamp the first frame's
-                // encode-complete boundary once (only when something was actually
-                // encoded), so the startup line splits the first frame into
-                // paint/encode vs present. Its own latch (not `first_frame_recorded`)
-                // because a first encode can precede the first present across an
-                // intervening `Redraw` reconfigure frame.
-                if matches!(encode_outcome, Ok(EncodeOutcome::Encoded))
-                    && !self.first_encode_recorded
-                {
-                    self.startup_spans.record(SPAN_FIRST_ENCODE_DONE);
-                    self.first_encode_recorded = true;
-                }
-
-                // Present-span split (Phase 11.A): the swapchain **acquire**
-                // (blocking vsync wait) and the **submit** (blit + queue-submit +
-                // present) are timed separately so the S5
-                // GPU-saturation-vs-blit-cost question has an acquire-only number.
-                // Each sub-span is its own `Instant` read (see the encode note
-                // above for why desktop doesn't gate these behind `perf::enabled()`).
-                let acquire_start = Instant::now();
-                let acquire_outcome = match encode_outcome {
-                    Ok(EncodeOutcome::Encoded) => self.renderer.acquire(&self.render_cx),
-                    // Nothing was encoded (no renderable surface): don't acquire,
-                    // and surface the same `Skipped` the old combined `render`
-                    // returned so the match below is unchanged.
-                    Ok(EncodeOutcome::Skipped) => Ok(AcquireOutcome::Skipped),
-                    Err(err) => Err(err),
-                };
-                let acquire_dur = acquire_start.elapsed();
-
-                let submit_start = Instant::now();
-                let render_outcome = match acquire_outcome {
-                    Ok(AcquireOutcome::Acquired) => self.renderer.submit(&self.render_cx),
-                    Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
-                    Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
-                    Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
-                    Err(err) => Err(err),
-                };
-                let submit_dur = submit_start.elapsed();
-
-                // Perf instrumentation (task 10): one FramePasses record per
-                // produced frame, piggybacking on this event-driven redraw path
-                // rather than a timer (desktop is dirty-driven, spec §8) — see
-                // `frame_stats`'s docs. `should_emit`/`emit_log` rate-limit the
-                // periodic summary line to roughly once per 2s of frame time.
-                self.frame_stats.record(FramePasses {
+                // Hand the finished frame to the executor. In the single-thread
+                // fallback this runs encode→acquire→submit inline (clearing to
+                // the live theme's surface color — 6e Finding 6); in the split
+                // path it moves the scene across the depth-1 latest-wins channel
+                // and the render thread runs the tail, recording its own
+                // `RenderSpans` folded with these `UiSpans` via
+                // `FramePasses::from_split` (the single perf emitter). Either way
+                // a render failure is log-and-continue, not fatal — one bad frame
+                // must not kill the app (see `fatal` for the persistent case).
+                let ui_spans = UiSpans {
                     rebuild: rebuild_dur,
                     layout: layout_dur,
                     paint: paint_dur,
-                    encode: encode_dur,
-                    acquire: acquire_dur,
-                    submit: submit_dur,
                     skipped: false,
-                });
-                if self.frame_stats.should_emit() {
-                    self.frame_stats.emit_log();
-                }
-
-                match render_outcome {
-                    // Stale swapchain (e.g. mid-resize): reconfigured internally,
-                    // so ask for another frame against the fresh configuration.
-                    Ok(FrameOutcome::Redraw) => window.request_redraw(),
-                    // Surface lost (rare on desktop): recreate it from the same
-                    // window and redraw. On failure, log and wait for the next
-                    // event rather than killing the app.
-                    Ok(FrameOutcome::SurfaceLost) => {
-                        let size = window.inner_size();
-                        let (width, height) = (size.width.max(1), size.height.max(1));
-                        match pollster::block_on(self.renderer.on_surface_created(
-                            &mut self.render_cx,
-                            window.clone(),
-                            width,
-                            height,
-                        )) {
-                            Ok(()) => window.request_redraw(),
-                            Err(err) => {
-                                eprintln!("frust: failed to recreate surface: {err}");
-                            }
-                        }
-                    }
-                    Ok(FrameOutcome::Rendered) => {
-                        // Perf instrumentation (task 10): the app's first-ever
-                        // presented frame — record once, then emit the whole
-                        // startup-span summary line.
-                        if !self.first_frame_recorded {
-                            self.startup_spans.record(SPAN_FIRST_FRAME_PRESENTED);
-                            self.startup_spans.emit_log();
-                            self.first_frame_recorded = true;
-                        }
-                    }
-                    Ok(FrameOutcome::Skipped) => {}
-                    Err(err) => eprintln!("frust: render error: {err}"),
-                }
+                };
+                let base_color = self.theme.scheme().surface;
+                let size = SurfaceSize {
+                    width: physical.width,
+                    height: physical.height,
+                    scale,
+                };
+                self.executor.submit_frame(
+                    &window,
+                    &mut self.scene,
+                    base_color,
+                    ui_spans,
+                    frame_time,
+                    size,
+                );
             }
 
             _ => {}

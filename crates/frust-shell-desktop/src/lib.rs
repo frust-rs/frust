@@ -9,5 +9,6 @@
 mod app_handler;
 mod cache;
 mod logger;
+mod render;
 
 pub use app_handler::run_desktop;
