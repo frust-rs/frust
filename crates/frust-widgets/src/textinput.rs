@@ -1647,8 +1647,7 @@ mod tests {
         fn draw_text(&mut self, _o: Point, _t: &str) {}
         fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
             // Capture the font bytes from this glyph run.
-            self.font_bytes
-                .push(run.font.font().data.as_ref().to_vec());
+            self.font_bytes.push(run.font.font().data.as_ref().to_vec());
         }
     }
 
@@ -2306,8 +2305,7 @@ mod tests {
         let mut root_default = RenderRoot::new();
         root_default.rebuild(
             &mut |s: &mut AppState| {
-                text_input(s.value.clone(), |_s: &mut AppState, _v: String| {})
-                    .placeholder("test")
+                text_input(s.value.clone(), |_s: &mut AppState, _v: String| {}).placeholder("test")
             },
             &mut state_default,
         );
