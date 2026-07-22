@@ -23,7 +23,9 @@ pub use editor::{
 };
 pub use layout::TextLayout;
 pub use shape_cache::ShapeCacheStats;
-pub use style::{FontFamily, FontStyle, FontWeight, LineHeight, TextStyle};
+pub use style::{
+    FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextStyle,
+};
 
 #[cfg(test)]
 mod tests {

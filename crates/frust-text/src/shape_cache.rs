@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use peniko::Brush;
 
-use crate::style::{FontFamily, FontStyle, LineHeight, TextStyle};
+use crate::style::{FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, TextStyle};
 
 /// Default cache capacity, mirroring Flutter's SkParagraph LRU paragraph cache
 /// (128 entries, keyed by text + styling).
@@ -81,6 +81,7 @@ impl ShapeKey {
 enum FamilyBits {
     SystemUi,
     Named(Vec<String>),
+    NamedWithGeneric(Vec<(Option<String>, Option<u8>)>),
 }
 
 impl From<&FontFamily> for FamilyBits {
@@ -88,6 +89,26 @@ impl From<&FontFamily> for FamilyBits {
         match family {
             FontFamily::SystemUi => FamilyBits::SystemUi,
             FontFamily::Named(names) => FamilyBits::Named(names.clone()),
+            FontFamily::NamedWithGeneric(families) => {
+                let bits = families
+                    .iter()
+                    .map(|f| match f {
+                        FamilyName::Named(name) => (Some(name.clone()), None),
+                        FamilyName::Generic(slot) => {
+                            // Use discriminant as a unique identifier for each generic slot
+                            let discriminant = match slot {
+                                GenericSlot::Monospace => 0u8,
+                                GenericSlot::SansSerif => 1u8,
+                                GenericSlot::Serif => 2u8,
+                                GenericSlot::SystemUi => 3u8,
+                                GenericSlot::Emoji => 4u8,
+                            };
+                            (None, Some(discriminant))
+                        }
+                    })
+                    .collect();
+                FamilyBits::NamedWithGeneric(bits)
+            }
         }
     }
 }
