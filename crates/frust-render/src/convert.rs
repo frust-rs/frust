@@ -12,6 +12,61 @@
 use frust_scene::{Command, GlyphRun, PathStyle, Scene};
 use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
+use std::collections::HashSet;
+use std::sync::Mutex;
+
+// TEMPORARY: Image-identity probe (task 04 / phase-11 render-path).
+// Tracks Blob IDs across frames to confirm atlas reuse.
+// Marked for removal once task 06 verdicts close this research.
+
+/// Tracks image Blob IDs across frames for the identity probe.
+/// Perf-gated by FRUST_TRACE.
+struct ImageIdentityProbe {
+    /// Blob IDs (by pointer) seen in the previous frame.
+    last_frame_ids: HashSet<u64>,
+}
+
+impl ImageIdentityProbe {
+    fn new() -> Self {
+        Self {
+            last_frame_ids: HashSet::new(),
+        }
+    }
+
+    /// Record the Blob IDs in this frame and log any changes since the last frame.
+    /// Returns (frame_unique, new_this_frame).
+    fn process_frame(&mut self, current_ids: HashSet<u64>) -> (usize, usize) {
+        let frame_unique = current_ids.len();
+        let new_this_frame = current_ids
+            .iter()
+            .filter(|id| !self.last_frame_ids.contains(id))
+            .count();
+
+        if new_this_frame > 0 {
+            log::info!(
+                "frust-perf image-ids frame_unique={} new_this_frame={}",
+                frame_unique,
+                new_this_frame
+            );
+        }
+
+        self.last_frame_ids = current_ids;
+        (frame_unique, new_this_frame)
+    }
+}
+
+thread_local! {
+    /// TEMPORARY: Process-local image-identity probe (task 04).
+    /// Stored in thread-local to avoid race conditions across frame encodes.
+    static IMAGE_IDENTITY_PROBE: Mutex<ImageIdentityProbe> = Mutex::new(ImageIdentityProbe::new());
+}
+
+/// Check if the image-identity probe is enabled (FRUST_TRACE set at runtime).
+fn image_probe_enabled() -> bool {
+    std::env::var("FRUST_TRACE")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
 
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
 ///
@@ -73,6 +128,10 @@ pub fn encode_scene(scene: &Scene, target: &mut vello::Scene) {
 /// Generic worker behind [`encode_scene`]; kept separate so tests can drive it
 /// with a non-`vello` sink.
 pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
+    // TEMPORARY: Image-identity probe (task 04 / phase-11 render-path).
+    // Collect Blob IDs from all image commands this frame, then log any changes.
+    let mut image_ids = HashSet::new();
+
     for command in scene.commands() {
         match command {
             Command::FillRect {
@@ -100,7 +159,13 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
                 data,
                 dest,
                 transform,
-            } => sink.draw_image(*transform, data, dest),
+            } => {
+                // TEMPORARY (task 04): Record this image's Blob ID for the probe.
+                // Use the pointer to the Blob itself as a unique identifier.
+                let blob_id = &data.data as *const _ as u64;
+                image_ids.insert(blob_id);
+                sink.draw_image(*transform, data, dest);
+            }
             Command::BlurredRoundedRect {
                 rect,
                 radius,
@@ -124,6 +189,15 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
                 PathStyle::Stroke { width } => sink.stroke_path(*transform, brush, path, *width),
             },
         }
+    }
+
+    // TEMPORARY (task 04): Update the image-identity probe with this frame's Blob IDs.
+    if image_probe_enabled() {
+        IMAGE_IDENTITY_PROBE.with(|probe| {
+            if let Ok(mut probe) = probe.lock() {
+                probe.process_frame(image_ids);
+            }
+        });
     }
 }
 
@@ -799,6 +873,62 @@ mod tests {
 
         let mut vello_scene = vello::Scene::new();
         encode_scene(&scene, &mut vello_scene);
+    }
+
+    // TEMPORARY (task 04): Tests for the image-identity probe tracker.
+    #[test]
+    fn image_identity_probe_counts_frame_unique_and_new_ids() {
+        let mut probe = super::ImageIdentityProbe::new();
+
+        // First frame: three unique IDs.
+        let mut ids = HashSet::new();
+        ids.insert(1u64);
+        ids.insert(2u64);
+        ids.insert(3u64);
+        let (frame_unique, new_this_frame) = probe.process_frame(ids);
+        assert_eq!(frame_unique, 3);
+        assert_eq!(new_this_frame, 3, "all three IDs are new on first frame");
+
+        // Second frame: two of the same IDs, one new.
+        let mut ids = HashSet::new();
+        ids.insert(1u64);
+        ids.insert(2u64);
+        ids.insert(4u64);
+        let (frame_unique, new_this_frame) = probe.process_frame(ids);
+        assert_eq!(frame_unique, 3);
+        assert_eq!(new_this_frame, 1, "only ID 4 is new");
+
+        // Third frame: no new IDs (all seen before).
+        let mut ids = HashSet::new();
+        ids.insert(1u64);
+        ids.insert(2u64);
+        let (frame_unique, new_this_frame) = probe.process_frame(ids);
+        assert_eq!(frame_unique, 2);
+        assert_eq!(new_this_frame, 0, "no new IDs");
+    }
+
+    #[test]
+    fn image_identity_probe_resets_on_empty_frame() {
+        let mut probe = super::ImageIdentityProbe::new();
+
+        // First frame: two IDs.
+        let mut ids = HashSet::new();
+        ids.insert(1u64);
+        ids.insert(2u64);
+        probe.process_frame(ids);
+
+        // Second frame: empty (no images).
+        let ids = HashSet::new();
+        let (frame_unique, new_this_frame) = probe.process_frame(ids);
+        assert_eq!(frame_unique, 0);
+        assert_eq!(new_this_frame, 0);
+
+        // Third frame: one ID (new from the empty frame perspective).
+        let mut ids = HashSet::new();
+        ids.insert(5u64);
+        let (frame_unique, new_this_frame) = probe.process_frame(ids);
+        assert_eq!(frame_unique, 1);
+        assert_eq!(new_this_frame, 1, "ID 5 is new after empty frame");
     }
 
     #[test]
