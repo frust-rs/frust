@@ -490,6 +490,18 @@ pub struct PaintCtx<'a> {
     /// the [`crate::insets`] module docs). Defaults to the zero inset in
     /// bare-core tests and pre-insets apps.
     window_insets: WindowInsets,
+    /// The shell's running count of frames the render thread has actually
+    /// presented, threaded down by the render root
+    /// ([`crate::app::RenderRoot::paint`]) and seeded into each child by
+    /// [`ChildPod::paint_child`], mirroring how `frame_time`/`theme`/
+    /// `window_insets` flow. `None` when no shell pushed one (bare-core tests,
+    /// pre-wiring shells) so a widget can fall back — see
+    /// [`PaintCtx::presented_frames`]. Unlike the clock/theme/insets this is a
+    /// pure *observation* the render root stores WITHOUT dirtying
+    /// [`ChangeFlags`] (see [`crate::app::RenderRoot::set_presented_frames`]), so
+    /// a ticking presented count never forces a relayout or feeds the mobile
+    /// frame gate.
+    presented_frames: Option<u64>,
     /// A tagged-rect ("hero") reporter a container installs over a subtree via
     /// [`PaintCtx::with_hero_registry`], threaded to descendants by
     /// [`ChildPod::paint_child`] like the theme/clock. `None` in the normal
@@ -516,6 +528,7 @@ impl<'a> PaintCtx<'a> {
             frame_time: FrameTime::ZERO,
             theme: None,
             window_insets: WindowInsets::default(),
+            presented_frames: None,
             hero: None,
         }
     }
@@ -575,6 +588,33 @@ impl<'a> PaintCtx<'a> {
     /// (copied, so it holds no borrow of `self`).
     pub(crate) fn window_insets_ref(&self) -> WindowInsets {
         self.window_insets
+    }
+
+    /// The shell's running count of frames the render thread has actually
+    /// presented, or `None` when no shell wired one in (bare-core tests,
+    /// pre-wiring shells) — a supported state, so a widget can fall back to a
+    /// paint-cadence measure.
+    ///
+    /// Under the render-thread split the UI thread paints faster than the render
+    /// thread presents (a gate-skipped or coalesced frame is never presented), so
+    /// a widget measuring *frames per second* must difference this presented
+    /// count — not its own paint count — to report the rate a user actually sees
+    /// (`examples/shadertoy`'s HUD is the reference consumer). A widget only ever
+    /// *differences* two reads (`wrapping_sub`); the absolute value is a
+    /// free-running monotonic counter it must never interpret directly. Seeded
+    /// from the shell at the root ([`crate::app::RenderRoot::paint`]) and threaded
+    /// unchanged into every child by [`ChildPod::paint_child`], mirroring
+    /// `frame_time`.
+    pub fn presented_frames(&self) -> Option<u64> {
+        self.presented_frames
+    }
+
+    /// Seed the shell's presented-frame count. Called by
+    /// [`crate::app::RenderRoot::paint`] at the root and by
+    /// [`ChildPod::paint_child`] for each child, mirroring how `frame_time`/
+    /// `window_insets` are threaded (copied down unchanged).
+    pub(crate) fn set_presented_frames(&mut self, presented: Option<u64>) {
+        self.presented_frames = presented;
     }
 
     /// The widget's origin in its parent's coordinate space.
@@ -720,6 +760,7 @@ impl<'a> PaintCtx<'a> {
             frame_time: self.frame_time,
             theme: self.theme,
             window_insets: self.window_insets,
+            presented_frames: self.presented_frames,
             hero: Some(registry),
         };
         f(&mut child);
@@ -1038,6 +1079,9 @@ impl ChildPod {
         // Thread the window insets down unchanged (copied — global and
         // origin-independent), mirroring the theme.
         child_ctx.set_window_insets(ctx.window_insets_ref());
+        // Thread the shell's presented-frame count down unchanged (copied
+        // `Option<u64>`), mirroring the clock/insets — global, origin-independent.
+        child_ctx.set_presented_frames(ctx.presented_frames());
         // Thread the tagged-rect ("hero") reporter down the same way, so a hero
         // wrapper nested arbitrarily deep under an installer sees it. `None` in
         // the normal case (no shared-element transition in flight).

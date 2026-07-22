@@ -215,7 +215,8 @@ fn fps_signal_publishes_a_sane_rate_after_a_second() {
     let mut state = ();
     let mut tcx = TextContext::new();
 
-    // ~1.2 simulated seconds at 60Hz.
+    // ~1.2 simulated seconds at 60Hz. `frame_at` never wires a presented
+    // counter, so this exercises the paint-count fallback path (~60 FPS).
     for i in 0..75u64 {
         let _ = frame_at(&mut root, &mut logic, &mut state, &mut tcx, i * 16);
     }
@@ -223,5 +224,49 @@ fn fps_signal_publishes_a_sane_rate_after_a_second() {
     assert!(
         (30.0..=120.0).contains(&measured),
         "measured FPS must reflect the 16ms frame cadence (got {measured})"
+    );
+}
+
+#[test]
+fn fps_measures_presented_rate_not_paint_cadence_when_wired() {
+    // The OP9 split scenario (task 10): the UI thread paints ~120 frames/s but
+    // the render thread presents only ~12 — the HUD must report the presented
+    // rate (~12), NOT the paint cadence (the deferred round-1 Minor: it showed
+    // ~121). We drive the real `RenderRoot` paint seam, pushing a presented
+    // counter that advances once per 10 paints, and assert the published rate
+    // tracks the presented deltas.
+    let _owner = setup();
+    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let fps = RwSignal::new(0.0_f64);
+    let program = ShaderProgram::new(
+        "@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> \
+         { return vec4<f32>(frust_u.time, 0.0, 0.0, 1.0); }",
+    );
+    let mut logic = move |_s: &mut ()| any(shader_view(program.clone(), fps));
+    let mut state = ();
+    let mut tcx = TextContext::new();
+
+    // 121 painted frames spanning ~1.008s of shell time (~120Hz paint cadence),
+    // of which the render thread presented only 12 (one present per 10 paints).
+    let mut presented: u64 = 0;
+    for i in 0..=120u64 {
+        root.rebuild(&mut logic, &mut state);
+        let tcx_any: &mut dyn Any = &mut tcx;
+        root.layout_with_text(Size::new(W, H), tcx_any);
+        // Every 10th paint corresponds to one presented frame (=> 12 total).
+        if i > 0 && i % 10 == 0 {
+            presented += 1;
+        }
+        root.set_presented_frames(presented);
+        let mut scene = RecScene::default();
+        // ~8.4ms/frame => the window crosses 1s exactly at frame 120.
+        let _ = root.paint(&mut scene, FrameTime::from_nanos(i * 8_400_000));
+    }
+
+    let measured = fps.get_untracked();
+    assert!(
+        (10.0..=14.0).contains(&measured),
+        "wired HUD must measure the ~12 presented rate, not the ~120 paint \
+         cadence (got {measured})"
     );
 }

@@ -27,6 +27,22 @@ pub fn shader_view(program: ShaderProgram, fps_out: RwSignal<f64>) -> ShaderView
     ShaderView { program, fps_out }
 }
 
+/// One in-flight FPS measurement window: when it opened (on the shell clock),
+/// how many times this widget has painted since, and — when the shell wired a
+/// presented-frame counter (`PaintCtx::presented_frames`) — the counter value at
+/// window open. `Δpresented / Δseconds` is the rate a user actually sees; the
+/// paint count is the fallback when no counter is wired (bare-core tests,
+/// pre-wiring shells).
+struct FpsWindow {
+    /// Window start on the shell clock.
+    start: FrameTime,
+    /// Frames this widget painted since `start` (the fallback measure).
+    paints: u32,
+    /// The shell's presented-frame count at `start`, if a counter was wired when
+    /// the window opened. `None` selects the paint-count fallback on close.
+    presented_at_start: Option<u64>,
+}
+
 /// The retained widget: the live program handle, the shader's own time
 /// origin (first-seen frame time), and the FPS measurement window.
 pub struct ShaderViewWidget {
@@ -37,8 +53,8 @@ pub struct ShaderViewWidget {
     /// the shader is always relative to this, never an absolute shell clock
     /// value (see `frust_core::anim::FrameTime`'s doc).
     start: Option<FrameTime>,
-    /// FPS measurement: window start on the shell clock + frames painted since.
-    fps_window: Option<(FrameTime, u32)>,
+    /// The live FPS measurement window (see [`FpsWindow`]).
+    fps_window: Option<FpsWindow>,
 }
 
 impl<State: 'static> View<State> for ShaderView {
@@ -76,19 +92,43 @@ impl<State: 'static> View<State> for ShaderView {
 
 impl ShaderViewWidget {
     /// Count this painted frame and publish the measured rate ~once a second
-    /// (identical cadence to `examples/bubblebench/src/chart.rs`'s
-    /// `track_fps`).
-    fn track_fps(&mut self, now: FrameTime) {
-        match self.fps_window {
-            None => self.fps_window = Some((now, 0)),
-            Some((start, frames)) => {
-                let frames = frames + 1;
-                let elapsed = now.saturating_sub(start);
-                if elapsed.as_secs_f64() >= 1.0 {
-                    self.fps_out.set(frames as f64 / elapsed.as_secs_f64());
-                    self.fps_window = Some((now, 0));
-                } else {
-                    self.fps_window = Some((start, frames));
+    /// (identical cadence to `examples/bubblebench/src/chart.rs`'s `track_fps`).
+    ///
+    /// `presented` is the shell's running presented-frame count
+    /// (`PaintCtx::presented_frames`), or `None` when no shell wired one. **When
+    /// wired** the window publishes `Δpresented / Δseconds` — the rate the render
+    /// thread actually *presents*, which under the render-thread split is far
+    /// below this widget's own paint cadence (the OP9 HUD read ~121 while the
+    /// render thread presented ~12; measuring presented deltas is the fix).
+    /// **Otherwise** it falls back to the old paint-count-per-second measure.
+    fn track_fps(&mut self, now: FrameTime, presented: Option<u64>) {
+        match &mut self.fps_window {
+            None => {
+                self.fps_window = Some(FpsWindow {
+                    start: now,
+                    paints: 0,
+                    presented_at_start: presented,
+                });
+            }
+            Some(window) => {
+                window.paints += 1;
+                let elapsed = now.saturating_sub(window.start).as_secs_f64();
+                if elapsed >= 1.0 {
+                    // Presented-delta mode when a counter is wired at both ends of
+                    // the window; else the paint-count fallback. `wrapping_sub`
+                    // guards the (never-in-practice) u64 counter wrap.
+                    let rate = match (window.presented_at_start, presented) {
+                        (Some(at_start), Some(now_presented)) => {
+                            now_presented.wrapping_sub(at_start) as f64 / elapsed
+                        }
+                        _ => window.paints as f64 / elapsed,
+                    };
+                    self.fps_out.set(rate);
+                    self.fps_window = Some(FpsWindow {
+                        start: now,
+                        paints: 0,
+                        presented_at_start: presented,
+                    });
                 }
             }
         }
@@ -118,7 +158,7 @@ impl Widget for ShaderViewWidget {
 
         scene.draw_shader(&self.program, dest, time);
 
-        self.track_fps(now);
+        self.track_fps(now, ctx.presented_frames());
         // Continuous animation: always ask for another frame while mounted,
         // matching `BubbleChartWidget`'s live-simulation contract.
         ctx.request_frame();

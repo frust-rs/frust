@@ -964,6 +964,13 @@ where
                 // own stored time (task 06 swaps this single expression for a
                 // platform vsync timestamp on mobile).
                 let frame_time = FrameTime::from_nanos(self.epoch.elapsed().as_nanos() as u64);
+                // Push the render side's presented-frame count so a widget
+                // measuring FPS reports the presented rate, not its paint cadence
+                // (task 10). A pure observation — `set_presented_frames` dirties
+                // nothing, so it neither forces a relayout nor (as the setter's
+                // contract notes) would ever feed a frame gate.
+                self.root
+                    .set_presented_frames(self.executor.presented_frames());
                 let paint_start = Instant::now();
                 let paint_outcome = {
                     let mut builder = SceneBuilder::new(&mut self.scene);

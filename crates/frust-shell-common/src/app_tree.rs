@@ -140,6 +140,24 @@ pub trait AppTree {
     /// exactly like `set_theme` (see [`crate::frame_gate`]'s module docs).
     fn set_insets(&mut self, _insets: WindowInsets) {}
 
+    /// Store the shell's running count of frames the render thread has actually
+    /// presented, threaded into every subsequent paint pass (delegates to
+    /// [`RenderRoot::set_presented_frames`]).
+    ///
+    /// A shell loads the atomic its render side increments (once per presented
+    /// frame) and pushes it here once per UI frame, before [`AppTree::paint`], so
+    /// a widget measuring FPS reports the *presented* rate rather than its own
+    /// paint cadence (which, under the render-thread split, runs faster).
+    ///
+    /// **Unlike [`AppTree::set_theme`]/[`AppTree::set_insets`], this dirties
+    /// nothing** — [`RenderRoot::set_presented_frames`] marks no [`ChangeFlags`],
+    /// so a monotonically ticking counter never forces a relayout and — the
+    /// subtle one — never keeps the mobile [`frame_gate`](crate::frame_gate)'s
+    /// pending-flags input perpetually true, so the menu still idles (the
+    /// task-08-verified behavior). Defaulted to a **no-op** so existing
+    /// [`AppTree`] impls compile unchanged; the concrete tree overrides it.
+    fn set_presented_frames(&mut self, _presented: u64) {}
+
     /// Collect the accessibility tree for the current frame (spec §9, phase-6d),
     /// for a shell to push into its platform `accesskit_*` adapter. Delegates to
     /// [`RenderRoot::semantics`]; must run **after** [`AppTree::layout`] so node
@@ -238,6 +256,10 @@ where
 
     fn set_insets(&mut self, insets: WindowInsets) {
         self.root.set_insets(insets);
+    }
+
+    fn set_presented_frames(&mut self, presented: u64) {
+        self.root.set_presented_frames(presented);
     }
 
     fn semantics(&mut self) -> SemanticsUpdate {

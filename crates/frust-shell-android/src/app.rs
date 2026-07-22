@@ -13,7 +13,7 @@
 use std::any::Any;
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -251,6 +251,11 @@ pub(crate) struct InlineExecutor {
     /// `Option::take`n on the first successful present (records
     /// [`perf::SPAN_FIRST_FRAME_PRESENTED`] + emits), `None` thereafter.
     startup_spans: Option<StartupSpans>,
+    /// Running count of presented frames (task 10). Inline renders on the UI
+    /// thread, so this is bumped and read on the same thread — the `Arc<Atomic>`
+    /// shape matches the split's cross-thread counter so `FrameExecutor` reads
+    /// both variants uniformly.
+    presented: Arc<AtomicU64>,
 }
 
 impl InlineExecutor {
@@ -268,6 +273,7 @@ impl InlineExecutor {
             renderer,
             frame_stats: FrameStats::new(),
             startup_spans: Some(startup_spans),
+            presented: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -290,6 +296,7 @@ impl InlineExecutor {
             &mut self.frame_stats,
             &mut self.startup_spans,
             perf_on,
+            &self.presented,
         )
     }
 
@@ -364,6 +371,12 @@ pub(crate) struct SplitExecutor {
     /// [`Self::scene_return`] on the next [`Self::take_reusable_scene`] call
     /// so that buffer is reused too, rather than dropped.
     spare_scene: Option<Scene>,
+    /// Running count of presented frames (task 10): one clone here (read by the
+    /// UI thread before paint via `FrameExecutor::presented_frames`), one on the
+    /// render thread ([`crate::jni_glue::render_loop`], which bumps it on each
+    /// `FrameOutcome::Rendered`). A plain `Arc<AtomicU64>` — no channel/protocol,
+    /// mirroring the `fatal`-flag pattern.
+    presented: Arc<AtomicU64>,
 }
 
 impl SplitExecutor {
@@ -372,6 +385,7 @@ impl SplitExecutor {
         join: JoinHandle<()>,
         fatal: Arc<AtomicBool>,
         scene_return: SceneReturnReceiver<Scene>,
+        presented: Arc<AtomicU64>,
     ) -> Self {
         Self {
             sender: Some(sender),
@@ -381,6 +395,7 @@ impl SplitExecutor {
             fatal,
             scene_return,
             spare_scene: None,
+            presented,
         }
     }
 
@@ -498,6 +513,19 @@ impl FrameExecutor {
         }
     }
 
+    /// The running count of frames the render side has actually presented
+    /// (`FrameOutcome::Rendered`). The UI thread loads this once per frame and
+    /// pushes it into `AppTree::set_presented_frames` before paint, so a widget
+    /// measuring FPS reports the presented rate — under the split, that is far
+    /// below the Choreographer's paint cadence (task 10). Both variants share
+    /// the counter with their render side via an `Arc<AtomicU64>`.
+    fn presented_frames(&self) -> u64 {
+        match self {
+            FrameExecutor::Inline(inline) => inline.presented.load(Ordering::Relaxed),
+            FrameExecutor::Split(split) => split.presented.load(Ordering::Relaxed),
+        }
+    }
+
     /// Record the `first_rebuild_done` startup milestone after the initial
     /// rebuild. Inline records it here on the UI thread; the split records it
     /// render-side when the first scene arrives (see [`crate::jni_glue::render_loop`]),
@@ -568,6 +596,7 @@ pub(crate) fn render_scene(
     frame_stats: &mut FrameStats,
     startup_spans: &mut Option<StartupSpans>,
     perf_on: bool,
+    presented: &AtomicU64,
 ) -> Duration {
     // Encode span (GPU/CPU encode, no swapchain touch).
     let encode_start = perf_on.then(Instant::now);
@@ -616,6 +645,9 @@ pub(crate) fn render_scene(
             log::warn!("frust-shell-android: surface lost; awaiting surfaceChanged");
         }
         Ok(FrameOutcome::Rendered) => {
+            // A presented frame: bump the shared counter the UI thread reads
+            // before paint (task 10). `Skipped` presents nothing, so it doesn't.
+            presented.fetch_add(1, Ordering::Relaxed);
             // First successful present: close out the cold-start recorder once.
             if let Some(mut spans) = startup_spans.take() {
                 spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
@@ -1523,6 +1555,15 @@ impl AndroidAppHandle {
         // bounds are valid. A cheap no-op unless the tree changed AND a screen
         // reader is active (double-gated inside).
         self.publish_semantics();
+
+        // Push the render side's presented-frame count so a widget measuring FPS
+        // reports the presented rate, not its Choreographer paint cadence (task
+        // 10). A pure observation — `set_presented_frames` marks no ChangeFlags,
+        // so a ticking counter never dirties layout NOR feeds the frame gate (the
+        // gate decision already ran above and never reads this), keeping the
+        // task-08 menu-idle behavior intact.
+        self.app
+            .set_presented_frames(self.executor.presented_frames());
 
         self.scene.reset();
         let paint_start = perf_on.then(Instant::now);

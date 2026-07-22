@@ -77,6 +77,18 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// `Box<dyn Any>` erasure needed. Defaults to the zero inset until a shell
     /// pushes one (a supported state — bare-core tests and pre-insets apps).
     insets: WindowInsets,
+    /// The shell's running count of frames the render thread has actually
+    /// presented, threaded into every subsequent paint pass and recovered by
+    /// widgets through [`crate::widget::PaintCtx::presented_frames`]. A plain
+    /// `u64` core stores by value (like the insets). `None` until a shell pushes
+    /// one via [`RenderRoot::set_presented_frames`] — a supported state
+    /// (bare-core tests and pre-wiring shells run without it), so widgets can
+    /// fall back to a paint-cadence measure. Unlike the theme/insets this is a
+    /// pure observation: [`RenderRoot::set_presented_frames`] deliberately marks
+    /// NO [`ChangeFlags`] and bumps NO semantics generation (see its doc), so a
+    /// ticking presented count never forces a relayout or feeds the mobile frame
+    /// gate.
+    presented_frames: Option<u64>,
     /// The persistent, never-reused per-pod semantics base-id allocator's next
     /// value (phase-6d D1). Seeded at `2` (ids `0`/`1` reserved: `0` keeps
     /// `NonZeroU64` valid, `1` is the [`ROOT_NODE_ID`] window node), advanced as
@@ -113,6 +125,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             pending: ChangeFlags::NONE,
             theme: None,
             insets: WindowInsets::default(),
+            presented_frames: None,
             // Ids 0 and 1 are reserved (see the field doc); pods start at 2.
             semantics_alloc: Cell::new(2),
             root_semantics_id: Cell::new(None),
@@ -179,6 +192,34 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// The window's insets currently threaded into the layout/paint passes.
     pub fn insets(&self) -> WindowInsets {
         self.insets
+    }
+
+    /// Store the shell's running count of frames the render thread has actually
+    /// presented, threaded into every subsequent paint pass and recovered by
+    /// widgets via [`crate::widget::PaintCtx::presented_frames`]. A shell loads
+    /// the atomic its render side increments (once per presented frame) and
+    /// pushes it here once per UI frame, before `paint`.
+    ///
+    /// **Deliberately dirties nothing.** Unlike [`RenderRoot::set_theme`] and
+    /// [`RenderRoot::set_insets`] — which mark `LAYOUT | PAINT` pending because a
+    /// widget bakes their value in at layout time — this setter marks NO
+    /// [`ChangeFlags`] and bumps NO semantics generation. The presented count is
+    /// a paint-only *observation* a widget reads live every paint (never baked at
+    /// layout), so treating it as dirty would be wrong twice over: it would force
+    /// a needless relayout, and — critically — on the mobile shells a
+    /// monotonically ticking counter would keep the frame gate's pending-flags
+    /// input perpetually true, so the menu would never idle (the 32s-idle
+    /// behavior verified in task 08 must survive). Keeping this setter dirt-free
+    /// is exactly what keeps the frame gate unaware of it (see
+    /// `docs/ARCHITECTURE.md`'s Frame gate).
+    pub fn set_presented_frames(&mut self, presented: u64) {
+        self.presented_frames = Some(presented);
+    }
+
+    /// The presented-frame count currently threaded into the paint pass, or
+    /// `None` if no shell has pushed one.
+    pub fn presented_frames(&self) -> Option<u64> {
+        self.presented_frames
     }
 
     /// Whether a captured pointer gesture is currently in flight.
@@ -372,6 +413,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let theme = self.theme.as_deref();
         // Copied out before the `&mut self.tree` borrow (a disjoint `Copy` read).
         let insets = self.insets;
+        // Same disjoint `Copy` read: the presented-frame count threaded to widgets.
+        let presented_frames = self.presented_frames;
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             // Seed the shared shell clock so the whole paint pass sees one time.
@@ -381,6 +424,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ctx.set_theme(theme);
             // Thread the window insets down (global — see `crate::insets`).
             ctx.set_window_insets(insets);
+            // Thread the shell's presented-frame count down (global; a widget
+            // measuring FPS differences it — see `PaintCtx::presented_frames`).
+            ctx.set_presented_frames(presented_frames);
             // Seed the root widget's paint-time focus from the cached focus path
             // so a leaf-root editable observes its own focus; deeper focus is
             // threaded per-pod by `ChildPod::paint_child`.
@@ -1326,6 +1372,92 @@ mod tests {
         // A different value dirties again.
         root.set_insets(WindowInsets::default());
         assert!(!root.take_change_flags().is_empty());
+    }
+
+    // --- Presented-frame count: pushed value reaches the paint context, unset
+    //     yields `None`, and — unlike theme/insets — the setter dirties nothing. ---
+
+    /// A root widget recording the `presented_frames` count it observed during
+    /// paint, proving the shell-pushed value threads through `PaintCtx`.
+    struct PresentedWidget {
+        seen_paint: std::rc::Rc<std::cell::Cell<Option<Option<u64>>>>,
+    }
+    impl crate::widget::Widget for PresentedWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.seen_paint.set(Some(ctx.presented_frames()));
+        }
+    }
+
+    struct PresentedView {
+        seen_paint: std::rc::Rc<std::cell::Cell<Option<Option<u64>>>>,
+    }
+    impl View<AppState> for PresentedView {
+        type Element = PresentedWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PresentedWidget {
+            PresentedWidget {
+                seen_paint: self.seen_paint.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PresentedWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn drive_presented_root(presented: Option<u64>) -> Option<u64> {
+        let seen_paint = std::rc::Rc::new(std::cell::Cell::new(None));
+        let mut root: RenderRoot<AppState, PresentedView> = RenderRoot::new();
+        if let Some(presented) = presented {
+            root.set_presented_frames(presented);
+        }
+        let mut state = AppState::default();
+        let sp = seen_paint.clone();
+        root.rebuild(
+            &mut move |_s: &mut AppState| PresentedView {
+                seen_paint: sp.clone(),
+            },
+            &mut state,
+        );
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        // Unwrap the "did paint run" outer Option; the inner is what the widget saw.
+        seen_paint.get().expect("paint ran")
+    }
+
+    #[test]
+    fn set_presented_frames_threads_into_paint() {
+        assert_eq!(drive_presented_root(Some(12)), Some(12));
+    }
+
+    #[test]
+    fn unset_presented_frames_yields_none_in_paint() {
+        assert_eq!(drive_presented_root(None), None);
+    }
+
+    #[test]
+    fn set_presented_frames_marks_no_change_flags() {
+        // Unlike `set_theme`/`set_insets`, a presented-count push is a paint-only
+        // observation — it must dirty NOTHING, so a monotonically ticking counter
+        // never forces a relayout or (on mobile) keeps the frame gate perpetually
+        // "Run" (the menu-idle behavior from task 08 depends on this).
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        let gen_before = root.semantics_generation();
+        root.set_presented_frames(1);
+        assert!(root.take_change_flags().is_empty());
+        assert!(!root.has_pending_change_flags());
+        // A second, changed push still dirties nothing.
+        root.set_presented_frames(2);
+        assert!(root.take_change_flags().is_empty());
+        // And bumps no semantics generation (mirrors the no-dirty contract).
+        assert_eq!(root.semantics_generation(), gen_before);
     }
 
     // Small test helper: does the boxed widget downcast to `W`?

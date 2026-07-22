@@ -40,7 +40,7 @@
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread::JoinHandle;
 
@@ -587,6 +587,7 @@ pub(crate) fn render_loop(
     cache_dir: Option<String>,
     fatal: Arc<AtomicBool>,
     scene_return: SceneReturnSender<Scene>,
+    presented: Arc<AtomicU64>,
 ) {
     // Render-thread priority self-boost (phase-11 fix F6): raise this dedicated
     // render thread to the display band so a busy UI thread can't starve the GPU
@@ -717,6 +718,7 @@ pub(crate) fn render_loop(
                     &mut frame_stats,
                     &mut startup_spans,
                     perf_on,
+                    &presented,
                 );
             }
             // Give the drained scene back for the UI thread to reclaim (review
@@ -986,6 +988,12 @@ fn spawn_split_executor(
     let fatal = Arc::new(AtomicBool::new(false));
     let fatal_render = Arc::clone(&fatal);
 
+    // Presented-frame counter (task 10): one clone drives into the render thread
+    // (bumped on each `FrameOutcome::Rendered`), one stays in the `SplitExecutor`
+    // for the UI thread to read before paint. Mirrors the `fatal` flag's shape.
+    let presented = Arc::new(AtomicU64::new(0));
+    let presented_render = Arc::clone(&presented);
+
     // Move `startup_spans` (init_entry + font spans already recorded) into the
     // render thread, which owns the rest of the startup line.
     let join = std::thread::Builder::new()
@@ -1001,6 +1009,7 @@ fn spawn_split_executor(
                     cache_dir,
                     fatal_render,
                     scene_return_tx,
+                    presented_render,
                 )
             })
         })
@@ -1015,7 +1024,13 @@ fn spawn_split_executor(
     });
 
     (
-        FrameExecutor::Split(SplitExecutor::new(sender, join, fatal, scene_return_rx)),
+        FrameExecutor::Split(SplitExecutor::new(
+            sender,
+            join,
+            fatal,
+            scene_return_rx,
+            presented,
+        )),
         text_ctx,
     )
 }

@@ -43,6 +43,7 @@
 //! (idle CPU near zero).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -126,6 +127,19 @@ impl FrameExecutor {
         match self {
             FrameExecutor::Inline(inline) => inline.renderer.phase() == SurfacePhase::SurfaceReady,
             FrameExecutor::Split(split) => split.surface_requested,
+        }
+    }
+
+    /// The running count of frames the render side has actually presented
+    /// (`FrameOutcome::Rendered`). The UI thread loads this once per frame and
+    /// pushes it into `RenderRoot::set_presented_frames` before paint, so a
+    /// widget measuring FPS reports the presented rate, not its paint cadence
+    /// (task 10). Both variants share the counter with their render side via an
+    /// `Arc<AtomicU64>` — the split's other clone lives on the render thread.
+    pub(crate) fn presented_frames(&self) -> u64 {
+        match self {
+            FrameExecutor::Inline(inline) => inline.presented.load(Ordering::Relaxed),
+            FrameExecutor::Split(split) => split.presented.load(Ordering::Relaxed),
         }
     }
 
@@ -240,6 +254,11 @@ pub(crate) fn spawn_render_thread(proxy: EventLoopProxy<ShellUserEvent>) -> Spli
     let factory = render_cx.surface_factory();
     let (sender, receiver) = render_channel::<PaintedScene, DesktopSurface>();
     let (scene_return_tx, scene_return_rx) = scene_return_channel::<Scene>();
+    // Presented-frame counter (task 10): one clone drives into the render thread
+    // (bumped on each `FrameOutcome::Rendered`), one stays in the `SplitExecutor`
+    // for the UI thread to read before paint.
+    let presented = Arc::new(AtomicU64::new(0));
+    let presented_render = Arc::clone(&presented);
     let join = std::thread::Builder::new()
         .name("frust-render".to_string())
         // Guard the loop so a dev-build panic logs and exits cleanly (dropping the
@@ -247,11 +266,17 @@ pub(crate) fn spawn_render_thread(proxy: EventLoopProxy<ShellUserEvent>) -> Spli
         // deadlock fix). A no-op under the release `panic = "abort"` profile.
         .spawn(move || {
             frust_shell_common::run_guarded_thread("frust-render (desktop)", move || {
-                render_loop(receiver, proxy, render_cx, scene_return_tx)
+                render_loop(
+                    receiver,
+                    proxy,
+                    render_cx,
+                    scene_return_tx,
+                    presented_render,
+                )
             })
         })
         .expect("frust: failed to spawn render thread");
-    SplitExecutor::new(sender, join, factory, scene_return_rx)
+    SplitExecutor::new(sender, join, factory, scene_return_rx, presented)
 }
 
 /// The single-thread fallback executor (kill switch engaged): the
@@ -266,6 +291,11 @@ pub(crate) struct InlineExecutor {
     first_rebuild_recorded: bool,
     first_encode_recorded: bool,
     first_frame_recorded: bool,
+    /// Running count of presented frames (task 10). Inline renders on the UI
+    /// thread, so this is bumped and read on the same thread — the `Arc<Atomic>`
+    /// shape matches the split's cross-thread counter so `FrameExecutor` reads
+    /// both variants uniformly.
+    presented: Arc<AtomicU64>,
 }
 
 impl InlineExecutor {
@@ -283,6 +313,7 @@ impl InlineExecutor {
             first_rebuild_recorded: false,
             first_encode_recorded: false,
             first_frame_recorded: false,
+            presented: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -344,7 +375,12 @@ impl InlineExecutor {
                     Err(err) => eprintln!("frust: failed to recreate surface: {err}"),
                 }
             }
-            Ok(FrameOutcome::Rendered) | Ok(FrameOutcome::Skipped) => {}
+            // A presented frame: bump the shared counter the UI thread reads
+            // before paint (task 10). `Skipped` presents nothing, so it doesn't.
+            Ok(FrameOutcome::Rendered) => {
+                self.presented.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(FrameOutcome::Skipped) => {}
             Err(err) => eprintln!("frust: render error: {err}"),
         }
     }
@@ -383,6 +419,12 @@ pub(crate) struct SplitExecutor {
     /// [`Self::scene_return`] on the next [`Self::take_reusable_scene`] call
     /// so that buffer is reused too, rather than dropped.
     spare_scene: Option<Scene>,
+    /// Running count of presented frames (task 10): one clone here (read by the
+    /// UI thread before paint via `FrameExecutor::presented_frames`), one on the
+    /// render thread ([`render_loop`], which bumps it on each
+    /// `FrameOutcome::Rendered`). A plain `Arc<AtomicU64>` — no channel/protocol,
+    /// mirroring the `fatal`-flag pattern on the mobile shells.
+    presented: Arc<AtomicU64>,
 }
 
 impl SplitExecutor {
@@ -391,6 +433,7 @@ impl SplitExecutor {
         join: JoinHandle<()>,
         factory: SurfaceFactory,
         scene_return: SceneReturnReceiver<Scene>,
+        presented: Arc<AtomicU64>,
     ) -> Self {
         Self {
             sender: Some(sender),
@@ -400,6 +443,7 @@ impl SplitExecutor {
             frame_id: 0,
             scene_return,
             spare_scene: None,
+            presented,
         }
     }
 
@@ -521,6 +565,7 @@ fn render_loop(
     proxy: EventLoopProxy<ShellUserEvent>,
     mut render_cx: RenderContext,
     scene_return: SceneReturnSender<Scene>,
+    presented: Arc<AtomicU64>,
 ) {
     let mut renderer = SurfaceRenderer::new();
     // Kept only for `pre_present_notify` (surface creation/recovery is UI-side).
@@ -633,7 +678,12 @@ fn render_loop(
                     Ok(FrameOutcome::SurfaceLost) => {
                         let _ = proxy.send_event(ShellUserEvent::RenderRecreateSurface);
                     }
-                    Ok(FrameOutcome::Rendered) | Ok(FrameOutcome::Skipped) => {}
+                    // A presented frame: bump the shared counter the UI thread
+                    // reads before paint (task 10). `Skipped` presents nothing.
+                    Ok(FrameOutcome::Rendered) => {
+                        presented.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(FrameOutcome::Skipped) => {}
                     Err(err) => log::error!("frust: render error: {err}"),
                 }
             }

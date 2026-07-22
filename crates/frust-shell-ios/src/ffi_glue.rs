@@ -50,7 +50,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Once};
 
 use anyhow::{Context, Result, bail};
@@ -357,6 +357,7 @@ pub(crate) fn render_loop(
     startup_spans: StartupSpans,
     fatal: Arc<AtomicBool>,
     scene_return: SceneReturnSender<Scene>,
+    presented: Arc<AtomicU64>,
 ) {
     // Render-thread QoS self-boost (phase-11 fix F6): tag this dedicated render
     // thread as user-interactive so the scheduler treats its GPU submit work at
@@ -484,6 +485,7 @@ pub(crate) fn render_loop(
                     &mut frame_stats,
                     &mut startup_spans,
                     perf_on,
+                    &presented,
                 );
 
                 // iOS self-heals a lost surface from the retained layer (nothing
@@ -711,6 +713,12 @@ fn spawn_split_executor(
     let fatal = Arc::new(AtomicBool::new(false));
     let fatal_render = Arc::clone(&fatal);
 
+    // Presented-frame counter (task 10): one clone drives into the render thread
+    // (bumped on each `FrameOutcome::Rendered`), one stays in the `SplitExecutor`
+    // for the UI thread to read before paint. Mirrors the `fatal` flag's shape.
+    let presented = Arc::new(AtomicU64::new(0));
+    let presented_render = Arc::clone(&presented);
+
     // Move `startup` (init_entry + font spans already recorded) into the render
     // thread, which owns the rest of the startup line. The raw `metal_layer`
     // pointer is NOT captured by the closure (it is `!Send`); it crosses the
@@ -723,7 +731,13 @@ fn spawn_split_executor(
         // deadlock fix). A no-op under the release `panic = "abort"` profile.
         .spawn(move || {
             run_guarded_thread("frust-render (ios)", move || {
-                render_loop(receiver, startup, fatal_render, scene_return_tx)
+                render_loop(
+                    receiver,
+                    startup,
+                    fatal_render,
+                    scene_return_tx,
+                    presented_render,
+                )
             })
         })
         .expect("frust-shell-ios: failed to spawn render thread");
@@ -737,7 +751,13 @@ fn spawn_split_executor(
     });
 
     (
-        FrameExecutor::Split(SplitExecutor::new(sender, join, fatal, scene_return_rx)),
+        FrameExecutor::Split(SplitExecutor::new(
+            sender,
+            join,
+            fatal,
+            scene_return_rx,
+            presented,
+        )),
         text_ctx,
     )
 }
