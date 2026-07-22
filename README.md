@@ -58,6 +58,18 @@ for the full command surface.
 | `frust` | The public app-author facade: `Component`/`app!`/`run` and the widget vocabulary apps are written against. |
 | `frust-cli` | The standalone `frust` binary: project scaffolding, environment doctor, device discovery, and the `run`/`build`/`clean` pipelines. |
 
+## Learning the rendering pipeline
+
+[`docs/learning/`](docs/learning/README.md) is a hands-on, lab-based
+curriculum for understanding how Frust turns a `View` into pixels — from
+the display list through the widget paint seam, the frame loop, the
+Vello/wgpu encode-present path, text shaping, the mobile frame gate, and
+the measurement tooling. Every chapter anchors to real files in this repo
+and ends with runnable experiments (build a scene by hand, break
+bubblebench on purpose, trace a frame with `FRUST_TRACE=1`), plus a
+verified watchlist of talks and university lectures for the theory —
+after you've seen the mechanism working.
+
 ## License
 
 Licensed under MIT OR Apache-2.0.
