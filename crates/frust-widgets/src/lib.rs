@@ -29,6 +29,7 @@ mod icon;
 pub mod icons;
 mod image;
 pub mod material;
+pub mod motion;
 pub mod nav;
 mod padding;
 mod radio;
@@ -758,7 +759,7 @@ pub(crate) fn route_event_single(
 pub(crate) mod test_support {
     use super::*;
     use frust_core::{BoxConstraints, LayoutCtx, PaintCtx, PaintScene, any};
-    use kurbo::{Point, Size};
+    use kurbo::{Affine, Point, Size};
     use peniko::Color;
 
     /// A leaf view of fixed intrinsic size that fills a rect on paint.
@@ -913,10 +914,17 @@ pub(crate) mod test_support {
         }
     }
 
-    /// A GPU-free [`PaintScene`] that records filled rects in paint order.
+    /// A GPU-free [`PaintScene`] that records filled rects in paint order, plus
+    /// (glyph-design-system task 12) `push_layer`/`push_transform` calls and
+    /// their pop counts — the `motion::animated` wrappers' recording-scene
+    /// tests assert against these alongside the pre-existing `rects`.
     #[derive(Default)]
     pub(crate) struct RecordingScene {
         pub(crate) rects: Vec<(Point, Size)>,
+        pub(crate) layers: Vec<(Point, Size, f32)>,
+        pub(crate) layer_pops: u32,
+        pub(crate) transforms: Vec<Affine>,
+        pub(crate) transform_pops: u32,
     }
 
     impl PaintScene for RecordingScene {
@@ -924,6 +932,18 @@ pub(crate) mod test_support {
             self.rects.push((origin, size));
         }
         fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn push_layer(&mut self, origin: Point, size: Size, alpha: f32) {
+            self.layers.push((origin, size, alpha));
+        }
+        fn pop_layer(&mut self) {
+            self.layer_pops += 1;
+        }
+        fn push_transform(&mut self, transform: Affine) {
+            self.transforms.push(transform);
+        }
+        fn pop_transform(&mut self) {
+            self.transform_pops += 1;
+        }
     }
 }
 

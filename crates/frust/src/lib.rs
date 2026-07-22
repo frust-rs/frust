@@ -144,6 +144,25 @@ pub use frust_widgets::{
     show_cupertino_alert, tab_item,
 };
 
+/// The `motion` module (glyph-design-system task 12): declarative
+/// implicit-animation wrappers (`AnimatedOpacity`/`AnimatedScale` today;
+/// `switcher`/`patterns` land in later tasks) over `frust-core`'s `anim`
+/// vocabulary. Re-exported **wholesale**
+/// (`pub use frust_widgets::motion;`), mirroring `frust_widgets::icons`'s
+/// existing wholesale-module precedent — the only other one in this facade —
+/// so later types under `frust_widgets::motion` ride along under
+/// `frust::motion::*` with no further facade edits (see that module's own
+/// docs for the full rationale).
+///
+/// ```
+/// use frust::motion::{AnimatedOpacity, AnimatedOpacityView, AnimatedScale};
+/// use frust::text;
+///
+/// let _opacity: AnimatedOpacityView<()> = AnimatedOpacity(1.0, text("hi"));
+/// let _scale: frust::motion::AnimatedScaleView<()> = AnimatedScale(1.0, text("hi"));
+/// ```
+pub use frust_widgets::motion;
+
 mod back_glue;
 mod router_glue;
 
