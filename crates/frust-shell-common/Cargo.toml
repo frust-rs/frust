@@ -17,6 +17,11 @@ license.workspace = true
 # release. Additive: nothing in a release invocation enables it, so cargo's
 # feature unification keeps it off unless a build explicitly opts in.
 perf-trace = []
+# Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain). Nothing
+# in this crate is itself feature-gated on it — `font_registry` registers
+# whatever bytes a caller pushes — this is purely a pass-through edge so the
+# facade's default-on `glyph-fonts` feature reaches frust-theme.
+glyph-fonts = ["frust-theme/glyph-fonts"]
 
 [dependencies]
 # Platform-agnostic shell plumbing: no jni/ndk/winit here, so the whole crate

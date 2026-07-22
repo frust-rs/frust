@@ -16,6 +16,16 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # that generated this project (spec §12.3: "frust_path" mechanism is
 # explicitly temporary). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead.
+#
+# Glyph fonts opt-out (gf2): `frust`'s default `glyph-fonts` feature bundles
+# ~1MB of Space Mono + IBM Plex Mono TTF bytes for the Glyph design
+# language's type scale (default ON — zero-config Glyph experience). An app
+# that never uses the Glyph design language can drop that ~1MB:
+#
+#   frust = { path = "{{ frust_path }}", default-features = false }
+#
+# `frust` has no other default feature today, so this is currently a clean
+# opt-out with nothing else to re-add.
 frust = { path = "{{ frust_path }}" }
 
 # `frust-shared-preferences` demo (plugin-system spec): a platform plugin
