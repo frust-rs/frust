@@ -20,6 +20,7 @@
 //! owning device.
 
 use anyhow::{Result, anyhow};
+use std::sync::OnceLock;
 use vello::util::RenderSurface;
 use wgpu::util::TextureBlitter;
 
@@ -29,6 +30,93 @@ use wgpu::util::TextureBlitter;
 /// from the `required_limits` we control.
 fn vello_optional_features() -> wgpu::Features {
     wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE
+}
+
+/// Whether perf tracing (frust-perf logging) is enabled via the process-wide
+/// `FRUST_TRACE` flag — mirroring the check in `frust-shell-common::perf`.
+/// Cached to avoid repeated environment lookups.
+fn perf_tracing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let compile_time = option_env!("FRUST_TRACE");
+        let runtime = std::env::var("FRUST_TRACE").ok();
+        fn is_set_non_zero(value: Option<&str>) -> bool {
+            matches!(value, Some(v) if v != "0")
+        }
+        is_set_non_zero(compile_time) || is_set_non_zero(runtime.as_deref())
+    })
+}
+
+/// Probes the surface's direct-to-surface capability and logs the result
+/// (if perf tracing is enabled). Logs once per process.
+///
+/// Direct-to-surface rendering requires:
+/// - Rgba8Unorm format in the surface's supported formats
+/// - STORAGE_BINDING usage in the surface's supported usages
+fn probe_direct_to_surface_capability(capabilities: &wgpu::SurfaceCapabilities) {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+
+    if !perf_tracing_enabled() {
+        return;
+    }
+
+    LOGGED.get_or_init(|| {
+        // Format the supported formats as a comma-separated list
+        let formats_str = if capabilities.formats.is_empty() {
+            "[]".to_string()
+        } else {
+            format!(
+                "[{}]",
+                capabilities
+                    .formats
+                    .iter()
+                    .map(|f| format!("{:?}", f))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+
+        // Check if Rgba8Unorm is in the supported formats
+        let has_rgba8unorm = capabilities
+            .formats
+            .contains(&wgpu::TextureFormat::Rgba8Unorm);
+
+        // Check if STORAGE_BINDING is in the supported usages
+        let has_storage_binding = capabilities
+            .usages
+            .contains(wgpu::TextureUsages::STORAGE_BINDING);
+
+        // Determine the verdict
+        let direct_to_surface_supported = has_rgba8unorm && has_storage_binding;
+        let verdict = if direct_to_surface_supported {
+            "YES"
+        } else {
+            "NO"
+        };
+
+        // Provide a reason for the verdict
+        let reason = if direct_to_surface_supported {
+            "Rgba8Unorm+STORAGE_BINDING".to_string()
+        } else {
+            let mut missing = Vec::new();
+            if !has_rgba8unorm {
+                missing.push("no Rgba8Unorm");
+            }
+            if !has_storage_binding {
+                missing.push("no STORAGE_BINDING");
+            }
+            missing.join(", ")
+        };
+
+        // Log the surface capabilities probe
+        log::info!(
+            "frust-perf surface-caps formats={} usages={:?} direct_to_surface={} ({})",
+            formats_str,
+            capabilities.usages,
+            verdict,
+            reason
+        );
+    });
 }
 
 /// A logical device plus the adapter it came from and the queue that executes
@@ -534,6 +622,7 @@ impl RenderContext {
         let handle = self.device_handle();
 
         let capabilities = surface.get_capabilities(&handle.adapter);
+        probe_direct_to_surface_capability(&capabilities);
         let format = capabilities
             .formats
             .iter()
