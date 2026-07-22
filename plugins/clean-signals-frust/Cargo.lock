@@ -1074,6 +1074,7 @@ dependencies = [
  "frust-theme",
  "jni 0.22.4",
  "kurbo",
+ "libc",
  "log",
  "ndk",
  "ndk-sys",
@@ -1129,6 +1130,7 @@ dependencies = [
  "frust-text",
  "frust-theme",
  "kurbo",
+ "libc",
  "log",
  "objc2 0.6.4",
  "peniko",
@@ -1143,6 +1145,7 @@ dependencies = [
  "kurbo",
  "parley",
  "peniko",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
