@@ -17,7 +17,7 @@ mod layout;
 mod shape_cache;
 mod style;
 
-pub use context::TextContext;
+pub use context::{FontError, RegisteredFamily, TextContext};
 pub use editor::{
     EditOp, EditingState, EditingStateBytes, TextEditor, byte_to_utf16, utf16_to_byte,
 };
