@@ -234,6 +234,37 @@ pub enum EncodeOutcome {
     Skipped,
 }
 
+/// The outcome of a single [`crate::SurfaceRenderer::acquire`] call — the first
+/// half of the two-phase present seam ([`crate::SurfaceRenderer::acquire`] +
+/// [`crate::SurfaceRenderer::submit`]), itself the second phase of the render
+/// pipeline after [`crate::SurfaceRenderer::encode`] (Phase 11.A).
+///
+/// A shell that times the swapchain **acquire** (the blocking vsync/present
+/// wait) separately from the **submit** (blit + queue-submit + present) branches
+/// on this to decide whether submitting is worthwhile. Only [`Self::Acquired`]
+/// carries a stashed swapchain texture for [`crate::SurfaceRenderer::submit`] to
+/// blit into; every other variant is terminal and maps to a [`FrameOutcome`]
+/// with no submit (see [`crate::SurfaceRenderer::present`]'s wrapper).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcquireOutcome {
+    /// The swapchain texture was acquired and stashed;
+    /// [`crate::SurfaceRenderer::submit`] blits into it and presents it. Maps to
+    /// [`FrameOutcome::Rendered`] once submitted.
+    Acquired,
+    /// The surface was stale and has been reconfigured internally; no texture was
+    /// stashed. Maps to [`FrameOutcome::Redraw`] — the shell should request
+    /// another frame against the fresh configuration.
+    Reconfigured,
+    /// The surface was lost and has been dropped; the machine is now in
+    /// [`SurfacePhase::SurfaceLost`]. Maps to [`FrameOutcome::SurfaceLost`] — the
+    /// shell must recreate the surface via `on_surface_created`.
+    Lost,
+    /// No renderable surface (`NoSurface`/`SurfaceLost`) or a transient acquire
+    /// failure: nothing was stashed and nothing was queued. Maps to
+    /// [`FrameOutcome::Skipped`].
+    Skipped,
+}
+
 /// Builds a `wgpu::Surface` from a raw `ANativeWindow` pointer.
 ///
 /// This is one of the framework's sanctioned `unsafe` boundaries: turning a

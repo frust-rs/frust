@@ -34,7 +34,7 @@ mod tier;
 
 pub use context::RenderContext;
 pub use convert::encode_scene;
-pub use lifecycle::{EncodeOutcome, FrameOutcome, SurfacePhase};
+pub use lifecycle::{AcquireOutcome, EncodeOutcome, FrameOutcome, SurfacePhase};
 pub use renderer::SurfaceRenderer;
 pub use tier::{
     GPU_REQUIRED_DOWNLEVEL_FLAGS, RENDER_TIER_ENV_VAR, RenderTier, TierCaps, TierOutcome,

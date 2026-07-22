@@ -28,7 +28,9 @@ use frust_core::event::{
 };
 use frust_core::insets::WindowInsets;
 use frust_reactive::{ReactiveRuntime, TrackedScope, provide_context};
-use frust_render::{EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
+use frust_render::{
+    AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
+};
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
@@ -1048,13 +1050,29 @@ impl AndroidAppHandle {
             }
         }
 
-        let present_start = perf_on.then(Instant::now);
-        let render_result = match encode_outcome {
-            Ok(EncodeOutcome::Encoded) => self.renderer.present(&self.render_cx),
-            Ok(EncodeOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+        // Present-span split (Phase 11.A): time the swapchain **acquire**
+        // (blocking vsync wait) and the **submit** (blit + queue-submit +
+        // present) separately so the S5 GPU-saturation-vs-blit-cost question has
+        // an acquire-only number. Each sub-span's `Instant::now()` stays gated
+        // behind `perf_on` (this module's FFI-path perf convention: zero clock
+        // reads when disabled).
+        let acquire_start = perf_on.then(Instant::now);
+        let acquire_result = match encode_outcome {
+            Ok(EncodeOutcome::Encoded) => self.renderer.acquire(&self.render_cx),
+            Ok(EncodeOutcome::Skipped) => Ok(AcquireOutcome::Skipped),
             Err(err) => Err(err),
         };
-        let present_time = present_start.map_or(Duration::ZERO, |t| t.elapsed());
+        let acquire_time = acquire_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+        let submit_start = perf_on.then(Instant::now);
+        let render_result = match acquire_result {
+            Ok(AcquireOutcome::Acquired) => self.renderer.submit(&self.render_cx),
+            Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
+            Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
+            Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+            Err(err) => Err(err),
+        };
+        let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
 
         match render_result {
             // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
@@ -1089,7 +1107,8 @@ impl AndroidAppHandle {
             layout: layout_time,
             paint: paint_time,
             encode: encode_time,
-            present: present_time,
+            acquire: acquire_time,
+            submit: submit_time,
             skipped: false,
         });
         if self.frame_stats.should_emit() {

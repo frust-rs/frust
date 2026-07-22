@@ -18,8 +18,8 @@ use anyhow::{Result, anyhow};
 use crate::context::RenderContext;
 use crate::convert;
 use crate::lifecycle::{
-    AcquireAction, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent, SurfacePhase,
-    decide_acquire, next_invalid_streak, next_phase,
+    AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
+    SurfacePhase, decide_acquire, next_invalid_streak, next_phase,
 };
 
 /// The live GPU resources of a [`SurfacePhase::SurfaceReady`] surface.
@@ -99,6 +99,15 @@ pub struct SurfaceRenderer {
     /// compilation. `None` is a cold start. Only meaningful on adapters with
     /// `PIPELINE_CACHE` (Vulkan/Android); validated and discarded elsewhere.
     initial_cache_data: Option<Vec<u8>>,
+    /// The swapchain texture [`Self::acquire`] acquired and stashed for
+    /// [`Self::submit`] to blit into and present (Phase 11.A present-span split).
+    /// `None` outside an in-flight `acquire`→`submit` pair — set only on an
+    /// [`AcquireOutcome::Acquired`] result, taken by the next [`Self::submit`].
+    /// A `wgpu::SurfaceTexture` is owned (it does not borrow the surface), so
+    /// stashing it here between the two clock-separated calls keeps the wgpu type
+    /// confined to `frust-render` while letting a shell time each span with its
+    /// own clock (timing stays shell-owned — see `frust-shell-common::perf`).
+    pending_present: Option<wgpu::SurfaceTexture>,
 }
 
 impl Default for SurfaceRenderer {
@@ -119,6 +128,7 @@ impl SurfaceRenderer {
             state: SurfaceState::NoSurface,
             consecutive_invalid: 0,
             initial_cache_data: None,
+            pending_present: None,
         }
     }
 
@@ -514,12 +524,19 @@ impl SurfaceRenderer {
         Ok(EncodeOutcome::Encoded)
     }
 
-    /// Phase 2 of the frame — the **present** span: acquire the swapchain
-    /// texture (the blocking vsync/present wait, per the surface's present
-    /// mode), blit the encoded intermediate target into it, submit, and
-    /// present. Timing this call in isolation attributes the present/vsync wait
-    /// separately from [`Self::encode`]'s GPU work — the split the
-    /// render-thread-split GO/NO-GO decision is made on (Phase 10.A).
+    /// Phase 2 of the frame — the **present** span: a thin wrapper over the
+    /// two-phase [`Self::acquire`] + [`Self::submit`] seam, kept for callers
+    /// (and the [`Self::render`] convenience wrapper) that time present as one
+    /// span. It acquires the swapchain texture (the blocking vsync/present
+    /// wait) and, on success, blits/submits/presents it.
+    ///
+    /// A caller wanting the finer **acquire** (blocking vsync wait) vs
+    /// **submit** (blit + queue-submit + present) attribution — the S5
+    /// GPU-saturation-vs-blit-cost question (Phase 11.A) — calls
+    /// [`Self::acquire`] and [`Self::submit`] directly, timing each with its own
+    /// clock (timing stays shell-owned; this crate reads no clock — see
+    /// `frust-shell-common::perf`'s layering note). `present`'s combined span
+    /// equals `acquire` + `submit` by construction.
     ///
     /// Assumes [`Self::encode`] has already filled the intermediate target this
     /// frame. In any phase but [`SurfacePhase::SurfaceReady`] the call is a
@@ -529,20 +546,45 @@ impl SurfaceRenderer {
     /// to [`SurfacePhase::SurfaceLost`], and [`FrameOutcome::SurfaceLost`] tells
     /// the shell to recreate it.
     pub fn present(&mut self, ctx: &RenderContext) -> Result<FrameOutcome> {
+        match self.acquire(ctx)? {
+            AcquireOutcome::Acquired => self.submit(ctx),
+            AcquireOutcome::Reconfigured => Ok(FrameOutcome::Redraw),
+            AcquireOutcome::Lost => Ok(FrameOutcome::SurfaceLost),
+            AcquireOutcome::Skipped => Ok(FrameOutcome::Skipped),
+        }
+    }
+
+    /// Phase 2a of the frame — the **acquire** sub-span: acquire the swapchain
+    /// texture (the blocking vsync/present wait, per the surface's present mode),
+    /// classify the result (spec §8.1), and — on a usable acquire — stash the
+    /// texture for [`Self::submit`] to blit into. Timing this call in isolation
+    /// attributes the blocking present/vsync wait separately from [`Self::submit`]'s
+    /// blit/queue-submit work — the split the S5 GPU-saturation-vs-blit-cost
+    /// question is answered on (Phase 11.A).
+    ///
+    /// Returns [`AcquireOutcome::Acquired`] when a texture was stashed (the
+    /// caller must follow with [`Self::submit`]); otherwise a terminal outcome —
+    /// [`AcquireOutcome::Reconfigured`] (`Outdated` acquire, surface reconfigured),
+    /// [`AcquireOutcome::Lost`] (surface dropped, now `SurfaceLost`), or
+    /// [`AcquireOutcome::Skipped`] (no renderable surface or a transient failure).
+    /// In any phase but [`SurfacePhase::SurfaceReady`] it is a no-op returning
+    /// [`AcquireOutcome::Skipped`] (spec §8.1).
+    pub fn acquire(&mut self, ctx: &RenderContext) -> Result<AcquireOutcome> {
         // Frames are dropped in every phase but SurfaceReady (spec §8.1).
         if !self.phase().can_render() {
-            return Ok(FrameOutcome::Skipped);
+            return Ok(AcquireOutcome::Skipped);
         }
-        // Disjoint field borrows: the live surface and the consecutive-Invalid
-        // counter (the reusable scene belongs to `encode`).
+        // Disjoint field borrows: the live surface, the consecutive-Invalid
+        // counter, and the stash slot (the reusable scene belongs to `encode`).
         let Self {
             state,
             consecutive_invalid,
+            pending_present,
             ..
         } = self;
         let SurfaceState::Ready(ready) = state else {
             // Unreachable: `can_render()` above guaranteed SurfaceReady.
-            return Ok(FrameOutcome::Skipped);
+            return Ok(AcquireOutcome::Skipped);
         };
         let ready: &mut ReadySurface = ready;
 
@@ -581,29 +623,14 @@ impl SurfaceRenderer {
                         return Err(anyhow!("frust-render: acquire classification desync"));
                     }
                 };
-                let device_handle = ctx.device_handle();
-                let target_view = surface_texture
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-                let mut encoder =
-                    device_handle
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("frust-render blit"),
-                        });
-                ready.surface.blitter.copy(
-                    &device_handle.device,
-                    &mut encoder,
-                    &ready.surface.target_view,
-                    &target_view,
-                );
-                device_handle.queue.submit([encoder.finish()]);
-                surface_texture.present();
-                Ok(FrameOutcome::Rendered)
+                // Stash the acquired texture for `submit`; the blocking vsync wait
+                // ended above, so timing stops here for the acquire sub-span.
+                *pending_present = Some(surface_texture);
+                Ok(AcquireOutcome::Acquired)
             }
             AcquireAction::Reconfigure => {
                 ctx.configure_surface(&ready.surface);
-                Ok(FrameOutcome::Redraw)
+                Ok(AcquireOutcome::Reconfigured)
             }
             AcquireAction::Lose => {
                 debug_assert_eq!(
@@ -617,10 +644,53 @@ impl SurfaceRenderer {
                 // recovery path (recreate on resize/redraw/surfaceChanged) starts a
                 // fresh episode.
                 *state = SurfaceState::Lost;
-                Ok(FrameOutcome::SurfaceLost)
+                Ok(AcquireOutcome::Lost)
             }
-            AcquireAction::Skip => Ok(FrameOutcome::Skipped),
+            AcquireAction::Skip => Ok(AcquireOutcome::Skipped),
         }
+    }
+
+    /// Phase 2b of the frame — the **submit** sub-span: blit the encoded
+    /// intermediate target into the swapchain texture [`Self::acquire`] stashed,
+    /// queue-submit the blit, and present it. Timing this call in isolation
+    /// attributes the blit/submit work separately from [`Self::acquire`]'s
+    /// blocking vsync wait (Phase 11.A).
+    ///
+    /// Must follow an [`AcquireOutcome::Acquired`] result from [`Self::acquire`]
+    /// on the same frame — it consumes the stashed texture. With nothing stashed
+    /// (no prior `Acquired`, or the surface vanished between the two calls) it is
+    /// a no-op returning [`FrameOutcome::Skipped`]; otherwise
+    /// [`FrameOutcome::Rendered`].
+    pub fn submit(&mut self, ctx: &RenderContext) -> Result<FrameOutcome> {
+        // Nothing acquired this frame (no prior `Acquired`): nothing to present.
+        let Some(surface_texture) = self.pending_present.take() else {
+            return Ok(FrameOutcome::Skipped);
+        };
+        // The stashed texture is owned, but the blit source (`target_view`) and
+        // the blitter live on the surface — if it vanished between `acquire` and
+        // `submit`, drop the texture and skip rather than present a stale frame.
+        let SurfaceState::Ready(ready) = &self.state else {
+            return Ok(FrameOutcome::Skipped);
+        };
+        let device_handle = ctx.device_handle();
+        let target_view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            device_handle
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frust-render blit"),
+                });
+        ready.surface.blitter.copy(
+            &device_handle.device,
+            &mut encoder,
+            &ready.surface.target_view,
+            &target_view,
+        );
+        device_handle.queue.submit([encoder.finish()]);
+        surface_texture.present();
+        Ok(FrameOutcome::Rendered)
     }
 }
 

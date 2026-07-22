@@ -41,7 +41,9 @@ use frust_core::event::{
 };
 use frust_core::view::View;
 use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
-use frust_render::{EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
+use frust_render::{
+    AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
+};
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::perf::{
     FramePasses, FrameStats, SPAN_ADAPTER_READY, SPAN_DEVICE_READY, SPAN_FIRST_ENCODE_DONE,
@@ -1043,16 +1045,32 @@ where
                     self.first_encode_recorded = true;
                 }
 
-                let present_start = Instant::now();
-                let render_outcome = match encode_outcome {
-                    Ok(EncodeOutcome::Encoded) => self.renderer.present(&self.render_cx),
-                    // Nothing was encoded (no renderable surface): don't present,
+                // Present-span split (Phase 11.A): the swapchain **acquire**
+                // (blocking vsync wait) and the **submit** (blit + queue-submit +
+                // present) are timed separately so the S5
+                // GPU-saturation-vs-blit-cost question has an acquire-only number.
+                // Each sub-span is its own `Instant` read (see the encode note
+                // above for why desktop doesn't gate these behind `perf::enabled()`).
+                let acquire_start = Instant::now();
+                let acquire_outcome = match encode_outcome {
+                    Ok(EncodeOutcome::Encoded) => self.renderer.acquire(&self.render_cx),
+                    // Nothing was encoded (no renderable surface): don't acquire,
                     // and surface the same `Skipped` the old combined `render`
                     // returned so the match below is unchanged.
-                    Ok(EncodeOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+                    Ok(EncodeOutcome::Skipped) => Ok(AcquireOutcome::Skipped),
                     Err(err) => Err(err),
                 };
-                let present_dur = present_start.elapsed();
+                let acquire_dur = acquire_start.elapsed();
+
+                let submit_start = Instant::now();
+                let render_outcome = match acquire_outcome {
+                    Ok(AcquireOutcome::Acquired) => self.renderer.submit(&self.render_cx),
+                    Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
+                    Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
+                    Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+                    Err(err) => Err(err),
+                };
+                let submit_dur = submit_start.elapsed();
 
                 // Perf instrumentation (task 10): one FramePasses record per
                 // produced frame, piggybacking on this event-driven redraw path
@@ -1064,7 +1082,8 @@ where
                     layout: layout_dur,
                     paint: paint_dur,
                     encode: encode_dur,
-                    present: present_dur,
+                    acquire: acquire_dur,
+                    submit: submit_dur,
                     skipped: false,
                 });
                 if self.frame_stats.should_emit() {

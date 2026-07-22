@@ -39,7 +39,9 @@ use frust_core::event::{
 };
 use frust_core::insets::WindowInsets;
 use frust_reactive::{ReactiveRuntime, TrackedScope, provide_context};
-use frust_render::{EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer};
+use frust_render::{
+    AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
+};
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
@@ -771,7 +773,8 @@ impl IosAppHandle {
                 layout: Duration::ZERO,
                 paint: Duration::ZERO,
                 encode: Duration::ZERO,
-                present: Duration::ZERO,
+                acquire: Duration::ZERO,
+                submit: Duration::ZERO,
                 skipped: true,
             });
             if self.frame_stats.should_emit() {
@@ -907,20 +910,37 @@ impl IosAppHandle {
             }
         }
 
-        let present_start = perf_on.then(Instant::now);
-        let render_result = match encode_outcome {
-            Ok(EncodeOutcome::Encoded) => self.renderer.present(&self.render_cx),
-            Ok(EncodeOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+        // Present-span split (Phase 11.A): time the swapchain **acquire**
+        // (blocking vsync wait) and the **submit** (blit + queue-submit +
+        // present) separately so the S5 GPU-saturation-vs-blit-cost question has
+        // an acquire-only number. Each sub-span's `Instant::now()` stays gated
+        // behind `perf_on` (this module's FFI-path perf convention: zero clock
+        // reads when disabled).
+        let acquire_start = perf_on.then(Instant::now);
+        let acquire_result = match encode_outcome {
+            Ok(EncodeOutcome::Encoded) => self.renderer.acquire(&self.render_cx),
+            Ok(EncodeOutcome::Skipped) => Ok(AcquireOutcome::Skipped),
             Err(err) => Err(err),
         };
-        let present = present_start.map(|t| t.elapsed()).unwrap_or_default();
+        let acquire = acquire_start.map(|t| t.elapsed()).unwrap_or_default();
+
+        let submit_start = perf_on.then(Instant::now);
+        let render_result = match acquire_result {
+            Ok(AcquireOutcome::Acquired) => self.renderer.submit(&self.render_cx),
+            Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
+            Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
+            Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+            Err(err) => Err(err),
+        };
+        let submit = submit_start.map(|t| t.elapsed()).unwrap_or_default();
 
         self.frame_stats.record(FramePasses {
             rebuild,
             layout,
             paint,
             encode,
-            present,
+            acquire,
+            submit,
             skipped: false,
         });
         if self.frame_stats.should_emit() {

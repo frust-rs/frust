@@ -24,10 +24,13 @@ no guaranteed `pip` access. Runnable in two ways:
 # Field-format contract
 
 - Frust:   `frust-perf raw n=<n> total_us=<> rebuild_us=<> layout_us=<> \\
-            paint_us=<> encode_us=<> present_us=<> skipped=<0|1>`
-  (raw format v2, Phase 10.A 2026-07-21: the single `encode_present_us`
-  field was split into separate `encode_us` + `present_us` — parsing is
-  key=value and forward-compatible, so only this contract note changed.)
+            paint_us=<> encode_us=<> acquire_us=<> submit_us=<> skipped=<0|1>`
+  (raw format v3, Phase 11.A 2026-07-22: the single `present_us` field was
+  split into separate `acquire_us` (blocking swapchain-acquire/vsync wait) +
+  `submit_us` (blit + queue-submit + present); `acquire_us + submit_us`
+  equals the old v2 `present_us`. Phase 10.A 2026-07-21 (v2) had earlier
+  split the v1 `encode_present_us` into `encode_us` + `present_us`. Parsing
+  is key=value and forward-compatible, so only this contract note changed.)
 - Flutter: `flutter-perf raw n=<n> build_us=<> raster_us=<> total_us=<>`
   (no `skipped` field — Flutter's `addTimingsCallback` only ever reports
   frames it actually rendered, so every parsed Flutter frame is treated as
