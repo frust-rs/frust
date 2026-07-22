@@ -11,6 +11,10 @@ frust-scene = { workspace = true }
 frust-render = { workspace = true }
 frust-text = { workspace = true }
 frust-reactive = { workspace = true }
+# Shared platform-dir resolution + atomic write (frust-paths substrate) —
+# cache.rs delegates cache-dir/app-stem/atomic-write to this leaf crate
+# instead of hand-rolling its own copy (see cache.rs's module doc).
+frust-paths = { workspace = true }
 # Load-bearing: the shell owns the active Theme, boxes it into RenderRoot's
 # type-erased slot, and re-pushes it on WindowEvent::ThemeChanged — see
 # docs/ARCHITECTURE.md's Theme delivery.
