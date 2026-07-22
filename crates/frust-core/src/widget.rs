@@ -100,6 +100,22 @@ pub trait PaintScene {
     /// id; `time` is seconds, app-supplied. Defaulted to a no-op so pre-existing
     /// recorder scenes stay valid; the `SceneBuilder` implementation records a
     /// real shader-quad command.
+    ///
+    /// # Cache-once contract
+    ///
+    /// `program` must be a retained, already-created `ShaderProgram` handle
+    /// (see `ShaderProgram::new`'s own doc for the full contract) — never a
+    /// fresh one minted inline in the call that invokes this method. This
+    /// method is reached from [`Widget::paint`], which re-runs every frame,
+    /// so a `ShaderProgram::new` call written directly at a `draw_shader`
+    /// call site there mints a new process-unique id (and therefore a new
+    /// GPU pipeline cache miss) every frame; the same applies to a
+    /// [`crate::component::Component`]'s `build`, which re-runs every
+    /// rebuild. Build the `ShaderProgram` once — in a `Component`'s `init`,
+    /// or other retained widget state — and clone the handle in; a
+    /// [`View::build`](crate::view::View::build) call, by contrast, runs
+    /// exactly once per widget instance and is a correct place to construct
+    /// one.
     fn draw_shader(&mut self, _program: &ShaderProgram, _dest: Rect, _time: f32) {}
 
     /// Draw a gaussian-blurred rounded-rectangle elevation shadow (an

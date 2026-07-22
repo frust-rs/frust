@@ -38,6 +38,27 @@ impl ShaderProgram {
     /// id.
     ///
     /// `Clone` shares the id — see the `id` field's doc comment.
+    ///
+    /// # Cache-once contract
+    ///
+    /// Call this **once** per distinct shader and retain (or `Clone`) the
+    /// result — never mint a fresh `ShaderProgram` every frame or rebuild.
+    /// `frust-render`'s shader-effects engine compiles and caches a GPU
+    /// pipeline keyed by [`id()`](Self::id): a fresh id every frame is a
+    /// permanent cache miss, forcing a full pipeline recompile (plus
+    /// target/registration churn) every single frame instead of the
+    /// intended compile-once-then-reuse cost.
+    ///
+    /// Create it once in retained state — a `Component`'s `init`, or other
+    /// `Widget`/`View` state built once and reused — and clone the handle
+    /// (cheap: an `Arc` handle copy, sharing the id) wherever it's drawn
+    /// thereafter. A `View`'s own `build` method is a correct create-once
+    /// hook too: it constructs the retained widget exactly once, so minting
+    /// a program there is fine. Do **not** call `ShaderProgram::new` inline
+    /// inside a widget's `paint` method (runs every frame) or inside a
+    /// `Component`'s `build` (re-runs every rebuild) — both mint a new id on
+    /// every call. See `examples/shadertoy/src/shaders.rs`'s `all()` for the
+    /// reference pattern: a registry built once and reused.
     pub fn new(wgsl: impl Into<Arc<str>>) -> Self {
         let id = NEXT_SHADER_PROGRAM_ID.fetch_add(1, Ordering::Relaxed);
         Self {

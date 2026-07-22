@@ -22,6 +22,12 @@
 //!   teardown — the whole-id counterpart to
 //!   [`ShaderEffects::evict_stale_targets`]'s frame-scoped resized-away-size
 //!   reclaim.
+//! - **Churn detection** ([`should_warn_churn`], consulted by
+//!   [`ShaderEffects::ensure_pipeline`]): a rate-limited `log::warn!` once the
+//!   live compiled-program count crosses [`CHURN_WARN_THRESHOLD`] — a
+//!   detection aid pointing at the `ShaderProgram::new` cache-once contract
+//!   (`frust_scene::ShaderProgram::new`'s rustdoc), not itself a bound on
+//!   growth; the age-based reap above is what actually bounds it.
 //!
 //! It is deliberately decoupled from `frust-scene`: the API speaks
 //! `(id: u64, wgsl: &str, size, time)` primitives, never a `Scene` or a
@@ -79,6 +85,32 @@ const MAX_FAILED_WARNINGS: u32 = 8;
 /// enough that navigating away from a shader-showcase screen reclaims its
 /// GPU state promptly instead of leaking for the rest of the session.
 const MAX_UNSEEN_FRAMES: u64 = 120;
+
+/// Distinct-compiled-program-id threshold [`should_warn_churn`] compares
+/// [`ShaderEffects::pipelines`]'s live size against. Crossing it is a
+/// detection signal — not itself a bound on growth (see below) — that
+/// `ShaderProgram::new` is likely being called somewhere that re-runs every
+/// frame/rebuild (a widget's `paint`, or a `Component`'s `build`) instead of
+/// once, per its documented cache-once contract
+/// (`frust_scene::ShaderProgram::new`'s rustdoc). 32 is chosen with generous
+/// headroom over the shader-showcase's own program count (a handful of
+/// fixed shaders) so a legitimate small gallery never trips it, while a
+/// per-frame-minting footgun — which compiles a fresh id on every frame and
+/// only stops accumulating once [`MAX_UNSEEN_FRAMES`]-old entries start
+/// reaping — reliably crosses it within about a second.
+///
+/// **Detection-only**: this constant does not bound
+/// [`ShaderEffects::pipelines`]'s actual growth — [`ShaderEffects::reap`]
+/// (driven by [`MAX_UNSEEN_FRAMES`]) is what keeps the maps from growing
+/// without bound; this threshold only decides when to *warn* that growth is
+/// happening in the first place.
+const CHURN_WARN_THRESHOLD: usize = 32;
+
+/// How many churn-detection warnings (see [`CHURN_WARN_THRESHOLD`]) are
+/// logged before further ones are suppressed — the same rate-limit shape as
+/// [`MAX_FAILED_WARNINGS`], applied to a distinct signal (concurrently
+/// compiled program count, not compile failures).
+const MAX_CHURN_WARNINGS: u32 = 8;
 
 /// The fixed WGSL prelude prepended to every fragment source: the 16-byte
 /// uniform block at `@group(0) @binding(0)` and the vertex-buffer-free
@@ -157,6 +189,9 @@ pub(crate) struct ShaderEffects {
     /// How many compile failures have been logged so far (the [`MAX_FAILED_WARNINGS`]
     /// rate limit).
     warned_failures: u32,
+    /// How many churn-detection warnings have been logged so far (the
+    /// [`MAX_CHURN_WARNINGS`] rate limit) — see [`should_warn_churn`].
+    warned_churn: u32,
     /// Monotonic per-frame counter, bumped once per [`Self::mark_seen`] call —
     /// the age clock [`reapable_ids`] measures a program id's absence against.
     frame: u64,
@@ -228,6 +263,20 @@ fn should_warn_failure(prior_warn_count: u32) -> bool {
     prior_warn_count < MAX_FAILED_WARNINGS
 }
 
+/// Whether [`ShaderEffects::ensure_pipeline`] should log its churn-detection
+/// warning: `compiled_ids` (the live [`ShaderEffects::pipelines`] count) has
+/// crossed [`CHURN_WARN_THRESHOLD`] and fewer than [`MAX_CHURN_WARNINGS`]
+/// have already been logged — mirroring [`should_warn_failure`]'s shape for
+/// a distinct signal. Pure: no GPU/log state touched, so the rate-limited
+/// decision is unit-testable on its own.
+///
+/// Detection-only, like the constant it reads: this predicate decides
+/// whether to *warn*, not whether to reap — [`ShaderEffects::reap`] bounds
+/// the actual growth independently of this rate limit.
+fn should_warn_churn(compiled_ids: usize, prior_warn_count: u32) -> bool {
+    compiled_ids > CHURN_WARN_THRESHOLD && prior_warn_count < MAX_CHURN_WARNINGS
+}
+
 /// The program ids in `last_seen` whose last-seen frame is at least `max_age`
 /// frames behind `current_frame` — a vanished-id reap candidate list, i.e.
 /// every id [`ShaderEffects::reap`] should drop resources for. Pure: operates
@@ -277,6 +326,7 @@ impl ShaderEffects {
             failed: HashSet::new(),
             dropped_images: Vec::new(),
             warned_failures: 0,
+            warned_churn: 0,
             frame: 0,
             last_seen: HashMap::new(),
         }
@@ -368,6 +418,24 @@ impl ShaderEffects {
                 bind_layout,
             },
         );
+
+        // Churn detection only — see CHURN_WARN_THRESHOLD's doc comment.
+        // This does NOT bound the underlying growth (f02's mark_seen/reap,
+        // driven by MAX_UNSEEN_FRAMES, does that); it only surfaces the
+        // common cache-once-contract violation (a fresh ShaderProgram
+        // minted every frame/rebuild instead of created once and cached —
+        // see ShaderProgram::new's rustdoc) via a rate-limited log.
+        if should_warn_churn(self.pipelines.len(), self.warned_churn) {
+            self.warned_churn += 1;
+            log::warn!(
+                "frust-render: {} distinct shader programs are concurrently compiled for this \
+                 surface (threshold {CHURN_WARN_THRESHOLD}) — if new ShaderProgram instances are \
+                 being minted every frame/rebuild instead of created once and cached (see \
+                 ShaderProgram::new's cache-once contract), this is why; this warning is \
+                 detection-only and does not itself bound the growth",
+                self.pipelines.len(),
+            );
+        }
     }
 
     /// Record a compile failure: mark `id` skipped and warn (rate-limited).
@@ -685,6 +753,51 @@ mod tests {
         assert!(should_warn_failure(MAX_FAILED_WARNINGS - 1));
         assert!(!should_warn_failure(MAX_FAILED_WARNINGS));
         assert!(!should_warn_failure(MAX_FAILED_WARNINGS + 1));
+    }
+
+    #[test]
+    fn should_warn_churn_fires_only_past_the_distinct_id_threshold() {
+        assert!(
+            !should_warn_churn(CHURN_WARN_THRESHOLD, 0),
+            "at threshold, not over it, must not warn"
+        );
+        assert!(should_warn_churn(CHURN_WARN_THRESHOLD + 1, 0));
+        assert!(should_warn_churn(CHURN_WARN_THRESHOLD + 100, 0));
+        assert!(
+            !should_warn_churn(0, 0),
+            "well under threshold must never warn"
+        );
+    }
+
+    #[test]
+    fn should_warn_churn_stops_at_the_rate_limit_cap() {
+        assert!(should_warn_churn(CHURN_WARN_THRESHOLD + 1, 0));
+        assert!(should_warn_churn(
+            CHURN_WARN_THRESHOLD + 1,
+            MAX_CHURN_WARNINGS - 1
+        ));
+        assert!(!should_warn_churn(
+            CHURN_WARN_THRESHOLD + 1,
+            MAX_CHURN_WARNINGS
+        ));
+        assert!(!should_warn_churn(
+            CHURN_WARN_THRESHOLD + 1,
+            MAX_CHURN_WARNINGS + 1
+        ));
+    }
+
+    #[test]
+    fn ensure_pipeline_never_warns_below_the_churn_threshold() {
+        // A device-free proxy for ensure_pipeline's hook: compiling well
+        // under CHURN_WARN_THRESHOLD distinct ids must never cross into
+        // should_warn_churn's true branch, mirroring what ensure_pipeline
+        // consults after every successful `pipelines.insert`.
+        for compiled in 0..=CHURN_WARN_THRESHOLD {
+            assert!(
+                !should_warn_churn(compiled, 0),
+                "compiled={compiled} must not warn (at or under threshold)"
+            );
+        }
     }
 
     #[test]
