@@ -823,6 +823,39 @@ mod tests {
     }
 
     #[test]
+    fn shader_quad_lowers_to_placeholder_when_pre_pass_disabled() {
+        // The `FRUST_NO_SHADER_EFFECTS` kill switch's downstream contract
+        // (`renderer::run_shader_prepass`'s `disabled` short-circuit returns an
+        // empty map with zero GPU work — see its own doc comment and
+        // `renderer::tests::shader_prepass_is_a_full_no_op_when_disabled`):
+        // feeding that empty map through `encode_scene_with_shaders` (the exact
+        // call `SurfaceRenderer::encode`'s Gpu arm makes) must lower every
+        // `Command::ShaderQuad` to the placeholder fill, identical to a
+        // never-had-a-pre-pass caller.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((3.0, 4.0));
+        builder.push_transform(translate);
+        let program = frust_scene::ShaderProgram::new("fn main() {}");
+        let dest = Rect::new(0.0, 0.0, 40.0, 40.0);
+        builder.draw_shader(&program, dest, 1.0);
+
+        // `encode_scene_with_shaders` targets a real `vello::Scene`; drive the
+        // same underlying walk (`encode_into_with_shaders`) with a
+        // `RecordingSink` instead so the assertion needs no GPU device.
+        let mut sink = RecordingSink::default();
+        encode_into_with_shaders(&scene, &mut sink, &HashMap::new(), u32::MAX);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::FillRect {
+                rect: dest,
+                transform: translate,
+            }]
+        );
+    }
+
+    #[test]
     fn shader_quad_hit_maps_to_draw_image_with_dest_and_transform() {
         // A `ShaderQuad` whose program id is in the shader-override map lowers
         // to a `draw_image` of the registered override texture, scaled to fill

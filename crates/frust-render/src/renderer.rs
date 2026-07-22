@@ -569,6 +569,17 @@ impl SurfaceRenderer {
                 // pre-pass (which keys the map by clamped physical size) and the
                 // encode lowering (which recomputes the identical key per quad),
                 // so the two derive the same `(id, w, h)` for every quad.
+                //
+                // `FRUST_NO_SHADER_EFFECTS` (`context::shader_effects_disabled`,
+                // `docs/DEVELOPMENT.md`'s Instrumentation table) is the kill
+                // switch for this still-unproven-on-device pre-pass: resolved
+                // once here and threaded into `run_shader_prepass`, which
+                // short-circuits to a zero-GPU-work no-op (skipping compile,
+                // targets, and the mark_seen/reap age tracking too) before
+                // touching `device`/`queue`/`renderer`/`shader_effects` at all —
+                // every `Command::ShaderQuad` this frame then falls through to
+                // `convert::encode_scene_with_shaders`'s existing miss
+                // placeholder, exactly like a CPU-tier or no-prepass caller.
                 let adapter_max = device_handle.device.limits().max_texture_dimension_2d;
                 let shader_images = run_shader_prepass(
                     &device_handle.device,
@@ -577,6 +588,7 @@ impl SurfaceRenderer {
                     &mut ready.shader_effects,
                     scene,
                     adapter_max,
+                    crate::context::shader_effects_disabled(),
                 );
                 match &ready.surface.path {
                     // Direct-to-surface (deliverable 1): the vello render targets the
@@ -940,6 +952,18 @@ impl SurfaceRenderer {
 /// frames has its pipeline, target(s), and `failed` record dropped instead of
 /// living until surface teardown — the whole-id counterpart to the
 /// frame-scoped resized-away-size reclaim above.
+///
+/// `disabled` is the resolved `FRUST_NO_SHADER_EFFECTS` kill switch
+/// ([`crate::context::shader_effects_disabled`]), threaded in by the caller so
+/// this stays unit-testable with a plain `bool` instead of reading the cached
+/// process-global itself. When `true` this is a **full no-op**, checked before
+/// any other work (the quad dedup, `ensure_pipeline`/`ensure_target`, and the
+/// `mark_seen`/`reap` age tracking all stay untouched): the flag means the
+/// pre-pass is off entirely, not merely "don't compile new programs", so a
+/// disabled run must not silently age out `last_seen` state a later re-enable
+/// would otherwise need. Returns an empty map either way, which is exactly
+/// the miss-everywhere input `convert::encode_scene_with_shaders` already
+/// handles by falling through to the placeholder fill.
 fn run_shader_prepass(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -947,7 +971,12 @@ fn run_shader_prepass(
     shader_effects: &mut ShaderEffects,
     scene: &frust_scene::Scene,
     adapter_max: u32,
+    disabled: bool,
 ) -> HashMap<(u64, u32, u32), ImageData> {
+    if disabled {
+        return HashMap::new();
+    }
+
     // Collect the distinct quads to render this frame, deduped by
     // (program id, clamped physical size) so a program drawn twice at the same
     // size is compiled/encoded once. `live` is this frame's full key set — what
@@ -1111,5 +1140,76 @@ mod tests {
         renderer.set_initial_pipeline_cache_data(None);
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
         assert_eq!(renderer.pipeline_cache_data(), None);
+    }
+
+    /// End-to-end (real device) confirmation of the `FRUST_NO_SHADER_EFFECTS`
+    /// kill switch's full-no-op contract: `run_shader_prepass(.., disabled:
+    /// true)` returns zero map entries AND never calls `ensure_pipeline` — the
+    /// actual compiled-pipeline cache stays empty, not just "the caller
+    /// ignored the result" — matching this task's "zero GPU work" acceptance
+    /// criterion. `disabled` is passed directly rather than going through
+    /// `context::shader_effects_disabled()`'s process-cached `OnceLock`, so
+    /// this test needs no env-var mutation (the flag-parsing itself is
+    /// covered by `context::tests`' `env_flag_*` cases). The resulting empty
+    /// map is exactly the input `convert::tests::
+    /// shader_quad_miss_maps_to_placeholder_fill_rect_with_dest_and_transform`
+    /// (and the new kill-switch-labeled test beside it) confirm lowers every
+    /// `Command::ShaderQuad` to the placeholder fill via `RecordingSink`.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn shader_prepass_is_a_full_no_op_when_disabled() {
+        pollster::block_on(run());
+
+        async fn run() {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .expect("no compatible GPU adapter");
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust renderer shader-disabled test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+            let mut vello_renderer =
+                vello::Renderer::new(&device, vello::RendererOptions::default())
+                    .expect("failed to create vello renderer");
+            let mut shader_effects = ShaderEffects::new(None);
+
+            let program = frust_scene::ShaderProgram::new(
+                "@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> { \
+                 return vec4<f32>(frust_u.time, 0.0, 0.0, 1.0); }",
+            );
+            let mut scene = frust_scene::Scene::new();
+            {
+                let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+                builder.draw_shader(&program, kurbo::Rect::new(0.0, 0.0, 32.0, 32.0), 1.0);
+            }
+
+            let images = run_shader_prepass(
+                &device,
+                &queue,
+                &mut vello_renderer,
+                &mut shader_effects,
+                &scene,
+                4096,
+                true, // FRUST_NO_SHADER_EFFECTS forced on
+            );
+
+            assert!(
+                images.is_empty(),
+                "a disabled pre-pass must yield zero map entries"
+            );
+            assert!(
+                shader_effects.needs_compile(program.id()),
+                "a disabled pre-pass must never call ensure_pipeline — zero GPU work"
+            );
+        }
     }
 }

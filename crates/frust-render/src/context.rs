@@ -111,6 +111,29 @@ pub(crate) fn choose_render_path(
     }
 }
 
+/// Whether the shader-showcase fragment-shader pre-pass
+/// (`crate::renderer::run_shader_prepass`) is force-disabled via the
+/// process-wide `FRUST_NO_SHADER_EFFECTS` flag — the same
+/// unproven-render-path safety valve shape as
+/// [`direct_surface_force_blit`]: the pre-pass drives real GPU work
+/// (pipeline compiles, offscreen targets, a vello image-override
+/// registration) that per the shader-showcase feature's own task notes is
+/// unproven on device, so this flag is the fallback-proof escape hatch that
+/// reverts every `Command::ShaderQuad` to the existing placeholder-fill
+/// lowering (`convert::encode_scene_with_shaders`'s miss path) with zero
+/// pre-pass GPU work. Same compile-time-or-runtime parsing as
+/// `FRUST_TRACE`/`FRUST_NO_DIRECT_SURFACE` (see `docs/DEVELOPMENT.md`'s
+/// Instrumentation table). Cached: read once per process.
+pub(crate) fn shader_effects_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_NO_SHADER_EFFECTS"),
+            std::env::var("FRUST_NO_SHADER_EFFECTS").ok(),
+        )
+    })
+}
+
 /// The two direct-to-surface capability bits, read once from a surface's
 /// [`wgpu::SurfaceCapabilities`]. Shared by the capability probe log and the
 /// [`choose_render_path`] decision so the query is not duplicated (the probe
@@ -968,6 +991,42 @@ impl RenderContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_flag_unset_both_halves_is_disabled() {
+        // Neither the compile-time (`option_env!`) nor runtime (`std::env::var`)
+        // half is set — every `FRUST_NO_*`/`FRUST_TRACE` flag's default state.
+        assert!(!env_flag_enabled(None, None));
+    }
+
+    #[test]
+    fn env_flag_compile_time_non_zero_enables() {
+        assert!(env_flag_enabled(Some("1"), None));
+    }
+
+    #[test]
+    fn env_flag_compile_time_zero_is_disabled() {
+        // "0" is the explicit opt-out spelling (mirrors `FRUST_TRACE`'s doc).
+        assert!(!env_flag_enabled(Some("0"), None));
+    }
+
+    #[test]
+    fn env_flag_runtime_non_zero_enables() {
+        assert!(env_flag_enabled(None, Some("1".to_string())));
+    }
+
+    #[test]
+    fn env_flag_runtime_zero_is_disabled() {
+        assert!(!env_flag_enabled(None, Some("0".to_string())));
+    }
+
+    #[test]
+    fn env_flag_either_half_set_non_zero_enables() {
+        // Compile-time-or-runtime: an Android app process (no runtime env) still
+        // honours a baked-in compile-time value, and vice versa.
+        assert!(env_flag_enabled(Some("1"), Some("0".to_string())));
+        assert!(env_flag_enabled(Some("0"), Some("1".to_string())));
+    }
 
     #[test]
     fn direct_path_chosen_only_when_both_caps_present_and_not_forced() {
