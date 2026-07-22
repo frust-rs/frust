@@ -29,11 +29,12 @@ pub use scene::{Command, PathStyle, Scene};
 /// safely across thread boundaries.
 const _: () = {
     /// Zero-cost static assertion that `T: Send`.
-    #[allow(dead_code)]
     const fn assert_send<T: Send>() {}
 
-    #[allow(dead_code)]
     const fn check_scene_is_send() {
         assert_send::<Scene>();
     }
+
+    // Invoke the assertion at compile time
+    let () = check_scene_is_send();
 };
