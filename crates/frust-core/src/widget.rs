@@ -13,7 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
-use frust_scene::{GlyphRun, SceneBuilder};
+use frust_scene::{GlyphRun, SceneBuilder, ShaderProgram};
 use kurbo::{Affine, BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
 
@@ -90,6 +90,17 @@ pub trait PaintScene {
     /// no-op so pre-existing recorder scenes stay valid; the `SceneBuilder`
     /// implementation records a real image command.
     fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
+
+    /// Draw a fragment-shader-filled rectangle, scaled to fill `dest`.
+    ///
+    /// An additive method (task 02, shader showcase) on this otherwise layer-2
+    /// trait — authorized because the shader program and destination have to
+    /// reach the scene through the same `&mut dyn PaintScene` seam every other
+    /// paint call uses. `program` carries the WGSL source and process-unique
+    /// id; `time` is seconds, app-supplied. Defaulted to a no-op so pre-existing
+    /// recorder scenes stay valid; the `SceneBuilder` implementation records a
+    /// real shader-quad command.
+    fn draw_shader(&mut self, _program: &ShaderProgram, _dest: Rect, _time: f32) {}
 
     /// Draw a gaussian-blurred rounded-rectangle elevation shadow (an
     /// approximation of a CSS `box-shadow`) at `origin`/`size`.
@@ -231,6 +242,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn draw_image(&mut self, data: &peniko::ImageData, dest: Rect) {
         SceneBuilder::draw_image(self, data, dest);
+    }
+
+    fn draw_shader(&mut self, program: &ShaderProgram, dest: Rect, time: f32) {
+        SceneBuilder::draw_shader(self, program, dest, time);
     }
 
     fn draw_shadow(&mut self, origin: Point, size: Size, radius: f64, std_dev: f64, color: Color) {
@@ -1162,6 +1177,7 @@ mod tests {
     struct RecordingScene {
         rects: Vec<(Point, Size)>,
         texts: Vec<(Point, String)>,
+        shaders: Vec<(u64, Rect, f32)>,
     }
 
     impl PaintScene for RecordingScene {
@@ -1170,6 +1186,9 @@ mod tests {
         }
         fn draw_text(&mut self, origin: Point, text: &str) {
             self.texts.push((origin, text.to_string()));
+        }
+        fn draw_shader(&mut self, program: &ShaderProgram, dest: Rect, time: f32) {
+            self.shaders.push((program.id(), dest, time));
         }
     }
 
@@ -1307,6 +1326,42 @@ mod tests {
             scene.rects,
             vec![(Point::new(5.0, 7.0), Size::new(50.0, 20.0))]
         );
+    }
+
+    #[test]
+    fn widget_paint_emits_shader_into_scene() {
+        /// A leaf widget that paints a shader quad.
+        struct ShaderWidget {
+            program: ShaderProgram,
+            dest: Rect,
+            time: f32,
+        }
+
+        impl Widget for ShaderWidget {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.max()
+            }
+
+            fn paint(&mut self, _ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                scene.draw_shader(&self.program, self.dest, self.time);
+            }
+        }
+
+        let program = ShaderProgram::new("fn main() {}");
+        let dest = Rect::new(10.0, 20.0, 100.0, 150.0);
+        let time = 1.5;
+        let mut w = ShaderWidget {
+            program: program.clone(),
+            dest,
+            time,
+        };
+        let mut scene = RecordingScene::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, 200.0));
+        w.paint(&mut ctx, &mut scene);
+        assert_eq!(scene.shaders.len(), 1);
+        assert_eq!(scene.shaders[0].0, program.id());
+        assert_eq!(scene.shaders[0].1, dest);
+        assert_eq!(scene.shaders[0].2, time);
     }
 
     #[test]
