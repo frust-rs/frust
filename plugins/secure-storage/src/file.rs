@@ -1,24 +1,14 @@
-//! The storage-core [`Backend`]: one JSON map file per named store.
-//!
-//! `<data_dir>/<app>/frust/secure/frust.ss.<store>.json`, where `data_dir`
-//! follows the platform's own convention (`$XDG_DATA_HOME`/`~/.local/share`
-//! on Unix, `%APPDATA%` on Windows — mirroring
-//! `frust-shared-preferences`' file backend) and `<app>` is the current
-//! executable's file stem (namespaced per binary). Baking the store name into
-//! the filename is what gives store-name isolation for free (two
-//! [`crate::SecureStorage`] handles with different names never share a file).
+//! The storage-core [`Backend`] conformance-suite harness: a plaintext JSON
+//! file per named store, compiled only under `#[cfg(test)]` to validate every
+//! backend implementation against a uniform contract. Production storage
+//! routes to platform-specific backends (Keychain on Apple, Keystore on
+//! Android, keyring on Linux/Windows).
 //!
 //! # Not secure at rest
 //!
-//! This backend stores plaintext JSON — it is the storage-core fallback and
-//! the conformance-suite target, **not** a secure store. [`crate::desktop`]'s
-//! `keyring-core`-backed store (Plan Phase 4) has superseded it on
-//! Linux/Windows — this module is compiled there only under `#[cfg(test)]`
-//! now (see `lib.rs`'s `mod file;` declaration). It remains the real
-//! fallback backend on Apple/Android (`#[cfg(any(test, target_vendor =
-//! "apple", target_os = "android"))]`) pending those platforms' own Phase
-//! 2/3 tasks; once those land, this module compiles under `#[cfg(test)]`
-//! everywhere, as the shared conformance-suite target for every backend.
+//! This backend stores plaintext JSON — it is **not** secure and must never
+//! be used in production. It exists solely to exercise the [`Backend`] trait
+//! contract in conformance tests.
 //!
 //! # On-disk shape
 //!
@@ -52,24 +42,7 @@ pub(crate) struct FileStore {
 }
 
 impl FileStore {
-    /// Open the store `name` at the OS-resolved default location.
-    ///
-    /// # Errors
-    /// [`SecureStorageError::Storage`] if no data directory could be resolved
-    /// (an unset `HOME`/`APPDATA`) — this module never guesses a fallback
-    /// that could silently write into the process's current directory.
-    pub(crate) fn standard(name: &str) -> Result<Self, SecureStorageError> {
-        let dir = data_dir();
-        if dir.as_os_str().is_empty() {
-            return Err(SecureStorageError::Storage(
-                "could not resolve a user data directory (HOME/APPDATA unset)".into(),
-            ));
-        }
-        Ok(Self::at_path(store_path(dir, name)))
-    }
-
-    /// Open the store at an explicit file path, bypassing OS data-dir
-    /// resolution.
+    /// Open the store at an explicit file path.
     ///
     /// Crate-private: the intended caller is the conformance suite
     /// (`#[cfg(test)]`), which opens tempdir-isolated stores so tests never
@@ -153,67 +126,6 @@ impl Backend for FileStore {
     }
 }
 
-/// Resolve the user's data directory, following XDG/platform conventions
-/// (mirrors `frust-shared-preferences`' file backend). Never panics: an
-/// unresolvable environment maps to an empty path, handled by
-/// [`FileStore::standard`].
-fn data_dir() -> PathBuf {
-    #[cfg(unix)]
-    {
-        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-            let path = PathBuf::from(&xdg);
-            if path.is_absolute() {
-                return path;
-            }
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".local").join("share");
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            return PathBuf::from(appdata);
-        }
-    }
-    PathBuf::new()
-}
-
-/// `<data_dir>/<app>/frust/secure/frust.ss.<store>.json`, namespaced per
-/// binary (like the desktop shell's pipeline-cache file) and per store name
-/// (see module doc).
-fn store_path(data_dir: PathBuf, store: &str) -> PathBuf {
-    let app = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_stem().map(|s| s.to_os_string()))
-        .unwrap_or_else(|| "app".into());
-    let file = format!(
-        "{}{}.json",
-        crate::KEY_NAMESPACE_PREFIX,
-        sanitize_store(store)
-    );
-    data_dir.join(app).join("frust").join("secure").join(file)
-}
-
-/// Make a store name safe to use as a single path component: replace any
-/// character that isn't alphanumeric, `-`, or `_` with `_`. Two distinct
-/// store names could in principle collide after sanitization, but store
-/// names are app-chosen identifiers, not arbitrary user input; this only
-/// guards against a name that would otherwise escape the intended directory
-/// or contain a path separator.
-fn sanitize_store(store: &str) -> String {
-    store
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -222,9 +134,8 @@ mod tests {
 
     use super::*;
 
-    /// A scratch, per-test directory under the OS temp dir — tests must NEVER
-    /// resolve [`FileStore::standard`]'s real data directory, so every test
-    /// opens `FileStore` via [`FileStore::at_path`] instead.
+    /// A scratch, per-test directory under the OS temp dir — every test opens
+    /// `FileStore` via [`FileStore::at_path`] with a tempdir-isolated path.
     fn scratch_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -326,24 +237,5 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// `standard()` never writes to (or resolves, beyond the directory check)
-    /// the real data directory in a way a test could observe — this just
-    /// confirms the constructor itself doesn't panic or perform I/O.
-    #[test]
-    fn standard_resolves_without_io() {
-        // Not asserting Ok/Err (hosts vary in HOME/APPDATA presence) — only
-        // that construction is infallible-by-panic.
-        let _ = FileStore::standard("s");
-    }
-
-    /// A store name with path-hostile characters is sanitized to a single
-    /// safe path component (no separators, no traversal).
-    #[test]
-    fn store_name_is_sanitized() {
-        assert_eq!(sanitize_store("a/b"), "a_b");
-        assert_eq!(sanitize_store("../etc"), "___etc");
-        assert_eq!(sanitize_store("ok-name_1"), "ok-name_1");
     }
 }
