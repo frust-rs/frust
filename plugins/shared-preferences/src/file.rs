@@ -1,12 +1,10 @@
 //! The Linux/Windows [`Backend`]: a single JSON map file.
 //!
-//! `<data_dir>/<app>/frust/preferences.json`, where `data_dir` follows the
-//! platform's own convention (`$XDG_DATA_HOME`/`~/.local/share` on Unix,
-//! `%APPDATA%` on Windows — mirrors `frust-shell-desktop::cache`'s
-//! `cache_dir` resolution, but for the platform's *data* directory, not its
-//! cache one) and `<app>` is the current executable's file stem (namespaced
-//! per binary, like the desktop shell's pipeline-cache file, so two Frust
-//! apps on one machine never share a preferences file).
+//! `<data_dir>/<app>/frust/preferences.json`, where `data_dir` and `<app>`
+//! come from `frust-paths` ([`frust_paths::data_dir`]/[`frust_paths::app_stem`])
+//! — the shared platform-dir resolution + atomic-write substrate every
+//! desktop-facing storage site delegates to (see `docs/ARCHITECTURE.md`'s
+//! `frust-paths` row).
 //!
 //! This module is also the **temporary routing target** for
 //! iOS/macOS/Android (see `crate`'s module doc) until task 06 lands the
@@ -36,13 +34,12 @@
 //!
 //! Every operation is a read-modify-write of the whole file, serialized by
 //! an in-process [`Mutex`] (same-process concurrent writers never
-//! interleave). Writes go to a process-unique temp file
-//! (`preferences.json.tmp.<pid>`) then `rename` into place — the
-//! `frust-shell-desktop::cache` precedent — so a reader never observes a
-//! partially-written file, and a crash mid-write leaves the previous
-//! contents intact. A missing or corrupted (non-JSON, or JSON that isn't an
-//! object) file is treated as an empty store rather than an error — this
-//! module never panics on bad on-disk data.
+//! interleave). Writes go through [`frust_paths::atomic_write`] (temp file +
+//! `rename`), so a reader never observes a partially-written file, and a
+//! crash mid-write leaves the previous contents intact. A missing or
+//! corrupted (non-JSON, or JSON that isn't an object) file is treated as an
+//! empty store rather than an error — this module never panics on bad
+//! on-disk data.
 
 use std::collections::HashMap;
 use std::fs;
@@ -69,12 +66,11 @@ impl FileStore {
     /// unset `HOME`/`APPDATA` — this module never guesses a fallback that
     /// could silently write into the process's current directory).
     pub(crate) fn standard() -> Result<Self, PrefsError> {
-        let dir = data_dir();
-        if dir.as_os_str().is_empty() {
-            return Err(PrefsError::Storage(
+        let dir = frust_paths::data_dir().ok_or_else(|| {
+            PrefsError::Storage(
                 "could not resolve a user data directory (HOME/APPDATA unset)".into(),
-            ));
-        }
+            )
+        })?;
         Ok(Self::at_path(preferences_path(dir)))
     }
 
@@ -107,22 +103,9 @@ impl FileStore {
 
     /// Persist `map`, atomically (see module doc).
     fn save(&self, map: &Map<String, Value>) -> Result<(), PrefsError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let bytes = serde_json::to_vec_pretty(&Value::Object(map.clone()))
             .map_err(|e| PrefsError::Storage(format!("encoding preferences: {e}")))?;
-        let temp_path = self
-            .path
-            .with_extension(format!("json.tmp.{}", std::process::id()));
-        fs::write(&temp_path, &bytes)?;
-        let rename_result = fs::rename(&temp_path, &self.path);
-        if rename_result.is_err() {
-            // Best-effort cleanup so a failed rename doesn't leave the temp
-            // file behind indefinitely.
-            let _ = fs::remove_file(&temp_path);
-        }
-        rename_result.map_err(PrefsError::from)
+        frust_paths::atomic_write(&self.path, &bytes).map_err(PrefsError::from)
     }
 }
 
@@ -166,40 +149,13 @@ impl Backend for FileStore {
     }
 }
 
-/// Resolve the user's data directory, following XDG/platform conventions
-/// (mirrors `frust-shell-desktop::cache::cache_dir`, but for the *data*
-/// directory rather than the cache one). Never panics: an unresolvable
-/// environment maps to an empty path, handled by [`FileStore::standard`].
-fn data_dir() -> PathBuf {
-    #[cfg(unix)]
-    {
-        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-            let path = PathBuf::from(&xdg);
-            if path.is_absolute() {
-                return path;
-            }
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".local").join("share");
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            return PathBuf::from(appdata);
-        }
-    }
-    PathBuf::new()
-}
-
-/// `<data_dir>/<app>/frust/preferences.json`, namespaced per binary like
-/// the desktop shell's pipeline-cache file (see module doc).
+/// `<data_dir>/<app>/frust/preferences.json`, namespaced per binary via
+/// [`frust_paths::app_stem`] (see module doc).
 fn preferences_path(data_dir: PathBuf) -> PathBuf {
-    let app = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_stem().map(|s| s.to_os_string()))
-        .unwrap_or_else(|| "app".into());
-    data_dir.join(app).join("frust").join("preferences.json")
+    data_dir
+        .join(frust_paths::app_stem())
+        .join("frust")
+        .join("preferences.json")
 }
 
 /// Encode one [`PrefValue`] into its tagged on-disk shape (module doc).
