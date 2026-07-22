@@ -13,6 +13,12 @@ import QuartzCore
 //     backgrounded app can get the process killed.
 //   - `frust_destroy` reclaims the native handle before the view is gone.
 final class FrustViewController: UIViewController {
+    // Shader-showcase immersive mode (example-local edit over the generated
+    // baseline): hide the status bar and auto-hide the home indicator so
+    // the shader owns the whole display; edge swipes still work.
+    override var prefersStatusBarHidden: Bool { true }
+    override var prefersHomeIndicatorAutoHidden: Bool { true }
+
     private var forgeView: FrustView { view as! FrustView }
     private var displayLink: CADisplayLink?
     private var handle: UnsafeMutableRawPointer?

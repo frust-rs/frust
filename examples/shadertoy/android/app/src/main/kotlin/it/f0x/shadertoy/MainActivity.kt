@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import dev.frust.FrustSurfaceView
 
 /**
@@ -60,6 +62,14 @@ class MainActivity : ComponentActivity() {
         // logcat stream. No other behavior change.
         Log.i("frust", "frust-perf activity-create")
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Shader-showcase immersive mode (example-local edit over the
+        // generated edge-to-edge baseline): hide the status/navigation bars
+        // entirely; a swipe from the edge reveals them transiently.
+        WindowCompat.getInsetsController(window, window.decorView).let { controller ->
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
         surfaceView = FrustSurfaceView(this)
         setContentView(surfaceView)
         surfaceView.onDeepLink(intent?.data?.toString())
