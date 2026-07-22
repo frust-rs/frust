@@ -2,6 +2,7 @@
   "Cargo.toml.tmpl",
   "Cargo.toml.clean-signals.tmpl",
   "frust.toml.tmpl",
+  "README.md.tmpl",
   ".gitignore",
   "assets/.gitkeep",
   "assets/logo.png",

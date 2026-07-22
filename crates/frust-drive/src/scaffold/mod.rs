@@ -368,6 +368,22 @@ mod tests {
         assert!(!dest.join("template_manifest.json").exists());
         assert!(!dest.join("Cargo.toml.tmpl").exists());
 
+        // Task 29: README.md generated with theme/font docs and examples
+        let readme = fs::read_to_string(dest.join("README.md")).unwrap();
+        assert!(readme.contains("Glyph design system"), "{readme}");
+        assert!(
+            readme.contains("set_app_theme(Theme::m3_baseline())"),
+            "{readme}"
+        );
+        assert!(
+            readme.contains("set_app_theme(Theme::cupertino_baseline())"),
+            "{readme}"
+        );
+        assert!(readme.contains("register_app_fonts"), "{readme}");
+        assert!(readme.contains("Theme::builder"), "{readme}");
+        // Verify no unresolved {{ }} placeholders remain
+        assert!(!readme.contains("{{"), "{readme}");
+
         let _ = fs::remove_dir_all(&dest);
     }
 
