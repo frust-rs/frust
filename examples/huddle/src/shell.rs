@@ -107,7 +107,9 @@ pub fn bottom_bar(
 ) -> AnyView<HuddleState> {
     let selected = tab.get().index();
     let bar: AnyView<HuddleState> = match design {
-        DesignLanguage::Material3 => any(navigation_bar::<HuddleState, _>(
+        // Glyph has no chrome baseline yet (task 28 replaces this) —
+        // falls through to the Material3 chrome arm for now.
+        DesignLanguage::Material3 | DesignLanguage::Glyph => any(navigation_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()
                 .map(|t| nav_item::<HuddleState>(t.label()).icon(any(icon(t.icon()).size(24.0))))

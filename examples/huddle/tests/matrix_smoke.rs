@@ -53,6 +53,10 @@ fn every_route_builds_under_both_design_languages_and_brightness_states() {
         let theme = match design {
             DesignLanguage::Material3 => Theme::m3_baseline(),
             DesignLanguage::Cupertino => Theme::cupertino_baseline(),
+            // Glyph has no baseline yet (task 28 replaces this); not part of
+            // `combos` above, so this arm is unreached today but keeps the
+            // match exhaustive.
+            DesignLanguage::Glyph => Theme::m3_baseline(),
         }
         .with_brightness(brightness);
         frust::provide_context(theme);

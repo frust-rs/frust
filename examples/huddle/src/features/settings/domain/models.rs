@@ -139,6 +139,9 @@ impl DesignChoice {
         match lang {
             DesignLanguage::Material3 => DesignChoice::Material3,
             DesignLanguage::Cupertino => DesignChoice::Cupertino,
+            // task 28 replaces this: no Glyph selector choice/baseline yet,
+            // so an ambient Glyph theme maps to the nearest existing choice.
+            DesignLanguage::Glyph => DesignChoice::Material3,
         }
     }
 }
@@ -236,6 +239,8 @@ pub fn compose(
         DesignChoice::System => match current.design_language {
             DesignLanguage::Material3 => Theme::m3_baseline(),
             DesignLanguage::Cupertino => Theme::cupertino_baseline(),
+            // task 28 replaces this: no Glyph baseline yet.
+            DesignLanguage::Glyph => Theme::m3_baseline(),
         },
     };
 

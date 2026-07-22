@@ -33,6 +33,12 @@ pub enum DesignLanguage {
     Material3,
     /// Cupertino (iOS).
     Cupertino,
+    /// Glyph — this crate's own design language (PLAN.md Phase 2). Not yet
+    /// the default and has no baseline constructor yet (no
+    /// `Theme::glyph_baseline` — that lands with the Glyph token module,
+    /// task 15); this variant exists so downstream exhaustive matches can be
+    /// patched ahead of the baseline landing.
+    Glyph,
 }
 
 /// A full design-token bundle: paired light/dark color schemes, the type

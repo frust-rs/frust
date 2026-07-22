@@ -173,7 +173,9 @@ fn design_selector(
     current: Theme,
 ) -> AnyView<AppearanceState> {
     match design_lang {
-        DesignLanguage::Material3 => any(button_group::<AppearanceState, _>(
+        // Glyph has no selector chrome baseline yet (task 28 replaces this) —
+        // falls through to the Material3 arm for now.
+        DesignLanguage::Material3 | DesignLanguage::Glyph => any(button_group::<AppearanceState, _>(
             DesignChoice::ALL.into_iter().map(|c| c.label()),
             selected.index(),
             move |st: &mut AppearanceState, idx: usize| {
@@ -221,7 +223,9 @@ fn brightness_switch(
         spawn_apply(&st.controller, current.clone());
     };
     match design_lang {
-        DesignLanguage::Material3 => any(Row(vec![
+        // Glyph has no chrome baseline yet (task 28 replaces this) — falls
+        // through to the Material3 arm for now.
+        DesignLanguage::Material3 | DesignLanguage::Glyph => any(Row(vec![
             any(text("Dark").size(14.0)),
             any(SizedBox(Some(8.0), None)),
             any(Switch(effective_dark, on_toggle)),
