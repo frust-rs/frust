@@ -50,8 +50,8 @@ use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, Start
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, RenderCommand, RenderSender, SceneFrame,
-    SurfaceSize, ThemeOverrideWatcher, effective_brightness_for_platform_change, logical_insets,
-    logical_size, sanitize_scale,
+    SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
+    effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
@@ -360,6 +360,17 @@ pub(crate) struct SplitExecutor {
     /// `initFailed` + invalidates its `CADisplayLink`. One clone here, one in the
     /// render thread ([`crate::ffi_glue::render_loop`]).
     fatal: Arc<AtomicBool>,
+    /// The UI-side half of the render thread's scene give-back channel (review
+    /// finding F5): polled once per [`Self::submit_frame`] for a scene the
+    /// render thread has finished with, so its buffer is reused instead of
+    /// reallocating a fresh `Scene` every frame.
+    scene_return: SceneReturnReceiver<Scene>,
+    /// A scene reclaimed from [`RenderSender::send_scene`]'s returned stale
+    /// frame (the UI thread outran the render thread, overwriting an
+    /// un-taken scene in the latest-wins slot) — checked before
+    /// [`Self::scene_return`] on the next [`Self::take_reusable_scene`] call
+    /// so that buffer is reused too, rather than dropped.
+    spare_scene: Option<Scene>,
 }
 
 impl SplitExecutor {
@@ -367,6 +378,7 @@ impl SplitExecutor {
         sender: RenderSender<PaintedScene, crate::ffi_glue::SendableMetalLayer>,
         join: JoinHandle<()>,
         fatal: Arc<AtomicBool>,
+        scene_return: SceneReturnReceiver<Scene>,
     ) -> Self {
         Self {
             sender: Some(sender),
@@ -374,7 +386,27 @@ impl SplitExecutor {
             surface_active: true,
             frame_id: 0,
             fatal,
+            scene_return,
+            spare_scene: None,
         }
+    }
+
+    /// Reclaim a reusable, empty `Scene` for the next frame (review finding
+    /// F5): prefer a scene already reclaimed from a stale [`Self::submit_frame`]
+    /// give-back ([`Self::spare_scene`]), else poll the render thread's
+    /// give-back channel ([`Self::scene_return`]), else allocate a fresh one.
+    /// Either reclaimed scene is [`Scene::reset`] before being handed out —
+    /// clearing its commands while keeping the backing `Vec` capacity, which
+    /// is the whole point of reusing it over `Scene::new()`.
+    fn take_reusable_scene(&mut self) -> Scene {
+        if let Some(spare) = self.spare_scene.take() {
+            return spare;
+        }
+        if let Some(mut returned) = self.scene_return.try_recv() {
+            returned.reset();
+            return returned;
+        }
+        Scene::new()
     }
 
     /// Hand one finished frame to the render thread (latest-wins).
@@ -387,7 +419,7 @@ impl SplitExecutor {
     ) {
         self.frame_id += 1;
         if let Some(sender) = self.sender.as_ref() {
-            sender.send_scene(SceneFrame {
+            let stale = sender.send_scene(SceneFrame {
                 scene: painted,
                 meta: FrameMeta {
                     frame_time,
@@ -396,6 +428,14 @@ impl SplitExecutor {
                 },
                 ui_spans: ui,
             });
+            // The UI thread outran the render thread: the just-overwritten,
+            // never-rendered stale frame's scene is still perfectly reusable —
+            // reclaim its buffer instead of letting it drop (review finding F5).
+            if let Some(stale_frame) = stale {
+                let mut reclaimed = stale_frame.scene.scene;
+                reclaimed.reset();
+                self.spare_scene = Some(reclaimed);
+            }
         }
     }
 
@@ -489,10 +529,12 @@ impl FrameExecutor {
 
     /// Hand one finished frame to the executor. Inline runs the encode→present
     /// tail synchronously (borrowing `scene`, reused next frame) and returns its
-    /// encode span; the split moves the scene out (replacing it with a fresh empty
-    /// one) into a [`SceneFrame`] and sends it across the channel, returning
-    /// `Duration::ZERO` (encode is off-thread, so it does not count against the UI
-    /// thread's deadline).
+    /// encode span; the split moves the scene out into a [`SceneFrame`] and sends
+    /// it across the channel, replacing it with a scene reclaimed off the render
+    /// thread's give-back channel (review finding F5) — `reset()`, so its buffer
+    /// is reused rather than reallocated — falling back to `Scene::new()` only
+    /// when none is available yet, and returning `Duration::ZERO` (encode is
+    /// off-thread, so it does not count against the UI thread's deadline).
     fn submit_frame(
         &mut self,
         scene: &mut Scene,
@@ -505,8 +547,9 @@ impl FrameExecutor {
         match self {
             FrameExecutor::Inline(inline) => inline.submit_frame(scene, base_color, ui, perf_on),
             FrameExecutor::Split(split) => {
+                let replacement = split.take_reusable_scene();
                 let painted = PaintedScene {
-                    scene: std::mem::replace(scene, Scene::new()),
+                    scene: std::mem::replace(scene, replacement),
                     base_color,
                 };
                 split.submit_frame(painted, ui, frame_time, size);

@@ -58,10 +58,12 @@ use anyhow::{Context, Result, bail};
 use frust_core::event::{EditingState, ImeState};
 use frust_reactive::{ReactiveRuntime, push_deep_link};
 use frust_render::{RenderContext, SurfacePhase, SurfaceRenderer};
+use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
-    AppTree, RenderCommand, RenderPhase, RenderReceiver, SurfaceSize, guard, next_render_phase,
-    render_channel, render_thread_enabled, run_guarded_thread,
+    AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceSize, guard,
+    next_render_phase, render_channel, render_thread_enabled, run_guarded_thread,
+    scene_return_channel,
 };
 use frust_text::TextContext;
 
@@ -354,6 +356,7 @@ pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableMetalLayer>,
     startup_spans: StartupSpans,
     fatal: Arc<AtomicBool>,
+    scene_return: SceneReturnSender<Scene>,
 ) {
     // Render-thread QoS self-boost (phase-11 fix F6): tag this dedicated render
     // thread as user-interactive so the scheduler treats its GPU submit work at
@@ -455,59 +458,67 @@ pub(crate) fn render_loop(
         }
 
         // Then the freshest scene, only if the phase allows submitting (a scene
-        // handed off while paused is dropped, not presented).
-        if let Some(frame) = batch.scene
-            && phase.can_render()
-        {
-            // The first handed-off scene marks the first UI frame produced — the
-            // render thread's stand-in for `first_rebuild_done` (it owns the
-            // startup line in the split).
-            if !first_rebuild_recorded {
-                if let Some(spans) = startup_spans.as_mut() {
-                    spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+        // handed off while paused is dropped from presentation, not silently
+        // dropped altogether — see the give-back below).
+        if let Some(frame) = batch.scene {
+            if phase.can_render() {
+                // The first handed-off scene marks the first UI frame produced —
+                // the render thread's stand-in for `first_rebuild_done` (it owns
+                // the startup line in the split).
+                if !first_rebuild_recorded {
+                    if let Some(spans) = startup_spans.as_mut() {
+                        spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+                    }
+                    first_rebuild_recorded = true;
                 }
-                first_rebuild_recorded = true;
-            }
-            // FFI-path perf convention: read `perf::enabled()` once per frame, gate
-            // every `Instant::now()` behind it (inside `render_scene`).
-            let perf_on = perf::enabled();
-            render_scene(
-                &mut renderer,
-                &render_cx,
-                &frame.scene.scene,
-                frame.scene.base_color,
-                frame.ui_spans,
-                &mut frame_stats,
-                &mut startup_spans,
-                perf_on,
-            );
-
-            // iOS self-heals a lost surface from the retained layer (nothing
-            // external re-drives creation), bounded by the failure budget so a
-            // persistently-failing recreate cannot storm.
-            if renderer.phase() == SurfacePhase::SurfaceLost
-                && recreate_failures < crate::ffi_support::MAX_RECREATE_ATTEMPTS
-                && let Some(ptr) = metal_layer
-            {
-                match install_surface(
+                // FFI-path perf convention: read `perf::enabled()` once per
+                // frame, gate every `Instant::now()` behind it (inside
+                // `render_scene`).
+                let perf_on = perf::enabled();
+                render_scene(
                     &mut renderer,
-                    &mut render_cx,
-                    ptr,
-                    physical.0,
-                    physical.1,
+                    &render_cx,
+                    &frame.scene.scene,
+                    frame.scene.base_color,
+                    frame.ui_spans,
+                    &mut frame_stats,
                     &mut startup_spans,
-                    false,
-                ) {
-                    Ok(()) => recreate_failures = 0,
-                    Err(err) => {
-                        recreate_failures = recreate_failures.saturating_add(1);
-                        log::error!(
-                            "frust-shell-ios: render-thread surface recreate failed \
-                             ({recreate_failures}): {err:#}"
-                        );
+                    perf_on,
+                );
+
+                // iOS self-heals a lost surface from the retained layer (nothing
+                // external re-drives creation), bounded by the failure budget so
+                // a persistently-failing recreate cannot storm.
+                if renderer.phase() == SurfacePhase::SurfaceLost
+                    && recreate_failures < crate::ffi_support::MAX_RECREATE_ATTEMPTS
+                    && let Some(ptr) = metal_layer
+                {
+                    match install_surface(
+                        &mut renderer,
+                        &mut render_cx,
+                        ptr,
+                        physical.0,
+                        physical.1,
+                        &mut startup_spans,
+                        false,
+                    ) {
+                        Ok(()) => recreate_failures = 0,
+                        Err(err) => {
+                            recreate_failures = recreate_failures.saturating_add(1);
+                            log::error!(
+                                "frust-shell-ios: render-thread surface recreate failed \
+                                 ({recreate_failures}): {err:#}"
+                            );
+                        }
                     }
                 }
             }
+            // Give the drained scene back for the UI thread to reclaim (review
+            // finding F5) — whether it was actually rendered above or
+            // phase-gated out (`Paused`/`NoSurface`); `render_scene`'s encode
+            // step has already fully consumed the scene's commands by this
+            // point, so its buffer is safe to reuse. Never silently dropped.
+            scene_return.give_back(frame.scene.scene);
         }
 
         if batch.disconnected {
@@ -687,6 +698,7 @@ fn spawn_split_executor(
     startup.record(SPAN_FONT_PREINIT_JOINED);
 
     let (sender, receiver) = render_channel::<PaintedScene, SendableMetalLayer>();
+    let (scene_return_tx, scene_return_rx) = scene_return_channel::<Scene>();
     let size = SurfaceSize {
         width: physical.0,
         height: physical.1,
@@ -711,7 +723,7 @@ fn spawn_split_executor(
         // deadlock fix). A no-op under the release `panic = "abort"` profile.
         .spawn(move || {
             run_guarded_thread("frust-render (ios)", move || {
-                render_loop(receiver, startup, fatal_render)
+                render_loop(receiver, startup, fatal_render, scene_return_tx)
             })
         })
         .expect("frust-shell-ios: failed to spawn render thread");
@@ -725,7 +737,7 @@ fn spawn_split_executor(
     });
 
     (
-        FrameExecutor::Split(SplitExecutor::new(sender, join, fatal)),
+        FrameExecutor::Split(SplitExecutor::new(sender, join, fatal, scene_return_rx)),
         text_ctx,
     )
 }

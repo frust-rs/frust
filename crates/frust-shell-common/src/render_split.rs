@@ -18,6 +18,14 @@
 //!   Depth 1 is deliberate — Flutter's merged-mode precedent (RESEARCH.md Q9:
 //!   pipeline depth drops to 1 when threads merge); deeper queues add latency
 //!   for no mobile win.
+//! - [`scene_return_channel`] — the reverse, render→UI give-back link (review
+//!   finding F5): a **non-blocking, depth-1** [`Mutex`]-only slot (no
+//!   [`Condvar`] — the UI thread only ever polls it, never parks) the render
+//!   thread pushes a drained scene back through once it is done reading it, so
+//!   a shell's split `submit_frame` can `Scene::reset()` and reuse the buffer
+//!   next frame instead of reallocating one via `Scene::new()` every frame —
+//!   restoring frust-scene's documented reuse contract (`scene.rs`'s
+//!   `Scene::reset` docs) in split mode.
 //! - [`RenderCommand`] / [`RenderEvent`] / [`RenderPhase`] — the surface
 //!   lifecycle vocabulary (created/changed/destroyed/pause/resume) as **owned
 //!   commands**, modelled on `frust-render`'s `SurfacePhase` machine: a pure,
@@ -540,23 +548,30 @@ pub fn render_channel<S, W>() -> (RenderSender<S, W>, RenderReceiver<S, W>) {
 
 impl<S, W> RenderSender<S, W> {
     /// Hand a finished frame to the render thread (**depth-1 latest-wins**): if
-    /// an un-taken scene is still in the slot it is replaced (and the drop
-    /// counter incremented), so the render thread always takes the freshest.
-    /// Wakes the render thread's [`RenderReceiver::wait_next`].
-    pub fn send_scene(&self, frame: SceneFrame<S>) {
+    /// an un-taken scene is still in the slot it is replaced (the drop counter
+    /// still increments — see [`Inbox::dropped`]) and **returned** to the
+    /// caller instead of being silently dropped in the lock (review finding
+    /// F5) — a shell can reclaim the stale frame's scene buffer the same way
+    /// it reclaims one off [`scene_return_channel`]. `None` if the slot was
+    /// empty. A pure widening of the original fire-and-forget signature — a
+    /// caller that doesn't care may still ignore the return value. Wakes the
+    /// render thread's [`RenderReceiver::wait_next`].
+    pub fn send_scene(&self, frame: SceneFrame<S>) -> Option<SceneFrame<S>> {
         let mut inbox = self.channel.inbox.lock().unwrap();
         if !inbox.receiver_alive {
-            // The render thread is gone (see `Inbox::receiver_alive`): drop the
-            // frame rather than queue it into a slot no one will ever take. `frame`
-            // carries no `Ack`, so nothing else needs firing.
-            return;
+            // The render thread is gone (see `Inbox::receiver_alive`): don't
+            // queue `frame` into a slot no one will ever take — hand it straight
+            // back so the caller can still reclaim its buffer. `frame` carries no
+            // `Ack`, so nothing else needs firing either way.
+            return Some(frame);
         }
-        if inbox.latest.is_some() {
+        let stale = inbox.latest.replace(frame);
+        if stale.is_some() {
             inbox.dropped += 1;
         }
-        inbox.latest = Some(frame);
         drop(inbox);
         self.channel.signal.notify_one();
+        stale
     }
 
     /// Queue a lifecycle command (FIFO) and wake the render thread. For the
@@ -684,12 +699,77 @@ fn drain<S, W>(inbox: &mut Inbox<S, W>) -> RenderBatch<S, W> {
     }
 }
 
+// ---------------------------------------------------------------------
+// Scene give-back: a non-blocking depth-1 return slot (review finding F5)
+// ---------------------------------------------------------------------
+
+/// The render-thread handle to [`scene_return_channel`]: pushes a drained
+/// scene back for the UI thread to reclaim (`Scene::reset` + reuse) instead
+/// of a shell allocating a fresh one every frame — the buffer-reuse gap
+/// review finding F5 flagged (a scene crossing [`render_channel`] never came
+/// back, so every split `submit_frame` replaced it with `Scene::new()`).
+#[derive(Debug)]
+pub struct SceneReturnSender<S> {
+    slot: Arc<Mutex<Option<S>>>,
+}
+
+/// The UI-thread handle to [`scene_return_channel`]: polls (never blocks)
+/// for a scene the render thread has finished with.
+#[derive(Debug)]
+pub struct SceneReturnReceiver<S> {
+    slot: Arc<Mutex<Option<S>>>,
+}
+
+/// Create the render→UI scene give-back channel (review finding F5): a
+/// non-blocking, depth-1 return slot — the reverse-direction, pull-based
+/// counterpart to [`render_channel`]'s UI→render handoff. `Mutex<Option<S>>`
+/// only, no [`Condvar`] and no new dependency: nothing should ever park
+/// waiting on this slot, so there is no wait point to back — preserving this
+/// module's no-`unsafe`, no-new-deps, generic-over-`S` charter (see the
+/// module docs' Layering choice).
+pub fn scene_return_channel<S>() -> (SceneReturnSender<S>, SceneReturnReceiver<S>) {
+    let slot = Arc::new(Mutex::new(None));
+    (
+        SceneReturnSender { slot: slot.clone() },
+        SceneReturnReceiver { slot },
+    )
+}
+
+impl<S> SceneReturnSender<S> {
+    /// Push a drained scene back for the UI thread to reclaim. Depth-1
+    /// latest-wins, mirroring [`RenderSender::send_scene`]: an unpolled scene
+    /// already in the slot is replaced (dropped) rather than queued — the UI
+    /// thread only ever needs one spare, and an unbounded backlog here would
+    /// just be a leak-shaped wait for a UI thread that has stopped polling.
+    ///
+    /// The render thread must call this for **every** [`SceneFrame`] it takes
+    /// off a [`RenderReceiver`] — whether the scene is actually rendered or
+    /// the frame is phase-gated out ([`RenderPhase::Paused`]/[`RenderPhase::NoSurface`]
+    /// after a `Pause`/`SurfaceDestroyed`) — so a scene is never silently
+    /// dropped instead of given back (review finding F5's "never silently
+    /// dropped" requirement).
+    pub fn give_back(&self, scene: S) {
+        let mut slot = self.slot.lock().unwrap();
+        *slot = Some(scene);
+    }
+}
+
+impl<S> SceneReturnReceiver<S> {
+    /// Non-blocking poll for a returned scene — `None` if the render thread
+    /// hasn't given one back yet (cold start, or it is still busy on the
+    /// current frame). Never blocks: a caller that finds nothing falls back
+    /// to allocating a fresh scene (`Scene::new()`).
+    pub fn try_recv(&self) -> Option<S> {
+        self.slot.lock().unwrap().take()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // -----------------------------------------------------------------
     // Kill switch (pure — the env-reading wrapper's cache-free counterpart,
@@ -902,6 +982,98 @@ mod tests {
             rx.dropped_frames(),
             0,
             "each scene was taken before the next"
+        );
+    }
+
+    #[test]
+    fn send_scene_returns_none_when_the_slot_was_empty() {
+        let (tx, _rx) = render_channel::<u32, ()>();
+        assert!(
+            tx.send_scene(frame(1)).is_none(),
+            "the first send has nothing stale to hand back"
+        );
+    }
+
+    #[test]
+    fn send_scene_returns_the_overwritten_stale_frame() {
+        // Review finding F5: an untaken scene replaced by a newer send must be
+        // handed back to the caller (to reclaim its buffer), not silently
+        // dropped in the lock.
+        let (tx, rx) = render_channel::<u32, ()>();
+        assert!(tx.send_scene(frame(1)).is_none());
+        let stale = tx
+            .send_scene(frame(2))
+            .expect("the untaken frame(1) must be returned");
+        assert_eq!(stale.scene, 1, "the returned frame is the one replaced");
+
+        // Latest-wins semantics are unchanged by the give-back: the freshest
+        // scene is still what the render thread takes, and the drop counter
+        // still increments exactly as before.
+        let batch = rx.try_next();
+        assert_eq!(batch.scene.expect("a scene is pending").scene, 2);
+        assert_eq!(rx.dropped_frames(), 1);
+    }
+
+    #[test]
+    fn send_scene_after_receiver_death_hands_the_frame_back() {
+        // The dead-receiver path (see `Inbox::receiver_alive`) must not queue
+        // the frame, but should still let the caller reclaim its buffer rather
+        // than drop it on the floor.
+        let (tx, rx) = render_channel::<u32, ()>();
+        drop(rx);
+        let returned = tx
+            .send_scene(frame(1))
+            .expect("a scene sent after receiver death must still be handed back");
+        assert_eq!(returned.scene, 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Scene give-back channel (review finding F5): non-blocking depth-1
+    // return slot, render thread -> UI thread.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn scene_return_try_recv_is_none_before_any_give_back() {
+        let (_tx, rx) = scene_return_channel::<u32>();
+        assert!(rx.try_recv().is_none());
+    }
+
+    #[test]
+    fn scene_return_round_trips_a_single_scene() {
+        let (tx, rx) = scene_return_channel::<u32>();
+        tx.give_back(7);
+        assert_eq!(rx.try_recv(), Some(7), "the given-back scene is polled out");
+        assert!(
+            rx.try_recv().is_none(),
+            "the slot is drained after a take, like the forward channel"
+        );
+    }
+
+    #[test]
+    fn scene_return_is_depth_1_latest_wins() {
+        // Mirrors `render_channel`'s forward-slot semantics: a second give-back
+        // before the UI thread polls replaces (not queues) the first.
+        let (tx, rx) = scene_return_channel::<u32>();
+        tx.give_back(1);
+        tx.give_back(2);
+        assert_eq!(
+            rx.try_recv(),
+            Some(2),
+            "only the most recently given-back scene survives"
+        );
+    }
+
+    #[test]
+    fn scene_return_never_blocks_the_ui_thread() {
+        // The whole point of the non-blocking design: polling an empty slot
+        // returns immediately rather than parking, even with no render-thread
+        // counterpart ever constructed to give one back.
+        let (_tx, rx) = scene_return_channel::<u32>();
+        let start = Instant::now();
+        assert!(rx.try_recv().is_none());
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "try_recv must return immediately, never park"
         );
     }
 

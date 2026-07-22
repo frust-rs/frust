@@ -17,8 +17,10 @@
 //! pacing helpers the mobile shells drive from their touch + frame paths (plan
 //! phase 10.C), and the [`render_split`] module's UI→render-thread plumbing
 //! ([`render_channel`]'s latest-wins scene handoff + [`RenderCommand`]/[`Ack`]
-//! lifecycle vocabulary, gated by [`render_thread_enabled`]) the shells split
-//! the frame pipeline across (plan phase 11.B).
+//! lifecycle vocabulary, gated by [`render_thread_enabled`], plus
+//! [`scene_return_channel`]'s reverse give-back slot restoring buffer reuse
+//! across the split) the shells split the frame pipeline across (plan phase
+//! 11.B).
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
 //! (retained tree / `RenderRoot`) plus `frust-scene`/`frust-text`/
@@ -42,8 +44,9 @@ pub use ffi_support::{guard, logical_insets, logical_size, run_guarded_thread, s
 pub use frame_gate::{FrameDecision, FrameGate, FrameInputs};
 pub use render_split::{
     Ack, AckWaiter, FrameMeta, NO_RENDER_THREAD_VAR, RenderBatch, RenderCommand, RenderEvent,
-    RenderPhase, RenderReceiver, RenderSender, SceneFrame, SurfaceSize, ack_pair,
-    next_render_phase, render_channel, render_thread_enabled,
+    RenderPhase, RenderReceiver, RenderSender, SceneFrame, SceneReturnReceiver, SceneReturnSender,
+    SurfaceSize, ack_pair, next_render_phase, render_channel, render_thread_enabled,
+    scene_return_channel,
 };
 pub use resample::{PointerResampler, RawPointerSample};
 pub use theme_override::{

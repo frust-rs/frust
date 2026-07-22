@@ -55,10 +55,12 @@ use ndk::native_window::NativeWindow;
 
 use frust_core::event::{EditingState, ImeState};
 use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_link};
+use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
-    AppTree, RenderCommand, RenderPhase, RenderReceiver, SurfaceSize, guard, next_render_phase,
-    render_channel, render_thread_enabled, run_guarded_thread,
+    AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceSize, guard,
+    next_render_phase, render_channel, render_thread_enabled, run_guarded_thread,
+    scene_return_channel,
 };
 use frust_text::TextContext;
 
@@ -584,6 +586,7 @@ pub(crate) fn render_loop(
     startup_spans: StartupSpans,
     cache_dir: Option<String>,
     fatal: Arc<AtomicBool>,
+    scene_return: SceneReturnSender<Scene>,
 ) {
     // Render-thread priority self-boost (phase-11 fix F6): raise this dedicated
     // render thread to the display band so a busy UI thread can't starve the GPU
@@ -688,32 +691,40 @@ pub(crate) fn render_loop(
         }
 
         // Then the freshest scene, only if the phase allows submitting (a scene
-        // handed off while paused/destroyed is dropped, not presented).
-        if let Some(frame) = batch.scene
-            && phase.can_render()
-        {
-            // The first handed-off scene marks the first UI frame produced — the
-            // render thread's stand-in for `first_rebuild_done` (it owns the
-            // startup line in the split).
-            if !first_rebuild_recorded {
-                if let Some(spans) = startup_spans.as_mut() {
-                    spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+        // handed off while paused/destroyed is dropped from presentation, not
+        // silently dropped altogether — see the give-back below).
+        if let Some(frame) = batch.scene {
+            if phase.can_render() {
+                // The first handed-off scene marks the first UI frame produced —
+                // the render thread's stand-in for `first_rebuild_done` (it owns
+                // the startup line in the split).
+                if !first_rebuild_recorded {
+                    if let Some(spans) = startup_spans.as_mut() {
+                        spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+                    }
+                    first_rebuild_recorded = true;
                 }
-                first_rebuild_recorded = true;
+                // FFI-path perf convention: read `perf::enabled()` once per
+                // frame, gate every `Instant::now()` behind it (inside
+                // `render_scene`).
+                let perf_on = perf::enabled();
+                crate::app::render_scene(
+                    &mut renderer,
+                    &render_cx,
+                    &frame.scene.scene,
+                    frame.scene.base_color,
+                    frame.ui_spans,
+                    &mut frame_stats,
+                    &mut startup_spans,
+                    perf_on,
+                );
             }
-            // FFI-path perf convention: read `perf::enabled()` once per frame,
-            // gate every `Instant::now()` behind it (inside `render_scene`).
-            let perf_on = perf::enabled();
-            crate::app::render_scene(
-                &mut renderer,
-                &render_cx,
-                &frame.scene.scene,
-                frame.scene.base_color,
-                frame.ui_spans,
-                &mut frame_stats,
-                &mut startup_spans,
-                perf_on,
-            );
+            // Give the drained scene back for the UI thread to reclaim (review
+            // finding F5) — whether it was actually rendered above or
+            // phase-gated out (`Paused`/`NoSurface`); `render_scene`'s encode
+            // step has already fully consumed the scene's commands by this
+            // point, so its buffer is safe to reuse. Never silently dropped.
+            scene_return.give_back(frame.scene.scene);
         }
 
         if batch.disconnected {
@@ -961,6 +972,7 @@ fn spawn_split_executor(
     startup_spans.record(SPAN_FONT_PREINIT_JOINED);
 
     let (sender, receiver) = render_channel::<PaintedScene, SendableWindowPtr>();
+    let (scene_return_tx, scene_return_rx) = scene_return_channel::<Scene>();
     let window_ptr = window.ptr().as_ptr().cast::<c_void>();
     let size = SurfaceSize {
         width: physical.0,
@@ -983,7 +995,13 @@ fn spawn_split_executor(
         // deadlock fix). A no-op under the release `panic = "abort"` profile.
         .spawn(move || {
             run_guarded_thread("frust-render (android)", move || {
-                render_loop(receiver, startup_spans, cache_dir, fatal_render)
+                render_loop(
+                    receiver,
+                    startup_spans,
+                    cache_dir,
+                    fatal_render,
+                    scene_return_tx,
+                )
             })
         })
         .expect("frust-shell-android: failed to spawn render thread");
@@ -997,7 +1015,7 @@ fn spawn_split_executor(
     });
 
     (
-        FrameExecutor::Split(SplitExecutor::new(sender, join, fatal)),
+        FrameExecutor::Split(SplitExecutor::new(sender, join, fatal, scene_return_rx)),
         text_ctx,
     )
 }

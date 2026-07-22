@@ -59,8 +59,9 @@ use frust_shell_common::perf::{
     SPAN_PIPELINE_CACHE_RESTORED, SPAN_RENDERER_READY, StartupSpans, UiSpans,
 };
 use frust_shell_common::{
-    FrameMeta, RenderCommand, RenderPhase, RenderReceiver, RenderSender, SceneFrame, SurfaceSize,
-    next_render_phase, render_channel,
+    FrameMeta, RenderCommand, RenderPhase, RenderReceiver, RenderSender, SceneFrame,
+    SceneReturnReceiver, SceneReturnSender, SurfaceSize, next_render_phase, render_channel,
+    scene_return_channel,
 };
 use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
@@ -197,9 +198,13 @@ impl FrameExecutor {
 
     /// Hand one finished frame to the executor. Inline runs the encode→present
     /// tail synchronously (borrowing `scene`, so it is reused next frame — spec
-    /// §7); the split moves the scene out (replacing it with a fresh one) into a
-    /// [`SceneFrame`] and sends it across the channel, latest-wins. `frame_time`
-    /// and `size` populate the split's [`FrameMeta`]; inline ignores them.
+    /// §7); the split moves the scene out into a [`SceneFrame`] and sends it
+    /// across the channel (latest-wins), replacing it with a scene reclaimed off
+    /// the render thread's give-back channel (review finding F5) — `reset()`,
+    /// so its buffer is reused rather than reallocated — falling back to
+    /// `Scene::new()` only when none is available yet (cold start, or the
+    /// render thread hasn't given one back). `frame_time` and `size` populate
+    /// the split's [`FrameMeta`]; inline ignores them.
     pub(crate) fn submit_frame(
         &mut self,
         window: &WindowHandle,
@@ -214,8 +219,9 @@ impl FrameExecutor {
                 inline.submit_frame(window, scene, base_color, ui_spans)
             }
             FrameExecutor::Split(split) => {
+                let replacement = split.take_reusable_scene();
                 let painted = PaintedScene {
-                    scene: std::mem::replace(scene, Scene::new()),
+                    scene: std::mem::replace(scene, replacement),
                     base_color,
                 };
                 split.submit_frame(painted, ui_spans, frame_time, size);
@@ -233,6 +239,7 @@ pub(crate) fn spawn_render_thread(proxy: EventLoopProxy<ShellUserEvent>) -> Spli
     let render_cx = RenderContext::new();
     let factory = render_cx.surface_factory();
     let (sender, receiver) = render_channel::<PaintedScene, DesktopSurface>();
+    let (scene_return_tx, scene_return_rx) = scene_return_channel::<Scene>();
     let join = std::thread::Builder::new()
         .name("frust-render".to_string())
         // Guard the loop so a dev-build panic logs and exits cleanly (dropping the
@@ -240,11 +247,11 @@ pub(crate) fn spawn_render_thread(proxy: EventLoopProxy<ShellUserEvent>) -> Spli
         // deadlock fix). A no-op under the release `panic = "abort"` profile.
         .spawn(move || {
             frust_shell_common::run_guarded_thread("frust-render (desktop)", move || {
-                render_loop(receiver, proxy, render_cx)
+                render_loop(receiver, proxy, render_cx, scene_return_tx)
             })
         })
         .expect("frust: failed to spawn render thread");
-    SplitExecutor::new(sender, join, factory)
+    SplitExecutor::new(sender, join, factory, scene_return_rx)
 }
 
 /// The single-thread fallback executor (kill switch engaged): the
@@ -365,6 +372,17 @@ pub(crate) struct SplitExecutor {
     surface_requested: bool,
     /// Monotonically increasing per-frame id stamped into [`FrameMeta`].
     frame_id: u64,
+    /// The UI-side half of the render thread's give-back channel (review
+    /// finding F5): polled once per [`Self::submit_frame`] for a scene the
+    /// render thread has finished with, so its buffer is reused instead of
+    /// reallocating a fresh `Scene` every frame.
+    scene_return: SceneReturnReceiver<Scene>,
+    /// A scene reclaimed from [`RenderSender::send_scene`]'s returned stale
+    /// frame (the UI thread outran the render thread, overwriting an
+    /// un-taken scene in the latest-wins slot) — checked before
+    /// [`Self::scene_return`] on the next [`Self::take_reusable_scene`] call
+    /// so that buffer is reused too, rather than dropped.
+    spare_scene: Option<Scene>,
 }
 
 impl SplitExecutor {
@@ -372,6 +390,7 @@ impl SplitExecutor {
         sender: RenderSender<PaintedScene, DesktopSurface>,
         join: JoinHandle<()>,
         factory: SurfaceFactory,
+        scene_return: SceneReturnReceiver<Scene>,
     ) -> Self {
         Self {
             sender: Some(sender),
@@ -379,7 +398,27 @@ impl SplitExecutor {
             factory,
             surface_requested: false,
             frame_id: 0,
+            scene_return,
+            spare_scene: None,
         }
+    }
+
+    /// Reclaim a reusable, empty `Scene` for the next frame (review finding
+    /// F5): prefer a scene already reclaimed from a stale [`Self::submit_frame`]
+    /// give-back ([`Self::spare_scene`]), else poll the render thread's
+    /// give-back channel ([`Self::scene_return`]), else allocate a fresh one.
+    /// Either reclaimed scene is [`Scene::reset`] before being handed out —
+    /// clearing its commands while keeping the backing `Vec` capacity, which
+    /// is the whole point of reusing it over `Scene::new()`.
+    fn take_reusable_scene(&mut self) -> Scene {
+        if let Some(spare) = self.spare_scene.take() {
+            return spare;
+        }
+        if let Some(mut returned) = self.scene_return.try_recv() {
+            returned.reset();
+            return returned;
+        }
+        Scene::new()
     }
 
     /// Create the surface on the UI thread and send it across for the render
@@ -436,7 +475,7 @@ impl SplitExecutor {
     ) {
         self.frame_id += 1;
         if let Some(sender) = self.sender.as_ref() {
-            sender.send_scene(SceneFrame {
+            let stale = sender.send_scene(SceneFrame {
                 scene: painted,
                 meta: FrameMeta {
                     frame_time,
@@ -445,6 +484,14 @@ impl SplitExecutor {
                 },
                 ui_spans,
             });
+            // The UI thread outran the render thread: the just-overwritten,
+            // never-rendered stale frame's scene is still perfectly reusable —
+            // reclaim its buffer instead of letting it drop (review finding F5).
+            if let Some(stale_frame) = stale {
+                let mut reclaimed = stale_frame.scene.scene;
+                reclaimed.reset();
+                self.spare_scene = Some(reclaimed);
+            }
         }
     }
 }
@@ -473,6 +520,7 @@ fn render_loop(
     receiver: RenderReceiver<PaintedScene, DesktopSurface>,
     proxy: EventLoopProxy<ShellUserEvent>,
     mut render_cx: RenderContext,
+    scene_return: SceneReturnSender<Scene>,
 ) {
     let mut renderer = SurfaceRenderer::new();
     // Kept only for `pre_present_notify` (surface creation/recovery is UI-side).
@@ -547,47 +595,54 @@ fn render_loop(
         }
 
         // Then the freshest scene, only if the phase allows submitting.
-        if let Some(frame) = batch.scene
-            && phase.can_render()
-            && let Some(win) = window.as_ref()
-        {
-            // The first handed-off scene marks the first UI frame produced — the
-            // render thread's stand-in for `first_rebuild_done` (it owns the
-            // startup line in the split).
-            if !first_rebuild_recorded {
-                startup.record(SPAN_FIRST_REBUILD_DONE);
-                first_rebuild_recorded = true;
-            }
-            let outcome = render_frame(
-                &mut renderer,
-                &render_cx,
-                win,
-                &frame.scene.scene,
-                frame.scene.base_color,
-                frame.ui_spans,
-                &mut frame_stats,
-                &mut startup,
-                &mut first_encode_recorded,
-                &mut first_frame_recorded,
-            );
-            match outcome {
-                // Stale swapchain: reconfigured internally — ask the UI thread
-                // (via the proxy) to repaint so a fresh scene is handed off,
-                // keeping winit's dirty-driven `Wait` model intact.
-                Ok(FrameOutcome::Redraw) => {
-                    let _ = proxy.send_event(ShellUserEvent::RenderNeedsRedraw);
+        if let Some(frame) = batch.scene {
+            if phase.can_render()
+                && let Some(win) = window.as_ref()
+            {
+                // The first handed-off scene marks the first UI frame produced —
+                // the render thread's stand-in for `first_rebuild_done` (it owns
+                // the startup line in the split).
+                if !first_rebuild_recorded {
+                    startup.record(SPAN_FIRST_REBUILD_DONE);
+                    first_rebuild_recorded = true;
                 }
-                // Surface lost: re-creation needs the main thread (the window
-                // handle), so hand the request back to the UI thread, which
-                // re-runs the detached creation and sends a fresh
-                // `SurfaceCreated`. Until then the renderer's own phase gate
-                // (now `SurfaceLost`) skips frames safely.
-                Ok(FrameOutcome::SurfaceLost) => {
-                    let _ = proxy.send_event(ShellUserEvent::RenderRecreateSurface);
+                let outcome = render_frame(
+                    &mut renderer,
+                    &render_cx,
+                    win,
+                    &frame.scene.scene,
+                    frame.scene.base_color,
+                    frame.ui_spans,
+                    &mut frame_stats,
+                    &mut startup,
+                    &mut first_encode_recorded,
+                    &mut first_frame_recorded,
+                );
+                match outcome {
+                    // Stale swapchain: reconfigured internally — ask the UI thread
+                    // (via the proxy) to repaint so a fresh scene is handed off,
+                    // keeping winit's dirty-driven `Wait` model intact.
+                    Ok(FrameOutcome::Redraw) => {
+                        let _ = proxy.send_event(ShellUserEvent::RenderNeedsRedraw);
+                    }
+                    // Surface lost: re-creation needs the main thread (the window
+                    // handle), so hand the request back to the UI thread, which
+                    // re-runs the detached creation and sends a fresh
+                    // `SurfaceCreated`. Until then the renderer's own phase gate
+                    // (now `SurfaceLost`) skips frames safely.
+                    Ok(FrameOutcome::SurfaceLost) => {
+                        let _ = proxy.send_event(ShellUserEvent::RenderRecreateSurface);
+                    }
+                    Ok(FrameOutcome::Rendered) | Ok(FrameOutcome::Skipped) => {}
+                    Err(err) => log::error!("frust: render error: {err}"),
                 }
-                Ok(FrameOutcome::Rendered) | Ok(FrameOutcome::Skipped) => {}
-                Err(err) => log::error!("frust: render error: {err}"),
             }
+            // Give the drained scene back for the UI thread to reclaim (review
+            // finding F5) — whether it was actually rendered above, phase-gated
+            // out (`Paused`/`NoSurface`), or the window wasn't ready yet; `encode`
+            // has already fully consumed the scene's commands by this point, so
+            // its buffer is safe to reuse. Never silently dropped.
+            scene_return.give_back(frame.scene.scene);
         }
 
         if batch.disconnected {
