@@ -171,6 +171,15 @@ impl Theme {
     pub fn extension<T: Any + Send + Sync>(&self) -> Option<&T> {
         self.extensions.get::<T>()
     }
+
+    /// Start a [`crate::builder::ThemeBuilder`] over `self` as the baseline —
+    /// the `defineTheme`/`copyWith` analog (PLAN.md Phase 2 step 1). See
+    /// `crate::builder`'s module docs for the full layered-precedence
+    /// contract (baseline → whole-group swaps → per-token closure edits →
+    /// extensions).
+    pub fn builder(base: Theme) -> crate::builder::ThemeBuilder {
+        crate::builder::ThemeBuilder::new(base)
+    }
 }
 
 #[cfg(test)]
