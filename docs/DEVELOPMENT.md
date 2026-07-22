@@ -376,10 +376,9 @@ counts, statistics, fairness gates, raw-line formats); `benchmarks/
 RESULTS.md` is the filled record of actual device runs (never placeholder/
 projected numbers), with every methodology deviation labeled per run.
 
-**macOS `mktemp` caveat.** `harness/run.sh`'s `mktemp` call only expands
-correctly under GNU mktemp; BSD/macOS `mktemp` returns the literal template
-unexpanded, silently colliding every run after the first — alias `mktemp`
-to `gmktemp` (`brew install coreutils`) until the script is fixed.
+**macOS `mktemp` caveat.** `harness/run.sh`'s `mktemp` only expands
+correctly under GNU mktemp — BSD/macOS returns the template unexpanded,
+silently colliding runs; alias `mktemp` to `gmktemp` (`brew install coreutils`) until fixed.
 
 ## Instrumentation
 
@@ -392,6 +391,7 @@ to `gmktemp` (`brew install coreutils`) until the script is fixed.
 | `FRUST_TRACE_RAW` | A second dial beside `FRUST_TRACE`: with both set, `FrameStats` emits one parseable `frust-perf raw ...` line per frame (instead of periodic summaries), plus `bench-scenario-start/end <name>` marker lines for a benchmark harness to slice by. Setting `FRUST_TRACE_RAW` alone does nothing — `FRUST_TRACE` must also be on. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Raw line format is v3: `acquire_us`/`submit_us` are separate fields, replacing v2's single `present_us` (`acquire_us + submit_us` == old `present_us`, so cross-baseline math still works); `stats.py` parses key=value so v1/v2/v3 logs stay parseable. In the default render-thread split, a gate-skipped frame is not sent to the render thread at all, so it never reaches this line — see the `FRUST_NO_RENDER_THREAD` row below for skip-sensitive series. See `benchmarks/PROTOCOL.md`'s raw-format changelog for the full field history. | off |
 | `FRUST_NO_RENDER_THREAD` | Kill switch for the render-thread split (`docs/ARCHITECTURE.md`'s frame pipelines) — restores the pre-split single-thread path (rebuild/layout/paint/encode/acquire/present all on the UI/main thread), the fallback if the split needs to be ruled out. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Also the skip-count fix: a `FrameGate` `Skip` sends nothing across the split's UI→render channel, so it is never recorded in `FrameStats`/the raw line — build with this set when a skip-sensitive series (skip counts/rates) needs every skip counted. | off (split active) |
 | `FRUST_NO_RESAMPLE` | Kill switch for the mobile pointer-event resampler (`docs/ARCHITECTURE.md`'s `frust-shell-common` row) — forces raw per-touch delivery with no frame-boundary interpolation/prediction. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (resampler active) |
+| `FRUST_NO_DIRECT_SURFACE` | Kill switch pinning a direct-capable surface onto the blit fallback arm (`docs/ARCHITECTURE.md`'s `frust-render` row) — the A/B valve for comparing the direct-to-surface and blit render paths on the same hardware. Same compile-time-or-runtime parsing as `FRUST_TRACE`. **A/B caveat:** on the direct arm the GPU render moves into `submit_us` (out of `encode_us`) and `acquire_us` now precedes it rather than follows — account for this remap before comparing `submit_us` across arms (`SurfaceRenderer::submit`'s doc comment has the full v3 field mapping). | off (path auto-probed) |
 
 `FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints one
 `frust-perf startup ...` line, then periodic `frust-perf frame ...`
