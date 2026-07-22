@@ -1633,6 +1633,37 @@ mod tests {
         *rec.colors.first().expect("one glyph run painted")
     }
 
+    // --- Placeholder family resolution (task gf3) ---
+
+    /// Records font bytes from each glyph run, enabling font-resolution testing.
+    #[derive(Default)]
+    struct PlaceholderFontRecorder {
+        font_bytes: Vec<Vec<u8>>,
+    }
+
+    impl PaintScene for PlaceholderFontRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+            // Capture the font bytes from this glyph run.
+            self.font_bytes
+                .push(run.font.font().data.as_ref().to_vec());
+        }
+    }
+
+    /// Paint `root` and return the font bytes of the first glyph run's font.
+    fn painted_placeholder_font_bytes(
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+    ) -> Vec<u8> {
+        let mut rec = PlaceholderFontRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+        rec.font_bytes
+            .first()
+            .expect("one glyph run painted")
+            .clone()
+    }
+
     #[test]
     fn unthemed_text_input_keeps_black_default() {
         // Parity: with no theme threaded in, the glyph color stays exactly the
@@ -2256,5 +2287,61 @@ mod tests {
         // the field's style is correctly applied. A proper pixel-level assertion
         // would require inspecting glyph runs directly (which RecordingScene doesn't
         // support), but the layout success itself proves the family was accepted.
+    }
+
+    #[test]
+    fn placeholder_font_reflects_configured_style_family() {
+        // Genuine shaped-output assertion (task gf3): verify that an empty,
+        // unfocused field's placeholder shapes with the input's configured font
+        // family, not a fallback. Two TextInputs—one with default family (SystemUi),
+        // one with an explicit named family—must resolve to different fonts in
+        // their placeholder runs. If `ph_style` regresses to `TextStyle::new(size,
+        // color)`, both would drop the family and resolve to the same default font,
+        // causing this assertion to fail.
+        use frust_text::{FontFamily, GenericSlot};
+
+        // First TextInput: default style (no explicit family).
+        // The placeholder will shape with the default family (SystemUi).
+        let mut state_default = AppState::default();
+        let mut root_default = RenderRoot::new();
+        root_default.rebuild(
+            &mut |s: &mut AppState| {
+                text_input(s.value.clone(), |_s: &mut AppState, _v: String| {})
+                    .placeholder("test")
+            },
+            &mut state_default,
+        );
+        root_default.layout(Size::new(300.0, 200.0));
+        let default_font = painted_placeholder_font_bytes(&mut root_default);
+
+        // Second TextInput: explicit monospace family using stack_with_generic.
+        // Monospace is a generic family available on all platforms; it will
+        // resolve to a different system font than SystemUi on any test host.
+        let monospace_style = TextStyle {
+            family: FontFamily::stack_with_generic(Vec::<String>::new(), GenericSlot::Monospace),
+            ..TextStyle::default()
+        };
+        let mut state_monospace = AppState::default();
+        let mut root_monospace = RenderRoot::new();
+        root_monospace.rebuild(
+            &mut |s: &mut AppState| {
+                text_input(s.value.clone(), |_s: &mut AppState, _v: String| {})
+                    .placeholder("test")
+                    .text_style(monospace_style.clone())
+            },
+            &mut state_monospace,
+        );
+        root_monospace.layout(Size::new(300.0, 200.0));
+        let monospace_font = painted_placeholder_font_bytes(&mut root_monospace);
+
+        // Assert: the two placeholders resolved to different fonts.
+        // If ph_style regressed (losing the family), both would use SystemUi
+        // and resolve to the same font.
+        assert_ne!(
+            default_font, monospace_font,
+            "placeholder with Monospace family should resolve to a different font \
+             than the default SystemUi family; if this fails, ph_style likely \
+             regressed to not preserving the configured family"
+        );
     }
 }
