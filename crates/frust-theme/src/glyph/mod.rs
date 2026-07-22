@@ -41,3 +41,22 @@ pub mod fonts;
 pub mod scales;
 
 pub use color::GlyphInk;
+
+/// Every bundled Glyph font face's raw bytes (task 27's shell auto-registration
+/// seam), or an empty slice when the `glyph-fonts` feature is off.
+///
+/// A `#[cfg(feature = "glyph-fonts")]`-gated item can't be gated *from another
+/// crate* (a shell can't write `#[cfg(feature = "frust-theme/glyph-fonts")]`),
+/// so this crate-boundary-safe wrapper always exists and does the gating
+/// internally — a shell calls this unconditionally, and the fonts module's
+/// presence/absence decides whether it returns real bytes or nothing.
+pub fn font_data() -> &'static [&'static [u8]] {
+    #[cfg(feature = "glyph-fonts")]
+    {
+        fonts::font_data()
+    }
+    #[cfg(not(feature = "glyph-fonts"))]
+    {
+        &[]
+    }
+}

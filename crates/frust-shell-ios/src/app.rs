@@ -55,7 +55,7 @@ use frust_shell_common::{
     effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
 };
 use frust_text::TextContext;
-use frust_theme::{Brightness, Theme};
+use frust_theme::{Brightness, DesignLanguage, Theme};
 use kurbo::{Affine, Point, Size};
 use objc2::rc::autoreleasepool;
 
@@ -712,9 +712,13 @@ impl IosAppHandle {
     /// `CAMetalLayer`; runs the first rebuild so the tree exists before the first
     /// frame. No `unsafe` here — the surface creation happens at the FFI boundary.
     ///
-    /// Seeds the M3 baseline theme (Light, until Swift's follow-up
-    /// `frust_set_appearance` reports the real preference) into both delivery
-    /// paths (`AppTree::set_theme` for widgets, `provide_context` for app code)
+    /// Seeds the Glyph baseline theme (task 27; dark-first per
+    /// `Theme::glyph_baseline`, until Swift's follow-up `frust_set_appearance`
+    /// reports the real preference — called synchronously right after
+    /// `frust_init` returns, before the display link starts, so a
+    /// light-preference device still ends up Glyph light before the first
+    /// frame is presented) into both delivery paths (`AppTree::set_theme` for
+    /// widgets, `provide_context` for app code)
     /// before the first rebuild, mirroring the desktop shell's `apply_theme`.
     /// Must be called under the root reactive `Owner` (see
     /// `crate::ffi_glue::create_handle`) so `provide_context` isn't a silent
@@ -753,7 +757,22 @@ impl IosAppHandle {
         let mut font_registry = FontRegistryWatcher::new();
         font_registry.drain_into(&mut text_ctx);
 
-        let theme = Theme::m3_baseline();
+        let theme = Theme::glyph_baseline();
+
+        // Bundled Glyph font auto-registration (task 27): the default theme
+        // above is the Glyph baseline, so register the bundled Space Mono /
+        // IBM Plex Mono faces (`frust_theme::glyph::font_data()` — an empty
+        // slice, so a no-op, when the `glyph-fonts` feature is off) directly
+        // into `text_ctx` before the first rebuild — same pre-first-rebuild
+        // timing as the drain above, so the first frame shapes with Glyph
+        // fonts with no relayout needed. Gated on the *default* theme's
+        // design language, not re-checked on a later `set_app_theme` swap.
+        if theme.design_language == DesignLanguage::Glyph {
+            for bytes in frust_theme::glyph::font_data() {
+                let _ = text_ctx.register_fonts(bytes.to_vec());
+            }
+        }
+
         app.set_theme(Box::new(theme.clone()));
         provide_context(theme.clone());
         app.rebuild();
@@ -1214,7 +1233,7 @@ impl IosAppHandle {
                 true
             }
             Some(None) => {
-                self.theme = Theme::m3_baseline();
+                self.theme = Theme::glyph_baseline();
                 self.theme.brightness = self.platform_brightness;
                 self.theme_override_active = false;
                 self.push_theme();

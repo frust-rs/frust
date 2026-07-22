@@ -53,7 +53,7 @@ use frust_shell_common::{
     render_thread_enabled,
 };
 use frust_text::TextContext;
-use frust_theme::{Brightness, Theme};
+use frust_theme::{Brightness, DesignLanguage, Theme};
 use kurbo::{Affine, Point, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
@@ -197,8 +197,11 @@ where
         semantics_seen: 0,
         fatal: None,
         epoch,
-        // M3 baseline, Light until `resumed` seeds the window's real preference.
-        theme: Theme::m3_baseline(),
+        // Glyph baseline (task 27), Dark until `resumed` seeds the window's real
+        // preference (`brightness_from_winit` below overwrites `brightness`
+        // unconditionally, so the baseline's own dark-first default never leaks
+        // into a light-preference platform).
+        theme: Theme::glyph_baseline(),
         theme_seeded: false,
         theme_override: ThemeOverrideWatcher::new(),
         theme_override_active: false,
@@ -212,8 +215,37 @@ where
     // per-frame poll in `RedrawRequested` picks up any later registration.
     handler.font_registry.drain_into(&mut handler.text_ctx);
 
+    // Bundled Glyph font auto-registration (task 27): the default theme just
+    // constructed above is the Glyph baseline, so register the bundled Space
+    // Mono / IBM Plex Mono faces directly into the shell's `TextContext`
+    // before the first layout — same pre-first-layout timing as the drain
+    // above, so the first frame shapes with Glyph fonts with no relayout
+    // needed.
+    register_glyph_fonts_if_active(&handler.theme, &mut handler.text_ctx);
+
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
+}
+
+/// Bundled Glyph font auto-registration (task 27): registers
+/// `frust_theme::glyph::font_data()`'s bundled Space Mono / IBM Plex Mono
+/// faces into `cx` when `theme`'s [`DesignLanguage`] is [`DesignLanguage::Glyph`]
+/// — a no-op otherwise (an app whose default theme is Material/Cupertino gets
+/// no bundled Glyph fonts registered), and also a no-op when the
+/// `glyph-fonts` feature is off (`font_data()` returns an empty slice then).
+/// Gated on the theme passed in at the call site (the just-constructed
+/// default) — a later `set_app_theme` swap away from Glyph does not
+/// un-register these faces (harmless; an unused registered family costs
+/// nothing at shape time, see the task's Details).
+///
+/// Pulled out as a free function so the gating + registration is
+/// unit-testable without a live window.
+fn register_glyph_fonts_if_active(theme: &Theme, cx: &mut TextContext) {
+    if theme.design_language == DesignLanguage::Glyph {
+        for bytes in frust_theme::glyph::font_data() {
+            let _ = cx.register_fonts(bytes.to_vec());
+        }
+    }
 }
 
 /// Turns a post-loop `ShellHandler::fatal` into the `run_desktop` result.
@@ -912,7 +944,7 @@ where
                         self.apply_theme(&window);
                     }
                     Some(None) => {
-                        self.theme = Theme::m3_baseline();
+                        self.theme = Theme::glyph_baseline();
                         self.theme.brightness = brightness_from_winit(window.theme());
                         self.theme_override_active = false;
                         self.apply_theme(&window);
@@ -1072,13 +1104,15 @@ mod tests {
     use super::{
         ComposeLatch, ElementState, Ime, Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme,
         brightness_from_winit, build_tree_update, finish, map_key_event, map_modifiers,
-        map_named_key, physical_to_logical,
+        map_named_key, physical_to_logical, register_glyph_fonts_if_active,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
     use frust_core::event::{ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
-    use frust_theme::{Brightness, Theme};
+    use frust_text::{FontFamily, TextContext, TextStyle};
+    use frust_theme::{Brightness, DesignLanguage, Theme};
     use kurbo::Point;
+    use peniko::Color;
     use winit::keyboard::ModifiersState;
 
     // --- brightness_from_winit ---
@@ -1448,5 +1482,69 @@ mod tests {
         // SemanticsUpdate::focus_id() defaults to root — accesskit's `focus`
         // field is non-optional and must always name some target.
         assert_eq!(tree_update.focus, root_id);
+    }
+
+    // --- register_glyph_fonts_if_active (task 27) ---
+
+    /// Extracts the raw font-file bytes a shaped `GlyphRun` resolved against,
+    /// mirroring `frust-text/tests/register_fonts.rs`'s helper of the same
+    /// shape, so a test can assert *which* face actually shaped the text.
+    fn shaped_font_bytes(cx: &mut TextContext, text: &str, sty: &TextStyle) -> Vec<u8> {
+        let layout = cx.layout(text, sty, None);
+        let runs = layout.to_scene_runs(Point::ORIGIN);
+        let run = runs.first().expect("expected at least one glyph run");
+        run.font.font().data.as_ref().to_vec()
+    }
+
+    #[test]
+    fn glyph_theme_auto_registers_and_shapes_space_mono_with_no_explicit_call() {
+        // Acceptance criterion 3: post-init (no `frust::register_app_fonts`
+        // call anywhere in this test), a Glyph-themed shell resolves "Space
+        // Mono" to the bundled face, not a SystemUi fallback.
+        let mut cx = TextContext::new();
+        register_glyph_fonts_if_active(&Theme::glyph_baseline(), &mut cx);
+
+        let sty = TextStyle {
+            family: FontFamily::named("Space Mono"),
+            ..TextStyle::new(16.0, Color::BLACK)
+        };
+        let glyph_bytes = shaped_font_bytes(&mut cx, "frust", &sty);
+
+        // A pristine context (no auto-registration) shaping the same request
+        // falls back to whatever the host resolves "Space Mono" to via the
+        // system font database (almost certainly not installed) — compare
+        // against the exact bundled bytes instead of a fallback-inequality
+        // check, since a real system match would make inequality flaky.
+        let bundled = frust_theme::glyph::font_data();
+        assert!(
+            !bundled.is_empty(),
+            "expected the default `glyph-fonts` feature to ship bundled bytes"
+        );
+        assert!(
+            bundled.iter().any(|face| face.to_vec() == glyph_bytes),
+            "expected \"Space Mono\" to resolve to one of the bundled Glyph \
+             font faces with no explicit `register_app_fonts` call"
+        );
+    }
+
+    #[test]
+    fn non_glyph_theme_does_not_auto_register_bundled_fonts() {
+        let mut cx = TextContext::new();
+        let mut m3 = Theme::m3_baseline();
+        m3.design_language = DesignLanguage::Material3;
+        register_glyph_fonts_if_active(&m3, &mut cx);
+
+        let sty = TextStyle {
+            family: FontFamily::named("Space Mono"),
+            ..TextStyle::new(16.0, Color::BLACK)
+        };
+        let bytes = shaped_font_bytes(&mut cx, "frust", &sty);
+
+        let bundled = frust_theme::glyph::font_data();
+        assert!(
+            bundled.iter().all(|face| face.to_vec() != bytes),
+            "a non-Glyph default theme must not auto-register the bundled \
+             Glyph fonts"
+        );
     }
 }
