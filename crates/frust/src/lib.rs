@@ -163,6 +163,18 @@ pub use frust_widgets::{
 /// ```
 pub use frust_widgets::motion;
 
+/// The Glyph widget catalog (glyph-design-system tasks 17/20-26): the
+/// terminal-native components with no Material/Cupertino equivalent
+/// (badges/tags/alerts, loaders + toast, nav chrome, content cards, the
+/// terminal block + tooltip, and the command-palette overlay). Re-exported
+/// **wholesale** (`pub use frust_widgets::glyph;`), following
+/// `frust_widgets::icons`/`frust_widgets::motion`'s wholesale-module
+/// precedent, so every widget a later fill task adds under
+/// `frust_widgets::glyph` rides along under `frust::glyph::*` with no further
+/// facade edit. This scaffold ships the module and its (currently doc-only)
+/// stub submodules; the widgets themselves land in the fill tasks.
+pub use frust_widgets::glyph;
+
 mod back_glue;
 mod router_glue;
 

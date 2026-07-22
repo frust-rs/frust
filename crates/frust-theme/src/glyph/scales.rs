@@ -144,10 +144,10 @@ impl ShapeScale {
     pub const fn glyph() -> Self {
         Self {
             none: 0.0,
-            extra_small: 4.0,  // --radius-xs (canonical 4, per the documented scale)
-            small: 6.0,        // --radius-sm
-            medium: 10.0,      // --radius-md
-            large: 16.0,       // --radius-lg
+            extra_small: 4.0, // --radius-xs (canonical 4, per the documented scale)
+            small: 6.0,       // --radius-sm
+            medium: 10.0,     // --radius-md
+            large: 16.0,      // --radius-lg
             large_increased: 16.0, // Glyph has no value between 16 and full
             extra_large: 16.0,
             extra_large_increased: 16.0,
@@ -205,11 +205,32 @@ impl Elevation {
             // Borders-first: a barely-there lift.
             level1: glyph_level(1.0, 1.0, 3.0, 0.10, 0.04, SurfaceRole::SurfaceContainerLow),
             level2: glyph_level(3.0, 4.0, 12.0, 0.22, 0.06, SurfaceRole::SurfaceContainer),
-            level3: glyph_level(6.0, 8.0, 20.0, 0.30, 0.09, SurfaceRole::SurfaceContainerHigh),
+            level3: glyph_level(
+                6.0,
+                8.0,
+                20.0,
+                0.30,
+                0.09,
+                SurfaceRole::SurfaceContainerHigh,
+            ),
             // Source: toast `0 12px 32px rgba(0,0,0,.4)` / warm-ink `.12`.
-            level4: glyph_level(8.0, 12.0, 32.0, 0.40, 0.12, SurfaceRole::SurfaceContainerHigh),
+            level4: glyph_level(
+                8.0,
+                12.0,
+                32.0,
+                0.40,
+                0.12,
+                SurfaceRole::SurfaceContainerHigh,
+            ),
             // Source: modal `0 24px 60px rgba(0,0,0,.5)` / warm-ink `.18`.
-            level5: glyph_level(12.0, 24.0, 60.0, 0.50, 0.18, SurfaceRole::SurfaceContainerHighest),
+            level5: glyph_level(
+                12.0,
+                24.0,
+                60.0,
+                0.50,
+                0.18,
+                SurfaceRole::SurfaceContainerHighest,
+            ),
         }
     }
 }
@@ -369,7 +390,10 @@ mod tests {
         assert_eq!(s.display_large_emphasized.weight, FontWeight::BOLD);
         // Size/line-height unchanged between base and emphasized.
         assert_eq!(s.body_large.size, s.body_large_emphasized.size);
-        assert_eq!(s.body_large.line_height, s.body_large_emphasized.line_height);
+        assert_eq!(
+            s.body_large.line_height,
+            s.body_large_emphasized.line_height
+        );
     }
 
     #[test]

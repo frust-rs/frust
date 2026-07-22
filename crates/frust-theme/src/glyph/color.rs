@@ -447,11 +447,17 @@ mod tests {
     #[test]
     fn glyph_dark_surface_ramp_matches_source() {
         let d = ColorScheme::glyph_dark();
-        assert_eq!(d.surface_container_lowest, Color::from_rgb8(0x0a, 0x0c, 0x11)); // void
+        assert_eq!(
+            d.surface_container_lowest,
+            Color::from_rgb8(0x0a, 0x0c, 0x11)
+        ); // void
         assert_eq!(d.surface_container_low, Color::from_rgb8(0x10, 0x13, 0x1a)); // base
         assert_eq!(d.surface, Color::from_rgb8(0x16, 0x1a, 0x23)); // surface
         assert_eq!(d.surface_container_high, Color::from_rgb8(0x1e, 0x23, 0x30)); // raised
-        assert_eq!(d.surface_container_highest, Color::from_rgb8(0x27, 0x2d, 0x3d)); // overlay
+        assert_eq!(
+            d.surface_container_highest,
+            Color::from_rgb8(0x27, 0x2d, 0x3d)
+        ); // overlay
         assert_eq!(d.surface_bright, Color::from_rgb8(0x2f, 0x36, 0x48)); // hover
     }
 
@@ -501,11 +507,17 @@ mod tests {
         // Deliberate: `surface` = white is the lightest slot (RESEARCH §1.1b),
         // unlike dark's monotonic ramp.
         assert_eq!(l.surface, Color::from_rgb8(0xff, 0xff, 0xff));
-        assert_eq!(l.surface_container_lowest, Color::from_rgb8(0xff, 0xff, 0xff));
+        assert_eq!(
+            l.surface_container_lowest,
+            Color::from_rgb8(0xff, 0xff, 0xff)
+        );
         assert_eq!(l.surface_container_low, Color::from_rgb8(0xfd, 0xfb, 0xf6));
         assert_eq!(l.surface_container, Color::from_rgb8(0xf6, 0xf2, 0xe9)); // page
         assert_eq!(l.surface_container_high, Color::from_rgb8(0xf1, 0xec, 0xe0));
-        assert_eq!(l.surface_container_highest, Color::from_rgb8(0xe8, 0xe1, 0xd0));
+        assert_eq!(
+            l.surface_container_highest,
+            Color::from_rgb8(0xe8, 0xe1, 0xd0)
+        );
     }
 
     #[test]
@@ -552,8 +564,14 @@ mod tests {
     fn aa_primary_on_surface_both_brightnesses() {
         let d = ColorScheme::glyph_dark();
         let l = ColorScheme::glyph_light();
-        assert!(contrast(d.primary, d.surface) >= AA, "dark primary-on-surface");
-        assert!(contrast(l.primary, l.surface) >= AA, "light primary-on-surface");
+        assert!(
+            contrast(d.primary, d.surface) >= AA,
+            "dark primary-on-surface"
+        );
+        assert!(
+            contrast(l.primary, l.surface) >= AA,
+            "light primary-on-surface"
+        );
     }
 
     #[test]

@@ -93,7 +93,10 @@ mod tests {
     fn glyph_baseline_carries_both_extensions() {
         // Acceptance criterion 3: both extensions resolve.
         let t = Theme::glyph_baseline();
-        assert_eq!(t.extension::<StatusPalette>(), Some(&StatusPalette::glyph()));
+        assert_eq!(
+            t.extension::<StatusPalette>(),
+            Some(&StatusPalette::glyph())
+        );
         assert_eq!(t.extension::<GlyphInk>(), Some(&GlyphInk::default_ink()));
     }
 
@@ -102,6 +105,9 @@ mod tests {
         let t = Theme::glyph_baseline();
         let c = t.clone();
         assert_eq!(c.extension::<GlyphInk>(), Some(&GlyphInk::default_ink()));
-        assert_eq!(c.extension::<StatusPalette>(), Some(&StatusPalette::glyph()));
+        assert_eq!(
+            c.extension::<StatusPalette>(),
+            Some(&StatusPalette::glyph())
+        );
     }
 }

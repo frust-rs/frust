@@ -25,6 +25,7 @@ mod checkbox;
 pub mod cupertino;
 mod flex;
 mod gesture;
+pub mod glyph;
 mod icon;
 pub mod icons;
 mod image;
