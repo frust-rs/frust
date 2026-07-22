@@ -15,10 +15,14 @@
     caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`.
   - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary
     (`extern "system"` exports, `Box::into_raw`/`from_raw`, `ANativeWindow_fromSurface`,
-    `nativeInitPlatform`'s `JavaVM` stash) — plus `android_app!`'s generated exports.
+    `nativeInitPlatform`'s `JavaVM` stash), `android_app!`'s generated
+    exports, and (render-thread split, `docs/ARCHITECTURE.md`) `unsafe impl
+    Send` for `SendableWindowPtr` plus a bare `libc::setpriority` self-boost.
   - `frust-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary
     (`extern "C"` exports, `Box::into_raw`/`from_raw`, the call into
-    `on_surface_created_from_metal_layer`) — plus `ios_app!`'s generated exports.
+    `on_surface_created_from_metal_layer`), `ios_app!`'s generated exports,
+    and the split's `unsafe impl Send` for `SendableMetalLayer` plus a bare
+    `libc::pthread_set_qos_class_self_np` self-boost.
   - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/`jobject`
     plugins need from `ndk-context`-stored handles, one sanctioned module,
     scoped `AttachGuard` per call.
@@ -40,6 +44,11 @@
   `frust-shell-common`'s `guard` helper (`catch_unwind` + log, returning a
   benign default) rather than unwinding into JVM-/Swift-owned stack frames
   — a panic crossing the FFI boundary is undefined behavior, not a bug.
+  `run_guarded_thread` is `guard`'s whole-thread-body counterpart: every
+  render-thread `spawn` closure (`docs/ARCHITECTURE.md`'s split) routes
+  through it, so a caught panic still exits cleanly and drains any
+  orphaned `Ack` via the owned `RenderReceiver`'s `Drop`, rather than
+  poisoning shared state.
 - **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text
   input doesn't send individual keystrokes across the FFI boundary — the platform owns
   composition (Gboard, CJK marked text) against a local mirror (Kotlin `Editable`/Swift
@@ -49,20 +58,19 @@
   add a per-keystroke op-forwarding path; it fights the platform's own composition machine.
 - **UTF-16 at the FFI seam, bytes inside.** `EditingState`'s
   `selection_*`/`composing_*` indices are UTF-16 code-unit indexed
-  everywhere they cross a shell boundary (JNI, C-ABI, `AppTree`). Convert
-  to/from byte offsets only inside `frust-text`'s `TextEditor`; a
+  everywhere they cross a shell boundary (JNI, C-ABI, `AppTree`); convert
+  to/from byte offsets only inside `frust-text`'s `TextEditor` — a
   shell/glue module passes indices through opaquely, never converting them.
 - **Hand-roll JSON at the mobile FFI boundary — no `serde` in shell crates.**
   `frust-shell-android`/`frust-shell-ios` serialize `ImeState` with a small
-  hand-written escaper/builder, keeping each shell's host-testable half
-  free of a codegen dependency for a handful of fixed fields.
+  hand-written escaper/builder, keeping each shell free of a codegen
+  dependency for a handful of fixed fields.
 - **Type-erase to avoid a downstream crate dependency**, not to avoid
   writing a type. When a lower layer threads a resource owned by a higher
   layer (e.g. `frust-core`'s `LayoutCtx` carrying `frust-text::TextContext`),
-  pass it as `&mut dyn Any` instead of adding the dependency, and recover it
-  at the one call site that knows the concrete type via a documented,
-  panic-on-mismatch `downcast_mut::<T>()` (the panic should say wiring bug,
-  not runtime-data condition).
+  pass it as `&mut dyn Any` and recover it at the one call site that knows
+  the concrete type via a documented, panic-on-mismatch `downcast_mut::<T>()`
+  (the panic should say wiring bug, not runtime-data condition).
 - **Edition-2024 `-> impl Trait` return types capture all in-scope
   lifetimes by default.** When a function returns an `impl Trait` that
   borrows nothing from its parameters (e.g. `app_logic(&mut State) -> impl
@@ -200,6 +208,13 @@ returning a `vello::*`/`wgpu::*` type.
 this is what lets the GPU backend be swapped later without touching widget
 or text code.
 
+**The one named exception:** `frust-render::DetachedSurface` (the
+render-thread split's cross-thread surface seam, `docs/ARCHITECTURE.md`)
+is a deliberate **opaque** escape valve, not a leak: its only accessor,
+`into_surface`, is crate-private, so the wrapped `wgpu::Surface` is never
+nameable outside `frust-render` — follow this pattern (opaque newtype,
+crate-private unwrap) for any future value crossing the same boundary.
+
 ### Printing directly from a `frust-drive` build/run core
 
 **BAD:** a `println!`/`print!` inside `android_build`/`ios_build`/
@@ -232,26 +247,24 @@ interactive widget in `frust-widgets`:
 - **Controlled components never self-mutate.** `Checkbox`/`Slider` report the
   *requested* value through `on_toggle`/`on_change` and leave `checked`/
   `value` untouched until the next `rebuild` feeds the app-confirmed value
-  back down — the widget is not its own source of truth. Never flip
-  `self.checked` (or similar) inline in an event handler. `TextInput` is a
-  controlled component too, reconciled rather than mutated: `rebuild`
-  applies the view's `value` to the widget's `TextEditor` with a
-  set-if-different (preserving the live selection when the text is
-  unchanged), so an app that rejects or transforms input in `on_change` sees
-  its own value win on the next frame.
+  back down — never flip `self.checked` (or similar) inline in a handler.
+  `TextInput` is controlled too, reconciled rather than mutated:
+  `rebuild` applies the view's `value` to the widget's `TextEditor`
+  set-if-different (preserving the live selection when unchanged), so an
+  app that rejects/transforms input in `on_change` sees its own value win
+  next frame.
 
 - **Focus routes by recorded path, like capture; `Key`/`Ime` events never
   hit-test.** `EventCtx::request_focus`/`release_focus` record/clear the
-  focused child exactly like `capture_pointer` records the active one, and a
-  container simply forwards `Key`/`Ime` events to its focused child. A
-  `Down` that doesn't (re)claim focus on the child it hits blurs the chain
-  (blur-on-outside-tap). **A structural container rebuild clears capture and
-  focus only where identity is actually lost — preservation is
-  stable-prefix/key-matched, not a blanket clear:** positional
-  reconciliation clears a child's recorded path only at/after the first
+  focused child exactly like `capture_pointer`, and a container simply
+  forwards `Key`/`Ime` events to its focused child; a `Down` that doesn't
+  (re)claim focus on the child it hits blurs the chain (blur-on-outside-tap).
+  **A structural container rebuild clears capture and focus only where
+  identity is actually lost** — stable-prefix/key-matched, not a blanket
+  clear: positional reconciliation clears a path only at/after the first
   index whose concrete type changed; keyed reconciliation clears it only
-  for a removed or type-swapped child (a key-matched reorder relocates the
-  widget, and its recorded path, intact). `RenderRoot`'s cached
+  for a removed/type-swapped child (a key-matched reorder relocates the
+  widget, and its path, intact). `RenderRoot`'s cached
   `focus_active`/`ime_state` self-correct on the next event pass.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key,
@@ -265,7 +278,7 @@ interactive widget in `frust-widgets`:
   `MOUSE_SLOP`), scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`,
   `FLING_STOP`, `VELOCITY_WINDOW_MS`), and `VelocityTracker` live in
   `frust-core::input`; widgets import them rather than hardcoding a local
-  threshold, so tuning changes in one place and stays consistent everywhere.
+  threshold.
 
 - **Events are logical-coordinate by the time they cross `AppTree`.** Every
   platform boundary (winit, JNI `nativeOnTouch`, the C `frust_dispatch_touch`)
@@ -277,16 +290,15 @@ interactive widget in `frust-widgets`:
   coordinates.** A platform delivers occlusion in physical px (Android
   `Insets`) or already-logical points (iOS `safeAreaInsets`); either way the
   FFI-boundary `logical_insets` helper reconciles it — widget code only
-  ever sees a resolved `WindowInsets` in logical px (see
-  `docs/ARCHITECTURE.md`'s Inset delivery). An inset change rides the
-  existing `ChangeFlags::LAYOUT | PAINT` pending path.
+  ever sees a resolved `WindowInsets` in logical px (`docs/ARCHITECTURE.md`'s
+  Inset delivery).
 
 - **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear
   internal flags (`self.pressed`/`self.captured`/`self.armed`) and request a
   redraw. A structural container rebuild can synthesize a `Cancel` to a
-  still-captured child delivered over a throwaway `()` state (see
-  `docs/ARCHITECTURE.md`'s Event pipeline); a handler that reached for real
-  state there panics on the `()` downcast — a deliberate tripwire.
+  still-captured child delivered over a throwaway `()` state
+  (`docs/ARCHITECTURE.md`'s Event pipeline) — a handler reaching for real
+  state there panics on the `()` downcast, a deliberate tripwire.
 
 - **A container that suppresses routing to its children must cancel their
   capture, clear their focus, and publish a cleared IME surface — in that
@@ -311,8 +323,7 @@ interactive widget in `frust-widgets`:
 
 ## Semantics Conventions
 
-Conventions for `Widget::semantics` (spec §9 — see `docs/ARCHITECTURE.md`'s
-Semantics pass):
+Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantics pass):
 
 - **The method defaults to a no-op.** Only override it if the widget has a
   role/label/state worth reporting; a widget with nothing to say about itself
@@ -335,24 +346,20 @@ Semantics pass):
   here; that integration lives in a shell, not `frust-core`.
 - **A platform adapter gates its pushes on `semantics_generation`/
   `semantics_if_changed`, not on pushing every frame unconditionally.** All
-  three shipping adapters (desktop, Android, iOS) compare the last-seen
-  generation before rebuilding a `TreeUpdate`; the iOS adapter additionally
-  serves a cached tree snapshot to a newly-activated screen reader so
-  gating never starves a VoiceOver connect against an already-settled
-  screen.
+  three shipping adapters compare the last-seen generation before
+  rebuilding a `TreeUpdate`; iOS additionally serves a cached snapshot to a
+  newly-activated screen reader so gating never starves a VoiceOver connect.
 
 ## Instrumentation & Frame-Gate Conventions
 
 - **Perf recording is always gated behind `perf::enabled()`, never
-  unconditional.** `frust-shell-common::perf`'s `FrameStats`/
-  `StartupSpans` no-op internally when disabled, but a shell should still
-  read `perf::enabled()` once per frame into a local bool and gate every
+  unconditional.** `frust-shell-common::perf`'s `FrameStats`/`StartupSpans`
+  no-op internally when disabled, but a shell should still read
+  `perf::enabled()` once per frame into a local bool and gate every
   `Instant::now()` read behind it (`bool::then(Instant::now)`) on
   FFI-sensitive paths (Android/iOS) so a disabled build takes zero clock
-  reads, not just zero recording; desktop's frame budget is generous enough
-  to skip this extra branch. Span names are `perf::SPAN_*` consts, not
-  string literals, so every shell logs the same names; a milestone with no
-  `perf::SPAN_*` const may pass a `&'static str` literal directly.
+  reads, not just zero recording. Span names are `perf::SPAN_*` consts, not
+  string literals, so every shell logs the same names.
 - **Frame-gate inputs default to must-run, never to skip.** A `FrameInputs`
   field with no precise signal should stay `true`/fed conservatively rather
   than guessed `false` — over-running costs a wasted frame, over-skipping
@@ -372,47 +379,44 @@ Semantics pass):
   element, then disposes the owner (running every `on_cleanup` registered
   under it since `init`) before dropping `State`. Register disposal (timers,
   controller/subscription teardown) with `on_cleanup` inside `init`/`build` —
-  never by hand-rolling a `Drop` impl on `State`; `Drop` order across the
+  never hand-roll a `Drop` impl on `State`; `Drop` order across the
   state/element/owner triple is not a contract, `on_cleanup` is.
-- **A `Cancel` arm still never touches state, even the component's own.** The
-  Cancel-never-mutates-state rule above binds every widget a component hosts,
-  including handlers reading `ComponentWidget`'s own `State` — a synthesized
-  `Cancel` crossing a component boundary carries real state (unlike the
-  throwaway `()` at the root), but the contract not to reach for it is
-  identical.
+- **A `Cancel` arm still never touches state, even the component's own** —
+  the Cancel-never-mutates-state rule above binds every handler a component
+  hosts, including one reading `ComponentWidget`'s own `State` (a
+  synthesized `Cancel` crossing a component boundary carries real state,
+  unlike the throwaway `()` at the root, but the contract is identical).
 - **Heavy work routes by shape: `spawn` (async IO) / `spawn_local` (UI-thread `!Send`) /
   `spawn_blocking` (one-off CPU) / rayon (an app-level choice, not bundled).** Calling
   `spawn_local` off the UI thread is a wiring bug, not a runtime-data condition, and panics
   saying so (the `downcast_mut` convention above); a backgrounded iOS app pauses
   `CADisplayLink`, so a `spawn_local` timer stalls until `frust_resume`'s next pump.
-  `use_task` composes `AsyncValue<T>` over this routing as the blessed load/compute-a-value
-  idiom (see `docs/ARCHITECTURE.md`'s Key Types): a UI-thread coordinator, run under the
-  calling component's `Owner`, hands work to `spawn`/`spawn_blocking` and is the sole signal
-  writer, ruling out a cross-thread write race by construction rather than discipline.
-  Cancellation is layered: owner cleanup aborts the coordinator; the coordinator aborts the
-  background `JoinHandle` via a registered `AbortHandle`; an already-running `spawn_blocking`
-  closure can't be interrupted — only its result delivery is dropped.
+  `use_task` composes `AsyncValue<T>` over this routing (`docs/ARCHITECTURE.md`'s Key
+  Types): a UI-thread coordinator, run under the calling component's `Owner`, hands work
+  to `spawn`/`spawn_blocking` and is the sole signal writer, ruling out a cross-thread write
+  race by construction. Cancellation is layered: owner cleanup aborts the coordinator; the
+  coordinator aborts the background `JoinHandle` via a registered `AbortHandle`; an
+  already-running `spawn_blocking` closure can't be interrupted — only its result delivery
+  is dropped.
 - **`Component::State` holds `RwSignal`s directly; app code depends on the
   `frust` facade only, never `reactive_graph`/`any_spawner`/`frust-reactive`
   directly.** A reactive field is typed `RwSignal<T>`, read/written through
-  the facade's `Get`/`Set`/`Update` traits (see `docs/ARCHITECTURE.md`'s Key
+  the facade's `Get`/`Set`/`Update` traits (`docs/ARCHITECTURE.md`'s Key
   Types). **An `examples/*` or app crate's `Cargo.toml` depends on `frust`
   plus plugin crates (`plugins/*`) only** — the facade never re-exports
-  plugins, an app adds them directly (Flutter's pubspec pattern; see Plugin
+  plugins, an app adds them directly (Flutter's pubspec pattern; Plugin
   Conventions below). `examples/huddle` carries a **documented**
-  `frust-core`/`kurbo`/`peniko` escape hatch (its `Cargo.toml` comment) for
-  custom widgets no facade widget covers yet — check whether a gap belongs
-  in the facade before reaching for it again.
+  `frust-core`/`kurbo`/`peniko` escape hatch for custom widgets no facade
+  widget covers yet — check whether a gap belongs in the facade first.
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
   untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only
-  when called from *inside* a live `TrackedScope::track` closure; both shells now guarantee
-  this for their per-frame rebuild (desktop's `scope.track(|| root.rebuild(..))`, mirrored
-  on mobile by a persistent per-`AppHandle` `TrackedScope` — see `docs/ARCHITECTURE.md`'s
-  Signal-driven wake). A render-relevant read taken via `*_untracked`/`get_untracked`
-  anywhere in that path never subscribes, so a later write flips no dirty flag and the shell
-  may never repaint until an unrelated input forces a frame. Reserve `*_untracked` for
-  genuine non-rendering reads — a disposal/liveness probe, an imperative event-handler
-  one-shot, a test assertion — never for a value a `build` return depends on.
+  from *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
+  per-frame rebuild (desktop's `scope.track(|| root.rebuild(..))`, mirrored on mobile by a
+  persistent per-`AppHandle` `TrackedScope` — `docs/ARCHITECTURE.md`'s Signal-driven wake).
+  A render-relevant read taken via `*_untracked`/`get_untracked` anywhere in that path never
+  subscribes, so a later write flips no dirty flag and the shell may never repaint until an
+  unrelated input forces a frame — reserve `*_untracked` for genuine non-rendering reads, never
+  a value a `build` return depends on.
 
 ## Theming & Animation Conventions
 
@@ -429,20 +433,17 @@ Semantics pass):
   value.** A themed widget looks up
   `Theme::from_paint_ctx(ctx)`/`from_layout_ctx(ctx)`, falling back to a local
   constant (e.g. `Button`'s `FILL`/`RADIUS`) when no theme is threaded
-  (bare-core tests, pre-theme apps) — a widget never assumes a theme is
-  present. Precedence is **explicit builder value > theme > fallback**: an
-  app-set value (`.color(...)`, `.style(...)`) always wins over both (see
-  `Text`'s `color_explicit` flag).
+  (bare-core tests, pre-theme apps). Precedence is **explicit builder value >
+  theme > fallback**: an app-set value (`.color(...)`, `.style(...)`) always
+  wins over both (see `Text`'s `color_explicit` flag).
 - **Token-not-hardcode: a widget authors against a `Theme` field first; a
   bare local constant is the documented fallback, not the default.** A
   hardcoded metric/color in paint or layout code is a defect once a matching
   `ColorScheme`/`ShapeScale`/`Elevation`/`GlassScale`/`MotionScheme` field
-  exists (see `docs/ARCHITECTURE.md`'s Key Types) — resolve it through
-  `Theme::from_paint_ctx`/`from_layout_ctx` per the fallback bullet above.
-  Only a genuine token-scale gap earns a hand-tuned constant (`frust-theme`
-  ships no spacing scale and no fixed-dimension scale for switch-track/button-
-  padding metrics), and that constant stays named, doc-commented, and states
-  *why* no token applies rather than being left as a silent magic number.
+  exists — resolve it through `Theme::from_paint_ctx`/`from_layout_ctx` per
+  the fallback bullet above. Only a genuine token-scale gap earns a
+  hand-tuned constant, and that constant stays named, doc-commented, and
+  states *why* no token applies rather than being a silent magic number.
 - **A contested or unsourced design fact is resolved against a primary
   source and cited with a retrieval date, not left as a guess.** When a
   research doc's claim lacks (or conflicts with) a citable primary source,
@@ -458,19 +459,19 @@ Semantics pass):
   the framework only from a shell, as the `FrameTime` passed into
   `RenderRoot::paint` and threaded via `PaintCtx::frame_time` — desktop reads
   its own `Instant` epoch; Android/iOS pass through the platform's own frame
-  clock (`Choreographer`/`CADisplayLink`). Widget code only *differences* two
-  `FrameTime`s (`saturating_sub`), never reads a wall clock directly.
+  clock. Widget code only *differences* two `FrameTime`s (`saturating_sub`),
+  never reads a wall clock directly.
 - **An animation controller advances during paint, not on a timer.** A widget
   holds an `anim::AnimationController`, calls `advance(ctx.frame_time())` once
   per paint, reads `value()`, and — while `advance` returns `true` — calls
   `PaintCtx::request_frame()` so the shell schedules the next frame; there is
-  no ambient ticker (see `docs/ARCHITECTURE.md`'s Frame pipeline).
+  no ambient ticker.
 - **State-layer opacity has one source: `material::state_layer`'s constants.**
   `HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/`DRAGGED_OPACITY` (M3
   `StateTokens`) live in that one module; a catalog widget imports them
-  rather than hardcoding its own overlay opacity, and takes the **maximum**
-  of concurrently-active states' opacity, never their sum. Only `pressed`
-  is currently wired by any shipping widget.
+  rather than hardcoding overlay opacity, taking the **maximum** of
+  concurrently-active states, never their sum. Only `pressed` is currently
+  wired by any shipping widget.
 
 ## Testing Patterns
 
@@ -482,9 +483,8 @@ Semantics pass):
   installing a real handler in production (`ctrlc::set_handler`, a
   filesystem watcher) takes a small `Hooks` struct defaulted to the real
   installers (`::real()`), with a `::fake()` (`#[cfg(test)]`) no-op pair a
-  test injects instead — exercising the exact dispatch logic without ever
-  installing a real process-wide handler (`frust-cli`'s
-  `WatchHooks`/`run_desktop_watch`).
+  test injects instead — exercising the dispatch logic without installing
+  a real process-wide handler (`frust-cli`'s `WatchHooks`/`run_desktop_watch`).
 - **`#[ignore = "<reason>"]` for GPU-dependent or slow end-to-end tests.**
   The reason string must say how to run it (`cargo test -p ... --ignored`)
   and why it's excluded by default (needs a real GPU; compiles a full
