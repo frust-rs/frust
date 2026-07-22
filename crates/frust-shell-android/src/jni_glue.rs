@@ -12,13 +12,30 @@
 //! each with a safety comment: `ANativeWindow_fromSurface` (raw handle →
 //! `NativeWindow`), reconstituting the opaque `jlong` handle
 //! (`Box::from_raw`/`&mut *`), `Box::into_raw`/`from_raw` for the handle's
-//! lifetime, and `frust_plugin::android::initialize` (handing the captured
+//! lifetime, `frust_plugin::android::initialize` (handing the captured
 //! `JavaVM` + application-`Context` pointers to the plugin platform bridge,
 //! which forwards them to `ndk-context` and arms its pre-init flag — see
-//! [`native_init_platform`]).
+//! [`native_init_platform`]), the `on_surface_created_from_android_window`
+//! calls that build a `wgpu::Surface` from a raw `ANativeWindow*` (the inline
+//! path's [`build_inline_executor`]/[`native_on_surface_changed`], and the
+//! render-thread split's [`install_surface`]), and the `unsafe impl Send` for
+//! [`SendableWindowPtr`] — the raw window pointer that crosses the UI→render
+//! channel in the split (plan phase 11.B).
+//!
+//! # Render-thread split (plan phase 11.B)
+//!
+//! When [`render_thread_enabled`](frust_shell_common::render_thread_enabled) is
+//! set (the default; `FRUST_NO_RENDER_THREAD` opts out), [`create_handle`] spawns
+//! the dedicated [`render_loop`] thread that owns the `RenderContext`/
+//! `SurfaceRenderer` + surface and runs encode→acquire→submit; the UI thread
+//! (Choreographer callbacks) keeps rebuild→layout→paint and hands finished scenes
+//! across the channel. Surface lifecycle is owned commands with an ack barrier on
+//! `SurfaceDestroyed`: the UI thread keeps the [`NativeWindow`] and releases it
+//! only after the render thread acks dropping the surface built from its pointer,
+//! so the `ANativeWindow` is never touched after release.
 
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
@@ -35,11 +52,14 @@ use ndk::native_window::NativeWindow;
 
 use frust_core::event::{EditingState, ImeState};
 use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_link};
-use frust_shell_common::perf::{self, StartupSpans};
-use frust_shell_common::{AppTree, guard};
+use frust_shell_common::perf::{self, FrameStats, StartupSpans};
+use frust_shell_common::{
+    AppTree, RenderCommand, RenderPhase, RenderReceiver, SurfaceSize, guard, next_render_phase,
+    render_channel, render_thread_enabled,
+};
 use frust_text::TextContext;
 
-use crate::app::AndroidAppHandle;
+use crate::app::{AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor};
 use crate::ffi_support::{
     ImeJsonState, build_ime_state_json, load_pipeline_cache, normalize_ime_indices,
     pipeline_cache_differs, pipeline_cache_path, write_pipeline_cache_atomic,
@@ -409,6 +429,239 @@ fn window_physical_size(window: &NativeWindow) -> (u32, u32) {
     (window.width().max(1) as u32, window.height().max(1) as u32)
 }
 
+// ---------------------------------------------------------------------
+// Render-thread split (plan phase 11.B)
+// ---------------------------------------------------------------------
+
+/// A raw `ANativeWindow*` made `Send` so it can cross the UI→render-thread
+/// scene-handoff channel as the `SurfaceCreated` payload (plan phase 11.B) — the
+/// `W` type parameter of the shared
+/// [`render_channel`](frust_shell_common::render_channel), which each shell picks
+/// (desktop pairs a `DetachedSurface`; Android passes this raw pointer, since
+/// `ANativeWindow_fromSurface`/surface creation from a pointer has no
+/// main-thread requirement, unlike winit's window handle).
+///
+/// # Safety
+///
+/// The wrapped pointer is a valid, acquired `ANativeWindow*` owned by the UI
+/// thread's [`NativeWindow`] (stored in [`AndroidAppHandle`]). The UI thread
+/// keeps that `NativeWindow` alive until the render thread acknowledges a
+/// [`RenderCommand::SurfaceDestroyed`] — dropping the surface built from this
+/// pointer *first* (the ack barrier in [`AndroidAppHandle::destroy_surface`]/
+/// [`AndroidAppHandle::split_recreate_surface`]) — so the pointer is valid for
+/// the whole lifetime of any surface the render thread creates from it. The two
+/// threads never touch it concurrently: the UI thread only reads a
+/// `NativeWindow` pointer to construct this wrapper; the render thread only reads
+/// it back to create the surface ([`install_surface`]). That single-owner,
+/// barrier-ordered handoff is what makes the `unsafe impl Send` sound.
+pub(crate) struct SendableWindowPtr(*mut c_void);
+
+// SAFETY: see the type's docs — the wrapped `ANativeWindow*` is kept alive by the
+// UI thread across the `SurfaceDestroyed` ack barrier and is never used by two
+// threads concurrently.
+unsafe impl Send for SendableWindowPtr {}
+
+impl SendableWindowPtr {
+    /// Wrap a raw `ANativeWindow*`. The caller upholds the type's safety
+    /// contract (the pointer's window outlives every surface built from it, on
+    /// the render thread); constructing the wrapper itself is a plain field
+    /// store.
+    pub(crate) fn new(ptr: *mut c_void) -> Self {
+        Self(ptr)
+    }
+
+    /// The wrapped raw pointer, for [`install_surface`] to build the surface from.
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
+        self.0
+    }
+}
+
+/// Install (or reinstall) a `wgpu::Surface` on `renderer` from the raw
+/// `ANativeWindow*` `window_ptr`, on the render thread (plan phase 11.B). On the
+/// **first** install it also seeds + persists the pipeline cache and records the
+/// cache/adapter/device/renderer startup spans, mirroring the pre-split
+/// [`create_handle`] flow (which now happens render-side in the split).
+///
+/// The unsafe `on_surface_created_from_android_window` call is confined here (a
+/// sanctioned zone); its `SAFETY` note states the cross-thread ownership
+/// contract [`SendableWindowPtr`] documents.
+#[allow(clippy::too_many_arguments)]
+fn install_surface(
+    renderer: &mut frust_render::SurfaceRenderer,
+    render_cx: &mut frust_render::RenderContext,
+    window_ptr: *mut c_void,
+    width: u32,
+    height: u32,
+    cache_path: Option<&Path>,
+    startup_spans: &mut Option<StartupSpans>,
+    first_install: bool,
+) -> Result<()> {
+    // Load + seed the pipeline cache before the surface (and thus vello's
+    // renderer + pipeline cache) is created — first install only. The cache
+    // spans are recorded here, before surface creation, so their deltas keep the
+    // "cache loaded before GPU bring-up" ordering the pre-split line had.
+    let loaded_cache = if first_install {
+        let lc = cache_path.and_then(load_pipeline_cache);
+        renderer.set_initial_pipeline_cache_data(lc.clone());
+        if let Some(spans) = startup_spans.as_mut() {
+            spans.record(SPAN_CACHE_LOADED);
+            if lc.is_some() {
+                spans.record(perf::SPAN_PIPELINE_CACHE_RESTORED);
+            }
+        }
+        lc
+    } else {
+        None
+    };
+
+    // SAFETY: `window_ptr` is a valid, acquired `ANativeWindow*` the UI thread's
+    // `NativeWindow` (in `AndroidAppHandle`) keeps alive until it receives this
+    // surface's `SurfaceDestroyed` ack — so it outlives the surface created here
+    // (spec §8.1). See `SendableWindowPtr`'s safety docs for the full contract.
+    pollster::block_on(unsafe {
+        renderer.on_surface_created_from_android_window(
+            render_cx,
+            window_ptr,
+            width.max(1),
+            height.max(1),
+        )
+    })
+    .context("frust-shell-android: failed to create Android render surface")?;
+
+    if first_install {
+        if let Some(spans) = startup_spans.as_mut() {
+            spans.record(perf::SPAN_ADAPTER_READY);
+            spans.record(perf::SPAN_DEVICE_READY);
+            spans.record(perf::SPAN_RENDERER_READY);
+        }
+        if let Some(path) = cache_path {
+            persist_pipeline_cache_if_changed(
+                path.to_path_buf(),
+                loaded_cache.as_deref(),
+                renderer,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The dedicated render thread's loop (plan phase 11.B): adopt the `JNI_OnLoad`
+/// GPU pre-init [`RenderContext`](frust_render::RenderContext) *on this thread*,
+/// own the `SurfaceRenderer` + surface wholesale, drain lifecycle commands and
+/// the freshest handed-off scene from the channel, and run encode→acquire→submit
+/// for each frame — the single perf emitter (folding the UI thread's [`UiSpans`]
+/// with its own render spans via [`crate::app::render_scene`]). Owns the whole
+/// startup line from `preinit_started` onward (the UI thread recorded
+/// `init_entry` + the font-preinit spans before moving the recorder here). Exits
+/// cleanly when the [`RenderSender`](frust_shell_common::RenderSender) is dropped.
+///
+/// [`UiSpans`]: frust_shell_common::perf::UiSpans
+pub(crate) fn render_loop(
+    receiver: RenderReceiver<PaintedScene, SendableWindowPtr>,
+    startup_spans: StartupSpans,
+    cache_dir: Option<String>,
+) {
+    let cache_path = cache_dir.as_deref().map(pipeline_cache_path);
+    let mut startup_spans = Some(startup_spans);
+
+    // Adopt the background GPU pre-init context here — the "pre-init handoff lands
+    // on the render thread" contract (plan phase 11.B). Bracketed by the
+    // preinit_started/joined spans exactly as the pre-split `create_handle` did.
+    if let Some(spans) = startup_spans.as_mut() {
+        spans.record(SPAN_PREINIT_STARTED);
+    }
+    let mut render_cx = take_preinit_context();
+    if let Some(spans) = startup_spans.as_mut() {
+        spans.record(SPAN_PREINIT_JOINED);
+    }
+
+    let mut renderer = frust_render::SurfaceRenderer::new();
+    let mut frame_stats = FrameStats::new();
+    let mut phase = RenderPhase::NoSurface;
+    let mut first_install_done = false;
+    let mut first_rebuild_recorded = false;
+
+    loop {
+        let batch = receiver.wait_next();
+
+        // Lifecycle commands first (FIFO), updating the phase machine.
+        for command in batch.commands {
+            phase = next_render_phase(phase, command.event());
+            match command {
+                RenderCommand::SurfaceCreated { window, size } => {
+                    let first_install = !first_install_done;
+                    match install_surface(
+                        &mut renderer,
+                        &mut render_cx,
+                        window.as_ptr(),
+                        size.width,
+                        size.height,
+                        cache_path.as_deref(),
+                        &mut startup_spans,
+                        first_install,
+                    ) {
+                        Ok(()) => first_install_done = true,
+                        Err(err) => log::error!(
+                            "frust-shell-android: render-thread surface install failed: {err:#}"
+                        ),
+                    }
+                }
+                RenderCommand::SurfaceChanged { size } => {
+                    renderer.on_surface_changed(&render_cx, size.width, size.height);
+                }
+                RenderCommand::SurfaceDestroyed { ack } => {
+                    // Drop the surface resources FIRST, then acknowledge — the UI
+                    // thread blocks on this ack before releasing the
+                    // `ANativeWindow`, so the window is never touched after
+                    // release (the plan's Android surface-lifecycle-race hazard).
+                    renderer.on_surface_destroyed();
+                    ack.acknowledge();
+                }
+                RenderCommand::Pause { ack } => {
+                    // Android v1 never sends `Pause` (Kotlin owns start/stop of the
+                    // Choreographer loop); honor the barrier defensively so a stray
+                    // one can never deadlock the UI thread.
+                    ack.acknowledge();
+                }
+                RenderCommand::Resume => {}
+            }
+        }
+
+        // Then the freshest scene, only if the phase allows submitting (a scene
+        // handed off while paused/destroyed is dropped, not presented).
+        if let Some(frame) = batch.scene
+            && phase.can_render()
+        {
+            // The first handed-off scene marks the first UI frame produced — the
+            // render thread's stand-in for `first_rebuild_done` (it owns the
+            // startup line in the split).
+            if !first_rebuild_recorded {
+                if let Some(spans) = startup_spans.as_mut() {
+                    spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+                }
+                first_rebuild_recorded = true;
+            }
+            // FFI-path perf convention: read `perf::enabled()` once per frame,
+            // gate every `Instant::now()` behind it (inside `render_scene`).
+            let perf_on = perf::enabled();
+            crate::app::render_scene(
+                &mut renderer,
+                &render_cx,
+                &frame.scene.scene,
+                frame.scene.base_color,
+                frame.ui_spans,
+                &mut frame_stats,
+                &mut startup_spans,
+                perf_on,
+            );
+        }
+
+        if batch.disconnected {
+            break;
+        }
+    }
+}
+
 /// Borrow the boxed [`AndroidAppHandle`] behind a `jlong`, or `None` if the JVM
 /// side has no live native handle (`0`).
 ///
@@ -477,10 +730,9 @@ fn create_handle(
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> Result<jlong> {
     // Cold-start span recorder (task 08, spec §14 phase 7.A). `begin()` marks
-    // the epoch; every span below is a delta from here, closed out by
-    // `AndroidAppHandle::frame`'s first successful render (see that method).
-    // A no-op recorder (allocates nothing further) when `perf::enabled()` is
-    // false.
+    // the epoch; every span below is a delta from here, closed out by the first
+    // successful render. A no-op recorder (allocates nothing further) when
+    // `perf::enabled()` is false.
     let mut startup_spans = StartupSpans::begin();
     startup_spans.record(perf::SPAN_INIT_ENTRY);
 
@@ -489,27 +741,79 @@ fn create_handle(
         .context("frust-shell-android: ANativeWindow_fromSurface returned null")?;
     let physical = window_physical_size(&window);
 
+    // Build the render-path executor (plan phase 11.B), chosen once by the
+    // `FRUST_NO_RENDER_THREAD` kill switch:
+    //
+    // - Split (default): spawn the dedicated render thread that owns the
+    //   `RenderContext`/`SurfaceRenderer` + surface and does all GPU work — the
+    //   GPU pre-init handoff lands *on that thread* — so `nativeInit` returns
+    //   without blocking the UI thread on adapter/device/pipeline bring-up. The
+    //   `startup_spans` recorder is moved into the render thread, which owns the
+    //   startup line from `preinit_started` on.
+    // - Inline (kill switch engaged): create the surface + renderer on this UI
+    //   thread exactly as the pre-split shell did, recording the full startup
+    //   line here.
+    //
+    // Both retain `window` in `AndroidAppHandle` (the UI thread owns the
+    // `NativeWindow` and releases it only after the render thread — split — acks
+    // dropping the surface built from its pointer).
+    let (executor, text_ctx) = if render_thread_enabled() {
+        spawn_split_executor(startup_spans, &window, physical, scale, cache_dir)
+    } else {
+        build_inline_executor(startup_spans, &window, physical, cache_dir)?
+    };
+
+    // Process-once (the runtime's own `OnceLock` provides that property; a
+    // repeat call — e.g. an activity recreated in the same process — just
+    // re-marks the calling thread as the UI thread and swaps in a fresh no-op
+    // waker). Must run BEFORE `make_app()`: a `State`'s own construction (a
+    // future `Component::init()`) may create signals/controllers that need the
+    // runtime already installed. Runs on this UI thread (never the render
+    // thread): `init` claims the *calling* thread as the UI thread for
+    // `spawn_local`, and every JNI call arrives on the JVM main thread.
+    let rt = ReactiveRuntime::init(std::sync::Arc::new(|| {
+        // No-op: Choreographer already posts every frame regardless, so there
+        // is nothing for `spawn_local`'s wake-up to nudge on Android.
+    }));
+
+    // Construct the app AND its handle under the root `Owner`. `make_app` runs
+    // `Component::init` (via `new_boxed_app_with`'s state factory), and
+    // `AndroidAppHandle::new` runs the initial `rebuild()` — both must see an
+    // ambient `Owner` or `provide_context`/`on_cleanup` silently no-op. A root
+    // component has no enclosing component to supply one, so it registers
+    // against the root owner (process lifetime, never disposed), mirroring the
+    // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
+    let handle = rt.with_owner(|| {
+        let app = make_app();
+        AndroidAppHandle::new(executor, text_ctx, window, physical, scale, app)
+    });
+
+    // SAFETY: hand a uniquely-owned boxed handle to the JVM as `jlong`; it is
+    // reclaimed exactly once in `native_on_destroy`.
+    Ok(Box::into_raw(Box::new(handle)) as jlong)
+}
+
+/// Build the **inline** (`FRUST_NO_RENDER_THREAD`) executor: create the renderer +
+/// surface on this UI thread and record the full startup line, exactly as the
+/// pre-split shell did (plan phase 11.B, kill-switch path). Returns the executor
+/// plus the joined [`TextContext`] the handle needs for layout.
+///
+/// `cache_dir` (when `Some`) is the app cache directory the pipeline-cache blob
+/// is loaded from before GPU init and saved back to after renderer creation
+/// (task 13, spec §14 phase 7.B) — best-effort and Vulkan-only.
+fn build_inline_executor(
+    mut startup_spans: StartupSpans,
+    window: &NativeWindow,
+    physical: (u32, u32),
+    cache_dir: Option<String>,
+) -> Result<(FrameExecutor, TextContext)> {
     let mut renderer = frust_render::SurfaceRenderer::new();
 
-    // Pipeline-cache persistence (task 13, spec §14 phase 7.B): restore the blob
-    // a prior launch persisted so vello's Vulkan shader pipelines are reused
-    // rather than recompiled on this warm start. Must be set BEFORE the surface
-    // install below (that's where vello's renderer — and its pipeline cache — is
-    // created). Best-effort and Vulkan-only: `frust-render` validates the
-    // blob against the live adapter at install time and silently starts from an
-    // empty cache on any mismatch, or on adapters without `PIPELINE_CACHE`
-    // (Metal/desktop — there is no iOS counterpart). `loaded_cache` (framed
-    // bytes read verbatim from disk) is retained for the differs-check after
-    // renderer creation.
-    //
-    // Done BEFORE the pre-init join below on purpose: this disk read overlaps the
-    // background GPU thread's adapter/device work, shrinking the join wait (task
-    // 19). The renderer build — and its pipeline cache — deliberately stays here
-    // at `nativeInit`, NOT on the pre-init thread: the pipeline cache needs
-    // `cache_dir`, which only arrives with `nativeInit` (task 13 option a) and is
-    // unknown at `JNI_OnLoad` time, so pre-init covers instance/adapter/device
-    // only and the renderer keeps its cache seeding. See the task-19 completion
-    // note for the pre-init/renderer split decision.
+    // Pipeline-cache persistence (task 13): restore the blob a prior launch
+    // persisted so vello's Vulkan shader pipelines are reused rather than
+    // recompiled. Set BEFORE the surface install (where vello's renderer + cache
+    // are created). Done before the pre-init join so the disk read overlaps the
+    // background GPU thread's adapter/device work.
     let cache_path = cache_dir.as_deref().map(pipeline_cache_path);
     let loaded_cache = cache_path.as_deref().and_then(load_pipeline_cache);
 
@@ -527,32 +831,21 @@ fn create_handle(
 
     renderer.set_initial_pipeline_cache_data(loaded_cache.clone());
     startup_spans.record(SPAN_CACHE_LOADED);
-
-    // Record warm-start span if non-empty blob was loaded (task 03, mirrors desktop app_handler.rs:722).
-    if let Some(ref _blob) = loaded_cache {
+    if loaded_cache.is_some() {
         startup_spans.record(perf::SPAN_PIPELINE_CACHE_RESTORED);
     }
 
-    // Adopt the `RenderContext` the `JNI_OnLoad` background thread has been
-    // building (wgpu instance + adapter + device) since native-library load
-    // (task 19, spec §14 phase 7.E), or fall back to a fresh synchronous one on
-    // any best-effort miss (pre-init absent/panicked/failed). Bracketed by
-    // `preinit_started`/`preinit_joined` so the `frust-perf startup` line
-    // shows how much of the GPU bring-up overlapped the window-acquire +
-    // cache-load work above — a near-zero window means full overlap. The
-    // `.join()` is never slower than the status quo (that adapter/device work ran
-    // serially here before). The surface install below reuses this device via
-    // `RenderContext::ensure_device`'s `is_surface_supported` check (Android's
-    // singular Vulkan adapter — see `ensure_device_headless`'s doc).
+    // Adopt the `JNI_OnLoad` GPU pre-init context (task 19), or fall back to a
+    // fresh synchronous one. Bracketed by preinit_started/joined.
     startup_spans.record(SPAN_PREINIT_STARTED);
     let mut render_cx = take_preinit_context();
     startup_spans.record(SPAN_PREINIT_JOINED);
 
     let window_ptr = window.ptr().as_ptr().cast::<c_void>();
 
-    // SAFETY: `window_ptr` comes from the just-acquired `window`, which is moved
-    // into the returned `AndroidAppHandle` and (by that struct's field-drop
-    // order) outlives the surface and all its textures (spec §8.1).
+    // SAFETY: `window_ptr` comes from `window`, which is moved into the returned
+    // `AndroidAppHandle` and (by that struct's `executor`-before-`window`
+    // field-drop order) outlives the surface and all its textures (spec §8.1).
     pollster::block_on(unsafe {
         renderer.on_surface_created_from_android_window(
             &mut render_cx,
@@ -563,85 +856,77 @@ fn create_handle(
     })
     .context("frust-shell-android: failed to create Android render surface")?;
 
-    // With task 19's pre-init, the adapter + device were (usually) already built
-    // on the `JNI_OnLoad` background thread and adopted at the join above, so the
-    // `on_surface_created_from_android_window` call just now only did the vello
-    // renderer + surface setup (`ensure_device` reused the pre-built device via
-    // its `is_surface_supported` check). The adapter/device spans therefore mark
-    // "confirmed ready post-join", and the real GPU-overlap signal is the
-    // `preinit_started`→`preinit_joined` window plus `renderer_ready`. On a
-    // pre-init miss (fallback path) adapter/device were instead created here,
-    // synchronously, exactly as before task 19 — the spans stay meaningful either
-    // way. Still recorded at one checkpoint (no intermediate hook into the vello
-    // setup) so the perf-line schema task 08 established stays stable across
-    // shells.
     startup_spans.record(perf::SPAN_ADAPTER_READY);
     startup_spans.record(perf::SPAN_DEVICE_READY);
     startup_spans.record(perf::SPAN_RENDERER_READY);
 
-    // Persist the pipeline cache the driver populated while creating vello's
-    // renderer above, if it changed from what we loaded (task 13). Spawns a
-    // detached background thread for the write so the first frame never blocks on
-    // disk I/O; a no-op on Metal/desktop (`pipeline_cache_data()` returns `None`
-    // without `PIPELINE_CACHE`) and when nothing changed. All failures logged and
-    // ignored — persistence is best-effort.
+    // Persist the pipeline cache the driver populated, if it changed (task 13).
     if let Some(path) = cache_path {
         persist_pipeline_cache_if_changed(path, loaded_cache.as_deref(), &renderer);
     }
 
-    // Font/`TextContext` warmup (phase 10.D): join the `JNI_OnLoad`
-    // font-preload thread as late as possible in this function — right before
-    // it's actually needed by `AndroidAppHandle::new` below — so the join has
-    // the maximum window to have already completed on its own (the thread
-    // started at native-library load, well before this whole function ran).
-    // Best-effort: a panicked/never-spawned thread falls back to a synchronous
-    // `TextContext::new` with a log line (see `take_preinit_text_context`),
-    // never a crash/block.
+    // Font/`TextContext` warmup (phase 10.D): join the font-preload thread as
+    // late as possible (max overlap with the GPU work above).
     startup_spans.record(SPAN_FONT_PREINIT_STARTED);
     let text_ctx = take_preinit_text_context();
     startup_spans.record(SPAN_FONT_PREINIT_JOINED);
 
-    // Process-once (the runtime's own `OnceLock` provides that property; a
-    // repeat call — e.g. an activity recreated in the same process — just
-    // re-marks the calling thread as the UI thread and swaps in a fresh no-op
-    // waker). Must run BEFORE `make_app()`: a `State`'s own construction (a
-    // future `Component::init()`) may create signals/controllers that need the
-    // runtime already installed.
-    //
-    // `init` claims the *calling* thread as the UI thread for `spawn_local`.
-    // Every JNI call (including a `nativeInit` after activity recreation)
-    // arrives on the same JVM main thread that invoked `nativeInit` the first
-    // time, so re-init here always runs on the thread already claimed — safe by
-    // construction, not by accident.
-    let rt = ReactiveRuntime::init(std::sync::Arc::new(|| {
-        // No-op: Choreographer already posts every frame regardless, so there
-        // is nothing for `spawn_local`'s wake-up to nudge on Android.
-    }));
+    let executor = FrameExecutor::Inline(Box::new(InlineExecutor::new(
+        render_cx,
+        renderer,
+        startup_spans,
+    )));
+    Ok((executor, text_ctx))
+}
 
-    // Construct the app AND its handle under the root `Owner`. `make_app` runs
-    // `Component::init` (via `new_boxed_app_with`'s state factory), and
-    // `AndroidAppHandle::new` runs the initial `rebuild()` — both must see an
-    // ambient `Owner` or `provide_context`/`on_cleanup` silently no-op. A root
-    // component has no enclosing component to supply one, so it registers
-    // against the root owner (process lifetime, never disposed), mirroring the
-    // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
-    let handle = rt.with_owner(|| {
-        let app = make_app();
-        AndroidAppHandle::new(
-            render_cx,
-            renderer,
-            text_ctx,
-            window,
-            physical,
-            scale,
-            app,
-            startup_spans,
-        )
+/// Spawn the **split** (default) render thread and return its executor handle
+/// (plan phase 11.B). The GPU work — pre-init context adoption, surface creation,
+/// pipeline cache, adapter/device/renderer spans — happens *on the render thread*
+/// ([`render_loop`]), so `nativeInit` never blocks the UI thread on it. Only the
+/// font-preload join (needed by UI-side layout) and the reactive-runtime claim
+/// stay on this UI thread. Returns the executor plus the joined [`TextContext`].
+fn spawn_split_executor(
+    mut startup_spans: StartupSpans,
+    window: &NativeWindow,
+    physical: (u32, u32),
+    scale: jfloat,
+    cache_dir: Option<String>,
+) -> (FrameExecutor, TextContext) {
+    // Font/`TextContext` warmup (phase 10.D) stays UI-side — layout runs on the
+    // UI thread. The GPU work is off-thread now, so this join's ordering vs GPU
+    // bring-up no longer matters; record it before the recorder is moved into the
+    // render thread below.
+    startup_spans.record(SPAN_FONT_PREINIT_STARTED);
+    let text_ctx = take_preinit_text_context();
+    startup_spans.record(SPAN_FONT_PREINIT_JOINED);
+
+    let (sender, receiver) = render_channel::<PaintedScene, SendableWindowPtr>();
+    let window_ptr = window.ptr().as_ptr().cast::<c_void>();
+    let size = SurfaceSize {
+        width: physical.0,
+        height: physical.1,
+        scale: scale as f64,
+    };
+
+    // Move `startup_spans` (init_entry + font spans already recorded) into the
+    // render thread, which owns the rest of the startup line.
+    let join = std::thread::Builder::new()
+        .name("frust-render".to_string())
+        .spawn(move || render_loop(receiver, startup_spans, cache_dir))
+        .expect("frust-shell-android: failed to spawn render thread");
+
+    // Hand the initial surface to the render thread. The UI thread keeps `window`
+    // (in the returned handle) alive until the render thread acks a later
+    // `SurfaceDestroyed` (the window-release barrier — see `SendableWindowPtr`).
+    sender.send_command(RenderCommand::SurfaceCreated {
+        window: SendableWindowPtr::new(window_ptr),
+        size,
     });
 
-    // SAFETY: hand a uniquely-owned boxed handle to the JVM as `jlong`; it is
-    // reclaimed exactly once in `native_on_destroy`.
-    Ok(Box::into_raw(Box::new(handle)) as jlong)
+    (
+        FrameExecutor::Split(SplitExecutor::new(sender, join)),
+        text_ctx,
+    )
 }
 
 /// Persist the current pipeline-cache blob to `path` on a background thread if it
@@ -729,13 +1014,27 @@ pub fn native_on_surface_changed(
             // Drop the extra reference `fromSurface` just acquired; the stored
             // window keeps the surface alive.
             drop(new_window);
-            app.resize(physical, density);
+            app.resize_surface(physical, density);
+            return;
+        }
+
+        // Recreate against the new window. The render-thread split routes this
+        // entirely through owned channel commands (safe, in `app`): a barriered
+        // `SurfaceDestroyed` drops the old render-side surface before the old
+        // window is released, then a `SurfaceCreated` hands the new pointer over.
+        // The inline path drives the `unsafe` surface creation here (the sanctioned
+        // FFI zone), then commits the new window with `set_window`.
+        if app.executor_is_split() {
+            app.split_recreate_surface(new_window, physical, density);
             return;
         }
 
         let window_ptr = new_window.ptr().as_ptr().cast::<c_void>();
         let result = {
-            let (render_cx, renderer) = app.renderer_mut();
+            let Some((render_cx, renderer)) = app.inline_renderer_mut() else {
+                // Unreachable: `executor_is_split()` was false just above.
+                return;
+            };
             // SAFETY: `window_ptr` is from `new_window`, which is moved into the
             // handle via `set_window` below (and thus outlives the surface); the
             // previous surface is torn down inside this call before the previous

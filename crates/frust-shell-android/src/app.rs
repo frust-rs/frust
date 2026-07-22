@@ -12,7 +12,9 @@
 
 use std::any::Any;
 use std::collections::VecDeque;
+use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use accesskit_android::InjectingAdapter;
@@ -32,11 +34,12 @@ use frust_render::{
     AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
 };
 use frust_scene::{Scene, SceneBuilder};
-use frust_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
+use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
-    AppTree, FrameGate, FrameInputs, ThemeOverrideWatcher,
-    effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
+    AppTree, FrameGate, FrameInputs, FrameMeta, RenderCommand, RenderSender, SceneFrame,
+    SurfaceSize, ThemeOverrideWatcher, effective_brightness_for_platform_change, logical_insets,
+    logical_size, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
@@ -48,13 +51,21 @@ use crate::ffi_support::TouchPhase;
 /// Everything a running Android app needs across frames — the state behind the
 /// opaque `jlong` handle the JVM passes back into every native call.
 ///
-/// Field order is load-bearing for drop safety: `renderer` (which owns the
-/// `wgpu::Surface` built from `window`'s raw pointer) is declared before
-/// `window`, so on drop the surface is torn down before the [`NativeWindow`] it
-/// borrows is released (spec §8.1: no surface outlives its window).
+/// Field order is load-bearing for drop safety: `executor` (which — in the
+/// render-thread split — owns the render thread whose `wgpu::Surface` was built
+/// from `window`'s raw pointer, and — inline — owns the `SurfaceRenderer`
+/// directly) is declared before `window`, so on drop the executor is torn down
+/// (the split's `Drop` joins the render thread, dropping its surface) before the
+/// [`NativeWindow`] it borrows is released (spec §8.1: no surface outlives its
+/// window).
 pub struct AndroidAppHandle {
-    render_cx: RenderContext,
-    renderer: SurfaceRenderer,
+    /// The render-path half of the frame loop (plan phase 11.B): either the
+    /// render-thread split ([`FrameExecutor::Split`], the default) — where a
+    /// dedicated thread owns the [`RenderContext`]/[`SurfaceRenderer`] + surface
+    /// and the UI thread only hands it finished scenes — or the pre-split inline
+    /// fallback ([`FrameExecutor::Inline`], `FRUST_NO_RENDER_THREAD`) where the
+    /// renderer lives on this UI thread. Chosen once at construction.
+    executor: FrameExecutor,
     text_ctx: TextContext,
     /// Reused across frames; `reset()` each frame rather than reallocated.
     scene: Scene,
@@ -118,21 +129,6 @@ pub struct AndroidAppHandle {
     /// `Drop` detaches the delegate through its own retained `JavaVM`, touching
     /// neither the surface nor the window.
     a11y: Option<AndroidA11y>,
-    /// Per-frame pass timing (task 08, spec §14 phase 7.A): rebuild/layout/
-    /// paint/encode+present durations, aggregated and rate-limit logged
-    /// (`frust-perf frame ...`) by [`Self::frame`]. Honors the
-    /// process-wide [`perf::enabled`] switch — a disabled recorder allocates
-    /// and records nothing.
-    frame_stats: FrameStats,
-    /// The cold-start span recorder begun in
-    /// [`crate::jni_glue::create_handle`] (`StartupSpans::begin()`), carried
-    /// through so [`Self::frame`]'s first successful render can record
-    /// [`perf::SPAN_FIRST_FRAME_PRESENTED`] and emit the one
-    /// `frust-perf startup ...` summary line. `Option::take`n at that
-    /// point, so the field is `None` for the rest of the handle's lifetime —
-    /// the latch that guarantees a single emission and costs nothing (no
-    /// clock read) on every later frame.
-    startup_spans: Option<StartupSpans>,
     /// The skip-frame gate (task 17, spec §14 phase 7): consulted once per
     /// [`Self::frame`] after the per-tick inputs are gathered. When it returns
     /// [`FrameDecision::Skip`](frust_shell_common::FrameDecision::Skip) the
@@ -211,6 +207,361 @@ pub struct AndroidAppHandle {
     /// (`frust-perf deadline`) behind [`perf::enabled`]; it never drops or
     /// reshapes work.
     deadline_overruns: u64,
+}
+
+/// One finished frame's payload crossing the UI→render-thread handoff in the
+/// split (plan phase 11.B): the painted [`Scene`] plus the clear color it was
+/// painted for (the live theme's surface color — it must ride *with* the frame
+/// so a mid-frame theme flip clears to the right color, mirroring the desktop
+/// shell's `PaintedScene`). This is the `S` type parameter of
+/// [`SceneFrame`]/[`render_channel`](frust_shell_common::render_channel); both
+/// `Scene` and `peniko::Color` are `Send`, keeping the handoff `Send`-clean with
+/// no `unsafe`.
+pub(crate) struct PaintedScene {
+    pub(crate) scene: Scene,
+    pub(crate) base_color: peniko::Color,
+}
+
+/// The render-path half of the Android frame loop (plan phase 11.B): either the
+/// render-thread split ([`Self::Split`], default) or the pre-split inline
+/// fallback ([`Self::Inline`], `FRUST_NO_RENDER_THREAD`). Chosen once at
+/// construction from
+/// [`render_thread_enabled`](frust_shell_common::render_thread_enabled) and
+/// owned by [`AndroidAppHandle`].
+pub(crate) enum FrameExecutor {
+    /// Pre-split fallback: the [`RenderContext`]/[`SurfaceRenderer`] and all perf
+    /// recording live on the UI thread, and the encode→acquire→submit tail runs
+    /// synchronously inside [`AndroidAppHandle::frame`]. Boxed — it owns the whole
+    /// render stack and dwarfs the split's thread-handle variant.
+    Inline(Box<InlineExecutor>),
+    /// The split: the renderer + context moved to a dedicated render thread; the
+    /// UI thread hands it finished frames over the channel.
+    Split(SplitExecutor),
+}
+
+/// The single-thread fallback executor (kill switch engaged): the
+/// [`RenderContext`]/[`SurfaceRenderer`] and all perf recording live on the UI
+/// thread, exactly as the pre-split shell did.
+pub(crate) struct InlineExecutor {
+    render_cx: RenderContext,
+    renderer: SurfaceRenderer,
+    frame_stats: FrameStats,
+    /// The cold-start span recorder begun in [`crate::jni_glue::create_handle`];
+    /// `Option::take`n on the first successful present (records
+    /// [`perf::SPAN_FIRST_FRAME_PRESENTED`] + emits), `None` thereafter.
+    startup_spans: Option<StartupSpans>,
+}
+
+impl InlineExecutor {
+    /// Build the fallback executor around the already-created, `SurfaceReady`
+    /// renderer + context (surface creation and the early startup spans happened
+    /// in [`crate::jni_glue::create_handle`], which hands `startup_spans` over
+    /// here to finish).
+    pub(crate) fn new(
+        render_cx: RenderContext,
+        renderer: SurfaceRenderer,
+        startup_spans: StartupSpans,
+    ) -> Self {
+        Self {
+            render_cx,
+            renderer,
+            frame_stats: FrameStats::new(),
+            startup_spans: Some(startup_spans),
+        }
+    }
+
+    /// Run the encode→acquire→submit tail synchronously for `scene`, recording
+    /// the folded frame and returning the encode span for the UI-side deadline
+    /// estimate.
+    fn submit_frame(
+        &mut self,
+        scene: &Scene,
+        base_color: peniko::Color,
+        ui: UiSpans,
+        perf_on: bool,
+    ) -> Duration {
+        render_scene(
+            &mut self.renderer,
+            &self.render_cx,
+            scene,
+            base_color,
+            ui,
+            &mut self.frame_stats,
+            &mut self.startup_spans,
+            perf_on,
+        )
+    }
+
+    /// Record a gate-skipped frame (all-zero pass durations) so the skip counter
+    /// accumulates in the perf line, mirroring the pre-split inline behavior.
+    fn record_skip(&mut self) {
+        self.frame_stats.record(FramePasses {
+            skipped: true,
+            ..FramePasses::default()
+        });
+        if self.frame_stats.should_emit() {
+            self.frame_stats.emit_log();
+        }
+    }
+
+    /// Record [`perf::SPAN_FIRST_REBUILD_DONE`] right after the initial rebuild
+    /// (the UI thread owns the startup line in the inline path).
+    fn record_first_rebuild(&mut self) {
+        if let Some(spans) = self.startup_spans.as_mut() {
+            spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+        }
+    }
+}
+
+/// The render-thread-split executor (default): the UI-thread [`RenderSender`]
+/// half of the scene-handoff channel plus the render thread's [`JoinHandle`].
+/// The render thread owns the [`RenderContext`]/[`SurfaceRenderer`], the surface,
+/// the [`FrameStats`] recorder (the single perf emitter), and the startup line —
+/// see [`crate::jni_glue::render_loop`].
+pub(crate) struct SplitExecutor {
+    /// `Option` so [`Drop`] can drop it *before* joining: dropping the sender is
+    /// what signals the render loop to exit.
+    sender: Option<RenderSender<PaintedScene, crate::jni_glue::SendableWindowPtr>>,
+    join: Option<JoinHandle<()>>,
+    /// The UI-side mirror of "a surface exists" (a `SurfaceCreated` was sent and
+    /// not yet destroyed) — the render thread owns the real `SurfacePhase`, so the
+    /// UI thread can't query it; this gates [`AndroidAppHandle::frame`]'s
+    /// not-ready early return in place of `renderer.phase()`.
+    surface_active: bool,
+    /// Monotonically increasing per-frame id stamped into [`FrameMeta`].
+    frame_id: u64,
+}
+
+impl SplitExecutor {
+    pub(crate) fn new(
+        sender: RenderSender<PaintedScene, crate::jni_glue::SendableWindowPtr>,
+        join: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            sender: Some(sender),
+            join: Some(join),
+            surface_active: true,
+            frame_id: 0,
+        }
+    }
+
+    /// Hand one finished frame to the render thread (latest-wins).
+    fn submit_frame(
+        &mut self,
+        painted: PaintedScene,
+        ui: UiSpans,
+        frame_time: FrameTime,
+        size: SurfaceSize,
+    ) {
+        self.frame_id += 1;
+        if let Some(sender) = self.sender.as_ref() {
+            sender.send_scene(SceneFrame {
+                scene: painted,
+                meta: FrameMeta {
+                    frame_time,
+                    size,
+                    frame_id: self.frame_id,
+                },
+                ui_spans: ui,
+            });
+        }
+    }
+
+    /// Send a [`RenderCommand::SurfaceChanged`] (in-place resize), fire-and-forget.
+    fn resize(&mut self, size: SurfaceSize) {
+        if let Some(sender) = self.sender.as_ref() {
+            sender.send_command(RenderCommand::SurfaceChanged { size });
+        }
+    }
+
+    /// Send a [`RenderCommand::SurfaceCreated`] carrying the raw window pointer
+    /// (wrapped `Send`), for the render thread to install a surface from.
+    fn send_surface_created(&mut self, ptr: *mut c_void, size: SurfaceSize) {
+        if let Some(sender) = self.sender.as_ref() {
+            sender.send_command(RenderCommand::SurfaceCreated {
+                window: crate::jni_glue::SendableWindowPtr::new(ptr),
+                size,
+            });
+        }
+        self.surface_active = true;
+    }
+
+    /// Send a barriered [`RenderCommand::SurfaceDestroyed`] and **block** until the
+    /// render thread has dropped its surface resources — the `ANativeWindow`
+    /// release barrier: the caller (which owns the [`NativeWindow`]) must not
+    /// release the window until this returns.
+    fn destroy_surface_barrier(&mut self) {
+        if let Some(sender) = self.sender.as_ref() {
+            sender.destroy_surface().wait();
+        }
+        self.surface_active = false;
+    }
+}
+
+impl Drop for SplitExecutor {
+    fn drop(&mut self) {
+        // Drop the sender first: that signals the render loop's `wait_next` to
+        // wake with a disconnection and exit. Then join so the render thread's
+        // final surface teardown completes before the UI thread drops the
+        // `NativeWindow` the surface borrowed (the handle's `executor`-before-
+        // `window` field order keeps that drop ordering).
+        self.sender.take();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl FrameExecutor {
+    /// Whether a live surface exists — the [`AndroidAppHandle::frame`] not-ready
+    /// gate. Inline reads the renderer's phase directly; the split tracks a
+    /// UI-side `surface_active` flag (the render thread owns the real phase).
+    fn has_surface(&self) -> bool {
+        match self {
+            FrameExecutor::Inline(inline) => inline.renderer.phase() == SurfacePhase::SurfaceReady,
+            FrameExecutor::Split(split) => split.surface_active,
+        }
+    }
+
+    /// Record the `first_rebuild_done` startup milestone after the initial
+    /// rebuild. Inline records it here on the UI thread; the split records it
+    /// render-side when the first scene arrives (see [`crate::jni_glue::render_loop`]),
+    /// so this is a no-op there.
+    fn record_first_rebuild(&mut self) {
+        if let FrameExecutor::Inline(inline) = self {
+            inline.record_first_rebuild();
+        }
+    }
+
+    /// Record a gate-skipped frame. Inline accumulates it in its UI-side
+    /// `FrameStats`; the split sends **nothing** on a skip (task 09 contract —
+    /// the render thread is the single emitter and never sees skipped frames), so
+    /// this is a no-op there.
+    fn record_skip(&mut self) {
+        if let FrameExecutor::Inline(inline) = self {
+            inline.record_skip();
+        }
+    }
+
+    /// Hand one finished frame to the executor. Inline runs the encode→present
+    /// tail synchronously (borrowing `scene`, reused next frame) and returns its
+    /// encode span; the split moves the scene out (replacing it with a fresh
+    /// empty one) into a [`SceneFrame`] and sends it across the channel,
+    /// returning `Duration::ZERO` (encode is off-thread, so it does not count
+    /// against the UI thread's deadline).
+    fn submit_frame(
+        &mut self,
+        scene: &mut Scene,
+        base_color: peniko::Color,
+        ui: UiSpans,
+        frame_time: FrameTime,
+        size: SurfaceSize,
+        perf_on: bool,
+    ) -> Duration {
+        match self {
+            FrameExecutor::Inline(inline) => inline.submit_frame(scene, base_color, ui, perf_on),
+            FrameExecutor::Split(split) => {
+                let painted = PaintedScene {
+                    scene: std::mem::replace(scene, Scene::new()),
+                    base_color,
+                };
+                split.submit_frame(painted, ui, frame_time, size);
+                Duration::ZERO
+            }
+        }
+    }
+}
+
+/// Run the encode→acquire→submit tail for one painted `scene`, timing each span
+/// behind `perf_on` (the FFI-path perf convention: zero clock reads when
+/// disabled), recording the folded [`FramePasses`] through the single emitter
+/// (`frame_stats`), and stamping the first-encode / first-frame startup
+/// milestones on `startup_spans`. Returns the encode span. Shared by the inline
+/// path (UI thread) and the split path's [`crate::jni_glue::render_loop`] (render
+/// thread) so the per-frame render logic is not forked — the exact pre-split
+/// tail, only relocated.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_scene(
+    renderer: &mut SurfaceRenderer,
+    render_cx: &RenderContext,
+    scene: &Scene,
+    base_color: peniko::Color,
+    ui: UiSpans,
+    frame_stats: &mut FrameStats,
+    startup_spans: &mut Option<StartupSpans>,
+    perf_on: bool,
+) -> Duration {
+    // Encode span (GPU/CPU encode, no swapchain touch).
+    let encode_start = perf_on.then(Instant::now);
+    let encode_outcome = renderer.encode(render_cx, scene, base_color);
+    let encode_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+    // First-frame decomposition (task 10.A): stamp the first encode-complete
+    // boundary once (only when something was actually encoded).
+    if matches!(encode_outcome, Ok(EncodeOutcome::Encoded))
+        && let Some(spans) = startup_spans.as_mut()
+        && !spans
+            .spans()
+            .iter()
+            .any(|(n, _)| *n == perf::SPAN_FIRST_ENCODE_DONE)
+    {
+        spans.record(perf::SPAN_FIRST_ENCODE_DONE);
+    }
+
+    // Acquire span (blocking vsync/present wait).
+    let acquire_start = perf_on.then(Instant::now);
+    let acquire_result = match encode_outcome {
+        Ok(EncodeOutcome::Encoded) => renderer.acquire(render_cx),
+        Ok(EncodeOutcome::Skipped) => Ok(AcquireOutcome::Skipped),
+        Err(err) => Err(err),
+    };
+    let acquire_time = acquire_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+    // Submit span (blit + queue-submit + present).
+    let submit_start = perf_on.then(Instant::now);
+    let render_result = match acquire_result {
+        Ok(AcquireOutcome::Acquired) => renderer.submit(render_cx),
+        Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
+        Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
+        Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+        Err(err) => Err(err),
+    };
+    let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+    match render_result {
+        // Stale swapchain (e.g. mid-rotation): reconfigured internally; the next
+        // frame draws against the fresh configuration.
+        Ok(FrameOutcome::Redraw) => {}
+        // Surface lost: dropped by the machine; wait for surfaceChanged to
+        // recreate it (Android pairs loss with a destroy/create cycle).
+        Ok(FrameOutcome::SurfaceLost) => {
+            log::warn!("frust-shell-android: surface lost; awaiting surfaceChanged");
+        }
+        Ok(FrameOutcome::Rendered) => {
+            // First successful present: close out the cold-start recorder once.
+            if let Some(mut spans) = startup_spans.take() {
+                spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
+                spans.emit_log();
+            }
+        }
+        Ok(FrameOutcome::Skipped) => {}
+        Err(err) => log::error!("frust-shell-android: render error: {err:#}"),
+    }
+
+    // One folded frame record through the single emitter (plan phase 11.B.3).
+    frame_stats.record(FramePasses::from_split(
+        ui,
+        RenderSpans {
+            encode: encode_time,
+            acquire: acquire_time,
+            submit: submit_time,
+        },
+    ));
+    if frame_stats.should_emit() {
+        frame_stats.emit_log();
+    }
+
+    encode_time
 }
 
 /// Per-handle accessibility state (phase 6d D3): the injecting accesskit Android
@@ -351,11 +702,15 @@ impl AndroidAppHandle {
     /// `crate::jni_glue::create_handle`) so `provide_context` isn't a silent
     /// no-op.
     ///
-    /// `startup_spans` is the cold-start recorder `create_handle` began
-    /// before any of the above (task 08, spec §14 phase 7.A): this method
-    /// records [`perf::SPAN_FIRST_REBUILD_DONE`] right after the initial
-    /// `rebuild()` below, then carries the recorder into the returned handle
-    /// for `Self::frame` to finish (first frame presented + emit).
+    /// `executor` is the render-path half [`crate::jni_glue::create_handle`]
+    /// already built (plan phase 11.B): the render-thread split
+    /// ([`FrameExecutor::Split`], with the render thread already spawned and its
+    /// initial `SurfaceCreated` sent) or the inline fallback
+    /// ([`FrameExecutor::Inline`], with the surface + early startup spans already
+    /// created on this UI thread). The initial `rebuild()` below records
+    /// [`perf::SPAN_FIRST_REBUILD_DONE`] via [`FrameExecutor::record_first_rebuild`]
+    /// — inline records it here, the split records it render-side on the first
+    /// handed-off scene.
     ///
     /// `text_ctx` is the [`TextContext`] `create_handle` already resolved
     /// (phase 10.D) — the pre-built one from `JNI_OnLoad`'s background
@@ -363,20 +718,19 @@ impl AndroidAppHandle {
     /// fallback otherwise (see `jni_glue::take_preinit_text_context`) — so
     /// this method never itself pays the font-DB load cost.
     pub(crate) fn new(
-        render_cx: RenderContext,
-        renderer: SurfaceRenderer,
+        executor: FrameExecutor,
         text_ctx: TextContext,
         window: NativeWindow,
         physical: (u32, u32),
         scale: f32,
         mut app: Box<dyn AppTree>,
-        mut startup_spans: StartupSpans,
     ) -> Self {
         let theme = Theme::m3_baseline();
         app.set_theme(Box::new(theme.clone()));
         provide_context(theme.clone());
         app.rebuild();
-        startup_spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+        let mut executor = executor;
+        executor.record_first_rebuild();
         // Seed the resume-warmup window so the first handful of frames run
         // unconditionally (surface just came up; the first tick's change
         // signals may not yet be observable — see `FrameGate::note_resumed`).
@@ -385,8 +739,7 @@ impl AndroidAppHandle {
         let mut frame_gate = FrameGate::new();
         frame_gate.note_resumed();
         Self {
-            render_cx,
-            renderer,
+            executor,
             text_ctx,
             scene: Scene::new(),
             app,
@@ -400,8 +753,6 @@ impl AndroidAppHandle {
             theme_override_active: false,
             platform_brightness: Brightness::Light,
             a11y: None,
-            frame_stats: FrameStats::new(),
-            startup_spans: Some(startup_spans),
             frame_gate,
             events_since_last_frame: false,
             surface_dirty: false,
@@ -552,11 +903,74 @@ impl AndroidAppHandle {
         self.window.as_ref()
     }
 
-    /// Access to the render context + renderer for the FFI layer to drive an
-    /// `unsafe` surface *creation* (the one lifecycle transition that crosses the
-    /// raw-pointer boundary); the safe transitions have their own methods below.
-    pub(crate) fn renderer_mut(&mut self) -> (&mut RenderContext, &mut SurfaceRenderer) {
-        (&mut self.render_cx, &mut self.renderer)
+    /// Whether the render-thread split is engaged (as opposed to the inline
+    /// fallback) — the FFI layer branches surface (re)creation on this: the split
+    /// routes it through owned channel commands (safe), the inline path drives the
+    /// `unsafe` surface creation directly with [`Self::inline_renderer_mut`].
+    pub(crate) fn executor_is_split(&self) -> bool {
+        matches!(self.executor, FrameExecutor::Split(_))
+    }
+
+    /// Access to the inline render context + renderer for the FFI layer to drive
+    /// an `unsafe` surface *creation* (the one lifecycle transition that crosses
+    /// the raw-pointer boundary). `None` in the render-thread split — there the
+    /// render thread owns the renderer and surface (re)creation is a channel
+    /// command (see [`Self::split_recreate_surface`] / the render loop).
+    pub(crate) fn inline_renderer_mut(
+        &mut self,
+    ) -> Option<(&mut RenderContext, &mut SurfaceRenderer)> {
+        match &mut self.executor {
+            FrameExecutor::Inline(inline) => Some((&mut inline.render_cx, &mut inline.renderer)),
+            FrameExecutor::Split(_) => None,
+        }
+    }
+
+    /// Recreate the surface against `new_window` in the render-thread split
+    /// (the inline path drives its own `unsafe` recreation in the FFI layer).
+    ///
+    /// The window-release ordering is the split's real hazard: the render thread
+    /// holds the OLD surface built from the OLD window's raw pointer, so the UI
+    /// thread must not release the old [`NativeWindow`] until the render thread has
+    /// dropped that surface. So this **first** blocks on a barriered
+    /// `SurfaceDestroyed` (the render thread drops the old surface and acks),
+    /// **then** releases the old window, **then** hands the new window's pointer
+    /// across for the render thread to build a fresh surface — the new window is
+    /// retained here to keep its `ANativeWindow` alive for that new surface.
+    pub(crate) fn split_recreate_surface(
+        &mut self,
+        new_window: NativeWindow,
+        physical: (u32, u32),
+        density: f32,
+    ) {
+        // Read the new window's raw pointer before it is moved into `self.window`
+        // below (moving the wrapper leaves the underlying `ANativeWindow` — and
+        // thus this pointer — unchanged).
+        let ptr = new_window.ptr().as_ptr().cast::<c_void>();
+        if let FrameExecutor::Split(split) = &mut self.executor {
+            // Barrier: the render thread drops the old surface and acks before we
+            // release the old window.
+            split.destroy_surface_barrier();
+        }
+        // Old surface gone → releasing the old `NativeWindow`
+        // (`ANativeWindow_release` via its `Drop`) is now safe.
+        self.window = None;
+        self.physical = physical;
+        self.scale = density;
+        self.window = Some(new_window);
+        if let FrameExecutor::Split(split) = &mut self.executor {
+            split.send_surface_created(
+                ptr,
+                SurfaceSize {
+                    width: physical.0,
+                    height: physical.1,
+                    scale: density as f64,
+                },
+            );
+        }
+        // Surface (re)creation: force the next frame to run + lay out at the new
+        // dimensions and open the resume-warmup window (task 17).
+        self.surface_dirty = true;
+        self.frame_gate.note_resumed();
     }
 
     /// Record the window + physical size backing a freshly (re)created surface.
@@ -581,14 +995,25 @@ impl AndroidAppHandle {
         self.frame_gate.note_resumed();
     }
 
-    /// Resize the live surface in place (same window, new dimensions). Safe: the
-    /// renderer's resize path touches no raw pointers.
+    /// Resize the live surface in place (same window, new dimensions). Safe: no
+    /// raw pointers — inline reconfigures the renderer's swapchain directly; the
+    /// split sends a [`RenderCommand::SurfaceChanged`] command.
     ///
     /// `density` re-sanitizes and stores the display's device pixel ratio for
     /// this configuration (device-parity task 06 — see [`Self::set_window`]).
-    pub(crate) fn resize(&mut self, physical: (u32, u32), density: f32) {
-        self.renderer
-            .on_surface_changed(&self.render_cx, physical.0, physical.1);
+    pub(crate) fn resize_surface(&mut self, physical: (u32, u32), density: f32) {
+        match &mut self.executor {
+            FrameExecutor::Inline(inline) => {
+                inline
+                    .renderer
+                    .on_surface_changed(&inline.render_cx, physical.0, physical.1)
+            }
+            FrameExecutor::Split(split) => split.resize(SurfaceSize {
+                width: physical.0,
+                height: physical.1,
+                scale: density as f64,
+            }),
+        }
         self.physical = physical;
         self.scale = density;
         // In-place resize: force the next frame to run and relayout at the new
@@ -636,16 +1061,26 @@ impl AndroidAppHandle {
         }
     }
 
-    /// Tear the surface down (`surfaceDestroyed`): drop the renderer's surface
-    /// first (spec §8.1), then release the [`NativeWindow`] it borrowed.
+    /// Tear the surface down (`surfaceDestroyed`): drop the surface **first**,
+    /// then release the [`NativeWindow`] it borrowed (spec §8.1).
+    ///
+    /// The ordering is a hard correctness contract in the render-thread split:
+    /// the render thread owns the surface built from `self.window`'s raw pointer,
+    /// so [`SplitExecutor::destroy_surface_barrier`] sends a barriered
+    /// `SurfaceDestroyed` and **blocks until the render thread has acknowledged**
+    /// dropping that surface. Only after that ack returns do we set
+    /// `self.window = None`, releasing the `ANativeWindow` — so the render thread
+    /// can never touch the window after it is released (the plan's Android
+    /// surface-lifecycle-race hazard). The inline path drops its surface
+    /// synchronously above, so the same window-after-surface order holds there.
     pub(crate) fn destroy_surface(&mut self) {
-        self.renderer.on_surface_destroyed();
+        match &mut self.executor {
+            FrameExecutor::Inline(inline) => inline.renderer.on_surface_destroyed(),
+            FrameExecutor::Split(split) => split.destroy_surface_barrier(),
+        }
+        // Barrier complete (split) / surface dropped (inline): releasing the
+        // window is now safe.
         self.window = None;
-    }
-
-    /// The current lifecycle phase (spec §8.1).
-    pub(crate) fn phase(&self) -> SurfacePhase {
-        self.renderer.phase()
     }
 
     /// Deliver one touch contact to the tree (spec §9), converting the incoming
@@ -820,13 +1255,17 @@ impl AndroidAppHandle {
         // Whether anything was applied is a frame-gate input.
         let a11y_action_performed = self.apply_pending_accessibility_actions();
 
-        if self.phase() != SurfacePhase::SurfaceReady {
+        if !self.executor.has_surface() {
             // Surface not ready (Kotlin keeps posting frames across surface
-            // loss): nothing to render or gate. The reactive pump + theme poll
-            // above already ran so state stays live through surface churn; the
-            // event/surface latches are intentionally *not* cleared here so the
-            // first ready frame still sees them. No FrameStats row is recorded
-            // for a not-ready tick (it never was pre-gate either).
+            // loss): nothing to render or gate. Inline reads the renderer's phase;
+            // the split reads its UI-side `surface_active` mirror (the render
+            // thread owns the real phase — a scene handed off while the render
+            // thread is still creating the surface is dropped render-side). The
+            // reactive pump + theme poll above already ran so state stays live
+            // through surface churn; the event/surface latches are intentionally
+            // *not* cleared here so the first ready frame still sees them. No
+            // FrameStats row is recorded for a not-ready tick (it never was
+            // pre-gate either).
             return;
         }
 
@@ -904,17 +1343,15 @@ impl AndroidAppHandle {
 
         if self.frame_gate.decide(inputs).is_skip() {
             // Skip path (task 17): nothing changed — return before rebuild, so
-            // CPU/GPU stay near idle. Record a `skipped` FramePasses (all-zero
-            // pass durations) so the skip counter accumulates in the perf log
-            // line; the Choreographer keeps re-posting callbacks, so only frame
-            // *production* stops, not the loop cadence.
-            self.frame_stats.record(FramePasses {
-                skipped: true,
-                ..FramePasses::default()
-            });
-            if self.frame_stats.should_emit() {
-                self.frame_stats.emit_log();
-            }
+            // CPU/GPU stay near idle. Inline records a `skipped` FramePasses
+            // (all-zero pass durations) so the skip counter accumulates in the
+            // perf log line. In the render-thread split a Skip sends **nothing**
+            // across the channel (task 09 contract — the render thread is the
+            // single emitter and never sees skipped frames), so `record_skip` is a
+            // no-op there. Either way only frame *production* stops; the
+            // Choreographer keeps re-posting callbacks, so the loop cadence is
+            // unchanged.
+            self.executor.record_skip();
             return;
         }
 
@@ -1018,108 +1455,43 @@ impl AndroidAppHandle {
         }
         let paint_time = paint_start.map_or(Duration::ZERO, |t| t.elapsed());
 
-        // Two-phase render seam (Phase 10.A): time the GPU/CPU encode and the
-        // swapchain-acquire (vsync) present separately so the render-thread-split
-        // decision has an encode-only number. Each span's `Instant::now()` stays
-        // gated behind `perf_on` (this module's FFI-path perf convention: zero
-        // clock reads when disabled). Clear to the live theme's surface color
-        // rather than a hardcoded white, so a dark-scheme app doesn't render its
-        // dark-themed widgets over a white canvas (6e Finding 6).
-        let encode_start = perf_on.then(Instant::now);
-        let encode_outcome =
-            self.renderer
-                .encode(&self.render_cx, &self.scene, self.theme.scheme().surface);
-        let encode_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
-
-        // First-frame decomposition (task 10.A): stamp the first encode-complete
-        // boundary once (only when something was actually encoded), so the
-        // startup line splits the first frame into paint/encode vs present. The
-        // `startup_spans` Option is consumed on the first present below, so this
-        // records at most once; the `any` guard covers a pre-present `Redraw`.
-        // `StartupSpans::record` reads no clock when perf is disabled, so this
-        // stays zero-clock-read on a disabled build (FFI-path perf convention).
-        if matches!(encode_outcome, Ok(EncodeOutcome::Encoded)) {
-            if let Some(spans) = self.startup_spans.as_mut() {
-                if !spans
-                    .spans()
-                    .iter()
-                    .any(|(n, _)| *n == perf::SPAN_FIRST_ENCODE_DONE)
-                {
-                    spans.record(perf::SPAN_FIRST_ENCODE_DONE);
-                }
-            }
-        }
-
-        // Present-span split (Phase 11.A): time the swapchain **acquire**
-        // (blocking vsync wait) and the **submit** (blit + queue-submit +
-        // present) separately so the S5 GPU-saturation-vs-blit-cost question has
-        // an acquire-only number. Each sub-span's `Instant::now()` stays gated
-        // behind `perf_on` (this module's FFI-path perf convention: zero clock
-        // reads when disabled).
-        let acquire_start = perf_on.then(Instant::now);
-        let acquire_result = match encode_outcome {
-            Ok(EncodeOutcome::Encoded) => self.renderer.acquire(&self.render_cx),
-            Ok(EncodeOutcome::Skipped) => Ok(AcquireOutcome::Skipped),
-            Err(err) => Err(err),
-        };
-        let acquire_time = acquire_start.map_or(Duration::ZERO, |t| t.elapsed());
-
-        let submit_start = perf_on.then(Instant::now);
-        let render_result = match acquire_result {
-            Ok(AcquireOutcome::Acquired) => self.renderer.submit(&self.render_cx),
-            Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
-            Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
-            Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
-            Err(err) => Err(err),
-        };
-        let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
-
-        match render_result {
-            // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
-            // next Choreographer frame draws against the fresh configuration.
-            Ok(FrameOutcome::Redraw) => {}
-            // Surface lost: dropped by the machine; wait for surfaceChanged to
-            // recreate it (Android pairs loss with a destroy/create cycle).
-            Ok(FrameOutcome::SurfaceLost) => {
-                log::warn!("frust-shell-android: surface lost; awaiting surfaceChanged");
-            }
-            Ok(FrameOutcome::Rendered) => {
-                // First successful present (task 08): close out the cold-start
-                // span recorder exactly once. `Option::take` both consumes it
-                // and doubles as the latch — every later `Rendered` frame sees
-                // `None` here at no cost beyond the `Option` check.
-                if let Some(mut spans) = self.startup_spans.take() {
-                    spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
-                    spans.emit_log();
-                }
-            }
-            Ok(FrameOutcome::Skipped) => {}
-            Err(err) => log::error!("frust-shell-android: render error: {err:#}"),
-        }
-
-        // Record this frame's pass timings (task 08). `FrameStats::record`/
-        // `should_emit`/`emit_log` are themselves cheap no-ops when disabled
-        // (the recorder's own `enabled` flag, captured once at construction —
-        // see `FrameStats::new`), so no extra gating is needed here beyond the
-        // `perf_on`-gated timer reads above.
-        self.frame_stats.record(FramePasses {
+        // Hand the finished frame to the render-path executor (plan phase 11.B).
+        // The inline fallback runs the encode→acquire→submit tail synchronously
+        // here (via the shared [`render_scene`]) and returns its encode span; the
+        // split moves the painted scene out (replacing `self.scene` with a fresh
+        // empty one) into a [`SceneFrame`] and hands it across the channel for the
+        // render thread to encode/present, returning `Duration::ZERO` (encode is
+        // off-thread). Either way [`render_scene`] is the single place the folded
+        // [`FramePasses`] is recorded, the first-encode/first-frame startup
+        // milestones are stamped, and SurfaceLost/Redraw are handled — the exact
+        // pre-split tail, only relocated. The clear color (the live theme's
+        // surface color, not white) rides *with* the scene so a mid-frame theme
+        // flip clears correctly (6e Finding 6).
+        let ui = UiSpans {
             rebuild: rebuild_time,
             layout: layout_time,
             paint: paint_time,
-            encode: encode_time,
-            acquire: acquire_time,
-            submit: submit_time,
             skipped: false,
-        });
-        if self.frame_stats.should_emit() {
-            self.frame_stats.emit_log();
-        }
+        };
+        let base_color = self.theme.scheme().surface;
+        let size = SurfaceSize {
+            width: self.physical.0,
+            height: self.physical.1,
+            scale: self.scale as f64,
+        };
+        let frame_time = FrameTime::from_nanos(frame_time_nanos);
+        let encode_time =
+            self.executor
+                .submit_frame(&mut self.scene, base_color, ui, frame_time, size, perf_on);
 
         // Deadline-aware pacing overrun (plan phase 10.C.2): this frame's *work*
         // (everything but the vsync `present` wait, which is expected to block)
         // overrunning the tick-to-tick budget is counted and logged. Gated
         // behind `perf_on` so a non-perf build reads no clocks and logs nothing;
-        // instrumentation only — no work is dropped on the strength of this.
+        // instrumentation only — no work is dropped on the strength of this. In
+        // the render-thread split `encode_time` is zero (encode is off-thread), so
+        // `work` reduces to the UI thread's real budget — rebuild+layout+paint —
+        // which is exactly what the UI thread is now responsible for hitting.
         if perf_on {
             let work = rebuild_time + layout_time + paint_time + encode_time;
             if resample::deadline_overrun(work, frame_interval) {
