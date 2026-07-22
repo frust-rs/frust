@@ -12,85 +12,8 @@
 use frust_scene::{Command, GlyphRun, PathStyle, Scene};
 use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::OnceLock;
-
-// TEMPORARY: Image-identity probe (task 04 / phase-11 render-path).
-// Tracks Blob IDs across frames to confirm atlas reuse.
-// Marked for removal once task 06 verdicts close this research.
-
-/// Tracks image Blob IDs across frames for the identity probe.
-struct ImageIdentityProbe {
-    /// Blob IDs seen in the previous frame.
-    last_frame_ids: HashSet<u64>,
-    /// Every Blob ID ever seen (monotone). For a scrolling workload the
-    /// previous-frame delta counts stable images re-entering the window as
-    /// "new", so identity stability is judged by THIS set's growth instead:
-    /// stable identity plateaus at the workload's distinct-image population;
-    /// per-frame Blob re-creation grows it without bound.
-    ever_seen: HashSet<u64>,
-}
-
-impl ImageIdentityProbe {
-    fn new() -> Self {
-        Self {
-            last_frame_ids: HashSet::new(),
-            ever_seen: HashSet::new(),
-        }
-    }
-
-    /// Record the Blob IDs in this frame and log any changes since the last frame.
-    /// Returns (frame_unique, new_this_frame).
-    fn process_frame(&mut self, current_ids: HashSet<u64>) -> (usize, usize) {
-        let frame_unique = current_ids.len();
-        let new_this_frame = current_ids
-            .iter()
-            .filter(|id| !self.last_frame_ids.contains(id))
-            .count();
-        let new_ever = current_ids
-            .iter()
-            .filter(|id| !self.ever_seen.contains(id))
-            .count();
-        self.ever_seen.extend(current_ids.iter().copied());
-
-        if new_this_frame > 0 {
-            log::info!(
-                "frust-perf image-ids frame_unique={} new_this_frame={} new_ever={} distinct_total={}",
-                frame_unique,
-                new_this_frame,
-                new_ever,
-                self.ever_seen.len()
-            );
-        }
-
-        self.last_frame_ids = current_ids;
-        (frame_unique, new_this_frame)
-    }
-}
-
-thread_local! {
-    /// TEMPORARY: Process-local image-identity probe (task 04).
-    /// Stored in thread-local to provide per-thread isolation; RefCell allows interior
-    /// mutability without synchronization since thread-locality guarantees no concurrent access.
-    static IMAGE_IDENTITY_PROBE: RefCell<ImageIdentityProbe> = RefCell::new(ImageIdentityProbe::new());
-}
-
-/// Check if the image-identity probe is enabled (`FRUST_TRACE` set at compile
-/// time or runtime — the same dual parsing as `context.rs::perf_tracing_enabled`;
-/// an Android app process has no runtime env, so the compile-time half is what
-/// enables the probe on-device).
-/// Cached in OnceLock for zero-cost when disabled.
-fn image_probe_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        fn is_set_non_zero(value: Option<&str>) -> bool {
-            matches!(value, Some(v) if !v.is_empty() && v != "0")
-        }
-        let runtime = std::env::var("FRUST_TRACE").ok();
-        is_set_non_zero(option_env!("FRUST_TRACE")) || is_set_non_zero(runtime.as_deref())
-    })
-}
 
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
 ///
@@ -190,12 +113,6 @@ pub(crate) fn encode_into_with_shaders(
     shader_images: &HashMap<(u64, u32, u32), ImageData>,
     adapter_max: u32,
 ) {
-    // TEMPORARY: Image-identity probe (task 04 / phase-11 render-path).
-    // Gate all probe work (HashSet population, ID computation, frame processing)
-    // behind the enabled check for zero-cost when disabled.
-    let probe_enabled = image_probe_enabled();
-    let mut image_ids = HashSet::new();
-
     for command in scene.commands() {
         match command {
             Command::FillRect {
@@ -224,13 +141,6 @@ pub(crate) fn encode_into_with_shaders(
                 dest,
                 transform,
             } => {
-                // TEMPORARY (task 04): Record this image's Blob ID for the probe.
-                // Use Peniko's Blob::id() (the linebender resource handle ID) as the key,
-                // which uniquely identifies the image data independent of allocation address.
-                if probe_enabled {
-                    let blob_id = data.data.id();
-                    image_ids.insert(blob_id);
-                }
                 sink.draw_image(*transform, data, dest);
             }
             Command::BlurredRoundedRect {
@@ -302,13 +212,6 @@ pub(crate) fn encode_into_with_shaders(
                 }
             }
         }
-    }
-
-    // TEMPORARY (task 04): Update the image-identity probe with this frame's Blob IDs.
-    if probe_enabled {
-        IMAGE_IDENTITY_PROBE.with(|probe| {
-            probe.borrow_mut().process_frame(image_ids);
-        });
     }
 }
 
@@ -1160,62 +1063,6 @@ mod tests {
 
         let mut vello_scene = vello::Scene::new();
         encode_scene(&scene, &mut vello_scene);
-    }
-
-    // TEMPORARY (task 04): Tests for the image-identity probe tracker.
-    #[test]
-    fn image_identity_probe_counts_frame_unique_and_new_ids() {
-        let mut probe = super::ImageIdentityProbe::new();
-
-        // First frame: three unique IDs.
-        let mut ids = HashSet::new();
-        ids.insert(1u64);
-        ids.insert(2u64);
-        ids.insert(3u64);
-        let (frame_unique, new_this_frame) = probe.process_frame(ids);
-        assert_eq!(frame_unique, 3);
-        assert_eq!(new_this_frame, 3, "all three IDs are new on first frame");
-
-        // Second frame: two of the same IDs, one new.
-        let mut ids = HashSet::new();
-        ids.insert(1u64);
-        ids.insert(2u64);
-        ids.insert(4u64);
-        let (frame_unique, new_this_frame) = probe.process_frame(ids);
-        assert_eq!(frame_unique, 3);
-        assert_eq!(new_this_frame, 1, "only ID 4 is new");
-
-        // Third frame: no new IDs (all seen before).
-        let mut ids = HashSet::new();
-        ids.insert(1u64);
-        ids.insert(2u64);
-        let (frame_unique, new_this_frame) = probe.process_frame(ids);
-        assert_eq!(frame_unique, 2);
-        assert_eq!(new_this_frame, 0, "no new IDs");
-    }
-
-    #[test]
-    fn image_identity_probe_resets_on_empty_frame() {
-        let mut probe = super::ImageIdentityProbe::new();
-
-        // First frame: two IDs.
-        let mut ids = HashSet::new();
-        ids.insert(1u64);
-        ids.insert(2u64);
-        probe.process_frame(ids);
-
-        // Second frame: empty (no images).
-        let ids = HashSet::new();
-        let (frame_unique, new_this_frame) = probe.process_frame(ids);
-        assert_eq!(frame_unique, 0);
-        assert_eq!(new_this_frame, 0);
-
-        // Third frame: one ID (new from the empty frame perspective).
-        let mut ids = HashSet::new();
-        ids.insert(5u64);
-        let (frame_unique, new_this_frame) = probe.process_frame(ids);
-        assert_eq!(frame_unique, 1);
-        assert_eq!(new_this_frame, 1, "ID 5 is new after empty frame");
     }
 
     #[test]

@@ -46,6 +46,14 @@ fn env_flag_enabled(name_compile_time: Option<&str>, name_runtime: Option<String
 /// Whether perf tracing (frust-perf logging) is enabled via the process-wide
 /// `FRUST_TRACE` flag — mirroring the check in `frust-shell-common::perf`.
 /// Cached to avoid repeated environment lookups.
+///
+/// Only compiled under the `perf-trace` feature (release-lean plan, task
+/// 02) — the sole callers, [`probe_direct_to_surface_capability`]/
+/// [`log_render_path`], are themselves feature-gated with an inert
+/// `#[cfg(not(feature = "perf-trace"))]` counterpart that skips this check
+/// entirely, so a build without the feature contains neither this env read
+/// nor the probe bodies it guards.
+#[cfg(feature = "perf-trace")]
 fn perf_tracing_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -154,6 +162,11 @@ fn direct_surface_caps(capabilities: &wgpu::SurfaceCapabilities) -> (bool, bool)
 /// Direct-to-surface rendering requires:
 /// - Rgba8Unorm format in the surface's supported formats
 /// - STORAGE_BINDING usage in the surface's supported usages
+///
+/// Only compiled under the `perf-trace` feature (release-lean plan, task
+/// 02); see the inert `#[cfg(not(feature = "perf-trace"))]` counterpart
+/// below.
+#[cfg(feature = "perf-trace")]
 fn probe_direct_to_surface_capability(capabilities: &wgpu::SurfaceCapabilities) {
     static LOGGED: OnceLock<()> = OnceLock::new();
 
@@ -214,9 +227,20 @@ fn probe_direct_to_surface_capability(capabilities: &wgpu::SurfaceCapabilities) 
     });
 }
 
+/// Without the `perf-trace` feature, the surface-caps probe is a complete
+/// no-op — no logging, no format-string bodies compiled in.
+#[cfg(not(feature = "perf-trace"))]
+#[inline]
+fn probe_direct_to_surface_capability(_capabilities: &wgpu::SurfaceCapabilities) {}
+
 /// Emits the one-per-process startup line naming the chosen render path and the
 /// reason (deliverable 3), mirroring the surface-caps probe line style and its
 /// `FRUST_TRACE` gating. Logged once regardless of surface recreation.
+///
+/// Only compiled under the `perf-trace` feature (release-lean plan, task
+/// 02); see the inert `#[cfg(not(feature = "perf-trace"))]` counterpart
+/// below.
+#[cfg(feature = "perf-trace")]
 fn log_render_path(
     path: RenderPathKind,
     has_rgba8unorm: bool,
@@ -252,6 +276,18 @@ fn log_render_path(
         };
         log::info!("frust-perf render-path {name} ({reason})");
     });
+}
+
+/// Without the `perf-trace` feature, the render-path startup line is a
+/// complete no-op — no logging, no format-string bodies compiled in.
+#[cfg(not(feature = "perf-trace"))]
+#[inline]
+fn log_render_path(
+    _path: RenderPathKind,
+    _has_rgba8unorm: bool,
+    _has_storage_binding: bool,
+    _force_blit: bool,
+) {
 }
 
 /// A logical device plus the adapter it came from and the queue that executes
