@@ -125,6 +125,19 @@ pub fn app_stem() -> OsString {
 /// mid-write leaves any previous contents at `path` intact. On a failed
 /// rename, the temp file is best-effort removed (its own removal error is
 /// swallowed) before the rename error is returned.
+///
+/// # Concurrency contract
+///
+/// The temp path is keyed on **PID only**, not on the target `path` or a
+/// per-call nonce — two concurrent calls from the *same process* writing to
+/// the *same* `path` race on one shared temp file. Every current caller
+/// already serializes same-process writes to one target path (shared-
+/// preferences' `Mutex`, the desktop shell's cache writing from its single
+/// render thread, Android's single writer), so this has never been
+/// observed in practice; a caller writing to one `path` from multiple
+/// threads without its own external serialization must add one (a
+/// `Mutex`/single-writer-thread, per the existing call sites) before
+/// calling this function concurrently.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -364,11 +377,14 @@ mod tests {
         let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 
-    /// A failing rename (target's parent replaced by a file, so
-    /// `create_dir_all`/`rename` cannot succeed) still returns the
-    /// underlying error and cleans up its temp file rather than leaking it.
+    /// `create_dir_all(parent)` fails when a path component of the parent is
+    /// already a plain file, so `atomic_write` returns via its first `?`
+    /// before ever writing a temp file. This covers only that first
+    /// short-circuit — it says nothing about the rename-failure cleanup
+    /// branch (see `atomic_write_returns_error_and_cleans_up_temp_on_rename_failure`
+    /// below for that).
     #[test]
-    fn atomic_write_returns_error_and_cleans_up_temp_on_failure() {
+    fn atomic_write_returns_error_when_parent_dir_cannot_be_created() {
         let base = std::env::temp_dir().join(format!(
             "frust-paths-test-{}-fail-parent",
             std::process::id()
@@ -385,5 +401,44 @@ mod tests {
         assert!(!temp_path.exists(), "temp file left behind on failure");
 
         let _ = fs::remove_file(&base);
+    }
+
+    /// A failing rename with the temp file *already written* (target `path`
+    /// is an existing non-empty directory, so `create_dir_all`/`fs::write`
+    /// both succeed and only the final `fs::rename` fails —
+    /// EISDIR/ENOTEMPTY-family on Unix/macOS) still returns the underlying
+    /// error, cleans up the now-orphaned temp file, and leaves the
+    /// directory's existing contents untouched. This is the rename-failure
+    /// cleanup branch itself, not just the earlier `create_dir_all` `?`
+    /// covered above.
+    #[test]
+    fn atomic_write_returns_error_and_cleans_up_temp_on_rename_failure() {
+        let path = scratch_path("rename-fail");
+        // `create_dir_all` on `path` itself creates every ancestor
+        // (including `path`'s own parent) *and* `path` as a directory, so
+        // the later `atomic_write`'s own `create_dir_all(parent)` call is a
+        // no-op success, not the failure point.
+        fs::create_dir_all(&path).unwrap();
+        let occupant = path.join("occupant");
+        fs::write(&occupant, b"do not touch").unwrap();
+
+        let result = atomic_write(&path, b"data");
+        assert!(
+            result.is_err(),
+            "renaming a file onto an existing non-empty directory must fail"
+        );
+
+        let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+        assert!(
+            !temp_path.exists(),
+            "temp file left behind after failed rename"
+        );
+        assert_eq!(
+            fs::read(&occupant).unwrap(),
+            b"do not touch",
+            "occupant must be untouched by the failed write"
+        );
+
+        let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 }

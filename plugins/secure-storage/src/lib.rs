@@ -6,11 +6,10 @@
 //!
 //! Like [`frust-shared-preferences`](../frust_shared_preferences/index.html),
 //! this is a **platform plugin** (see `docs/ARCHITECTURE.md`'s Module
-//! Structure): it depends on `frust-plugin` (once its Android backend lands)
-//! plus FFI crates only, and carries **no other `frust-*` framework
-//! dependency**. An app adds this crate to its own `Cargo.toml` alongside
-//! `frust`, the Flutter-pubspec model; the `frust` facade does not depend on
-//! or re-export it.
+//! Structure): it depends on `frust-plugin` plus FFI crates only, and
+//! carries **no other `frust-*` framework dependency**. An app adds this
+//! crate to its own `Cargo.toml` alongside `frust`, the Flutter-pubspec
+//! model; the `frust` facade does not depend on or re-export it.
 //!
 //! # Phased delivery
 //!
@@ -282,14 +281,15 @@ pub enum SecureStorageError {
 }
 
 /// One backend implementation — [`desktop::DesktopStore`] on Linux/Windows,
-/// the [`file`] fallback backend on Apple/Android pending their own tasks.
+/// [`apple::AppleStore`] on Apple targets, [`android::AndroidStore`] on
+/// Android, and the [`file`] `#[cfg(test)]` conformance-harness backend.
 ///
 /// Crate-private and deliberately minimal: [`SecureStorage`]'s public API is
 /// a thin, String-valued wrapper over one of these, scoped to a single named
 /// store. The conformance suite ([`conformance::run_conformance_suite`],
-/// `#[cfg(test)]`) exercises any backend factory uniformly, so the assertions
-/// this task locks in for [`file::FileStore`] will validate the platform
-/// backends once they land.
+/// `#[cfg(test)]`) exercises any backend factory uniformly, so the same
+/// assertions validate every platform backend and the [`file::FileStore`]
+/// harness alike.
 ///
 /// Every method returns a [`Result`] (unlike `SharedPreferences`' infallible
 /// `get`): a secure-store read can genuinely fail — a locked Keychain, a
