@@ -1,1 +1,612 @@
 //! Filled by task 24-glyph-content-widgets (EmptyState).
+//!
+//! [`empty_state`]/[`EmptyStateView`]: the "nothing here yet" placeholder — a
+//! dashed-border panel with a large, faint centered glyph char (Space Mono
+//! display face), a title, a description, and an optional action child-view
+//! slot (the reference build's `§content` `.empty-state`).
+//!
+//! The title, description, and centered glyph are the widget's own text runs
+//! (shaped/painted directly, like [`super::badge`]); the action slot is an
+//! arbitrary child [`frust_core::View`] (typically a button), so its events
+//! route through and its semantics is forwarded (`semantics_child`) — the
+//! silent-drop rule.
+//!
+//! # Token resolution
+//!
+//! - **glyph char** = `on_surface_variant` at [`GLYPH_FAINT_ALPHA`] (Glyph's
+//!   "faintest" ghost ink — no opaque `ColorScheme` role exists for it, so a
+//!   true alpha wash stands in).
+//! - **title** = `on_surface`; **desc** = `on_surface_variant`.
+//! - **dashed border** = `outline`.
+//!
+//! Unthemed, each falls back to the literal Glyph **dark** constant.
+//!
+//! # Dashed border
+//!
+//! [`frust_core::PaintScene`] has no dashed-stroke primitive, so the border is
+//! drawn as a run of short [`frust_core::PaintScene::stroke_line`] segments
+//! ([`DASH_LEN`] on, [`DASH_GAP`] off) around a straight-edged rectangle inset
+//! half the stroke width — the documented approximation of the source's
+//! `border:1px dashed`.
+
+use frust_core::accesskit::Role;
+use frust_core::{
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+};
+use frust_text::{
+    FontFamily, FontWeight, GenericSlot, LineHeight, TextContext, TextLayout, TextStyle,
+};
+use frust_theme::Theme;
+use kurbo::{Point, Size, Vec2};
+use peniko::Color;
+
+/// Content padding on all four edges, in logical px.
+const EMPTY_PADDING: f64 = 24.0;
+/// Gap below the big glyph char, in logical px.
+const EMPTY_GLYPH_GAP: f64 = 12.0;
+/// Gap below the title, in logical px.
+const EMPTY_TITLE_GAP: f64 = 6.0;
+/// Gap above the action slot, in logical px.
+const EMPTY_ACTION_GAP: f64 = 16.0;
+/// Border width, in logical px.
+const EMPTY_BORDER_WIDTH: f64 = 1.0;
+/// Dash on-length, in logical px.
+const DASH_LEN: f64 = 6.0;
+/// Dash off-length (gap), in logical px.
+const DASH_GAP: f64 = 4.0;
+
+/// Big centered glyph font size, in logical px.
+const EMPTY_GLYPH_SIZE: f32 = 40.0;
+/// Title font size, in logical px.
+const EMPTY_TITLE_SIZE: f32 = 15.0;
+/// Description font size, in logical px.
+const EMPTY_DESC_SIZE: f32 = 12.5;
+/// Prose line height for the description.
+const EMPTY_DESC_LINE_HEIGHT: f32 = 1.5;
+/// The faint alpha applied to the big glyph char.
+const GLYPH_FAINT_ALPHA: f32 = 0.35;
+
+// ---- Unthemed fallback constants (Glyph **dark** values) ---------------
+
+const EMPTY_BORDER: Color = Color::from_rgb8(0x3e, 0x3f, 0x44); // outline
+const EMPTY_TITLE_FG: Color = Color::from_rgb8(0xf2, 0xea, 0xd9); // fg
+const EMPTY_DESC_FG: Color = Color::from_rgb8(0xa3, 0x9c, 0x88); // fg-muted
+const EMPTY_GLYPH_FG: Color = Color::from_rgb8(0xa3, 0x9c, 0x88); // fg-muted (washed by alpha)
+
+/// The default centered glyph char (an empty-set sign).
+const DEFAULT_GLYPH: &str = "\u{2205}"; // ∅
+
+/// Return `color` with its alpha channel replaced by `alpha`.
+fn with_alpha(color: Color, alpha: f32) -> Color {
+    let c = color.components;
+    Color::new([c[0], c[1], c[2], alpha])
+}
+
+/// A declarative empty-state panel. See the [module docs](self).
+pub struct EmptyStateView<State: 'static> {
+    glyph: String,
+    title: String,
+    desc: String,
+    action: Option<AnyView<State>>,
+}
+
+/// Create an empty-state panel with a `title` and `desc`. Chain
+/// [`EmptyStateView::glyph`] to change the centered char and
+/// [`EmptyStateView::action`] to add an action slot.
+pub fn empty_state<State: 'static>(
+    title: impl Into<String>,
+    desc: impl Into<String>,
+) -> EmptyStateView<State> {
+    EmptyStateView {
+        glyph: DEFAULT_GLYPH.to_string(),
+        title: title.into(),
+        desc: desc.into(),
+        action: None,
+    }
+}
+
+impl<State: 'static> EmptyStateView<State> {
+    /// Override the centered glyph char.
+    pub fn glyph(mut self, glyph: impl Into<String>) -> Self {
+        self.glyph = glyph.into();
+        self
+    }
+
+    /// Set the action slot (rendered centered below the description).
+    pub fn action<V: View<State>>(mut self, view: V) -> Self {
+        self.action = Some(any(view));
+        self
+    }
+}
+
+/// A minimal retained text run — see [`super::badge`]'s `GlyphLabel`.
+struct GlyphLabel {
+    content: String,
+    layout: Option<TextLayout>,
+    laid_out_style: Option<TextStyle>,
+    laid_out_max_width: Option<f32>,
+}
+
+impl GlyphLabel {
+    fn new(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            layout: None,
+            laid_out_style: None,
+            laid_out_max_width: None,
+        }
+    }
+
+    fn set_content(&mut self, content: impl Into<String>) {
+        let content = content.into();
+        if self.content != content {
+            self.content = content;
+            self.layout = None;
+        }
+    }
+
+    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f32>) -> Size {
+        if let Some(cached) = &self.layout
+            && self.laid_out_max_width == max_width
+            && self.laid_out_style.as_ref() == Some(style)
+        {
+            return cached.size();
+        }
+        let text_ctx = ctx.text_context::<TextContext>();
+        let laid = text_ctx.layout(&self.content, style, max_width);
+        let size = laid.size();
+        self.layout = Some(laid);
+        self.laid_out_style = Some(style.clone());
+        self.laid_out_max_width = max_width;
+        size
+    }
+
+    fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
+        if let Some(layout) = &self.layout {
+            for run in layout.to_scene_runs(origin) {
+                scene.draw_glyph_run(run);
+            }
+        }
+    }
+}
+
+/// The retained widget for an [`EmptyStateView`].
+pub struct EmptyStateWidget<State: 'static> {
+    glyph: GlyphLabel,
+    glyph_size: Size,
+    title: GlyphLabel,
+    title_text: String,
+    title_size: Size,
+    desc: GlyphLabel,
+    desc_text: String,
+    desc_size: Size,
+    action: Option<ChildPod>,
+    action_size: Size,
+    _state: std::marker::PhantomData<State>,
+}
+
+impl<State: 'static> View<State> for EmptyStateView<State> {
+    type Element = EmptyStateWidget<State>;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> EmptyStateWidget<State> {
+        EmptyStateWidget {
+            glyph: GlyphLabel::new(self.glyph.clone()),
+            glyph_size: Size::ZERO,
+            title: GlyphLabel::new(self.title.clone()),
+            title_text: self.title.clone(),
+            title_size: Size::ZERO,
+            desc: GlyphLabel::new(self.desc.clone()),
+            desc_text: self.desc.clone(),
+            desc_size: Size::ZERO,
+            action: self.action.as_ref().map(|v| crate::build_child(v, ctx)),
+            action_size: Size::ZERO,
+            _state: std::marker::PhantomData,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut EmptyStateWidget<State>,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let mut flags = ChangeFlags::NONE;
+        if prev.glyph != self.glyph {
+            element.glyph.set_content(self.glyph.clone());
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.title != self.title {
+            element.title.set_content(self.title.clone());
+            element.title_text = self.title.clone();
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.desc != self.desc {
+            element.desc.set_content(self.desc.clone());
+            element.desc_text = self.desc.clone();
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        match (&prev.action, &self.action, element.action.as_mut()) {
+            (Some(p), Some(n), Some(pod)) => flags |= crate::rebuild_child(p, n, pod, ctx),
+            (None, Some(n), _) => {
+                element.action = Some(crate::build_child(n, ctx));
+                flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            }
+            (Some(p), None, Some(_)) => {
+                if let Some(mut pod) = element.action.take() {
+                    crate::teardown_child(p, &mut pod, ctx);
+                }
+                flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            }
+            _ => {}
+        }
+        flags
+    }
+
+    fn teardown(&self, element: &mut EmptyStateWidget<State>, ctx: &mut BuildCtx<'_>) {
+        if let (Some(v), Some(pod)) = (self.action.as_ref(), element.action.as_mut()) {
+            crate::teardown_child(v, pod, ctx);
+        }
+    }
+}
+
+fn glyph_style(color: Color) -> TextStyle {
+    TextStyle {
+        family: FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace),
+        weight: FontWeight::BOLD,
+        ..TextStyle::new(EMPTY_GLYPH_SIZE, color)
+    }
+}
+
+fn title_style(color: Color) -> TextStyle {
+    TextStyle {
+        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        weight: FontWeight::MEDIUM,
+        ..TextStyle::new(EMPTY_TITLE_SIZE, color)
+    }
+}
+
+fn desc_style(color: Color) -> TextStyle {
+    TextStyle {
+        family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        weight: FontWeight::REGULAR,
+        line_height: LineHeight::FontSizeRelative(EMPTY_DESC_LINE_HEIGHT),
+        ..TextStyle::new(EMPTY_DESC_SIZE, color)
+    }
+}
+
+/// Resolve `(border, glyph, title, desc)` colors.
+fn resolve_colors(theme: Option<&Theme>) -> (Color, Color, Color, Color) {
+    match theme {
+        Some(theme) => {
+            let s = theme.scheme();
+            (
+                s.outline,
+                with_alpha(s.on_surface_variant, GLYPH_FAINT_ALPHA),
+                s.on_surface,
+                s.on_surface_variant,
+            )
+        }
+        None => (
+            EMPTY_BORDER,
+            with_alpha(EMPTY_GLYPH_FG, GLYPH_FAINT_ALPHA),
+            EMPTY_TITLE_FG,
+            EMPTY_DESC_FG,
+        ),
+    }
+}
+
+/// Stroke a dashed straight-edged rectangle border along the perimeter of the
+/// box at `origin`/`size` (see the module docs' Dashed border note).
+fn stroke_dashed_rect(scene: &mut dyn PaintScene, origin: Point, size: Size, color: Color) {
+    let half = EMPTY_BORDER_WIDTH / 2.0;
+    let x0 = origin.x + half;
+    let y0 = origin.y + half;
+    let x1 = origin.x + size.width - half;
+    let y1 = origin.y + size.height - half;
+    let step = DASH_LEN + DASH_GAP;
+
+    // Horizontal edges (top y0, bottom y1).
+    let mut x = x0;
+    while x < x1 {
+        let end = (x + DASH_LEN).min(x1);
+        scene.stroke_line(
+            Point::new(x, y0),
+            Point::new(end, y0),
+            EMPTY_BORDER_WIDTH,
+            color,
+        );
+        scene.stroke_line(
+            Point::new(x, y1),
+            Point::new(end, y1),
+            EMPTY_BORDER_WIDTH,
+            color,
+        );
+        x += step;
+    }
+    // Vertical edges (left x0, right x1).
+    let mut y = y0;
+    while y < y1 {
+        let end = (y + DASH_LEN).min(y1);
+        scene.stroke_line(
+            Point::new(x0, y),
+            Point::new(x0, end),
+            EMPTY_BORDER_WIDTH,
+            color,
+        );
+        scene.stroke_line(
+            Point::new(x1, y),
+            Point::new(x1, end),
+            EMPTY_BORDER_WIDTH,
+            color,
+        );
+        y += step;
+    }
+}
+
+impl<State: 'static> Widget for EmptyStateWidget<State> {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let theme = Theme::from_layout_ctx(ctx);
+        let (_, glyph_c, title_c, desc_c) = resolve_colors(theme);
+
+        let inner_max_w = if bc.max().width.is_finite() {
+            Some((bc.max().width - EMPTY_PADDING * 2.0).max(0.0) as f32)
+        } else {
+            None
+        };
+
+        self.glyph_size = self.glyph.layout(ctx, &glyph_style(glyph_c), None);
+        self.title_size = self.title.layout(ctx, &title_style(title_c), inner_max_w);
+        self.desc_size = self.desc.layout(ctx, &desc_style(desc_c), inner_max_w);
+
+        let mut content_h = self.glyph_size.height
+            + EMPTY_GLYPH_GAP
+            + self.title_size.height
+            + EMPTY_TITLE_GAP
+            + self.desc_size.height;
+        let mut content_w = self
+            .glyph_size
+            .width
+            .max(self.title_size.width)
+            .max(self.desc_size.width);
+
+        if let Some(pod) = self.action.as_mut() {
+            let action_bc = BoxConstraints::new(
+                Size::ZERO,
+                Size::new(
+                    inner_max_w.map(|w| w as f64).unwrap_or(f64::INFINITY),
+                    f64::INFINITY,
+                ),
+            );
+            self.action_size = pod.layout_child(ctx, &action_bc);
+            content_h += EMPTY_ACTION_GAP + self.action_size.height;
+            content_w = content_w.max(self.action_size.width);
+        } else {
+            self.action_size = Size::ZERO;
+        }
+
+        let width = if bc.max().width.is_finite() {
+            bc.max().width
+        } else {
+            content_w + EMPTY_PADDING * 2.0
+        };
+        let height = content_h + EMPTY_PADDING * 2.0;
+        let size = bc.constrain(Size::new(width, height));
+
+        // Center the action slot horizontally now that the final width is known.
+        if let Some(pod) = self.action.as_mut() {
+            let ax = (size.width - self.action_size.width) / 2.0;
+            let ay = size.height - EMPTY_PADDING - self.action_size.height;
+            pod.set_origin(Point::new(ax, ay));
+        }
+        size
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let theme = Theme::from_paint_ctx(ctx);
+        let (border, _, _, _) = resolve_colors(theme);
+        let o = ctx.origin();
+        let size = ctx.size();
+
+        stroke_dashed_rect(scene, o, size, border);
+
+        let center_x = size.width / 2.0;
+        let mut y = EMPTY_PADDING;
+        self.glyph.paint(
+            o + Vec2::new(center_x - self.glyph_size.width / 2.0, y),
+            scene,
+        );
+        y += self.glyph_size.height + EMPTY_GLYPH_GAP;
+        self.title.paint(
+            o + Vec2::new(center_x - self.title_size.width / 2.0, y),
+            scene,
+        );
+        y += self.title_size.height + EMPTY_TITLE_GAP;
+        self.desc.paint(
+            o + Vec2::new(center_x - self.desc_size.width / 2.0, y),
+            scene,
+        );
+
+        if let Some(pod) = self.action.as_mut() {
+            pod.paint_child(ctx, scene);
+        }
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        if let Some(pod) = self.action.as_mut() {
+            return crate::route_event_single(pod, ctx, event);
+        }
+        EventResult::Ignored
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        ctx.push_container(
+            Role::GenericContainer,
+            |node| {
+                node.set_label(self.title_text.as_str());
+                node.set_description(self.desc_text.as_str());
+            },
+            |ctx| {
+                if let Some(pod) = self.action.as_ref() {
+                    pod.semantics_child(ctx);
+                }
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust_theme::Brightness;
+    use std::any::Any;
+
+    #[derive(Default)]
+    struct Recorder {
+        lines: Vec<(Point, Point, Color)>,
+        glyph_colors: Vec<Color>,
+    }
+
+    impl PaintScene for Recorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn stroke_line(&mut self, p0: Point, p1: Point, _w: f64, color: Color) {
+            self.lines.push((p0, p1, color));
+        }
+        fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+            if let peniko::Brush::Solid(c) = run.brush {
+                self.glyph_colors.push(c);
+            }
+        }
+    }
+
+    fn build<S: 'static>(view: &EmptyStateView<S>) -> EmptyStateWidget<S> {
+        let mut counter = 0u64;
+        View::<S>::build(view, &mut BuildCtx::new(&mut counter))
+    }
+
+    fn layout_and_paint<S: 'static>(
+        widget: &mut EmptyStateWidget<S>,
+        theme: Option<&Theme>,
+    ) -> Recorder {
+        let mut tcx = TextContext::new();
+        let mut lctx = match theme {
+            Some(t) => {
+                LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), Some(t as &dyn Any))
+            }
+            None => LayoutCtx::with_text_context(&mut tcx as &mut dyn Any),
+        };
+        let size = widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(400.0, 400.0)));
+        let mut rec = Recorder::default();
+        let mut pctx = match theme {
+            Some(t) => PaintCtx::new(Point::ZERO, size).with_theme(t),
+            None => PaintCtx::new(Point::ZERO, size),
+        };
+        widget.paint(&mut pctx, &mut rec);
+        rec
+    }
+
+    #[test]
+    fn unthemed_paints_dashed_border_and_faint_glyph() {
+        let view: EmptyStateView<()> = empty_state("Nothing here", "Add something to begin");
+        let mut w = build(&view);
+        let rec = layout_and_paint(&mut w, None);
+        // Multiple dash segments (not a single stroke) → dashed border.
+        assert!(rec.lines.len() > 4, "dashed border emits many segments");
+        assert!(rec.lines.iter().all(|(_, _, c)| *c == EMPTY_BORDER));
+        // The big glyph run is the faint-alpha wash.
+        assert_eq!(
+            rec.glyph_colors[0],
+            with_alpha(EMPTY_GLYPH_FG, GLYPH_FAINT_ALPHA)
+        );
+    }
+
+    #[test]
+    fn glyph_dark_and_light_borders_differ() {
+        let dark = Theme::glyph_baseline();
+        let light = dark.clone().with_brightness(Brightness::Light);
+        let view: EmptyStateView<()> = empty_state("t", "d");
+        let mut wd = build(&view);
+        let mut wl = build(&view);
+        let rec_d = layout_and_paint(&mut wd, Some(&dark));
+        let rec_l = layout_and_paint(&mut wl, Some(&light));
+        assert_eq!(rec_d.lines[0].2, dark.scheme().outline);
+        assert_eq!(rec_l.lines[0].2, light.scheme().outline);
+        assert_ne!(dark.scheme().outline, light.scheme().outline);
+    }
+
+    #[test]
+    fn default_glyph_is_the_empty_set_sign() {
+        let view: EmptyStateView<()> = empty_state("t", "d");
+        let w = build(&view);
+        assert_eq!(w.glyph.content, DEFAULT_GLYPH);
+    }
+
+    #[test]
+    fn action_slot_receives_press_events() {
+        #[derive(Default)]
+        struct Counter {
+            presses: u32,
+        }
+        let view: EmptyStateView<Counter> =
+            empty_state("Empty", "Add one")
+                .action(crate::button::<Counter, _>("add", |s: &mut Counter| {
+                    s.presses += 1
+                }));
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 300.0)));
+
+        let ao = w.action.as_ref().unwrap().origin();
+        let mut state = Counter::default();
+        let ev = |phase, x: f64, y: f64| {
+            InputEvent::Pointer(frust_core::PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: frust_core::PointerButton::Primary,
+            })
+        };
+        let dispatch = |w: &mut EmptyStateWidget<Counter>, s: &mut Counter, e: &InputEvent| {
+            let sa: &mut dyn Any = s;
+            let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(400.0, 300.0));
+            w.event(&mut ctx, e)
+        };
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(frust_core::PointerPhase::Down, ao.x + 4.0, ao.y + 4.0),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(frust_core::PointerPhase::Up, ao.x + 4.0, ao.y + 4.0),
+        );
+        assert_eq!(state.presses, 1);
+    }
+
+    #[test]
+    fn semantics_forwards_action_and_carries_title_desc() {
+        fn logic(_s: &mut ()) -> EmptyStateView<()> {
+            empty_state("No results", "Try another search").action(crate::text::text("retry"))
+        }
+        let mut root: frust_core::RenderRoot<(), EmptyStateView<()>> =
+            frust_core::RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(300.0, 300.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::GenericContainer)
+            .expect("empty state contributes a Role::GenericContainer node");
+        assert_eq!(node.label(), Some("No results"));
+        assert_eq!(node.description(), Some("Try another search"));
+        assert!(
+            !node.children().is_empty(),
+            "the action is a semantics child"
+        );
+    }
+}
