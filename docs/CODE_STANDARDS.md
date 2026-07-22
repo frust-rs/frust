@@ -146,11 +146,11 @@ Structure) follow these conventions:
   `frust-plugin::android::with_jni_env`'s scoped `AttachGuard`.
 - **No panics/unwinds near an FFI boundary**, the same rule as shell exports (Language Idioms, above).
 - **Platform plugins never depend on `frust-*` framework crates**
-  (`frust-plugin` + FFI crates only); **facade plugins depend on `frust`
-  alone**. A plugin needing both splits into a platform-core plus facade-glue crate.
-- **A store shared with the OS namespaces its keys `frust.`**
-  (NSUserDefaults, Android SharedPreferences) so plugin keys can't collide
-  with other libraries'.
+  (`frust-plugin` + `frust-paths` + FFI crates only); **facade plugins depend
+  on `frust` alone**. A plugin needing both splits into a platform-core plus
+  facade-glue crate.
+- **A store shared with the OS namespaces its keys `frust.`** (NSUserDefaults,
+  Android SharedPreferences) so plugin keys can't collide with other libraries'.
 - **An Android plugin's app-side Kotlin lives under `dev.frust`, beside
   the generated `FrustSurfaceView.kt`.** The package/class name is a hard
   JNI lookup contract; ship the canonical file for a caller to copy in

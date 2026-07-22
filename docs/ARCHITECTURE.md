@@ -29,7 +29,8 @@ consumed by app code via the `frust` facade crate, and example apps under
 | `frust-tui` | Mouse-first ratatui TEA workbench: `engine` (pure `AppState`/`Message`/`update`, returning an `Effect` for the impure actions `update` itself can't perform — stop/launch a session, clipboard copy — that the runner enacts; an mpsc-channeled `Engine`), `ui` (layout/views/theme/a per-frame mouse-region registry with hover, an ANSI-aware session log view — renders `&AppState` only, never mutates the engine), `supervise` (the session-supervision layer: a session is keyed by project root × device target × build mode, moving through a `Configuring→Building→Installing→Running→Exited`/`Killed` lifecycle inferred tolerantly from streamed output; a std drain thread per session bridges `frust-drive`'s blocking `spawn_streaming` handle into a bounded tokio mpsc the engine selects on, coalescing each ready burst of lines into one `Lines` batch send and applying a drop-newest + counted-overflow policy on a full channel — one layer above `frust-drive`'s drop-oldest ring, see the `ProcessRunner` row below), and a tokio-driven `runner` (terminal lifecycle, crossterm event loop, dirty-frame skip, effect enactment). Layered on this triad as further `ActiveModal`/overlay state, not a new tier: a bootstrap wizard projecting `frust-drive`'s doctor report into a guided-fix flow (auto-runnable fixes run as an ad-hoc supervised session, re-preflighting on exit); a fuzzy command palette + toast stack (the palette's command registry doubles as the single source a generated help overlay renders from); right-click context menus and drag regions (sidebar resize, log scrollbar) riding the same mouse-region registry; a per-session perf sparkline panel parsing `frust-perf` trace lines out of that session's log stream; and an Add Plugin dialog (a key / sidebar / palette command) walking Select→Options→Applying→Report over `frust-drive::plugin::add_plugin`. Depends on `frust-drive` only; no other framework crate. |
 | `frust-cli` | Standalone `frust` binary: a thin clap front-end. `commands::dispatch` constructs one `RealProcessRunner` and injects it into every handler, which calls `frust-drive` for scaffolding, doctor/device checks, and the run/build/clean drive pipelines, and `frust-tui` for the `tui` subcommand. Depends on `frust-drive` + `frust-tui`; no direct dependency on the framework crates above. |
 | `frust-plugin` | Leaf plugin substrate (like `frust-reactive`): owns the Android `(JavaVM, application Context)` platform-handle install a plugin needs to reach the OS through FFI — the shell's `nativeInitPlatform` calls `android::initialize` once, which writes the handles into `ndk-context`'s process-wide slot and sets an atomic ready flag; a plugin reads them back via `android::with_jni_env` (a scoped JNI attach), gated on that flag first — see Data Flow's Plugin flow. No `frust-*` dependencies; inert (the flag never sets, so calls always report `NotInitialized`) on non-Android targets so it stays an unconditional plugin dependency. On Apple there is nothing to publish — the ObjC runtime is globally reachable via `objc2`. |
-| `frust-shared-preferences` (`plugins/shared-preferences`) | The first **platform plugin**: a synchronous, thread-safe key-value store (`bool`/`i64`/`f64`/`String`/`Vec<String>`) behind one `SharedPreferences` API, routed by `#[cfg(target_os)]` to three backends — `apple` (`NSUserDefaults` via `objc2`, also serving macOS desktop preview), `android` (`Context.getSharedPreferences` via `frust-plugin`), `file` (a JSON file on Linux/Windows). Depends on `frust-plugin` plus FFI crates only, never on a `frust-*` framework crate. |
+| `frust-paths` | Leaf substrate crate (like `frust-plugin`/`frust-reactive`): desktop data/cache directory resolution per XDG (Unix)/`APPDATA`+`LOCALAPPDATA` (Windows) conventions, per-binary `app_stem()` namespacing, and an `atomic_write` temp-file-then-rename helper. No `frust-*` dependencies. Consumed by `frust-shared-preferences`' `file` backend (see below) and by both the desktop and Android shells' pipeline-cache persistence (see Data Flow's GPU pipeline cache). |
+| `frust-shared-preferences` (`plugins/shared-preferences`) | The first **platform plugin**: a synchronous, thread-safe key-value store (`bool`/`i64`/`f64`/`String`/`Vec<String>`) behind one `SharedPreferences` API, routed by `#[cfg(target_os)]` to three backends — `apple` (`NSUserDefaults` via `objc2`, also serving macOS desktop preview), `android` (`Context.getSharedPreferences` via `frust-plugin`), `file` (a JSON file on Linux/Windows, its directory resolution and atomic write delegated to `frust-paths`). Depends on `frust-plugin` + `frust-paths` plus FFI crates only, never on any other `frust-*` framework crate. |
 | `frust-secure-storage` (`plugins/secure-storage`) | The secure sibling of `frust-shared-preferences`: a synchronous, typed `SecureStorage` named-store API (`frust.ss.<store>` namespace, String values) with an optional per-store biometric gate, routed by `#[cfg(target_os)]` to `apple` (Keychain via `objc2-security`, gate via `SecAccessControl`+`LAContext`), `android` (`AndroidKeyStore` AES-256-GCM via `frust-plugin`, gate via framework `BiometricPrompt` plus an app-supplied `dev.frust.FrustBiometric` Kotlin helper), and `desktop` linux/windows (`keyring-core` over secret-service/Credential Manager, gate permanently unsupported); `file` is test-only. A gated call blocks on the system prompt, so callers pair it with `frust-reactive::spawn_blocking` — never on the UI thread (see `docs/CODE_STANDARDS.md`). Depends on `frust-plugin` plus FFI crates only. |
 | `clean-signals-frust` (`plugins/clean-signals-frust`) | The first **facade-tier plugin**: a glue crate binding the (separately published) `clean-signals` clean-architecture core to Frust — nothing more than a crate depending on `frust`, sitting above the whole framework graph. A standalone workspace excluded from the root Cargo workspace (like `examples/huddle`), since its `clean-signals` dependency is a sibling-checkout path dep until `clean-signals` publishes to crates.io (see `docs/DEVELOPMENT.md`). |
 
@@ -44,8 +45,8 @@ frust-reactive       (leaf: reactive_graph + any_spawner + tokio only — no cor
 frust-theme          = peniko + frust-text (+ frust-core, a reverse edge for its from_paint_ctx/from_layout_ctx accessors only — core never depends on theme, so no cycle)
 frust-widgets       = core + scene + text + theme
 frust-shell-common  = core + scene + text + theme             (platform-agnostic; no jni/ndk/winit, no unsafe, reactive-free in shipped deps)
-frust-shell-desktop = core + scene + render + text + theme + winit + reactive    (non-Android integration point)
-frust-shell-android = core + scene + render + text + theme + reactive + shell-common + jni/ndk + frust-plugin (Android-gated)  (Android integration point; JNI FFI)
+frust-shell-desktop = core + scene + render + text + theme + winit + reactive + frust-paths    (non-Android integration point)
+frust-shell-android = core + scene + render + text + theme + reactive + shell-common + jni/ndk + frust-plugin + frust-paths (Android-gated)  (Android integration point; JNI FFI)
 frust-shell-ios     = core + scene + render + text + theme + reactive + shell-common           (iOS integration point; C-ABI FFI)
 frust  = core + widgets + reactive + shell-android (always) + shell-ios (always) + shell-desktop (non-Android only)
 
@@ -53,22 +54,23 @@ frust-drive  (leaf: no frust-* deps, no framework-crate deps — process/devices
 frust-cli (bin) → frust-tui → frust-drive  (clap front-end → ratatui/crossterm TEA workbench → drive library; no other framework crate)
 
 frust-plugin  (leaf: no frust-* deps; Android-only jni/ndk-context, target-gated; inert stub elsewhere)
+frust-paths   (leaf: no frust-* deps; desktop data/cache-dir resolution + atomic_write + app_stem)
 plugins/*     (beside the facade, never inside it — the facade never depends on or re-exports a plugin)
-    ├── frust-shared-preferences  = frust-plugin + FFI crates only   (platform plugin)
+    ├── frust-shared-preferences  = frust-plugin + frust-paths + FFI crates only   (platform plugin)
     ├── frust-secure-storage      = frust-plugin + FFI crates only   (platform plugin)
     └── clean-signals-frust      = frust alone                      (facade plugin)
 ```
 
-**Plugins are a tier beside the facade, not inside it.** `frust-plugin` is
-a leaf by charter — no outgoing `frust-*` edges — though `frust-shell-android`
-now depends on it (Android-gated) to install platform handles via its
-`initialize` entry; a plugin only reads them back. A **platform plugin**
-depends on `frust-plugin` plus FFI crates and never on a `frust-*` framework
-crate (keeps it tiny and cycle-free); a **facade plugin** depends on `frust`
-alone and sits above the whole graph. Either way the facade never depends on
-or re-exports a plugin — an app adds one directly to its own `Cargo.toml`,
-the Flutter-pubspec model (see `docs/CODE_STANDARDS.md`'s Plugin
-Conventions).
+**Plugins are a tier beside the facade, not inside it.** `frust-plugin` and
+`frust-paths` are leaves by charter — no outgoing `frust-*` edges — though
+`frust-shell-android` depends on `frust-plugin` (Android-gated, installs
+platform handles) and both shells depend on `frust-paths` (pipeline-cache
+persistence); a plugin only reads `frust-plugin`'s handles back. A **platform
+plugin** depends on `frust-plugin` + `frust-paths` plus FFI crates, never on
+any other `frust-*` framework crate; a **facade plugin** depends on `frust`
+alone, above the whole graph. Either way the facade never depends on or
+re-exports a plugin — an app adds one directly to its own `Cargo.toml`, the
+Flutter-pubspec model (see `docs/CODE_STANDARDS.md`'s Plugin Conventions).
 
 **`frust-reactive` is a leaf substrate**, consumed by the three shells and
 the `frust` facade — never by `frust-core`/`frust-scene`/
@@ -364,9 +366,7 @@ atomic ready flag that `with_jni_env` checks first, returning
 attaches the calling thread for the closure's scope only (detaching on
 return — Frust doesn't own the thread), and hands back a live JNI env plus
 the context. On Apple there is no init step: the ObjC runtime is globally
-reachable via `objc2`. A project scaffolded before this plumbing existed
-just gets `PlatformHandleError::NotInitialized` on first plugin call, never
-a panic (see `docs/DEVELOPMENT.md`'s manual gate).
+reachable via `objc2`.
 
 **Plugin contributions (OS-side).** A plugin needing an OS-side contribution
 (a manifest permission, a Kotlin helper file, an Info.plist key, a Cargo.toml
