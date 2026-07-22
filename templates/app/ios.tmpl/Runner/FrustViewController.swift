@@ -326,7 +326,18 @@ final class FrustViewController: UIViewController {
         // wall-clock value) — see frust-core::anim's FrameTime contract.
         // Don't "fix" this by reordering the multiply/cast without reading
         // that contract first.
-        frust_render_frame(handle, UInt64(link.timestamp * 1_000_000_000))
+        let alive = frust_render_frame(handle, UInt64(link.timestamp * 1_000_000_000))
+        if alive == 0 {
+            // A 0 return is a FATAL, unrecoverable render-thread failure (the
+            // first surface install could not succeed) — latch it exactly like a
+            // failed `frust_init` (so `updateSurface`'s `!initFailed` guard never
+            // re-runs a doomed init) and stop the display link rather than drive
+            // doomed frames against a permanent black screen.
+            initFailed = true
+            displayLink?.invalidate()
+            displayLink = nil
+            NSLog("Frust: render thread reported a fatal error — rendering disabled for this session")
+        }
     }
 
     @objc private func appWillResignActive() {

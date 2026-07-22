@@ -179,13 +179,19 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeOnFrame`: run one Choreographer-driven frame.
+        ///
+        /// Returns `jboolean` (phase-11 fix F2): `false` = a fatal render-thread
+        /// failure (first-surface install could not succeed), on which Kotlin's
+        /// `doFrame` stops the Choreographer loop. The JNI symbol name is
+        /// unchanged; the Kotlin `external` declaration gains the `Boolean` return
+        /// in lockstep (the `nativeOnSurfaceChanged`-density precedent).
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnFrame<'local>(
             _env: $crate::__jni::EnvUnowned<'local>,
             _class: $crate::__jni::JClass<'local>,
             handle: $crate::__jni::jlong,
             frame_time_nanos: $crate::__jni::jlong,
-        ) {
+        ) -> $crate::__jni::jboolean {
             $crate::jni_glue::native_on_frame(handle, frame_time_nanos)
         }
 

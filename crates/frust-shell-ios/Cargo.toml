@@ -56,6 +56,12 @@ anyhow = { workspace = true }
 # plugin crates, and transitively via accesskit_ios), so this adds no new crate —
 # only a dependency edge. Target-gated like the rest of the render/GPU stack.
 objc2 = { workspace = true }
+# Render-thread QoS self-boost (phase-11 fix F6): the split's dedicated render
+# thread calls `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)` at
+# the top of its loop so the scheduler treats its GPU submit work at the UI tier.
+# Confined to the sanctioned-unsafe `ffi_glue` zone; target-gated like the rest
+# of the render/GPU stack.
+libc = { workspace = true }
 # iOS accesskit adapter (phase 6d D3, structurally wired in task 05; never
 # compiled on this host — no macOS, see docs/DEVELOPMENT.md — compiled +
 # verified in phase 6e). Target-gated like the rest of this block.

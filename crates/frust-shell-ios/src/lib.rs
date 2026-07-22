@@ -159,9 +159,18 @@ macro_rules! ios_app {
         /// `timestamp_ns` is the `CADisplayLink` tick's `timestamp`
         /// (`CFTimeInterval` seconds) converted to nanoseconds by the Swift
         /// caller — the shell-owned monotonic frame clock (spec §8).
+        ///
+        /// Returns `u8` (phase-11 fix F2): `0` = a fatal render-thread failure
+        /// (first-surface install could not succeed), on which Swift's
+        /// `renderFrame` latches `initFailed` and invalidates its `CADisplayLink`;
+        /// `1` = keep driving frames. The bridging header's `void` return becomes
+        /// `uint8_t` in lockstep.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
-        pub extern "C" fn frust_render_frame(handle: *mut ::core::ffi::c_void, timestamp_ns: u64) {
+        pub extern "C" fn frust_render_frame(
+            handle: *mut ::core::ffi::c_void,
+            timestamp_ns: u64,
+        ) -> u8 {
             $crate::ffi_glue::render_frame(handle, timestamp_ns)
         }
 

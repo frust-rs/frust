@@ -30,6 +30,8 @@
 
 use std::any::Any;
 use std::ffi::c_void;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -350,18 +352,28 @@ pub(crate) struct SplitExecutor {
     surface_active: bool,
     /// Monotonically increasing per-frame id stamped into [`FrameMeta`].
     frame_id: u64,
+    /// Fatal-signal flag (phase-11 fix F2): the render thread stores `true` here
+    /// if its **first** surface install fails — unrecoverable (an incapable
+    /// GPU/driver can't change mid-process). The UI thread reads it via
+    /// [`IosAppHandle::render_fatal`] each `frust_render_frame` and returns
+    /// [`FRAME_FATAL`](crate::ffi_support::FRAME_FATAL) so Swift latches
+    /// `initFailed` + invalidates its `CADisplayLink`. One clone here, one in the
+    /// render thread ([`crate::ffi_glue::render_loop`]).
+    fatal: Arc<AtomicBool>,
 }
 
 impl SplitExecutor {
     pub(crate) fn new(
         sender: RenderSender<PaintedScene, crate::ffi_glue::SendableMetalLayer>,
         join: JoinHandle<()>,
+        fatal: Arc<AtomicBool>,
     ) -> Self {
         Self {
             sender: Some(sender),
             join: Some(join),
             surface_active: true,
             frame_id: 0,
+            fatal,
         }
     }
 
@@ -811,6 +823,20 @@ impl IosAppHandle {
     /// in `frust_render_frame`/`frust_resize` applies only to the inline path.
     pub(crate) fn executor_is_split(&self) -> bool {
         matches!(self.executor, FrameExecutor::Split(_))
+    }
+
+    /// Whether the render thread signalled a fatal, unrecoverable first-surface
+    /// install failure (phase-11 fix F2), read by
+    /// [`crate::ffi_glue::render_frame`] to tell Swift to latch `initFailed` and
+    /// invalidate its `CADisplayLink`. The split reads its shared `fatal` flag;
+    /// the inline fallback never faults here — a failed first install returns
+    /// `Err` from `create_handle`, so `frust_init` yields a null handle and no
+    /// frame is ever driven — so it is always `false`.
+    pub(crate) fn render_fatal(&self) -> bool {
+        match &self.executor {
+            FrameExecutor::Split(split) => split.fatal.load(Ordering::Acquire),
+            FrameExecutor::Inline(_) => false,
+        }
     }
 
     /// Access to the inline render context + renderer for the FFI layer to drive an

@@ -173,6 +173,28 @@ pub(crate) fn should_recreate_surface(
     matches!(phase, SurfacePhase::SurfaceLost) && !paused && failed_attempts < MAX_RECREATE_ATTEMPTS
 }
 
+/// `frust_render_frame`'s "keep driving frames" return code (phase-11 fix F2).
+pub(crate) const FRAME_ALIVE: u8 = 1;
+
+/// `frust_render_frame`'s "fatal — stop the CADisplayLink" return code
+/// (phase-11 fix F2).
+pub(crate) const FRAME_FATAL: u8 = 0;
+
+/// Map the render thread's fatal-flag state onto `frust_render_frame`'s `u8`
+/// return: [`FRAME_FATAL`] (`0`) when a fatal first-surface install failure was
+/// signalled, else [`FRAME_ALIVE`] (`1`).
+///
+/// A first-surface install failure is unrecoverable (an incapable GPU/driver
+/// can't change mid-process), so the Swift side treats a `0` return exactly like
+/// a failed `frust_init` — latching `initFailed` and invalidating its
+/// `CADisplayLink`. The return is a plain `uint8_t` (not C `_Bool`), matching
+/// this crate's `frust_set_appearance` convention of not pulling in `<stdbool.h>`
+/// at the bridging header.
+#[inline]
+pub(crate) fn frame_liveness_signal(fatal: bool) -> u8 {
+    if fatal { FRAME_FATAL } else { FRAME_ALIVE }
+}
+
 /// The focused field's caret rectangle in **logical** pixels (view-local), the
 /// geometry the Swift `UITextInput` bridge approximates `caretRect(for:)` /
 /// `firstRect(for:)` from. Logical points equal view points on iOS (touch
@@ -332,6 +354,17 @@ mod tests {
     fn frame_is_a_noop_when_surface_not_ready() {
         assert!(!should_render_frame(false, false));
         assert!(!should_render_frame(false, true));
+    }
+
+    #[test]
+    fn frame_liveness_signal_encodes_fatal_as_zero() {
+        // 0 = fatal (Swift latches initFailed + invalidates the CADisplayLink);
+        // 1 = keep driving frames. The non-obvious 0-means-stop encoding is why
+        // this mapping is a named, tested helper rather than an inline literal.
+        assert_eq!(frame_liveness_signal(true), FRAME_FATAL);
+        assert_eq!(frame_liveness_signal(true), 0);
+        assert_eq!(frame_liveness_signal(false), FRAME_ALIVE);
+        assert_eq!(frame_liveness_signal(false), 1);
     }
 
     #[test]

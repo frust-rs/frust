@@ -22,7 +22,12 @@ void  frust_init_accessibility(void *handle, void *view);
 void  frust_resize(void *handle, uint32_t width, uint32_t height, float scale);
 // `timestamp_ns` is the CADisplayLink tick's `timestamp` (CFTimeInterval
 // seconds), converted to nanoseconds by the caller: UInt64(link.timestamp * 1_000_000_000).
-void  frust_render_frame(void *handle, uint64_t timestamp_ns);
+// Returns 0 = FATAL, unrecoverable render-thread failure (the first surface
+// install could not succeed — an incapable GPU/driver); 1 = keep driving
+// frames. On 0 the Swift side latches `initFailed` and invalidates its
+// CADisplayLink (see FrustViewController.renderFrame). uint8_t, not C _Bool,
+// to match frust_set_appearance's no-<stdbool.h> convention.
+uint8_t frust_render_frame(void *handle, uint64_t timestamp_ns);
 // Touch delivery (spec §9). `phase` is a fixed numeric ABI shared with the Rust
 // `frust_dispatch_touch` glue — DO NOT renumber without changing both sides:
 //   0 = began, 1 = moved, 2 = ended, 3 = cancelled.

@@ -38,6 +38,11 @@ anyhow = { workspace = true }
 jni = { workspace = true }
 ndk = { workspace = true }
 ndk-sys = { workspace = true }
+# Render-thread priority self-boost (phase-11 fix F6): the split's dedicated
+# render thread calls `setpriority(PRIO_PROCESS, gettid(), THREAD_PRIORITY_DISPLAY)`
+# at the top of its loop so a busy UI thread can't starve GPU submit. Confined to
+# the sanctioned-unsafe `jni_glue` zone; target-gated like the JNI/NDK deps above.
+libc = { workspace = true }
 # Plugin platform bridge (task 01 / Design Decision 2, fix F1): the shell
 # *writes* the captured `(JavaVM, application Context)` at `nativeInitPlatform`
 # via `frust_plugin::android::initialize`, which owns the `ndk-context` install

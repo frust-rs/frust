@@ -125,6 +125,15 @@ jni = "0.22"
 ndk = "0.9"
 ndk-sys = "0.6"
 android_logger = "0.15"
+# Platform priority self-boost for the render-thread split (phase-11 fix F6):
+# `frust-shell-android` calls `setpriority(THREAD_PRIORITY_DISPLAY)` and
+# `frust-shell-ios` calls `pthread_set_qos_class_self_np(USER_INTERACTIVE)` at
+# the top of their render loops. Target-gated in both shells (only compiles for
+# `--target *-linux-android` / `*-apple-ios*`), so — like the JNI deps above —
+# it lands in Cargo.lock but never builds on the host. Already resolved
+# transitively (via ndk/wgpu-hal/objc2), so adding this edge bumps no version.
+# Floats on 0.2 minor: a ubiquitous, stable platform-binding crate, no pin.
+libc = "0.2"
 # plugin platform-handle storage (frust-plugin, Design Decision 2) — the
 # `(JavaVM, application Context)` slot the Android shell writes at
 # `nativeInitPlatform` and plugins read via `frust-plugin::android`.

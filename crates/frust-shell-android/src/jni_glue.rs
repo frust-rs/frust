@@ -18,9 +18,12 @@
 //! [`native_init_platform`]), the `on_surface_created_from_android_window`
 //! calls that build a `wgpu::Surface` from a raw `ANativeWindow*` (the inline
 //! path's [`build_inline_executor`]/[`native_on_surface_changed`], and the
-//! render-thread split's [`install_surface`]), and the `unsafe impl Send` for
+//! render-thread split's [`install_surface`]), the `unsafe impl Send` for
 //! [`SendableWindowPtr`] — the raw window pointer that crosses the UI→render
-//! channel in the split (plan phase 11.B).
+//! channel in the split (plan phase 11.B) — and the render-thread priority
+//! self-boost `libc::setpriority(PRIO_PROCESS, gettid(), THREAD_PRIORITY_DISPLAY)`
+//! at the top of [`render_loop`] (phase-11 fix F6: a bare libc syscall scoping
+//! itself to the calling thread, best-effort and non-fatal).
 //!
 //! # Render-thread split (plan phase 11.B)
 //!
@@ -37,8 +40,8 @@
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread::JoinHandle;
 
 use accesskit_android::jni as ak_jni;
@@ -545,6 +548,19 @@ fn install_surface(
     Ok(())
 }
 
+/// Android render-thread nice value: `android.os.Process.THREAD_PRIORITY_DISPLAY`
+/// (phase-11 fix F6).
+///
+/// `-4` is a **published platform constant** — the nice value Android's own
+/// UI/display pipeline threads run at, one band above the default (`0`) and below
+/// `THREAD_PRIORITY_URGENT_DISPLAY` (`-8`)
+/// (developer.android.com/reference/android/os/Process#THREAD_PRIORITY_DISPLAY,
+/// retrieved 2026-07-22). [`render_loop`] self-boosts to it via
+/// `setpriority(PRIO_PROCESS, gettid(), ..)` so a busy UI thread can't starve the
+/// GPU submit path; a backgrounded cpuset can legitimately refuse it, so a failure
+/// is logged, never fatal.
+const THREAD_PRIORITY_DISPLAY: libc::c_int = -4;
+
 /// The dedicated render thread's loop (plan phase 11.B): adopt the `JNI_OnLoad`
 /// GPU pre-init [`RenderContext`](frust_render::RenderContext) *on this thread*,
 /// own the `SurfaceRenderer` + surface wholesale, drain lifecycle commands and
@@ -555,12 +571,44 @@ fn install_surface(
 /// `init_entry` + the font-preinit spans before moving the recorder here). Exits
 /// cleanly when the [`RenderSender`](frust_shell_common::RenderSender) is dropped.
 ///
+/// `fatal` is the per-shell fatal flag (phase-11 fix F2): this thread stores
+/// `true` into it if the **first** surface install fails, so the UI thread's
+/// [`native_on_frame`] returns `false` and Kotlin stops the Choreographer loop
+/// (a first-install failure — an incapable GPU/driver — is unrecoverable and
+/// otherwise leaves a permanent black screen with no platform signal). Later
+/// reinstall failures stay log-only.
+///
 /// [`UiSpans`]: frust_shell_common::perf::UiSpans
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableWindowPtr>,
     startup_spans: StartupSpans,
     cache_dir: Option<String>,
+    fatal: Arc<AtomicBool>,
 ) {
+    // Render-thread priority self-boost (phase-11 fix F6): raise this dedicated
+    // render thread to the display band so a busy UI thread can't starve the GPU
+    // submit path. Best-effort — a backgrounded cpuset can refuse it, so a
+    // non-zero return is logged, never fatal (this loop never panics).
+    //
+    // SAFETY: `setpriority`/`gettid` are plain libc syscalls with no
+    // memory-safety preconditions; `gettid()` returns this very thread's kernel
+    // id and `PRIO_PROCESS` scopes the call to it alone. A sanctioned-unsafe FFI
+    // call confined to this module (see the module docs).
+    unsafe {
+        if libc::setpriority(
+            libc::PRIO_PROCESS,
+            libc::gettid() as libc::id_t,
+            THREAD_PRIORITY_DISPLAY,
+        ) != 0
+        {
+            log::warn!(
+                "frust-shell-android: render-thread setpriority(THREAD_PRIORITY_DISPLAY) failed \
+                 ({}); continuing at default priority",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
     let cache_path = cache_dir.as_deref().map(pipeline_cache_path);
     let mut startup_spans = Some(startup_spans);
 
@@ -601,9 +649,21 @@ pub(crate) fn render_loop(
                         first_install,
                     ) {
                         Ok(()) => first_install_done = true,
-                        Err(err) => log::error!(
-                            "frust-shell-android: render-thread surface install failed: {err:#}"
-                        ),
+                        Err(err) => {
+                            log::error!(
+                                "frust-shell-android: render-thread surface install failed: {err:#}"
+                            );
+                            // First-install failure is fatal + unrecoverable (the
+                            // one observed cause — an incapable GPU/driver — can't
+                            // change mid-process). Signal the UI thread so
+                            // `nativeOnFrame` returns false and Kotlin stops the
+                            // Choreographer loop instead of driving doomed frames
+                            // against a permanent black screen (phase-11 fix F2).
+                            // Later reinstall failures stay log-only.
+                            if first_install {
+                                fatal.store(true, Ordering::Release);
+                            }
+                        }
                     }
                 }
                 RenderCommand::SurfaceChanged { size } => {
@@ -908,6 +968,12 @@ fn spawn_split_executor(
         scale: scale as f64,
     };
 
+    // Per-shell fatal flag (phase-11 fix F2): one clone lives in the render
+    // thread (set on a first-install failure), one in the `SplitExecutor` (read
+    // by `native_on_frame`). A plain `Arc<AtomicBool>` — no channel/protocol.
+    let fatal = Arc::new(AtomicBool::new(false));
+    let fatal_render = Arc::clone(&fatal);
+
     // Move `startup_spans` (init_entry + font spans already recorded) into the
     // render thread, which owns the rest of the startup line.
     let join = std::thread::Builder::new()
@@ -917,7 +983,7 @@ fn spawn_split_executor(
         // deadlock fix). A no-op under the release `panic = "abort"` profile.
         .spawn(move || {
             run_guarded_thread("frust-render (android)", move || {
-                render_loop(receiver, startup_spans, cache_dir)
+                render_loop(receiver, startup_spans, cache_dir, fatal_render)
             })
         })
         .expect("frust-shell-android: failed to spawn render thread");
@@ -931,7 +997,7 @@ fn spawn_split_executor(
     });
 
     (
-        FrameExecutor::Split(SplitExecutor::new(sender, join)),
+        FrameExecutor::Split(SplitExecutor::new(sender, join, fatal)),
         text_ctx,
     )
 }
@@ -1076,14 +1142,28 @@ pub fn native_on_surface_destroyed(handle: jlong) {
 /// timestamp (`System.nanoTime()`-based, monotonic); a negative value (should
 /// never happen, but the JNI boundary is untrusted input) clamps to `0` rather
 /// than wrapping through the `as u64` cast.
-pub fn native_on_frame(handle: jlong, frame_time_nanos: jlong) {
-    guard("nativeOnFrame", (), || {
+///
+/// Returns a `jboolean` (a real `bool` in this `jni` crate): `true` = keep
+/// driving frames, `false` = a **fatal** render-thread failure (a first-surface
+/// install that could not succeed — see [`render_loop`]/[`AndroidAppHandle::render_fatal`]),
+/// on which Kotlin's `doFrame` stops the Choreographer loop rather than driving
+/// doomed frames against a permanent black screen (phase-11 fix F2). This is a
+/// signature-shape change moving in lockstep with the Kotlin `external`
+/// declaration (the JNI symbol name is unchanged), following the
+/// `nativeOnSurfaceChanged`-density precedent.
+pub fn native_on_frame(handle: jlong, frame_time_nanos: jlong) -> jboolean {
+    // Benign default `true` on a caught panic: a single frame's failure must not
+    // stop the loop — only a render-thread FATAL does.
+    guard("nativeOnFrame", true, || {
         let frame_time_nanos = crate::ffi_support::frame_time_nanos_from_jlong(frame_time_nanos);
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
-        if let Some(app) = unsafe { handle_mut(handle) } {
-            app.frame(frame_time_nanos);
-        }
-    });
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return true; // no live handle — nothing has faulted; keep the loop alive
+        };
+        app.frame(frame_time_nanos);
+        // `false` (fatal) tells Kotlin to stop the loop; `true` keeps driving.
+        !app.render_fatal()
+    })
 }
 
 /// `nativeOnTouch`: deliver one touch contact to the tree (spec §9).

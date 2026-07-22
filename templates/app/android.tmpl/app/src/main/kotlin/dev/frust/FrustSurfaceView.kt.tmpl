@@ -88,7 +88,13 @@ class FrustSurfaceView(context: Context) :
 
     private external fun nativeOnSurfaceDestroyed(handle: Long)
 
-    private external fun nativeOnFrame(handle: Long, frameTimeNanos: Long)
+    // Returns whether the framework is still healthy: `false` signals a FATAL,
+    // unrecoverable render-thread failure (the first surface install could not
+    // succeed — an incapable GPU/driver), on which [doFrame] stops the
+    // Choreographer loop instead of driving doomed frames against a permanent
+    // black screen. The JNI symbol name is unchanged; this `Boolean` return moves
+    // in lockstep with the Rust `native_on_frame` signature.
+    private external fun nativeOnFrame(handle: Long, frameTimeNanos: Long): Boolean
 
     // Touch delivery (spec §9). `action` is a fixed numeric ABI shared with the
     // Rust `nativeOnTouch` glue — DO NOT renumber without changing both sides:
@@ -551,7 +557,15 @@ class FrustSurfaceView(context: Context) :
         // Once the surface is lost the handle stays valid and the native frame
         // is a cheap no-op, so re-posting is always correct while `running`.
         if (handle != 0L) {
-            nativeOnFrame(handle, frameTimeNanos)
+            // A `false` return is a FATAL, unrecoverable render-thread failure
+            // (first-surface install could not succeed) — stop the loop rather
+            // than drive doomed frames against a permanent black screen. This is
+            // the Android counterpart to iOS's `initFailed` displayLink
+            // invalidation; a new branch beside the `handle == 0L` guard above.
+            if (!nativeOnFrame(handle, frameTimeNanos)) {
+                running = false
+                return
+            }
             // Per-frame IME reconcile: pick up caret moves, field switches, and
             // submit-clears that no InputConnection callback originated.
             // `pollImeAfterDispatch` reconciles the live mirror to the focused

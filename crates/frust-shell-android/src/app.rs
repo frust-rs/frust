@@ -13,6 +13,7 @@
 use std::any::Any;
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -344,18 +345,28 @@ pub(crate) struct SplitExecutor {
     surface_active: bool,
     /// Monotonically increasing per-frame id stamped into [`FrameMeta`].
     frame_id: u64,
+    /// Fatal-signal flag (phase-11 fix F2): the render thread stores `true` here
+    /// if its **first** surface install fails — unrecoverable (an incapable
+    /// GPU/driver can't change mid-process). The UI thread reads it via
+    /// [`AndroidAppHandle::render_fatal`] each `nativeOnFrame` and returns `false`
+    /// to Kotlin so the Choreographer loop stops rather than driving doomed
+    /// frames against a permanent black screen. One clone here, one in the render
+    /// thread ([`crate::jni_glue::render_loop`]).
+    fatal: Arc<AtomicBool>,
 }
 
 impl SplitExecutor {
     pub(crate) fn new(
         sender: RenderSender<PaintedScene, crate::jni_glue::SendableWindowPtr>,
         join: JoinHandle<()>,
+        fatal: Arc<AtomicBool>,
     ) -> Self {
         Self {
             sender: Some(sender),
             join: Some(join),
             surface_active: true,
             frame_id: 0,
+            fatal,
         }
     }
 
@@ -933,6 +944,20 @@ impl AndroidAppHandle {
     /// `unsafe` surface creation directly with [`Self::inline_renderer_mut`].
     pub(crate) fn executor_is_split(&self) -> bool {
         matches!(self.executor, FrameExecutor::Split(_))
+    }
+
+    /// Whether the render thread signalled a fatal, unrecoverable first-surface
+    /// install failure (phase-11 fix F2), read by
+    /// [`crate::jni_glue::native_on_frame`] to tell Kotlin to stop the
+    /// Choreographer loop. The split reads its shared `fatal` flag; the inline
+    /// fallback never faults here — a failed first install returns `Err` from
+    /// `create_handle`, so `nativeInit` yields the `0` handle and no frame is ever
+    /// driven — so it is always `false`.
+    pub(crate) fn render_fatal(&self) -> bool {
+        match &self.executor {
+            FrameExecutor::Split(split) => split.fatal.load(Ordering::Acquire),
+            FrameExecutor::Inline(_) => false,
+        }
     }
 
     /// Access to the inline render context + renderer for the FFI layer to drive

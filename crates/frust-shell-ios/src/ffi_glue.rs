@@ -16,8 +16,11 @@
 //! (raw `UIView*` → adapter, handed to the now-safe
 //! `IosAppHandle::attach_accessibility`), `Box::into_raw`/`from_raw` for the
 //! opaque handle's lifetime, reconstituting the raw handle pointer as a `&mut`,
-//! and the `unsafe impl Send` for [`SendableMetalLayer`] — the raw `CAMetalLayer*`
-//! that crosses the UI→render channel in the split (plan phase 11.B).
+//! the `unsafe impl Send` for [`SendableMetalLayer`] — the raw `CAMetalLayer*`
+//! that crosses the UI→render channel in the split (plan phase 11.B) — and the
+//! render-thread QoS self-boost `libc::pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)`
+//! at the top of [`render_loop`] (phase-11 fix F6: a bare libc call operating on
+//! the calling thread only, best-effort and non-fatal).
 //!
 //! # Render-thread split (plan phase 11.B)
 //!
@@ -47,7 +50,8 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::Write;
-use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Once};
 
 use anyhow::{Context, Result, bail};
 
@@ -338,10 +342,39 @@ fn install_surface(
 /// consecutive failures so a persistently-failing recreate cannot storm. (The
 /// inline path keeps its UI-side `should_recreate_surface` recovery in
 /// `frust_render_frame`/`frust_resize`.)
+///
+/// `fatal` is the per-shell fatal flag (phase-11 fix F2): this thread stores
+/// `true` into it if the **first** surface install fails, so the UI thread's
+/// [`render_frame`] returns [`FRAME_FATAL`](crate::ffi_support::FRAME_FATAL) and
+/// Swift latches `initFailed` + invalidates its `CADisplayLink` (a first-install
+/// failure — an incapable GPU/driver — is unrecoverable and otherwise leaves a
+/// permanent black screen with no platform signal). Later reinstall/self-heal
+/// failures stay log-only.
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableMetalLayer>,
     startup_spans: StartupSpans,
+    fatal: Arc<AtomicBool>,
 ) {
+    // Render-thread QoS self-boost (phase-11 fix F6): tag this dedicated render
+    // thread as user-interactive so the scheduler treats its GPU submit work at
+    // the same tier as the UI thread (a plain `std::thread` starts at a lower,
+    // utility-ish QoS). Best-effort — a non-zero return is logged, never fatal
+    // (this loop never panics).
+    //
+    // SAFETY: `pthread_set_qos_class_self_np` is a plain libc call operating on
+    // the calling thread only, with no memory-safety preconditions. A
+    // sanctioned-unsafe FFI call confined to this module (see the module docs).
+    unsafe {
+        let rc =
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+        if rc != 0 {
+            log::warn!(
+                "frust-shell-ios: render-thread pthread_set_qos_class_self_np(USER_INTERACTIVE) \
+                 failed (rc {rc}); continuing at default QoS"
+            );
+        }
+    }
+
     let mut render_cx = RenderContext::new();
     let mut renderer = SurfaceRenderer::new();
     let mut startup_spans = Some(startup_spans);
@@ -379,9 +412,21 @@ pub(crate) fn render_loop(
                             first_install_done = true;
                             recreate_failures = 0;
                         }
-                        Err(err) => log::error!(
-                            "frust-shell-ios: render-thread surface install failed: {err:#}"
-                        ),
+                        Err(err) => {
+                            log::error!(
+                                "frust-shell-ios: render-thread surface install failed: {err:#}"
+                            );
+                            // First-install failure is fatal + unrecoverable (an
+                            // incapable GPU/driver can't change mid-process).
+                            // Signal the UI thread so `frust_render_frame` returns
+                            // FRAME_FATAL and Swift stops the CADisplayLink instead
+                            // of driving doomed frames against a permanent black
+                            // screen (phase-11 fix F2). Later reinstall/self-heal
+                            // failures below stay log-only.
+                            if first_install {
+                                fatal.store(true, Ordering::Release);
+                            }
+                        }
                     }
                 }
                 RenderCommand::SurfaceChanged { size } => {
@@ -648,6 +693,12 @@ fn spawn_split_executor(
         scale: scale as f64,
     };
 
+    // Per-shell fatal flag (phase-11 fix F2): one clone lives in the render
+    // thread (set on a first-install failure), one in the `SplitExecutor` (read
+    // by `frust_render_frame`). A plain `Arc<AtomicBool>` — no channel/protocol.
+    let fatal = Arc::new(AtomicBool::new(false));
+    let fatal_render = Arc::clone(&fatal);
+
     // Move `startup` (init_entry + font spans already recorded) into the render
     // thread, which owns the rest of the startup line. The raw `metal_layer`
     // pointer is NOT captured by the closure (it is `!Send`); it crosses the
@@ -659,7 +710,9 @@ fn spawn_split_executor(
         // owned `RenderReceiver`, which drains any orphaned `Ack` — the barrier
         // deadlock fix). A no-op under the release `panic = "abort"` profile.
         .spawn(move || {
-            run_guarded_thread("frust-render (ios)", move || render_loop(receiver, startup))
+            run_guarded_thread("frust-render (ios)", move || {
+                render_loop(receiver, startup, fatal_render)
+            })
         })
         .expect("frust-shell-ios: failed to spawn render thread");
 
@@ -672,7 +725,7 @@ fn spawn_split_executor(
     });
 
     (
-        FrameExecutor::Split(SplitExecutor::new(sender, join)),
+        FrameExecutor::Split(SplitExecutor::new(sender, join, fatal)),
         text_ctx,
     )
 }
@@ -773,10 +826,24 @@ pub fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
 /// seconds), converted to nanoseconds by the Swift caller
 /// (`UInt64(link.timestamp * 1_000_000_000)`) — the shell-owned monotonic
 /// frame clock threaded into [`frust_core::FrameTime`] (spec §8).
-pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) {
-    guard("frust_render_frame", (), || {
-        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
-        if let Some(app) = unsafe { handle_mut(handle) } {
+///
+/// Returns a `u8` (phase-11 fix F2): [`FRAME_FATAL`](crate::ffi_support::FRAME_FATAL)
+/// (`0`) = a fatal render-thread failure (first-surface install could not
+/// succeed — see [`render_loop`]/[`IosAppHandle::render_fatal`]), on which Swift's
+/// `renderFrame` latches `initFailed` and invalidates its `CADisplayLink`;
+/// [`FRAME_ALIVE`](crate::ffi_support::FRAME_ALIVE) (`1`) = keep driving frames.
+/// The bridging header's `void` return becomes `uint8_t` in lockstep.
+pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) -> u8 {
+    // Benign default `FRAME_ALIVE` on a caught panic: a single frame's failure
+    // must not stop the CADisplayLink — only a render-thread FATAL does.
+    guard(
+        "frust_render_frame",
+        crate::ffi_support::FRAME_ALIVE,
+        || {
+            // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+            let Some(app) = (unsafe { handle_mut(handle) }) else {
+                return crate::ffi_support::FRAME_ALIVE; // no live handle — nothing faulted
+            };
             // Inline-only surface recovery (the split self-heals render-side).
             let recover = !app.executor_is_split()
                 && app.inline_phase().is_some_and(|phase| {
@@ -791,13 +858,14 @@ pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) {
                 recover_surface(app, physical, scale);
             }
             // In the split, the first-presented-frame startup span is recorded
-            // render-side inside `render_scene` (the render thread is the single
-            // perf emitter); in the inline path it is recorded there too, since
-            // both paths share `render_scene`. So `frame` no longer returns
-            // anything for the FFI layer to latch.
+            // render-side inside `render_scene` (the render thread is the single perf
+            // emitter); in the inline path it is recorded there too, since both paths
+            // share `render_scene`. So `frame` returns nothing — the liveness signal
+            // comes from the fatal flag the render thread sets (phase-11 fix F2).
             app.frame(timestamp_ns);
-        }
-    });
+            crate::ffi_support::frame_liveness_signal(app.render_fatal())
+        },
+    )
 }
 
 /// `frust_dispatch_touch`: deliver one touch contact to the tree (spec §9).
