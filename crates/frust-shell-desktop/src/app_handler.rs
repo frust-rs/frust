@@ -46,6 +46,7 @@ use frust_core::event::{
 use frust_core::view::View;
 use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
 use frust_scene::{Scene, SceneBuilder};
+use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::UiSpans;
 use frust_shell_common::{
     SurfaceSize, ThemeOverrideWatcher, effective_brightness_for_platform_change,
@@ -201,7 +202,16 @@ where
         theme_seeded: false,
         theme_override: ThemeOverrideWatcher::new(),
         theme_override_active: false,
+        font_registry: FontRegistryWatcher::new(),
     };
+
+    // Construction-time font drain (task 14): apply any fonts registered via
+    // `frust::register_app_fonts` before `run` (app construction) into the
+    // shell-owned `TextContext` before the first layout — inline, on this UI
+    // thread. Pre-first-layout, so no invalidation/relayout is needed; the
+    // per-frame poll in `RedrawRequested` picks up any later registration.
+    handler.font_registry.drain_into(&mut handler.text_ctx);
+
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
 }
@@ -467,6 +477,13 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// the override wins entirely until `clear_app_theme` runs (see
     /// `effective_brightness_for_platform_change`).
     theme_override_active: bool,
+    /// Polls the process-wide app-facing pending-font registry
+    /// (`frust::register_app_fonts`, task 14) once per frame, before rebuild in
+    /// `RedrawRequested` (beside `theme_override`) — draining any late
+    /// registration into `text_ctx`. Also drained once at construction time (in
+    /// `run_desktop`, before the first frame). See
+    /// `frust_shell_common::font_registry`'s module docs.
+    font_registry: FontRegistryWatcher,
 }
 
 impl<State, Logic, V> ShellHandler<State, Logic, V>
@@ -901,6 +918,20 @@ where
                         self.apply_theme(&window);
                     }
                     None => {}
+                }
+
+                // Poll the app-facing pending-font registry (task 14) once per
+                // frame, beside the theme poll above. `drain_into` applies any
+                // late-registered fonts to `text_ctx` (clearing the shape cache
+                // internally) and returns whether anything registered. On a
+                // late drain, force the relayout `register_fonts` documents by
+                // re-pushing the currently-active theme through `set_theme`
+                // (the same LAYOUT|PAINT contract a theme swap uses — no new
+                // core API), so text laid out before the drain re-shapes against
+                // the new faces this frame. When nothing is pending this is one
+                // cheap `Mutex` check returning an empty `Vec` (no allocation).
+                if self.font_registry.drain_into(&mut self.text_ctx) {
+                    self.root.set_theme(Box::new(self.theme.clone()));
                 }
 
                 // Rebuild the view tree every frame (app_logic is cheap by

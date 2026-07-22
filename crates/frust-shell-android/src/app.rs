@@ -35,6 +35,7 @@ use frust_render::{
     AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
 };
 use frust_scene::{Scene, SceneBuilder};
+use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
@@ -68,6 +69,13 @@ pub struct AndroidAppHandle {
     /// renderer lives on this UI thread. Chosen once at construction.
     executor: FrameExecutor,
     text_ctx: TextContext,
+    /// Polls the process-wide app-facing pending-font registry
+    /// (`frust::register_app_fonts`, task 14) once per frame (see [`Self::frame`],
+    /// beside the theme-override poll) — draining any late registration into
+    /// `text_ctx`. Also drained once at construction ([`Self::new`], after the
+    /// background prewarm join, on this UI thread) before the first rebuild. See
+    /// `frust_shell_common::font_registry`'s module docs.
+    font_registry: FontRegistryWatcher,
     /// Reused across frames; `reset()` each frame rather than reallocated.
     scene: Scene,
     app: Box<dyn AppTree>,
@@ -829,12 +837,23 @@ impl AndroidAppHandle {
     /// this method never itself pays the font-DB load cost.
     pub(crate) fn new(
         executor: FrameExecutor,
-        text_ctx: TextContext,
+        mut text_ctx: TextContext,
         window: NativeWindow,
         physical: (u32, u32),
         scale: f32,
         mut app: Box<dyn AppTree>,
     ) -> Self {
+        // Construction-time font drain (task 14): apply any fonts registered via
+        // `frust::register_app_fonts` before this handle existed into the joined
+        // `TextContext`, on this (the UI) thread after the background prewarm
+        // join — NOT inside the spawned prewarm closure. `create_handle` funnels
+        // both executor paths (inline + split) through here with the already-
+        // joined `text_ctx`, so this one drain covers both. Pre-first-rebuild, so
+        // no invalidation is needed; the per-frame poll in `frame` picks up any
+        // later registration.
+        let mut font_registry = FontRegistryWatcher::new();
+        font_registry.drain_into(&mut text_ctx);
+
         let theme = Theme::m3_baseline();
         app.set_theme(Box::new(theme.clone()));
         provide_context(theme.clone());
@@ -851,6 +870,7 @@ impl AndroidAppHandle {
         Self {
             executor,
             text_ctx,
+            font_registry,
             scene: Scene::new(),
             app,
             physical,
@@ -1370,6 +1390,23 @@ impl AndroidAppHandle {
                 theme_or_appearance_changed = true;
             }
             None => {}
+        }
+
+        // Poll the app-facing pending-font registry (task 14) once per frame,
+        // beside the theme poll above and before the surface-ready gate — the
+        // drain needs no renderer, so it stays in sync through surface churn.
+        // `drain_into` applies any late-registered fonts to `text_ctx` (clearing
+        // the shape cache internally) and returns whether anything registered.
+        // On a late drain, force the relayout `register_fonts` documents by
+        // re-pushing the currently-active theme through `set_theme` (via
+        // `push_theme` — the same LAYOUT|PAINT contract a theme swap uses, no new
+        // core API), so `Text`'s layout-baked shaping re-runs against the new
+        // faces; that also feeds the frame gate (`change_flags_pending`, plus the
+        // explicit `theme_or_appearance_changed` bit here per the default-to-run
+        // rule). When nothing is pending this is one cheap `Mutex` check.
+        if self.font_registry.drain_into(&mut self.text_ctx) {
+            self.push_theme();
+            theme_or_appearance_changed = true;
         }
 
         // Apply accessibility actions queued by assistive tech since the last
