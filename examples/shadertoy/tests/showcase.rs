@@ -110,7 +110,7 @@ fn running_screen_paints_exactly_one_shader_quad_and_hud_text() {
     let (_owner, mut root, mut state, mut tcx) = mounted_app();
     let (menu, _) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 0);
     assert_eq!(menu.quads.len(), 0, "the menu never paints a shader quad");
-    assert_eq!(menu.rounded.len(), 2, "one button per registered shader");
+    assert_eq!(menu.rounded.len(), 4, "one button per registered shader");
 
     // Tap the first shader button to enter the running screen.
     tap(&mut root, &mut state, menu.rounded[0]);
@@ -155,7 +155,7 @@ fn needs_frame_is_true_while_running_and_false_on_menu() {
 fn switching_shaders_swaps_the_recorded_program_id() {
     let (_owner, mut root, mut state, mut tcx) = mounted_app();
     let (menu, _) = frame_at(&mut root, &mut app_logic, &mut state, &mut tcx, 0);
-    assert_eq!(menu.rounded.len(), 2, "two shaders are registered");
+    assert_eq!(menu.rounded.len(), 4, "four shaders are registered");
 
     // Run the first shader.
     tap(&mut root, &mut state, menu.rounded[0]);
@@ -196,8 +196,8 @@ fn back_button_returns_to_menu_with_no_quad_recorded() {
     assert_eq!(back_to_menu.quads.len(), 0, "back returns to the menu");
     assert_eq!(
         back_to_menu.rounded.len(),
-        2,
-        "the menu's two shader buttons repaint"
+        4,
+        "the menu's four shader buttons repaint"
     );
     assert!(!needs_frame, "the menu is static once more");
 }
