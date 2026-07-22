@@ -22,6 +22,7 @@ pub mod color;
 pub mod elevation;
 pub mod extensions;
 pub mod glass;
+pub mod glyph;
 pub mod motion;
 pub mod shape;
 pub mod status;
@@ -30,6 +31,7 @@ pub mod typography;
 
 pub use builder::ThemeBuilder;
 pub use color::{Brightness, ColorScheme};
+pub use glyph::GlyphInk;
 pub use elevation::{Elevation, ElevationLevel, ShadowSpec, SurfaceRole};
 pub use extensions::ThemeExtensions;
 pub use glass::{GlassFill, GlassMaterial, GlassScale};

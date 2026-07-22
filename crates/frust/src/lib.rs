@@ -202,9 +202,20 @@ pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 /// assert_eq!(glass.chrome.blur_radius_intent, 75.0);
 /// assert!(!glass.control.is_opaque());
 /// ```
+///
+/// Also the composable-theming surface (glyph-design-system tasks 04/05/09/11/15):
+/// [`ThemeBuilder`] (`defineTheme`/`copyWith` analog), the no-lock-in typed
+/// extension slot ([`ThemeExtensions`]) plus its first two consumers
+/// [`StatusPalette`]/[`StatusColors`] (success/warning/info) and [`GlyphInk`]
+/// (Glyph's brightness-invariant terminal/tooltip ink), and the Glyph motion
+/// vocabulary ([`MotionDurations`]/[`EasingSet`]) — all flat-re-exported so an
+/// app authors a custom theme against `frust::*` alone. The Glyph baseline
+/// itself is [`Theme::glyph_baseline`].
 pub use frust_theme::{
-    Brightness, ColorScheme, DesignLanguage, Elevation, ElevationLevel, GlassFill, GlassMaterial,
-    GlassScale, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, SurfaceRole, Theme, TypeScale,
+    Brightness, ColorScheme, DesignLanguage, EasingSet, Elevation, ElevationLevel, GlassFill,
+    GlassMaterial, GlassScale, GlyphInk, MotionDurations, MotionScheme, MotionSpring, ShadowSpec,
+    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions,
+    TypeScale,
 };
 
 /// The color type every [`ColorScheme`] role is expressed in
