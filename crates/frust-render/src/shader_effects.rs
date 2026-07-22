@@ -172,15 +172,26 @@ fn compose_shader(fragment_src: &str) -> String {
     format!("{VERTEX_PRELUDE}\n{fragment_src}")
 }
 
-/// The keys of same-`id` targets whose size differs from `(w, h)` — the entries
-/// a resize evicts (a resized quad replaces its target). Pure: operates on the
-/// key set alone, so the eviction policy is GPU-free unit-testable.
-fn stale_target_keys<I>(keys: I, id: u64, w: u32, h: u32) -> Vec<(u64, u32, u32)>
+/// The target keys a frame's eviction reclaims: same-`id` targets whose size is
+/// **not** live this frame, where the frame's live key set is `live` (every
+/// `(id, w, h)` a `Command::ShaderQuad` resolves to this frame). Pure: operates
+/// on the key sets alone, so the eviction policy is GPU-free unit-testable.
+///
+/// Frame-scoped, not per-quad: a program drawn at two distinct sizes in the same
+/// frame has both `(id, w, h)` keys in `live`, so both survive — the two-sizes-
+/// one-frame case the old per-quad policy (which evicted any other-size same-id
+/// entry unconditionally) ping-ponged every frame. A size a quad resized *away*
+/// from is not in `live` and is reclaimed. A program id absent from `live`
+/// entirely is left intact — whole-id reaping is a separate concern, so a
+/// vanished program's targets are preserved here exactly as before.
+fn stale_target_keys<I>(target_keys: I, live: &HashSet<(u64, u32, u32)>) -> Vec<(u64, u32, u32)>
 where
     I: IntoIterator<Item = (u64, u32, u32)>,
 {
-    keys.into_iter()
-        .filter(|&(tid, tw, th)| tid == id && (tw, th) != (w, h))
+    let live_ids: HashSet<u64> = live.iter().map(|&(id, _, _)| id).collect();
+    target_keys
+        .into_iter()
+        .filter(|key| live_ids.contains(&key.0) && !live.contains(key))
         .collect()
 }
 
@@ -303,10 +314,32 @@ impl ShaderEffects {
         }
     }
 
-    /// Ensure a target exists for `(id, w, h)`, creating it if absent. Any
-    /// other-size target for the same `id` is evicted (a resized quad replaces
-    /// its target), and its registered image (if any) is queued for
-    /// `unregister_texture` — see [`take_dropped_images`](Self::take_dropped_images).
+    /// Evict the targets a frame's live key set has left stale — the resized-out
+    /// sizes of a still-drawn program — handing each evicted target's registered
+    /// image back for `unregister_texture` (see
+    /// [`take_dropped_images`](Self::take_dropped_images)). `live` is every
+    /// `(id, w, h)` key drawn this frame; see [`stale_target_keys`] for the
+    /// frame-scoped policy (two sizes of one id both live both survive; a
+    /// vanished id is left intact).
+    ///
+    /// Called once per frame by the caller's pre-pass after it has resolved the
+    /// frame's full live key set, rather than per-quad during target creation —
+    /// which is what lets two distinct sizes of the same program coexist within
+    /// one frame instead of evicting each other.
+    pub(crate) fn evict_stale_targets(&mut self, live: &HashSet<(u64, u32, u32)>) {
+        for stale in stale_target_keys(self.targets.keys().copied(), live) {
+            if let Some(entry) = self.targets.remove(&stale)
+                && let Some(image) = entry.image
+            {
+                self.dropped_images.push(image);
+            }
+        }
+    }
+
+    /// Ensure a target exists for `(id, w, h)`, creating it if absent. Eviction
+    /// of resized-out sizes is frame-scoped and handled separately by
+    /// [`evict_stale_targets`](Self::evict_stale_targets), so two distinct sizes
+    /// of the same program can coexist within one frame.
     ///
     /// A no-op if program `id` has no compiled pipeline (never compiled, or
     /// compile-failed): a target is useless without the pipeline that owns its
@@ -315,15 +348,6 @@ impl ShaderEffects {
         let key = (id, w, h);
         if self.targets.contains_key(&key) {
             return;
-        }
-
-        // Evict other-size entries for this id, handing their images back.
-        for stale in stale_target_keys(self.targets.keys().copied(), id, w, h) {
-            if let Some(entry) = self.targets.remove(&stale)
-                && let Some(image) = entry.image
-            {
-                self.dropped_images.push(image);
-            }
         }
 
         let Some(pipeline_entry) = self.pipelines.get(&id) else {
@@ -556,21 +580,59 @@ mod tests {
     }
 
     #[test]
-    fn stale_target_keys_selects_only_other_sizes_of_same_id() {
+    fn stale_target_keys_selects_only_other_sizes_of_same_live_id() {
+        // The resize-reclaim behavior, now expressed frame-scoped: with ids 1
+        // and 2 both live at 100x100 this frame, the other-size entries of id 1
+        // are stale (a resized-away size), while both live sizes are kept.
         let keys = [
-            (1, 100, 100), // same id, same size — kept
-            (1, 200, 200), // same id, other size — evicted
-            (1, 100, 200), // same id, other size — evicted
-            (2, 100, 100), // other id — kept
+            (1, 100, 100), // live this frame — kept
+            (1, 200, 200), // same id, not live — evicted
+            (1, 100, 200), // same id, not live — evicted
+            (2, 100, 100), // live this frame — kept
         ];
-        let mut stale = stale_target_keys(keys.iter().copied(), 1, 100, 100);
+        let live: HashSet<(u64, u32, u32)> = [(1, 100, 100), (2, 100, 100)].into_iter().collect();
+        let mut stale = stale_target_keys(keys.iter().copied(), &live);
         stale.sort();
         assert_eq!(stale, vec![(1, 100, 200), (1, 200, 200)]);
     }
 
     #[test]
     fn stale_target_keys_empty_when_no_prior_target() {
-        assert!(stale_target_keys(std::iter::empty(), 1, 100, 100).is_empty());
+        let live: HashSet<(u64, u32, u32)> = [(1, 100, 100)].into_iter().collect();
+        assert!(stale_target_keys(std::iter::empty(), &live).is_empty());
+    }
+
+    #[test]
+    fn stale_target_keys_keeps_two_sizes_of_same_id_live_in_one_frame() {
+        // The regression: one program (id 1) drawn at two physical sizes in the
+        // same frame. Both keys are live, so neither is evicted — the old
+        // per-quad policy evicted whichever was created first, ping-ponging both
+        // every frame.
+        let keys = [(1, 100, 100), (1, 200, 200)];
+        let live: HashSet<(u64, u32, u32)> = [(1, 100, 100), (1, 200, 200)].into_iter().collect();
+        assert!(stale_target_keys(keys.iter().copied(), &live).is_empty());
+    }
+
+    #[test]
+    fn stale_target_keys_still_evicts_a_resized_away_size() {
+        // A single-size quad resized across frames: last frame's 100x100 target
+        // is stale once only 200x200 is live, and is reclaimed (the behavior the
+        // resize-across-frames path depends on).
+        let keys = [(1, 100, 100), (1, 200, 200)];
+        let live: HashSet<(u64, u32, u32)> = [(1, 200, 200)].into_iter().collect();
+        assert_eq!(
+            stale_target_keys(keys.iter().copied(), &live),
+            vec![(1, 100, 100)]
+        );
+    }
+
+    #[test]
+    fn stale_target_keys_leaves_a_vanished_id_intact() {
+        // A program id absent from the live set entirely is NOT reaped here —
+        // whole-id reaping is a separate concern, so its targets are preserved.
+        let keys = [(1, 100, 100), (1, 200, 200)];
+        let live: HashSet<(u64, u32, u32)> = [(2, 50, 50)].into_iter().collect();
+        assert!(stale_target_keys(keys.iter().copied(), &live).is_empty());
     }
 
     fn dummy_image(marker: u8) -> ImageData {

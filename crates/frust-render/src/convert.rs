@@ -157,31 +157,38 @@ pub fn encode_scene(scene: &Scene, target: &mut vello::Scene) {
 }
 
 /// Encodes `scene` into `target`, resolving each [`Command::ShaderQuad`] against
-/// `shader_images` (program id → the shader pre-pass's registered override
-/// [`ImageData`]). A hit lowers to a `draw_image`; a miss keeps the placeholder
-/// fill. The in-crate render path ([`crate::renderer::SurfaceRenderer::encode`])
-/// builds the map in its shader pre-pass and calls this.
+/// `shader_images` (`(program id, clamped physical size)` → the shader pre-pass's
+/// registered override [`ImageData`]). A hit lowers to a `draw_image`; a miss
+/// keeps the placeholder fill. The in-crate render path
+/// ([`crate::renderer::SurfaceRenderer::encode`]) builds the map in its shader
+/// pre-pass and calls this, passing the same `adapter_max` the pre-pass used so
+/// the per-quad key recomputed here matches the one the entry was stored under.
 pub(crate) fn encode_scene_with_shaders(
     scene: &Scene,
     target: &mut vello::Scene,
-    shader_images: &HashMap<u64, ImageData>,
+    shader_images: &HashMap<(u64, u32, u32), ImageData>,
+    adapter_max: u32,
 ) {
-    encode_into_with_shaders(scene, target, shader_images);
+    encode_into_with_shaders(scene, target, shader_images, adapter_max);
 }
 
 /// Generic worker behind [`encode_scene`]; kept separate so tests (and the
-/// `cpu-tier` sink) can drive it with a non-`vello` sink and no shader map.
+/// `cpu-tier` sink) can drive it with a non-`vello` sink and no shader map. The
+/// empty map means every [`Command::ShaderQuad`] misses to its placeholder, so
+/// the `adapter_max` passed here is immaterial — `u32::MAX` (no extra clamp).
 pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
-    encode_into_with_shaders(scene, sink, &HashMap::new());
+    encode_into_with_shaders(scene, sink, &HashMap::new(), u32::MAX);
 }
 
 /// The command walk, parameterized by the per-frame shader-override map (empty
-/// for the no-shader callers above). Kept generic over [`SceneSink`] so it is
-/// GPU-free unit-testable.
+/// for the no-shader callers above) and the `adapter_max` used to recompute each
+/// [`Command::ShaderQuad`]'s `(id, w, h)` map key (identical to the pre-pass's
+/// keying). Kept generic over [`SceneSink`] so it is GPU-free unit-testable.
 pub(crate) fn encode_into_with_shaders(
     scene: &Scene,
     sink: &mut impl SceneSink,
-    shader_images: &HashMap<u64, ImageData>,
+    shader_images: &HashMap<(u64, u32, u32), ImageData>,
+    adapter_max: u32,
 ) {
     // TEMPORARY: Image-identity probe (task 04 / phase-11 render-path).
     // Gate all probe work (HashSet population, ID computation, frame processing)
@@ -260,7 +267,17 @@ pub(crate) fn encode_into_with_shaders(
                 // lowers to the same `draw_image` path a `Command::Image` uses,
                 // reusing `natural_to_dest_transform`'s natural→dest scaling so
                 // the physical-pixel target lands pixel-for-pixel in `dest`.
-                match shader_images.get(&program.id()) {
+                //
+                // The map is keyed by `(id, clamped physical size)`, so the same
+                // program drawn at two sizes in one frame resolves each quad to
+                // its own texture — recompute the identical key the pre-pass
+                // stored the entry under (`physical_size` then `clamp_size` with
+                // the same `adapter_max`).
+                let (w, h) = crate::shader_effects::clamp_size(
+                    crate::renderer::physical_size(*transform, *dest),
+                    adapter_max,
+                );
+                match shader_images.get(&(program.id(), w, h)) {
                     Some(image) => sink.draw_image(*transform, image, dest),
                     None => {
                         // Miss: the CPU tier (no shader pre-pass runs), a
@@ -618,12 +635,19 @@ mod tests {
     }
 
     fn two_by_two_image() -> ImageData {
+        image_of_size(2, 2)
+    }
+
+    /// An `ImageData` of a given natural pixel size — the `RecordingSink`
+    /// records `width`/`height`, so distinct sizes let a test tell two override
+    /// entries apart.
+    fn image_of_size(w: u32, h: u32) -> ImageData {
         ImageData {
-            data: Blob::from(vec![0u8; 2 * 2 * 4]),
+            data: Blob::from(vec![0u8; (w * h * 4) as usize]),
             format: peniko::ImageFormat::Rgba8,
             alpha_type: peniko::ImageAlphaType::Alpha,
-            width: 2,
-            height: 2,
+            width: w,
+            height: h,
         }
     }
 
@@ -812,12 +836,16 @@ mod tests {
         let dest = Rect::new(0.0, 0.0, 40.0, 40.0);
         builder.draw_shader(&program, dest, 1.0);
 
-        // Stand in for the pre-pass's registered override handle (a 2x2 image).
+        // Stand in for the pre-pass's registered override handle (a 2x2 image),
+        // keyed by (id, clamped physical size). Under a pure translate the
+        // physical size equals dest's 40x40; `max_dim` is large enough not to
+        // clamp, so the encode side recomputes the identical (id, 40, 40) key.
+        let max_dim = 16384;
         let mut shader_images = HashMap::new();
-        shader_images.insert(program.id(), two_by_two_image());
+        shader_images.insert((program.id(), 40, 40), two_by_two_image());
 
         let mut sink = RecordingSink::default();
-        encode_into_with_shaders(&scene, &mut sink, &shader_images);
+        encode_into_with_shaders(&scene, &mut sink, &shader_images, max_dim);
 
         assert_eq!(
             sink.events,
@@ -827,6 +855,51 @@ mod tests {
                 dest,
                 transform: translate,
             }]
+        );
+    }
+
+    #[test]
+    fn shader_quad_same_id_two_sizes_resolve_distinct_images() {
+        // The two-size keying regression: ONE `ShaderProgram` (a single id)
+        // drawn at two different physical sizes in the same frame must resolve
+        // each quad to its own size's registered override, not collapse both to
+        // one image. With an id-only map the second entry would overwrite the
+        // first and both quads would draw the same texture.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let program = frust_scene::ShaderProgram::new("fn main() {}");
+        // Identity transform, so each dest's physical size is its own extent.
+        let dest_a = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let dest_b = Rect::new(0.0, 0.0, 80.0, 60.0);
+        builder.draw_shader(&program, dest_a, 1.0);
+        builder.draw_shader(&program, dest_b, 1.0);
+
+        // Distinct natural sizes so the recorded events distinguish which
+        // override each quad resolved to. `max_dim` large enough not to clamp.
+        let max_dim = 16384;
+        let mut shader_images = HashMap::new();
+        shader_images.insert((program.id(), 40, 40), image_of_size(2, 2));
+        shader_images.insert((program.id(), 80, 60), image_of_size(3, 3));
+
+        let mut sink = RecordingSink::default();
+        encode_into_with_shaders(&scene, &mut sink, &shader_images, max_dim);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::Image {
+                    width: 2,
+                    height: 2,
+                    dest: dest_a,
+                    transform: Affine::IDENTITY,
+                },
+                Event::Image {
+                    width: 3,
+                    height: 3,
+                    dest: dest_b,
+                    transform: Affine::IDENTITY,
+                },
+            ]
         );
     }
 

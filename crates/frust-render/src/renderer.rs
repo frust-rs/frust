@@ -564,12 +564,19 @@ impl SurfaceRenderer {
                 // against. Runs (and submits its own encoder) BEFORE vello's
                 // `render_to_texture` so the atlas copy reads a complete texture
                 // — wgpu serializes queue submissions in order (RESEARCH.md §Q3).
+                //
+                // `adapter_max` is captured once and threaded into both the
+                // pre-pass (which keys the map by clamped physical size) and the
+                // encode lowering (which recomputes the identical key per quad),
+                // so the two derive the same `(id, w, h)` for every quad.
+                let adapter_max = device_handle.device.limits().max_texture_dimension_2d;
                 let shader_images = run_shader_prepass(
                     &device_handle.device,
                     &device_handle.queue,
                     renderer,
                     &mut ready.shader_effects,
                     scene,
+                    adapter_max,
                 );
                 match &ready.surface.path {
                     // Direct-to-surface (deliverable 1): the vello render targets the
@@ -579,7 +586,12 @@ impl SurfaceRenderer {
                     // span-mapping comment for how this remaps the v3 spans.
                     RenderPath::Direct => {
                         vello_scene.reset();
-                        convert::encode_scene_with_shaders(scene, vello_scene, &shader_images);
+                        convert::encode_scene_with_shaders(
+                            scene,
+                            vello_scene,
+                            &shader_images,
+                            adapter_max,
+                        );
                         // Carry `base_color` to `submit`, where the render runs.
                         *pending_base_color = Some(base_color);
                     }
@@ -588,7 +600,12 @@ impl SurfaceRenderer {
                     // the swapchain.
                     RenderPath::Blit { target_view, .. } => {
                         vello_scene.reset();
-                        convert::encode_scene_with_shaders(scene, vello_scene, &shader_images);
+                        convert::encode_scene_with_shaders(
+                            scene,
+                            vello_scene,
+                            &shader_images,
+                            adapter_max,
+                        );
                         let params = vello::RenderParams {
                             base_color,
                             width: ready.surface.config.width,
@@ -895,30 +912,40 @@ impl SurfaceRenderer {
 /// The shader-showcase pre-pass (Gpu tier only): for every distinct
 /// `Command::ShaderQuad` in `scene`, compile its program, render it into an
 /// offscreen texture at the quad's physical size, register that texture with
-/// vello as an image override, and collect a `program id → ImageData` map for
-/// `convert::encode_into` to lower each quad against.
+/// vello as an image override, and collect a `(program id, clamped physical
+/// size) → ImageData` map for `convert::encode_into` to lower each quad against.
+///
+/// The map is keyed by `(id, w, h)` — not `id` alone — so the same program drawn
+/// at two different physical sizes in one frame resolves each quad to its own
+/// size's texture; the encode side recomputes the identical `(w, h)` via
+/// [`physical_size`]/[`clamp_size`] (with the same `adapter_max`) to look each
+/// entry up.
 ///
 /// Ordering (RESEARCH.md §Q3): all quad passes share ONE command encoder,
 /// submitted BEFORE the caller's `render_to_texture`, so wgpu's in-order queue
 /// serialization guarantees each shader texture is complete before vello's
 /// atlas copy reads it. Registration happens once per target (via
 /// `ShaderEffects::ensure_registered`); the override is re-marked dirty every
-/// frame the quad is present (the intended per-frame texture→atlas copy cost);
-/// resize-evicted targets are unregistered by draining `take_dropped_images`.
-/// Never panics — a failed compile is recorded/skipped inside `ShaderEffects`
-/// and simply yields no map entry (the quad then takes the miss placeholder).
+/// frame the quad is present (the intended per-frame texture→atlas copy cost).
+/// Eviction is frame-scoped ([`ShaderEffects::evict_stale_targets`], driven by
+/// this frame's live key set): a resized-away size is reclaimed and unregistered
+/// via `take_dropped_images`, but two sizes of one program live in the same
+/// frame both survive. Never panics — a failed compile is recorded/skipped
+/// inside `ShaderEffects` and simply yields no map entry (the quad then takes
+/// the miss placeholder).
 fn run_shader_prepass(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     renderer: &mut vello::Renderer,
     shader_effects: &mut ShaderEffects,
     scene: &frust_scene::Scene,
-) -> HashMap<u64, ImageData> {
+    adapter_max: u32,
+) -> HashMap<(u64, u32, u32), ImageData> {
     // Collect the distinct quads to render this frame, deduped by
     // (program id, clamped physical size) so a program drawn twice at the same
-    // size is compiled/encoded once.
-    let adapter_max = device.limits().max_texture_dimension_2d;
-    let mut seen = HashSet::new();
+    // size is compiled/encoded once. `live` is this frame's full key set — what
+    // frame-scoped eviction preserves against.
+    let mut live: HashSet<(u64, u32, u32)> = HashSet::new();
     let mut quads: Vec<(u64, &str, u32, u32, f32)> = Vec::new();
     for command in scene.commands() {
         if let Command::ShaderQuad {
@@ -929,7 +956,7 @@ fn run_shader_prepass(
         } = command
         {
             let (w, h) = clamp_size(physical_size(*transform, *dest), adapter_max);
-            if seen.insert((program.id(), w, h)) {
+            if live.insert((program.id(), w, h)) {
                 quads.push((program.id(), program.source(), w, h, *time));
             }
         }
@@ -951,14 +978,16 @@ fn run_shader_prepass(
                 .ensure_registered(id, w, h, |tex| renderer.register_texture(tex.clone()))
             {
                 renderer.mark_override_image_dirty(&image);
-                shader_images.insert(id, image);
+                shader_images.insert((id, w, h), image);
             }
         }
         queue.submit([encoder.finish()]);
     }
 
-    // Hand back any images belonging to resize-evicted targets so vello stops
-    // treating their (now-dropped) textures as overrides.
+    // Reclaim the resized-away sizes of still-drawn programs (frame-scoped: two
+    // live sizes of one id both survive), then hand back any evicted target's
+    // image so vello stops treating its (now-dropped) texture as an override.
+    shader_effects.evict_stale_targets(&live);
     for image in shader_effects.take_dropped_images() {
         renderer.unregister_texture(image);
     }
@@ -971,7 +1000,12 @@ fn run_shader_prepass(
 /// as `(width, height)` rounded to whole pixels. Sizing the shader target in
 /// physical pixels keeps its rendered detail matched to the on-screen area. A
 /// degenerate/negative extent yields `0`, which `clamp_size` then floors to `1`.
-fn physical_size(transform: Affine, dest: kurbo::Rect) -> (u32, u32) {
+///
+/// `pub(crate)` so the encode-side lowering ([`convert::encode_into_with_shaders`])
+/// can recompute the identical `(w, h)` per quad — the shader-image map is keyed
+/// by `(program id, clamped physical size)`, so the lookup must derive the same
+/// size the pre-pass keyed the entry under.
+pub(crate) fn physical_size(transform: Affine, dest: kurbo::Rect) -> (u32, u32) {
     let bbox = transform.transform_rect_bbox(dest);
     let to_u32 = |v: f64| {
         let v = v.round();
