@@ -12,17 +12,17 @@
 use frust_scene::{Command, GlyphRun, PathStyle, Scene};
 use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
+use std::cell::RefCell;
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 
 // TEMPORARY: Image-identity probe (task 04 / phase-11 render-path).
 // Tracks Blob IDs across frames to confirm atlas reuse.
 // Marked for removal once task 06 verdicts close this research.
 
 /// Tracks image Blob IDs across frames for the identity probe.
-/// Perf-gated by FRUST_TRACE.
 struct ImageIdentityProbe {
-    /// Blob IDs (by pointer) seen in the previous frame.
+    /// Blob IDs seen in the previous frame.
     last_frame_ids: HashSet<u64>,
 }
 
@@ -57,15 +57,20 @@ impl ImageIdentityProbe {
 
 thread_local! {
     /// TEMPORARY: Process-local image-identity probe (task 04).
-    /// Stored in thread-local to avoid race conditions across frame encodes.
-    static IMAGE_IDENTITY_PROBE: Mutex<ImageIdentityProbe> = Mutex::new(ImageIdentityProbe::new());
+    /// Stored in thread-local to provide per-thread isolation; RefCell allows interior
+    /// mutability without synchronization since thread-locality guarantees no concurrent access.
+    static IMAGE_IDENTITY_PROBE: RefCell<ImageIdentityProbe> = RefCell::new(ImageIdentityProbe::new());
 }
 
 /// Check if the image-identity probe is enabled (FRUST_TRACE set at runtime).
+/// Cached in OnceLock for zero-cost when disabled (see context.rs::perf_tracing_enabled).
 fn image_probe_enabled() -> bool {
-    std::env::var("FRUST_TRACE")
-        .map(|v| !v.is_empty() && v != "0")
-        .unwrap_or(false)
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FRUST_TRACE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
 }
 
 /// Sink for the individual draw operations a [`Scene`] decomposes into.
@@ -129,7 +134,9 @@ pub fn encode_scene(scene: &Scene, target: &mut vello::Scene) {
 /// with a non-`vello` sink.
 pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
     // TEMPORARY: Image-identity probe (task 04 / phase-11 render-path).
-    // Collect Blob IDs from all image commands this frame, then log any changes.
+    // Gate all probe work (HashSet population, ID computation, frame processing)
+    // behind the enabled check for zero-cost when disabled.
+    let probe_enabled = image_probe_enabled();
     let mut image_ids = HashSet::new();
 
     for command in scene.commands() {
@@ -161,9 +168,12 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
                 transform,
             } => {
                 // TEMPORARY (task 04): Record this image's Blob ID for the probe.
-                // Use the pointer to the Blob itself as a unique identifier.
-                let blob_id = &data.data as *const _ as u64;
-                image_ids.insert(blob_id);
+                // Use Peniko's Blob::id() (the linebender resource handle ID) as the key,
+                // which uniquely identifies the image data independent of allocation address.
+                if probe_enabled {
+                    let blob_id = data.data.id();
+                    image_ids.insert(blob_id);
+                }
                 sink.draw_image(*transform, data, dest);
             }
             Command::BlurredRoundedRect {
@@ -192,11 +202,9 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
     }
 
     // TEMPORARY (task 04): Update the image-identity probe with this frame's Blob IDs.
-    if image_probe_enabled() {
+    if probe_enabled {
         IMAGE_IDENTITY_PROBE.with(|probe| {
-            if let Ok(mut probe) = probe.lock() {
-                probe.process_frame(image_ids);
-            }
+            probe.borrow_mut().process_frame(image_ids);
         });
     }
 }
@@ -699,6 +707,35 @@ mod tests {
                 dest,
                 transform: translate,
             }]
+        );
+    }
+
+    #[test]
+    fn image_identity_cloned_data_yields_same_blob_id() {
+        // Verify that the image-identity probe keys on Blob::id() (the linebender
+        // resource handle), not the pointer address. When the same ImageData is cloned
+        // into two separate Command slots, Blob::id() must return the SAME value for both.
+        //
+        // This is critical for atlas reuse tracking: the old approach
+        // (keying on &data.data as *const _ as u64) would see different pointer
+        // addresses for allocations in different frames, breaking identity tracking.
+        let data1 = two_by_two_image();
+        let data2 = data1.clone(); // Clone into a separate slot
+
+        // Verify that both clones yield the same Blob ID via Blob::id()
+        let id1 = data1.data.id();
+        let id2 = data2.data.id();
+
+        assert_eq!(
+            id1, id2,
+            "Cloned ImageData must have the same Blob::id() for atlas reuse tracking"
+        );
+
+        // Also verify that the clones are distinct values (to show we're testing
+        // the ID, not pointer equality)
+        assert_ne!(
+            &data1.data as *const _, &data2.data as *const _,
+            "ImageData pointers must be different (clones in different slots)"
         );
     }
 
