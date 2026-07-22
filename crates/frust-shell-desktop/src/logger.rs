@@ -97,6 +97,14 @@ impl log::Log for StderrLogger {
 /// `log::info!` lines) reach the terminal. Default level is `Info`;
 /// `FRUST_LOG` (e.g. `debug`, `trace`, `warn`) overrides it — the same
 /// convention `frust-shell-ios`'s logger uses.
+///
+/// Also emits one unconditional (NOT `perf-trace`-gated) `log::info!` marker
+/// line — `scripts/release-lean-check.sh`'s F1 contrast check needs a
+/// first-party info-level string that is guaranteed present in a normal
+/// (profile) build and constant-folded out under the release `lean` feature's
+/// `log/release_max_level_warn` ceiling, since every existing info-level site
+/// is either `perf-trace`-gated or mobile-shell-only (release-lean followup
+/// fix-1, task f1).
 pub fn init_once() {
     static LOGGER: Once = Once::new();
     LOGGER.call_once(|| {
@@ -110,6 +118,7 @@ pub fn init_once() {
         if log::set_logger(logger).is_ok() {
             log::set_max_level(level);
         }
+        log::info!("frust-shell-desktop: logger initialized");
     });
 }
 

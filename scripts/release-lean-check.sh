@@ -3,8 +3,17 @@
 #
 # Builds release and profile binaries of an app (default: examples/shadertoy),
 # asserts the release binary contains ZERO "frust-perf"/"bench-scenario" strings
-# (positive control: profile contains them), and that warn-level diagnostics
-# survive the release ceiling. Exits non-zero on any assertion failure.
+# (positive control: profile contains them), that the release build is built
+# with the SAME `--features lean` the real CLI/device pipeline always passes
+# (`BuildMode::cargo_features`'s release arm — the artifact this script
+# inspects must match what actually ships), that a first-party info-level
+# marker string is folded out of the ceiling in that release+lean build (real
+# proof the log ceiling engages, present as a positive control in the
+# non-lean profile build), and that warn-level diagnostics are retained
+# (not ceiling proof by itself — see the marker check for that). Exits
+# non-zero on any assertion failure, and non-zero (a distinct code) if any
+# check was SKIPPED rather than executed — a SKIP is never silently reported
+# as a PASS.
 #
 # Usage: scripts/release-lean-check.sh [--app <dir>] [--android] [--help]
 #   --app <dir>   App directory to check (default: examples/shadertoy,
@@ -13,9 +22,13 @@
 #   --help        Print this message and exit.
 #
 # Exits with:
-#   0 if all checks pass
+#   0 if all checks executed and passed
 #   1 if a build fails
-#   2 if a strings check fails or other assertion fails
+#   2 if a strings check (or other assertion) FAILed
+#   3 if every check executed but one or more checks were SKIPPED (missing
+#     binary, missing `strings`, or an unavailable --android toolchain) —
+#     INCONCLUSIVE, distinct from a hard FAIL: a run entirely made of skips
+#     must never report PASS.
 #
 # Runtime: ~a couple of release builds (3-5 minutes typical).
 #
@@ -46,7 +59,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      sed -n '2,20p' "$0"
+      sed -n '2,34p' "$0"
       exit 0
       ;;
     *)
@@ -73,6 +86,12 @@ echo
 
 # --- Helpers -----------------------------------------------------------
 
+# Global count of SKIPped checks (F3 fix): a run made entirely of skips must
+# never report PASS — every SKIP branch below increments this, and the final
+# summary reports INCONCLUSIVE (distinct exit code) whenever it's nonzero,
+# even if zero checks FAILed.
+SKIP_COUNT=0
+
 # Check a binary for the absence of instrumentation strings.
 # Returns 0 if the string is NOT found (good for release).
 check_strings_absent() {
@@ -82,11 +101,13 @@ check_strings_absent() {
 
   if [ ! -f "${binary}" ]; then
     echo "SKIP ${label}: binary not found at ${binary}"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
     return 0
   fi
 
   if ! command -v strings >/dev/null 2>&1; then
     echo "SKIP ${label}: 'strings' command not available"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
     return 0
   fi
 
@@ -111,11 +132,13 @@ check_strings_present() {
 
   if [ ! -f "${binary}" ]; then
     echo "SKIP ${label}: binary not found at ${binary}"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
     return 0
   fi
 
   if ! command -v strings >/dev/null 2>&1; then
     echo "SKIP ${label}: 'strings' command not available"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
     return 0
   fi
 
@@ -137,12 +160,18 @@ echo "-- Building desktop release --"
 BUILD_LOG="$(mktemp)"
 trap 'rm -f "${BUILD_LOG}"' EXIT
 
-if ! (cd "${APP_DIR}" && cargo build --release) >"${BUILD_LOG}" 2>&1; then
+# `--features lean` matches `BuildMode::cargo_features()`'s release arm
+# (`crates/frust-drive/src/build_info.rs`) — the real CLI/device pipeline
+# always passes this on release, so the artifact this script inspects must
+# be built the same way or the checks below (in particular the marker
+# contrast check) prove nothing about the shipping ceiling (review round-0's
+# F1 finding).
+if ! (cd "${APP_DIR}" && cargo build --release --features lean) >"${BUILD_LOG}" 2>&1; then
   echo "BUILD FAILED:" >&2
   cat "${BUILD_LOG}" >&2
   exit 1
 fi
-echo "Release build OK."
+echo "Release build OK (--features lean)."
 echo
 
 echo "-- Building desktop profile --"
@@ -207,13 +236,37 @@ fi
 
 echo
 
-# --- Warn-level survival check (desktop) ---------------------------------
+# --- Log-ceiling marker contrast check (desktop) --------------------------
 
-echo "-- Warn-level survival check (desktop) --"
+echo "-- Log-ceiling marker contrast check (desktop) --"
 
-# Check that warn-level strings like "frust-render:" are still in the release binary.
-# These should NOT be compiled out by the perf-trace feature gate.
-if ! check_strings_present "${RELEASE_BIN}" "frust-render:" "Release warn-level 'frust-render:' survival"; then
+# `frust-shell-desktop::logger::init_once` emits ONE unconditional (NOT
+# perf-trace-gated), OnceLock/Once-guarded `log::info!` marker line
+# purpose-built for this check: every other first-party info-level site is
+# either perf-trace-gated or mobile-shell-only, so none of them can prove the
+# release `lean` feature's `log/release_max_level_warn` ceiling actually
+# folds info-level lines out of the binary. This is the REAL ceiling proof
+# (review round-0's F1 finding) — present as a positive control in the
+# non-lean profile build, absent once the release+lean ceiling engages.
+if ! check_strings_present "${PROFILE_BIN}" "frust-shell-desktop: logger initialized" "Profile log-ceiling marker (positive control)"; then
+  PROFILE_FAIL=1
+fi
+
+if ! check_strings_absent "${RELEASE_BIN}" "frust-shell-desktop: logger initialized" "Release log-ceiling marker (ceiling proof)"; then
+  RELEASE_FAIL=1
+fi
+
+echo
+
+# --- Warn-level retention check (desktop) ---------------------------------
+
+echo "-- Warn-level retention check (desktop) --"
+
+# Check that warn-level strings like "frust-render:" are still in the release
+# binary. This is warn-RETENTION only, NOT ceiling proof by itself (a build
+# with no ceiling at all would also pass this) — the marker check above is
+# what actually proves the ceiling folds info lines out.
+if ! check_strings_present "${RELEASE_BIN}" "frust-render:" "Release warn-level 'frust-render:' retention"; then
   RELEASE_FAIL=1
 fi
 
@@ -226,7 +279,8 @@ if [ "${CHECK_ANDROID}" -eq 1 ]; then
 
   # Try to build the .so for Android.
   if ! (cd "${APP_DIR}" && cargo ndk -t arm64-v8a build --release) >"${BUILD_LOG}" 2>&1; then
-    echo "note: Android release .so build failed or NDK not available — skipping Android checks"
+    echo "SKIP Android .so checks: release .so build failed or NDK not available"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
   else
     echo "Android release build OK."
 
@@ -234,7 +288,8 @@ if [ "${CHECK_ANDROID}" -eq 1 ]; then
     SO_PATH="${APP_DIR}/target/aarch64-linux-android/release/lib${BIN_STEM}.so"
 
     if [ ! -f "${SO_PATH}" ]; then
-      echo "note: expected .so not found at ${SO_PATH} — skipping Android .so checks"
+      echo "SKIP Android .so checks: expected .so not found at ${SO_PATH}"
+      SKIP_COUNT=$((SKIP_COUNT + 1))
     else
       # Same string checks for the .so.
       if ! check_strings_absent "${SO_PATH}" "frust-perf" "Android .so frust-perf strings"; then
@@ -254,13 +309,21 @@ if [ "${CHECK_ANDROID}" -eq 1 ]; then
 fi
 
 # --- Summary ---------------------------------------------------------------
+#
+# Three-way verdict (F3 fix): a SKIP is never silently reported as a PASS.
+# Any FAIL wins outright (exit 2); otherwise any SKIP downgrades an
+# all-checks-executed PASS to INCONCLUSIVE (exit 3) — only a run where every
+# check actually EXECUTED and passed reports PASS (exit 0).
 
 echo "== Release-lean check summary =="
 
-if [ "${RELEASE_FAIL}" -eq 0 ] && [ "${PROFILE_FAIL}" -eq 0 ]; then
-  echo "PASS: All checks passed. Release artifacts are lean."
-  exit 0
-else
+if [ "${RELEASE_FAIL}" -ne 0 ] || [ "${PROFILE_FAIL}" -ne 0 ]; then
   echo "FAIL: One or more checks failed (see above)."
   exit 2
+elif [ "${SKIP_COUNT}" -gt 0 ]; then
+  echo "INCONCLUSIVE: ${SKIP_COUNT} check(s) skipped (see above) — no assertion failed, but a SKIP is not proof of leanness."
+  exit 3
+else
+  echo "PASS: All checks executed (0 skipped) and passed. Release artifacts are lean."
+  exit 0
 fi
