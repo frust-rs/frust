@@ -54,7 +54,7 @@ use frust_core::{
 use kurbo::Point;
 
 pub use align::{Align, AlignView, AlignWidget, Alignment};
-pub use button::{Button, ButtonView, ButtonWidget, button};
+pub use button::{Button, ButtonStyle, ButtonView, ButtonWidget, button};
 pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox};
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,

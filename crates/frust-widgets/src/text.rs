@@ -47,6 +47,9 @@ pub(crate) enum ThemeTextColor {
     /// `primary_container`-filled surface (used by
     /// [`crate::material::fab`]'s extended-FAB visible label).
     OnPrimaryContainer,
+    /// `colors.error` — a label reading as a destructive/error action (used
+    /// by [`crate::Button`]'s `ButtonStyle::Danger`, task 22).
+    Error,
 }
 
 /// A declarative description of a run of text.
@@ -230,6 +233,7 @@ impl TextWidget {
                     ThemeTextColor::OnPrimary => scheme.on_primary,
                     ThemeTextColor::OnSurfaceVariant => scheme.on_surface_variant,
                     ThemeTextColor::OnPrimaryContainer => scheme.on_primary_container,
+                    ThemeTextColor::Error => scheme.error,
                 };
                 let mut style = self.style.clone();
                 style.color = color;
@@ -412,6 +416,13 @@ mod tests {
             painted_color(view, Some(&theme)),
             theme.scheme().on_primary_container
         );
+    }
+
+    #[test]
+    fn error_role_resolves_to_error() {
+        let theme = Theme::m3_baseline();
+        let view = text("x").themed_role(ThemeTextColor::Error);
+        assert_eq!(painted_color(view, Some(&theme)), theme.scheme().error);
     }
 
     #[test]

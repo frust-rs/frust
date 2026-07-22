@@ -74,8 +74,8 @@
 pub use frust_core::component::{Component, ComponentView, component};
 pub use frust_core::view::{AnyView, View, any};
 pub use frust_widgets::{
-    Align, AlignView, Alignment, Axis, Button, ButtonView, Checkbox, CheckboxView, ChildKey,
-    Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
+    Align, AlignView, Alignment, Axis, Button, ButtonStyle, ButtonView, Checkbox, CheckboxView,
+    ChildKey, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
     GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView, IconWidget, Image,
     ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment, NavigatorController,
     NavigatorView, Padding, PaddingView, PageBuilder, PageTransition, PopResult, Radio, RadioView,

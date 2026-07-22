@@ -1817,8 +1817,14 @@ mod tests {
 
         // Tap the sibling button, below the field (a container-routed blur): the
         // field's pod focus is cleared by `route_event`, but its own `event()` is
-        // never called on this dispatch.
+        // never called on this dispatch. The `Up` completes the button's own
+        // tap cycle (glyph-design-system task 22 gave `Button` a press-scale
+        // animation that lazily launches at the next `paint` — completing the
+        // gesture here, with no paint in between, cancels the retarget before
+        // it ever launches, so this stays a pure blur probe rather than also
+        // asserting anything about the button's own animation).
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 45.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 45.0));
 
         // Leg 1 — the blur event clears the shell-facing focus + IME surface.
         assert!(!root.is_focus_active(), "the sibling tap blurs the field");
@@ -1877,8 +1883,11 @@ mod tests {
 
         // Blur via the OUTER-level sibling: route_event clears the focused link
         // at the outer Column (the inner Column's pod); the field's own pod flag
-        // two levels down stays stale.
+        // two levels down stays stale. The `Up` completes the button's own tap
+        // cycle (see `nested_blur_clears_ime_and_idles_paint`'s identical note)
+        // so this stays a pure blur probe.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 45.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 45.0));
         assert!(!root.is_focus_active());
         assert!(root.ime_state().is_none());
 
