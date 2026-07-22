@@ -7,15 +7,24 @@
 //! down on `on_surface_destroyed`, and drops to [`SurfacePhase::SurfaceLost`]
 //! when the swapchain reports `Lost` mid-frame.
 //!
-//! vello 0.9 renders via compute into an intermediate `Rgba8Unorm` texture, so
-//! each frame is: encode → `render_to_texture` (intermediate) → blit
-//! (intermediate → acquired swapchain view) → present.
+//! vello 0.9 renders via compute into an `Rgba8Unorm` storage texture. Two
+//! render paths follow from that (chosen per surface, see
+//! [`crate::context::choose_render_path`]):
+//!
+//! - **Direct-to-surface** (surface supports `Rgba8Unorm` + `STORAGE_BINDING`):
+//!   acquire → `render_to_texture` straight into the acquired swapchain texture
+//!   → present. No intermediate, no blit (phase 11.C).
+//! - **Blit fallback** (`Bgra8`-only surfaces, or the `cpu-tier` path): encode →
+//!   `render_to_texture` (intermediate) → acquire → blit (intermediate → acquired
+//!   swapchain view) → present.
+//!
+//! The two arms remap the v3 present spans — see [`SurfaceRenderer::submit`].
 
 use core::ffi::c_void;
 
 use anyhow::{Result, anyhow};
 
-use crate::context::{DetachedSurface, RenderContext};
+use crate::context::{ConfiguredSurface, DetachedSurface, RenderContext, RenderPath};
 use crate::convert;
 use crate::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
@@ -28,9 +37,10 @@ use crate::lifecycle::{
 /// `RenderSurface`, is dropped on every transition out of `SurfaceReady`,
 /// upholding the "no `SurfaceTexture`/surface outlives a transition" invariant.
 struct ReadySurface {
-    surface: vello::util::RenderSurface<'static>,
-    /// The tier-specific renderer that fills `surface.target_view` each frame;
-    /// the shared acquire/blit/present tail is tier-agnostic.
+    surface: ConfiguredSurface,
+    /// The tier-specific renderer that produces this frame's pixels. On the blit
+    /// arm it fills the intermediate `surface.path` target; on the direct arm the
+    /// GPU renderer targets the acquired swapchain texture in `submit`.
     backend: TierBackend,
     /// The device's persisted `wgpu::PipelineCache` (handed to vello's
     /// `RendererOptions` on the `Gpu` path) paired with the adapter fingerprint
@@ -43,11 +53,12 @@ struct ReadySurface {
 
 /// The per-surface renderer for the selected [`crate::RenderTier`].
 ///
-/// Both variants produce the same thing — pixels in the intermediate
-/// `Rgba8Unorm` target `surface.target_texture`/`target_view` — which the
-/// shared tail then blits to the acquired swapchain texture. Without the
-/// `cpu-tier` feature this is effectively a one-variant enum and the GPU path
-/// is unchanged.
+/// On the blit arm both variants produce the same thing — pixels in the
+/// intermediate `Rgba8Unorm` target — which the shared tail then blits to the
+/// acquired swapchain texture. On the direct arm (GPU tier only) the `Gpu`
+/// variant instead renders straight into the acquired swapchain texture in
+/// [`SurfaceRenderer::submit`]. Without the `cpu-tier` feature this is
+/// effectively a one-variant enum.
 // The GPU variant holds a `vello::Renderer` inline (~1.2 KiB) while the CPU
 // variant is boxed; the whole `ReadySurface` already lives behind a `Box`
 // (`SurfaceState::Ready`), so the size asymmetry costs nothing on the hot path
@@ -108,6 +119,14 @@ pub struct SurfaceRenderer {
     /// confined to `frust-render` while letting a shell time each span with its
     /// own clock (timing stays shell-owned — see `frust-shell-common::perf`).
     pending_present: Option<wgpu::SurfaceTexture>,
+    /// The `base_color` [`Self::encode`] was called with, stashed for the
+    /// **direct** render path only: there, the vello `render_to_texture` that
+    /// consumes `base_color` runs in [`Self::submit`] (it targets the acquired
+    /// swapchain texture, which does not exist until [`Self::acquire`]), so the
+    /// color must survive the gap between `encode` and `submit`. Unused on the
+    /// blit path (which renders inside `encode`, where `base_color` is a
+    /// parameter). `None` outside an in-flight direct-path frame.
+    pending_base_color: Option<peniko::Color>,
 }
 
 impl Default for SurfaceRenderer {
@@ -129,6 +148,7 @@ impl SurfaceRenderer {
             consecutive_invalid: 0,
             initial_cache_data: None,
             pending_present: None,
+            pending_base_color: None,
         }
     }
 
@@ -320,11 +340,7 @@ impl SurfaceRenderer {
 
     /// Wraps a freshly created `RenderSurface` in a device-bound renderer and
     /// installs it as the live surface. Shared by the safe and Android paths.
-    fn install_surface(
-        &mut self,
-        ctx: &RenderContext,
-        surface: vello::util::RenderSurface<'static>,
-    ) -> Result<()> {
+    fn install_surface(&mut self, ctx: &RenderContext, surface: ConfiguredSurface) -> Result<()> {
         // Seed vello's shader-pipeline compilation from a persisted
         // `wgpu::PipelineCache` when the adapter supports it (Vulkan/Android) and
         // the shell restored a validated blob via
@@ -468,17 +484,23 @@ impl SurfaceRenderer {
     }
 
     /// Phase 1 of the frame — the **encode** span: reset the internal
-    /// `vello::Scene`, encode `scene` into it, and render it (clearing to
-    /// `base_color`) into the intermediate `Rgba8Unorm` target. This is the
-    /// GPU-encode/CPU-rasterize work; it does **not** touch the swapchain, so a
-    /// caller timing this call in isolation measures encode cost with no vsync
-    /// wait folded in.
+    /// `vello::Scene` and encode `scene` into it. It does **not** touch the
+    /// swapchain, so a caller timing this call in isolation measures encode cost
+    /// with no vsync wait folded in. What else happens here depends on the render
+    /// path (see [`Self::submit`]'s span mapping):
+    ///
+    /// - **Blit arm**: also renders (clearing to `base_color`) into the
+    ///   intermediate `Rgba8Unorm` target — so `encode_us` includes the GPU
+    ///   render, as before 11.C.
+    /// - **Direct arm**: does ONLY the CPU-side scene build and stashes
+    ///   `base_color`; the GPU render moves to [`Self::submit`] (it needs the
+    ///   acquired swapchain texture). `encode_us` is then just the CPU encode.
     ///
     /// Returns [`EncodeOutcome::Skipped`] (no work done, nothing queued) in any
     /// phase but [`SurfacePhase::SurfaceReady`] (spec §8.1); otherwise
-    /// [`EncodeOutcome::Encoded`], after which [`Self::present`] blits and
-    /// presents the target. The internal scene is `reset()` every call; nothing
-    /// accumulates across frames.
+    /// [`EncodeOutcome::Encoded`], after which [`Self::present`] finishes the
+    /// frame. The internal scene is `reset()` every call; nothing accumulates
+    /// across frames.
     pub fn encode(
         &mut self,
         ctx: &RenderContext,
@@ -489,11 +511,12 @@ impl SurfaceRenderer {
         if !self.phase().can_render() {
             return Ok(EncodeOutcome::Skipped);
         }
-        // Disjoint field borrows: only the reusable scene and the live surface
-        // are needed here; `consecutive_invalid` belongs to `present`.
+        // Disjoint field borrows: the reusable scene, the live surface, and the
+        // direct-path color stash; `consecutive_invalid` belongs to `present`.
         let Self {
             scene: vello_scene,
             state,
+            pending_base_color,
             ..
         } = self;
         let SurfaceState::Ready(ready) = state else {
@@ -508,40 +531,65 @@ impl SurfaceRenderer {
 
         let device_handle = ctx.device_handle();
 
-        // Fill the intermediate `Rgba8Unorm` target for this frame, per tier.
-        // Both paths land pixels in `ready.surface.target_view`/`target_texture`;
-        // the acquire/blit/present tail (see `present`) is tier-agnostic.
+        // Encode this frame's pixels, per tier and per render path.
         match &mut ready.backend {
-            TierBackend::Gpu(renderer) => {
-                vello_scene.reset();
-                convert::encode_scene(scene, vello_scene);
-                let params = vello::RenderParams {
-                    base_color,
-                    width: ready.surface.config.width,
-                    height: ready.surface.config.height,
-                    antialiasing_method: vello::AaConfig::Area,
-                };
-                renderer
-                    .render_to_texture(
-                        &device_handle.device,
-                        &device_handle.queue,
-                        vello_scene,
-                        &ready.surface.target_view,
-                        &params,
-                    )
-                    .map_err(|e| anyhow!("frust-render: vello render_to_texture failed: {e}"))?;
-            }
+            TierBackend::Gpu(renderer) => match &ready.surface.path {
+                // Direct-to-surface (deliverable 1): the vello render targets the
+                // acquired swapchain texture, which does not exist until
+                // `acquire`. So `encode` does ONLY the CPU-side scene build here;
+                // the GPU `render_to_texture` moves to `submit`. See `submit`'s
+                // span-mapping comment for how this remaps the v3 spans.
+                RenderPath::Direct => {
+                    vello_scene.reset();
+                    convert::encode_scene(scene, vello_scene);
+                    // Carry `base_color` to `submit`, where the render runs.
+                    *pending_base_color = Some(base_color);
+                }
+                // Blit fallback: render into the intermediate `Rgba8Unorm` target
+                // now; the acquire/blit/present tail (see `submit`) copies it to
+                // the swapchain.
+                RenderPath::Blit { target_view, .. } => {
+                    vello_scene.reset();
+                    convert::encode_scene(scene, vello_scene);
+                    let params = vello::RenderParams {
+                        base_color,
+                        width: ready.surface.config.width,
+                        height: ready.surface.config.height,
+                        antialiasing_method: vello::AaConfig::Area,
+                    };
+                    renderer
+                        .render_to_texture(
+                            &device_handle.device,
+                            &device_handle.queue,
+                            vello_scene,
+                            target_view,
+                            &params,
+                        )
+                        .map_err(|e| {
+                            anyhow!("frust-render: vello render_to_texture failed: {e}")
+                        })?;
+                }
+            },
             #[cfg(feature = "cpu-tier")]
             TierBackend::Cpu(cpu) => {
+                // The CPU tier uploads its pixmap into the intermediate target, so
+                // it is always configured on the blit arm (see
+                // `context::choose_render_path`'s `force_blit`); a `Direct` path
+                // here is a wiring bug.
+                let RenderPath::Blit { target_texture, .. } = &ready.surface.path else {
+                    return Err(anyhow!(
+                        "frust-render: cpu-tier requires the blit render path"
+                    ));
+                };
                 let width = ready.surface.config.width;
                 let height = ready.surface.config.height;
                 // Rasterize headless into the reusable pixmap (premultiplied
-                // RGBA8), then upload it into the same target the GPU path
-                // renders into. `write_texture` needs no row padding (unlike a
+                // RGBA8), then upload it into the intermediate target the blit
+                // reads from. `write_texture` needs no row padding (unlike a
                 // buffer copy), so the tight `4 * width` stride is fine.
                 let pixels = cpu.render(scene, base_color, width, height);
                 device_handle.queue.write_texture(
-                    ready.surface.target_texture.as_image_copy(),
+                    target_texture.as_image_copy(),
                     pixels,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
@@ -686,11 +734,33 @@ impl SurfaceRenderer {
         }
     }
 
-    /// Phase 2b of the frame — the **submit** sub-span: blit the encoded
-    /// intermediate target into the swapchain texture [`Self::acquire`] stashed,
-    /// queue-submit the blit, and present it. Timing this call in isolation
-    /// attributes the blit/submit work separately from [`Self::acquire`]'s
-    /// blocking vsync wait (Phase 11.A).
+    /// Phase 2b of the frame — the **submit** sub-span: turn the swapchain
+    /// texture [`Self::acquire`] stashed into a presented frame, then present it.
+    /// Timing this call in isolation attributes the submit work separately from
+    /// [`Self::acquire`]'s blocking vsync wait (Phase 11.A).
+    ///
+    /// What the submit span contains depends on the render path (deliverable 5,
+    /// the v3 span mapping):
+    ///
+    /// - **Blit arm** (`Bgra8`-only/probe-refused/`cpu-tier`): the intermediate
+    ///   target was already filled in [`Self::encode`], so `submit` = create the
+    ///   swapchain view + `TextureBlitter::copy` + queue-submit + present. This is
+    ///   the pre-11.C behavior, unchanged.
+    /// - **Direct arm** (`Rgba8Unorm` + `STORAGE_BINDING`): the vello
+    ///   `render_to_texture` runs HERE, targeting the acquired swapchain texture
+    ///   directly (it does not exist until [`Self::acquire`]), then present — no
+    ///   blit. So the GPU render cost that the blit arm records in `encode_us`
+    ///   moves into `submit_us`; `encode_us` is then only the CPU scene build.
+    ///
+    /// **v3 wire mapping (unchanged fields, remapped work).** The
+    /// `acquire_us`/`submit_us` field names and the wire format are unchanged
+    /// (`perf.rs` is untouched). In the direct arm the swapchain **acquire** (the
+    /// blocking vsync wait) still happens in [`Self::acquire`] and is recorded in
+    /// `acquire_us` exactly as before — so acquire now precedes the GPU render
+    /// (which moved to this span) instead of following it as in the blit arm. A
+    /// benchmark comparing direct vs blit must account for this: the GPU render
+    /// migrates `encode_us` → `submit_us`, `submit_us` sheds the blit, and
+    /// `acquire_us` is unchanged but now sits *before* the render.
     ///
     /// Must follow an [`AcquireOutcome::Acquired`] result from [`Self::acquire`]
     /// on the same frame — it consumes the stashed texture. With nothing stashed
@@ -702,29 +772,82 @@ impl SurfaceRenderer {
         let Some(surface_texture) = self.pending_present.take() else {
             return Ok(FrameOutcome::Skipped);
         };
-        // The stashed texture is owned, but the blit source (`target_view`) and
-        // the blitter live on the surface — if it vanished between `acquire` and
-        // `submit`, drop the texture and skip rather than present a stale frame.
-        let SurfaceState::Ready(ready) = &self.state else {
+        // The stashed texture is owned, but the encoded pixels (direct: the vello
+        // renderer + scene; blit: the intermediate target + blitter) live on
+        // `self` — if the surface vanished between `acquire` and `submit`, drop
+        // the texture and skip rather than present a stale frame.
+        let Self {
+            scene: vello_scene,
+            state,
+            pending_base_color,
+            ..
+        } = self;
+        let SurfaceState::Ready(ready) = state else {
             return Ok(FrameOutcome::Skipped);
         };
+        let ReadySurface {
+            surface, backend, ..
+        } = &mut **ready;
         let device_handle = ctx.device_handle();
-        let target_view = surface_texture
+        let swapchain_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            device_handle
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("frust-render blit"),
-                });
-        ready.surface.blitter.copy(
-            &device_handle.device,
-            &mut encoder,
-            &ready.surface.target_view,
-            &target_view,
-        );
-        device_handle.queue.submit([encoder.finish()]);
+
+        match &surface.path {
+            // Direct-to-surface: render vello straight into the acquired swapchain
+            // texture, then present. No intermediate, no blit pass.
+            RenderPath::Direct => match backend {
+                TierBackend::Gpu(renderer) => {
+                    let params = vello::RenderParams {
+                        // Set in `encode`; a well-formed frame always encoded first.
+                        base_color: pending_base_color.take().unwrap_or(peniko::Color::BLACK),
+                        width: surface.config.width,
+                        height: surface.config.height,
+                        antialiasing_method: vello::AaConfig::Area,
+                    };
+                    renderer
+                        .render_to_texture(
+                            &device_handle.device,
+                            &device_handle.queue,
+                            vello_scene,
+                            &swapchain_view,
+                            &params,
+                        )
+                        .map_err(|e| {
+                            anyhow!("frust-render: vello render_to_texture failed: {e}")
+                        })?;
+                }
+                // Unreachable: the direct arm is only ever configured for the GPU
+                // tier (`choose_render_path` forces blit for cpu-tier).
+                #[cfg(feature = "cpu-tier")]
+                TierBackend::Cpu(_) => {
+                    return Err(anyhow!(
+                        "frust-render: direct render path requires the GPU tier"
+                    ));
+                }
+            },
+            // Blit fallback: copy the intermediate target (filled in `encode`)
+            // into the swapchain texture and submit.
+            RenderPath::Blit {
+                target_view,
+                blitter,
+                ..
+            } => {
+                let mut encoder =
+                    device_handle
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("frust-render blit"),
+                        });
+                blitter.copy(
+                    &device_handle.device,
+                    &mut encoder,
+                    target_view,
+                    &swapchain_view,
+                );
+                device_handle.queue.submit([encoder.finish()]);
+            }
+        }
         surface_texture.present();
         Ok(FrameOutcome::Rendered)
     }

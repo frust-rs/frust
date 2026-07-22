@@ -21,7 +21,6 @@
 
 use anyhow::{Result, anyhow};
 use std::sync::OnceLock;
-use vello::util::RenderSurface;
 use wgpu::util::TextureBlitter;
 
 /// The features vello's renderer opportunistically uses when the adapter
@@ -32,19 +31,98 @@ fn vello_optional_features() -> wgpu::Features {
     wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE
 }
 
+/// Whether a `FRUST_*` boolean env flag is set to a non-zero value, checking
+/// both the compile-time (`option_env!`) and runtime (`std::env::var`) halves —
+/// the compile-time-or-runtime parsing every shipping flag (`FRUST_TRACE`,
+/// `FRUST_NO_FRAME_GATE`, `FRUST_NO_RENDER_THREAD`, …) uses, so an Android app
+/// process (which has no runtime env) still honours a baked-in value.
+fn env_flag_enabled(name_compile_time: Option<&str>, name_runtime: Option<String>) -> bool {
+    fn is_set_non_zero(value: Option<&str>) -> bool {
+        matches!(value, Some(v) if v != "0")
+    }
+    is_set_non_zero(name_compile_time) || is_set_non_zero(name_runtime.as_deref())
+}
+
 /// Whether perf tracing (frust-perf logging) is enabled via the process-wide
 /// `FRUST_TRACE` flag — mirroring the check in `frust-shell-common::perf`.
 /// Cached to avoid repeated environment lookups.
 fn perf_tracing_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        let compile_time = option_env!("FRUST_TRACE");
-        let runtime = std::env::var("FRUST_TRACE").ok();
-        fn is_set_non_zero(value: Option<&str>) -> bool {
-            matches!(value, Some(v) if v != "0")
-        }
-        is_set_non_zero(compile_time) || is_set_non_zero(runtime.as_deref())
+        env_flag_enabled(
+            option_env!("FRUST_TRACE"),
+            std::env::var("FRUST_TRACE").ok(),
+        )
     })
+}
+
+/// Whether the direct-to-surface render path is force-disabled via the
+/// process-wide `FRUST_NO_DIRECT_SURFACE` flag — the fallback-proof safety valve
+/// (deliverable 4) that pins a capable device onto the blit arm so the two arms
+/// can be A/B'd on the same hardware. Same compile-time-or-runtime parsing as
+/// `FRUST_TRACE`/`FRUST_NO_RENDER_THREAD` (see `docs/DEVELOPMENT.md`'s
+/// Instrumentation table). Cached: read once per process.
+fn direct_surface_force_blit() -> bool {
+    static FORCED: OnceLock<bool> = OnceLock::new();
+    *FORCED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_NO_DIRECT_SURFACE"),
+            std::env::var("FRUST_NO_DIRECT_SURFACE").ok(),
+        )
+    })
+}
+
+/// Which per-frame render path a configured surface uses (see [`RenderPath`]).
+///
+/// Pure decision output, kept separate from the `wgpu` resources so the
+/// selection logic ([`choose_render_path`]) is unit-testable without a GPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenderPathKind {
+    /// vello renders straight into the acquired swapchain texture
+    /// (`Rgba8Unorm` + `STORAGE_BINDING`); no intermediate texture, no blit.
+    Direct,
+    /// vello renders into an intermediate `Rgba8Unorm` target that is blitted to
+    /// the swapchain each frame — the fallback for probe-refused/`Bgra8`-only
+    /// surfaces and the `cpu-tier` path.
+    Blit,
+}
+
+/// Pure direct-to-surface path policy (deliverable 2/4): choose [`Direct`] only
+/// when the surface advertises **both** `Rgba8Unorm` and `STORAGE_BINDING` (the
+/// exact requirements of vello 0.9's `render_to_texture` target) **and** the
+/// blit arm is not force-selected; otherwise [`Blit`].
+///
+/// `force_blit` folds together the `FRUST_NO_DIRECT_SURFACE` safety valve and
+/// the `cpu-tier`-selected case (the CPU tier uploads its pixmap into the
+/// intermediate target, so it is blit-only by construction) — both resolved at
+/// the call site. Host-testable: no `wgpu` state is touched here.
+///
+/// [`Direct`]: RenderPathKind::Direct
+/// [`Blit`]: RenderPathKind::Blit
+pub(crate) fn choose_render_path(
+    has_rgba8unorm: bool,
+    has_storage_binding: bool,
+    force_blit: bool,
+) -> RenderPathKind {
+    if !force_blit && has_rgba8unorm && has_storage_binding {
+        RenderPathKind::Direct
+    } else {
+        RenderPathKind::Blit
+    }
+}
+
+/// The two direct-to-surface capability bits, read once from a surface's
+/// [`wgpu::SurfaceCapabilities`]. Shared by the capability probe log and the
+/// [`choose_render_path`] decision so the query is not duplicated (the probe
+/// from task 05 is the source of this logic).
+fn direct_surface_caps(capabilities: &wgpu::SurfaceCapabilities) -> (bool, bool) {
+    let has_rgba8unorm = capabilities
+        .formats
+        .contains(&wgpu::TextureFormat::Rgba8Unorm);
+    let has_storage_binding = capabilities
+        .usages
+        .contains(wgpu::TextureUsages::STORAGE_BINDING);
+    (has_rgba8unorm, has_storage_binding)
 }
 
 /// Probes the surface's direct-to-surface capability and logs the result
@@ -76,15 +154,9 @@ fn probe_direct_to_surface_capability(capabilities: &wgpu::SurfaceCapabilities) 
             )
         };
 
-        // Check if Rgba8Unorm is in the supported formats
-        let has_rgba8unorm = capabilities
-            .formats
-            .contains(&wgpu::TextureFormat::Rgba8Unorm);
-
-        // Check if STORAGE_BINDING is in the supported usages
-        let has_storage_binding = capabilities
-            .usages
-            .contains(wgpu::TextureUsages::STORAGE_BINDING);
+        // Reuse the shared capability read so the probe verdict and the live
+        // path decision (`choose_render_path`) can never disagree.
+        let (has_rgba8unorm, has_storage_binding) = direct_surface_caps(capabilities);
 
         // Determine the verdict
         let direct_to_surface_supported = has_rgba8unorm && has_storage_binding;
@@ -116,6 +188,46 @@ fn probe_direct_to_surface_capability(capabilities: &wgpu::SurfaceCapabilities) 
             verdict,
             reason
         );
+    });
+}
+
+/// Emits the one-per-process startup line naming the chosen render path and the
+/// reason (deliverable 3), mirroring the surface-caps probe line style and its
+/// `FRUST_TRACE` gating. Logged once regardless of surface recreation.
+fn log_render_path(
+    path: RenderPathKind,
+    has_rgba8unorm: bool,
+    has_storage_binding: bool,
+    force_blit: bool,
+) {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+
+    if !perf_tracing_enabled() {
+        return;
+    }
+
+    LOGGED.get_or_init(|| {
+        let (name, reason) = match path {
+            RenderPathKind::Direct => ("direct", "Rgba8Unorm+STORAGE_BINDING".to_string()),
+            RenderPathKind::Blit => {
+                let reason = if force_blit {
+                    // The safety valve wins even on a capable surface — say so, so
+                    // an A/B run's log confirms the arm it is actually exercising.
+                    "forced (FRUST_NO_DIRECT_SURFACE or cpu-tier)".to_string()
+                } else {
+                    let mut missing = Vec::new();
+                    if !has_rgba8unorm {
+                        missing.push("no Rgba8Unorm");
+                    }
+                    if !has_storage_binding {
+                        missing.push("no STORAGE_BINDING");
+                    }
+                    missing.join(", ")
+                };
+                ("blit", reason)
+            }
+        };
+        log::info!("frust-perf render-path {name} ({reason})");
     });
 }
 
@@ -222,6 +334,41 @@ impl DetachedSurface {
     pub(crate) fn into_surface(self) -> wgpu::Surface<'static> {
         self.surface
     }
+}
+
+/// The per-frame render path a [`ConfiguredSurface`] carries — the resources
+/// specific to the chosen arm (see [`RenderPathKind`]).
+///
+/// The [`Direct`](Self::Direct) arm holds nothing extra: vello renders straight
+/// into the acquired swapchain texture, so there is no intermediate target or
+/// blitter to keep. The [`Blit`](Self::Blit) arm owns the intermediate
+/// `Rgba8Unorm` target vello renders into plus the [`TextureBlitter`] that
+/// copies it to the swapchain each frame.
+pub(crate) enum RenderPath {
+    /// Direct-to-surface: the swapchain is configured `Rgba8Unorm` +
+    /// `STORAGE_BINDING` and vello's `render_to_texture` targets its acquired
+    /// texture directly (deliverable 1). Eliminates the intermediate texture and
+    /// the per-frame blit pass.
+    Direct,
+    /// Blit fallback: vello renders into `target_view`, then `blitter` copies
+    /// `target_texture` into the acquired swapchain texture each frame. Also the
+    /// `cpu-tier` upload target (`COPY_DST`, see [`create_targets`]).
+    Blit {
+        target_texture: wgpu::Texture,
+        target_view: wgpu::TextureView,
+        blitter: TextureBlitter,
+    },
+}
+
+/// A configured swapchain surface plus the render-path resources for the arm it
+/// was configured for — frust's replacement for `vello::util::RenderSurface`
+/// (whose fields always include an intermediate target + blitter, which the
+/// direct arm does not use). Crate-private; the wrapped `wgpu` types never
+/// escape `frust-render`.
+pub(crate) struct ConfiguredSurface {
+    pub(crate) surface: wgpu::Surface<'static>,
+    pub(crate) config: wgpu::SurfaceConfiguration,
+    pub(crate) path: RenderPath,
 }
 
 /// Given the build-config-derived instance flags and whether the process is
@@ -696,26 +843,53 @@ impl RenderContext {
         width: u32,
         height: u32,
         present_mode: wgpu::PresentMode,
-    ) -> Result<RenderSurface<'static>> {
+    ) -> Result<ConfiguredSurface> {
         self.ensure_device(&surface).await?;
+        // The tier probe (task 06) already ran in `ensure_device`, so
+        // `selected_tier()` is authoritative here: the `cpu-tier` path uploads
+        // its pixmap into the intermediate target, so it is blit-only and forces
+        // the blit arm alongside the `FRUST_NO_DIRECT_SURFACE` safety valve.
+        let force_blit =
+            direct_surface_force_blit() || self.selected_tier() != crate::tier::RenderTier::Gpu;
         let handle = self.device_handle();
 
         let capabilities = surface.get_capabilities(&handle.adapter);
         probe_direct_to_surface_capability(&capabilities);
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(|it| {
-                matches!(
-                    it,
-                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
-                )
-            })
-            .ok_or_else(|| anyhow!("frust-render: no supported surface format (Rgba8/Bgra8)"))?;
+        let (has_rgba8unorm, has_storage_binding) = direct_surface_caps(&capabilities);
+        let path_kind = choose_render_path(has_rgba8unorm, has_storage_binding, force_blit);
+        log_render_path(path_kind, has_rgba8unorm, has_storage_binding, force_blit);
+
+        // Direct arm: the swapchain itself is the vello render target, so it must
+        // be `Rgba8Unorm` (vello's `render_to_texture` target format) and carry
+        // `STORAGE_BINDING` (vello renders via a compute storage write). Blit arm:
+        // any supported `Rgba8/Bgra8` swapchain works — the blitter converts the
+        // intermediate `Rgba8Unorm` target into it — and only `RENDER_ATTACHMENT`
+        // is needed.
+        let (format, usage) = match path_kind {
+            RenderPathKind::Direct => (
+                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING,
+            ),
+            RenderPathKind::Blit => {
+                let format = capabilities
+                    .formats
+                    .iter()
+                    .copied()
+                    .find(|it| {
+                        matches!(
+                            it,
+                            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
+                        )
+                    })
+                    .ok_or_else(|| {
+                        anyhow!("frust-render: no supported surface format (Rgba8/Bgra8)")
+                    })?;
+                (format, wgpu::TextureUsages::RENDER_ATTACHMENT)
+            }
+        };
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage,
             format,
             width,
             height,
@@ -724,20 +898,24 @@ impl RenderContext {
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
         };
-        let (target_texture, target_view) = create_targets(width, height, &handle.device);
-        let render_surface = RenderSurface {
+        let path = match path_kind {
+            RenderPathKind::Direct => RenderPath::Direct,
+            RenderPathKind::Blit => {
+                let (target_texture, target_view) = create_targets(width, height, &handle.device);
+                RenderPath::Blit {
+                    target_texture,
+                    target_view,
+                    blitter: TextureBlitter::new(&handle.device, format),
+                }
+            }
+        };
+        let configured = ConfiguredSurface {
             surface,
             config,
-            // `dev_id` indexes vello's own device pool, which we do not use;
-            // frust reads the device from `self.device` instead. Left at 0.
-            dev_id: 0,
-            format,
-            target_texture,
-            target_view,
-            blitter: TextureBlitter::new(&handle.device, format),
+            path,
         };
-        self.configure_surface(&render_surface);
-        Ok(render_surface)
+        self.configure_surface(&configured);
+        Ok(configured)
     }
 
     /// Builds a [`RenderSurface`] from anything convertible into a wgpu
@@ -749,7 +927,7 @@ impl RenderContext {
         width: u32,
         height: u32,
         present_mode: wgpu::PresentMode,
-    ) -> Result<RenderSurface<'static>> {
+    ) -> Result<ConfiguredSurface> {
         let surface = self
             .instance
             .create_surface(target)
@@ -759,26 +937,30 @@ impl RenderContext {
     }
 
     /// (Re)configures the swapchain for `surface`'s current config.
-    pub(crate) fn configure_surface(&self, surface: &RenderSurface<'static>) {
+    pub(crate) fn configure_surface(&self, surface: &ConfiguredSurface) {
         surface
             .surface
             .configure(&self.device_handle().device, &surface.config);
     }
 
-    /// Resizes `surface` in place: recreates the intermediate target texture
-    /// and reconfigures the swapchain. Zero dimensions are rejected upstream.
-    pub(crate) fn resize_surface(
-        &self,
-        surface: &mut RenderSurface<'static>,
-        width: u32,
-        height: u32,
-    ) {
-        let (target_texture, target_view) =
-            create_targets(width, height, &self.device_handle().device);
-        surface.target_texture = target_texture;
-        surface.target_view = target_view;
+    /// Resizes `surface` in place and reconfigures the swapchain. On the blit
+    /// arm the intermediate target texture is recreated at the new size; the
+    /// direct arm has no intermediate, so only the swapchain config changes. Zero
+    /// dimensions are rejected upstream.
+    pub(crate) fn resize_surface(&self, surface: &mut ConfiguredSurface, width: u32, height: u32) {
         surface.config.width = width;
         surface.config.height = height;
+        if let RenderPath::Blit {
+            target_texture,
+            target_view,
+            ..
+        } = &mut surface.path
+        {
+            let (new_texture, new_view) =
+                create_targets(width, height, &self.device_handle().device);
+            *target_texture = new_texture;
+            *target_view = new_view;
+        }
         self.configure_surface(surface);
     }
 }
@@ -786,6 +968,38 @@ impl RenderContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_path_chosen_only_when_both_caps_present_and_not_forced() {
+        // The GO population (OP9/Xiaomi 12): Rgba8Unorm + STORAGE_BINDING, no
+        // force → direct-to-surface.
+        assert_eq!(
+            choose_render_path(true, true, false),
+            RenderPathKind::Direct
+        );
+    }
+
+    #[test]
+    fn force_blit_overrides_a_capable_surface() {
+        // FRUST_NO_DIRECT_SURFACE (or cpu-tier) pins a fully-capable surface onto
+        // the blit arm — the fallback-proof safety valve / A-B mechanism.
+        assert_eq!(choose_render_path(true, true, true), RenderPathKind::Blit);
+    }
+
+    #[test]
+    fn missing_either_cap_falls_back_to_blit() {
+        // iPhone SE (Bgra8-only): no Rgba8Unorm → blit.
+        assert_eq!(choose_render_path(false, true, false), RenderPathKind::Blit);
+        // No STORAGE_BINDING → blit.
+        assert_eq!(choose_render_path(true, false, false), RenderPathKind::Blit);
+        // Neither → blit.
+        assert_eq!(
+            choose_render_path(false, false, false),
+            RenderPathKind::Blit
+        );
+        // Neither, and forced → still blit (force never resurrects direct).
+        assert_eq!(choose_render_path(false, false, true), RenderPathKind::Blit);
+    }
 
     #[test]
     fn emulator_strips_debug_and_validation() {

@@ -2,10 +2,13 @@
 //!
 //! Consumes the renderer-agnostic [`frust_scene::Scene`] display list and
 //! renders it into a window's swapchain via Vello. Vello 0.9 has no
-//! `render_to_surface`: it renders (by compute) into an intermediate
-//! `Rgba8Unorm` texture, which is then blitted to the acquired swapchain
-//! texture — that presentation model lives in [`RenderContext`] /
-//! [`SurfaceRenderer`].
+//! `render_to_surface`: it renders (by compute) into an `Rgba8Unorm` storage
+//! texture. Where the surface itself supports `Rgba8Unorm` + `STORAGE_BINDING`
+//! (probed per surface), Frust renders **direct-to-surface** — vello targets the
+//! acquired swapchain texture and there is no blit (phase 11.C); otherwise it
+//! falls back to rendering into an intermediate `Rgba8Unorm` texture blitted to
+//! the swapchain each frame. Both presentation models live in [`RenderContext`]
+//! / [`SurfaceRenderer`].
 //!
 //! `vello`/`wgpu` types are kept out of the public API except at two
 //! deliberate seams: [`SurfaceRenderer::on_surface_created`] takes a
