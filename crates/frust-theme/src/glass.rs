@@ -185,9 +185,12 @@ impl GlassScale {
             shadow,
         };
         Self {
-            chrome: opaque(m3.level3.shadow),
-            bar: opaque(m3.level2.shadow),
-            control: opaque(m3.level1.shadow),
+            // M3's v1 shadow mapping doesn't branch by brightness (see
+            // `elevation`'s module docs), so `shadow_light` and
+            // `shadow_dark` are identical here — pick either.
+            chrome: opaque(m3.level3.shadow_light),
+            bar: opaque(m3.level2.shadow_light),
+            control: opaque(m3.level1.shadow_light),
         }
     }
 }
@@ -260,9 +263,9 @@ mod tests {
     fn opaque_material_shadows_track_the_m3_elevation_table() {
         let g = GlassScale::opaque_material();
         let m3 = Elevation::m3();
-        assert_eq!(g.chrome.shadow, m3.level3.shadow);
-        assert_eq!(g.bar.shadow, m3.level2.shadow);
-        assert_eq!(g.control.shadow, m3.level1.shadow);
+        assert_eq!(g.chrome.shadow, m3.level3.shadow_light);
+        assert_eq!(g.bar.shadow, m3.level2.shadow_light);
+        assert_eq!(g.control.shadow, m3.level1.shadow_light);
     }
 
     #[test]
