@@ -933,6 +933,13 @@ impl SurfaceRenderer {
 /// frame both survive. Never panics — a failed compile is recorded/skipped
 /// inside `ShaderEffects` and simply yields no map entry (the quad then takes
 /// the miss placeholder).
+///
+/// Whole-id reap ([`ShaderEffects::mark_seen`]/[`ShaderEffects::reap`]) runs
+/// once per call, keyed on this frame's live *ids* (not just live keys) so a
+/// program absent from the scene entirely for `MAX_UNSEEN_FRAMES` consecutive
+/// frames has its pipeline, target(s), and `failed` record dropped instead of
+/// living until surface teardown — the whole-id counterpart to the
+/// frame-scoped resized-away-size reclaim above.
 fn run_shader_prepass(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -983,6 +990,16 @@ fn run_shader_prepass(
         }
         queue.submit([encoder.finish()]);
     }
+
+    // Age out whole ids that have stopped being drawn entirely (screen
+    // navigation, a dynamic id, etc.) — computed from this frame's live ids
+    // regardless of whether `quads` was empty, so a scene that stops drawing
+    // shader quads altogether still ages out and reaps every previously-seen
+    // id rather than only ones still present. Reaping a stale id drops its
+    // real pipeline/target(s) and any `failed` record.
+    let live_ids: HashSet<u64> = live.iter().map(|&(id, _, _)| id).collect();
+    let reapable = shader_effects.mark_seen(&live_ids);
+    shader_effects.reap(&reapable);
 
     // Reclaim the resized-away sizes of still-drawn programs (frame-scoped: two
     // live sizes of one id both survive), then hand back any evicted target's

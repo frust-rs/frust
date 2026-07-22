@@ -15,6 +15,13 @@
 //! - **Size-clamp policy** ([`clamp_size`]) against vello's 8192² atlas cap
 //!   (RESEARCH.md §Q1: an over-cap image is a *silent* non-render, so we must
 //!   clamp proactively rather than rely on any error surfacing).
+//! - **Age-based whole-id reap** ([`ShaderEffects::mark_seen`]/[`ShaderEffects::reap`]):
+//!   a program id absent from every frame's live key set for
+//!   [`MAX_UNSEEN_FRAMES`] consecutive frames has its pipeline, target(s), and
+//!   any recorded compile failure dropped, rather than living until surface
+//!   teardown — the whole-id counterpart to
+//!   [`ShaderEffects::evict_stale_targets`]'s frame-scoped resized-away-size
+//!   reclaim.
 //!
 //! It is deliberately decoupled from `frust-scene`: the API speaks
 //! `(id: u64, wgsl: &str, size, time)` primitives, never a `Scene` or a
@@ -61,6 +68,17 @@ const UNIFORM_SIZE: u64 = 16;
 /// shaders from flooding the log. A failure past this is still recorded in
 /// [`ShaderEffects::failed`] (so it is skipped), just not re-logged.
 const MAX_FAILED_WARNINGS: u32 = 8;
+
+/// How many consecutive frames a program id may go unseen (absent from every
+/// frame's live key set — see [`ShaderEffects::mark_seen`]) before its
+/// compiled pipeline, offscreen target(s), and any recorded compile failure
+/// are reaped ([`ShaderEffects::reap`]) rather than living until surface
+/// teardown. ~120 frames is roughly 1-2s at a 60-120Hz refresh rate:
+/// generous enough that a shader drawn intermittently (every-other-frame, or
+/// through a brief scene-diff hiccup) is never mistaken for vanished, short
+/// enough that navigating away from a shader-showcase screen reclaims its
+/// GPU state promptly instead of leaking for the rest of the session.
+const MAX_UNSEEN_FRAMES: u64 = 120;
 
 /// The fixed WGSL prelude prepended to every fragment source: the 16-byte
 /// uniform block at `@group(0) @binding(0)` and the vertex-buffer-free
@@ -139,6 +157,15 @@ pub(crate) struct ShaderEffects {
     /// How many compile failures have been logged so far (the [`MAX_FAILED_WARNINGS`]
     /// rate limit).
     warned_failures: u32,
+    /// Monotonic per-frame counter, bumped once per [`Self::mark_seen`] call —
+    /// the age clock [`reapable_ids`] measures a program id's absence against.
+    frame: u64,
+    /// The frame (per [`Self::frame`]) each program id was last present in a
+    /// frame's live key set, updated by [`Self::mark_seen`] for every id
+    /// passed in — including one whose pipeline failed to compile, so a
+    /// broken shader's [`failed`](Self::failed) entry can still age out. An
+    /// id absent from this map has never been seen (or was already reaped).
+    last_seen: HashMap<u64, u64>,
 }
 
 /// Clamp a requested target size to the renderable range: at most
@@ -201,6 +228,42 @@ fn should_warn_failure(prior_warn_count: u32) -> bool {
     prior_warn_count < MAX_FAILED_WARNINGS
 }
 
+/// The program ids in `last_seen` whose last-seen frame is at least `max_age`
+/// frames behind `current_frame` — a vanished-id reap candidate list, i.e.
+/// every id [`ShaderEffects::reap`] should drop resources for. Pure: operates
+/// on the age map alone (no GPU state), so the reap policy is unit-testable
+/// exactly like [`stale_target_keys`].
+///
+/// A vanished id (one whose `Command::ShaderQuad` stops appearing in the
+/// scene entirely — screen navigation, a dynamic id, etc.) is a distinct case
+/// from a resized-away *size* of a still-drawn id, which
+/// [`stale_target_keys`]/[`ShaderEffects::evict_stale_targets`] already
+/// reclaims frame-scoped; this function is the whole-id counterpart, aged
+/// rather than frame-scoped since a vanished id produces no live key at all
+/// for `evict_stale_targets` to compare against.
+fn reapable_ids(last_seen: &HashMap<u64, u64>, current_frame: u64, max_age: u64) -> Vec<u64> {
+    last_seen
+        .iter()
+        .filter(|&(_, &seen)| current_frame.saturating_sub(seen) >= max_age)
+        .map(|(&id, _)| id)
+        .collect()
+}
+
+/// The `targets` keys [`ShaderEffects::reap`] should remove for a given
+/// `stale_ids` list — every key whose id is one of them. Pure key-selection,
+/// mirroring [`stale_target_keys`]'s shape, so `reap`'s target-removal choice
+/// is unit-testable without a `wgpu::Device` (a real `TargetEntry` can't be
+/// constructed without one).
+fn reapable_target_keys<I>(target_keys: I, stale_ids: &HashSet<u64>) -> Vec<(u64, u32, u32)>
+where
+    I: IntoIterator<Item = (u64, u32, u32)>,
+{
+    target_keys
+        .into_iter()
+        .filter(|key| stale_ids.contains(&key.0))
+        .collect()
+}
+
 impl ShaderEffects {
     /// Create an empty engine seeded with an optional clone of the surface's
     /// [`wgpu::PipelineCache`] (used as `RenderPipelineDescriptor.cache` so a
@@ -214,6 +277,8 @@ impl ShaderEffects {
             failed: HashSet::new(),
             dropped_images: Vec::new(),
             warned_failures: 0,
+            frame: 0,
+            last_seen: HashMap::new(),
         }
     }
 
@@ -311,6 +376,49 @@ impl ShaderEffects {
         if should_warn_failure(self.warned_failures) {
             self.warned_failures += 1;
             log::warn!("frust-render: shader program {id} failed to compile, skipping: {message}");
+        }
+    }
+
+    /// Bump the frame counter and record every id in `live_ids` (this frame's
+    /// distinct program ids, taken before compile/target work — so an id whose
+    /// pipeline just failed to compile is still marked seen) as last seen at
+    /// the new frame. Returns every id that has now gone unseen for at least
+    /// [`MAX_UNSEEN_FRAMES`] frames (via [`reapable_ids`]), ready to hand to
+    /// [`Self::reap`].
+    ///
+    /// Called once per frame regardless of whether `live_ids` is empty — a
+    /// scene that stops drawing shader quads entirely must still age out and
+    /// eventually reap every previously-seen id, not just ones still present.
+    pub(crate) fn mark_seen(&mut self, live_ids: &HashSet<u64>) -> Vec<u64> {
+        self.frame += 1;
+        for &id in live_ids {
+            self.last_seen.insert(id, self.frame);
+        }
+        reapable_ids(&self.last_seen, self.frame, MAX_UNSEEN_FRAMES)
+    }
+
+    /// Reap every resource for each id in `stale_ids` (a [`Self::mark_seen`]
+    /// output): every `targets` entry whose key's id matches — draining its
+    /// registered image into [`dropped_images`](Self::dropped_images), the
+    /// same handoff [`evict_stale_targets`](Self::evict_stale_targets) uses —
+    /// plus the compiled `pipelines` entry, any `failed` record, and the
+    /// `last_seen` row itself. Dropping `failed` alongside the rest means a
+    /// program id that reappears after being reaped is treated as brand new:
+    /// it recompiles cleanly rather than hitting a stale skip from a compile
+    /// failure that happened frames ago (or never happened at all).
+    pub(crate) fn reap(&mut self, stale_ids: &[u64]) {
+        let stale_id_set: HashSet<u64> = stale_ids.iter().copied().collect();
+        for key in reapable_target_keys(self.targets.keys().copied(), &stale_id_set) {
+            if let Some(entry) = self.targets.remove(&key)
+                && let Some(image) = entry.image
+            {
+                self.dropped_images.push(image);
+            }
+        }
+        for &id in stale_ids {
+            self.pipelines.remove(&id);
+            self.failed.remove(&id);
+            self.last_seen.remove(&id);
         }
     }
 
@@ -635,6 +743,111 @@ mod tests {
         assert!(stale_target_keys(keys.iter().copied(), &live).is_empty());
     }
 
+    #[test]
+    fn reapable_ids_selects_only_ids_unseen_for_at_least_max_age() {
+        let last_seen: HashMap<u64, u64> = [(1, 0), (2, 50), (3, 100)].into_iter().collect();
+        // At frame 120: id 1 (age 120) and id 2 (age 70) are both >= max_age
+        // 60; id 3 (age 20) is not.
+        let mut stale = reapable_ids(&last_seen, 120, 60);
+        stale.sort();
+        assert_eq!(stale, vec![1, 2]);
+    }
+
+    #[test]
+    fn reapable_ids_boundary_is_inclusive() {
+        let last_seen: HashMap<u64, u64> = [(1, 0)].into_iter().collect();
+        // Age exactly max_age reaps; one frame short does not.
+        assert!(reapable_ids(&last_seen, 60, 60).contains(&1));
+        assert!(!reapable_ids(&last_seen, 59, 60).contains(&1));
+    }
+
+    #[test]
+    fn reapable_ids_empty_when_every_id_seen_this_frame() {
+        // An id seen every frame is never reaped, however many frames elapse.
+        let mut last_seen: HashMap<u64, u64> = HashMap::new();
+        for frame in 1..=(MAX_UNSEEN_FRAMES * 3) {
+            last_seen.insert(1, frame);
+            assert!(reapable_ids(&last_seen, frame, MAX_UNSEEN_FRAMES).is_empty());
+        }
+    }
+
+    #[test]
+    fn reapable_target_keys_selects_only_matching_stale_ids() {
+        let keys = [(1, 100, 100), (1, 200, 200), (2, 100, 100), (3, 50, 50)];
+        let stale_ids: HashSet<u64> = [1, 3].into_iter().collect();
+        let mut got = reapable_target_keys(keys.iter().copied(), &stale_ids);
+        got.sort();
+        assert_eq!(got, vec![(1, 100, 100), (1, 200, 200), (3, 50, 50)]);
+    }
+
+    #[test]
+    fn reapable_target_keys_empty_for_no_stale_ids() {
+        let keys = [(1, 100, 100)];
+        let stale_ids: HashSet<u64> = HashSet::new();
+        assert!(reapable_target_keys(keys.iter().copied(), &stale_ids).is_empty());
+    }
+
+    #[test]
+    fn mark_seen_bumps_frame_and_reaps_ids_unseen_past_max_age() {
+        let mut fx = ShaderEffects::new(None);
+        // Frame 1: id 1 is live.
+        assert!(fx.mark_seen(&[1].into_iter().collect()).is_empty());
+        // Id 1 vanishes; keep marking an unrelated id (or nothing) live for
+        // MAX_UNSEEN_FRAMES more frames — id 1 must not surface as reapable
+        // until its age actually crosses the threshold.
+        for _ in 0..(MAX_UNSEEN_FRAMES - 1) {
+            assert!(fx.mark_seen(&HashSet::new()).is_empty());
+        }
+        // One more frame crosses the threshold.
+        let reapable = fx.mark_seen(&HashSet::new());
+        assert_eq!(reapable, vec![1]);
+    }
+
+    #[test]
+    fn mark_seen_never_reaps_an_id_kept_live_every_frame() {
+        let mut fx = ShaderEffects::new(None);
+        for _ in 0..(MAX_UNSEEN_FRAMES * 2) {
+            assert!(fx.mark_seen(&[1].into_iter().collect()).is_empty());
+        }
+    }
+
+    #[test]
+    fn reap_clears_failed_and_last_seen_so_a_redrawn_id_recompiles_cleanly() {
+        let mut fx = ShaderEffects::new(None);
+        // Program 1 failed to compile once, and was seen at some prior frame.
+        fx.record_failed(1, "boom");
+        fx.last_seen.insert(1, 3);
+        assert!(!fx.needs_compile(1), "a failed id is skipped, not retried");
+
+        fx.reap(&[1]);
+
+        assert!(!fx.failed.contains(&1));
+        assert!(!fx.last_seen.contains_key(&1));
+        assert!(
+            fx.needs_compile(1),
+            "a reaped id must be eligible to recompile cleanly, not stuck in `failed`"
+        );
+    }
+
+    #[test]
+    fn reap_only_touches_the_stale_ids_given() {
+        let mut fx = ShaderEffects::new(None);
+        fx.record_failed(1, "boom");
+        fx.record_failed(2, "boom");
+        fx.last_seen.insert(1, 1);
+        fx.last_seen.insert(2, 1);
+
+        fx.reap(&[1]);
+
+        assert!(!fx.failed.contains(&1));
+        assert!(
+            fx.failed.contains(&2),
+            "id 2 was not in stale_ids, must survive"
+        );
+        assert!(!fx.last_seen.contains_key(&1));
+        assert!(fx.last_seen.contains_key(&2));
+    }
+
     fn dummy_image(marker: u8) -> ImageData {
         ImageData {
             data: peniko::Blob::from(vec![marker; 2 * 2 * 4]),
@@ -671,5 +884,76 @@ mod tests {
         assert_eq!(taken.len(), 2);
         // Draining leaves the queue empty for the next frame.
         assert!(fx.take_dropped_images().is_empty());
+    }
+
+    /// End-to-end (real device) confirmation that a vanished id's *actual*
+    /// compiled pipeline and offscreen target — not just the pure key-selection
+    /// logic above — are dropped by `mark_seen`/`reap`, and that the id
+    /// recompiles cleanly if redrawn afterward. The pure-logic tests above
+    /// (`reapable_ids`/`reapable_target_keys`/`mark_seen`/`reap`) cover the
+    /// policy without a device; this covers the real `PipelineEntry`/
+    /// `TargetEntry` removal a `wgpu::Device` requires to construct at all.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn reap_drops_a_vanished_ids_real_pipeline_and_target() {
+        pollster::block_on(run());
+
+        async fn run() {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .expect("no compatible GPU adapter");
+            let (device, _queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust shader_effects reap test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+
+            const FRAGMENT: &str = "@fragment fn fs_main(in: FrustVsOut) -> \
+                @location(0) vec4<f32> { return vec4<f32>(frust_u.time, 0.0, 0.0, 1.0); }";
+
+            let mut fx = ShaderEffects::new(None);
+            assert!(fx.mark_seen(&[1].into_iter().collect()).is_empty());
+            fx.ensure_pipeline(&device, 1, FRAGMENT);
+            fx.ensure_target(&device, 1, 4, 4);
+            assert!(!fx.needs_compile(1), "compile must have succeeded");
+            assert!(fx.pipelines.contains_key(&1));
+            assert!(fx.targets.contains_key(&(1, 4, 4)));
+
+            // id 1 stops being drawn: mark_seen with an empty live set every
+            // frame until its age crosses MAX_UNSEEN_FRAMES.
+            let mut reapable = Vec::new();
+            for _ in 0..MAX_UNSEEN_FRAMES {
+                reapable = fx.mark_seen(&HashSet::new());
+            }
+            assert_eq!(reapable, vec![1]);
+            fx.reap(&reapable);
+
+            assert!(
+                !fx.pipelines.contains_key(&1),
+                "reap must drop the real compiled pipeline"
+            );
+            assert!(
+                !fx.targets.contains_key(&(1, 4, 4)),
+                "reap must drop the real offscreen target"
+            );
+            assert!(fx.needs_compile(1));
+
+            // Re-drawn: recompiles cleanly, with no stale `failed` skip.
+            assert!(fx.mark_seen(&[1].into_iter().collect()).is_empty());
+            fx.ensure_pipeline(&device, 1, FRAGMENT);
+            assert!(
+                !fx.needs_compile(1),
+                "a reaped id must recompile cleanly when redrawn"
+            );
+            assert!(fx.pipelines.contains_key(&1));
+        }
     }
 }
