@@ -200,12 +200,14 @@ pub enum Timing {
     /// A physics spring ([`MotionSpring`], from the theme's motion scheme). A
     /// spatial preset overshoots position; an effects preset does not.
     Spring(MotionSpring),
-    /// Resolve concrete timing from the active theme's [`MotionScheme`] at
-    /// driver-construction time (the durations/easing tokens), per preset and
-    /// honoring `reduce_motion`. Normally pre-resolved into a concrete
-    /// `Duration`/`Spring` by [`resolve_spec`] before the driver is built; if it
-    /// reaches [`make_driver`] unresolved (no theme threaded), it falls back to
-    /// the M3 default duration + [`Curve::Emphasized`] easing.
+    /// Resolve concrete timing from the active theme's [`MotionScheme`] (the
+    /// durations/easing tokens), per preset and honoring `reduce_motion`. The
+    /// navigator resolves this via [`resolve_spec`] on the transition's **first
+    /// paint** — the first point a `PaintCtx` carries the theme (the `BuildCtx`
+    /// that stages a transition carries none) — and rebuilds the driver from the
+    /// resolved timing before any frame is staged. If no theme is threaded it
+    /// falls back through [`make_driver`] to the M3 default duration +
+    /// [`Curve::Emphasized`] easing.
     ThemeDefault,
 }
 
@@ -274,7 +276,7 @@ impl TransitionSpec {
     }
 
     /// A theme-timed transition: the preset's timing is resolved from the active
-    /// [`MotionScheme`] at driver-construction time (via [`resolve_spec`]),
+    /// [`MotionScheme`] (via [`resolve_spec`]) on the transition's first paint,
     /// honoring `reduce_motion`. The idiomatic constructor for
     /// [`PageTransition::Glyph`].
     pub const fn themed(preset: PageTransition) -> Self {
