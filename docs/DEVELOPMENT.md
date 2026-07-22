@@ -61,10 +61,10 @@ carve-out (measured via `scripts/size-report.sh`, below; full A/B in
 
 **Glyph bundled fonts.** `frust-theme`'s default-on `glyph-fonts` feature
 embeds Space Mono + IBM Plex Mono (~1MB) for the Glyph design language's
-type scale; `cargo build -p frust-theme --no-default-features` compiles
-them out. Not yet forwarded through the `frust` facade to an app's own
-`Cargo.toml` — opting out today means depending on `frust-theme` directly
-with `default-features = false`.
+type scale. An app opts out via its own `frust` dependency edge —
+`frust = { ..., default-features = false }` (see
+`templates/app/Cargo.toml.tmpl`) — which removes the fonts from the whole
+graph, confirmed via `cargo tree -e features`.
 
 ## Run
 
