@@ -65,6 +65,7 @@
 //! [`RenderSpans`]: crate::perf::RenderSpans
 
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use frust_core::anim::FrameTime;
 
@@ -332,6 +333,30 @@ impl AckWaiter {
         }
     }
 
+    /// Block the UI thread until the render thread acknowledges the paired
+    /// [`Ack`] **or** `timeout` elapses, whichever comes first. Returns `true` if
+    /// the ack fired (the barrier was honored), `false` on timeout.
+    ///
+    /// This is the **bounded** counterpart of [`Self::wait`]: the correctness fix
+    /// (receiver-liveness — see [`RenderReceiver`]'s [`Drop`]) means a live render
+    /// thread's ack always fires, but a render thread wedged mid-command (a GPU
+    /// driver hang, not a clean exit) would still block [`Self::wait`] forever.
+    /// A timeout lets the caller **degrade instead of hang** — proceed to release
+    /// the window / let the app background after logging — so a stuck render
+    /// thread never trips a platform watchdog (iOS backgrounding kill, Android
+    /// ANR). Each call site picks a named, doc-commented per-platform deadline
+    /// safely under its watchdog budget.
+    #[must_use = "the caller must handle a timeout (proceed degraded) rather than assume the barrier was honored"]
+    pub fn wait_timeout(self, timeout: Duration) -> bool {
+        let done = self.shared.done.lock().unwrap();
+        let (done, _timeout_result) = self
+            .shared
+            .signal
+            .wait_timeout_while(done, timeout, |done| !*done)
+            .unwrap();
+        *done
+    }
+
     /// Whether the paired [`Ack`] has been acknowledged yet, without blocking —
     /// a non-consuming diagnostic peek (the barrier proper is [`Self::wait`]).
     pub fn completed(&self) -> bool {
@@ -438,6 +463,14 @@ struct Inbox<S, W> {
     /// [`RenderReceiver::wait_next`] wakes and reports disconnection (the render
     /// loop's clean-exit signal).
     sender_alive: bool,
+    /// Cleared when the [`RenderReceiver`] is dropped (the render thread exited —
+    /// panic-unwind, a clean early `return`, or a hung thread's drop). Once
+    /// `false`, [`RenderSender::send_command`]/[`RenderSender::send_scene`] drop
+    /// (rather than queue) new work: an ack-carrying command dropped here fires
+    /// its [`Ack`]'s [`Drop`] safety net, so a UI thread blocked on the paired
+    /// [`AckWaiter`] can never wedge on a command the departed render thread will
+    /// never drain (review finding F1). Symmetric with [`Self::sender_alive`].
+    receiver_alive: bool,
 }
 
 #[derive(Debug)]
@@ -493,6 +526,7 @@ pub fn render_channel<S, W>() -> (RenderSender<S, W>, RenderReceiver<S, W>) {
             dropped: 0,
             commands: Vec::new(),
             sender_alive: true,
+            receiver_alive: true,
         }),
         signal: Condvar::new(),
     });
@@ -511,6 +545,12 @@ impl<S, W> RenderSender<S, W> {
     /// Wakes the render thread's [`RenderReceiver::wait_next`].
     pub fn send_scene(&self, frame: SceneFrame<S>) {
         let mut inbox = self.channel.inbox.lock().unwrap();
+        if !inbox.receiver_alive {
+            // The render thread is gone (see `Inbox::receiver_alive`): drop the
+            // frame rather than queue it into a slot no one will ever take. `frame`
+            // carries no `Ack`, so nothing else needs firing.
+            return;
+        }
         if inbox.latest.is_some() {
             inbox.dropped += 1;
         }
@@ -525,6 +565,16 @@ impl<S, W> RenderSender<S, W> {
     /// pair and return the [`AckWaiter`] to block on.
     pub fn send_command(&self, command: RenderCommand<W>) {
         let mut inbox = self.channel.inbox.lock().unwrap();
+        if !inbox.receiver_alive {
+            // The render thread is gone (see `Inbox::receiver_alive`): drop the
+            // command rather than queue it forever. Releasing the inbox lock first,
+            // then dropping `command`, fires any embedded `Ack`'s `Drop` safety net
+            // (Pause/SurfaceDestroyed), so a UI thread blocked on the paired
+            // `AckWaiter` unblocks instead of deadlocking (review finding F1).
+            drop(inbox);
+            drop(command);
+            return;
+        }
         inbox.commands.push(command);
         drop(inbox);
         self.channel.signal.notify_one();
@@ -558,6 +608,35 @@ impl<S, W> Drop for RenderSender<S, W> {
         drop(inbox);
         // notify_all: a receiver blocked in wait_next must wake to observe the
         // disconnection and exit its loop.
+        self.channel.signal.notify_all();
+    }
+}
+
+impl<S, W> Drop for RenderReceiver<S, W> {
+    fn drop(&mut self) {
+        // The render thread is exiting (panic-unwind, a clean early `return`, or a
+        // hung thread being torn down). Symmetric with `Drop for RenderSender`:
+        // mark the receiver gone and drain any undrained work so an ack-carrying
+        // command the render loop never reached (a `Pause`/`SurfaceDestroyed`
+        // still in `commands`, or embedded in `latest` — the latter carries none
+        // today, drained for completeness) fires its `Ack`'s `Drop` safety net.
+        // Without this, that command would sit in the inbox forever (kept alive by
+        // the `Arc<Channel>` the still-blocked UI side holds), the safety net would
+        // never fire, and `AckWaiter::wait()` would deadlock the UI/main thread —
+        // review finding F1, the load-bearing correctness fix.
+        let mut inbox = self.channel.inbox.lock().unwrap();
+        inbox.receiver_alive = false;
+        let commands = std::mem::take(&mut inbox.commands);
+        let latest = inbox.latest.take();
+        drop(inbox);
+        // Drop the drained work *after* releasing the inbox lock — dropping an
+        // `Ack` locks its own (separate) mutex to signal, so ordering here avoids
+        // holding the inbox lock across that notify.
+        drop(commands);
+        drop(latest);
+        // notify_all for symmetry with the sender's drop (no thread blocks on the
+        // channel condvar once the receiver is gone, but a stray waiter must never
+        // be left parked).
         self.channel.signal.notify_all();
     }
 }
@@ -1008,6 +1087,107 @@ mod tests {
         assert!(
             submitted.is_none(),
             "a leftover scene must not be submitted after a Pause"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Receiver-liveness (review finding F1): a render thread that exits
+    // before draining an ack-carrying command must never deadlock the UI
+    // thread. Every assertion here is timeout-bounded so a *regression* FAILS
+    // (the timeout expires, returning `false`) rather than hanging the suite.
+    // -----------------------------------------------------------------
+
+    /// A deadline generous enough that the correct path (the ack fires the
+    /// instant the receiver drops) always beats it, yet finite so a regression
+    /// fails the test instead of wedging the whole `cargo test` run.
+    const REGRESSION_DEADLINE: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn receiver_drop_drains_a_queued_orphaned_ack() {
+        // The barrier command is queued while the receiver is still alive...
+        let (tx, rx) = render_channel::<u32, ()>();
+        let waiter = tx.pause();
+        // ...then the render thread exits before draining it (drops its receiver).
+        drop(rx);
+        // The orphaned `Ack` must have fired via `RenderReceiver::drop`, so the
+        // UI-side waiter unblocks rather than deadlocking.
+        assert!(
+            waiter.wait_timeout(REGRESSION_DEADLINE),
+            "dropping the receiver must drain the queued Pause's Ack so the UI waiter unblocks"
+        );
+    }
+
+    #[test]
+    fn command_sent_after_receiver_death_fires_its_ack() {
+        // The receiver is already gone before the barrier command is sent: the
+        // sender must drop (not queue) it, still firing the embedded Ack.
+        let (tx, rx) = render_channel::<u32, ()>();
+        drop(rx);
+        let waiter = tx.destroy_surface();
+        assert!(
+            waiter.wait_timeout(REGRESSION_DEADLINE),
+            "an ack-carrying command sent after receiver death must fire its Ack safety net"
+        );
+    }
+
+    #[test]
+    fn receiver_death_mid_flight_unblocks_a_waiting_ui_thread() {
+        // The closest reproduction of the live hazard: the UI thread is *already*
+        // blocked on the barrier when the render thread dies. A background thread
+        // sends the barrier and blocks on it (bounded); the main thread drops the
+        // receiver a moment later, standing in for the render thread's exit.
+        let (tx, rx) = render_channel::<u32, ()>();
+        let (report_tx, report_rx) = std::sync::mpsc::channel();
+        let ui = thread::spawn(move || {
+            let honored = tx.destroy_surface().wait_timeout(REGRESSION_DEADLINE);
+            report_tx.send(honored).unwrap();
+        });
+        thread::sleep(Duration::from_millis(20));
+        drop(rx); // render thread exits without draining the command
+
+        // The UI thread must have unblocked; a regression would leave it parked
+        // until its own wait_timeout expired `false`.
+        let honored = report_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the UI thread must report back, not stay deadlocked");
+        assert!(
+            honored,
+            "receiver drop must unblock a UI thread already waiting on the barrier"
+        );
+        ui.join().unwrap();
+    }
+
+    #[test]
+    fn a_scene_sent_after_receiver_death_is_dropped_not_queued() {
+        // The scene half of the same contract: sending after the receiver is gone
+        // must not stash a frame in a slot no one will take.
+        let (tx, rx) = render_channel::<u32, ()>();
+        drop(rx);
+        tx.send_scene(frame(1)); // must be a no-op, not a panic or a leak
+    }
+
+    // -----------------------------------------------------------------
+    // Bounded barrier waits (wait_timeout)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn wait_timeout_returns_true_when_acknowledged() {
+        let (waiter, ack) = ack_pair();
+        ack.acknowledge();
+        assert!(
+            waiter.wait_timeout(REGRESSION_DEADLINE),
+            "an acknowledged barrier must report honored"
+        );
+    }
+
+    #[test]
+    fn wait_timeout_expires_false_when_never_acknowledged() {
+        // Hold the `Ack` for the whole call so it can never fire: the wait must
+        // expire and report the timeout (the degrade-not-hang signal).
+        let (waiter, _ack) = ack_pair();
+        assert!(
+            !waiter.wait_timeout(Duration::from_millis(20)),
+            "wait_timeout must return false when the ack never fires"
         );
     }
 }

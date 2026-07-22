@@ -105,6 +105,35 @@ pub fn guard<T>(what: &str, default: T, f: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Run a shell-spawned render-thread body, catching any panic so the thread
+/// **exits cleanly** instead of unwinding out of the thread closure — following
+/// the same `catch_unwind` + `AssertUnwindSafe` + `error`-log convention as
+/// [`guard`], but for a whole-thread closure rather than an FFI entry point.
+///
+/// A dev-build render-thread panic logs here and returns, which runs the
+/// closure's owned `RenderReceiver`'s [`Drop`] — the receiver-liveness drain
+/// (see `render_split`'s `RenderReceiver`) that fires any orphaned `Ack`'s
+/// safety net, so a UI/main thread blocked on a `Pause`/`SurfaceDestroyed`
+/// barrier unblocks rather than deadlocking. This is a **diagnosability** aid,
+/// not the correctness anchor: correctness rests on the receiver-liveness drain,
+/// which fires on *any* thread exit (clean early `return`, hang teardown, or
+/// this caught panic).
+///
+/// **No-op under the release `panic = "abort"` profile** (root `Cargo.toml`):
+/// there `catch_unwind` never catches — a panic aborts the whole process before
+/// unwinding — so this wrapper matters only in dev / `panic = "unwind"` builds.
+/// The barrier deadlock the caught panic would otherwise cause bites exactly
+/// those non-abort builds (plus clean early-returns and hung threads, which this
+/// wrapper does not touch — the drain covers those).
+pub fn run_guarded_thread(what: &str, f: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(f)).is_err() {
+        log::error!(
+            "frust-shell: panic caught in render thread {what}; thread exiting cleanly \
+             (surface teardown + ack drain run via RenderReceiver drop)"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +269,20 @@ mod tests {
             out, -1,
             "a panic must be swallowed and the default returned"
         );
+    }
+
+    #[test]
+    fn run_guarded_thread_runs_the_body_to_completion() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ran = AtomicBool::new(false);
+        run_guarded_thread("ok", || ran.store(true, Ordering::SeqCst));
+        assert!(ran.load(Ordering::SeqCst), "the body must run");
+    }
+
+    #[test]
+    fn run_guarded_thread_swallows_a_panic() {
+        // A render-thread panic must not unwind out of the wrapper (which would
+        // unwind the thread closure); it is caught and logged, and control returns.
+        run_guarded_thread("boom", || panic!("simulated render-thread panic"));
     }
 }

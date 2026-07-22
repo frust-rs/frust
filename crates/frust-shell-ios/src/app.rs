@@ -318,6 +318,20 @@ impl InlineExecutor {
     }
 }
 
+/// Upper bound on how long `frust_pause` blocks the UI (main) thread on the
+/// [`RenderCommand::Pause`] barrier before letting the app background degraded
+/// rather than hanging behind a wedged render thread.
+///
+/// **Community-approximate**: UIKit's app-suspension watchdog (the deadline for
+/// returning from `applicationDidEnterBackground` before the system kills the
+/// process, `0x8badf00d`) is not a published constant; the community-converged
+/// estimate is ~5s of background-transition grace. 2s stays safely under that so
+/// the barrier degrades before the watchdog fires; the barrier normally returns
+/// in microseconds (the render thread quiesces to `Paused`), so a multi-second
+/// wait means the render thread is stuck and hanging risks the process kill this
+/// barrier exists to prevent.
+const PAUSE_BARRIER_DEADLINE: Duration = Duration::from_secs(2);
+
 /// The render-thread-split executor (default): the UI-thread [`RenderSender`] half
 /// of the scene-handoff channel plus the render thread's [`JoinHandle`]. The
 /// render thread owns the [`RenderContext`]/[`SurfaceRenderer`], the surface, the
@@ -392,7 +406,15 @@ impl SplitExecutor {
     /// suspended app can get the process killed.
     fn pause_barrier(&mut self) {
         if let Some(sender) = self.sender.as_ref() {
-            sender.pause().wait();
+            // Bounded so a wedged render thread degrades instead of blocking the
+            // main thread past the backgrounding watchdog (see
+            // `PAUSE_BARRIER_DEADLINE`).
+            if !sender.pause().wait_timeout(PAUSE_BARRIER_DEADLINE) {
+                log::error!(
+                    "frust-shell-ios: pause barrier timed out after \
+                     {PAUSE_BARRIER_DEADLINE:?}; backgrounding (degraded)"
+                );
+            }
         }
     }
 

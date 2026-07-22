@@ -55,7 +55,7 @@ use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_l
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
     AppTree, RenderCommand, RenderPhase, RenderReceiver, SurfaceSize, guard, next_render_phase,
-    render_channel, render_thread_enabled,
+    render_channel, render_thread_enabled, run_guarded_thread,
 };
 use frust_text::TextContext;
 
@@ -912,7 +912,14 @@ fn spawn_split_executor(
     // render thread, which owns the rest of the startup line.
     let join = std::thread::Builder::new()
         .name("frust-render".to_string())
-        .spawn(move || render_loop(receiver, startup_spans, cache_dir))
+        // Guard the loop so a dev-build panic logs and exits cleanly (dropping the
+        // owned `RenderReceiver`, which drains any orphaned `Ack` — the barrier
+        // deadlock fix). A no-op under the release `panic = "abort"` profile.
+        .spawn(move || {
+            run_guarded_thread("frust-render (android)", move || {
+                render_loop(receiver, startup_spans, cache_dir)
+            })
+        })
         .expect("frust-shell-android: failed to spawn render thread");
 
     // Hand the initial surface to the render thread. The UI thread keeps `window`

@@ -38,7 +38,7 @@ pub mod resample;
 mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
-pub use ffi_support::{guard, logical_insets, logical_size, sanitize_scale};
+pub use ffi_support::{guard, logical_insets, logical_size, run_guarded_thread, sanitize_scale};
 pub use frame_gate::{FrameDecision, FrameGate, FrameInputs};
 pub use render_split::{
     Ack, AckWaiter, FrameMeta, NO_RENDER_THREAD_VAR, RenderBatch, RenderCommand, RenderEvent,

@@ -57,7 +57,7 @@ use frust_render::{RenderContext, SurfacePhase, SurfaceRenderer};
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
     AppTree, RenderCommand, RenderPhase, RenderReceiver, SurfaceSize, guard, next_render_phase,
-    render_channel, render_thread_enabled,
+    render_channel, render_thread_enabled, run_guarded_thread,
 };
 use frust_text::TextContext;
 
@@ -655,7 +655,12 @@ fn spawn_split_executor(
     // sent from this UI thread below.
     let join = std::thread::Builder::new()
         .name("frust-render".to_string())
-        .spawn(move || render_loop(receiver, startup))
+        // Guard the loop so a dev-build panic logs and exits cleanly (dropping the
+        // owned `RenderReceiver`, which drains any orphaned `Ack` — the barrier
+        // deadlock fix). A no-op under the release `panic = "abort"` profile.
+        .spawn(move || {
+            run_guarded_thread("frust-render (ios)", move || render_loop(receiver, startup))
+        })
         .expect("frust-shell-ios: failed to spawn render thread");
 
     // Hand the initial surface to the render thread. The UI thread keeps

@@ -313,6 +313,20 @@ impl InlineExecutor {
     }
 }
 
+/// Upper bound on how long `surfaceDestroyed` blocks the UI (JVM main) thread on
+/// the [`RenderCommand::SurfaceDestroyed`] barrier before proceeding degraded
+/// rather than releasing the `ANativeWindow` behind a wedged render thread.
+///
+/// **Community-approximate**: Android's exact per-callback watchdog for a
+/// `SurfaceHolder.Callback` is not a published constant, but a blocked main
+/// thread trips the ANR ("Application Not Responding") watchdog — 5s for input
+/// dispatch (the published, longest of the ANR budgets;
+/// developer.android.com/topic/performance/vitals/anr, retrieved 2026-07-22).
+/// 2s stays safely under that so the barrier degrades before the system flags an
+/// ANR; the barrier normally returns in microseconds (drop the surface's `wgpu`
+/// resources), so a multi-second wait means the render thread is stuck.
+const DESTROY_SURFACE_BARRIER_DEADLINE: Duration = Duration::from_secs(2);
+
 /// The render-thread-split executor (default): the UI-thread [`RenderSender`]
 /// half of the scene-handoff channel plus the render thread's [`JoinHandle`].
 /// The render thread owns the [`RenderContext`]/[`SurfaceRenderer`], the surface,
@@ -392,7 +406,17 @@ impl SplitExecutor {
     /// release the window until this returns.
     fn destroy_surface_barrier(&mut self) {
         if let Some(sender) = self.sender.as_ref() {
-            sender.destroy_surface().wait();
+            // Bounded so a wedged render thread degrades instead of blocking the
+            // JVM main thread into an ANR (see `DESTROY_SURFACE_BARRIER_DEADLINE`).
+            if !sender
+                .destroy_surface()
+                .wait_timeout(DESTROY_SURFACE_BARRIER_DEADLINE)
+            {
+                log::error!(
+                    "frust-shell-android: surface-destroy barrier timed out after \
+                     {DESTROY_SURFACE_BARRIER_DEADLINE:?}; releasing the window (degraded)"
+                );
+            }
         }
         self.surface_active = false;
     }

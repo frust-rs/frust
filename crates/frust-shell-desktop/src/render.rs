@@ -44,7 +44,7 @@
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use frust_core::FrameTime;
@@ -69,6 +69,17 @@ use crate::app_handler::ShellUserEvent;
 
 /// A shared [`Window`] handle.
 type WindowHandle = Arc<Window>;
+
+/// Upper bound on how long the UI thread blocks on the surface-destroy barrier
+/// (`suspended`) before proceeding degraded rather than hanging.
+///
+/// **Conservative**: desktop has no platform watchdog (unlike iOS backgrounding
+/// / Android ANR), so this is a generous safety cap on a wedged render thread,
+/// not a value matched to any published deadline. The barrier normally returns
+/// in microseconds (drop the surface's `wgpu` resources); a multi-second wait
+/// means the render thread is stuck, and hanging the winit event loop is worse
+/// than a degraded teardown.
+const DESTROY_SURFACE_BARRIER_DEADLINE: Duration = Duration::from_secs(5);
 
 /// One finished frame's payload crossing the UI→render handoff: the painted
 /// [`Scene`] plus the clear color it was painted for (the live theme's surface
@@ -224,7 +235,14 @@ pub(crate) fn spawn_render_thread(proxy: EventLoopProxy<ShellUserEvent>) -> Spli
     let (sender, receiver) = render_channel::<PaintedScene, DesktopSurface>();
     let join = std::thread::Builder::new()
         .name("frust-render".to_string())
-        .spawn(move || render_loop(receiver, proxy, render_cx))
+        // Guard the loop so a dev-build panic logs and exits cleanly (dropping the
+        // owned `RenderReceiver`, which drains any orphaned `Ack` — the barrier
+        // deadlock fix). A no-op under the release `panic = "abort"` profile.
+        .spawn(move || {
+            frust_shell_common::run_guarded_thread("frust-render (desktop)", move || {
+                render_loop(receiver, proxy, render_cx)
+            })
+        })
         .expect("frust: failed to spawn render thread");
     SplitExecutor::new(sender, join, factory)
 }
@@ -388,8 +406,17 @@ impl SplitExecutor {
     fn destroy_surface(&mut self) {
         if let Some(sender) = self.sender.as_ref() {
             // Block until the render thread has dropped its surface resources
-            // before the shell proceeds (the barrier contract).
-            sender.destroy_surface().wait();
+            // before the shell proceeds (the barrier contract), but bounded so a
+            // wedged render thread degrades instead of hanging the UI thread.
+            if !sender
+                .destroy_surface()
+                .wait_timeout(DESTROY_SURFACE_BARRIER_DEADLINE)
+            {
+                log::error!(
+                    "frust: surface-destroy barrier timed out after \
+                     {DESTROY_SURFACE_BARRIER_DEADLINE:?}; proceeding (degraded)"
+                );
+            }
         }
         self.surface_requested = false;
     }
