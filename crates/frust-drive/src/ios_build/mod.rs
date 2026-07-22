@@ -94,7 +94,17 @@ fn build_with_env(
     schemes::verify(runner, project_dir, &sc)?;
 
     let defines_b64 = encode_defines(&info.defines);
-    let features_b64 = encode_features(info.mode);
+    // Release-lean preflight (followup F2): a legacy app that predates the
+    // `lean` feature has it dropped here (with a one-time warning through the
+    // `on_line` sink) so xcodebuild never threads an undeclared `--features
+    // lean` down to `cargo` — cargo's opaque hard error. A declaring app keeps
+    // byte-identical features and warns nothing.
+    let (features, warning) =
+        crate::cargo_manifest::resolve_release_features(project_dir, info.mode);
+    if let Some(warning) = warning {
+        on_line(&warning);
+    }
+    let features_b64 = encode_features(&features);
 
     match target {
         IosArtifact::App {
@@ -275,15 +285,15 @@ fn encode_defines(defines: &HashMap<String, String>) -> Option<String> {
     Some(base64_encode(joined.as_bytes()))
 }
 
-/// base64-encodes `mode`'s cargo features (`BuildMode::cargo_features`) as
-/// `feat,feat` for the `FRUST_FEATURES` build setting, matching the template
-/// run-script's `base64 -d` decode into `--features <csv>` (release-lean
-/// plan, task 04). `None` when the mode selects no features (never today —
-/// every mode selects at least one, but the caller stays tolerant). Shared
-/// with the simulator run path (`ios_run::xcodebuild`) so the mode → feature
-/// encoding has one source.
-pub(crate) fn encode_features(mode: crate::build_info::BuildMode) -> Option<String> {
-    let features = mode.cargo_features();
+/// base64-encodes the resolved cargo `features` as `feat,feat` for the
+/// `FRUST_FEATURES` build setting, matching the template run-script's
+/// `base64 -d` decode into `--features <csv>` (release-lean plan, task 04).
+/// `None` when there are no features to pass — the release-lean preflight can
+/// legitimately produce an empty list for a legacy app whose `lean` feature
+/// was dropped (`cargo_manifest::resolve_release_features`), in which case no
+/// `FRUST_FEATURES=` setting is emitted at all. Shared with the simulator run
+/// path (`ios_run::xcodebuild`) so the feature encoding has one source.
+pub(crate) fn encode_features(features: &[&str]) -> Option<String> {
     if features.is_empty() {
         return None;
     }
@@ -456,6 +466,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(artifacts.paths.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Followup F2, legacy direction: a `--release` build against an app whose
+    /// Cargo.toml declares no `lean` feature drops it and warns once through
+    /// `on_line`; the xcodebuild invocation carries NO `FRUST_FEATURES=` build
+    /// setting (the fixture omits it), so a regression that kept `lean` would
+    /// surface via the absent warning. No-codesign device build for simplicity.
+    #[test]
+    fn release_legacy_app_drops_lean_and_warns() {
+        let dir = temp_project("f2-legacy");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+        plant_products(&dir, "Release", false, "Runner.app");
+        let runner = base_runner().with(
+            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build",
+            ok("Build succeeded"),
+        );
+        let env = FakeEnv::new();
+        let mut lines = Vec::new();
+        let artifacts = build_with_env(
+            &runner,
+            &env,
+            &dir,
+            &info(BuildMode::Release),
+            &IosArtifact::App {
+                simulator: false,
+                codesign: false,
+            },
+            &mut |l| lines.push(l.to_string()),
+        )
+        .unwrap();
+        assert_eq!(artifacts.paths.len(), 1);
+        assert!(
+            lines.iter().any(|l| l.contains("lean")),
+            "legacy release build must warn about the missing `lean` feature: {lines:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Followup F2, declaring direction: an app that declares `lean` keeps it —
+    /// `FRUST_FEATURES=bGVhbg==` (base64 "lean"), registered exactly, so a
+    /// regression that dropped it would produce a shorter, non-matching argv
+    /// and error early — and warns nothing.
+    #[test]
+    fn release_declaring_app_keeps_lean_without_warning() {
+        let dir = temp_project("f2-declaring");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
+        )
+        .unwrap();
+        plant_products(&dir, "Release", false, "Runner.app");
+        let runner = base_runner().with(
+            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build",
+            ok("Build succeeded"),
+        );
+        let env = FakeEnv::new();
+        let mut lines = Vec::new();
+        let artifacts = build_with_env(
+            &runner,
+            &env,
+            &dir,
+            &info(BuildMode::Release),
+            &IosArtifact::App {
+                simulator: false,
+                codesign: false,
+            },
+            &mut |l| lines.push(l.to_string()),
+        )
+        .unwrap();
+        assert_eq!(artifacts.paths.len(), 1);
+        assert!(
+            !lines.iter().any(|l| l.contains("lean")),
+            "a declaring app must not warn: {lines:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

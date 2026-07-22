@@ -38,14 +38,21 @@ fn capitalize(s: &str) -> String {
 /// consumes: `-Pfrust.targetPlatforms=<abi,csv>` (always),
 /// `-Pfrust.splitPerAbi=true|false` (APK only),
 /// `-Pfrust.defines=<base64("K=V;K=V")>` when `defines` is non-empty, and
-/// `-Pfrust.cargoFeatures=<base64("feat,feat")>` selecting `mode`'s cargo
-/// features (release-lean plan, task 04) — the exact seam `-Pfrust.defines`
+/// `-Pfrust.cargoFeatures=<base64("feat,feat")>` for the resolved cargo
+/// `features` (release-lean plan, task 04) — the exact seam `-Pfrust.defines`
 /// rides, so a feature flag can never fall foul of the Android release
 /// env-drop Known Issue (it's a build arg, not an environment variable).
+///
+/// `features` is the release-lean-preflight-resolved list
+/// (`cargo_manifest::resolve_release_features`), not the raw
+/// `BuildMode::cargo_features` — a legacy app that doesn't declare `lean`
+/// arrives here with `lean` already dropped, so the `cargoFeatures` prop is
+/// simply omitted (empty → no prop) rather than passing an undeclared feature
+/// to `cargo ndk`.
 pub fn gradle_properties(
     target: &AndroidArtifact,
     defines: &HashMap<String, String>,
-    mode: BuildMode,
+    features: &[&str],
 ) -> Vec<String> {
     let mut props = Vec::new();
 
@@ -66,7 +73,7 @@ pub fn gradle_properties(
         props.push(format!("-Pfrust.defines={}", encode_defines(defines)));
     }
 
-    if let Some(features_b64) = encode_features(mode) {
+    if let Some(features_b64) = encode_features(features) {
         props.push(format!("-Pfrust.cargoFeatures={features_b64}"));
     }
 
@@ -88,13 +95,15 @@ fn encode_defines(defines: &HashMap<String, String>) -> String {
     base64_encode(joined.as_bytes())
 }
 
-/// Encodes `mode`'s cargo features (`BuildMode::cargo_features`) as
-/// `base64("feat,feat")` — the exact value template 62's `build.gradle.kts.tmpl`
-/// decodes with `Base64.getDecoder()` and appends to the cargo-ndk invocation
-/// as `--features <csv>`. `None` when the mode selects no features (never
-/// today — every mode selects at least one, but the caller stays tolerant).
-fn encode_features(mode: BuildMode) -> Option<String> {
-    let features = mode.cargo_features();
+/// Encodes the resolved cargo `features` as `base64("feat,feat")` — the exact
+/// value template 62's `build.gradle.kts.tmpl` decodes with
+/// `Base64.getDecoder()` and appends to the cargo-ndk invocation as
+/// `--features <csv>`. `None` when there are no features to pass (the
+/// release-lean preflight can legitimately produce an empty list for a legacy
+/// app whose `lean` feature was dropped — see
+/// `cargo_manifest::resolve_release_features`), in which case no
+/// `-Pfrust.cargoFeatures` prop is emitted at all.
+fn encode_features(features: &[&str]) -> Option<String> {
     if features.is_empty() {
         return None;
     }
@@ -214,7 +223,7 @@ mod tests {
     #[test]
     fn gradle_properties_apk_includes_target_platforms_and_split_per_abi() {
         let target = apk(&["arm64-v8a", "x86_64"], true);
-        let props = gradle_properties(&target, &HashMap::new(), BuildMode::Debug);
+        let props = gradle_properties(&target, &HashMap::new(), BuildMode::Debug.cargo_features());
         assert_eq!(
             props,
             vec![
@@ -231,7 +240,7 @@ mod tests {
         let props = gradle_properties(
             &AndroidArtifact::Appbundle,
             &HashMap::new(),
-            BuildMode::Debug,
+            BuildMode::Debug.cargo_features(),
         );
         assert_eq!(
             props,
@@ -245,7 +254,7 @@ mod tests {
     #[test]
     fn gradle_properties_omits_defines_prop_when_empty() {
         let target = apk(&["arm64-v8a"], false);
-        let props = gradle_properties(&target, &HashMap::new(), BuildMode::Debug);
+        let props = gradle_properties(&target, &HashMap::new(), BuildMode::Debug.cargo_features());
         assert!(props.iter().all(|p| !p.starts_with("-Pfrust.defines=")));
     }
 
@@ -255,7 +264,7 @@ mod tests {
         let mut defines = HashMap::new();
         defines.insert("A".to_string(), "1".to_string());
         defines.insert("B".to_string(), "2".to_string());
-        let props = gradle_properties(&target, &defines, BuildMode::Debug);
+        let props = gradle_properties(&target, &defines, BuildMode::Debug.cargo_features());
         let defines_prop = props
             .iter()
             .find(|p| p.starts_with("-Pfrust.defines="))
@@ -269,7 +278,7 @@ mod tests {
     fn gradle_properties_debug_and_profile_carry_perf_trace_feature() {
         let target = apk(&["arm64-v8a"], false);
         for mode in [BuildMode::Debug, BuildMode::Profile] {
-            let props = gradle_properties(&target, &HashMap::new(), mode);
+            let props = gradle_properties(&target, &HashMap::new(), mode.cargo_features());
             // base64("frust/perf-trace")
             assert!(
                 props.contains(&"-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ==".to_string()),
@@ -281,7 +290,11 @@ mod tests {
     #[test]
     fn gradle_properties_release_carries_lean_not_perf_trace() {
         let target = apk(&["arm64-v8a"], false);
-        let props = gradle_properties(&target, &HashMap::new(), BuildMode::Release);
+        let props = gradle_properties(
+            &target,
+            &HashMap::new(),
+            BuildMode::Release.cargo_features(),
+        );
         let feature_prop = props
             .iter()
             .find(|p| p.starts_with("-Pfrust.cargoFeatures="))
@@ -291,6 +304,22 @@ mod tests {
         assert_ne!(
             feature_prop,
             "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ=="
+        );
+    }
+
+    #[test]
+    fn gradle_properties_omits_cargo_features_prop_for_dropped_lean_legacy_app() {
+        // The release-lean preflight resolves a legacy app (no declared
+        // `lean`) to an empty feature list; `gradle_properties` must then
+        // emit no `-Pfrust.cargoFeatures` prop at all rather than an empty
+        // one — no undeclared feature ever reaches `cargo ndk`.
+        let target = apk(&["arm64-v8a"], false);
+        let props = gradle_properties(&target, &HashMap::new(), &[]);
+        assert!(
+            props
+                .iter()
+                .all(|p| !p.starts_with("-Pfrust.cargoFeatures=")),
+            "{props:?}"
         );
     }
 
