@@ -1009,6 +1009,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-paths"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "frust-plugin"
 version = "0.1.0"
 dependencies = [
@@ -1057,6 +1064,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "frust-core",
+ "frust-paths",
  "frust-plugin",
  "frust-reactive",
  "frust-render",
@@ -1092,6 +1100,7 @@ dependencies = [
  "accesskit_winit",
  "anyhow",
  "frust-core",
+ "frust-paths",
  "frust-reactive",
  "frust-render",
  "frust-scene",
@@ -1121,6 +1130,7 @@ dependencies = [
  "frust-theme",
  "kurbo",
  "log",
+ "objc2 0.6.4",
  "peniko",
  "pollster",
 ]
