@@ -514,6 +514,7 @@ dependencies = [
  "frust-scene",
  "frust-text",
  "kurbo",
+ "log",
  "peniko",
  "reactive_graph",
 ]
@@ -994,6 +995,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-paths"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "frust-plugin"
 version = "0.1.0"
 dependencies = [
@@ -1042,6 +1050,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "frust-core",
+ "frust-paths",
  "frust-plugin",
  "frust-reactive",
  "frust-render",
@@ -1051,6 +1060,7 @@ dependencies = [
  "frust-theme",
  "jni 0.22.4",
  "kurbo",
+ "libc",
  "log",
  "ndk",
  "ndk-sys",
@@ -1077,6 +1087,7 @@ dependencies = [
  "accesskit_winit",
  "anyhow",
  "frust-core",
+ "frust-paths",
  "frust-reactive",
  "frust-render",
  "frust-scene",
@@ -1105,7 +1116,9 @@ dependencies = [
  "frust-text",
  "frust-theme",
  "kurbo",
+ "libc",
  "log",
+ "objc2 0.6.4",
  "peniko",
  "pollster",
 ]
@@ -1118,6 +1131,7 @@ dependencies = [
  "kurbo",
  "parley",
  "peniko",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

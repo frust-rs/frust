@@ -1452,6 +1452,7 @@ dependencies = [
  "frust-scene",
  "frust-text",
  "kurbo",
+ "log",
  "peniko",
  "reactive_graph",
  "tokio",
