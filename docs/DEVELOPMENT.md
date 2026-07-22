@@ -392,10 +392,10 @@ silently colliding runs; alias `mktemp` to `gmktemp` (`brew install coreutils`) 
 | `FRUST_NO_RENDER_THREAD` | Kill switch for the render-thread split (`docs/ARCHITECTURE.md`'s frame pipelines) — restores the pre-split single-thread path (rebuild/layout/paint/encode/acquire/present all on the UI/main thread), the fallback if the split needs to be ruled out. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Also the skip-count fix: a `FrameGate` `Skip` sends nothing across the split's UI→render channel, so it is never recorded in `FrameStats`/the raw line — build with this set when a skip-sensitive series (skip counts/rates) needs every skip counted. | off (split active) |
 | `FRUST_NO_RESAMPLE` | Kill switch for the mobile pointer-event resampler (`docs/ARCHITECTURE.md`'s `frust-shell-common` row) — forces raw per-touch delivery with no frame-boundary interpolation/prediction. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (resampler active) |
 | `FRUST_NO_DIRECT_SURFACE` | Kill switch pinning a direct-capable surface onto the blit fallback arm (`docs/ARCHITECTURE.md`'s `frust-render` row) — the A/B valve for comparing the direct-to-surface and blit render paths on the same hardware. Same compile-time-or-runtime parsing as `FRUST_TRACE`. **A/B caveat:** on the direct arm the GPU render moves into `submit_us` (out of `encode_us`) and `acquire_us` now precedes it rather than follows — account for this remap before comparing `submit_us` across arms (`SurfaceRenderer::submit`'s doc comment has the full v3 field mapping). | off (path auto-probed) |
+| `FRUST_NO_SHADER_EFFECTS` | Kill switch for the shader-quad pre-pass (`docs/ARCHITECTURE.md`'s `frust-render` row) — disables it entirely, so `Command::ShaderQuad` falls back to the built-in placeholder fill instead of running the pre-pass. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (pre-pass active) |
 
-`FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints one
-`frust-perf startup ...` line, then periodic `frust-perf frame ...`
-summaries while interacting with the window.
+`FRUST_TRACE=1 (cd examples/huddle && cargo run)` prints a `frust-perf
+startup ...` line, then periodic `frust-perf frame ...` summaries.
 
 `scripts/size-report.sh [--app <dir>]` (default `examples/huddle`) builds
 the arm64-v8a release `.so` via `cargo ndk`, reporting unstripped/stripped
