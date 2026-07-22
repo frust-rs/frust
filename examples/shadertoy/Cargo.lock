@@ -2794,9 +2794,12 @@ version = "0.1.0"
 dependencies = [
  "frust",
  "frust-core",
+ "frust-reactive",
  "frust-scene",
+ "frust-text",
  "kurbo",
  "peniko",
+ "reactive_graph",
 ]
 
 [[package]]

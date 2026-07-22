@@ -32,13 +32,25 @@ frust = { path = "../../crates/frust" }
 # it backs the `ShaderProgram` widget (task 06) — a custom `View`/`Widget`
 # pair painting a fragment-shader-driven fill directly through
 # `frust-scene`'s `PaintScene`/`Command` vocabulary, which no facade widget
-# covers. `frust-text` is intentionally omitted: HUD text uses facade
-# widgets, not hand-shaped glyph runs. Everything else in this crate depends
-# on the `frust` facade alone.
+# covers. `frust-text` is intentionally omitted from *production* code: HUD
+# text uses facade widgets, not hand-shaped glyph runs (it reappears below as
+# a dev-dependency, needed only by the headless test harness). Everything
+# else in this crate depends on the `frust` facade alone.
 frust-core = { path = "../../crates/frust-core" }
 frust-scene = { path = "../../crates/frust-scene" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
+
+# Headless integration-test harness only (`tests/showcase.rs`, task 06):
+# drives `RenderRoot`/`Component` directly (mirroring
+# `examples/bubblebench`'s `tests/bench.rs`) without a live shell, so it
+# needs the reactive runtime/owner types and the text-shaping context the
+# desktop shell would otherwise supply. Same literal specs as bubblebench's
+# `[dev-dependencies]`.
+[dev-dependencies]
+frust-reactive = { path = "../../crates/frust-reactive" }
+frust-text = { path = "../../crates/frust-text" }
+reactive_graph = "0.2"
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
 # store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
