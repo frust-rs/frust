@@ -190,6 +190,12 @@ pub enum PageTransition {
     /// the active [`MotionScheme`] via [`resolve_spec`]/[`preset_enter_exit`] —
     /// pair it with [`Timing::ThemeDefault`] (or [`TransitionSpec::glyph`]).
     Glyph,
+    /// Pure alpha cross-fade with **zero geometric motion** (no slide, no
+    /// scale) — the [`resolve_spec`] `reduce_motion` collapse target
+    /// (research §1.4's hard accessibility rule: a reduced transition is a
+    /// short linear cross-fade, never a zoom or slide). Selectable directly,
+    /// but its primary role is the collapse; see [`resolve_layers`]'s arm.
+    ReducedCrossfade,
 }
 
 /// How a transition's `0.0..=1.0` progress is driven.
@@ -486,16 +492,16 @@ pub fn resolve_timing(
 /// spec the navigator drives:
 ///
 /// - `scheme.reduce_motion == true` collapses *any* animated preset to a
-///   `≤120ms` linear cross-fade ([`PageTransition::M3FadeThrough`] driven by
-///   [`REDUCE_MOTION_DURATION`] + [`Curve::Linear`]) — research §1.4's hard
-///   accessibility rule. A non-animated ([`PageTransition::None`]) spec is left
-///   untouched.
+///   `≤120ms` linear cross-fade ([`PageTransition::ReducedCrossfade`] driven by
+///   [`REDUCE_MOTION_DURATION`] + [`Curve::Linear`] — pure alpha, no slide or
+///   scale) — research §1.4's hard accessibility rule. A non-animated
+///   ([`PageTransition::None`]) spec is left untouched.
 /// - otherwise a [`Timing::ThemeDefault`] is resolved to the preset's theme
 ///   timing ([`resolve_timing`]); the preset is unchanged.
 pub fn resolve_spec(spec: TransitionSpec, scheme: Option<&MotionScheme>) -> TransitionSpec {
     if spec.is_animated() && scheme.map(|s| s.reduce_motion).unwrap_or(false) {
         return TransitionSpec {
-            preset: PageTransition::M3FadeThrough,
+            preset: PageTransition::ReducedCrossfade,
             timing: Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear),
         };
     }
@@ -574,6 +580,25 @@ pub fn resolve_layers(
 
     match preset {
         PageTransition::None => (Layer::IDENTITY, Layer::IDENTITY),
+
+        PageTransition::ReducedCrossfade => {
+            // reduce_motion collapse target: pure alpha cross-fade — by
+            // contract NO geometric motion (dx/dy 0, scale 1.0) so a
+            // reduced-motion user never sees a zoom or slide.
+            let entering = Layer {
+                dx: 0.0,
+                dy: 0.0,
+                alpha: pc as f32,
+                scale: 1.0,
+            };
+            let leaving = Layer {
+                dx: 0.0,
+                dy: 0.0,
+                alpha: (1.0 - pc) as f32,
+                scale: 1.0,
+            };
+            (entering, leaving)
+        }
 
         PageTransition::M3SharedAxisX => {
             let slide = M3_SHARED_AXIS_SLIDE_DP;
@@ -997,14 +1022,26 @@ mod tests {
             let resolved = resolve_spec(TransitionSpec::themed(preset), Some(&m));
             assert_eq!(
                 resolved.preset,
-                PageTransition::M3FadeThrough,
-                "{preset:?} must collapse to the fade-through crossfade family"
+                PageTransition::ReducedCrossfade,
+                "{preset:?} must collapse to the pure alpha crossfade"
             );
             let Timing::Duration(d, curve) = resolved.timing else {
                 panic!("reduced-motion must be a duration crossfade");
             };
             assert!(d <= Duration::from_millis(120), "{preset:?} not ≤120ms");
             assert_eq!(curve, Curve::Linear, "{preset:?}");
+            // The collapse target must carry ZERO geometric motion at every
+            // progress point — no slide, no scale (the round-1 review's
+            // scale-leak finding: M3FadeThrough's 0.92→1.0 zoom must not
+            // survive into reduced motion).
+            for p in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let (entering, leaving) =
+                    resolve_layers(resolved.preset, p, false, Size::new(100.0, 100.0));
+                for (label, l) in [("entering", entering), ("leaving", leaving)] {
+                    assert_eq!((l.dx, l.dy), (0.0, 0.0), "{label} slid at p={p}");
+                    assert_eq!(l.scale, 1.0, "{label} scaled at p={p}");
+                }
+            }
         }
         // A non-animated (`None`) spec is left untouched under reduce_motion.
         let none = resolve_spec(TransitionSpec::NONE, Some(&m));

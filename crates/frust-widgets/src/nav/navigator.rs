@@ -2605,6 +2605,19 @@ mod tests {
             0.0,
             "reduce_motion collapses the 16px Glyph slide to a non-directional crossfade"
         );
+
+        // Round-1 review scale-leak guard: the reduced crossfade must also paint
+        // ZERO scale transforms mid-transition — a reduce_motion user never sees
+        // the fade-through 0.92→1.0 zoom.
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, ft(60));
+        assert_eq!(
+            scene.transforms.len(),
+            0,
+            "reduced-motion crossfade must not scale either page"
+        );
     }
 
     // --- gf1(c): a mid-transition M3 fade-through paint brackets the incoming
