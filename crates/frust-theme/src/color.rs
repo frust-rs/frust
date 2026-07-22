@@ -185,6 +185,63 @@ pub struct ColorScheme {
 }
 
 impl ColorScheme {
+    /// Replace the accent family from one seed color, Glyph-style.
+    ///
+    /// Swaps exactly four roles: `primary`, `on_primary`, `primary_container`,
+    /// and `on_primary_container`. All other 42 fields remain unchanged.
+    ///
+    /// - **primary**: set to the provided `accent` color.
+    /// - **on_primary**: selected by relative luminance (WCAG contrast ratio ≥
+    ///   4.5:1 preferred) — prefer white if the accent is dark enough, else
+    ///   dark ink. A simple luminance threshold is used (see docs below).
+    /// - **primary_container**: an alpha-wash of the accent at 10% opacity,
+    ///   flattened over the scheme's `surface` color to opaque.
+    /// - **on_primary_container**: set to the provided `accent` color (same as
+    ///   primary, following Material 3 Glyph conventions).
+    ///
+    /// ## Luminance and Contrast
+    ///
+    /// `on_primary` is determined by picking the ink that provides better
+    /// contrast against the accent. Luminance is calculated via the WCAG
+    /// relative luminance formula: `L = 0.2126*R + 0.7152*G + 0.0722*B`
+    /// (after linearizing each channel from sRGB). If the accent's luminance
+    /// is below 0.5 (midpoint), white is preferred; otherwise, dark ink is
+    /// preferred. This simple threshold provides acceptable contrast for most
+    /// colors and avoids the overhead of computing the full contrast ratio
+    /// (though task 15 may optimize this).
+    ///
+    /// ## Works with Any Scheme
+    ///
+    /// This method works on any `ColorScheme` — Material 3, Cupertino, or
+    /// future Glyph baselines — without design-language branching.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use peniko::Color;
+    /// use frust_theme::color::ColorScheme;
+    ///
+    /// let base = ColorScheme::m3_baseline_dark();
+    /// let red = Color::from_rgb8(0xFF, 0x00, 0x00);
+    /// let accent_scheme = base.with_accent(red);
+    ///
+    /// assert_eq!(accent_scheme.primary, red);
+    /// assert_eq!(accent_scheme.on_primary_container, red);
+    /// // All other roles remain unchanged from the base scheme.
+    /// ```
+    pub fn with_accent(self, accent: Color) -> Self {
+        let on_primary = select_ink_by_luminance(accent);
+        let primary_container = blend_accent_over_surface(accent, self.surface);
+
+        Self {
+            primary: accent,
+            on_primary,
+            primary_container,
+            on_primary_container: accent,
+            ..self
+        }
+    }
+
     /// The Material 3 baseline light `ColorScheme` (seed `#6750A4`).
     ///
     /// Source: material-components/material-web tokens v0.192
@@ -496,6 +553,74 @@ impl ColorScheme {
     }
 }
 
+/// Calculate the relative luminance of a color per WCAG standards.
+///
+/// Luminance = 0.2126*R + 0.7152*G + 0.0722*B, where R, G, B are linearized
+/// from sRGB.
+fn relative_luminance(color: Color) -> f64 {
+    let [r, g, b, _] = color.to_rgba8().to_u8_array();
+    let r = linearize_srgb_channel(r as f64 / 255.0);
+    let g = linearize_srgb_channel(g as f64 / 255.0);
+    let b = linearize_srgb_channel(b as f64 / 255.0);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/// Linearize an sRGB channel value.
+///
+/// If the channel is ≤ 0.03928, divide by 12.92; otherwise, raise
+/// ((channel + 0.055) / 1.055) to the power of 2.4.
+fn linearize_srgb_channel(c: f64) -> f64 {
+    if c <= 0.03928 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Select dark ink or white based on the luminance of a given color.
+///
+/// Returns white if the accent's relative luminance is below 0.5 (dark
+/// accent), else returns dark ink. This provides a simple heuristic for
+/// contrast without computing the full WCAG contrast ratio.
+fn select_ink_by_luminance(color: Color) -> Color {
+    if relative_luminance(color) < 0.5 {
+        // Dark accent: use white
+        Color::from_rgb8(0xFF, 0xFF, 0xFF)
+    } else {
+        // Light accent: use dark ink
+        Color::from_rgb8(0x1D, 0x1B, 0x20)
+    }
+}
+
+/// Blend an accent color at 10% opacity over a surface color, flattening to opaque.
+///
+/// Uses the standard alpha-blending formula: result = accent * alpha + surface * (1 - alpha).
+/// The alpha is fixed at 0.10 (10%) per the Glyph accent-variant recipe.
+fn blend_accent_over_surface(accent: Color, surface: Color) -> Color {
+    const ACCENT_ALPHA: f64 = 0.10;
+
+    let [a_r, a_g, a_b, _] = accent.to_rgba8().to_u8_array();
+    let [s_r, s_g, s_b, _] = surface.to_rgba8().to_u8_array();
+
+    let a_r = a_r as f64 / 255.0;
+    let a_g = a_g as f64 / 255.0;
+    let a_b = a_b as f64 / 255.0;
+    let s_r = s_r as f64 / 255.0;
+    let s_g = s_g as f64 / 255.0;
+    let s_b = s_b as f64 / 255.0;
+
+    let blend_channel = |a: f64, s: f64| -> u8 {
+        let result = a * ACCENT_ALPHA + s * (1.0 - ACCENT_ALPHA);
+        (result * 255.0).round() as u8
+    };
+
+    Color::from_rgb8(
+        blend_channel(a_r, s_r),
+        blend_channel(a_g, s_g),
+        blend_channel(a_b, s_b),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,5 +762,111 @@ mod tests {
         );
         assert_eq!(light.secondary_fixed, dark.secondary_fixed);
         assert_eq!(light.tertiary_fixed, dark.tertiary_fixed);
+    }
+
+    #[test]
+    fn with_accent_changes_exactly_four_roles() {
+        // Verify that with_accent changes exactly the 4 accent roles and
+        // leaves all other 42 fields byte-equal.
+        let base = ColorScheme::m3_baseline_dark();
+        let red = Color::from_rgb8(0xFF, 0x00, 0x00);
+        let modified = base.with_accent(red);
+
+        // The four accent roles must change.
+        assert_eq!(modified.primary, red);
+        assert_eq!(modified.on_primary_container, red);
+        // on_primary and primary_container are derived; check they're not the
+        // same as the original.
+        assert_ne!(modified.on_primary, base.on_primary);
+        assert_ne!(modified.primary_container, base.primary_container);
+
+        // All other 42 roles must remain unchanged.
+        assert_eq!(modified.secondary, base.secondary);
+        assert_eq!(modified.on_secondary, base.on_secondary);
+        assert_eq!(modified.secondary_container, base.secondary_container);
+        assert_eq!(modified.on_secondary_container, base.on_secondary_container);
+        assert_eq!(modified.secondary_fixed, base.secondary_fixed);
+        assert_eq!(modified.secondary_fixed_dim, base.secondary_fixed_dim);
+        assert_eq!(modified.on_secondary_fixed, base.on_secondary_fixed);
+        assert_eq!(
+            modified.on_secondary_fixed_variant,
+            base.on_secondary_fixed_variant
+        );
+
+        assert_eq!(modified.tertiary, base.tertiary);
+        assert_eq!(modified.on_tertiary, base.on_tertiary);
+        assert_eq!(modified.tertiary_container, base.tertiary_container);
+        assert_eq!(modified.on_tertiary_container, base.on_tertiary_container);
+        assert_eq!(modified.tertiary_fixed, base.tertiary_fixed);
+        assert_eq!(modified.tertiary_fixed_dim, base.tertiary_fixed_dim);
+        assert_eq!(modified.on_tertiary_fixed, base.on_tertiary_fixed);
+        assert_eq!(
+            modified.on_tertiary_fixed_variant,
+            base.on_tertiary_fixed_variant
+        );
+
+        assert_eq!(modified.error, base.error);
+        assert_eq!(modified.on_error, base.on_error);
+        assert_eq!(modified.error_container, base.error_container);
+        assert_eq!(modified.on_error_container, base.on_error_container);
+
+        assert_eq!(modified.surface, base.surface);
+        assert_eq!(modified.on_surface, base.on_surface);
+        assert_eq!(modified.on_surface_variant, base.on_surface_variant);
+        assert_eq!(modified.surface_dim, base.surface_dim);
+        assert_eq!(modified.surface_bright, base.surface_bright);
+        assert_eq!(
+            modified.surface_container_lowest,
+            base.surface_container_lowest
+        );
+        assert_eq!(modified.surface_container_low, base.surface_container_low);
+        assert_eq!(modified.surface_container, base.surface_container);
+        assert_eq!(modified.surface_container_high, base.surface_container_high);
+        assert_eq!(
+            modified.surface_container_highest,
+            base.surface_container_highest
+        );
+
+        assert_eq!(modified.outline, base.outline);
+        assert_eq!(modified.outline_variant, base.outline_variant);
+        assert_eq!(modified.shadow, base.shadow);
+        assert_eq!(modified.scrim, base.scrim);
+        assert_eq!(modified.inverse_surface, base.inverse_surface);
+        assert_eq!(modified.inverse_on_surface, base.inverse_on_surface);
+        assert_eq!(modified.inverse_primary, base.inverse_primary);
+        assert_eq!(modified.surface_tint, base.surface_tint);
+
+        assert_eq!(modified.primary_fixed, base.primary_fixed);
+        assert_eq!(modified.primary_fixed_dim, base.primary_fixed_dim);
+        assert_eq!(modified.on_primary_fixed, base.on_primary_fixed);
+        assert_eq!(
+            modified.on_primary_fixed_variant,
+            base.on_primary_fixed_variant
+        );
+    }
+
+    #[test]
+    fn on_primary_contrast_for_dark_and_light_accents() {
+        // Verify on_primary is selected appropriately for both dark and light
+        // accents.
+        let base = ColorScheme::m3_baseline_dark();
+
+        // Dark accent (red): should get white on_primary.
+        let dark_accent = Color::from_rgb8(0x80, 0x00, 0x00);
+        let dark_scheme = base.with_accent(dark_accent);
+        assert_eq!(
+            dark_scheme.on_primary,
+            Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            "Dark accent should pair with white ink"
+        );
+
+        // Light accent (yellow): should get dark ink on_primary.
+        let light_accent = Color::from_rgb8(0xFF, 0xFF, 0x00);
+        let light_scheme = base.with_accent(light_accent);
+        assert_eq!(
+            light_scheme.on_primary,
+            Color::from_rgb8(0x1D, 0x1B, 0x20),
+            "Light accent should pair with dark ink"
+        );
     }
 }
