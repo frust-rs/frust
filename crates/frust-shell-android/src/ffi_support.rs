@@ -303,12 +303,7 @@ pub(crate) fn load_pipeline_cache(path: &Path) -> Option<Vec<u8>> {
 /// is best-effort and a failure only means the next launch pays the cold-compile
 /// cost again.
 pub(crate) fn write_pipeline_cache_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_file_name(format!("pipeline_cache.bin.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)
+    frust_paths::atomic_write(path, data)
 }
 
 // ---------------------------------------------------------------------
@@ -599,9 +594,10 @@ mod tests {
         write_pipeline_cache_atomic(&path, b"second").unwrap();
         assert_eq!(load_pipeline_cache(&path), Some(b"second".to_vec()));
         // The temp sibling must not linger after a successful rename.
+        // frust_paths::atomic_write uses extension format: `.tmp.<pid>`
         let leftover = dir
             .join("frust")
-            .join(format!("pipeline_cache.bin.{}.tmp", std::process::id()));
+            .join(format!("pipeline_cache.tmp.{}", std::process::id()));
         assert!(!leftover.exists(), "temp file should be renamed away");
     }
 }

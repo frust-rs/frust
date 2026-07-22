@@ -10,6 +10,8 @@ license.workspace = true
 # *expands* to real code where its call site is `#[cfg(target_os = "android")]`),
 # and the panic-guard helper is host-testable, so `log` builds everywhere.
 log = { workspace = true }
+# Platform-agnostic atomic write and directory resolution (task 05).
+frust-paths = { workspace = true }
 
 # The JNI runtime and the whole render/text stack are only ever compiled for an
 # Android target; on the host this crate is (almost) empty but the macro and the

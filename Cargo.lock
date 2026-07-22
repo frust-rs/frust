@@ -1571,6 +1571,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "frust-core",
+ "frust-paths",
  "frust-plugin",
  "frust-reactive",
  "frust-render",
