@@ -221,6 +221,24 @@ pub use peniko::Color;
 /// ```
 pub use frust_shell_common::{clear_app_theme, set_app_theme};
 
+/// App-facing pending-font registry (glyph-design-system task 08):
+/// [`register_app_fonts`] pushes raw font bytes (TTF/OTF, or a TTC/OTC
+/// collection) to be registered into the running shell's `TextContext` the
+/// next time it drains this registry (construction time, and once per
+/// frame -- task 14's shell wiring). See
+/// `frust_shell_common::font_registry`'s module docs for the full layering
+/// rationale and thread contract (mirrors [`set_app_theme`]'s: a plain
+/// `Mutex`-guarded process-global, callable from any thread).
+///
+/// ```no_run
+/// // Push bundled font bytes (e.g. loaded via `include_bytes!` at the app
+/// // crate's own build) before or after the app starts running; the shell
+/// // picks them up on its next drain.
+/// let font_bytes: Vec<u8> = vec![];
+/// frust::register_app_fonts(font_bytes);
+/// ```
+pub use frust_shell_common::font_registry::register_app_fonts;
+
 /// The animation vocabulary (spec §8): the shell-fed frame clock ([`FrameTime`])
 /// plus the pure easing/interpolation/spring math a widget or app advances it
 /// through, flat-re-exported from `frust-core::anim`. Time enters from the

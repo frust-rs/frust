@@ -33,6 +33,7 @@
 
 mod app_tree;
 mod ffi_support;
+pub mod font_registry;
 pub mod frame_gate;
 pub mod perf;
 pub mod render_split;
