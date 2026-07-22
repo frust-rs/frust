@@ -12,10 +12,13 @@
 //! layering rationale), the [`perf`] module's frame-timing/startup-span
 //! instrumentation, the [`frame_gate`] module's shared skip-frame decision
 //! ([`FrameGate`]/[`FrameInputs`]/[`FrameDecision`]) the mobile shells consult
-//! to idle on unchanged frames (spec §14 phase 7), and the [`resample`]
+//! to idle on unchanged frames (spec §14 phase 7), the [`resample`]
 //! module's pointer-event resampling ([`PointerResampler`]) plus deadline-aware
 //! pacing helpers the mobile shells drive from their touch + frame paths (plan
-//! phase 10.C).
+//! phase 10.C), and the [`render_split`] module's UI→render-thread plumbing
+//! ([`render_channel`]'s latest-wins scene handoff + [`RenderCommand`]/[`Ack`]
+//! lifecycle vocabulary, gated by [`render_thread_enabled`]) the shells split
+//! the frame pipeline across (plan phase 11.B).
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
 //! (retained tree / `RenderRoot`) plus `frust-scene`/`frust-text`/
@@ -30,12 +33,18 @@ mod app_tree;
 mod ffi_support;
 pub mod frame_gate;
 pub mod perf;
+pub mod render_split;
 pub mod resample;
 mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
 pub use ffi_support::{guard, logical_insets, logical_size, sanitize_scale};
 pub use frame_gate::{FrameDecision, FrameGate, FrameInputs};
+pub use render_split::{
+    Ack, AckWaiter, FrameMeta, NO_RENDER_THREAD_VAR, RenderBatch, RenderCommand, RenderEvent,
+    RenderPhase, RenderReceiver, RenderSender, SceneFrame, SurfaceSize, ack_pair,
+    next_render_phase, render_channel, render_thread_enabled,
+};
 pub use resample::{PointerResampler, RawPointerSample};
 pub use theme_override::{
     ThemeOverrideWatcher, clear_app_theme, effective_brightness_for_platform_change, set_app_theme,

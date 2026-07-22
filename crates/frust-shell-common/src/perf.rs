@@ -183,6 +183,61 @@ impl FramePasses {
     pub fn total(&self) -> Duration {
         self.rebuild + self.layout + self.paint + self.encode + self.acquire + self.submit
     }
+
+    /// Recombine a render-thread-split frame's two half-measurements into the
+    /// one [`FramePasses`] the single emitter records (Phase 11.B).
+    ///
+    /// In the render-thread split (plan phase 11.B) the UI thread measures
+    /// `rebuild`/`layout`/`paint` ([`UiSpans`]) while the render thread measures
+    /// `encode`/`acquire`/`submit` ([`RenderSpans`]); the UI half rides across
+    /// the scene-handoff channel
+    /// ([`SceneFrame`](crate::render_split::SceneFrame)) so the render thread —
+    /// the **single emitter** — can fold both halves into one frame record.
+    /// This is a pure reassembly of the *existing* six fields: it changes no
+    /// wire format (the raw v3 line [`format_raw_frame_line`] emits is byte-for-
+    /// byte identical to a single-thread frame's), it only moves *where* each
+    /// span is measured. The `skipped` flag comes from the UI half (the frame
+    /// gate is UI-side — see [`crate::frame_gate`]).
+    pub fn from_split(ui: UiSpans, render: RenderSpans) -> Self {
+        Self {
+            rebuild: ui.rebuild,
+            layout: ui.layout,
+            paint: ui.paint,
+            encode: render.encode,
+            acquire: render.acquire,
+            submit: render.submit,
+            skipped: ui.skipped,
+        }
+    }
+}
+
+/// The UI-thread half of a render-thread-split frame's timing (plan phase
+/// 11.B): the `rebuild`/`layout`/`paint` spans measured on the UI thread,
+/// plus the frame gate's `skipped` verdict (the gate stays UI-side — see
+/// [`crate::frame_gate`]). Rides the scene-handoff channel across to the
+/// render thread, which folds it together with its own [`RenderSpans`] via
+/// [`FramePasses::from_split`] and records the result through the one emitter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UiSpans {
+    pub rebuild: Duration,
+    pub layout: Duration,
+    pub paint: Duration,
+    /// The frame gate's skip verdict (a skipped frame carries all-zero spans);
+    /// preserved through [`FramePasses::from_split`] into the recorded frame.
+    pub skipped: bool,
+}
+
+/// The render-thread half of a render-thread-split frame's timing (plan phase
+/// 11.B): the `encode`/`acquire`/`submit` spans measured on the render thread,
+/// folded together with the UI thread's [`UiSpans`] via
+/// [`FramePasses::from_split`]. See [`FramePasses::encode`]/[`FramePasses::acquire`]/
+/// [`FramePasses::submit`] for each span's exact boundary (the v3 attribution
+/// this split preserves unchanged).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderSpans {
+    pub encode: Duration,
+    pub acquire: Duration,
+    pub submit: Duration,
 }
 
 /// A rolling summary over [`FrameStats`]'s current ring-buffer window plus
@@ -923,6 +978,61 @@ mod tests {
         );
         // Total still sums every span (22ms here).
         assert_eq!(s.total_p95, Duration::from_millis(22));
+    }
+
+    #[test]
+    fn from_split_recombines_the_two_half_frames_without_changing_the_record() {
+        // Phase 11.B: the UI thread measures rebuild/layout/paint, the render
+        // thread measures encode/acquire/submit. `from_split` folds them into
+        // the exact same FramePasses a single-thread frame would have built —
+        // the render-thread split moves *where* spans are measured, not the
+        // recorded shape or wire format.
+        let ui = UiSpans {
+            rebuild: Duration::from_millis(2),
+            layout: Duration::from_millis(1),
+            paint: Duration::from_millis(1),
+            skipped: false,
+        };
+        let render = RenderSpans {
+            encode: Duration::from_millis(6),
+            acquire: Duration::from_millis(9),
+            submit: Duration::from_millis(3),
+        };
+        let split = FramePasses::from_split(ui, render);
+        let whole = FramePasses {
+            rebuild: Duration::from_millis(2),
+            layout: Duration::from_millis(1),
+            paint: Duration::from_millis(1),
+            encode: Duration::from_millis(6),
+            acquire: Duration::from_millis(9),
+            submit: Duration::from_millis(3),
+            skipped: false,
+        };
+        assert_eq!(split, whole, "split reassembly must equal the whole frame");
+        assert_eq!(split.total(), Duration::from_millis(22));
+
+        // The raw v3 line is byte-for-byte identical to a single-thread frame's.
+        let mut split_line = String::new();
+        let mut whole_line = String::new();
+        format_raw_frame_line(&mut split_line, 1, &split);
+        format_raw_frame_line(&mut whole_line, 1, &whole);
+        assert_eq!(
+            split_line, whole_line,
+            "v3 wire format is unchanged by the split"
+        );
+    }
+
+    #[test]
+    fn from_split_preserves_the_ui_side_skipped_verdict() {
+        // The frame gate is UI-side, so a skipped frame's verdict rides in on
+        // the UiSpans half and must survive the fold.
+        let ui = UiSpans {
+            skipped: true,
+            ..Default::default()
+        };
+        let split = FramePasses::from_split(ui, RenderSpans::default());
+        assert!(split.skipped, "the UI-side skip verdict must be preserved");
+        assert_eq!(split.total(), Duration::ZERO);
     }
 
     #[test]
