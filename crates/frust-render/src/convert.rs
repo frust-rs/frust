@@ -62,14 +62,19 @@ thread_local! {
     static IMAGE_IDENTITY_PROBE: RefCell<ImageIdentityProbe> = RefCell::new(ImageIdentityProbe::new());
 }
 
-/// Check if the image-identity probe is enabled (FRUST_TRACE set at runtime).
-/// Cached in OnceLock for zero-cost when disabled (see context.rs::perf_tracing_enabled).
+/// Check if the image-identity probe is enabled (`FRUST_TRACE` set at compile
+/// time or runtime — the same dual parsing as `context.rs::perf_tracing_enabled`;
+/// an Android app process has no runtime env, so the compile-time half is what
+/// enables the probe on-device).
+/// Cached in OnceLock for zero-cost when disabled.
 fn image_probe_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("FRUST_TRACE")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
+        fn is_set_non_zero(value: Option<&str>) -> bool {
+            matches!(value, Some(v) if !v.is_empty() && v != "0")
+        }
+        let runtime = std::env::var("FRUST_TRACE").ok();
+        is_set_non_zero(option_env!("FRUST_TRACE")) || is_set_non_zero(runtime.as_deref())
     })
 }
 
