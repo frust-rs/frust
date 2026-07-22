@@ -175,14 +175,16 @@ fn design_selector(
     match design_lang {
         // Glyph has no selector chrome baseline yet (task 28 replaces this) —
         // falls through to the Material3 arm for now.
-        DesignLanguage::Material3 | DesignLanguage::Glyph => any(button_group::<AppearanceState, _>(
-            DesignChoice::ALL.into_iter().map(|c| c.label()),
-            selected.index(),
-            move |st: &mut AppearanceState, idx: usize| {
-                st.controller.design.set(DesignChoice::from_index(idx));
-                spawn_apply(&st.controller, current.clone());
-            },
-        )),
+        DesignLanguage::Material3 | DesignLanguage::Glyph => {
+            any(button_group::<AppearanceState, _>(
+                DesignChoice::ALL.into_iter().map(|c| c.label()),
+                selected.index(),
+                move |st: &mut AppearanceState, idx: usize| {
+                    st.controller.design.set(DesignChoice::from_index(idx));
+                    spawn_apply(&st.controller, current.clone());
+                },
+            ))
+        }
         DesignLanguage::Cupertino => {
             let mut btns: Vec<AnyView<AppearanceState>> = Vec::new();
             for (i, choice) in DesignChoice::ALL.into_iter().enumerate() {
