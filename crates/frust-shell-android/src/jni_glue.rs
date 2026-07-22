@@ -512,8 +512,26 @@ fn create_handle(
     // note for the pre-init/renderer split decision.
     let cache_path = cache_dir.as_deref().map(pipeline_cache_path);
     let loaded_cache = cache_path.as_deref().and_then(load_pipeline_cache);
+
+    // Log loaded blob size + validation outcome (perf-gated, task 03).
+    if perf::enabled() {
+        if let Some(ref blob) = loaded_cache {
+            log::info!(
+                "frust-shell-android: loaded pipeline cache blob ({} bytes, validation: pending)",
+                blob.len()
+            );
+        } else {
+            log::info!("frust-shell-android: pipeline cache blob not found (cold start)");
+        }
+    }
+
     renderer.set_initial_pipeline_cache_data(loaded_cache.clone());
     startup_spans.record(SPAN_CACHE_LOADED);
+
+    // Record warm-start span if non-empty blob was loaded (task 03, mirrors desktop app_handler.rs:722).
+    if let Some(ref _blob) = loaded_cache {
+        startup_spans.record(perf::SPAN_PIPELINE_CACHE_RESTORED);
+    }
 
     // Adopt the `RenderContext` the `JNI_OnLoad` background thread has been
     // building (wgpu instance + adapter + device) since native-library load
@@ -643,15 +661,28 @@ fn persist_pipeline_cache_if_changed(
     let Some(data) = renderer.pipeline_cache_data() else {
         return; // no cache to persist (Metal/desktop, or nothing compiled)
     };
-    if !pipeline_cache_differs(loaded, &data) {
+    let cache_changed = pipeline_cache_differs(loaded, &data);
+    if !cache_changed {
         return; // unchanged since load — skip the rewrite
     }
+    let data_len = data.len();
+    let perf_enabled = perf::enabled();
     std::thread::spawn(move || match write_pipeline_cache_atomic(&path, &data) {
-        Ok(()) => log::debug!(
-            "frust-shell-android: persisted pipeline cache ({} bytes) to {}",
-            data.len(),
-            path.display()
-        ),
+        Ok(()) => {
+            log::debug!(
+                "frust-shell-android: persisted pipeline cache ({} bytes) to {}",
+                data_len,
+                path.display()
+            );
+            // Log persisted size + whether it changed (perf-gated, task 03).
+            if perf_enabled {
+                log::info!(
+                    "frust-shell-android: persisted pipeline cache ({} bytes, changed: {})",
+                    data_len,
+                    cache_changed
+                );
+            }
+        }
         Err(err) => log::warn!(
             "frust-shell-android: failed to persist pipeline cache to {}: {err}",
             path.display()
