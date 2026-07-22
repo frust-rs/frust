@@ -22,11 +22,14 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # `frust create` scaffold whose generated Android/iOS projects need a
 # project-local `target/` dir, and its generated Cargo.toml carries its own
 # `[profile.*]` blocks, which only take effect in a workspace root.
+# examples/shadertoy (the shader showcase) is standalone for the same reason
+# as bubblebench: a full `frust create` scaffold with its own project-local
+# `target/` dir and hand-synced `[profile.*]` blocks.
 # plugins/clean-signals-frust (Phase 4 facade-tier plugin) is a standalone
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
 # Version-Pin Policy). Excluding a not-yet-migrated dir is harmless.
-exclude = ["examples/huddle", "examples/bubblebench", "plugins/clean-signals-frust"]
+exclude = ["examples/huddle", "examples/bubblebench", "examples/shadertoy", "plugins/clean-signals-frust"]
 
 [workspace.package]
 version = "0.1.0"
