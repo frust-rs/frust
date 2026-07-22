@@ -107,7 +107,6 @@ struct PipelineEntry {
 /// source vello's override atlas reads, RESEARCH.md §Q1), its view, the 16-byte
 /// uniform buffer, and the bind group wiring the buffer to `@binding(0)`.
 struct TargetEntry {
-    #[allow(unused)]
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     uniforms: wgpu::Buffer,
@@ -416,6 +415,30 @@ impl ShaderEffects {
         pass.draw(0..3, 0..1);
     }
 
+    /// Ensure the `(id, w, h)` target carries a vello image-override handle,
+    /// registering it via `register` on first use. `register` is handed the
+    /// target's own [`wgpu::Texture`] and returns the [`ImageData`] vello mints
+    /// for it (`Renderer::register_texture`) — so the `vello::Renderer` stays
+    /// entirely in the caller (the encode pre-pass), this module never naming a
+    /// vello type. The handle is stashed in the entry (so a later resize/teardown
+    /// can hand it back via [`take_dropped_images`](Self::take_dropped_images))
+    /// and a clone is returned for the caller to draw with / mark dirty. `None`
+    /// if `(id, w, h)` has no target (never [`ensure_target`](Self::ensure_target)ed,
+    /// or the pipeline compile failed).
+    pub(crate) fn ensure_registered(
+        &mut self,
+        id: u64,
+        w: u32,
+        h: u32,
+        register: impl FnOnce(&wgpu::Texture) -> ImageData,
+    ) -> Option<ImageData> {
+        let target = self.targets.get_mut(&(id, w, h))?;
+        if target.image.is_none() {
+            target.image = Some(register(&target.texture));
+        }
+        target.image.clone()
+    }
+
     /// Drain the images of evicted targets, transferring ownership to the caller
     /// so it can `unregister_texture` them against the vello renderer it owns.
     pub(crate) fn take_dropped_images(&mut self) -> Vec<ImageData> {
@@ -558,6 +581,21 @@ mod tests {
             width: 2,
             height: 2,
         }
+    }
+
+    #[test]
+    fn ensure_registered_is_none_and_skips_register_without_a_target() {
+        // With no target created for `(id, w, h)` (never `ensure_target`ed, or a
+        // failed compile), registration is a no-op returning `None` — and the
+        // `register` closure (which would touch the vello renderer) never runs.
+        let mut fx = ShaderEffects::new(None);
+        let mut registered = false;
+        let out = fx.ensure_registered(1, 100, 100, |_tex| {
+            registered = true;
+            dummy_image(1)
+        });
+        assert!(out.is_none());
+        assert!(!registered, "register must not run without a target");
     }
 
     #[test]

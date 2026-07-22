@@ -34,10 +34,9 @@ mod lifecycle;
 mod pipeline_cache;
 mod renderer;
 // Offscreen WGSL fragment-shader effects (shader-showcase feature). Crate-
-// private and not yet wired into the encode path — the encode-prepass consumer
-// lands in a sibling task — so its GPU-touching API has no non-test caller here
-// yet; the pure logic is exercised by the module's own unit tests.
-#[allow(dead_code)]
+// private; wired into `SurfaceRenderer::encode`'s Gpu-tier shader pre-pass,
+// which compiles/renders each `Command::ShaderQuad` program into an offscreen
+// texture and registers it as a vello image override before vello encoding.
 mod shader_effects;
 mod tier;
 

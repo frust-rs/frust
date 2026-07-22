@@ -18,6 +18,24 @@ use peniko::color::palette::css::{BLACK, RED};
 
 const SIZE: u32 = 64; // 64 * 4 bytes = 256, the wgpu row-copy alignment — no padding math needed.
 
+/// A self-contained fullscreen-triangle WGSL module returning a solid green —
+/// the shape of the shader pre-pass's offscreen program (`shader_effects.rs`'s
+/// prelude + an `fs_main`), minus the uniform block a solid color needs.
+const SOLID_GREEN_WGSL: &str = r#"
+struct VsOut { @builtin(position) pos: vec4<f32> };
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
+    var out: VsOut;
+    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    out.pos = vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
+    return out;
+}
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+}
+"#;
+
 #[test]
 #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
 fn red_fill_rect_produces_non_zero_pixels() {
@@ -144,5 +162,227 @@ async fn run() {
     assert!(
         r > g && r > b,
         "centre pixel should be red-dominant, got rgb=({r},{g},{b})"
+    );
+}
+
+/// End-to-end smoke of the shader-showcase GPU mechanism the `encode` pre-pass
+/// (`renderer.rs`'s `run_shader_prepass`) performs: render a solid-color WGSL
+/// fragment shader into an offscreen `Rgba8Unorm` texture, register it with
+/// vello as an image override (`register_texture`), and draw it through Frust's
+/// scene encode — the exact `draw_image` a `Command::ShaderQuad` lowers to.
+/// Reads the presented pixels back and asserts the shader's color survived the
+/// override→atlas copy (RESEARCH.md §Q1), with no uncaptured validation error.
+///
+/// The crate-private `ShaderEffects` wrapper is unit-tested in-crate; this
+/// covers the real-device GPU path it drives, which no headless surface can.
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+fn shader_override_solid_color_survives_the_atlas_copy() {
+    pollster::block_on(run_shader());
+}
+
+async fn run_shader() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .expect("no compatible GPU adapter");
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("frust gpu_smoke shader"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        })
+        .await
+        .expect("failed to create device");
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    // The shader pre-pass target: Rgba8Unorm + RENDER_ATTACHMENT (our pass) +
+    // COPY_SRC (vello's override copy reads it — RESEARCH.md §Q1).
+    let shader_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frust gpu_smoke shader target"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let shader_view = shader_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Compile + run the fullscreen solid-green fragment shader into the target.
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("frust gpu_smoke shader module"),
+        source: wgpu::ShaderSource::Wgsl(SOLID_GREEN_WGSL.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("frust gpu_smoke shader layout"),
+        bind_group_layouts: &[],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("frust gpu_smoke shader pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust gpu_smoke shader pass"),
+    });
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("frust gpu_smoke shader pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &shader_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.draw(0..3, 0..1);
+    }
+    // Submit the shader pass BEFORE vello renders (the pre-pass's ordering).
+    queue.submit([enc.finish()]);
+
+    // Register the shader texture as a vello override, then draw it through the
+    // Frust scene encode — the `draw_image` a `ShaderQuad` lowers to.
+    let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
+        .expect("failed to create vello renderer");
+    let image = renderer.register_texture(shader_tex);
+    renderer.mark_override_image_dirty(&image);
+
+    let mut fk_scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut fk_scene);
+        builder.draw_image(&image, kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64));
+    }
+    let mut vello_scene = vello::Scene::new();
+    encode_scene(&fk_scene, &mut vello_scene);
+
+    // Present into a vello-compatible storage target and read it back.
+    let out_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frust gpu_smoke shader present target"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        view_formats: &[],
+    });
+    let out_view = out_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    renderer
+        .render_to_texture(
+            &device,
+            &queue,
+            &vello_scene,
+            &out_view,
+            &vello::RenderParams {
+                base_color: BLACK,
+                width: SIZE,
+                height: SIZE,
+                antialiasing_method: vello::AaConfig::Area,
+            },
+        )
+        .expect("render_to_texture failed");
+
+    let bytes_per_row = SIZE * 4;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("frust gpu_smoke shader readback"),
+        size: (bytes_per_row * SIZE) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| {
+        let _ = tx.send(res);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll failed");
+    rx.recv()
+        .expect("map channel closed")
+        .expect("buffer map failed");
+
+    let data = slice.get_mapped_range();
+    // Centre pixel came from the solid-green shader via the override copy.
+    let centre = ((SIZE / 2) * bytes_per_row + (SIZE / 2) * 4) as usize;
+    let (r, g, b) = (data[centre], data[centre + 1], data[centre + 2]);
+    assert!(
+        g > r && g > b,
+        "centre pixel should be green-dominant (the shader color), got rgb=({r},{g},{b})"
+    );
+    drop(data);
+
+    let scope_err = error_scope.pop().await;
+    assert!(
+        scope_err.is_none(),
+        "shader pre-pass produced an uncaptured validation error: {scope_err:?}"
     );
 }

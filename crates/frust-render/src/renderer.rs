@@ -24,12 +24,19 @@ use core::ffi::c_void;
 
 use anyhow::{Result, anyhow};
 
+use std::collections::{HashMap, HashSet};
+
+use frust_scene::Command;
+use kurbo::Affine;
+use peniko::ImageData;
+
 use crate::context::{ConfiguredSurface, DetachedSurface, RenderContext, RenderPath};
 use crate::convert;
 use crate::lifecycle::{
     AcquireAction, AcquireOutcome, AcquireStatus, EncodeOutcome, FrameOutcome, SurfaceEvent,
     SurfacePhase, decide_acquire, next_invalid_streak, next_phase,
 };
+use crate::shader_effects::{ShaderEffects, clamp_size};
 
 /// The live GPU resources of a [`SurfacePhase::SurfaceReady`] surface.
 ///
@@ -49,6 +56,15 @@ struct ReadySurface {
     /// `PIPELINE_CACHE` (Metal/desktop) — see
     /// [`crate::context::RenderContext::create_pipeline_cache`].
     pipeline_cache: Option<(wgpu::PipelineCache, String)>,
+    /// Offscreen WGSL fragment-shader effects (shader-showcase feature): the
+    /// per-`Command::ShaderQuad` pipelines/targets the Gpu-tier shader pre-pass
+    /// renders and registers as vello image overrides. Lives here so it is
+    /// dropped with the surface on `on_surface_destroyed` and survives an
+    /// `on_surface_changed` resize (its compiled pipelines persist like vello's
+    /// own). Constructed with a clone of the surface's `pipeline_cache` so shader
+    /// pipelines seed from the same persisted blob. Unused on the Cpu tier (that
+    /// path runs no shader pre-pass — `ShaderQuad`s take the miss placeholder).
+    shader_effects: ShaderEffects,
 }
 
 /// The per-surface renderer for the selected [`crate::RenderTier`].
@@ -395,6 +411,12 @@ impl SurfaceRenderer {
             SurfacePhase::SurfaceReady,
             "Created must reach SurfaceReady (spec §8.1)"
         );
+        // Seed the shader-showcase effects engine with a clone of the same
+        // pipeline cache handed to vello, so its per-program shader pipelines
+        // compile from the same persisted blob (a no-op `None` on adapters
+        // without `PIPELINE_CACHE`). Cloned before `pipeline_cache` is consumed
+        // into the fingerprint pair below.
+        let shader_effects = ShaderEffects::new(pipeline_cache.clone());
         // Pair the live pipeline cache with the adapter fingerprint its data is
         // framed under, so `pipeline_cache_data()` can hand back a validatable
         // blob without re-reading the adapter. `None` when the adapter lacks
@@ -407,6 +429,7 @@ impl SurfaceRenderer {
             surface,
             backend,
             pipeline_cache,
+            shader_effects,
         }));
         // A freshly (re)installed surface starts a new `Invalid`-reconfigure
         // episode — any prior streak belonged to the surface just replaced.
@@ -533,43 +556,59 @@ impl SurfaceRenderer {
 
         // Encode this frame's pixels, per tier and per render path.
         match &mut ready.backend {
-            TierBackend::Gpu(renderer) => match &ready.surface.path {
-                // Direct-to-surface (deliverable 1): the vello render targets the
-                // acquired swapchain texture, which does not exist until
-                // `acquire`. So `encode` does ONLY the CPU-side scene build here;
-                // the GPU `render_to_texture` moves to `submit`. See `submit`'s
-                // span-mapping comment for how this remaps the v3 spans.
-                RenderPath::Direct => {
-                    vello_scene.reset();
-                    convert::encode_scene(scene, vello_scene);
-                    // Carry `base_color` to `submit`, where the render runs.
-                    *pending_base_color = Some(base_color);
+            TierBackend::Gpu(renderer) => {
+                // Shader pre-pass (shader-showcase): compile/render each
+                // `Command::ShaderQuad` program into an offscreen texture and
+                // register it as a vello image override, producing the
+                // program-id → `ImageData` map `encode_into` lowers each quad
+                // against. Runs (and submits its own encoder) BEFORE vello's
+                // `render_to_texture` so the atlas copy reads a complete texture
+                // — wgpu serializes queue submissions in order (RESEARCH.md §Q3).
+                let shader_images = run_shader_prepass(
+                    &device_handle.device,
+                    &device_handle.queue,
+                    renderer,
+                    &mut ready.shader_effects,
+                    scene,
+                );
+                match &ready.surface.path {
+                    // Direct-to-surface (deliverable 1): the vello render targets the
+                    // acquired swapchain texture, which does not exist until
+                    // `acquire`. So `encode` does ONLY the CPU-side scene build here;
+                    // the GPU `render_to_texture` moves to `submit`. See `submit`'s
+                    // span-mapping comment for how this remaps the v3 spans.
+                    RenderPath::Direct => {
+                        vello_scene.reset();
+                        convert::encode_scene_with_shaders(scene, vello_scene, &shader_images);
+                        // Carry `base_color` to `submit`, where the render runs.
+                        *pending_base_color = Some(base_color);
+                    }
+                    // Blit fallback: render into the intermediate `Rgba8Unorm` target
+                    // now; the acquire/blit/present tail (see `submit`) copies it to
+                    // the swapchain.
+                    RenderPath::Blit { target_view, .. } => {
+                        vello_scene.reset();
+                        convert::encode_scene_with_shaders(scene, vello_scene, &shader_images);
+                        let params = vello::RenderParams {
+                            base_color,
+                            width: ready.surface.config.width,
+                            height: ready.surface.config.height,
+                            antialiasing_method: vello::AaConfig::Area,
+                        };
+                        renderer
+                            .render_to_texture(
+                                &device_handle.device,
+                                &device_handle.queue,
+                                vello_scene,
+                                target_view,
+                                &params,
+                            )
+                            .map_err(|e| {
+                                anyhow!("frust-render: vello render_to_texture failed: {e}")
+                            })?;
+                    }
                 }
-                // Blit fallback: render into the intermediate `Rgba8Unorm` target
-                // now; the acquire/blit/present tail (see `submit`) copies it to
-                // the swapchain.
-                RenderPath::Blit { target_view, .. } => {
-                    vello_scene.reset();
-                    convert::encode_scene(scene, vello_scene);
-                    let params = vello::RenderParams {
-                        base_color,
-                        width: ready.surface.config.width,
-                        height: ready.surface.config.height,
-                        antialiasing_method: vello::AaConfig::Area,
-                    };
-                    renderer
-                        .render_to_texture(
-                            &device_handle.device,
-                            &device_handle.queue,
-                            vello_scene,
-                            target_view,
-                            &params,
-                        )
-                        .map_err(|e| {
-                            anyhow!("frust-render: vello render_to_texture failed: {e}")
-                        })?;
-                }
-            },
+            }
             #[cfg(feature = "cpu-tier")]
             TierBackend::Cpu(cpu) => {
                 // The CPU tier uploads its pixmap into the intermediate target, so
@@ -853,6 +892,98 @@ impl SurfaceRenderer {
     }
 }
 
+/// The shader-showcase pre-pass (Gpu tier only): for every distinct
+/// `Command::ShaderQuad` in `scene`, compile its program, render it into an
+/// offscreen texture at the quad's physical size, register that texture with
+/// vello as an image override, and collect a `program id → ImageData` map for
+/// `convert::encode_into` to lower each quad against.
+///
+/// Ordering (RESEARCH.md §Q3): all quad passes share ONE command encoder,
+/// submitted BEFORE the caller's `render_to_texture`, so wgpu's in-order queue
+/// serialization guarantees each shader texture is complete before vello's
+/// atlas copy reads it. Registration happens once per target (via
+/// `ShaderEffects::ensure_registered`); the override is re-marked dirty every
+/// frame the quad is present (the intended per-frame texture→atlas copy cost);
+/// resize-evicted targets are unregistered by draining `take_dropped_images`.
+/// Never panics — a failed compile is recorded/skipped inside `ShaderEffects`
+/// and simply yields no map entry (the quad then takes the miss placeholder).
+fn run_shader_prepass(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut vello::Renderer,
+    shader_effects: &mut ShaderEffects,
+    scene: &frust_scene::Scene,
+) -> HashMap<u64, ImageData> {
+    // Collect the distinct quads to render this frame, deduped by
+    // (program id, clamped physical size) so a program drawn twice at the same
+    // size is compiled/encoded once.
+    let adapter_max = device.limits().max_texture_dimension_2d;
+    let mut seen = HashSet::new();
+    let mut quads: Vec<(u64, &str, u32, u32, f32)> = Vec::new();
+    for command in scene.commands() {
+        if let Command::ShaderQuad {
+            program,
+            dest,
+            transform,
+            time,
+        } = command
+        {
+            let (w, h) = clamp_size(physical_size(*transform, *dest), adapter_max);
+            if seen.insert((program.id(), w, h)) {
+                quads.push((program.id(), program.source(), w, h, *time));
+            }
+        }
+    }
+
+    let mut shader_images = HashMap::new();
+    if !quads.is_empty() {
+        // ONE encoder for every quad pass; submitted before the caller renders.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust shader-effect pre-pass"),
+        });
+        for (id, wgsl, w, h, time) in quads {
+            shader_effects.ensure_pipeline(device, id, wgsl);
+            shader_effects.ensure_target(device, id, w, h);
+            shader_effects.encode_pass(&mut encoder, queue, id, (w, h), time);
+            // Register on first use (stashed in the target entry) and mark dirty
+            // every frame so vello recopies the texture into its atlas.
+            if let Some(image) = shader_effects
+                .ensure_registered(id, w, h, |tex| renderer.register_texture(tex.clone()))
+            {
+                renderer.mark_override_image_dirty(&image);
+                shader_images.insert(id, image);
+            }
+        }
+        queue.submit([encoder.finish()]);
+    }
+
+    // Hand back any images belonging to resize-evicted targets so vello stops
+    // treating their (now-dropped) textures as overrides.
+    for image in shader_effects.take_dropped_images() {
+        renderer.unregister_texture(image);
+    }
+
+    shader_images
+}
+
+/// The physical-pixel extent of a shader quad: the axis-aligned bounding box of
+/// `dest` mapped through `transform` (the root transform carries the DPI scale),
+/// as `(width, height)` rounded to whole pixels. Sizing the shader target in
+/// physical pixels keeps its rendered detail matched to the on-screen area. A
+/// degenerate/negative extent yields `0`, which `clamp_size` then floors to `1`.
+fn physical_size(transform: Affine, dest: kurbo::Rect) -> (u32, u32) {
+    let bbox = transform.transform_rect_bbox(dest);
+    let to_u32 = |v: f64| {
+        let v = v.round();
+        if v.is_finite() && v > 0.0 {
+            v as u32
+        } else {
+            0
+        }
+    };
+    (to_u32(bbox.width()), to_u32(bbox.height()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,6 +992,22 @@ mod tests {
     fn starts_with_no_surface() {
         let renderer = SurfaceRenderer::new();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+    }
+
+    #[test]
+    fn physical_size_applies_the_dpi_scale_from_the_transform() {
+        // A 100x50 logical dest under a 2x DPI transform is a 200x100 physical
+        // target; the origin offset does not affect the extent.
+        let dest = kurbo::Rect::new(10.0, 20.0, 110.0, 70.0);
+        let transform = Affine::scale(2.0);
+        assert_eq!(physical_size(transform, dest), (200, 100));
+    }
+
+    #[test]
+    fn physical_size_rounds_and_floors_degenerate_extents_to_zero() {
+        // A zero-area dest yields (0, 0) — `clamp_size` later floors it to 1.
+        let dest = kurbo::Rect::new(5.0, 5.0, 5.0, 5.0);
+        assert_eq!(physical_size(Affine::IDENTITY, dest), (0, 0));
     }
 
     #[test]

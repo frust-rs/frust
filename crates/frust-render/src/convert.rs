@@ -13,7 +13,7 @@ use frust_scene::{Command, GlyphRun, PathStyle, Scene};
 use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 // TEMPORARY: Image-identity probe (task 04 / phase-11 render-path).
@@ -145,13 +145,44 @@ pub(crate) trait SceneSink {
 /// Call `target.reset()` before this to clear the previous frame — the render
 /// path does exactly that (spec §7: rebuild the scene per frame, never
 /// accumulate).
+///
+/// This is the no-shader-map convenience entry the public seam
+/// (`docs/ARCHITECTURE.md`'s scene-layer purity rule) exposes for shells that
+/// drive their own `vello::Renderer`: with no per-frame shader-override map,
+/// every `Command::ShaderQuad` lowers to its miss placeholder (a CPU-tier /
+/// no-prepass caller has no compiled shader targets anyway). The in-crate
+/// render path calls [`encode_scene_with_shaders`] instead.
 pub fn encode_scene(scene: &Scene, target: &mut vello::Scene) {
     encode_into(scene, target);
 }
 
-/// Generic worker behind [`encode_scene`]; kept separate so tests can drive it
-/// with a non-`vello` sink.
+/// Encodes `scene` into `target`, resolving each [`Command::ShaderQuad`] against
+/// `shader_images` (program id → the shader pre-pass's registered override
+/// [`ImageData`]). A hit lowers to a `draw_image`; a miss keeps the placeholder
+/// fill. The in-crate render path ([`crate::renderer::SurfaceRenderer::encode`])
+/// builds the map in its shader pre-pass and calls this.
+pub(crate) fn encode_scene_with_shaders(
+    scene: &Scene,
+    target: &mut vello::Scene,
+    shader_images: &HashMap<u64, ImageData>,
+) {
+    encode_into_with_shaders(scene, target, shader_images);
+}
+
+/// Generic worker behind [`encode_scene`]; kept separate so tests (and the
+/// `cpu-tier` sink) can drive it with a non-`vello` sink and no shader map.
 pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
+    encode_into_with_shaders(scene, sink, &HashMap::new());
+}
+
+/// The command walk, parameterized by the per-frame shader-override map (empty
+/// for the no-shader callers above). Kept generic over [`SceneSink`] so it is
+/// GPU-free unit-testable.
+pub(crate) fn encode_into_with_shaders(
+    scene: &Scene,
+    sink: &mut impl SceneSink,
+    shader_images: &HashMap<u64, ImageData>,
+) {
     // TEMPORARY: Image-identity probe (task 04 / phase-11 render-path).
     // Gate all probe work (HashSet population, ID computation, frame processing)
     // behind the enabled check for zero-cost when disabled.
@@ -218,29 +249,40 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
                 PathStyle::Stroke { width } => sink.stroke_path(*transform, brush, path, *width),
             },
             Command::ShaderQuad {
-                dest, transform, ..
+                program,
+                dest,
+                transform,
+                time: _,
             } => {
-                // TEMPORARY placeholder lowering (frust-shader-showcase task
-                // 01): task 04 replaces this arm with the real WGSL
-                // compile+render-to-texture path
-                // (workflow/plans/features/frust-shader-showcase/tasks/04-render-encode-integration.md).
-                // Fill `dest` with an opaque mid-gray so a `ShaderQuad`-
-                // painting widget still renders visible geometry instead of
-                // silently dropping, and warn once per process (not per
-                // frame) so the gap is loud in logs without spamming.
-                static WARNED_SHADER_PLACEHOLDER: OnceLock<()> = OnceLock::new();
-                WARNED_SHADER_PLACEHOLDER.get_or_init(|| {
-                    log::warn!(
-                        "Command::ShaderQuad encoded via a placeholder fill_rect — \
-                         the real WGSL lowering lands in frust-shader-showcase task 04"
-                    );
-                });
-                sink.fill_rect(
-                    Fill::NonZero,
-                    *transform,
-                    &Brush::Solid(Color::from_rgba8(128, 128, 128, 255)),
-                    dest,
-                );
+                // Resolve the program's shader pre-pass output (an offscreen
+                // texture registered with vello as an image override — see
+                // `crate::renderer`'s pre-pass and RESEARCH.md §Q1). A hit
+                // lowers to the same `draw_image` path a `Command::Image` uses,
+                // reusing `natural_to_dest_transform`'s natural→dest scaling so
+                // the physical-pixel target lands pixel-for-pixel in `dest`.
+                match shader_images.get(&program.id()) {
+                    Some(image) => sink.draw_image(*transform, image, dest),
+                    None => {
+                        // Miss: the CPU tier (no shader pre-pass runs), a
+                        // failed shader compile, or no override registered this
+                        // frame. Fill `dest` with an opaque dark placeholder so
+                        // the quad renders visible geometry rather than silently
+                        // dropping, warning once per process (not per frame).
+                        static WARNED_SHADER_MISS: OnceLock<()> = OnceLock::new();
+                        WARNED_SHADER_MISS.get_or_init(|| {
+                            log::warn!(
+                                "Command::ShaderQuad lowered to a placeholder fill — no shader \
+                                 override registered (CPU tier, failed compile, or no pre-pass)"
+                            );
+                        });
+                        sink.fill_rect(
+                            Fill::NonZero,
+                            *transform,
+                            &Brush::Solid(Color::from_rgba8(16, 16, 16, 255)),
+                            dest,
+                        );
+                    }
+                }
             }
         }
     }
@@ -731,10 +773,10 @@ mod tests {
     }
 
     #[test]
-    fn shader_quad_maps_to_placeholder_fill_rect_with_dest_and_transform() {
-        // TEMPORARY (frust-shader-showcase task 01): asserts today's
-        // placeholder lowering; task 04 replaces this with a real WGSL
-        // render-to-texture assertion.
+    fn shader_quad_miss_maps_to_placeholder_fill_rect_with_dest_and_transform() {
+        // A `ShaderQuad` with no matching entry in the shader-override map (the
+        // CPU tier, a failed compile, or no pre-pass) lowers to the placeholder
+        // fill covering `dest` under the widget transform.
         let mut scene = Scene::new();
         let mut builder = SceneBuilder::new(&mut scene);
         let translate = Affine::translate((3.0, 4.0));
@@ -744,12 +786,45 @@ mod tests {
         builder.draw_shader(&program, dest, 1.0);
 
         let mut sink = RecordingSink::default();
+        // Empty map == miss for every program.
         encode_into(&scene, &mut sink);
 
         assert_eq!(
             sink.events,
             vec![Event::FillRect {
                 rect: dest,
+                transform: translate,
+            }]
+        );
+    }
+
+    #[test]
+    fn shader_quad_hit_maps_to_draw_image_with_dest_and_transform() {
+        // A `ShaderQuad` whose program id is in the shader-override map lowers
+        // to a `draw_image` of the registered override texture, scaled to fill
+        // `dest` under the widget transform — the same mapping `Command::Image`
+        // records.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((3.0, 4.0));
+        builder.push_transform(translate);
+        let program = frust_scene::ShaderProgram::new("fn main() {}");
+        let dest = Rect::new(0.0, 0.0, 40.0, 40.0);
+        builder.draw_shader(&program, dest, 1.0);
+
+        // Stand in for the pre-pass's registered override handle (a 2x2 image).
+        let mut shader_images = HashMap::new();
+        shader_images.insert(program.id(), two_by_two_image());
+
+        let mut sink = RecordingSink::default();
+        encode_into_with_shaders(&scene, &mut sink, &shader_images);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::Image {
+                width: 2,
+                height: 2,
+                dest,
                 transform: translate,
             }]
         );
