@@ -1631,6 +1631,7 @@ dependencies = [
  "frust-widgets",
  "kurbo",
  "log",
+ "objc2 0.6.4",
  "peniko",
  "pollster",
 ]

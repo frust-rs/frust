@@ -30,6 +30,7 @@
 
 use std::any::Any;
 use std::ffi::c_void;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::accessibility::IosA11yAdapter;
@@ -43,28 +44,41 @@ use frust_render::{
     AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
 };
 use frust_scene::{Scene, SceneBuilder};
-use frust_shell_common::perf::{self, FramePasses, FrameStats, StartupSpans};
+use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
-    AppTree, FrameGate, FrameInputs, ThemeOverrideWatcher,
-    effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
+    AppTree, FrameGate, FrameInputs, FrameMeta, RenderCommand, RenderSender, SceneFrame,
+    SurfaceSize, ThemeOverrideWatcher, effective_brightness_for_platform_change, logical_insets,
+    logical_size, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
+use objc2::rc::autoreleasepool;
 
 use crate::ffi_support::TouchPhase;
 
 /// Everything a running iOS app needs across frames — the state behind the opaque
 /// handle Swift passes back into every C call.
 ///
-/// The `renderer` owns the `wgpu::Surface` and is the only thing torn down on
-/// drop; the `metal_layer` pointer it was built from is Swift-owned and merely
-/// retained (never freed) here so a lost surface can be recreated (see the module
-/// docs' *Layer lifetime contract*).
+/// The `executor` owns the render path (plan phase 11.B): in the render-thread
+/// split ([`FrameExecutor::Split`], the default) a dedicated thread owns the
+/// `RenderContext`/`SurfaceRenderer` + the `wgpu::Surface` and this UI thread only
+/// hands it finished scenes; in the inline fallback ([`FrameExecutor::Inline`],
+/// `FRUST_NO_RENDER_THREAD`) the renderer lives on this thread. Either way the
+/// `wgpu::Surface` is torn down before the `metal_layer` it was built from — in
+/// the split, [`SplitExecutor`]'s `Drop` joins the render thread (dropping its
+/// surface) before `frust_destroy` returns, and the `metal_layer` pointer is
+/// Swift-owned and merely retained (never freed) here so a lost surface can be
+/// recreated (see the module docs' *Layer lifetime contract*).
 pub struct IosAppHandle {
-    render_cx: RenderContext,
-    renderer: SurfaceRenderer,
+    /// The render-path half of the frame loop (plan phase 11.B): either the
+    /// render-thread split ([`FrameExecutor::Split`], default) — where a dedicated
+    /// thread owns the [`RenderContext`]/[`SurfaceRenderer`] + surface and the UI
+    /// thread only hands it finished scenes — or the pre-split inline fallback
+    /// ([`FrameExecutor::Inline`], `FRUST_NO_RENDER_THREAD`) where the renderer
+    /// lives on this UI thread. Chosen once at construction.
+    executor: FrameExecutor,
     text_ctx: TextContext,
     /// Reused across frames; `reset()` each frame rather than reallocated.
     scene: Scene,
@@ -142,13 +156,6 @@ pub struct IosAppHandle {
     /// drains its queued a11y actions (pre-rebuild) and pushes the post-layout
     /// semantics tree to it (see [`Self::frame`]).
     a11y: Option<IosA11yAdapter>,
-    /// Per-frame pass-timing recorder (spec §14 phase 7.A task 09) — honors
-    /// the process-wide [`perf::enabled`] switch itself, so every call
-    /// against it is a cheap no-op in a non-perf build; [`Self::frame`]
-    /// still gates its own `Instant::now()` reads behind [`perf::enabled`]
-    /// separately (no clock reads at all when disabled, not just no
-    /// recording).
-    frame_stats: FrameStats,
     /// The per-frame skip gate (spec §14 phase 7, task 18): consulted each
     /// CADisplayLink tick to skip the rebuild/layout/paint/encode passes on an
     /// idle frame (nothing changed), so CPU/GPU stay near zero on a static
@@ -177,13 +184,6 @@ pub struct IosAppHandle {
     /// `push_theme`'s LAYOUT|PAINT change flags carry correctness either way;
     /// this explicit latch is belt-and-suspenders, mirroring the Android shell.
     appearance_dirty: bool,
-    /// The startup-span recorder `ffi_glue::create_handle` began and stashed
-    /// here via [`Self::set_startup_spans`] immediately after construction —
-    /// held until the first frame this handle actually presents completes
-    /// and emits the one-line startup summary (see
-    /// [`Self::latch_first_frame_presented`]), then dropped. `None` before
-    /// that stash call and after the summary has been emitted once.
-    startup_spans: Option<StartupSpans>,
     /// Pointer-event resampler (plan phase 10.C.1) — the iOS counterpart to the
     /// Android shell's field: buffers raw touch samples and emits
     /// frame-boundary-interpolated `Move`s while Down/Up/Cancel pass through
@@ -214,6 +214,380 @@ pub struct IosAppHandle {
     deadline_overruns: u64,
 }
 
+/// One finished frame's payload crossing the UI→render-thread handoff in the
+/// split (plan phase 11.B): the painted [`Scene`] plus the clear color it was
+/// painted for (the live theme's surface color — it must ride *with* the frame so
+/// a mid-frame theme flip clears to the right color, mirroring the desktop and
+/// Android shells' `PaintedScene`). This is the `S` type parameter of
+/// [`SceneFrame`]/[`render_channel`](frust_shell_common::render_channel); both
+/// `Scene` and `peniko::Color` are `Send`, keeping the handoff `Send`-clean with
+/// no `unsafe`.
+pub(crate) struct PaintedScene {
+    pub(crate) scene: Scene,
+    pub(crate) base_color: peniko::Color,
+}
+
+/// The render-path half of the iOS frame loop (plan phase 11.B): either the
+/// render-thread split ([`Self::Split`], default) or the pre-split inline fallback
+/// ([`Self::Inline`], `FRUST_NO_RENDER_THREAD`). Chosen once at construction from
+/// [`render_thread_enabled`](frust_shell_common::render_thread_enabled) and owned
+/// by [`IosAppHandle`].
+pub(crate) enum FrameExecutor {
+    /// Pre-split fallback: the [`RenderContext`]/[`SurfaceRenderer`] and all perf
+    /// recording live on the UI thread, and the encode→acquire→submit tail runs
+    /// synchronously inside [`IosAppHandle::frame`]. Boxed — it owns the whole
+    /// render stack and dwarfs the split's thread-handle variant.
+    Inline(Box<InlineExecutor>),
+    /// The split: the renderer + context moved to a dedicated render thread; the
+    /// UI thread hands it finished frames over the channel.
+    Split(SplitExecutor),
+}
+
+/// The single-thread fallback executor (kill switch engaged): the
+/// [`RenderContext`]/[`SurfaceRenderer`] and all perf recording live on the UI
+/// thread, exactly as the pre-split shell did.
+pub(crate) struct InlineExecutor {
+    render_cx: RenderContext,
+    renderer: SurfaceRenderer,
+    frame_stats: FrameStats,
+    /// The cold-start span recorder begun in [`crate::ffi_glue::create_handle`];
+    /// `Option::take`n on the first successful present (records
+    /// [`perf::SPAN_FIRST_FRAME_PRESENTED`] + emits — inside [`render_scene`]),
+    /// `None` thereafter.
+    startup_spans: Option<StartupSpans>,
+}
+
+impl InlineExecutor {
+    /// Build the fallback executor around the already-created, `SurfaceReady`
+    /// renderer + context (surface creation and the early startup spans happened
+    /// in [`crate::ffi_glue::create_handle`], which hands `startup_spans` over
+    /// here to finish).
+    pub(crate) fn new(
+        render_cx: RenderContext,
+        renderer: SurfaceRenderer,
+        startup_spans: StartupSpans,
+    ) -> Self {
+        Self {
+            render_cx,
+            renderer,
+            frame_stats: FrameStats::new(),
+            startup_spans: Some(startup_spans),
+        }
+    }
+
+    /// Run the encode→acquire→submit tail synchronously for `scene`, recording
+    /// the folded frame and returning the encode span for the UI-side deadline
+    /// estimate.
+    fn submit_frame(
+        &mut self,
+        scene: &Scene,
+        base_color: peniko::Color,
+        ui: UiSpans,
+        perf_on: bool,
+    ) -> Duration {
+        render_scene(
+            &mut self.renderer,
+            &self.render_cx,
+            scene,
+            base_color,
+            ui,
+            &mut self.frame_stats,
+            &mut self.startup_spans,
+            perf_on,
+        )
+    }
+
+    /// Record a gate-skipped frame (all-zero pass durations) so the skip counter
+    /// accumulates in the perf line, mirroring the pre-split inline behavior.
+    fn record_skip(&mut self) {
+        self.frame_stats.record(FramePasses {
+            skipped: true,
+            ..FramePasses::default()
+        });
+        if self.frame_stats.should_emit() {
+            self.frame_stats.emit_log();
+        }
+    }
+
+    /// Record [`perf::SPAN_FIRST_REBUILD_DONE`] right after the initial rebuild
+    /// (the UI thread owns the startup line in the inline path).
+    fn record_first_rebuild(&mut self) {
+        if let Some(spans) = self.startup_spans.as_mut() {
+            spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+        }
+    }
+}
+
+/// The render-thread-split executor (default): the UI-thread [`RenderSender`] half
+/// of the scene-handoff channel plus the render thread's [`JoinHandle`]. The
+/// render thread owns the [`RenderContext`]/[`SurfaceRenderer`], the surface, the
+/// [`FrameStats`] recorder (the single perf emitter), and the startup line — see
+/// [`crate::ffi_glue::render_loop`].
+pub(crate) struct SplitExecutor {
+    /// `Option` so [`Drop`] can drop it *before* joining: dropping the sender is
+    /// what signals the render loop to exit.
+    sender: Option<RenderSender<PaintedScene, crate::ffi_glue::SendableMetalLayer>>,
+    join: Option<JoinHandle<()>>,
+    /// The UI-side mirror of "a surface exists" — the render thread owns the real
+    /// `SurfacePhase`, so the UI thread can't query it; this gates
+    /// [`IosAppHandle::frame`]'s not-ready early return in place of `renderer.phase()`.
+    /// Always `true` after construction on iOS (the `CAMetalLayer` is permanent
+    /// and the render thread self-heals a lost surface — no UI-side destroy path).
+    surface_active: bool,
+    /// Monotonically increasing per-frame id stamped into [`FrameMeta`].
+    frame_id: u64,
+}
+
+impl SplitExecutor {
+    pub(crate) fn new(
+        sender: RenderSender<PaintedScene, crate::ffi_glue::SendableMetalLayer>,
+        join: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            sender: Some(sender),
+            join: Some(join),
+            surface_active: true,
+            frame_id: 0,
+        }
+    }
+
+    /// Hand one finished frame to the render thread (latest-wins).
+    fn submit_frame(
+        &mut self,
+        painted: PaintedScene,
+        ui: UiSpans,
+        frame_time: FrameTime,
+        size: SurfaceSize,
+    ) {
+        self.frame_id += 1;
+        if let Some(sender) = self.sender.as_ref() {
+            sender.send_scene(SceneFrame {
+                scene: painted,
+                meta: FrameMeta {
+                    frame_time,
+                    size,
+                    frame_id: self.frame_id,
+                },
+                ui_spans: ui,
+            });
+        }
+    }
+
+    /// Send a [`RenderCommand::SurfaceChanged`] (the layer-owned in-place resize),
+    /// fire-and-forget.
+    fn resize(&mut self, size: SurfaceSize) {
+        if let Some(sender) = self.sender.as_ref() {
+            sender.send_command(RenderCommand::SurfaceChanged { size });
+        }
+    }
+
+    /// The **iOS backgrounding barrier** (plan Risks / RESEARCH Q9): send a
+    /// barriered [`RenderCommand::Pause`] and **block** until the render thread
+    /// has acknowledged it. The render loop processes the `Pause` only after any
+    /// in-flight frame's submit completes, moves its [`RenderPhase`] to `Paused`
+    /// (so any scene still in the latest-wins slot is dropped, not submitted), and
+    /// only *then* acks — so when this returns, the render thread is guaranteed to
+    /// be parked, submitting no more Metal work. The caller (`frust_pause`) must
+    /// not let the app background until this returns: Metal submission from a
+    /// suspended app can get the process killed.
+    fn pause_barrier(&mut self) {
+        if let Some(sender) = self.sender.as_ref() {
+            sender.pause().wait();
+        }
+    }
+
+    /// Send a fire-and-forget [`RenderCommand::Resume`]: the render thread returns
+    /// to `Active` and resumes submitting handed-off scenes.
+    fn resume(&mut self) {
+        if let Some(sender) = self.sender.as_ref() {
+            sender.send_command(RenderCommand::Resume);
+        }
+    }
+}
+
+impl Drop for SplitExecutor {
+    fn drop(&mut self) {
+        // Destroy-join ordering (plan Risks / RESEARCH Q9): drop the sender first
+        // — that signals the render loop's `wait_next` to wake with a
+        // disconnection and exit, dropping its `SurfaceRenderer` (and the
+        // `wgpu::Surface` built from the retained `CAMetalLayer` pointer). Then
+        // join, so the surface is fully torn down BEFORE this returns — and, since
+        // this runs inside `frust_destroy` (which drops the handle), before
+        // `frust_destroy` returns and Swift releases the layer. So the render
+        // thread can never touch the layer after Swift frees it.
+        self.sender.take();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl FrameExecutor {
+    /// Whether a live surface exists — the [`IosAppHandle::frame`] not-ready gate.
+    /// Inline reads the renderer's phase directly; the split tracks a UI-side
+    /// `surface_active` flag (the render thread owns the real phase).
+    fn has_surface(&self) -> bool {
+        match self {
+            FrameExecutor::Inline(inline) => inline.renderer.phase() == SurfacePhase::SurfaceReady,
+            FrameExecutor::Split(split) => split.surface_active,
+        }
+    }
+
+    /// Record the `first_rebuild_done` startup milestone after the initial
+    /// rebuild. Inline records it here on the UI thread; the split records it
+    /// render-side when the first scene arrives (see [`crate::ffi_glue::render_loop`]),
+    /// so this is a no-op there.
+    fn record_first_rebuild(&mut self) {
+        if let FrameExecutor::Inline(inline) = self {
+            inline.record_first_rebuild();
+        }
+    }
+
+    /// Record a gate-skipped frame. Inline accumulates it in its UI-side
+    /// `FrameStats`; the split sends **nothing** on a skip (the render thread is
+    /// the single emitter and never sees skipped frames — split mode records no
+    /// skip frames; known, logged for 11.E), so this is a no-op there.
+    fn record_skip(&mut self) {
+        if let FrameExecutor::Inline(inline) = self {
+            inline.record_skip();
+        }
+    }
+
+    /// Hand one finished frame to the executor. Inline runs the encode→present
+    /// tail synchronously (borrowing `scene`, reused next frame) and returns its
+    /// encode span; the split moves the scene out (replacing it with a fresh empty
+    /// one) into a [`SceneFrame`] and sends it across the channel, returning
+    /// `Duration::ZERO` (encode is off-thread, so it does not count against the UI
+    /// thread's deadline).
+    fn submit_frame(
+        &mut self,
+        scene: &mut Scene,
+        base_color: peniko::Color,
+        ui: UiSpans,
+        frame_time: FrameTime,
+        size: SurfaceSize,
+        perf_on: bool,
+    ) -> Duration {
+        match self {
+            FrameExecutor::Inline(inline) => inline.submit_frame(scene, base_color, ui, perf_on),
+            FrameExecutor::Split(split) => {
+                let painted = PaintedScene {
+                    scene: std::mem::replace(scene, Scene::new()),
+                    base_color,
+                };
+                split.submit_frame(painted, ui, frame_time, size);
+                Duration::ZERO
+            }
+        }
+    }
+}
+
+/// Run the encode→acquire→submit tail for one painted `scene`, timing each span
+/// behind `perf_on` (the FFI-path perf convention: zero clock reads when
+/// disabled), recording the folded [`FramePasses`] through the single emitter
+/// (`frame_stats`), and stamping the first-encode / first-frame startup milestones
+/// on `startup_spans`. Returns the encode span. Shared by the inline path (UI
+/// thread) and the split path's [`crate::ffi_glue::render_loop`] (render thread)
+/// so the per-frame render logic is not forked — the exact pre-split tail, only
+/// relocated.
+///
+/// # Autorelease pool
+///
+/// The swapchain **acquire** (`nextDrawable`) and Metal command submission happen
+/// on *this* thread — in the split that is the dedicated render thread, which has
+/// no UIKit runloop draining an autorelease pool each iteration. So the whole GPU
+/// tail is wrapped in an explicit [`autoreleasepool`] drain: without it every
+/// frame's autoreleased `CAMetalDrawable` (and other Metal temporaries) would
+/// accumulate and exhaust the layer's small drawable pool — a hard stall. On the
+/// inline path (the UIKit main thread) this nests inside the runloop's own pool,
+/// which is harmless (RESEARCH Q9 — the iOS-specific hazard the split adds).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_scene(
+    renderer: &mut SurfaceRenderer,
+    render_cx: &RenderContext,
+    scene: &Scene,
+    base_color: peniko::Color,
+    ui: UiSpans,
+    frame_stats: &mut FrameStats,
+    startup_spans: &mut Option<StartupSpans>,
+    perf_on: bool,
+) -> Duration {
+    autoreleasepool(|_pool| {
+        // Encode span (GPU/CPU encode, no swapchain touch).
+        let encode_start = perf_on.then(Instant::now);
+        let encode_outcome = renderer.encode(render_cx, scene, base_color);
+        let encode_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+        // First-frame decomposition: stamp the first encode-complete boundary once
+        // (only when something was actually encoded).
+        if matches!(encode_outcome, Ok(EncodeOutcome::Encoded))
+            && let Some(spans) = startup_spans.as_mut()
+            && !spans
+                .spans()
+                .iter()
+                .any(|(n, _)| *n == perf::SPAN_FIRST_ENCODE_DONE)
+        {
+            spans.record(perf::SPAN_FIRST_ENCODE_DONE);
+        }
+
+        // Acquire span (blocking vsync/present wait — `nextDrawable`).
+        let acquire_start = perf_on.then(Instant::now);
+        let acquire_result = match encode_outcome {
+            Ok(EncodeOutcome::Encoded) => renderer.acquire(render_cx),
+            Ok(EncodeOutcome::Skipped) => Ok(AcquireOutcome::Skipped),
+            Err(err) => Err(err),
+        };
+        let acquire_time = acquire_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+        // Submit span (blit + queue-submit + present).
+        let submit_start = perf_on.then(Instant::now);
+        let render_result = match acquire_result {
+            Ok(AcquireOutcome::Acquired) => renderer.submit(render_cx),
+            Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
+            Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
+            Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
+            Err(err) => Err(err),
+        };
+        let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+        match render_result {
+            // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
+            // next tick draws against the fresh configuration.
+            Ok(FrameOutcome::Redraw) => {}
+            // Surface lost: dropped by the machine. The render loop self-heals from
+            // the retained `CAMetalLayer` pointer on this same wakeup (split); the
+            // inline path recovers on the next FFI entry (see `ffi_glue`).
+            Ok(FrameOutcome::SurfaceLost) => {
+                log::warn!("frust-shell-ios: surface lost; recreating");
+            }
+            Ok(FrameOutcome::Rendered) => {
+                // First successful present: close out the cold-start recorder once.
+                if let Some(mut spans) = startup_spans.take() {
+                    spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
+                    spans.emit_log();
+                }
+            }
+            Ok(FrameOutcome::Skipped) => {}
+            Err(err) => log::error!("frust-shell-ios: render error: {err:#}"),
+        }
+
+        // One folded frame record through the single emitter (plan phase 11.B.3).
+        frame_stats.record(FramePasses::from_split(
+            ui,
+            RenderSpans {
+                encode: encode_time,
+                acquire: acquire_time,
+                submit: submit_time,
+            },
+        ));
+        if frame_stats.should_emit() {
+            frame_stats.emit_log();
+        }
+
+        encode_time
+    })
+}
+
 impl IosAppHandle {
     /// Assemble a handle with an already-created, `SurfaceReady` renderer.
     ///
@@ -233,9 +607,18 @@ impl IosAppHandle {
     /// (phase 10.D) — the pre-built one from its own background font-preload
     /// thread when it finished in time, or a synchronous fallback otherwise —
     /// so this method never itself pays the font-DB load cost.
+    ///
+    /// `executor` is the render-path half [`crate::ffi_glue::create_handle`]
+    /// already built (plan phase 11.B): the render-thread split
+    /// ([`FrameExecutor::Split`], with the render thread already spawned and its
+    /// initial `SurfaceCreated` sent) or the inline fallback
+    /// ([`FrameExecutor::Inline`], with the surface + early startup spans already
+    /// created on this UI thread). The initial `rebuild()` below records
+    /// [`perf::SPAN_FIRST_REBUILD_DONE`] via [`FrameExecutor::record_first_rebuild`]
+    /// — inline records it here, the split records it render-side on the first
+    /// handed-off scene.
     pub(crate) fn new(
-        render_cx: RenderContext,
-        renderer: SurfaceRenderer,
+        executor: FrameExecutor,
         text_ctx: TextContext,
         metal_layer: *mut c_void,
         physical: (u32, u32),
@@ -246,6 +629,8 @@ impl IosAppHandle {
         app.set_theme(Box::new(theme.clone()));
         provide_context(theme.clone());
         app.rebuild();
+        let mut executor = executor;
+        executor.record_first_rebuild();
         // The gate honors the `FRUST_NO_FRAME_GATE` kill switch at
         // construction; seed its resume-warmup so the first frames after this
         // handle is built run unconditionally (the surface just became ready and
@@ -254,8 +639,7 @@ impl IosAppHandle {
         let mut frame_gate = FrameGate::new();
         frame_gate.note_resumed();
         Self {
-            render_cx,
-            renderer,
+            executor,
             text_ctx,
             scene: Scene::new(),
             app,
@@ -273,47 +657,15 @@ impl IosAppHandle {
             // Attached later, on the first layout, via `frust_init_accessibility`
             // once Swift can supply the UIView (see the field doc).
             a11y: None,
-            // Honors `perf::enabled()`'s cache internally; a no-op recorder
-            // in a non-perf build (see the field doc).
-            frame_stats: FrameStats::new(),
             frame_gate,
             events_since_last_frame: false,
             last_needs_frame: false,
             appearance_dirty: false,
-            // Stashed by `ffi_glue::create_handle` right after this call
-            // returns (see `Self::set_startup_spans`).
-            startup_spans: None,
             resampler: PointerResampler::new(),
             resample_clock: Instant::now(),
             pointer_scratch: Vec::new(),
             last_frame_time_nanos: None,
             deadline_overruns: 0,
-        }
-    }
-
-    /// Stash the startup-span recorder `ffi_glue::create_handle` began (see
-    /// its docs) so [`Self::latch_first_frame_presented`] can complete it
-    /// once this handle actually presents its first frame. Called exactly
-    /// once, immediately after construction returns.
-    pub(crate) fn set_startup_spans(&mut self, spans: StartupSpans) {
-        self.startup_spans = Some(spans);
-    }
-
-    /// Complete the startup-span summary on the first frame this handle
-    /// actually presents (`FrameOutcome::Rendered`, reported by
-    /// [`Self::frame`]'s `bool` return): records
-    /// [`perf::SPAN_FIRST_FRAME_PRESENTED`], emits the one
-    /// `frust-perf startup ...` summary line, then drops the recorder.
-    ///
-    /// Idempotent by construction (`Option::take`): a `None` — already
-    /// latched, or never stashed (perf disabled, so `ffi_glue::create_handle`
-    /// still stashes a disabled recorder whose `emit_log` is itself a
-    /// no-op) — is a no-op, so `ffi_glue::render_frame` can call this
-    /// unconditionally after every [`Self::frame`] call that returns `true`.
-    pub(crate) fn latch_first_frame_presented(&mut self) {
-        if let Some(mut spans) = self.startup_spans.take() {
-            spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
-            spans.emit_log();
         }
     }
 
@@ -421,19 +773,36 @@ impl IosAppHandle {
 
     /// The retained Swift-owned `CAMetalLayer*` this handle's surface was built
     /// from, used by [`crate::ffi_glue`] to recreate the surface after a
-    /// `SurfaceLost`. Returns the raw pointer by value (no borrow) so the FFI
-    /// layer can read it before taking a `&mut` via [`renderer_mut`](Self::renderer_mut);
-    /// the actual `unsafe` surface creation stays confined to `ffi_glue`.
+    /// `SurfaceLost` in the inline path. Returns the raw pointer by value (no
+    /// borrow) so the FFI layer can read it before taking a `&mut` via
+    /// [`inline_renderer_mut`](Self::inline_renderer_mut); the actual `unsafe`
+    /// surface creation stays confined to `ffi_glue`. (In the split the render
+    /// thread keeps its own copy of the pointer and self-heals render-side.)
     pub(crate) fn metal_layer(&self) -> *mut c_void {
         self.metal_layer
     }
 
-    /// Access to the render context + renderer for the FFI layer to drive an
+    /// Whether the render-thread split is engaged (as opposed to the inline
+    /// fallback) — the FFI layer branches surface *recovery* on this: the split
+    /// self-heals a lost surface render-side (the render loop recreates from the
+    /// retained layer pointer), so the UI-side `should_recreate_surface` recovery
+    /// in `frust_render_frame`/`frust_resize` applies only to the inline path.
+    pub(crate) fn executor_is_split(&self) -> bool {
+        matches!(self.executor, FrameExecutor::Split(_))
+    }
+
+    /// Access to the inline render context + renderer for the FFI layer to drive an
     /// `unsafe` surface *recreation* (the one lifecycle transition that crosses the
-    /// raw-pointer boundary), mirroring the Android handle's accessor of the same
-    /// name; the safe transitions have their own methods below.
-    pub(crate) fn renderer_mut(&mut self) -> (&mut RenderContext, &mut SurfaceRenderer) {
-        (&mut self.render_cx, &mut self.renderer)
+    /// raw-pointer boundary). `None` in the render-thread split — there the render
+    /// thread owns the renderer and recovery is render-side (see
+    /// [`crate::ffi_glue::render_loop`]).
+    pub(crate) fn inline_renderer_mut(
+        &mut self,
+    ) -> Option<(&mut RenderContext, &mut SurfaceRenderer)> {
+        match &mut self.executor {
+            FrameExecutor::Inline(inline) => Some((&mut inline.render_cx, &mut inline.renderer)),
+            FrameExecutor::Split(_) => None,
+        }
     }
 
     /// The current surface's physical (pixel) size, used by [`crate::ffi_glue`] to
@@ -470,11 +839,22 @@ impl IosAppHandle {
     /// Resize the live surface in place (rotation / bounds change). The
     /// `CAMetalLayer` survives an iOS rotation, so this is always a plain resize —
     /// no recreate path is needed (contrast the Android shell, where a new
-    /// `Surface` object forces surface recreation). Safe: the renderer's resize
-    /// path touches no raw pointers.
+    /// `Surface` object forces surface recreation). Safe: no raw pointers — inline
+    /// reconfigures the renderer's swapchain directly; the split routes the
+    /// layer-owned in-place resize as a [`RenderCommand::SurfaceChanged`] command.
     pub(crate) fn resize(&mut self, physical: (u32, u32), scale: f32) {
-        self.renderer
-            .on_surface_changed(&self.render_cx, physical.0, physical.1);
+        match &mut self.executor {
+            FrameExecutor::Inline(inline) => {
+                inline
+                    .renderer
+                    .on_surface_changed(&inline.render_cx, physical.0, physical.1)
+            }
+            FrameExecutor::Split(split) => split.resize(SurfaceSize {
+                width: physical.0,
+                height: physical.1,
+                scale: scale as f64,
+            }),
+        }
         self.physical = physical;
         self.scale = scale;
         // A resize (rotation / bounds change) forces the frame gate's
@@ -484,13 +864,31 @@ impl IosAppHandle {
     }
 
     /// Mark the app paused (`frust_pause`): subsequent `frame()`s are no-ops.
+    ///
+    /// In the render-thread split this **barriers on the render thread's ack
+    /// before returning** (plan Risks / RESEARCH Q9): it sends a `Pause` command
+    /// and blocks until the render thread has quiesced (moved to `Paused`, dropped
+    /// any leftover scene, and acked). Only then does this return, so the app
+    /// never backgrounds while the render thread might still submit Metal work —
+    /// which can get a suspended process killed. The `self.paused` flag is the
+    /// UI-side belt-and-suspenders (it also no-ops `frame()`); the ack is the real
+    /// cross-thread guarantee. Set `paused` first so a `frame()` racing in cannot
+    /// hand off a new scene while the barrier is in flight.
     pub(crate) fn pause(&mut self) {
         self.paused = true;
+        if let FrameExecutor::Split(split) = &mut self.executor {
+            split.pause_barrier();
+        }
     }
 
-    /// Mark the app resumed (`frust_resume`): `frame()`s do work again.
+    /// Mark the app resumed (`frust_resume`): `frame()`s do work again. In the
+    /// split, sends a fire-and-forget `Resume` so the render thread leaves `Paused`
+    /// and resumes submitting.
     pub(crate) fn resume(&mut self) {
         self.paused = false;
+        if let FrameExecutor::Split(split) = &mut self.executor {
+            split.resume();
+        }
         // Re-open the frame gate's resume-warmup: the first frames after
         // foregrounding must run unconditionally (a backgrounded app's change
         // signals may have been coalesced away — spec §14 phase 7, task 18).
@@ -516,10 +914,16 @@ impl IosAppHandle {
         self.recreate_failures = self.recreate_failures.saturating_add(1);
     }
 
-    /// The current lifecycle phase (spec §8.1). `pub(crate)` so [`crate::ffi_glue`]
-    /// can gate surface recreation on a `SurfaceLost` phase.
-    pub(crate) fn phase(&self) -> SurfacePhase {
-        self.renderer.phase()
+    /// The inline renderer's current lifecycle phase (spec §8.1), or `None` in the
+    /// split (the render thread owns the phase). `pub(crate)` so [`crate::ffi_glue`]
+    /// can gate the inline path's surface recreation on a `SurfaceLost` phase — the
+    /// split self-heals render-side, so this returning `None` is exactly the "no
+    /// UI-side recovery" signal there.
+    pub(crate) fn inline_phase(&self) -> Option<SurfacePhase> {
+        match &self.executor {
+            FrameExecutor::Inline(inline) => Some(inline.renderer.phase()),
+            FrameExecutor::Split(_) => None,
+        }
     }
 
     /// Deliver one touch contact to the tree (spec §9).
@@ -630,18 +1034,20 @@ impl IosAppHandle {
     /// — the shell-owned monotonic clock threaded into [`FrameTime`] (spec §8:
     /// `frust-core` never reads a clock itself).
     ///
-    /// A no-op unless the surface is `SurfaceReady` *and* the app is not paused
-    /// (see [`crate::ffi_support::should_render_frame`]). On
-    /// `FrameOutcome::SurfaceLost` the machine has already dropped the surface;
-    /// this frame becomes a no-op, and the *next* `frust_render_frame`/
-    /// `frust_resize` FFI entry recreates the surface from the retained
-    /// `metal_layer` (see [`crate::ffi_glue`]) before rendering resumes.
+    /// A no-op unless the surface is ready *and* the app is not paused (see
+    /// [`crate::ffi_support::should_render_frame`]). Readiness comes from the
+    /// executor: inline reads the renderer's phase, the split reads its UI-side
+    /// `surface_active` mirror. On `FrameOutcome::SurfaceLost` (surfaced
+    /// render-side in the split, or from the inline tail) the surface is dropped;
+    /// recovery recreates it from the retained `metal_layer` — render-side on the
+    /// same wakeup in the split, or on the next `frust_render_frame`/`frust_resize`
+    /// FFI entry in the inline path (see [`crate::ffi_glue`]).
     ///
-    /// Returns whether this call actually presented a frame
-    /// (`FrameOutcome::Rendered`) — [`crate::ffi_glue::render_frame`] uses this
-    /// to latch the first-presented-frame startup span exactly once (see
-    /// [`Self::latch_first_frame_presented`]); every other caller may ignore it.
-    pub(crate) fn frame(&mut self, timestamp_ns: u64) -> bool {
+    /// The render tail is off this thread in the split — the first-presented-frame
+    /// startup span is recorded render-side inside [`render_scene`] (the render
+    /// thread is the single perf emitter), so this method no longer returns
+    /// anything.
+    pub(crate) fn frame(&mut self, timestamp_ns: u64) {
         // Pump the UI-thread reactive local-task queue BEFORE the ready/paused
         // gate below: placed after it, queued `spawn_local` completions (e.g. a
         // signal write scheduled from a background task) would stall for as
@@ -680,9 +1086,9 @@ impl IosAppHandle {
         // undrained (it is only `take`n past this gate below), so a tracked-signal
         // write that lands while backgrounded is observed by the first frame
         // after resume rather than being silently consumed on a no-op tick.
-        let ready = self.phase() == SurfacePhase::SurfaceReady;
+        let ready = self.executor.has_surface();
         if !crate::ffi_support::should_render_frame(ready, self.paused) {
-            return false;
+            return;
         }
 
         // Drain any queued accessibility actions (VoiceOver activations, etc.)
@@ -763,24 +1169,17 @@ impl IosAppHandle {
         );
 
         if self.frame_gate.decide(inputs).is_skip() {
-            // Nothing changed: skip rebuild/layout/paint/encode entirely. Record a
-            // skipped-frame stat (ZERO pass durations; counts toward `skipped=` in
-            // the perf log line) and return. The CADisplayLink keeps ticking — only
-            // frame *production* stops, callbacks don't (the accepted v1 shape,
-            // same as Android — see `docs/DEVELOPMENT.md`).
-            self.frame_stats.record(FramePasses {
-                rebuild: Duration::ZERO,
-                layout: Duration::ZERO,
-                paint: Duration::ZERO,
-                encode: Duration::ZERO,
-                acquire: Duration::ZERO,
-                submit: Duration::ZERO,
-                skipped: true,
-            });
-            if self.frame_stats.should_emit() {
-                self.frame_stats.emit_log();
-            }
-            return false;
+            // Nothing changed: skip rebuild/layout/paint/encode entirely. Inline
+            // records a `skipped` FramePasses (ZERO pass durations; counts toward
+            // `skipped=` in the perf log line); the render-thread split sends
+            // **nothing** across the channel on a skip (the render thread is the
+            // single emitter and never sees skipped frames — split mode records no
+            // skip frames; known, logged for 11.E), so `record_skip` is a no-op
+            // there. Either way the CADisplayLink keeps ticking — only frame
+            // *production* stops, callbacks don't (the accepted v1 shape, same as
+            // Android — see `docs/DEVELOPMENT.md`).
+            self.executor.record_skip();
+            return;
         }
 
         // Perf instrumentation (spec §14 phase 7.A task 09): read the cached
@@ -878,82 +1277,45 @@ impl IosAppHandle {
         // needs, so it is fed forward via `FrameInputs::last_needs_frame`.
         self.last_needs_frame = paint_outcome.needs_frame;
 
-        // Two-phase render seam (Phase 10.A): time the GPU/CPU encode and the
-        // swapchain-acquire (vsync) present separately so the render-thread-split
-        // decision has an encode-only number. Each span's `Instant::now()` stays
-        // gated behind `perf_on` (this module's FFI-path perf convention: zero
-        // clock reads when disabled). Clear to the live theme's surface color
-        // rather than a hardcoded white, so a dark-scheme app doesn't render its
-        // dark-themed widgets over a white canvas (6e Finding 6).
-        let encode_start = perf_on.then(Instant::now);
-        let encode_outcome =
-            self.renderer
-                .encode(&self.render_cx, &self.scene, self.theme.scheme().surface);
-        let encode = encode_start.map(|t| t.elapsed()).unwrap_or_default();
-
-        // First-frame decomposition (task 10.A): stamp the first encode-complete
-        // boundary once (only when something was actually encoded), so the
-        // startup line splits the first frame into paint/encode vs present. The
-        // `startup_spans` Option is consumed on the first present below, so this
-        // records at most once; the `any` guard covers a pre-present `Redraw`.
-        // `StartupSpans::record` reads no clock when perf is disabled, so this
-        // stays zero-clock-read on a disabled build (FFI-path perf convention).
-        if matches!(encode_outcome, Ok(EncodeOutcome::Encoded)) {
-            if let Some(spans) = self.startup_spans.as_mut() {
-                if !spans
-                    .spans()
-                    .iter()
-                    .any(|(n, _)| *n == perf::SPAN_FIRST_ENCODE_DONE)
-                {
-                    spans.record(perf::SPAN_FIRST_ENCODE_DONE);
-                }
-            }
-        }
-
-        // Present-span split (Phase 11.A): time the swapchain **acquire**
-        // (blocking vsync wait) and the **submit** (blit + queue-submit +
-        // present) separately so the S5 GPU-saturation-vs-blit-cost question has
-        // an acquire-only number. Each sub-span's `Instant::now()` stays gated
-        // behind `perf_on` (this module's FFI-path perf convention: zero clock
-        // reads when disabled).
-        let acquire_start = perf_on.then(Instant::now);
-        let acquire_result = match encode_outcome {
-            Ok(EncodeOutcome::Encoded) => self.renderer.acquire(&self.render_cx),
-            Ok(EncodeOutcome::Skipped) => Ok(AcquireOutcome::Skipped),
-            Err(err) => Err(err),
-        };
-        let acquire = acquire_start.map(|t| t.elapsed()).unwrap_or_default();
-
-        let submit_start = perf_on.then(Instant::now);
-        let render_result = match acquire_result {
-            Ok(AcquireOutcome::Acquired) => self.renderer.submit(&self.render_cx),
-            Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
-            Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
-            Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
-            Err(err) => Err(err),
-        };
-        let submit = submit_start.map(|t| t.elapsed()).unwrap_or_default();
-
-        self.frame_stats.record(FramePasses {
+        // Hand the finished frame to the render-path executor (plan phase 11.B).
+        // The inline fallback runs the encode→acquire→submit tail synchronously
+        // here (via the shared [`render_scene`]) and returns its encode span; the
+        // split moves the painted scene out (replacing `self.scene` with a fresh
+        // empty one) into a [`SceneFrame`] and hands it across the channel for the
+        // render thread to encode/acquire/present, returning `Duration::ZERO`
+        // (encode is off-thread). Either way [`render_scene`] is the single place
+        // the folded [`FramePasses`] is recorded, the first-encode/first-frame
+        // startup milestones are stamped, and SurfaceLost/Redraw are surfaced —
+        // the exact pre-split tail, only relocated. The clear color (the live
+        // theme's surface color, not white) rides *with* the scene so a mid-frame
+        // theme flip clears correctly (6e Finding 6).
+        let ui = UiSpans {
             rebuild,
             layout,
             paint,
-            encode,
-            acquire,
-            submit,
             skipped: false,
-        });
-        if self.frame_stats.should_emit() {
-            self.frame_stats.emit_log();
-        }
+        };
+        let base_color = self.theme.scheme().surface;
+        let size = SurfaceSize {
+            width: self.physical.0,
+            height: self.physical.1,
+            scale: self.scale as f64,
+        };
+        let meta_time = FrameTime::from_nanos(timestamp_ns);
+        let encode_time =
+            self.executor
+                .submit_frame(&mut self.scene, base_color, ui, meta_time, size, perf_on);
 
         // Deadline-aware pacing overrun (plan phase 10.C.2): this frame's *work*
         // (everything but the vsync `present` wait, which is expected to block)
         // overrunning the tick-to-tick budget is counted and logged. Gated behind
         // `perf_on` so a non-perf build logs nothing; instrumentation only — no
-        // work is dropped on the strength of this.
+        // work is dropped on the strength of this. In the render-thread split
+        // `encode_time` is zero (encode is off-thread), so `work` reduces to the UI
+        // thread's real budget — rebuild+layout+paint — which is exactly what the
+        // UI thread is now responsible for hitting.
         if perf_on {
-            let work = rebuild + layout + paint + encode;
+            let work = rebuild + layout + paint + encode_time;
             if resample::deadline_overrun(work, frame_interval) {
                 self.deadline_overruns += 1;
                 log::info!(
@@ -962,25 +1324,6 @@ impl IosAppHandle {
                     frame_interval / 1_000,
                     self.deadline_overruns,
                 );
-            }
-        }
-
-        match render_result {
-            // Stale swapchain (e.g. mid-rotation): reconfigured internally; the
-            // next CADisplayLink frame draws against the fresh configuration.
-            Ok(FrameOutcome::Redraw) => false,
-            // Surface lost: dropped by the machine. The next render_frame/resize
-            // FFI entry recreates it from the retained `metal_layer` (see
-            // `ffi_glue`), bounded by the CADisplayLink cadence — not a busy loop.
-            Ok(FrameOutcome::SurfaceLost) => {
-                log::warn!("frust-shell-ios: surface lost; recreating on next frame/resize");
-                false
-            }
-            Ok(FrameOutcome::Rendered) => true,
-            Ok(FrameOutcome::Skipped) => false,
-            Err(err) => {
-                log::error!("frust-shell-ios: render error: {err:#}");
-                false
             }
         }
     }

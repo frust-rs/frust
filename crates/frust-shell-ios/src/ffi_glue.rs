@@ -8,14 +8,42 @@
 //! here is wrapped in [`guard`](frust_shell_common::guard) so a panic is
 //! caught and turned into a benign default instead of unwinding across the C-ABI
 //! boundary (undefined behaviour). The `unsafe` *code* in this module is confined
-//! to four things, each with a safety comment: the calls into
+//! to five things, each with a safety comment: the calls into
 //! `on_surface_created_from_metal_layer` (raw `CAMetalLayer*` → surface — at init
-//! in [`create_handle`] and on surface recovery in [`recover_surface`]), the
+//! in [`build_inline_executor`], on the render thread in [`install_surface`], and
+//! on inline surface recovery in [`recover_surface`]), the
 //! `accessibility::IosA11yAdapter::new` construction in [`init_accessibility`]
 //! (raw `UIView*` → adapter, handed to the now-safe
 //! `IosAppHandle::attach_accessibility`), `Box::into_raw`/`from_raw` for the
-//! opaque handle's lifetime, and reconstituting the raw handle pointer as a
-//! `&mut`.
+//! opaque handle's lifetime, reconstituting the raw handle pointer as a `&mut`,
+//! and the `unsafe impl Send` for [`SendableMetalLayer`] — the raw `CAMetalLayer*`
+//! that crosses the UI→render channel in the split (plan phase 11.B).
+//!
+//! # Render-thread split (plan phase 11.B)
+//!
+//! When [`render_thread_enabled`](frust_shell_common::render_thread_enabled) is
+//! set (the default; `FRUST_NO_RENDER_THREAD` opts out), [`create_handle`] spawns
+//! the dedicated [`render_loop`] thread that owns the `RenderContext`/
+//! `SurfaceRenderer` + surface and runs encode→acquire→submit; the UI thread
+//! (CADisplayLink ticks) keeps rebuild→layout→paint and hands finished scenes
+//! across the channel. Three iOS-specific contracts (RESEARCH Q9):
+//!
+//! - **Drawable acquisition moves to the render thread** — `nextDrawable` now runs
+//!   off the UIKit main thread, so each frame's GPU work is wrapped in an
+//!   `objc2::rc::autoreleasepool` drain (in [`render_scene`]) — that thread has no
+//!   runloop pool.
+//! - **`frust_pause` barriers on the render thread's ack** before returning: a
+//!   suspended app that submits Metal work can be killed, so the UI thread blocks
+//!   until the render thread has moved to `Paused` and quiesced (see
+//!   [`IosAppHandle::pause`]).
+//! - **The retained `CAMetalLayer` outlives the render thread**: [`frust_destroy`]
+//!   joins the render thread (dropping its surface) *first*, before returning and
+//!   letting Swift release the layer (see [`SendableMetalLayer`] and
+//!   [`SplitExecutor`]'s `Drop`).
+//!
+//! Unlike Android (whose window is destroyed/recreated on rotation), iOS keeps the
+//! same layer for the app's lifetime, so a lost surface self-heals **render-side**
+//! from the retained pointer — there is no UI-side `SurfaceDestroyed` path.
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::Write;
@@ -25,13 +53,18 @@ use anyhow::{Context, Result, bail};
 
 use frust_core::event::{EditingState, ImeState};
 use frust_reactive::{ReactiveRuntime, push_deep_link};
-use frust_render::{RenderContext, SurfaceRenderer};
-use frust_shell_common::perf::{self, StartupSpans};
-use frust_shell_common::{AppTree, guard};
+use frust_render::{RenderContext, SurfacePhase, SurfaceRenderer};
+use frust_shell_common::perf::{self, FrameStats, StartupSpans};
+use frust_shell_common::{
+    AppTree, RenderCommand, RenderPhase, RenderReceiver, SurfaceSize, guard, next_render_phase,
+    render_channel, render_thread_enabled,
+};
 use frust_text::TextContext;
 
 use crate::accessibility::IosA11yAdapter;
-use crate::app::IosAppHandle;
+use crate::app::{
+    FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, SplitExecutor, render_scene,
+};
 use crate::ffi_support::CaretRect;
 
 /// Startup-span name (phase 10.D): `create_handle` is about to join the
@@ -201,6 +234,243 @@ fn pump_reactive() {
     }
 }
 
+// ---------------------------------------------------------------------
+// Render-thread split (plan phase 11.B)
+// ---------------------------------------------------------------------
+
+/// A raw `CAMetalLayer*` made `Send` so it can cross the UI→render-thread
+/// scene-handoff channel as the `SurfaceCreated` payload (plan phase 11.B) — the
+/// `W` type parameter of the shared
+/// [`render_channel`](frust_shell_common::render_channel), which each shell picks
+/// (desktop pairs a `DetachedSurface`; the mobile shells pass a raw pointer, since
+/// surface creation from a `CAMetalLayer*`/`ANativeWindow*` has no main-thread
+/// requirement — the render thread creates the surface itself).
+///
+/// # Safety
+///
+/// The wrapped pointer is the Swift-owned `CAMetalLayer*` retained by the UI
+/// thread's [`IosAppHandle`] (`metal_layer`). Swift guarantees the layer outlives
+/// the handle: it calls `frust_destroy` before releasing the view/layer, and
+/// `frust_destroy` **joins the render thread first** (dropping the surface built
+/// from this pointer) via [`SplitExecutor`]'s `Drop` — so the pointer is valid for
+/// the whole lifetime of any surface the render thread creates from it, and the
+/// render thread never touches it after Swift frees it. The two threads never use
+/// it concurrently: the UI thread only reads the `IosAppHandle`'s pointer to
+/// construct this wrapper; the render thread only reads it back to create/recreate
+/// the surface ([`install_surface`]). That single-owner, join-ordered handoff is
+/// what makes the `unsafe impl Send` sound.
+pub(crate) struct SendableMetalLayer(*mut c_void);
+
+// SAFETY: see the type's docs — the wrapped `CAMetalLayer*` is kept alive by Swift
+// across the destroy-join and is never used by two threads concurrently.
+unsafe impl Send for SendableMetalLayer {}
+
+impl SendableMetalLayer {
+    /// Wrap a raw `CAMetalLayer*`. The caller upholds the type's safety contract
+    /// (the layer outlives every surface built from it, on the render thread);
+    /// constructing the wrapper itself is a plain field store.
+    pub(crate) fn new(ptr: *mut c_void) -> Self {
+        Self(ptr)
+    }
+
+    /// The wrapped raw pointer, for [`install_surface`] to build the surface from.
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
+        self.0
+    }
+}
+
+/// Install (or reinstall) a `wgpu::Surface` on `renderer` from the raw
+/// `CAMetalLayer*` `metal_layer`, on the render thread (plan phase 11.B). On the
+/// **first** install it also records the adapter/device/renderer startup spans,
+/// mirroring the pre-split `create_handle` flow (which now happens render-side in
+/// the split). iOS/Metal has no pipeline cache (that is Vulkan-only), so — unlike
+/// the Android shell's `install_surface` — there is no cache load/persist here.
+///
+/// The unsafe `on_surface_created_from_metal_layer` call is confined here (a
+/// sanctioned zone); its `SAFETY` note states the cross-thread ownership contract
+/// [`SendableMetalLayer`] documents.
+fn install_surface(
+    renderer: &mut SurfaceRenderer,
+    render_cx: &mut RenderContext,
+    metal_layer: *mut c_void,
+    width: u32,
+    height: u32,
+    startup_spans: &mut Option<StartupSpans>,
+    first_install: bool,
+) -> Result<()> {
+    // SAFETY: `metal_layer` is the Swift-owned `CAMetalLayer*` the UI thread's
+    // `IosAppHandle` keeps alive until `frust_destroy` — which joins THIS render
+    // thread first (dropping this surface) before Swift releases the layer — so it
+    // outlives every surface created from it here. See `SendableMetalLayer`'s docs.
+    pollster::block_on(unsafe {
+        renderer.on_surface_created_from_metal_layer(
+            render_cx,
+            metal_layer,
+            width.max(1),
+            height.max(1),
+        )
+    })
+    .context("frust-shell-ios: failed to create Metal render surface")?;
+    if first_install && let Some(spans) = startup_spans.as_mut() {
+        spans.record(perf::SPAN_ADAPTER_READY);
+        spans.record(perf::SPAN_DEVICE_READY);
+        spans.record(perf::SPAN_RENDERER_READY);
+    }
+    Ok(())
+}
+
+/// The dedicated render thread's loop (plan phase 11.B): create + own the
+/// `RenderContext`/`SurfaceRenderer` + surface wholesale, drain lifecycle commands
+/// and the freshest handed-off scene from the channel, and run
+/// encode→acquire→submit for each frame — the single perf emitter (folding the UI
+/// thread's `UiSpans` with its own render spans via [`render_scene`]). Owns the
+/// startup line from `adapter_ready` onward (the UI thread recorded `init_entry` +
+/// the font-preinit spans before moving the recorder here). Exits cleanly when the
+/// `RenderSender` is dropped.
+///
+/// # iOS surface recovery
+///
+/// The `CAMetalLayer` is permanent (Swift never re-delivers it), so nothing
+/// external re-drives surface creation after a `SurfaceLost`. This loop therefore
+/// self-heals **render-side**: it retains the layer pointer + last size and, when a
+/// frame leaves the renderer in `SurfaceLost`, recreates the surface here on the
+/// same wakeup — bounded by [`MAX_RECREATE_ATTEMPTS`](crate::ffi_support::MAX_RECREATE_ATTEMPTS)
+/// consecutive failures so a persistently-failing recreate cannot storm. (The
+/// inline path keeps its UI-side `should_recreate_surface` recovery in
+/// `frust_render_frame`/`frust_resize`.)
+pub(crate) fn render_loop(
+    receiver: RenderReceiver<PaintedScene, SendableMetalLayer>,
+    startup_spans: StartupSpans,
+) {
+    let mut render_cx = RenderContext::new();
+    let mut renderer = SurfaceRenderer::new();
+    let mut startup_spans = Some(startup_spans);
+    let mut frame_stats = FrameStats::new();
+    let mut phase = RenderPhase::NoSurface;
+    let mut first_install_done = false;
+    let mut first_rebuild_recorded = false;
+    // iOS self-recovery state (the layer is permanent — recreate from it on loss).
+    let mut metal_layer: Option<*mut c_void> = None;
+    let mut physical: (u32, u32) = (1, 1);
+    let mut recreate_failures: u8 = 0;
+
+    loop {
+        let batch = receiver.wait_next();
+
+        // Lifecycle commands first (FIFO), updating the phase machine.
+        for command in batch.commands {
+            phase = next_render_phase(phase, command.event());
+            match command {
+                RenderCommand::SurfaceCreated { window, size } => {
+                    let ptr = window.as_ptr();
+                    metal_layer = Some(ptr);
+                    physical = (size.width, size.height);
+                    let first_install = !first_install_done;
+                    match install_surface(
+                        &mut renderer,
+                        &mut render_cx,
+                        ptr,
+                        size.width,
+                        size.height,
+                        &mut startup_spans,
+                        first_install,
+                    ) {
+                        Ok(()) => {
+                            first_install_done = true;
+                            recreate_failures = 0;
+                        }
+                        Err(err) => log::error!(
+                            "frust-shell-ios: render-thread surface install failed: {err:#}"
+                        ),
+                    }
+                }
+                RenderCommand::SurfaceChanged { size } => {
+                    physical = (size.width, size.height);
+                    renderer.on_surface_changed(&render_cx, size.width, size.height);
+                }
+                RenderCommand::SurfaceDestroyed { ack } => {
+                    // iOS never sends `SurfaceDestroyed` in v1 (the layer is
+                    // permanent, so there is no UI-side destroy path); honor the
+                    // barrier defensively so a stray one can never deadlock the UI
+                    // thread.
+                    renderer.on_surface_destroyed();
+                    ack.acknowledge();
+                }
+                RenderCommand::Pause { ack } => {
+                    // The iOS backgrounding barrier (plan Risks / RESEARCH Q9):
+                    // `next_render_phase` has already moved us to `Paused`, so no
+                    // scene handed off from here on is submitted. Acknowledge only
+                    // now — so `frust_pause` returns (and the app may background)
+                    // strictly AFTER the render thread has quiesced. No Metal
+                    // submission from a suspended app.
+                    ack.acknowledge();
+                }
+                RenderCommand::Resume => {}
+            }
+        }
+
+        // Then the freshest scene, only if the phase allows submitting (a scene
+        // handed off while paused is dropped, not presented).
+        if let Some(frame) = batch.scene
+            && phase.can_render()
+        {
+            // The first handed-off scene marks the first UI frame produced — the
+            // render thread's stand-in for `first_rebuild_done` (it owns the
+            // startup line in the split).
+            if !first_rebuild_recorded {
+                if let Some(spans) = startup_spans.as_mut() {
+                    spans.record(perf::SPAN_FIRST_REBUILD_DONE);
+                }
+                first_rebuild_recorded = true;
+            }
+            // FFI-path perf convention: read `perf::enabled()` once per frame, gate
+            // every `Instant::now()` behind it (inside `render_scene`).
+            let perf_on = perf::enabled();
+            render_scene(
+                &mut renderer,
+                &render_cx,
+                &frame.scene.scene,
+                frame.scene.base_color,
+                frame.ui_spans,
+                &mut frame_stats,
+                &mut startup_spans,
+                perf_on,
+            );
+
+            // iOS self-heals a lost surface from the retained layer (nothing
+            // external re-drives creation), bounded by the failure budget so a
+            // persistently-failing recreate cannot storm.
+            if renderer.phase() == SurfacePhase::SurfaceLost
+                && recreate_failures < crate::ffi_support::MAX_RECREATE_ATTEMPTS
+                && let Some(ptr) = metal_layer
+            {
+                match install_surface(
+                    &mut renderer,
+                    &mut render_cx,
+                    ptr,
+                    physical.0,
+                    physical.1,
+                    &mut startup_spans,
+                    false,
+                ) {
+                    Ok(()) => recreate_failures = 0,
+                    Err(err) => {
+                        recreate_failures = recreate_failures.saturating_add(1);
+                        log::error!(
+                            "frust-shell-ios: render-thread surface recreate failed \
+                             ({recreate_failures}): {err:#}"
+                        );
+                    }
+                }
+            }
+        }
+
+        if batch.disconnected {
+            break;
+        }
+    }
+}
+
 /// Fallible body of [`init`], separated so the happy path reads top-down.
 fn create_handle(
     metal_layer: *mut c_void,
@@ -226,16 +496,85 @@ fn create_handle(
     // process-wide load hook to start this earlier from (unlike the Android
     // shell — `frust_init` is the earliest Rust entry point Swift ever calls),
     // so spawn the background thread here, as the very first thing, right
-    // before the synchronous GPU surface/device bring-up below — the iOS
-    // counterpart to Android's pre-init overlap window. `TextContext::new` has
-    // no fallible step, so this thread cannot fail, only panic (handled at the
-    // join below). Joined as late as possible (right before
-    // `IosAppHandle::new` needs it) to maximize overlap with the GPU work.
+    // before the GPU surface/device bring-up below — the iOS counterpart to
+    // Android's pre-init overlap window. `TextContext::new` has no fallible step,
+    // so this thread cannot fail, only panic (handled at the join inside the
+    // executor builders). Joined as late as possible (right before layout needs
+    // it) to maximize overlap with the GPU work.
     let font_preinit = std::thread::spawn(TextContext::new);
+    let physical = (width.max(1), height.max(1));
 
+    // Build the render-path executor (plan phase 11.B), chosen once by the
+    // `FRUST_NO_RENDER_THREAD` kill switch:
+    //
+    // - Split (default): spawn the dedicated render thread that owns the
+    //   `RenderContext`/`SurfaceRenderer` + surface and does all GPU work
+    //   (drawable acquisition, encode, present) — so `frust_init` returns without
+    //   blocking on adapter/device/surface bring-up (it happens render-side). The
+    //   `startup` recorder is moved into the render thread, which owns the startup
+    //   line from `adapter_ready` on.
+    // - Inline (kill switch engaged): create the surface + renderer on this UI
+    //   thread exactly as the pre-split shell did, recording the full startup line
+    //   here.
+    //
+    // Both retain `metal_layer` in `IosAppHandle` (Swift owns it and releases it
+    // only after `frust_destroy` — which, in the split, joins the render thread
+    // first, dropping the surface built from the pointer).
+    let (executor, text_ctx) = if render_thread_enabled() {
+        spawn_split_executor(startup, metal_layer, physical, scale, font_preinit)
+    } else {
+        build_inline_executor(startup, metal_layer, physical, font_preinit)?
+    };
+
+    // Process-wide reactive runtime init (idempotent — `ReactiveRuntime::init`'s
+    // own `OnceLock` provides the process-once property). The Swift-side
+    // `handle`/`initFailed` guards are only per-view-controller: a locale
+    // change, split-screen resize, or an init retry after a prior failure can
+    // re-enter `frust_init` in the same process (the project's own
+    // g2-swift-init-latch history shows this happens), and a repeat call here
+    // must be benign rather than rebuilding the background tokio runtime. Runs
+    // BEFORE app construction so a `Component::init` (a future task) creating
+    // signals/controllers has a live runtime to create them against. Runs on this
+    // UI thread (never the render thread): `init` claims the *calling* thread as
+    // the UI thread for `spawn_local`, and every C-ABI call arrives on the main
+    // thread. The continuous `CADisplayLink` loop already ticks every frame
+    // regardless of a signal write, so the waker is a no-op (mirrors Android).
+    let rt = ReactiveRuntime::init(no_op_waker());
+
+    // Construct the app AND its handle under the root `Owner`. `make_app` runs
+    // `Component::init` (via `new_boxed_app_with`'s state factory), and
+    // `IosAppHandle::new` runs the initial `rebuild()` — both must see an
+    // ambient `Owner` or `provide_context`/`on_cleanup` silently no-op. A root
+    // component has no enclosing component to supply one, so it registers
+    // against the root owner (process lifetime, never disposed), mirroring the
+    // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
+    // Retain `metal_layer` in the handle so a later `SurfaceLost` can be recovered
+    // by recreating the surface from it (iOS never re-delivers the layer). The
+    // initial `rebuild()` records `first_rebuild_done` via
+    // `IosAppHandle::new` → `FrameExecutor::record_first_rebuild` — inline records
+    // it here, the split records it render-side on the first handed-off scene.
+    let handle = rt.with_owner(|| {
+        let app = make_app();
+        IosAppHandle::new(executor, text_ctx, metal_layer, physical, scale, app)
+    });
+
+    // SAFETY: hand a uniquely-owned boxed handle to Swift as a raw pointer; it is
+    // reclaimed exactly once in `destroy`.
+    Ok(Box::into_raw(Box::new(handle)) as *mut c_void)
+}
+
+/// Build the **inline** (`FRUST_NO_RENDER_THREAD`) executor: create the renderer +
+/// surface on this UI thread and record the full startup line, exactly as the
+/// pre-split shell did (plan phase 11.B, kill-switch path). Returns the executor
+/// plus the joined [`TextContext`] the handle needs for layout.
+fn build_inline_executor(
+    mut startup: StartupSpans,
+    metal_layer: *mut c_void,
+    physical: (u32, u32),
+    font_preinit: std::thread::JoinHandle<TextContext>,
+) -> Result<(FrameExecutor, TextContext)> {
     let mut render_cx = RenderContext::new();
     let mut renderer = SurfaceRenderer::new();
-    let physical = (width.max(1), height.max(1));
 
     // SAFETY: `metal_layer` is a valid, live `CAMetalLayer*` per the FFI contract
     // (owned by the Swift `UIView`, guaranteed to outlive this handle because the
@@ -249,37 +588,17 @@ fn create_handle(
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
-    // `RenderContext::ensure_device` (see `frust-render/src/context.rs`)
-    // creates the adapter, the logical device, and this call's surface/
-    // renderer readiness in one async chain with no finer-grained seam
-    // exposed to a shell — all three spans land at this single point rather
-    // than three distinct timestamps, an acknowledged granularity limit
-    // (the Android shell's `on_surface_created_from_android_window` has the
-    // same shape).
+    // `RenderContext::ensure_device` creates the adapter, the logical device, and
+    // this call's surface/renderer readiness in one async chain with no
+    // finer-grained seam — all three spans land at this single point (an
+    // acknowledged granularity limit, same shape as the Android shell).
     startup.record(perf::SPAN_ADAPTER_READY);
     startup.record(perf::SPAN_DEVICE_READY);
     startup.record(perf::SPAN_RENDERER_READY);
 
-    // Process-wide reactive runtime init (idempotent — `ReactiveRuntime::init`'s
-    // own `OnceLock` provides the process-once property). The Swift-side
-    // `handle`/`initFailed` guards are only per-view-controller: a locale
-    // change, split-screen resize, or an init retry after a prior failure can
-    // re-enter `frust_init` in the same process (the project's own
-    // g2-swift-init-latch history shows this happens), and a repeat call here
-    // must be benign rather than rebuilding the background tokio runtime. Runs
-    // BEFORE app construction so a `Component::init` (a future task) creating
-    // signals/controllers has a live runtime to create them against. The
-    // continuous `CADisplayLink` loop already ticks every frame regardless of a
-    // signal write, so the waker is a no-op (mirrors the Android shell).
-    let rt = ReactiveRuntime::init(no_op_waker());
-
-    // Join the font-preload thread spawned at the top of this function, as
-    // late as possible — right before `IosAppHandle::new` actually needs the
-    // result — so the join has the maximum window to have already completed
-    // on its own (it started before the surface/device bring-up above, which
-    // itself is not-trivial synchronous work). Best-effort: a panicked thread
-    // falls back to a synchronous `TextContext::new` with a log line — kill
-    // nothing, defer nothing silently (never a crash/block).
+    // Join the font-preload thread as late as possible (max overlap with the GPU
+    // work above). Best-effort: a panicked thread falls back to a synchronous
+    // `TextContext::new` with a log line — kill nothing, defer nothing silently.
     startup.record(SPAN_FONT_PREINIT_STARTED);
     let text_ctx = font_preinit.join().unwrap_or_else(|_| {
         log::warn!(
@@ -290,38 +609,67 @@ fn create_handle(
     });
     startup.record(SPAN_FONT_PREINIT_JOINED);
 
-    // Construct the app AND its handle under the root `Owner`. `make_app` runs
-    // `Component::init` (via `new_boxed_app_with`'s state factory), and
-    // `IosAppHandle::new` runs the initial `rebuild()` — both must see an
-    // ambient `Owner` or `provide_context`/`on_cleanup` silently no-op. A root
-    // component has no enclosing component to supply one, so it registers
-    // against the root owner (process lifetime, never disposed), mirroring the
-    // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
-    // Retain `metal_layer` in the handle so a later `SurfaceLost` can be recovered
-    // by recreating the surface from it (iOS never re-delivers the layer).
-    let mut handle = rt.with_owner(|| {
-        let app = make_app();
-        IosAppHandle::new(
-            render_cx,
-            renderer,
-            text_ctx,
-            metal_layer,
-            physical,
-            scale,
-            app,
-        )
-    });
-    // `IosAppHandle::new` runs the app's first `rebuild()` synchronously as
-    // its last step before returning, so recording the span here is
-    // effectively the same instant as the rebuild's completion.
-    startup.record(perf::SPAN_FIRST_REBUILD_DONE);
-    // Stash for `render_frame` to complete once this handle actually
-    // presents its first frame (see `IosAppHandle::latch_first_frame_presented`).
-    handle.set_startup_spans(startup);
+    let executor =
+        FrameExecutor::Inline(Box::new(InlineExecutor::new(render_cx, renderer, startup)));
+    Ok((executor, text_ctx))
+}
 
-    // SAFETY: hand a uniquely-owned boxed handle to Swift as a raw pointer; it is
-    // reclaimed exactly once in `destroy`.
-    Ok(Box::into_raw(Box::new(handle)) as *mut c_void)
+/// Spawn the **split** (default) render thread and return its executor handle
+/// (plan phase 11.B). The GPU work — surface creation, drawable acquisition,
+/// encode, present, adapter/device/renderer spans — happens *on the render thread*
+/// ([`render_loop`]), so `frust_init` never blocks the UI thread on it. Only the
+/// font-preload join (needed by UI-side layout) stays on this UI thread. Returns
+/// the executor plus the joined [`TextContext`].
+fn spawn_split_executor(
+    mut startup: StartupSpans,
+    metal_layer: *mut c_void,
+    physical: (u32, u32),
+    scale: f32,
+    font_preinit: std::thread::JoinHandle<TextContext>,
+) -> (FrameExecutor, TextContext) {
+    // Font/`TextContext` warmup (phase 10.D) stays UI-side — layout runs on the UI
+    // thread. The GPU work is off-thread now, so this join's ordering vs surface
+    // bring-up no longer matters; record it before the recorder moves into the
+    // render thread below.
+    startup.record(SPAN_FONT_PREINIT_STARTED);
+    let text_ctx = font_preinit.join().unwrap_or_else(|_| {
+        log::warn!(
+            "frust-shell-ios: font pre-init thread panicked; \
+             falling back to synchronous TextContext::new"
+        );
+        TextContext::new()
+    });
+    startup.record(SPAN_FONT_PREINIT_JOINED);
+
+    let (sender, receiver) = render_channel::<PaintedScene, SendableMetalLayer>();
+    let size = SurfaceSize {
+        width: physical.0,
+        height: physical.1,
+        scale: scale as f64,
+    };
+
+    // Move `startup` (init_entry + font spans already recorded) into the render
+    // thread, which owns the rest of the startup line. The raw `metal_layer`
+    // pointer is NOT captured by the closure (it is `!Send`); it crosses the
+    // channel wrapped in `SendableMetalLayer` via the `SurfaceCreated` command
+    // sent from this UI thread below.
+    let join = std::thread::Builder::new()
+        .name("frust-render".to_string())
+        .spawn(move || render_loop(receiver, startup))
+        .expect("frust-shell-ios: failed to spawn render thread");
+
+    // Hand the initial surface to the render thread. The UI thread keeps
+    // `metal_layer` alive (Swift owns it, released only after `frust_destroy` joins
+    // this thread — see `SendableMetalLayer`).
+    sender.send_command(RenderCommand::SurfaceCreated {
+        window: SendableMetalLayer::new(metal_layer),
+        size,
+    });
+
+    (
+        FrameExecutor::Split(SplitExecutor::new(sender, join)),
+        text_ctx,
+    )
 }
 
 /// Recreate a lost surface from the handle's retained `CAMetalLayer` at the given
@@ -344,7 +692,12 @@ fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
     // Read the retained pointer before taking the `&mut` borrow of the renderer.
     let metal_layer = app.metal_layer();
     let result = {
-        let (render_cx, renderer) = app.renderer_mut();
+        // Inline-only: the render-thread split self-heals render-side (see
+        // `render_loop`), so its `inline_renderer_mut()` is `None` and this is
+        // never reached in the split (the call sites gate on `!executor_is_split()`).
+        let Some((render_cx, renderer)) = app.inline_renderer_mut() else {
+            return;
+        };
         // SAFETY: `metal_layer` is the Swift-owned `CAMetalLayer*` this handle was
         // created with; Swift guarantees it outlives the handle (it calls
         // `frust_destroy` before releasing the view/layer), so recreating a
@@ -376,19 +729,26 @@ fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
 }
 
 /// `frust_resize`: resize the live surface (rotation / bounds change). The
-/// `CAMetalLayer` survives, so a live surface is a plain in-place resize; a
-/// `SurfaceLost` surface is instead recreated from the retained layer at the
-/// incoming dimensions (self-recovery — see [`recover_surface`]).
+/// `CAMetalLayer` survives, so a live surface is a plain in-place resize (routed as
+/// a `SurfaceChanged` command in the split). In the inline path a `SurfaceLost`
+/// surface is instead recreated from the retained layer at the incoming dimensions
+/// (self-recovery — see [`recover_surface`]); the split self-heals render-side, so
+/// it always routes a plain resize.
 pub fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
     guard("frust_resize", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             let physical = (width.max(1), height.max(1));
-            if crate::ffi_support::should_recreate_surface(
-                app.phase(),
-                app.paused(),
-                app.recreate_failures(),
-            ) {
+            // Inline-only surface recovery (the split self-heals render-side).
+            let recover = !app.executor_is_split()
+                && app.inline_phase().is_some_and(|phase| {
+                    crate::ffi_support::should_recreate_surface(
+                        phase,
+                        app.paused(),
+                        app.recreate_failures(),
+                    )
+                });
+            if recover {
                 recover_surface(app, physical, scale);
             } else {
                 app.resize(physical, scale);
@@ -398,10 +758,11 @@ pub fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
 }
 
 /// `frust_render_frame`: run one `CADisplayLink`-driven frame (no-op unless the
-/// surface is ready and the app is not paused). If the surface was lost, first
-/// recreate it from the retained layer at the last-known size/scale (self-recovery
-/// — see [`recover_surface`]) so a `SurfaceLost` is no longer a permanent black
-/// screen.
+/// surface is ready and the app is not paused). In the inline path, if the surface
+/// was lost, first recreate it from the retained layer at the last-known
+/// size/scale (self-recovery — see [`recover_surface`]) so a `SurfaceLost` is no
+/// longer a permanent black screen; the split self-heals render-side (see
+/// [`render_loop`]), so no UI-side recovery runs there.
 ///
 /// `timestamp_ns` is the `CADisplayLink` tick's `timestamp` (`CFTimeInterval`
 /// seconds), converted to nanoseconds by the Swift caller
@@ -411,22 +772,25 @@ pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) {
     guard("frust_render_frame", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
-            if crate::ffi_support::should_recreate_surface(
-                app.phase(),
-                app.paused(),
-                app.recreate_failures(),
-            ) {
+            // Inline-only surface recovery (the split self-heals render-side).
+            let recover = !app.executor_is_split()
+                && app.inline_phase().is_some_and(|phase| {
+                    crate::ffi_support::should_recreate_surface(
+                        phase,
+                        app.paused(),
+                        app.recreate_failures(),
+                    )
+                });
+            if recover {
                 let (physical, scale) = (app.physical(), app.scale());
                 recover_surface(app, physical, scale);
             }
-            // `frame` reports whether this tick actually presented a frame
-            // (`FrameOutcome::Rendered`); the first-presented-frame startup
-            // span (spec §14 phase 7.A task 09) is latched here, exactly
-            // once, the first time it does — see
-            // `IosAppHandle::latch_first_frame_presented`'s idempotency doc.
-            if app.frame(timestamp_ns) {
-                app.latch_first_frame_presented();
-            }
+            // In the split, the first-presented-frame startup span is recorded
+            // render-side inside `render_scene` (the render thread is the single
+            // perf emitter); in the inline path it is recorded there too, since
+            // both paths share `render_scene`. So `frame` no longer returns
+            // anything for the FFI layer to latch.
+            app.frame(timestamp_ns);
         }
     });
 }
