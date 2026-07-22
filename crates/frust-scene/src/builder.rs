@@ -5,6 +5,7 @@ use peniko::{Brush, Color, ImageData};
 
 use crate::glyph::GlyphRun;
 use crate::scene::{Command, PathStyle, Scene};
+use crate::shader::ShaderProgram;
 
 /// Records paint commands into a [`Scene`], maintaining a transform stack.
 ///
@@ -180,6 +181,22 @@ impl<'a> SceneBuilder<'a> {
             style: PathStyle::Stroke { width },
             brush,
             transform,
+        });
+    }
+
+    /// Records a fragment-shader-filled rectangle, scaled to fill `dest`,
+    /// under the current transform (see [`Command::ShaderQuad`]).
+    ///
+    /// `program` is cloned into the command — cheap, since [`ShaderProgram`]
+    /// clones its id and its `Arc<str>` source handle, never the source
+    /// text. `time` is seconds, app-supplied.
+    pub fn draw_shader(&mut self, program: &ShaderProgram, dest: Rect, time: f32) {
+        let transform = self.current_transform();
+        self.scene.push(Command::ShaderQuad {
+            program: program.clone(),
+            dest,
+            transform,
+            time,
         });
     }
 }
@@ -437,6 +454,64 @@ mod tests {
         match &scene.commands()[0] {
             Command::Image { transform, .. } => assert_eq!(*transform, translate),
             other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_shader_round_trips_program_dest_and_time_under_identity_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let program = ShaderProgram::new("fn main() {}");
+        let dest = Rect::new(0.0, 0.0, 20.0, 20.0);
+        builder.draw_shader(&program, dest, 1.5);
+
+        match &scene.commands()[0] {
+            Command::ShaderQuad {
+                program: got_program,
+                dest: got_dest,
+                transform,
+                time,
+            } => {
+                assert_eq!(got_program.id(), program.id());
+                assert_eq!(*got_dest, dest);
+                assert_eq!(*transform, Affine::IDENTITY);
+                assert_eq!(*time, 1.5);
+            }
+            other => panic!("expected ShaderQuad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_shader_composes_with_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((5.0, 6.0));
+        builder.push_transform(translate);
+        let program = ShaderProgram::new("fn main() {}");
+        builder.draw_shader(&program, Rect::new(0.0, 0.0, 4.0, 4.0), 0.0);
+
+        match &scene.commands()[0] {
+            Command::ShaderQuad { transform, .. } => assert_eq!(*transform, translate),
+            other => panic!("expected ShaderQuad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_shader_clones_program_sharing_id() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let program = ShaderProgram::new("fn main() {}");
+        builder.draw_shader(&program, Rect::new(0.0, 0.0, 4.0, 4.0), 0.0);
+
+        match &scene.commands()[0] {
+            Command::ShaderQuad {
+                program: got_program,
+                ..
+            } => {
+                assert_eq!(got_program.id(), program.id());
+                assert_eq!(got_program.source(), program.source());
+            }
+            other => panic!("expected ShaderQuad, got {other:?}"),
         }
     }
 

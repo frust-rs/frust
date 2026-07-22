@@ -217,6 +217,31 @@ pub(crate) fn encode_into(scene: &Scene, sink: &mut impl SceneSink) {
                 PathStyle::Fill => sink.fill_path(*transform, brush, path),
                 PathStyle::Stroke { width } => sink.stroke_path(*transform, brush, path, *width),
             },
+            Command::ShaderQuad {
+                dest, transform, ..
+            } => {
+                // TEMPORARY placeholder lowering (frust-shader-showcase task
+                // 01): task 04 replaces this arm with the real WGSL
+                // compile+render-to-texture path
+                // (workflow/plans/features/frust-shader-showcase/tasks/04-render-encode-integration.md).
+                // Fill `dest` with an opaque mid-gray so a `ShaderQuad`-
+                // painting widget still renders visible geometry instead of
+                // silently dropping, and warn once per process (not per
+                // frame) so the gap is loud in logs without spamming.
+                static WARNED_SHADER_PLACEHOLDER: OnceLock<()> = OnceLock::new();
+                WARNED_SHADER_PLACEHOLDER.get_or_init(|| {
+                    log::warn!(
+                        "Command::ShaderQuad encoded via a placeholder fill_rect — \
+                         the real WGSL lowering lands in frust-shader-showcase task 04"
+                    );
+                });
+                sink.fill_rect(
+                    Fill::NonZero,
+                    *transform,
+                    &Brush::Solid(Color::from_rgba8(128, 128, 128, 255)),
+                    dest,
+                );
+            }
         }
     }
 
@@ -703,6 +728,31 @@ mod tests {
         let mut sink = RecordingSink::default();
         encode_into(&scene, &mut sink);
         assert_eq!(sink.events.len(), 2);
+    }
+
+    #[test]
+    fn shader_quad_maps_to_placeholder_fill_rect_with_dest_and_transform() {
+        // TEMPORARY (frust-shader-showcase task 01): asserts today's
+        // placeholder lowering; task 04 replaces this with a real WGSL
+        // render-to-texture assertion.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((3.0, 4.0));
+        builder.push_transform(translate);
+        let program = frust_scene::ShaderProgram::new("fn main() {}");
+        let dest = Rect::new(0.0, 0.0, 40.0, 40.0);
+        builder.draw_shader(&program, dest, 1.0);
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::FillRect {
+                rect: dest,
+                transform: translate,
+            }]
+        );
     }
 
     #[test]

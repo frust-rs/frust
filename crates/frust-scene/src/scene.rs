@@ -4,6 +4,7 @@ use kurbo::{Affine, BezPath, Point, Rect};
 use peniko::{Brush, Color, ImageData};
 
 use crate::glyph::GlyphRun;
+use crate::shader::ShaderProgram;
 
 /// How a [`Command::Path`] is rendered: filled or stroked.
 ///
@@ -114,6 +115,19 @@ pub enum Command {
         style: PathStyle,
         brush: Brush,
         transform: Affine,
+    },
+    /// Draw a fragment-shader-filled rectangle, scaled to fill `dest`, under
+    /// a transform.
+    ///
+    /// `program` is compiled (and cache-keyed on [`ShaderProgram::id`]) by
+    /// `frust-render` — see [`ShaderProgram`]'s v1 opaque-output contract.
+    /// `time` is seconds, app-supplied (from `PaintCtx::frame_time` at the
+    /// widget layer), threaded into the shader's uniform buffer.
+    ShaderQuad {
+        program: ShaderProgram,
+        dest: Rect,
+        transform: Affine,
+        time: f32,
     },
 }
 

@@ -10,11 +10,13 @@ mod arc;
 mod builder;
 mod glyph;
 mod scene;
+mod shader;
 
 pub use arc::arc_path;
 pub use builder::SceneBuilder;
 pub use glyph::{FontHandle, Glyph, GlyphRun};
 pub use scene::{Command, PathStyle, Scene};
+pub use shader::ShaderProgram;
 
 /// Compile-time assertion that [`Scene`] is [`Send`].
 ///
