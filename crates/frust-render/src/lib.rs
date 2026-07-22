@@ -33,6 +33,12 @@ mod cpu_tier;
 mod lifecycle;
 mod pipeline_cache;
 mod renderer;
+// Offscreen WGSL fragment-shader effects (shader-showcase feature). Crate-
+// private and not yet wired into the encode path — the encode-prepass consumer
+// lands in a sibling task — so its GPU-touching API has no non-test caller here
+// yet; the pure logic is exercised by the module's own unit tests.
+#[allow(dead_code)]
+mod shader_effects;
 mod tier;
 
 pub use context::{DetachedSurface, RenderContext, SurfaceFactory};
