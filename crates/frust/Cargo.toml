@@ -69,3 +69,15 @@ frust-text = { workspace = true }
 # Version-Pin Policy); `frust-widgets` already depends on it non-dev, this
 # only adds the dev-only copy the facade's own tests need.
 image = { workspace = true }
+
+[features]
+# Opt-in perf-trace instrumentation: re-exports perf-trace from all three shells.
+# Empty by default (opt-in survives cargo's additive unification; the CLI is the
+# sole enabler). Cargo applies each shell's feature per target: desktop's feature
+# activates only on non-Android targets; Android/iOS features activate only on
+# their respective targets.
+perf-trace = [
+    "frust-shell-desktop/perf-trace",
+    "frust-shell-android/perf-trace",
+    "frust-shell-ios/perf-trace",
+]

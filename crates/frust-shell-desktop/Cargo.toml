@@ -41,3 +41,9 @@ anyhow = { workspace = true }
 # `frust-shell-ios`'s own `StderrLogger` (zero new transitive deps, `log`
 # is already pulled in via `frust-shell-common`).
 log = { workspace = true }
+
+[features]
+# Opt-in perf-trace instrumentation: re-exports frust-shell-common/perf-trace
+# and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive
+# unification; the CLI is the sole enabler).
+perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
