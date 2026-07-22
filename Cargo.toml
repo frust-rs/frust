@@ -209,6 +209,7 @@ frust-theme = { path = "crates/frust-theme" }
 frust-widgets = { path = "crates/frust-widgets" }
 frust-reactive = { path = "crates/frust-reactive" }
 frust-plugin = { path = "crates/frust-plugin" }
+frust-paths = { path = "crates/frust-paths" }
 frust-shell-desktop = { path = "crates/frust-shell-desktop" }
 frust-shell-common = { path = "crates/frust-shell-common" }
 frust-shell-android = { path = "crates/frust-shell-android" }

@@ -1,0 +1,12 @@
+[package]
+name = "frust-paths"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Debug-log the ignoring of a set-but-relative XDG var (see the module doc's
+# absolute-validation note). No other dependency: this is a leaf crate (like
+# `frust-plugin`) with zero `frust-*` deps.
+log = { workspace = true }

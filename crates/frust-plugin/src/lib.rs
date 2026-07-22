@@ -21,8 +21,9 @@
 //! crate that reads `ndk-context` work inside a Frust app for free.
 //!
 //! A **platform plugin** (e.g. `frust-shared-preferences`) may depend on this
-//! crate plus FFI crates, and must NOT depend on any `frust-*` framework
-//! crate — that keeps plugins tiny and free of framework cycles.
+//! crate plus `frust-paths` and FFI crates, and must NOT depend on any
+//! `frust-*` framework crate — that keeps plugins tiny and free of framework
+//! cycles.
 
 pub mod android;
 
