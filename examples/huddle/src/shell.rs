@@ -6,8 +6,8 @@
 //! for the feature-slice convention). The shell is the app's
 //! first real [`icon`](frust::icon) consumer: each tab carries an
 //! [`icons`](frust::icons) glyph. The bottom bar branches its
-//! Material/Cupertino chrome on the active [`DesignLanguage`] (the settings
-//! appearance screen swaps it live).
+//! Material/Cupertino/Glyph chrome on the active [`DesignLanguage`] (the
+//! settings appearance screen swaps it live).
 //!
 //! The tab roots fade into each other: the shell's [`navigator`] runs an M3
 //! fade-through transition, so selecting a tab (`router.go(tab.route())`)
@@ -17,8 +17,9 @@
 use std::rc::Rc;
 
 use frust::{
-    AnyView, DesignLanguage, Get, RouterDeepLinks, RwSignal, Set, any, cupertino_tab_bar, icon,
-    icons, nav_item, navigation_bar, safe_area, tab_item,
+    AnyView, DesignLanguage, Get, RouterDeepLinks, RwSignal, Set, any, cupertino_tab_bar,
+    glyph::{glyph_nav_bar, glyph_nav_item},
+    icon, icons, nav_item, navigation_bar, safe_area, tab_item,
 };
 
 use crate::HuddleState;
@@ -72,6 +73,20 @@ impl Tab {
         }
     }
 
+    /// This tab's Glyph bottom-nav character (task 28) — a single monospace
+    /// glyph standing in for [`Tab::icon`]'s Material Symbols path on the
+    /// Glyph design language, matching `glyph::navbar`'s own catalog demo
+    /// (box-drawing / geometric shapes, `research/glyph-design-system.html`'s
+    /// `.bottom-nav-glyph` rule).
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Tab::Home => "▣",
+            Tab::Search => "◎",
+            Tab::Activity => "◆",
+            Tab::You => "◉",
+        }
+    }
+
     /// This tab's index in [`Tab::ALL`] (the nav bar's `selected` position).
     pub fn index(self) -> usize {
         Tab::ALL
@@ -87,10 +102,12 @@ impl Tab {
     }
 }
 
-/// The persistent bottom bar: a Material [`navigation_bar`] or a Cupertino
-/// [`cupertino_tab_bar`] (per the active `design`), each with a per-tab
-/// [`icon`]. Selecting a destination records it in `tab` (the highlight) and
-/// drives the router to that tab's route.
+/// The persistent bottom bar: a Material [`navigation_bar`], a Cupertino
+/// [`cupertino_tab_bar`], or a Glyph `glyph_nav_bar` (per the active
+/// `design`) — the Material/Cupertino bars carry a per-tab [`icon`], the
+/// Glyph bar a per-tab monospace glyph char ([`Tab::glyph`]). Selecting a
+/// destination records it in `tab` (the highlight) and drives the router to
+/// that tab's route.
 ///
 /// Wrapped in [`safe_area`] (device-parity task 14, item 1) so the bar's
 /// bottom edge clears the system gesture/nav bar — `top` stays unpadded (the
@@ -107,12 +124,25 @@ pub fn bottom_bar(
 ) -> AnyView<HuddleState> {
     let selected = tab.get().index();
     let bar: AnyView<HuddleState> = match design {
-        // Glyph has no chrome baseline yet (task 28 replaces this) —
-        // falls through to the Material3 chrome arm for now.
-        DesignLanguage::Material3 | DesignLanguage::Glyph => any(navigation_bar::<HuddleState, _>(
+        DesignLanguage::Material3 => any(navigation_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()
                 .map(|t| nav_item::<HuddleState>(t.label()).icon(any(icon(t.icon()).size(24.0))))
+                .collect(),
+            selected,
+            move |_s: &mut HuddleState, idx: usize| {
+                let t = Tab::from_index(idx);
+                tab.set(t);
+                nav.router().go(t.route());
+            },
+        )),
+        // `glyph_nav_bar`'s (items, selected, on_select(index)) shape is the
+        // same controlled-index contract `navigation_bar`/`cupertino_tab_bar`
+        // use above, so it fits this shell's tab model directly (task 28).
+        DesignLanguage::Glyph => any(glyph_nav_bar::<HuddleState, _>(
+            Tab::ALL
+                .iter()
+                .map(|t| glyph_nav_item(t.glyph(), t.label()))
                 .collect(),
             selected,
             move |_s: &mut HuddleState, idx: usize| {

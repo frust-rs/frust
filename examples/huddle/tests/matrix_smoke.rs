@@ -1,5 +1,5 @@
-//! Route × theme matrix smoke test: every Huddle route must build under both
-//! design languages and both brightness states.
+//! Route × theme matrix smoke test: every Huddle route must build under every
+//! design language and both brightness states.
 //!
 //! Deliberately one `#[test]` iterating the whole matrix, rather than one test
 //! per combination: `frust::provide_context` writes to the ambient reactive
@@ -47,16 +47,15 @@ fn every_route_builds_under_both_design_languages_and_brightness_states() {
         (DesignLanguage::Material3, Brightness::Dark),
         (DesignLanguage::Cupertino, Brightness::Light),
         (DesignLanguage::Cupertino, Brightness::Dark),
+        (DesignLanguage::Glyph, Brightness::Light),
+        (DesignLanguage::Glyph, Brightness::Dark),
     ];
 
     for (design, brightness) in combos {
         let theme = match design {
             DesignLanguage::Material3 => Theme::m3_baseline(),
             DesignLanguage::Cupertino => Theme::cupertino_baseline(),
-            // Glyph has no baseline yet (task 28 replaces this); not part of
-            // `combos` above, so this arm is unreached today but keeps the
-            // match exhaustive.
-            DesignLanguage::Glyph => Theme::m3_baseline(),
+            DesignLanguage::Glyph => Theme::glyph_baseline(),
         }
         .with_brightness(brightness);
         frust::provide_context(theme);
