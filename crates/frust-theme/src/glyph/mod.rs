@@ -36,10 +36,8 @@
 
 pub mod baseline;
 pub mod color;
+#[cfg(feature = "glyph-fonts")]
+pub mod fonts;
 pub mod scales;
-
-// task 18 adds the gated fonts module (`#[cfg(feature = "glyph-fonts")] pub
-// mod fonts;`) together with the `glyph-fonts` feature and the embedded font
-// bytes — this module intentionally does not declare it.
 
 pub use color::GlyphInk;
