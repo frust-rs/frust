@@ -171,15 +171,15 @@ frust build ipa --export-method app-store-connect
 frust clean
 ```
 
-`--flavor <name>` needs a matching Gradle product flavor / Xcode
-scheme+configuration already declared in the generated project.
-
-**Android release minification.** A generated app's `release`/`profile`
-Gradle build type runs R8 (`isMinifyEnabled`/`isShrinkResources = true`)
-against `proguard-rules.pro` (keeps the Frust JNI surface and the vendored
-`accesskit_android` delegate); `--debug` is unaffected. NDK r27+ already
-16KB-aligns `.so` `LOAD` segments by default, so Android 15's page-size
-requirement needed no linker-flag change.
+`--flavor <name>` needs a matching Gradle flavor or Xcode scheme+configuration already declared
+in the project. **Android release minification.** A generated app's `release`/`profile` Gradle
+build type runs R8 (`isMinifyEnabled`/`isShrinkResources = true`) against `proguard-rules.pro`
+(keeps the Frust JNI surface and the vendored `accesskit_android` delegate); `--debug` is
+unaffected. NDK r27+ already 16KB-aligns `.so` LOAD segments, so Android 15's page-size rule
+needs no linker-flag change. **Release-lean mode.** `--release` also compiles out all
+`perf-trace` instrumentation and enables the app's `lean` feature (`log/release_max_level_warn`),
+matching Flutter's release log-level parity; `scripts/release-lean-check.sh` is the manual
+strings-absence gate confirming both before shipping.
 
 ## Test
 
@@ -384,11 +384,11 @@ silently colliding runs; alias `mktemp` to `gmktemp` (`brew install coreutils`) 
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `FRUST_TRACE` | Enables `frust-perf` frame/startup logging (`frust-shell-common::perf`). Runtime env var on any build; `frust run --profile`/`frust build --profile` auto-inject `--define FRUST_TRACE=1` unless already set — opt out of that default with `--define FRUST_TRACE=0`. | off |
+| `FRUST_TRACE` | Enables `frust-perf` frame/startup logging (`frust-shell-common::perf`); requires a `perf-trace` build (debug/profile compile it in by default) — release compiles the instrumentation out entirely, no code or strings. Runtime env var; `frust run --profile`/`frust build --profile` auto-inject `--define FRUST_TRACE=1` unless already set — opt out with `--define FRUST_TRACE=0`. | off |
 | `FRUST_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/ARCHITECTURE.md`'s Frame gate) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
 | `FRUST_LOG` | Desktop-only stderr log level override (`frust-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger suppresses only known-noisy vello Error/Warn messages below `debug` (see *Known Issues*' vello bitmap-emoji note); unknown vello errors still surface at the default level. Pass `FRUST_LOG=debug` to see all vello log lines when debugging the render stack. | `info` |
 | `FRUST_RENDER_TIER` | Forces the desktop preview's render tier (`gpu`/`cpu`) — see *Run* above. | adapter-probed |
-| `FRUST_TRACE_RAW` | A second dial beside `FRUST_TRACE`: with both set, `FrameStats` emits one parseable `frust-perf raw ...` line per frame (instead of periodic summaries), plus `bench-scenario-start/end <name>` marker lines for a benchmark harness to slice by. Setting `FRUST_TRACE_RAW` alone does nothing — `FRUST_TRACE` must also be on. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Raw line format is v3: `acquire_us`/`submit_us` are separate fields, replacing v2's single `present_us` (`acquire_us + submit_us` == old `present_us`, so cross-baseline math still works); `stats.py` parses key=value so v1/v2/v3 logs stay parseable. In the default render-thread split, a gate-skipped frame is not sent to the render thread at all, so it never reaches this line — see the `FRUST_NO_RENDER_THREAD` row below for skip-sensitive series. See `benchmarks/PROTOCOL.md`'s raw-format changelog for the full field history. | off |
+| `FRUST_TRACE_RAW` | A second dial beside `FRUST_TRACE`, requiring the same `perf-trace` build: with both set, `FrameStats` emits one parseable `frust-perf raw ...` line per frame (instead of periodic summaries), plus `bench-scenario-start/end <name>` marker lines for a benchmark harness to slice by. Setting `FRUST_TRACE_RAW` alone does nothing — `FRUST_TRACE` must also be on. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Raw line format is v3 (`acquire_us`/`submit_us` as separate fields, superseding v2's single `present_us`); `stats.py` parses key=value so v1/v2/v3 logs stay parseable. In the default render-thread split, a gate-skipped frame never reaches this line — see the `FRUST_NO_RENDER_THREAD` row below for skip-sensitive series. See `benchmarks/PROTOCOL.md`'s raw-format changelog for the full field history. | off |
 | `FRUST_NO_RENDER_THREAD` | Kill switch for the render-thread split (`docs/ARCHITECTURE.md`'s frame pipelines) — restores the pre-split single-thread path (rebuild/layout/paint/encode/acquire/present all on the UI/main thread), the fallback if the split needs to be ruled out. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Also the skip-count fix: a `FrameGate` `Skip` sends nothing across the split's UI→render channel, so it is never recorded in `FrameStats`/the raw line — build with this set when a skip-sensitive series (skip counts/rates) needs every skip counted. | off (split active) |
 | `FRUST_NO_RESAMPLE` | Kill switch for the mobile pointer-event resampler (`docs/ARCHITECTURE.md`'s `frust-shell-common` row) — forces raw per-touch delivery with no frame-boundary interpolation/prediction. Same compile-time-or-runtime parsing as `FRUST_TRACE`. | off (resampler active) |
 | `FRUST_NO_DIRECT_SURFACE` | Kill switch pinning a direct-capable surface onto the blit fallback arm (`docs/ARCHITECTURE.md`'s `frust-render` row) — the A/B valve for comparing the direct-to-surface and blit render paths on the same hardware. Same compile-time-or-runtime parsing as `FRUST_TRACE`. **A/B caveat:** on the direct arm the GPU render moves into `submit_us` (out of `encode_us`) and `acquire_us` now precedes it rather than follows — account for this remap before comparing `submit_us` across arms (`SurfaceRenderer::submit`'s doc comment has the full v3 field mapping). | off (path auto-probed) |
