@@ -38,7 +38,7 @@
 use std::time::Duration;
 
 use frust_core::{AnimationController, Curve, FrameTime, Spring, SpringDesc};
-use frust_theme::MotionSpring;
+use frust_theme::{MotionScheme, MotionSpring};
 use kurbo::{Affine, Point, Rect, Size};
 
 // --- Named preset constants (see per-constant source comments) --------------
@@ -60,16 +60,64 @@ const M3_SHARED_AXIS_SLIDE_DP: f64 = 30.0;
 const M3_FADE_SPLIT: f64 = 0.35;
 
 /// M3 fade-through incoming scale start (the incoming page scales 92% → 100% as
-/// it fades in). Source: Material Design 3 "fade through" spec.
+/// it fades in). Source: Material Design 3 "fade through" spec, matching the
+/// verified Flutter `FadeThroughTransition` staging (research §7.3).
 ///
-/// **Documented, not applied**: a scale is a scene-transform effect, and the
-/// current `PaintScene` seam (task 6a) exposes only `push_layer`(alpha)/`push_clip`
-/// — no per-widget transform. Applying it would require extending the layer-2
-/// `PaintScene` trait, which is outside this task's scope; the fade-through
-/// transition therefore ships as a pure cross-fade for now, with the scale
-/// recorded here for when the transform seam lands.
-#[allow(dead_code)]
+/// Applied on the incoming [`Layer::scale`] over the `[`[`M3_FADE_THROUGH_SPLIT`]`,
+/// 1]` segment with [`M3_FADE_THROUGH_IN_CURVE`]; the navigator brackets the
+/// incoming page's paint with a `push_transform` when the layer scale differs
+/// from `1.0`.
 const M3_FADE_THROUGH_SCALE_START: f64 = 0.92;
+
+/// M3 fade-through progress split: the outgoing page finishes its fade-out and
+/// the incoming page begins its fade-in + scale-up at this fraction — the
+/// verified Flutter `FadeThroughTransition` staging boundary (the first
+/// **6/20** of the timeline; research §7.3).
+const M3_FADE_THROUGH_SPLIT: f64 = 0.30;
+
+/// M3 fade-through *outgoing* fade-out easing — Flutter `Cubic(0.4,0,1,1)`
+/// applied over `[0, `[`M3_FADE_THROUGH_SPLIT`]`]`, after which the outgoing page
+/// holds at `0` opacity (research §7.3).
+const M3_FADE_THROUGH_OUT_CURVE: Curve = Curve::Cubic(0.4, 0.0, 1.0, 1.0);
+
+/// M3 fade-through *incoming* fade-in + scale-up easing — Flutter
+/// `Cubic(0,0,0.2,1)` applied over `[`[`M3_FADE_THROUGH_SPLIT`]`, 1]` (research
+/// §7.3). Both the opacity `0→1` and the scale
+/// [`M3_FADE_THROUGH_SCALE_START`]`→1.0` track this one eased segment.
+const M3_FADE_THROUGH_IN_CURVE: Curve = Curve::Cubic(0.0, 0.0, 0.2, 1.0);
+
+/// Glyph screen-transition slide distance, in logical px (research §1.4 pattern
+/// 10 — "screen transition: 340ms spatial slide-in 16px + fade").
+const GLYPH_SLIDE_DP: f64 = 16.0;
+
+/// Glyph screen-transition *enter* duration — the new screen's spatial slide-in
+/// (research §1.4 pattern 10: 340ms, the Glyph `slow` token). The unthemed
+/// fallback when no [`MotionScheme`] is threaded (see [`preset_enter_exit`]).
+const GLYPH_ENTER: Duration = Duration::from_millis(340);
+
+/// Glyph screen-transition *exit* duration — the old screen's accelerate-out
+/// (research §1.4 pattern 10: 150ms, the Glyph `fast` token) plus the hard rule
+/// "exits always faster than entrances". Unthemed fallback.
+const GLYPH_EXIT: Duration = Duration::from_millis(150);
+
+/// Glyph `spatial` easing (overshoot; position/scale) — research §1.4
+/// (`cubic-bezier(0.34,1.35,0.64,1)`). Unthemed fallback for the enter curve.
+const GLYPH_SPATIAL_CURVE: Curve = Curve::Cubic(0.34, 1.35, 0.64, 1.0);
+
+/// Glyph `exit` easing (accelerate-out) — research §1.4
+/// (`cubic-bezier(0.4,0,1,1)`). Unthemed fallback for the exit curve.
+const GLYPH_EXIT_CURVE: Curve = Curve::Cubic(0.4, 0.0, 1.0, 1.0);
+
+/// The progress split for the Glyph preset's cross-fade: the leaving page
+/// completes its fade-out by this fraction (≈ the 150/340 exit/enter duration
+/// ratio), after which the entering page fades in — encoding the "exits always
+/// faster than entrances" rule in the single-progress geometry (research §1.4).
+const GLYPH_FADE_SPLIT: f64 = 0.44;
+
+/// Reduced-motion collapse duration: research §1.4's hard rule that
+/// `prefers-reduced-motion` collapses *every* pattern to a `≤120ms` linear
+/// crossfade. See [`resolve_spec`].
+const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 
 /// iOS push parallax fraction: the outgoing (below) page slides out by one third
 /// of the incoming page's travel while the incoming page slides fully across.
@@ -117,8 +165,10 @@ pub enum PageTransition {
     None,
     /// Material 3 shared-axis-X: a 30dp slide paired with a threshold cross-fade.
     M3SharedAxisX,
-    /// Material 3 fade-through: outgoing fade-out then incoming fade-in (a scale
-    /// component is spec'd but not yet applied — see [`M3_FADE_THROUGH_SCALE_START`]).
+    /// Material 3 fade-through: a *staged* outgoing fade-out then incoming
+    /// fade-in **with** the incoming [`M3_FADE_THROUGH_SCALE_START`]`→1.0`
+    /// scale-up — the verified Flutter `FadeThroughTransition` staging
+    /// (research §7.3). See [`resolve_layers`]'s `M3FadeThrough` arm.
     M3FadeThrough,
     /// iOS-style push/pop: incoming slides full-width from the edge; outgoing
     /// parallaxes by [`IOS_PARALLAX_FRACTION`] with an optional dim.
@@ -132,6 +182,14 @@ pub enum PageTransition {
     /// transition progress itself or a fixed alpha), not a [`Layer`]-level
     /// effect this preset drives; see [`resolve_layers`]'s `SlideUp` arm.
     SlideUp,
+    /// Glyph screen transition (research §1.4 pattern 10): a directional
+    /// [`GLYPH_SLIDE_DP`]-px slide paired with a cross-fade. The entering screen
+    /// slides in over the theme's *slow* spatial timing while the leaving screen
+    /// accelerates out over the faster *exit* timing ("exits always faster than
+    /// entrances"); a pop reverses the slide direction. Timing is resolved from
+    /// the active [`MotionScheme`] via [`resolve_spec`]/[`preset_enter_exit`] —
+    /// pair it with [`Timing::ThemeDefault`] (or [`TransitionSpec::glyph`]).
+    Glyph,
 }
 
 /// How a transition's `0.0..=1.0` progress is driven.
@@ -142,6 +200,13 @@ pub enum Timing {
     /// A physics spring ([`MotionSpring`], from the theme's motion scheme). A
     /// spatial preset overshoots position; an effects preset does not.
     Spring(MotionSpring),
+    /// Resolve concrete timing from the active theme's [`MotionScheme`] at
+    /// driver-construction time (the durations/easing tokens), per preset and
+    /// honoring `reduce_motion`. Normally pre-resolved into a concrete
+    /// `Duration`/`Spring` by [`resolve_spec`] before the driver is built; if it
+    /// reaches [`make_driver`] unresolved (no theme threaded), it falls back to
+    /// the M3 default duration + [`Curve::Emphasized`] easing.
+    ThemeDefault,
 }
 
 impl Default for Timing {
@@ -206,6 +271,24 @@ impl TransitionSpec {
             preset,
             timing: Timing::Spring(spring),
         }
+    }
+
+    /// A theme-timed transition: the preset's timing is resolved from the active
+    /// [`MotionScheme`] at driver-construction time (via [`resolve_spec`]),
+    /// honoring `reduce_motion`. The idiomatic constructor for
+    /// [`PageTransition::Glyph`].
+    pub const fn themed(preset: PageTransition) -> Self {
+        TransitionSpec {
+            preset,
+            timing: Timing::ThemeDefault,
+        }
+    }
+
+    /// The Glyph screen transition (research §1.4 pattern 10) with theme-resolved
+    /// timing — shorthand for
+    /// [`TransitionSpec::themed`]`(`[`PageTransition::Glyph`]`)`.
+    pub const fn glyph() -> Self {
+        Self::themed(PageTransition::Glyph)
     }
 
     /// Whether this spec animates at all (`false` for [`PageTransition::None`]).
@@ -332,6 +415,91 @@ pub fn make_driver(timing: Timing) -> (TransitionDriver, SpringDesc) {
             c.fling(0.0, desc);
             (TransitionDriver::Auto(c), desc)
         }
+        Timing::ThemeDefault => {
+            // Normally pre-resolved by `resolve_spec` against the active theme
+            // before the driver is built; an unresolved `ThemeDefault` reaching
+            // here (no theme threaded) falls back to the M3 default duration +
+            // emphasized easing.
+            make_driver(Timing::Duration(M3_DEFAULT_DURATION, Curve::Emphasized))
+        }
+    }
+}
+
+/// The (enter, exit) driver [`Timing`]s a directional preset resolves to from
+/// the active `scheme` (or the unthemed fallback constants when `None`).
+///
+/// `enter` is the longer *spatial* motion (new content arriving); `exit` is the
+/// faster accelerate-out (old content leaving) — Glyph's "exits always faster
+/// than entrances" rule (research §1.4). For [`PageTransition::Glyph`] these are
+/// the theme's `slow`/`fast` durations with the `spatial`/`exit` easings
+/// (research §1.4 pattern 10: 340ms spatial in / 150ms exit out); every other
+/// preset reuses its natural [`TransitionSpec::duration`] timing for both.
+pub fn preset_enter_exit(
+    preset: PageTransition,
+    scheme: Option<&MotionScheme>,
+) -> (Timing, Timing) {
+    match preset {
+        PageTransition::Glyph => match scheme {
+            Some(s) => (
+                Timing::Duration(
+                    Duration::from_secs_f64(s.durations.slow / 1000.0),
+                    s.easing.spatial,
+                ),
+                Timing::Duration(
+                    Duration::from_secs_f64(s.durations.fast / 1000.0),
+                    s.easing.exit,
+                ),
+            ),
+            None => (
+                Timing::Duration(GLYPH_ENTER, GLYPH_SPATIAL_CURVE),
+                Timing::Duration(GLYPH_EXIT, GLYPH_EXIT_CURVE),
+            ),
+        },
+        other => {
+            let d = TransitionSpec::duration(other).timing;
+            (d, d)
+        }
+    }
+}
+
+/// Resolve a spec's [`Timing`] into the concrete timing the driver runs, given
+/// the preset and the active `scheme`. A [`Timing::ThemeDefault`] becomes the
+/// preset's *enter* timing ([`preset_enter_exit`]`.0`) — the dominant, longer
+/// motion the single progress driver runs; the faster exit is expressed by the
+/// geometry's cross-fade split ([`GLYPH_FADE_SPLIT`]). An explicit
+/// `Duration`/`Spring` passes through unchanged. `reduce_motion` collapse is
+/// applied at the spec level by [`resolve_spec`], not here.
+pub fn resolve_timing(
+    timing: Timing,
+    preset: PageTransition,
+    scheme: Option<&MotionScheme>,
+) -> Timing {
+    match timing {
+        Timing::ThemeDefault => preset_enter_exit(preset, scheme).0,
+        other => other,
+    }
+}
+
+/// Resolve a [`TransitionSpec`] against the active `scheme` into the concrete
+/// spec the navigator drives:
+///
+/// - `scheme.reduce_motion == true` collapses *any* animated preset to a
+///   `≤120ms` linear cross-fade ([`PageTransition::M3FadeThrough`] driven by
+///   [`REDUCE_MOTION_DURATION`] + [`Curve::Linear`]) — research §1.4's hard
+///   accessibility rule. A non-animated ([`PageTransition::None`]) spec is left
+///   untouched.
+/// - otherwise a [`Timing::ThemeDefault`] is resolved to the preset's theme
+///   timing ([`resolve_timing`]); the preset is unchanged.
+pub fn resolve_spec(spec: TransitionSpec, scheme: Option<&MotionScheme>) -> TransitionSpec {
+    if spec.is_animated() && scheme.map(|s| s.reduce_motion).unwrap_or(false) {
+        return TransitionSpec {
+            preset: PageTransition::M3FadeThrough,
+            timing: Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear),
+        };
+    }
+    TransitionSpec {
+        preset: spec.preset,
+        timing: resolve_timing(spec.timing, spec.preset, scheme),
     }
 }
 
@@ -365,14 +533,22 @@ pub struct Layer {
     pub dy: f64,
     /// Opacity in `[0, 1]` (composited via `PaintScene::push_layer`).
     pub alpha: f32,
+    /// Uniform scale factor about the page's paint area, composited via
+    /// [`PaintScene::push_transform`](frust_core::PaintScene::push_transform).
+    /// `1.0` for every preset except [`PageTransition::M3FadeThrough`], whose
+    /// incoming page scales [`M3_FADE_THROUGH_SCALE_START`]`→1.0` as it fades in
+    /// (research §7.3). The navigator brackets the page's paint with the scale
+    /// transform when this differs from `1.0`.
+    pub scale: f64,
 }
 
 impl Layer {
-    /// A fully-visible, un-offset layer.
+    /// A fully-visible, un-offset, un-scaled layer.
     pub const IDENTITY: Layer = Layer {
         dx: 0.0,
         dy: 0.0,
         alpha: 1.0,
+        scale: 1.0,
     };
 }
 
@@ -405,26 +581,62 @@ pub fn resolve_layers(
                 dx: dir * (1.0 - p) * slide,
                 dy: 0.0,
                 alpha: ramp(pc, M3_FADE_SPLIT, 1.0),
+                scale: 1.0,
             };
             let leaving = Layer {
                 dx: -dir * p * slide,
                 dy: 0.0,
                 alpha: 1.0 - ramp(pc, 0.0, M3_FADE_SPLIT),
+                scale: 1.0,
             };
             (entering, leaving)
         }
 
         PageTransition::M3FadeThrough => {
-            // Pure cross-fade (scale spec'd but not applied — see the constant).
+            // Verified Flutter `FadeThroughTransition` staging (research §7.3):
+            // the outgoing page fades 1→0 over the first 6/20 of the timeline
+            // (`Cubic(0.4,0,1,1)`) then holds; the incoming page holds at
+            // `M3_FADE_THROUGH_SCALE_START` scale / 0 opacity for that 6/20,
+            // then fades in AND scales to 1.0 over the remaining 14/20
+            // (`Cubic(0,0,0.2,1)`) — opacity and scale track one shared segment.
+            let out = M3_FADE_THROUGH_OUT_CURVE.interval(0.0, M3_FADE_THROUGH_SPLIT);
+            let inc = M3_FADE_THROUGH_IN_CURVE.interval(M3_FADE_THROUGH_SPLIT, 1.0);
+            let in_progress = inc.transform(pc);
             let entering = Layer {
                 dx: 0.0,
                 dy: 0.0,
-                alpha: ramp(pc, M3_FADE_SPLIT, 1.0),
+                alpha: in_progress as f32,
+                scale: M3_FADE_THROUGH_SCALE_START
+                    + (1.0 - M3_FADE_THROUGH_SCALE_START) * in_progress,
             };
             let leaving = Layer {
                 dx: 0.0,
                 dy: 0.0,
-                alpha: 1.0 - ramp(pc, 0.0, M3_FADE_SPLIT),
+                alpha: (1.0 - out.transform(pc)) as f32,
+                scale: 1.0,
+            };
+            (entering, leaving)
+        }
+
+        PageTransition::Glyph => {
+            // Directional 16px slide + cross-fade (research §1.4 pattern 10).
+            // Push: entering enters from +16px; pop: from -16px (back reverses).
+            // The leaving page completes its fade by `GLYPH_FADE_SPLIT`, encoding
+            // "exits always faster than entrances" in the single-progress geometry;
+            // the theme-resolved enter/exit *durations* live in `preset_enter_exit`.
+            let slide = GLYPH_SLIDE_DP;
+            let dir = if is_pop { -1.0 } else { 1.0 };
+            let entering = Layer {
+                dx: dir * (1.0 - p) * slide,
+                dy: 0.0,
+                alpha: ramp(pc, GLYPH_FADE_SPLIT, 1.0),
+                scale: 1.0,
+            };
+            let leaving = Layer {
+                dx: -dir * p * slide,
+                dy: 0.0,
+                alpha: 1.0 - ramp(pc, 0.0, GLYPH_FADE_SPLIT),
+                scale: 1.0,
             };
             (entering, leaving)
         }
@@ -437,11 +649,13 @@ pub fn resolve_layers(
                     dx: -(1.0 - p) * w * IOS_PARALLAX_FRACTION,
                     dy: 0.0,
                     alpha: 1.0,
+                    scale: 1.0,
                 };
                 let leaving = Layer {
                     dx: p * w,
                     dy: 0.0,
                     alpha: 1.0,
+                    scale: 1.0,
                 };
                 (entering, leaving)
             } else {
@@ -451,11 +665,13 @@ pub fn resolve_layers(
                     dx: (1.0 - p) * w,
                     dy: 0.0,
                     alpha: 1.0,
+                    scale: 1.0,
                 };
                 let leaving = Layer {
                     dx: -p * w * IOS_PARALLAX_FRACTION,
                     dy: 0.0,
                     alpha: 1.0 - pc as f32 * IOS_DIM_MAX,
+                    scale: 1.0,
                 };
                 (entering, leaving)
             }
@@ -471,11 +687,13 @@ pub fn resolve_layers(
                     dx: 0.0,
                     dy: 0.0,
                     alpha: 1.0,
+                    scale: 1.0,
                 };
                 let leaving = Layer {
                     dx: 0.0,
                     dy: p * h,
                     alpha: 1.0,
+                    scale: 1.0,
                 };
                 (entering, leaving)
             } else {
@@ -486,11 +704,13 @@ pub fn resolve_layers(
                     dx: 0.0,
                     dy: (1.0 - p) * h,
                     alpha: 1.0,
+                    scale: 1.0,
                 };
                 let leaving = Layer {
                     dx: 0.0,
                     dy: 0.0,
                     alpha: 1.0,
+                    scale: 1.0,
                 };
                 (entering, leaving)
             }
@@ -615,10 +835,191 @@ mod tests {
     }
 
     #[test]
-    fn fade_through_is_pure_crossfade() {
+    fn fade_through_has_no_horizontal_slide() {
+        // Fade-through is a staged fade + incoming scale-up (verified Flutter
+        // `FadeThroughTransition` staging, research §7.3), never a slide: both
+        // pages stay horizontally at rest at every progress.
         let (enter, leave) = resolve_layers(PageTransition::M3FadeThrough, 0.5, false, SIZE);
         assert_eq!(enter.dx, 0.0);
         assert_eq!(leave.dx, 0.0);
+    }
+
+    #[test]
+    fn fade_through_staged_opacity_and_scale_table() {
+        // Verified Flutter `FadeThroughTransition` staging (research §7.3):
+        // outgoing fades 1→0 over the first 6/20 (`Cubic(0.4,0,1,1)`) then holds;
+        // incoming holds at 0.92 scale / 0 opacity for 6/20 then fades in AND
+        // scales to 1.0 over the remaining 14/20 (`Cubic(0,0,0.2,1)`).
+        // Split = 6/20 = 0.30. Table at t ∈ {0, 0.3, 0.65, 1.0} for BOTH pages.
+        let ft = PageTransition::M3FadeThrough;
+
+        // t = 0: outgoing fully opaque at rest scale; incoming invisible at 0.92.
+        let (enter, leave) = resolve_layers(ft, 0.0, false, SIZE);
+        assert_eq!(leave.alpha, 1.0);
+        assert_eq!(leave.scale, 1.0);
+        assert_eq!(enter.alpha, 0.0);
+        assert!((enter.scale - 0.92).abs() < 1e-9);
+
+        // t = 0.30 (the 6/20 split): outgoing has just finished fading (0);
+        // incoming's window opens here — still 0 opacity / 0.92 scale.
+        let (enter, leave) = resolve_layers(ft, 0.30, false, SIZE);
+        assert!(leave.alpha.abs() < 1e-6, "outgoing gone by the split");
+        assert_eq!(enter.alpha, 0.0, "incoming fade-in opens at the split");
+        assert!((enter.scale - 0.92).abs() < 1e-9);
+
+        // t = 0.65: outgoing long gone; incoming mid fade-in. Local progress into
+        // the [0.30, 1.0] segment is (0.65-0.30)/0.70 = 0.5, eased by
+        // `Cubic(0,0,0.2,1)`. Opacity and scale track that one eased value.
+        let (enter, leave) = resolve_layers(ft, 0.65, false, SIZE);
+        assert_eq!(leave.alpha, 0.0);
+        let eased = Curve::Cubic(0.0, 0.0, 0.2, 1.0).transform(0.5);
+        assert!((enter.alpha as f64 - eased).abs() < 1e-6);
+        assert!((enter.scale - (0.92 + 0.08 * eased)).abs() < 1e-9);
+        // Flutter staging sanity: ≈0.84 opacity / ≈0.987 scale at this point.
+        assert!((enter.alpha as f64 - 0.839).abs() < 2e-2);
+        assert!((enter.scale - 0.987).abs() < 2e-2);
+
+        // t = 1.0: incoming fully arrived (opaque, unit scale); outgoing gone.
+        let (enter, leave) = resolve_layers(ft, 1.0, false, SIZE);
+        assert_eq!(enter.alpha, 1.0);
+        assert!((enter.scale - 1.0).abs() < 1e-9);
+        assert_eq!(leave.alpha, 0.0);
+        assert_eq!(leave.scale, 1.0);
+    }
+
+    #[test]
+    fn glyph_slides_directionally_and_crossfades() {
+        // Research §1.4 pattern 10: a 16px directional slide + cross-fade, no scale.
+        let g = PageTransition::Glyph;
+        // Push start: entering offset by the full slide, invisible; leaving at rest.
+        let (enter, leave) = resolve_layers(g, 0.0, false, SIZE);
+        assert_eq!(enter.dx, GLYPH_SLIDE_DP);
+        assert_eq!(enter.alpha, 0.0);
+        assert_eq!(enter.scale, 1.0);
+        assert_eq!(leave.dx, 0.0);
+        assert_eq!(leave.alpha, 1.0);
+        // Push end: entering at rest, opaque; leaving slid out one slide, transparent.
+        let (enter, leave) = resolve_layers(g, 1.0, false, SIZE);
+        assert_eq!(enter.dx, 0.0);
+        assert_eq!(enter.alpha, 1.0);
+        assert_eq!(leave.dx, -GLYPH_SLIDE_DP);
+        assert_eq!(leave.alpha, 0.0);
+    }
+
+    #[test]
+    fn glyph_pop_mirrors_push_direction() {
+        // Back reverses direction (research §1.4 pattern 10): entering comes from
+        // the left (negative offset), the popped page slides right.
+        let (enter, _leave) = resolve_layers(PageTransition::Glyph, 0.0, true, SIZE);
+        assert_eq!(enter.dx, -GLYPH_SLIDE_DP);
+        let (_enter, leave) = resolve_layers(PageTransition::Glyph, 1.0, true, SIZE);
+        assert_eq!(leave.dx, GLYPH_SLIDE_DP);
+    }
+
+    #[test]
+    fn glyph_enter_exit_durations_unthemed_fallback() {
+        // Unthemed fallback = research §1.4 pattern 10 authored values.
+        let (enter, exit) = preset_enter_exit(PageTransition::Glyph, None);
+        assert_eq!(enter, Timing::Duration(GLYPH_ENTER, GLYPH_SPATIAL_CURVE));
+        assert_eq!(exit, Timing::Duration(GLYPH_EXIT, GLYPH_EXIT_CURVE));
+        let (Timing::Duration(de, _), Timing::Duration(dx, _)) = (enter, exit) else {
+            panic!("expected duration timings");
+        };
+        assert_eq!(de, Duration::from_millis(340));
+        assert_eq!(dx, Duration::from_millis(150));
+        assert!(dx < de, "exits always faster than entrances");
+    }
+
+    #[test]
+    fn glyph_enter_exit_durations_from_theme_scheme() {
+        // With a scheme, enter/exit pull the slow/fast duration + spatial/exit
+        // easing tokens.
+        let m = MotionScheme::m3_expressive();
+        let (enter, exit) = preset_enter_exit(PageTransition::Glyph, Some(&m));
+        assert_eq!(
+            enter,
+            Timing::Duration(
+                Duration::from_secs_f64(m.durations.slow / 1000.0),
+                m.easing.spatial
+            )
+        );
+        assert_eq!(
+            exit,
+            Timing::Duration(
+                Duration::from_secs_f64(m.durations.fast / 1000.0),
+                m.easing.exit
+            )
+        );
+    }
+
+    #[test]
+    fn theme_default_timing_resolves_to_enter_and_passes_explicit_through() {
+        // `ThemeDefault` → the preset's enter timing (the driver's dominant motion).
+        let resolved = resolve_timing(Timing::ThemeDefault, PageTransition::Glyph, None);
+        assert_eq!(resolved, Timing::Duration(GLYPH_ENTER, GLYPH_SPATIAL_CURVE));
+        // An explicit timing passes through unchanged.
+        let explicit = Timing::Duration(Duration::from_millis(200), Curve::Linear);
+        assert_eq!(
+            resolve_timing(explicit, PageTransition::Glyph, None),
+            explicit
+        );
+    }
+
+    #[test]
+    fn resolve_spec_resolves_theme_default_when_motion_enabled() {
+        let m = MotionScheme::m3_expressive(); // reduce_motion == false
+        let resolved = resolve_spec(TransitionSpec::glyph(), Some(&m));
+        assert_eq!(resolved.preset, PageTransition::Glyph);
+        assert_eq!(
+            resolved.timing,
+            Timing::Duration(
+                Duration::from_secs_f64(m.durations.slow / 1000.0),
+                m.easing.spatial
+            )
+        );
+    }
+
+    #[test]
+    fn reduce_motion_collapses_every_preset_to_crossfade() {
+        // research §1.4 hard rule: reduced motion → ≤120ms linear crossfade for
+        // every animated pattern.
+        let mut m = MotionScheme::m3_expressive();
+        m.reduce_motion = true;
+        for preset in [
+            PageTransition::Glyph,
+            PageTransition::M3SharedAxisX,
+            PageTransition::IosPush,
+            PageTransition::SlideUp,
+            PageTransition::M3FadeThrough,
+        ] {
+            let resolved = resolve_spec(TransitionSpec::themed(preset), Some(&m));
+            assert_eq!(
+                resolved.preset,
+                PageTransition::M3FadeThrough,
+                "{preset:?} must collapse to the fade-through crossfade family"
+            );
+            let Timing::Duration(d, curve) = resolved.timing else {
+                panic!("reduced-motion must be a duration crossfade");
+            };
+            assert!(d <= Duration::from_millis(120), "{preset:?} not ≤120ms");
+            assert_eq!(curve, Curve::Linear, "{preset:?}");
+        }
+        // A non-animated (`None`) spec is left untouched under reduce_motion.
+        let none = resolve_spec(TransitionSpec::NONE, Some(&m));
+        assert_eq!(none.preset, PageTransition::None);
+    }
+
+    #[test]
+    fn make_driver_theme_default_falls_back_when_unresolved() {
+        // An unresolved `ThemeDefault` (no theme threaded) degrades to the M3
+        // default duration; it still runs 0→1 like any duration driver.
+        let (mut driver, _) = make_driver(Timing::ThemeDefault);
+        let a = driver.advance(ft_secs(0.0));
+        assert!(a.animating && !a.done);
+        // Runs to completion past the M3 default duration (300ms).
+        let a = driver.advance(ft_secs(1.0));
+        assert!(a.done);
+        assert_eq!(a.value, 1.0);
     }
 
     #[test]
