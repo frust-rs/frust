@@ -390,9 +390,9 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   directly.** A reactive field is typed `RwSignal<T>`, read/written through
   the facade's `Get`/`Set`/`Update` traits. **An `examples/*`/app crate's
   `Cargo.toml` depends on `frust` plus plugin crates only** — the facade
-  never re-exports plugins (Plugin Conventions below); `examples/huddle`'s
-  documented `frust-core`/`kurbo`/`peniko` escape hatch is the one
-  exception, for gaps no facade widget covers yet.
+  never re-exports plugins (Plugin Conventions below); a documented
+  `frust-core`/`kurbo`(/`peniko`) escape hatch (`examples/huddle`,
+  `examples/glyph-catalog`) is sanctioned, for gaps no facade widget covers.
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
   untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
   *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
