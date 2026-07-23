@@ -126,6 +126,57 @@ const SHADOW_Y: f64 = 6.0;
 const SHADOW_BLUR: f64 = 16.0;
 const SHADOW_ALPHA: f32 = 0.28;
 
+// ---- Large-variant metrics (`glyph-appbar.html` §02, retrieved 2026-07-22) --
+
+/// Large-bar top padding at rest, logical px (`.appbar-large{padding-top:6px}`),
+/// interpolated `6→0` by collapse progress (`paddingTop = 6 - 6*progress`).
+const LARGE_PAD_TOP: f64 = 6.0;
+/// Large-bar bottom padding at rest, logical px
+/// (`.appbar-large{padding-bottom:10px}`), interpolated `10→0`
+/// (`paddingBottom = 10 - 10*progress`).
+const LARGE_PAD_BOTTOM: f64 = 10.0;
+/// Big-title font size at rest, logical px (`.ab-big-title{font-size:19px}`).
+const BIG_TITLE_SIZE_MAX: f32 = 19.0;
+/// Big-title font-size collapse span (`fontSize = 19 - 6*progress`), so the
+/// fully-collapsed size is `BIG_TITLE_SIZE_MAX - BIG_TITLE_SIZE_SPAN = 13px`,
+/// exactly the compact [`TITLE_SIZE`].
+const BIG_TITLE_SIZE_SPAN: f32 = 6.0;
+/// Big-title horizontal padding, logical px (`.ab-big-title{padding:8px 12px}`).
+const BIG_TITLE_PAD_X: f64 = 12.0;
+/// Big-title top padding, logical px (the `8px` of `padding:8px 12px 2px`).
+const BIG_TITLE_PAD_TOP: f64 = 8.0;
+/// Big-title bottom padding at rest, logical px (the `2px` of
+/// `padding:8px 12px 2px`), interpolated `2→0` (`paddingBottom = 2*(1-progress)`).
+const BIG_TITLE_PAD_BOTTOM: f64 = 2.0;
+/// Meta-row height at rest, logical px (`.ab-meta-row` shown at `max-height:20px`
+/// in the HTML), interpolated `20→0` by collapse progress + a `1-progress` fade.
+const META_HEIGHT: f64 = 20.0;
+/// Meta-row horizontal padding, logical px (`.ab-meta-row{padding:0 12px}`).
+const META_PAD_X: f64 = 12.0;
+
+// ---- Connection-banner metrics (`glyph-appbar.html` §06) --------------------
+
+/// Banner strip height when fully open, logical px
+/// (`.conn-banner.show{max-height:40px}`).
+const BANNER_HEIGHT: f64 = 40.0;
+/// Banner horizontal padding, logical px (`.conn-banner.show{padding:10px 16px}`).
+const BANNER_PAD_X: f64 = 16.0;
+/// Banner text size, logical px (`.conn-banner{font-size:11px}`).
+const BANNER_FONT_SIZE: f32 = 11.0;
+/// Banner warning-tint background alpha (`--warning-faint:rgba(...,0.15)`).
+const BANNER_WARNING_BG_ALPHA: f32 = 0.15;
+/// Banner success-tint background alpha (`--success-faint:rgba(...,0.12)`).
+const BANNER_SUCCESS_BG_ALPHA: f32 = 0.12;
+/// Banner bottom-border alpha, both variants (`--warning-border`/the
+/// `rgba(95,216,143,0.35)` success border-color).
+const BANNER_BORDER_ALPHA: f32 = 0.35;
+/// Banner open/close animation duration (`max-height .32s` spring;
+/// `--ease-spring` collapses to linear under `reduce_motion`).
+const BANNER_DURATION: Duration = Duration::from_millis(320);
+/// The HTML's `--ease-spring` (`cubic-bezier(0.34,1.4,0.55,1)`), the banner's
+/// open/close curve.
+const BANNER_CURVE: Curve = Curve::Cubic(0.34, 1.4, 0.55, 1.0);
+
 // ---- Unthemed fallback constants (Glyph **dark** values) -------------------
 
 /// Bar surface — `--bg-surface` / themed `surface_container`.
@@ -142,6 +193,10 @@ const FALLBACK_ACCENT: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
 const FALLBACK_WASH: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
 /// Elevated shadow color base — black (themed `scheme.shadow`).
 const FALLBACK_SHADOW: Color = Color::from_rgb8(0x00, 0x00, 0x00);
+/// Banner warning ink — `--warning` / themed `StatusPalette::warning`.
+const FALLBACK_BANNER_WARNING: Color = Color::from_rgb8(0xf5, 0xc8, 0x60);
+/// Banner success ink — `--success` / themed `StatusPalette::success`.
+const FALLBACK_BANNER_SUCCESS: Color = Color::from_rgb8(0x5f, 0xd8, 0x8f);
 
 /// The resolved bar color set.
 struct BarColors {
@@ -183,6 +238,42 @@ fn resolve_colors(theme: Option<&Theme>) -> BarColors {
     }
 }
 
+/// The resolved `(background, border, ink)` triple for a connection banner
+/// variant. Success/Warning resolve `StatusPalette` first (the badge
+/// Success/Warning precedent — extension-first, Glyph-dark constant fallback);
+/// the tint/border are the ink at [`BANNER_WARNING_BG_ALPHA`]/
+/// [`BANNER_SUCCESS_BG_ALPHA`] and [`BANNER_BORDER_ALPHA`] respectively.
+fn resolve_banner_colors(theme: Option<&Theme>, variant: BannerVariant) -> (Color, Color, Color) {
+    let ink = match theme {
+        Some(theme) => match theme.extension::<frust_theme::StatusPalette>() {
+            Some(status) => {
+                let c = status.colors(theme.brightness);
+                match variant {
+                    BannerVariant::Warning => c.warning,
+                    BannerVariant::Success => c.success,
+                }
+            }
+            None => match variant {
+                BannerVariant::Warning => FALLBACK_BANNER_WARNING,
+                BannerVariant::Success => FALLBACK_BANNER_SUCCESS,
+            },
+        },
+        None => match variant {
+            BannerVariant::Warning => FALLBACK_BANNER_WARNING,
+            BannerVariant::Success => FALLBACK_BANNER_SUCCESS,
+        },
+    };
+    let bg_alpha = match variant {
+        BannerVariant::Warning => BANNER_WARNING_BG_ALPHA,
+        BannerVariant::Success => BANNER_SUCCESS_BG_ALPHA,
+    };
+    (
+        with_alpha(ink, bg_alpha),
+        with_alpha(ink, BANNER_BORDER_ALPHA),
+        ink,
+    )
+}
+
 /// Replace `color`'s alpha channel with `alpha` (the per-module helper shape
 /// used across `frust-widgets`).
 fn with_alpha(color: Color, alpha: f32) -> Color {
@@ -194,6 +285,30 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 /// against.
 fn mono_family() -> FontFamily {
     FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+}
+
+/// The Glyph `display` (Space Mono) font stack the large-variant big title
+/// shapes against (`.ab-big-title{font-family:var(--font-display)}`, §02).
+fn display_family() -> FontFamily {
+    FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace)
+}
+
+/// The big-title style at the collapse-interpolated `size` (display font, bold).
+fn big_title_style(size: f32, color: Color) -> TextStyle {
+    TextStyle {
+        family: display_family(),
+        weight: FontWeight::BOLD,
+        ..TextStyle::new(size, color)
+    }
+}
+
+/// The connection-banner text style (body mono, 11px).
+fn banner_style(color: Color) -> TextStyle {
+    TextStyle {
+        family: mono_family(),
+        weight: FontWeight::REGULAR,
+        ..TextStyle::new(BANNER_FONT_SIZE, color)
+    }
 }
 
 fn title_style(color: Color) -> TextStyle {
@@ -335,6 +450,54 @@ fn count_text(count: usize) -> String {
     format!("{count} selected")
 }
 
+/// Which tint a [`BannerSpec`] paints (§06): the connection-loss warning strip
+/// or the `recovered` success flash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BannerVariant {
+    /// The connection-loss warning strip (`--warning` tint).
+    Warning,
+    /// The reconnect-success flash (`--success` tint, the HTML's `recovered`
+    /// state).
+    Success,
+}
+
+/// A connection-loss banner strip (§06): a caller-supplied `text` line under a
+/// `variant` tint. The countdown/text content is app-driven (re-rendered per
+/// rebuild); auto-dismiss timing is app-side, never baked in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BannerSpec {
+    text: String,
+    variant: BannerVariant,
+}
+
+/// Create a [`BannerSpec`] with `text` under the given `variant` tint.
+pub fn banner_spec(text: impl Into<String>, variant: BannerVariant) -> BannerSpec {
+    BannerSpec {
+        text: text.into(),
+        variant,
+    }
+}
+
+/// The large scroll-collapse configuration (§02): a `big_title` shown at 19px
+/// display font over a caller-supplied `meta` row (heartbeat/latency
+/// compositions come from the app). Collapse is driven by
+/// [`AppBarView::collapse_progress`], not this struct.
+pub struct LargeConfig<State: 'static> {
+    big_title: String,
+    meta: AnyView<State>,
+}
+
+/// Create a [`LargeConfig`] with `big_title` over the app-supplied `meta` row.
+pub fn large_config<State: 'static>(
+    big_title: impl Into<String>,
+    meta: AnyView<State>,
+) -> LargeConfig<State> {
+    LargeConfig {
+        big_title: big_title.into(),
+        meta,
+    }
+}
+
 /// A declarative Glyph top AppBar. See the [module docs](self).
 pub struct AppBarView<State: 'static> {
     title: String,
@@ -344,6 +507,9 @@ pub struct AppBarView<State: 'static> {
     elevated: bool,
     title_direction: TitleDirection,
     selection: Option<SelectionBar<State>>,
+    large: Option<LargeConfig<State>>,
+    collapse_progress: f64,
+    banner: Option<BannerSpec>,
 }
 
 /// Create a Glyph AppBar titled `title`, with no leading slot, actions,
@@ -357,6 +523,9 @@ pub fn app_bar<State: 'static>(title: impl Into<String>) -> AppBarView<State> {
         elevated: false,
         title_direction: TitleDirection::Forward,
         selection: None,
+        large: None,
+        collapse_progress: 0.0,
+        banner: None,
     }
 }
 
@@ -407,6 +576,34 @@ impl<State: 'static> AppBarView<State> {
         self.selection = selection;
         self
     }
+
+    /// Enable the large scroll-collapse variant (§02): a big display-font title
+    /// over an app-supplied meta row. Drive its collapse with
+    /// [`Self::collapse_progress`]. Selection mode (§05) takes precedence — a
+    /// bar that is both `large` and in `selection` renders the compact
+    /// selection face.
+    pub fn large(mut self, config: LargeConfig<State>) -> Self {
+        self.large = Some(config);
+        self
+    }
+
+    /// Set the large variant's collapse progress `0.0..=1.0` (§02). The app
+    /// computes this from its own scroll offset (`min(1, offset/60)` in the
+    /// research HTML); the bar interpolates its padding, big-title size, and
+    /// meta-row height/fade from it. No-op unless [`Self::large`] is set.
+    pub fn collapse_progress(mut self, progress: f64) -> Self {
+        self.collapse_progress = progress.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Attach (or clear) the connection-loss banner strip beneath the bar
+    /// (§06). `Some` animates the strip open across rebuilds; `None` animates it
+    /// closed. The countdown/text content is app-driven; auto-dismiss timing is
+    /// app-side, never baked in.
+    pub fn banner(mut self, banner: Option<BannerSpec>) -> Self {
+        self.banner = banner;
+        self
+    }
 }
 
 /// Collect the current face's interactive child views into one ordered slice —
@@ -443,17 +640,51 @@ pub struct AppBarWidget {
     on_close: Option<crate::ErasedCallback>,
     title_direction: TitleDirection,
     elevated_target: bool,
+    // --- large variant (§02) ---
+    /// Whether the current view carries a [`LargeConfig`] (its layout is only
+    /// *active* when not also in selection mode — see `large_active`).
+    large_present: bool,
+    big_title: ShapedRun,
+    big_title_text: String,
+    /// The app-supplied meta row (heartbeat/latency), present iff `large_present`.
+    meta: Option<ChildPod>,
+    /// Input-driven collapse progress `0.0..=1.0` (not animated internally).
+    collapse_progress: f64,
+    // --- connection banner (§06) ---
+    banner_present: bool,
+    banner_run: ShapedRun,
+    banner_text: Option<String>,
+    banner_variant: BannerVariant,
     // --- animation state (advanced from `PaintCtx::frame_time`) ---
     elev_progress: f64,
     sel_progress: f64,
+    /// Banner open/close progress (`0.0` = closed, `1.0` = fully open).
+    banner_progress: f64,
+    /// Whether the banner's open/close animation was still in flight at the last
+    /// `advance` (drives `request_layout`, since banner height is layout-bound).
+    banner_animating: bool,
     title_stage: Option<TitleStage>,
     last_time: Option<FrameTime>,
     // --- layout-cached geometry (local coordinates) ---
     top_inset: f64,
     total_size: Size,
+    /// The bar's own height (inset + content, excluding any banner strip). The
+    /// surface/shadow/elevation border paint to this, so the banner area below
+    /// stays uncovered.
+    bar_height: f64,
     title_pos: Point,
     subtitle_pos: Point,
     count_pos: Point,
+    /// Big-title origin + interpolated font size, large variant (local coords).
+    big_title_pos: Point,
+    big_title_size_px: f32,
+    /// Meta-row origin + fade alpha, large variant (local coords).
+    meta_pos: Point,
+    meta_alpha: f32,
+    /// The banner strip's box, in widget-local coordinates (height reflects the
+    /// last-laid `banner_progress`).
+    banner_rect: Rect,
+    banner_text_pos: Point,
     /// The selection close button's hit box, in widget-local coordinates.
     close_rect: Rect,
     close_pressed: bool,
@@ -469,6 +700,12 @@ impl<State: 'static> View<State> for AppBarView<State> {
             .map(|v| crate::build_child(v, ctx))
             .collect();
         let selection_present = self.selection.is_some();
+        let large_present = self.large.is_some();
+        let meta = self
+            .large
+            .as_ref()
+            .map(|l| crate::build_child(&l.meta, ctx));
+        let banner_present = self.banner.is_some();
         AppBarWidget {
             title: ShapedRun::new(self.title.clone()),
             title_text: self.title.clone(),
@@ -485,15 +722,47 @@ impl<State: 'static> View<State> for AppBarView<State> {
                 .map(|s| crate::erase_callback(&s.on_close)),
             title_direction: self.title_direction,
             elevated_target: self.elevated,
+            large_present,
+            big_title: ShapedRun::new(
+                self.large
+                    .as_ref()
+                    .map_or(String::new(), |l| l.big_title.clone()),
+            ),
+            big_title_text: self
+                .large
+                .as_ref()
+                .map_or(String::new(), |l| l.big_title.clone()),
+            meta,
+            collapse_progress: self.collapse_progress,
+            banner_present,
+            banner_run: ShapedRun::new(
+                self.banner
+                    .as_ref()
+                    .map_or(String::new(), |b| b.text.clone()),
+            ),
+            banner_text: self.banner.as_ref().map(|b| b.text.clone()),
+            banner_variant: self
+                .banner
+                .as_ref()
+                .map_or(BannerVariant::Warning, |b| b.variant),
             elev_progress: if self.elevated { 1.0 } else { 0.0 },
             sel_progress: if selection_present { 1.0 } else { 0.0 },
+            banner_progress: if banner_present { 1.0 } else { 0.0 },
+            banner_animating: false,
             title_stage: None,
             last_time: None,
             top_inset: 0.0,
             total_size: Size::ZERO,
+            bar_height: 0.0,
             title_pos: Point::ZERO,
             subtitle_pos: Point::ZERO,
             count_pos: Point::ZERO,
+            big_title_pos: Point::ZERO,
+            big_title_size_px: BIG_TITLE_SIZE_MAX,
+            meta_pos: Point::ZERO,
+            meta_alpha: 1.0,
+            banner_rect: Rect::ZERO,
+            banner_text_pos: Point::ZERO,
             close_rect: Rect::ZERO,
             close_pressed: false,
             close_captured: false,
@@ -588,6 +857,57 @@ impl<State: 'static> View<State> for AppBarView<State> {
                 .as_ref()
                 .map(|s| crate::erase_callback(&s.on_close));
         }
+
+        // Large variant reconcile (§02). Collapse is input-driven — a progress
+        // change relayouts via dirty flags (no internal animation controller),
+        // so mark LAYOUT here rather than driving a paint-time timeline.
+        element.collapse_progress = self.collapse_progress;
+        if prev.collapse_progress != self.collapse_progress {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        match (&prev.large, &self.large) {
+            (Some(prev_l), Some(next_l)) => {
+                if prev_l.big_title != next_l.big_title {
+                    element.big_title = ShapedRun::new(next_l.big_title.clone());
+                    element.big_title_text = next_l.big_title.clone();
+                    flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+                }
+                if let Some(pod) = element.meta.as_mut() {
+                    flags |= crate::rebuild_child(&prev_l.meta, &next_l.meta, pod, ctx);
+                }
+            }
+            (None, Some(next_l)) => {
+                element.big_title = ShapedRun::new(next_l.big_title.clone());
+                element.big_title_text = next_l.big_title.clone();
+                element.meta = Some(crate::build_child(&next_l.meta, ctx));
+                flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            }
+            (Some(prev_l), None) => {
+                if let Some(pod) = element.meta.as_mut() {
+                    crate::teardown_child(&prev_l.meta, pod, ctx);
+                }
+                element.meta = None;
+                flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            }
+            (None, None) => {}
+        }
+        element.large_present = self.large.is_some();
+
+        // Connection banner reconcile (§06). A spec change (presence or
+        // text/variant) restages the show/hide animation; banner height is
+        // layout-bound, so its in-flight animation calls `request_layout` from
+        // paint (see `AppBarWidget::advance`/`paint`). Clearing to `None` keeps
+        // the last run/variant so the close animation fades the content out.
+        if prev.banner != self.banner {
+            element.banner_present = self.banner.is_some();
+            if let Some(b) = &self.banner {
+                element.banner_variant = b.variant;
+                element.banner_text = Some(b.text.clone());
+                element.banner_run = ShapedRun::new(b.text.clone());
+            }
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+
         flags
     }
 
@@ -597,6 +917,9 @@ impl<State: 'static> View<State> for AppBarView<State> {
             .zip(element.interactive.iter_mut())
         {
             crate::teardown_child(view, pod, ctx);
+        }
+        if let (Some(large), Some(pod)) = (&self.large, element.meta.as_mut()) {
+            crate::teardown_child(&large.meta, pod, ctx);
         }
     }
 }
@@ -634,12 +957,27 @@ impl AppBarWidget {
         let mut animating = false;
         let elev_target = if self.elevated_target { 1.0 } else { 0.0 };
         let sel_target = if self.selection_present { 1.0 } else { 0.0 };
+        let banner_target = if self.banner_present { 1.0 } else { 0.0 };
         if reduce_motion {
             self.elev_progress = elev_target;
             self.sel_progress = sel_target;
+            self.banner_progress = banner_target;
+            self.banner_animating = false;
         } else {
             animating |= step(&mut self.elev_progress, elev_target, dt, ELEVATION_DURATION);
             animating |= step(&mut self.sel_progress, sel_target, dt, SELECTION_DURATION);
+            // The banner is height-animated (layout-bound): track its in-flight
+            // state separately so `paint` can `request_layout` rather than a
+            // plain `request_frame`. `BANNER_CURVE`'s spring overshoot is folded
+            // into the eased height/fade at paint time, not the linear driver
+            // here (the driver stays monotone so height never rewinds).
+            self.banner_animating = step(
+                &mut self.banner_progress,
+                banner_target,
+                dt,
+                BANNER_DURATION,
+            );
+            animating |= self.banner_animating;
         }
 
         if let Some(stage) = &mut self.title_stage {
@@ -673,7 +1011,11 @@ impl AppBarWidget {
 
 impl Widget for AppBarWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let colors = resolve_colors(Theme::from_layout_ctx(ctx));
+        // Resolve every color to an owned value up front so the immutable theme
+        // borrow ends before the `&mut ctx` child-layout calls below.
+        let theme = Theme::from_layout_ctx(ctx);
+        let colors = resolve_colors(theme);
+        let banner_ink = resolve_banner_colors(theme, self.banner_variant).2;
 
         let width = if bc.max().width.is_finite() {
             bc.max().width
@@ -682,6 +1024,52 @@ impl Widget for AppBarWidget {
         };
         let top_inset = ctx.window_insets().padding().top;
         self.top_inset = top_inset;
+
+        // The bar's own height, laid out either as the large scroll-collapse
+        // variant (§02) or the compact three-zone bar (§01). Selection mode
+        // (§05) takes precedence over `large`.
+        let large_active = self.large_present && !self.selection_present;
+        let bar_height = if large_active {
+            self.layout_large(ctx, &colors, width, top_inset)
+        } else {
+            self.layout_compact(ctx, &colors, width, top_inset)
+        };
+        self.bar_height = bar_height;
+
+        // Connection banner strip (§06) beneath the bar. Its height tracks the
+        // eased open/close progress — layout-bound, so paint requests relayout
+        // while it animates.
+        let banner_height = self.layout_banner(ctx, banner_ink, width, bar_height);
+
+        let total = bc.constrain(Size::new(width, bar_height + banner_height));
+        self.total_size = total;
+        total
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.paint_impl(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        self.event_impl(ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        self.semantics_impl(ctx);
+    }
+}
+
+impl AppBarWidget {
+    /// Lay out the compact three-zone bar (§01), returning its total height
+    /// (`top_inset + BAR_HEIGHT`). Unchanged from task 04 — factored out of
+    /// `Widget::layout` so the large variant can slot in beside it.
+    fn layout_compact(
+        &mut self,
+        ctx: &mut LayoutCtx,
+        colors: &BarColors,
+        width: f64,
+        top_inset: f64,
+    ) -> f64 {
         let content_top = top_inset;
         let icon_y = content_top + (BAR_HEIGHT - ICON_SIZE) / 2.0;
         let slot_bc = BoxConstraints::loose(Size::new(f64::INFINITY, BAR_HEIGHT));
@@ -753,39 +1141,145 @@ impl Widget for AppBarWidget {
         let count_h = self.count.size().height;
         self.count_pos = Point::new(zone_x, content_top + (BAR_HEIGHT - count_h) / 2.0);
 
-        let total = bc.constrain(Size::new(width, BAR_HEIGHT + top_inset));
-        self.total_size = total;
-        total
+        top_inset + BAR_HEIGHT
     }
 
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+    /// Lay out the large scroll-collapse variant (§02), returning its total
+    /// height. Geometry interpolates on `collapse_progress`: paddings `6→0` /
+    /// `10→0`, big-title size `19→13`, big-title bottom padding `2→0`, meta-row
+    /// height `20→0` + fade. Row 1 (leading + trailing actions) reuses the
+    /// compact slot geometry; the compact title/subtitle/count are unused here.
+    fn layout_large(
+        &mut self,
+        ctx: &mut LayoutCtx,
+        colors: &BarColors,
+        width: f64,
+        top_inset: f64,
+    ) -> f64 {
+        let p = self.collapse_progress;
+        let pad_top = LARGE_PAD_TOP * (1.0 - p);
+        let pad_bottom = LARGE_PAD_BOTTOM * (1.0 - p);
+        let row1_top = top_inset + pad_top;
+
+        // Row 1: leading + trailing actions, laid within an ICON_SIZE band. The
+        // big title (below) is the title zone, so row 1 carries no compact title.
+        self.close_rect = Rect::ZERO;
+        let slot_bc = BoxConstraints::loose(Size::new(f64::INFINITY, ICON_SIZE));
+        let action_start = if self.has_leading {
+            let size = self.interactive[0].layout_child(ctx, &slot_bc);
+            self.interactive[0].set_origin(Point::new(
+                PAD_X,
+                row1_top + (ICON_SIZE - size.height) / 2.0,
+            ));
+            1
+        } else {
+            0
+        };
+        let mut right = width - PAD_X;
+        for pod in self.interactive[action_start..].iter_mut().rev() {
+            let size = pod.layout_child(ctx, &slot_bc);
+            right -= size.width;
+            pod.set_origin(Point::new(
+                right,
+                row1_top + (ICON_SIZE - size.height) / 2.0,
+            ));
+            right -= SLOT_GAP;
+        }
+        let row1_bottom = row1_top + ICON_SIZE;
+
+        // Big title (display font, interpolated size).
+        let size_px = BIG_TITLE_SIZE_MAX - BIG_TITLE_SIZE_SPAN * p as f32;
+        self.big_title_size_px = size_px;
+        let bt_max_w = (width - 2.0 * BIG_TITLE_PAD_X).max(0.0);
+        let bt_size = self.big_title.layout(
+            ctx,
+            &big_title_style(size_px, colors.title_ink),
+            Some(bt_max_w as f32),
+        );
+        let bt_top = row1_bottom + BIG_TITLE_PAD_TOP;
+        self.big_title_pos = Point::new(BIG_TITLE_PAD_X, bt_top);
+        let bt_pad_bottom = BIG_TITLE_PAD_BOTTOM * (1.0 - p);
+        let bt_bottom = bt_top + bt_size.height + bt_pad_bottom;
+
+        // Meta row: collapses `20→0` with a `1-progress` fade.
+        self.meta_alpha = (1.0 - p) as f32;
+        let meta_h = META_HEIGHT * (1.0 - p);
+        self.meta_pos = Point::new(META_PAD_X, bt_bottom);
+        if let Some(pod) = self.meta.as_mut() {
+            let meta_bc =
+                BoxConstraints::loose(Size::new((width - 2.0 * META_PAD_X).max(0.0), META_HEIGHT));
+            let msize = pod.layout_child(ctx, &meta_bc);
+            pod.set_origin(Point::new(
+                META_PAD_X,
+                bt_bottom + (meta_h - msize.height).max(0.0) / 2.0,
+            ));
+        }
+
+        bt_bottom + meta_h + pad_bottom
+    }
+
+    /// Lay out the connection banner strip (§06) beneath the bar, returning its
+    /// eased height (`0` when fully closed and absent). The strip's box and the
+    /// centered text position are cached in local coordinates.
+    fn layout_banner(
+        &mut self,
+        ctx: &mut LayoutCtx,
+        ink: Color,
+        width: f64,
+        bar_bottom: f64,
+    ) -> f64 {
+        if !self.banner_present && self.banner_progress <= 0.0 {
+            self.banner_rect = Rect::ZERO;
+            return 0.0;
+        }
+        let eased = BANNER_CURVE.transform(self.banner_progress).max(0.0);
+        let banner_h = BANNER_HEIGHT * eased;
+        self.banner_rect =
+            Rect::from_origin_size(Point::new(0.0, bar_bottom), Size::new(width, banner_h));
+        let max_w = (width - 2.0 * BANNER_PAD_X).max(0.0);
+        let tsize = self
+            .banner_run
+            .layout(ctx, &banner_style(ink), Some(max_w as f32));
+        self.banner_text_pos =
+            Point::new(BANNER_PAD_X, bar_bottom + (banner_h - tsize.height) / 2.0);
+        banner_h
+    }
+
+    fn paint_impl(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
         let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
         let colors = resolve_colors(theme);
         let animating = self.advance(ctx.frame_time(), reduce_motion);
 
+        let banner_colors = resolve_banner_colors(theme, self.banner_variant);
+
         let origin = ctx.origin();
         let size = ctx.size();
+        // The surface/shadow/elevation border paint to the bar's own height so
+        // the banner strip below stays uncovered; `push_layer` bounds still use
+        // the full size (they are only alpha-clip bounds).
+        let bar_size = Size::new(size.width, self.bar_height);
+        let large_active = self.large_present && !self.selection_present;
 
         // Elevated drop shadow, beneath the surface fill so the surface covers
         // the shadow's near edge.
         if self.elev_progress > 0.0 {
             scene.draw_shadow(
                 Point::new(origin.x, origin.y + SHADOW_Y),
-                size,
+                bar_size,
                 0.0,
                 SHADOW_BLUR,
                 with_alpha(colors.shadow, SHADOW_ALPHA * self.elev_progress as f32),
             );
         }
 
-        // Surface: fills the full extended height (running under the status
+        // Surface: fills the bar's extended height (running under the status
         // bar), plus the selection wash overlay.
-        scene.fill_rect(origin, size, colors.surface);
+        scene.fill_rect(origin, bar_size, colors.surface);
         if self.sel_progress > 0.0 {
             scene.fill_rect(
                 origin,
-                size,
+                bar_size,
                 with_alpha(colors.wash, SELECTION_WASH_ALPHA * self.sel_progress as f32),
             );
         }
@@ -793,87 +1287,165 @@ impl Widget for AppBarWidget {
         // Elevated bottom hairline border.
         if self.elev_progress > 0.0 {
             scene.fill_rect(
-                Point::new(origin.x, origin.y + size.height - 1.0),
-                Size::new(size.width, 1.0),
+                Point::new(origin.x, origin.y + bar_size.height - 1.0),
+                Size::new(bar_size.width, 1.0),
                 with_alpha(colors.border, self.elev_progress as f32),
             );
         }
 
-        // Interactive children (current face), faded by the morph progress.
-        let child_alpha = if self.selection_present {
-            self.sel_progress
-        } else {
-            1.0 - self.sel_progress
-        } as f32;
-        if child_alpha > 0.0 {
-            let layered = child_alpha < 1.0;
-            if layered {
-                scene.push_layer(origin, size, child_alpha);
-            }
+        if large_active {
+            // Large variant (§02): row-1 children (no selection morph fade), the
+            // big display title, and the collapse-faded meta row.
             for pod in &mut self.interactive {
                 pod.paint_child(ctx, scene);
             }
-            if layered {
-                scene.pop_layer();
-            }
-        }
-
-        // Selection close button (owned), fading in with the morph.
-        if self.sel_progress > 0.0 {
-            self.paint_close(origin, colors.accent, self.sel_progress as f32, scene);
-        }
-
-        // Normal title-zone content (title + subtitle), fading/sliding out under
-        // the selection morph.
-        let normal_alpha = (1.0 - self.sel_progress) as f32;
-        if normal_alpha > 0.0 {
-            let dy = -SELECTION_SHIFT * self.sel_progress;
-            scene.push_transform(Affine::translate((0.0, dy)));
-            let layered = normal_alpha < 1.0;
-            if layered {
-                scene.push_layer(origin, size, normal_alpha);
-            }
-            self.paint_title(origin, scene);
-            if let Some(subtitle) = &self.subtitle {
-                subtitle.paint(
-                    Point::new(
-                        origin.x + self.subtitle_pos.x,
-                        origin.y + self.subtitle_pos.y,
-                    ),
-                    scene,
-                );
-            }
-            if layered {
-                scene.pop_layer();
-            }
-            scene.pop_transform();
-        }
-
-        // Selection count content, fading/sliding in.
-        if self.sel_progress > 0.0 {
-            let dy = SELECTION_SHIFT * (1.0 - self.sel_progress);
-            scene.push_transform(Affine::translate((0.0, dy)));
-            let alpha = self.sel_progress as f32;
-            let layered = alpha < 1.0;
-            if layered {
-                scene.push_layer(origin, size, alpha);
-            }
-            self.count.paint(
-                Point::new(origin.x + self.count_pos.x, origin.y + self.count_pos.y),
+            self.big_title.paint(
+                Point::new(
+                    origin.x + self.big_title_pos.x,
+                    origin.y + self.big_title_pos.y,
+                ),
                 scene,
             );
-            if layered {
-                scene.pop_layer();
+            if self.meta_alpha > 0.0
+                && let Some(pod) = self.meta.as_mut()
+            {
+                let layered = self.meta_alpha < 1.0;
+                if layered {
+                    scene.push_layer(origin, size, self.meta_alpha);
+                }
+                pod.paint_child(ctx, scene);
+                if layered {
+                    scene.pop_layer();
+                }
             }
-            scene.pop_transform();
+        } else {
+            // Compact face (§01/§03/§05).
+            // Interactive children (current face), faded by the morph progress.
+            let child_alpha = if self.selection_present {
+                self.sel_progress
+            } else {
+                1.0 - self.sel_progress
+            } as f32;
+            if child_alpha > 0.0 {
+                let layered = child_alpha < 1.0;
+                if layered {
+                    scene.push_layer(origin, size, child_alpha);
+                }
+                for pod in &mut self.interactive {
+                    pod.paint_child(ctx, scene);
+                }
+                if layered {
+                    scene.pop_layer();
+                }
+            }
+
+            // Selection close button (owned), fading in with the morph.
+            if self.sel_progress > 0.0 {
+                self.paint_close(origin, colors.accent, self.sel_progress as f32, scene);
+            }
+
+            // Normal title-zone content (title + subtitle), fading/sliding out
+            // under the selection morph.
+            let normal_alpha = (1.0 - self.sel_progress) as f32;
+            if normal_alpha > 0.0 {
+                let dy = -SELECTION_SHIFT * self.sel_progress;
+                scene.push_transform(Affine::translate((0.0, dy)));
+                let layered = normal_alpha < 1.0;
+                if layered {
+                    scene.push_layer(origin, size, normal_alpha);
+                }
+                self.paint_title(origin, scene);
+                if let Some(subtitle) = &self.subtitle {
+                    subtitle.paint(
+                        Point::new(
+                            origin.x + self.subtitle_pos.x,
+                            origin.y + self.subtitle_pos.y,
+                        ),
+                        scene,
+                    );
+                }
+                if layered {
+                    scene.pop_layer();
+                }
+                scene.pop_transform();
+            }
+
+            // Selection count content, fading/sliding in.
+            if self.sel_progress > 0.0 {
+                let dy = SELECTION_SHIFT * (1.0 - self.sel_progress);
+                scene.push_transform(Affine::translate((0.0, dy)));
+                let alpha = self.sel_progress as f32;
+                let layered = alpha < 1.0;
+                if layered {
+                    scene.push_layer(origin, size, alpha);
+                }
+                self.count.paint(
+                    Point::new(origin.x + self.count_pos.x, origin.y + self.count_pos.y),
+                    scene,
+                );
+                if layered {
+                    scene.pop_layer();
+                }
+                scene.pop_transform();
+            }
         }
 
-        if animating {
+        // Connection banner strip (§06) beneath the bar.
+        self.paint_banner(origin, banner_colors, scene);
+
+        // The banner is height-animated (layout-bound): while it animates, ask
+        // for a relayout (which implies another frame); otherwise a plain frame
+        // request covers the paint-only elevation/selection/title timelines.
+        if self.banner_animating {
+            ctx.request_layout();
+        } else if animating {
             ctx.request_frame();
         }
     }
 
-    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+    /// Paint the connection banner strip (§06): a `variant`-tinted fill, a bottom
+    /// hairline border, and the app-supplied text, all faded together by
+    /// `banner_progress`. No-op when the strip is fully closed.
+    fn paint_banner(
+        &self,
+        origin: Point,
+        colors: (Color, Color, Color),
+        scene: &mut dyn PaintScene,
+    ) {
+        let h = self.banner_rect.height();
+        if h <= 0.0 {
+            return;
+        }
+        let (bg, border, _ink) = colors;
+        let alpha = self.banner_progress.clamp(0.0, 1.0) as f32;
+        let bo = Point::new(
+            origin.x + self.banner_rect.x0,
+            origin.y + self.banner_rect.y0,
+        );
+        let bsize = Size::new(self.banner_rect.width(), h);
+        let layered = alpha < 1.0;
+        if layered {
+            scene.push_layer(bo, bsize, alpha);
+        }
+        scene.fill_rect(bo, bsize, bg);
+        scene.fill_rect(
+            Point::new(bo.x, bo.y + h - 1.0),
+            Size::new(bsize.width, 1.0),
+            border,
+        );
+        self.banner_run.paint(
+            Point::new(
+                origin.x + self.banner_text_pos.x,
+                origin.y + self.banner_text_pos.y,
+            ),
+            scene,
+        );
+        if layered {
+            scene.pop_layer();
+        }
+    }
+
+    fn event_impl(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // The widget-owned selection close button takes precedence over the
         // child action pods (it occupies the leading slot in selection mode).
         if self.selection_present
@@ -914,18 +1486,35 @@ impl Widget for AppBarWidget {
                 return EventResult::Handled;
             }
         }
-        crate::route_event(&mut self.interactive, ctx, event)
+        // Row-1 / face children first, then the large variant's meta row (which
+        // may itself hold interactive views).
+        let result = crate::route_event(&mut self.interactive, ctx, event);
+        if result == EventResult::Handled {
+            return result;
+        }
+        if let Some(pod) = self.meta.as_mut() {
+            let meta_result = crate::route_event_single(pod, ctx, event);
+            if meta_result == EventResult::Handled {
+                return meta_result;
+            }
+        }
+        result
     }
 
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
+    fn semantics_impl(&self, ctx: &mut SemanticsCtx) {
         let label = if self.selection_present {
             count_text(self.count_value)
+        } else if self.large_present {
+            self.big_title_text.clone()
         } else {
             self.title_text.clone()
         };
         let selection_present = self.selection_present;
         let has_leading = self.has_leading;
         let interactive = &self.interactive;
+        let meta = self.meta.as_ref();
+        let banner_text = self.banner_text.clone();
+        let banner_present = self.banner_present;
         ctx.push_container(
             Role::TitleBar,
             |node| node.set_label(label.as_str()),
@@ -943,6 +1532,15 @@ impl Widget for AppBarWidget {
                     for pod in &interactive[if has_leading { 1 } else { 0 }..] {
                         pod.semantics_child(ctx);
                     }
+                    // The large variant's meta row joins the container's children.
+                    if let Some(pod) = meta {
+                        pod.semantics_child(ctx);
+                    }
+                }
+                // The connection banner text joins the container's children while
+                // shown (§06).
+                if banner_present && let Some(text) = &banner_text {
+                    ctx.push_node(Role::Label, |node| node.set_label(text.as_str()));
                 }
             },
         );
@@ -1087,6 +1685,26 @@ mod tests {
         let animating = w.advance(now, reduce);
         w.paint(&mut pctx, &mut rec);
         (rec, animating)
+    }
+
+    /// Like [`paint`] but also reports the `PaintCtx::needs_layout` flag the
+    /// widget raised — the banner's layout-bound animation is asserted through
+    /// this (a bare `advance` returns `needs_frame`, not `needs_layout`).
+    fn paint_nl(
+        w: &mut AppBarWidget,
+        now: FrameTime,
+        theme: Option<&Theme>,
+    ) -> (Recorder, bool, bool) {
+        let mut rec = Recorder::default();
+        let size = w.total_size;
+        let mut pctx = match theme {
+            Some(t) => PaintCtx::new(Point::ZERO, size).with_theme(t),
+            None => PaintCtx::new(Point::ZERO, size),
+        };
+        let reduce = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
+        let animating = w.advance(now, reduce);
+        w.paint(&mut pctx, &mut rec);
+        (rec, animating, pctx.needs_layout())
     }
 
     // -- Acceptance 1: top-inset consumption (Flutter parity) ---------------
@@ -1358,6 +1976,247 @@ mod tests {
         assert!(
             update.nodes.iter().any(|(_, n)| n.role() == Role::Button),
             "the close button contributes a Button node"
+        );
+    }
+
+    // -- Acceptance 1 (task 13): large scroll-collapse variant (§02) ---------
+
+    fn large_view(progress: f64) -> AppBarView<()> {
+        app_bar("host")
+            .large(large_config("100.71.31.57", leaf_any(120.0, 12.0)))
+            .collapse_progress(progress)
+    }
+
+    #[test]
+    fn large_collapse_interpolates_height_and_title_size_to_match_the_html_states() {
+        // Expanded (progress 0): 19px big title, full-opacity meta, tall bar.
+        let v0 = large_view(0.0);
+        let mut w = build(&v0);
+        assert!(w.large_present);
+        assert!(w.meta.is_some(), "meta child built with the large config");
+        layout(&mut w, Size::new(360.0, 400.0), None);
+        let h0 = w.bar_height;
+        assert_eq!(w.big_title_size_px, BIG_TITLE_SIZE_MAX);
+        assert_eq!(w.meta_alpha, 1.0);
+
+        // Half-collapsed: font-size interpolates `19 - 6*0.5 = 16` (the HTML's
+        // `fontSize = 19 - 6*progress`).
+        let v_half = large_view(0.5);
+        rebuild(&v0, &v_half, &mut w);
+        layout(&mut w, Size::new(360.0, 400.0), None);
+        assert!(
+            (w.big_title_size_px - 16.0).abs() < 1e-4,
+            "title size at 0.5 is 16px, got {}",
+            w.big_title_size_px
+        );
+        assert!((w.meta_alpha - 0.5).abs() < 1e-6);
+
+        // Fully collapsed (progress 1): 13px big title (== compact TITLE_SIZE),
+        // meta faded out, and a strictly shorter bar than the expanded state.
+        let v1 = large_view(1.0);
+        rebuild(&v_half, &v1, &mut w);
+        layout(&mut w, Size::new(360.0, 400.0), None);
+        let h1 = w.bar_height;
+        assert_eq!(w.big_title_size_px, TITLE_SIZE);
+        assert_eq!(w.meta_alpha, 0.0);
+        assert!(
+            h0 > h1,
+            "expanded large bar ({h0}) is taller than collapsed ({h1})"
+        );
+    }
+
+    #[test]
+    fn selection_takes_precedence_over_the_large_variant() {
+        // A bar that is both `large` and in `selection` renders the compact
+        // selection face (its owned close button is laid out).
+        let v = app_bar("host")
+            .large(large_config("100.71.31.57", leaf_any(120.0, 12.0)))
+            .selection(Some(selection_bar(2, |_: &mut ()| {})));
+        let mut w = build(&v);
+        assert!(w.selection_present);
+        layout(&mut w, Size::new(360.0, 400.0), None);
+        assert!(
+            w.close_rect.width() > 0.0,
+            "selection close button laid out, not the large row"
+        );
+        // Bar height is the compact bar, not the tall large layout.
+        assert_eq!(w.bar_height, BAR_HEIGHT);
+    }
+
+    // -- Acceptance 2 (task 13): connection banner open/close (§06) ----------
+
+    #[test]
+    fn banner_none_to_some_animates_open_requesting_layout_while_in_flight() {
+        let prev = app_bar("terminal — dev");
+        let mut w = build(&prev);
+        assert!(!w.banner_present);
+        assert_eq!(w.banner_progress, 0.0);
+
+        let next = app_bar("terminal — dev").banner(Some(banner_spec(
+            "connection lost — retrying in 3s",
+            BannerVariant::Warning,
+        )));
+        let flags = rebuild(&prev, &next, &mut w);
+        assert!(flags.needs_layout());
+        assert!(w.banner_present);
+        assert_eq!(
+            w.banner_text.as_deref(),
+            Some("connection lost — retrying in 3s")
+        );
+
+        // First advance seeds the clock (dt 0), leaving the strip mid-open.
+        assert!(w.advance(ft_ms(0.0), false), "banner still animating");
+        assert!(w.banner_animating);
+        // A step forward opens it partway.
+        w.advance(ft_ms(100.0), false);
+        assert!(
+            w.banner_progress > 0.0 && w.banner_progress < 1.0,
+            "banner opening mid-flight, got {}",
+            w.banner_progress
+        );
+        assert!(w.banner_animating);
+
+        // Paint mid-open raises needs_layout (banner height is layout-bound).
+        layout(&mut w, Size::new(360.0, 120.0), None);
+        let (_, _, needs_layout) = paint_nl(&mut w, ft_ms(100.0), None);
+        assert!(needs_layout, "an in-flight banner requests relayout");
+
+        // It settles fully open.
+        w.advance(ft_ms(1000.0), false);
+        assert!((w.banner_progress - 1.0).abs() < 1e-6);
+        assert!(!w.banner_animating);
+    }
+
+    #[test]
+    fn banner_some_to_none_animates_closed() {
+        let prev = app_bar("terminal — dev")
+            .banner(Some(banner_spec("connection lost", BannerVariant::Warning)));
+        let mut w = build(&prev);
+        assert!(w.banner_present);
+        assert_eq!(w.banner_progress, 1.0, "starts fully open");
+
+        let next = app_bar("terminal — dev");
+        let flags = rebuild(&prev, &next, &mut w);
+        assert!(flags.needs_layout());
+        assert!(!w.banner_present);
+
+        assert!(
+            w.advance(ft_ms(0.0), false),
+            "banner still animating closed"
+        );
+        assert!(w.banner_animating);
+        w.advance(ft_ms(100.0), false);
+        assert!(
+            w.banner_progress > 0.0 && w.banner_progress < 1.0,
+            "banner closing mid-flight, got {}",
+            w.banner_progress
+        );
+        w.advance(ft_ms(1000.0), false);
+        assert!(w.banner_progress.abs() < 1e-6, "banner fully closed");
+        assert!(!w.banner_animating);
+    }
+
+    #[test]
+    fn banner_warning_and_success_variants_resolve_distinct_status_colors() {
+        let theme = Theme::glyph_baseline();
+        let status = theme
+            .extension::<frust_theme::StatusPalette>()
+            .expect("glyph baseline attaches a StatusPalette");
+        let c = status.colors(theme.brightness);
+
+        let (w_bg, _w_border, w_ink) = resolve_banner_colors(Some(&theme), BannerVariant::Warning);
+        let (s_bg, _s_border, s_ink) = resolve_banner_colors(Some(&theme), BannerVariant::Success);
+        assert_eq!(
+            w_ink, c.warning,
+            "warning ink resolves StatusPalette warning"
+        );
+        assert_eq!(
+            s_ink, c.success,
+            "success ink resolves StatusPalette success"
+        );
+        assert_ne!(w_ink, s_ink, "warning and success tints are distinct");
+        assert_eq!(w_bg, with_alpha(c.warning, BANNER_WARNING_BG_ALPHA));
+        assert_eq!(s_bg, with_alpha(c.success, BANNER_SUCCESS_BG_ALPHA));
+    }
+
+    #[test]
+    fn banner_paints_its_variant_tint_fill() {
+        let theme = Theme::glyph_baseline();
+        let warn_ink = theme
+            .extension::<frust_theme::StatusPalette>()
+            .unwrap()
+            .colors(theme.brightness)
+            .warning;
+
+        let prev = app_bar("terminal — dev");
+        let mut w = build(&prev);
+        let next = app_bar("terminal — dev")
+            .banner(Some(banner_spec("connection lost", BannerVariant::Warning)));
+        rebuild(&prev, &next, &mut w);
+        // Force a mid-open progress so the strip has height at layout time.
+        w.banner_progress = 0.5;
+        layout(&mut w, Size::new(360.0, 120.0), Some(&theme));
+        assert!(
+            w.banner_rect.height() > 0.0,
+            "banner strip has height mid-open"
+        );
+
+        let (rec, _, _) = paint_nl(&mut w, ft_ms(0.0), Some(&theme));
+        let want = with_alpha(warn_ink, BANNER_WARNING_BG_ALPHA);
+        assert!(
+            rec.rects.iter().any(|(_, _, c)| *c == want),
+            "the warning-tint banner fill is recorded"
+        );
+    }
+
+    // -- Acceptance 4 (task 13): reduce_motion collapses the banner ----------
+
+    #[test]
+    fn reduce_motion_snaps_the_banner_open() {
+        let mut theme = Theme::glyph_baseline();
+        theme.motion.reduce_motion = true;
+        let prev = app_bar("terminal — dev");
+        let mut w = build(&prev);
+        let next = app_bar("terminal — dev")
+            .banner(Some(banner_spec("connection lost", BannerVariant::Warning)));
+        rebuild(&prev, &next, &mut w);
+        layout(&mut w, Size::new(360.0, 120.0), Some(&theme));
+        // One advance snaps straight to fully open under reduce_motion.
+        let animating = w.advance(ft_ms(0.0), true);
+        assert!(!animating, "reduce_motion snaps, no follow-up frame");
+        assert!((w.banner_progress - 1.0).abs() < 1e-6);
+        assert!(!w.banner_animating);
+    }
+
+    // -- Semantics (task 13): meta row + banner join the container ----------
+
+    #[test]
+    fn large_and_banner_semantics_join_the_titlebar_children() {
+        fn logic(_: &mut ()) -> AppBarView<()> {
+            app_bar("terminal — dev")
+                .large(large_config("100.71.31.57", leaf_any(120.0, 12.0)))
+                .banner(Some(banner_spec("connection lost", BannerVariant::Warning)))
+        }
+        let mut root: RenderRoot<(), AppBarView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(360.0, 200.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TitleBar)
+            .expect("a TitleBar container node");
+        // The large variant labels the bar with its big title.
+        assert_eq!(node.label(), Some("100.71.31.57"));
+        // The banner text joins the container as a Label node.
+        assert!(
+            update
+                .nodes
+                .iter()
+                .any(|(_, n)| n.role() == Role::Label && n.label() == Some("connection lost")),
+            "the banner text contributes a Label node"
         );
     }
 }
