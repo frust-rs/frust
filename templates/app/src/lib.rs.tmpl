@@ -10,7 +10,7 @@
 
 use frust::{
     AnyView, Axis, Button, Column, Component, FlexView, Image, ImageFit, ImageSource, Row,
-    SizedBox, View, any, keyed, scroll_view, text, text_input,
+    SizedBox, View, any, keyed, safe_area, scroll_view, text, text_input,
 };
 // `frust-shared-preferences`: a platform plugin (not part of the `frust`
 // facade — added to `Cargo.toml` like any other Frust plugin) this app uses
@@ -188,7 +188,9 @@ pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<> {
     ));
     children.push(any(scroll_view(FlexView::new(Axis::Vertical, rows))));
 
-    Column(children)
+    // SafeArea pads the root view by the window's system-bar/notch/gesture-nav insets,
+    // keeping content visible and interactive. Remove it to render edge-to-edge.
+    safe_area(Column(children))
 }
 
 /// The generated app's root [`Component`] (spec §5.5): stateless config
