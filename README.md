@@ -22,11 +22,11 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 > Frust can currently be considered in an alpha state. In particular, we're
 > still working on the following:
 >
-> - **Animation performance on mobile** — a perpetual animation anywhere on
->   screen currently drives a full-scene re-encode and a full-surface GPU
->   pass at the display's max refresh rate (device heat, janky scroll on
->   animated screens). Root-caused with a fix plan in flight:
->   [`workflow/plans/bugs/catalog-animation-performance/`](workflow/plans/bugs/catalog-animation-performance/BUG.md).
+> - [**Animation performance on mobile**](https://github.com/f0x-it-llc/frust/issues/3)
+>   — a perpetual animation anywhere on screen currently drives a full-scene
+>   re-encode and a full-surface GPU pass at the display's max refresh rate
+>   (device heat, janky scroll on animated screens). Root-caused with a fix
+>   plan in flight; see the issue for measurements and details.
 > - **No partial repaint / damage regions** — a whole-stack gap shared with
 >   the wider ecosystem today ([wgpu#2869](https://github.com/gfx-rs/wgpu/issues/2869),
 >   [xilem#789](https://github.com/linebender/xilem/issues/789)); every
