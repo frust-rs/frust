@@ -12,3 +12,11 @@ mod logger;
 mod render;
 
 pub use app_handler::run_desktop;
+
+/// Pure, winit-free decision logic behind `ShellHandler`'s paced-wake
+/// mechanism (see the module's own docs). `run_desktop`/`ShellHandler` are
+/// this crate's only real public surface — this module is `pub` purely so
+/// `tests/paced_wake_integration.rs` can drive it as a black box with a fake
+/// advancing clock; `#[doc(hidden)]` keeps it out of published docs.
+#[doc(hidden)]
+pub mod paced_wake;

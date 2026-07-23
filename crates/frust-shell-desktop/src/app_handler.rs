@@ -62,6 +62,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
 use winit::window::{Theme as WinitTheme, Window, WindowAttributes, WindowId};
 
+use crate::paced_wake::{NextPacedWake, PacedWakeAction, next_paced_wake, paced_wake_action};
 use crate::render::FrameExecutor;
 
 /// Initial preview-window size, in logical pixels.
@@ -807,15 +808,19 @@ where
         // once the deadline passes, request the redraw and revert to `Wait`.
         // Any other redraw source (input, a signal wake, a resize) still wakes
         // the loop immediately regardless of this timer — pacing only bounds the
-        // cosmetic loop's own cadence.
-        if let Some(deadline) = self.paced_wake {
-            if Instant::now() >= deadline {
+        // cosmetic loop's own cadence. The decision itself lives in the pure,
+        // winit-free `paced_wake` module (see its docs) — this is a straight
+        // match over its result.
+        match paced_wake_action(self.paced_wake, Instant::now()) {
+            PacedWakeAction::None => {}
+            PacedWakeAction::Fire => {
                 self.paced_wake = None;
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
                 event_loop.set_control_flow(ControlFlow::Wait);
-            } else {
+            }
+            PacedWakeAction::Park(deadline) => {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
             }
         }
@@ -1093,17 +1098,33 @@ where
                 // than every vsync. The desktop shell has no skip gate, so it
                 // paces via a delayed wake (`about_to_wait` parks on
                 // `WaitUntil`). A `Transition` request (or the pacing kill
-                // switch) keeps the immediate every-frame path.
-                if paint_outcome.needs_frame {
-                    if self.anim_pacing && paint_outcome.needs_frame_paced_only {
-                        let interval = std::time::Duration::from_secs_f32(
-                            1.0 / self.theme.motion.cosmetic_loop_rate.hz(),
-                        );
-                        self.paced_wake = Some(Instant::now() + interval);
-                    } else {
-                        // A real transition supersedes any pending paced wake.
+                // switch) keeps the immediate every-frame path. `needs_frame ==
+                // false` (a settled loop) must clear any stale prior
+                // `paced_wake` too, not just leave it assigned only inside a
+                // `needs_frame` arm — `next_paced_wake` is driven every frame
+                // (not just the `needs_frame` ones) precisely so its `Idle` arm
+                // covers that settle case.
+                let interval = std::time::Duration::from_secs_f32(
+                    1.0 / self.theme.motion.cosmetic_loop_rate.hz(),
+                );
+                match next_paced_wake(
+                    paint_outcome.needs_frame,
+                    paint_outcome.needs_frame_paced_only,
+                    self.anim_pacing,
+                    Instant::now(),
+                    interval,
+                ) {
+                    NextPacedWake::Scheduled(deadline) => {
+                        self.paced_wake = Some(deadline);
+                    }
+                    NextPacedWake::FireNow => {
+                        // A real transition (or the pacing kill switch)
+                        // supersedes any pending paced wake.
                         self.paced_wake = None;
                         window.request_redraw();
+                    }
+                    NextPacedWake::Idle => {
+                        self.paced_wake = None;
                     }
                 }
 
