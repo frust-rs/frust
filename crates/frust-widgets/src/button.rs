@@ -688,7 +688,10 @@ impl Widget for ButtonWidget {
             // `glyph::skeleton`'s shimmer).
             if !reduce_motion {
                 self.spinner.advance(ctx.frame_time());
-                ctx.request_frame();
+                // The loading-spinner is a perpetual decorative loop — its exact
+                // cadence is imperceptible, so the mobile frame gate may pace it
+                // (task 08).
+                ctx.request_frame_paced();
             }
             self.paint_spinner(ctx, scene, ink);
         } else {
@@ -1129,6 +1132,9 @@ mod tests {
     /// performance bug task 10: without this, an always-`.loading(true)`
     /// button — e.g. a disabled-look demo — spins forever regardless of the
     /// header animations-off toggle forcing `Theme.motion.reduce_motion`).
+    /// The spinner requests frames via the paced (CosmeticLoop) class, letting
+    /// the mobile frame gate throttle it to the theme's `cosmetic_loop_rate`
+    /// (task f2, following task 08's pattern).
     #[test]
     fn loading_spinner_freezes_and_stops_requesting_frames_under_reduce_motion() {
         let mut w = widget();
@@ -1142,6 +1148,10 @@ mod tests {
         assert!(
             ctx.needs_frame(),
             "with reduce_motion off, the loading spinner must keep requesting frames"
+        );
+        assert!(
+            ctx.needs_frame_paced_only(),
+            "the loading spinner is a CosmeticLoop request — the frame gate must be able to pace it"
         );
 
         theme.motion.reduce_motion = true;
