@@ -43,6 +43,7 @@
 
 pub mod accordion;
 pub mod alert;
+pub mod appbar;
 pub mod avatar;
 pub mod badge;
 pub mod breadcrumb;
@@ -65,6 +66,7 @@ pub mod tooltip;
 
 pub use accordion::*;
 pub use alert::*;
+pub use appbar::*;
 pub use avatar::*;
 pub use badge::*;
 pub use breadcrumb::*;
