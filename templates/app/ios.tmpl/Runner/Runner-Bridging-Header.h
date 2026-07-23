@@ -80,4 +80,12 @@ void  frust_set_insets(
     float vi_l, float vi_t, float vi_r, float vi_b
 );
 
+// System UI / SystemChrome (task 03/09/10/14 — RESEARCH.md "Insets /
+// SafeArea / SystemChrome"): peek the process-wide `frust::set_system_ui_mode`
+// override slot, returning `frust_shell_common::system_ui::encoded_state()`'s
+// packed `(generation, mode)` u64 verbatim (see that fn's doc comment for the
+// exact bit layout). `handle` is taken and ignored (the slot is
+// process-global) — see FrustViewController's `pollSystemUiState`.
+uint64_t frust_system_ui_state(void *handle);
+
 #endif /* Runner_Bridging_Header_h */
