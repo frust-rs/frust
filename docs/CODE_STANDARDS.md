@@ -295,22 +295,11 @@ interactive widget in `frust-widgets`:
   capture, clear their focus, and publish a cleared IME surface — in that
   order, with no bypass.** This binds any container that stops forwarding
   events to an already-interactive child (the navigator's mid-transition
-  input block is the reference impl — see `docs/ARCHITECTURE.md`'s
-  Navigation flow), not just `Navigator`:
-
-  ```rust
-  fn cancel_top(&mut self) {
-      if let Some(top) = self.pages.last_mut() {
-          // synthetic Cancel first, then focus
-          if top.pod.is_active() { crate::cancel_pod(&mut top.pod); top.pod.set_active(false); }
-          if top.pod.is_focused() { top.pod.set_focused(false); }
-      }
-      // then: publish a cleared ImeState on the next paint
-  }
-  ```
-  Skipping this leaves a child armed (a later `Up` it never receives fires
-  against a widget the container has stopped routing to) or a stale
-  focus/IME surface behind after the block lifts.
+  input block is the reference impl, via `cancel_pod`/`set_active`/
+  `set_focused` — see `docs/ARCHITECTURE.md`'s Navigation flow), not just
+  `Navigator`. Skipping this leaves a child armed (a later `Up` it never
+  receives fires against a widget the container has stopped routing to) or
+  a stale focus/IME surface behind after the block lifts.
 
 ## Semantics Conventions
 
@@ -476,6 +465,17 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   `Timing` (an explicit `.timing(...)` call always wins); every
   pattern/wrapper substitutes a short linear crossfade under
   `reduce_motion` instead of a bespoke reduced variant.
+- **A perpetual decorative loop calls `PaintCtx::request_frame_paced`
+  (`TickClass::CosmeticLoop`), never bare `request_frame`.** `request_frame`
+  stays `TickClass::Transition` (unpaced) — correct for a spring, a finite
+  transition, or anything with a user-visible endpoint (`request_layout`
+  always implies `Transition`). A shimmer/spinner/pulse with no endpoint
+  requests the paced class instead, letting the mobile frame gate throttle
+  it to `MotionScheme::cosmetic_loop_rate` (`docs/ARCHITECTURE.md`'s Frame
+  gate), and must still honor `reduce_motion` like any other loop (freeze
+  in place, stop requesting frames). **Input-driven frames are never
+  paced** — a paced request only ever comes from a perpetual paint-time
+  loop, never from `EventCtx`.
 
 ## Testing Patterns
 
