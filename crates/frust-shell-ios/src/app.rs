@@ -50,8 +50,8 @@ use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
-    AppTree, FrameGate, FrameInputs, FrameMeta, RenderCommand, RenderSender, SceneFrame,
-    SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
+    AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, RenderCommand, RenderSender,
+    SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
     effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
 };
 use frust_text::TextContext;
@@ -187,6 +187,13 @@ pub struct IosAppHandle {
     /// frame the gate runs; a skipped frame leaves it untouched. Without it the
     /// gate would skip the follow-up frame a running animation needs.
     last_needs_frame: bool,
+    /// Handle-side latch feeding [`FrameInputs::last_needs_frame_paced_only`]:
+    /// the previous paint's [`frust_core::PaintOutcome::needs_frame_paced_only`]
+    /// (its frame request aggregated to [`frust_core::TickClass::CosmeticLoop`]
+    /// alone). Lets [`FrameGate::decide_paced`] throttle a paced-only decorative
+    /// loop to the theme's `cosmetic_loop_rate` instead of every `CADisplayLink`
+    /// tick. Latched beside `last_needs_frame`; a skipped frame leaves it.
+    last_needs_frame_paced_only: bool,
     /// Handle-side latch feeding [`FrameInputs::theme_or_appearance_changed`]:
     /// set by [`Self::set_appearance`] on an OS-driven light/dark flip, taken
     /// only past the pause/ready gate (like the signals-dirty drain) so a flip
@@ -808,6 +815,7 @@ impl IosAppHandle {
             frame_gate,
             events_since_last_frame: false,
             last_needs_frame: false,
+            last_needs_frame_paced_only: false,
             appearance_dirty: false,
             resampler: PointerResampler::new(),
             resample_clock: Instant::now(),
@@ -1318,6 +1326,7 @@ impl IosAppHandle {
             pointer_capture_active: self.app.is_pointer_captured(),
             focus_or_ime_active: self.app.is_focus_active() || self.app.ime_state().is_some(),
             last_needs_frame: self.last_needs_frame,
+            last_needs_frame_paced_only: self.last_needs_frame_paced_only,
             // Non-draining peek: a skipped frame leaves the flags for the next
             // frame that runs to drain (spec §14 phase 7).
             change_flags_pending: self.app.has_pending_change_flags(),
@@ -1347,7 +1356,19 @@ impl IosAppHandle {
             timestamp_ns,
         );
 
-        if self.frame_gate.decide(inputs).is_skip() {
+        // Animation pacing (frame-gate pacing): a frame whose ONLY dirtiness is
+        // a paced (CosmeticLoop) request is throttled to the active theme's
+        // `cosmetic_loop_rate` rather than reproduced every `CADisplayLink`
+        // tick. `now` is this tick's display-link clock (the same domain `paint`
+        // consumes below); the interval is `1 / rate` resolved from the live
+        // theme so a retuned token re-paces live. Every other FrameInputs signal
+        // still forces an immediate Run — pacing never delays real work.
+        let pacing = FramePacing {
+            now: FrameTime::from_nanos(timestamp_ns),
+            interval: Duration::from_secs_f32(1.0 / self.theme.motion.cosmetic_loop_rate.hz()),
+        };
+
+        if self.frame_gate.decide_paced(inputs, pacing).is_skip() {
             // Nothing changed: skip rebuild/layout/paint/encode entirely. Inline
             // records a `skipped` FramePasses (ZERO pass durations; counts toward
             // `skipped=` in the perf log line); the render-thread split sends
@@ -1464,6 +1485,10 @@ impl IosAppHandle {
         // would now skip the follow-up frame an in-flight animation/transition
         // needs, so it is fed forward via `FrameInputs::last_needs_frame`.
         self.last_needs_frame = paint_outcome.needs_frame;
+        // Latch the aggregated tick-class for the NEXT frame's gate so a
+        // paced-only decorative loop can be throttled (see
+        // `FrameInputs::last_needs_frame_paced_only`).
+        self.last_needs_frame_paced_only = paint_outcome.needs_frame_paced_only;
 
         // Hand the finished frame to the render-path executor (plan phase 11.B).
         // The inline fallback runs the encode→acquire→submit tail synchronously

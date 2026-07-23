@@ -39,8 +39,8 @@ use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
-    AppTree, FrameGate, FrameInputs, FrameMeta, RenderCommand, RenderSender, SceneFrame,
-    SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
+    AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, RenderCommand, RenderSender,
+    SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
     effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
 };
 use frust_text::TextContext;
@@ -178,6 +178,14 @@ pub struct AndroidAppHandle {
     /// producing frames until it settles (whereupon paint returns `false` and
     /// the gate may skip again).
     last_needs_frame: bool,
+    /// Latch: the previous paint's frame request aggregated to
+    /// [`frust_core::TickClass::CosmeticLoop`] alone (a pacable decorative loop
+    /// with no concurrent transition —
+    /// [`frust_core::PaintOutcome::needs_frame_paced_only`]). Read into
+    /// [`FrameInputs::last_needs_frame_paced_only`] so
+    /// [`FrameGate::decide_paced`] throttles a paced-only frame to the theme's
+    /// `cosmetic_loop_rate` instead of running it every Choreographer tick.
+    last_needs_frame_paced_only: bool,
     /// Whether the layout pass has run at least once. Until it has, the
     /// layout-skip seam in [`Self::frame`] force-runs layout (a paint before the
     /// first layout would have no valid geometry); after the first layout it is
@@ -906,6 +914,7 @@ impl AndroidAppHandle {
             surface_dirty: false,
             appearance_dirty: false,
             last_needs_frame: false,
+            last_needs_frame_paced_only: false,
             first_layout_done: false,
             resampler: PointerResampler::new(),
             resample_clock: Instant::now(),
@@ -1482,6 +1491,7 @@ impl AndroidAppHandle {
             pointer_capture_active: self.app.is_pointer_captured(),
             focus_or_ime_active: self.app.is_focus_active() || self.app.ime_state().is_some(),
             last_needs_frame: self.last_needs_frame,
+            last_needs_frame_paced_only: self.last_needs_frame_paced_only,
             change_flags_pending: self.app.has_pending_change_flags(),
             // The `appearance_dirty` latch (set by `set_appearance`) is taken
             // only past the surface-ready gate — like `signals_dirty` above —
@@ -1520,7 +1530,20 @@ impl AndroidAppHandle {
             frame_time_nanos,
         );
 
-        if self.frame_gate.decide(inputs).is_skip() {
+        // Animation pacing (frame-gate pacing): a frame whose ONLY dirtiness is
+        // a paced (CosmeticLoop) request is throttled to the active theme's
+        // `cosmetic_loop_rate` rather than reproduced every Choreographer tick.
+        // `now` is this tick's Choreographer clock (the same domain `paint`
+        // consumes below); the interval is `1 / rate` resolved from the live
+        // theme so an app that retunes the token re-paces without a restart.
+        // Every other FrameInputs signal still forces an immediate Run — pacing
+        // never delays real work (see `frame_gate`'s pacing docs).
+        let pacing = FramePacing {
+            now: FrameTime::from_nanos(frame_time_nanos),
+            interval: Duration::from_secs_f32(1.0 / self.theme.motion.cosmetic_loop_rate.hz()),
+        };
+
+        if self.frame_gate.decide_paced(inputs, pacing).is_skip() {
             // Skip path (task 17): nothing changed — return before rebuild, so
             // CPU/GPU stay near idle. Inline records a `skipped` FramePasses
             // (all-zero pass durations) so the skip counter accumulates in the
@@ -1639,6 +1662,9 @@ impl AndroidAppHandle {
             // next frame to run (and stops forcing once it settles).
             let outcome = self.app.paint(&mut builder, frame_time);
             self.last_needs_frame = outcome.needs_frame;
+            // Latch the aggregated tick-class so the NEXT frame's gate can pace a
+            // paced-only decorative loop (see `FrameInputs::last_needs_frame_paced_only`).
+            self.last_needs_frame_paced_only = outcome.needs_frame_paced_only;
             builder.pop_transform();
         }
         let paint_time = paint_start.map_or(Duration::ZERO, |t| t.elapsed());

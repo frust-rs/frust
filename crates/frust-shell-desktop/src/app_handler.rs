@@ -206,6 +206,8 @@ where
         theme_override: ThemeOverrideWatcher::new(),
         theme_override_active: false,
         font_registry: FontRegistryWatcher::new(),
+        paced_wake: None,
+        anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
     };
 
     // Construction-time font drain (task 14): apply any fonts registered via
@@ -516,6 +518,21 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// `run_desktop`, before the first frame). See
     /// `frust_shell_common::font_registry`'s module docs.
     font_registry: FontRegistryWatcher,
+    /// Animation pacing (frame-gate pacing): the desktop shell has no skip gate
+    /// (it is dirty-driven under `ControlFlow::Wait`), so it paces a paced-only
+    /// decorative loop by scheduling a *delayed* redraw instead of the immediate
+    /// `request_redraw` a `needs_frame` normally triggers. When a paint returns
+    /// `needs_frame_paced_only` and nothing else needs the next frame, this
+    /// holds the `Instant` the next paced redraw is due; `about_to_wait` parks
+    /// the loop on `ControlFlow::WaitUntil(that)` and fires the redraw when it
+    /// elapses. `None` when no paced redraw is pending.
+    paced_wake: Option<Instant>,
+    /// Whether animation pacing is enabled (the [`FRUST_NO_ANIM_PACING`] kill
+    /// switch, resolved once at construction). When `false` a paced-only frame
+    /// falls back to the immediate `request_redraw` every-vsync path.
+    ///
+    /// [`FRUST_NO_ANIM_PACING`]: frust_shell_common::frame_gate::NO_ANIM_PACING_VAR
+    anim_pacing: bool,
 }
 
 impl<State, Logic, V> ShellHandler<State, Logic, V>
@@ -777,12 +794,31 @@ where
         self.executor.destroy_surface();
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Drain any UI-thread local tasks that became runnable while dispatching
         // this batch of events, before the loop parks on `Wait`. Cheap no-op
         // when the queue is empty; a task that writes a signal here re-dirties a
         // scope and fires the waker, which re-arms the loop rather than parking.
         self.runtime.pump_local();
+
+        // Animation pacing (frame-gate pacing): a paced-only decorative loop
+        // scheduled its follow-up redraw for a future instant rather than the
+        // next vsync. Park the loop on `WaitUntil(deadline)` so it wakes then;
+        // once the deadline passes, request the redraw and revert to `Wait`.
+        // Any other redraw source (input, a signal wake, a resize) still wakes
+        // the loop immediately regardless of this timer — pacing only bounds the
+        // cosmetic loop's own cadence.
+        if let Some(deadline) = self.paced_wake {
+            if Instant::now() >= deadline {
+                self.paced_wake = None;
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+                event_loop.set_control_flow(ControlFlow::Wait);
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            }
+        }
     }
 
     fn window_event(
@@ -1049,8 +1085,26 @@ where
                 // `ControlFlow::Wait` would otherwise idle with no pending input,
                 // so we keep frames coming with an explicit redraw request until
                 // the animation reaches rest and stops signalling.
+                //
+                // Animation pacing (frame-gate pacing): when the request is a
+                // paced-only decorative loop (`needs_frame_paced_only` — a
+                // shimmer/pulse/spinner with no concurrent transition), schedule
+                // the follow-up redraw a `cosmetic_loop_rate` interval out rather
+                // than every vsync. The desktop shell has no skip gate, so it
+                // paces via a delayed wake (`about_to_wait` parks on
+                // `WaitUntil`). A `Transition` request (or the pacing kill
+                // switch) keeps the immediate every-frame path.
                 if paint_outcome.needs_frame {
-                    window.request_redraw();
+                    if self.anim_pacing && paint_outcome.needs_frame_paced_only {
+                        let interval = std::time::Duration::from_secs_f32(
+                            1.0 / self.theme.motion.cosmetic_loop_rate.hz(),
+                        );
+                        self.paced_wake = Some(Instant::now() + interval);
+                    } else {
+                        // A real transition supersedes any pending paced wake.
+                        self.paced_wake = None;
+                        window.request_redraw();
+                    }
                 }
 
                 // A tracked signal written *during* this frame (e.g. a local
