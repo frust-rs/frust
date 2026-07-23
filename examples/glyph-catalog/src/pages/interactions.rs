@@ -706,6 +706,17 @@ const CHARGE_ROW_H: f64 = 56.0;
 /// docs](self)'s substitution note — + a chip); an early lift or slop-break
 /// resets the ring to empty (the widget's own final-`0.0` contract). Tapping
 /// a floated row drops it back down.
+///
+/// **Reset idiom (followup f2)**: `on_hold_progress`'s Cancel staleness gap
+/// (`frust_widgets::gesture`'s module docs) means a platform `Cancel`
+/// mid-hold delivers no final observation, so a naive consumer could be left
+/// showing a stale, frozen ring from an interrupted hold. This demo's
+/// `on_hold_progress` handler always trusts the widget's latest observation
+/// — never clamping it to be monotonically non-decreasing — so a fresh press
+/// cycle's low-restarting first observation (`press_start` re-anchors on
+/// every `Down`) overwrites any stale value immediately, letting the ring
+/// self-correct the moment the *next* hold begins rather than only after a
+/// full press-release cycle completes.
 fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     let reduce = state.reduce_motion.get();
     let progress_sig = charge_progress_sig();
@@ -790,7 +801,15 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
 
     let gesture: AnyView<CatalogState> = any(GestureDetector(scaled)
         .hold_threshold_ms(CHARGE_HOLD_MS)
-        .on_hold_progress(move |_s: &mut CatalogState, p: f64| progress_sig.set(p))
+        .on_hold_progress(move |_s: &mut CatalogState, p: f64| {
+            // Reset idiom for the Cancel staleness gap (see this fn's doc
+            // comment, and `frust_widgets::gesture`'s module docs): always
+            // trust the widget's latest observation rather than clamping it
+            // to never decrease, so a fresh cycle's low-restarting first
+            // observation overwrites any stale value left behind by an
+            // earlier interrupted (Cancel'd) hold.
+            progress_sig.set(p);
+        })
         .on_long_press(move |_s: &mut CatalogState| {
             floated_sig.set(true);
             progress_sig.set(1.0);

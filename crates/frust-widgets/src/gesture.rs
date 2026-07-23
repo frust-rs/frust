@@ -55,11 +55,31 @@
 //! `on_long_press` above) can only *record* it; the observation is delivered on
 //! the next pointer event that already carries a mutable `EventCtx` (an in-slop
 //! `Move`, matching `on_long_press`'s fire-on-move-arrival). A drag past
-//! [`TOUCH_SLOP`] or an early release before the threshold delivers a final
-//! `0.0` (from the `Move`/`Up` arm handling that transition — never the
-//! `Cancel` arm, which never touches state); reaching the threshold delivers a
-//! final `1.0`. [`hold_threshold_ms`](GestureDetectorView::hold_threshold_ms)
+//! [`TOUCH_SLOP`] or an early release *before* the threshold — i.e. the
+//! `Move`/`Up` arm handling that transition, never `PointerPhase::Cancel`
+//! (see the Cancel staleness gap below) — delivers a final `0.0`; reaching the
+//! threshold delivers a final `1.0`. [`hold_threshold_ms`](GestureDetectorView::hold_threshold_ms)
 //! overrides [`LONG_PRESS_MS`] for both `on_long_press` and this timer.
+//!
+//! ## Cancel staleness gap
+//!
+//! A platform `Cancel` (gesture steal, e.g. a parent `ScrollView` claiming
+//! the drag; or structural teardown, e.g. the child subtree changing shape
+//! mid-hold) delivers **no** final observation — the Cancel-never-mutates-state
+//! convention above means `on_hold_progress` is never called from that arm.
+//! The consumer's last-observed `progress` therefore stays stale (whatever it
+//! was mid-hold) until a full new press cycle (`Down`→...→`Up`/threshold)
+//! delivers a fresh `0.0`/`1.0` through the normal path — there is no
+//! Cancel-delivered reset. **Consumer-side reset idiom:** since a fresh press
+//! cycle's *first* observation is always a low value counting up from near
+//! `0.0`, a consumer that stored a stale non-zero `progress` can self-correct
+//! at the top of its `on_hold_progress` callback by detecting a restart (the
+//! incoming value is lower than the last-stored one after a gap) and treating
+//! it as the new cycle's baseline rather than carrying the stale high value
+//! forward — see `demo_charge_ring` in `examples/glyph-catalog`'s
+//! `pages/interactions.rs` for a worked instance. Do not add a Cancel-arm
+//! callback to close this gap; it would violate the Cancel-never-mutates-state
+//! convention (`docs/CODE_STANDARDS.md`).
 
 use std::rc::Rc;
 
@@ -127,8 +147,16 @@ impl<State: 'static> GestureDetectorView<State> {
     /// [`hold_threshold_ms`](Self::hold_threshold_ms), default [`LONG_PRESS_MS`])
     /// while the child is held — the primitive a charge-up ring or similar hold
     /// feedback widget renders from. See the [module docs](self#hold-progress-observation)
-    /// for the delivery/firing semantics (paint-clock timed, delivered on the
-    /// next pointer event, final `0.0`/`1.0` on cancel/threshold).
+    /// for the delivery/firing semantics: paint-clock timed, delivered on the
+    /// next pointer event, with a final `0.0` on an early lift/drag-past-slop
+    /// or a final `1.0` on reaching the threshold.
+    ///
+    /// **Cancel staleness gap**: a platform `PointerPhase::Cancel` (gesture
+    /// steal or structural teardown) delivers **no** final observation — the
+    /// last value this callback saw stays stale until the next full press
+    /// cycle. See the [module docs](self#cancel-staleness-gap) for the
+    /// consumer-side reset idiom that self-corrects on the next touch-down
+    /// rather than waiting for a full press-release.
     pub fn on_hold_progress<F: Fn(&mut State, f64) + 'static>(
         mut self,
         on_hold_progress: F,
@@ -140,6 +168,12 @@ impl<State: 'static> GestureDetectorView<State> {
     /// Override the hold threshold (milliseconds), used by both
     /// [`on_long_press`](Self::on_long_press) and
     /// [`on_hold_progress`](Self::on_hold_progress); defaults to [`LONG_PRESS_MS`].
+    ///
+    /// Resolved with a floor of 1ms (`ms.max(1)`) at both `build`/`rebuild` —
+    /// `hold_threshold_ms(0)` never divides progress by zero (`f64::clamp`
+    /// passes a `NaN` numerator/denominator-zero result straight through
+    /// rather than clamping it away), so it instead yields a defined, finite
+    /// progress that reaches `1.0` on the very next paint.
     pub fn hold_threshold_ms(mut self, ms: u64) -> Self {
         self.hold_threshold_ms = Some(ms);
         self
@@ -197,9 +231,13 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
                 .on_hold_progress
                 .as_ref()
                 .map(crate::erase_callback_arg),
+            // `.max(1)` guards against a 0ms override: `f64::clamp` passes
+            // NaN through unchanged, so an unguarded `0.0 / 0.0` divisor in
+            // paint's progress computation would poison every subsequent
+            // observation. See `hold_threshold_ms`'s doc comment.
             threshold_ms: self
                 .hold_threshold_ms
-                .map(|ms| ms as f64)
+                .map(|ms| ms.max(1) as f64)
                 .unwrap_or(LONG_PRESS_MS),
         }
     }
@@ -216,9 +254,10 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
             .on_hold_progress
             .as_ref()
             .map(crate::erase_callback_arg);
+        // Same NaN guard as `build` above — see `hold_threshold_ms`'s doc comment.
         element.threshold_ms = self
             .hold_threshold_ms
-            .map(|ms| ms as f64)
+            .map(|ms| ms.max(1) as f64)
             .unwrap_or(LONG_PRESS_MS);
         crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
@@ -892,5 +931,88 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 12.0, 12.0));
         assert_eq!(state.taps, 1);
         assert_eq!(state.long_presses, 0);
+    }
+
+    // --- Cancel staleness gap + zero-threshold NaN guard (followup f2) -------
+
+    #[test]
+    fn cancel_leaves_progress_stale_until_fresh_down_cycle_delivers_clean_value() {
+        // Regression for the Cancel staleness gap (see gesture.rs module
+        // docs): a platform Cancel delivers NO final observation, so the
+        // consumer's last-observed progress stays whatever it was mid-hold.
+        // A fresh Down-cycle's first observation must start low again, never
+        // resuming from the stale value Cancel left behind — the reset idiom
+        // works at the widget contract level.
+        let mut root = progress_root();
+        let mut state = HoldState::default();
+        let mut sink = NullScene;
+
+        // Cycle 1: hold to ~30% progress, then Cancel (gesture steal).
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 10.0)); // delivers 0.0
+        root.paint(&mut sink, ft(150.0)); // 30% of the 500ms default threshold
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 11.0, 10.0)); // delivers 0.3
+        let before_cancel_len = state.progress.len();
+        let stale_value = *state.progress.last().unwrap();
+        assert!(
+            stale_value > 0.0,
+            "sanity: mid-hold progress is non-zero before Cancel"
+        );
+
+        root.event(&mut state, &hold_ev(PointerPhase::Cancel, 11.0, 10.0));
+        assert_eq!(
+            state.progress.len(),
+            before_cancel_len,
+            "Cancel delivers no observation — the Cancel-never-mutates-state convention"
+        );
+
+        // Cycle 2: a fresh Down cycle. The first delivered observation must
+        // be a low, fresh value — never the stale value Cancel left behind.
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(150.0)); // press_start re-anchors here; elapsed_ms = 0
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 10.0));
+        let fresh_value = *state.progress.last().unwrap();
+        assert!(
+            fresh_value < stale_value,
+            "a fresh Down-cycle's first observation starts low, self-correcting the stale \
+             ring (fresh={fresh_value}, stale={stale_value})"
+        );
+        assert_eq!(
+            fresh_value, 0.0,
+            "a fresh press-start yields exactly 0.0 progress"
+        );
+    }
+
+    #[test]
+    fn zero_threshold_guard_yields_finite_progress_never_nan() {
+        // Regression: `hold_threshold_ms(0)` must resolve to a floor of 1ms
+        // (`ms.max(1)`), never dividing progress by zero — `f64::clamp`
+        // passes a NaN numerator/zero-denominator result straight through
+        // rather than clamping it away, which would otherwise poison every
+        // subsequent observation.
+        let mut root = progress_root_with_threshold(0);
+        let mut state = HoldState::default();
+        let mut sink = NullScene;
+
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 10.0)); // first observation
+        let p0 = state.progress[0];
+        assert!(!p0.is_nan(), "zero threshold must never yield NaN progress");
+        assert!(
+            (0.0..=1.0).contains(&p0),
+            "progress stays in the defined [0.0, 1.0] range"
+        );
+
+        // The 1ms floor is reached almost immediately: elapsed marks, and
+        // the long-press fires on the very next deliverable event, per the
+        // existing fire-on-move-arrival convention.
+        root.paint(&mut sink, ft(1.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 11.0, 10.0));
+        assert_eq!(
+            state.long_presses, 1,
+            "long-press fires almost immediately at the 1ms floor"
+        );
     }
 }
