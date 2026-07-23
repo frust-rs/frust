@@ -1,10 +1,13 @@
-//! Interactions section (glyph-refinements task 19): five moments tied to
-//! actual muxr events — a connection heartbeat, a session-attach card morph,
-//! a new-session boot sequence, a live-output waveform, and a copy-to-clipboard
-//! burst — reproducing
-//! `../../glyph-design-system/research/glyph-interactions.html` §01/§02/§03/
-//! §07/§08 (the remaining three — §04 scramble, §05 charge ring, §06 rain
-//! burst — are task 21, appended to this same file).
+//! Interactions section (glyph-refinements tasks 19 + 21): all eight moments
+//! tied to actual muxr events — a connection heartbeat, a session-attach card
+//! morph, a new-session boot sequence, a token-revoke character scramble, a
+//! long-press charge ring, a pull-to-refresh rain burst, a live-output
+//! waveform, and a copy-to-clipboard burst — reproducing
+//! `../../glyph-design-system/research/glyph-interactions.html` §01-§08.
+//! Task 19 landed §01/§02/§03/§07/§08 (composition-only, no new primitives);
+//! task 21 (this addendum, §04/§05/§06) leans on task 15's
+//! `GestureDetector::on_hold_progress`/`hold_threshold_ms` for the charge ring
+//! and `ScrollView::on_refresh_release` for the rain burst.
 //!
 //! # No new framework primitives
 //!
@@ -42,6 +45,30 @@
 //!   idiom the task cites (`frust_bench`'s `s6_text` `WidthPulse` pattern),
 //!   adapted to a page fn with no `Component`/`PaintCtx` of its own.
 //!
+//! Task 21 adds three more, one further substitution and two implementation
+//! choices left to the implementor's call (documented per the task):
+//!
+//! - **§04 scramble's noise source is a tiny LCG** ([`lcg_next`]), not
+//!   `Math.random()` — deterministic per `(frame, char index)` so the same
+//!   hold/frame always renders the same glitch text (reproducible in a test,
+//!   unlike a true RNG), per the task's own "no `Math.random` analog needed"
+//!   guidance.
+//! - **§05's "shadow" is an amber wash layer, not `PaintScene::draw_shadow`.**
+//!   That call is a `PaintCtx`/`Widget::paint` primitive with no facade
+//!   equivalent reachable from application code (this file composes views,
+//!   not widgets) — an `AnimatedOpacity`-faded [`Image`] wash behind the row
+//!   (the same `solid_source` technique [`demo_copy_burst`]'s flash uses)
+//!   reads as a comparable "lift" cue without it.
+//! - **§06's rain is per-frame positioned glyph views on a fixed column
+//!   grid** (the task's "honest-composition route"), not a `draw_shader` WGSL
+//!   quad — consistent with every other demo on this page staying inside the
+//!   plain widget-composition surface (no `frust_scene`/shader dependency to
+//!   add to this crate's manifest, mirroring the §02 substitution's
+//!   deps-unchanged constraint above). The column count is fixed rather than
+//!   measured-width-derived (application code has no layout-pass access to
+//!   its own resolved size), so the refresh zone itself is a fixed-width
+//!   [`SizedBox`] ([`RAIN_ZONE_W`]) rather than filling the available width.
+//!
 //! # Reduced motion
 //!
 //! Every clock-driven demo checks `state.reduce_motion.get()` directly (the
@@ -52,7 +79,14 @@
 //! and skips the animated portion outright rather than fighting the built-in
 //! collapse: the heartbeat ring/latency-roll, waveform bars, and copy-burst
 //! particles all render their settled end-state instead, matching
-//! `motion.rs`'s reduced-motion note ("every demo below collapses").
+//! `motion.rs`'s reduced-motion note ("every demo below collapses"). §04/§06
+//! (also wall-clock-driven) follow the same rule — a revoke jumps straight to
+//! the collapsed row, a refresh straight to "last updated just now", no
+//! scramble/rain frames rendered. §05 is the one exception on this page: its
+//! progress comes from `GestureDetectorView::on_hold_progress`, an
+//! event-delivered (not wall-clock) observation with no theme-default timing
+//! to bypass, so it needs no `ZERO`-timing workaround — reduced motion there
+//! only drops the ring/scale visuals, not the underlying gesture contract.
 //!
 //! Structure mirrors `motion.rs`: `pub fn page(state)` + one `demo_*` fn per
 //! moment inside `block(...)` scaffolds, thread-local demo state via the same
@@ -68,7 +102,7 @@ use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, Curve, EdgeInsets,
     FlexChild, FlexView, GestureDetector, Get, GetUntracked, Image, ImageFit, ImageSource, Padding,
     ProgressValue, RwSignal, Set, SizedBox, Stack, Theme, Timing, Update, any, button,
-    circular_progress, flexible, inflexible, keyed, text, use_context,
+    circular_progress, flexible, inflexible, keyed, scroll_view, text, use_context,
 };
 
 use crate::CatalogState;
@@ -89,6 +123,15 @@ fn muted() -> Color {
         .unwrap_or_else(Theme::glyph_baseline)
         .scheme()
         .on_surface_variant
+}
+
+/// The error/danger ink — [`demo_token_scramble`]'s glitching-token tint. See
+/// [`amber`]'s twin.
+fn error_ink() -> Color {
+    use_context::<Theme>()
+        .unwrap_or_else(Theme::glyph_baseline)
+        .scheme()
+        .error
 }
 
 /// `color` with its alpha channel replaced — duplicated from
@@ -469,6 +512,438 @@ fn demo_boot() -> FlexChild<CatalogState> {
 }
 
 // ---------------------------------------------------------------------------
+// Shared PRNG (task 21 — §04/§06)
+// ---------------------------------------------------------------------------
+
+/// One step of a small linear-congruential generator (Numerical Recipes'
+/// constants) — the deterministic "no `Math.random` analog needed" noise
+/// source [`scramble_char`]/[`rain_char`] use. Given the same `seed` this
+/// always returns the same value, so a given `(frame, index)` pair always
+/// renders the same glitch/rain character — reproducible, not a true RNG.
+fn lcg_next(seed: u32) -> u32 {
+    seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223)
+}
+
+// ---------------------------------------------------------------------------
+// 04 — token revoke scramble
+// ---------------------------------------------------------------------------
+
+local_sig!(token_active_sig, bool, false);
+local_clock!(token_elapsed_ms, token_reset_clock);
+
+/// The demo token, and the noise charset — both lifted verbatim from the
+/// reference's `ORIGINAL_TOKEN`/`CHARS`.
+const SCRAMBLE_TOKEN: &str = "zelli-mobile-100-71-31-57-mr3g6w5g";
+const SCRAMBLE_CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-#$%&";
+/// Per-frame tick length (reference: `setInterval(..., 40)`).
+const SCRAMBLE_FRAME_MS: f64 = 40.0;
+/// Total scramble frames before the string freezes (reference: `maxFrames`).
+const SCRAMBLE_MAX_FRAMES: f64 = 14.0;
+/// Delay after the last scramble frame before the collapse starts (reference:
+/// the `setTimeout(..., 120)` that adds `.collapsing`).
+const SCRAMBLE_COLLAPSE_DELAY_MS: f64 = 120.0;
+/// Collapse (max-height/opacity) transition length (reference: `.3s`).
+const SCRAMBLE_COLLAPSE_MS: f64 = 300.0;
+/// The row's at-rest height, in logical px (this demo's own choice — the
+/// reference's `max-height:60px` is a CSS cap, not the rendered height).
+const SCRAMBLE_ROW_H: f64 = 40.0;
+
+/// One noise character for token index `idx` at scramble `frame` — mirrors
+/// `Math.random()<0.5 ? CHARS[...] : original` with [`lcg_next`] standing in
+/// for `Math.random`. A space always stays a space (matches the reference's
+/// `ORIGINAL_TOKEN[i]==' '?' '` guard, though this token has none).
+fn scramble_char(original: char, frame: u32, idx: u32) -> char {
+    if original == ' ' {
+        return ' ';
+    }
+    let r1 = lcg_next(frame.wrapping_mul(0x9E37_79B1).wrapping_add(idx));
+    if r1 & 1 == 0 {
+        original
+    } else {
+        let r2 = lcg_next(r1);
+        SCRAMBLE_CHARSET[(r2 as usize) % SCRAMBLE_CHARSET.len()] as char
+    }
+}
+
+/// The full scrambled string at `frame` (0..=14): the left `lock_ratio*40%`
+/// of characters are locked to `·`, the rest noisy — mirrors the reference's
+/// per-character loop. The frame's one allocation (Acceptance Criteria #1:
+/// "no per-frame allocations beyond the rebuilt string").
+fn scramble_text(frame: u32) -> String {
+    let lock_ratio = frame as f64 / SCRAMBLE_MAX_FRAMES;
+    let len = SCRAMBLE_TOKEN.chars().count();
+    SCRAMBLE_TOKEN
+        .chars()
+        .enumerate()
+        .map(|(i, ch)| {
+            if len > 0 && (i as f64 / len as f64) < lock_ratio * 0.4 {
+                if ch == ' ' { ' ' } else { '·' }
+            } else {
+                scramble_char(ch, frame, i as u32)
+            }
+        })
+        .collect()
+}
+
+/// The token name text, tinted [`error_ink`] while glitching.
+fn token_name_view(rendered: String, glitching: bool) -> AnyView<CatalogState> {
+    let t = text(rendered).size(11.5);
+    if glitching {
+        any(t.color(error_ink()))
+    } else {
+        any(t)
+    }
+}
+
+/// 04 token revoke — scramble: revoking progressively locks the token's
+/// characters left-to-right through noise (14 ticks × 40ms, [`scramble_text`]),
+/// then the row collapses (height + opacity, driven by the same wall clock —
+/// no `request_layout` needed since a per-frame `SizedBox` height change
+/// already marks `ChangeFlags::LAYOUT` on rebuild). "Restore row" resets.
+fn demo_token_scramble(state: &CatalogState) -> FlexChild<CatalogState> {
+    let reduce = state.reduce_motion.get();
+    let active_sig = token_active_sig();
+    let active = active_sig.get();
+
+    // (display text, glitch tint, height/opacity ratio, still animating?)
+    let (display, glitching, ratio, running) = if !active {
+        (SCRAMBLE_TOKEN.to_string(), false, 1.0, false)
+    } else if reduce {
+        // Reduced motion: settle straight to the collapsed end-state, no
+        // scramble frames rendered (module docs' Reduced motion note).
+        (String::new(), false, 0.0, false)
+    } else {
+        let elapsed = token_elapsed_ms();
+        let frame = (elapsed / SCRAMBLE_FRAME_MS)
+            .floor()
+            .clamp(0.0, SCRAMBLE_MAX_FRAMES) as u32;
+        let collapse_start = SCRAMBLE_MAX_FRAMES * SCRAMBLE_FRAME_MS + SCRAMBLE_COLLAPSE_DELAY_MS;
+        let collapse_p = if elapsed > collapse_start {
+            ((elapsed - collapse_start) / SCRAMBLE_COLLAPSE_MS).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (
+            scramble_text(frame),
+            true,
+            1.0 - collapse_p,
+            collapse_p < 1.0,
+        )
+    };
+
+    let row_inner = FlexView::new(
+        Axis::Horizontal,
+        vec![
+            flexible(1, token_name_view(display, glitching)),
+            inflexible(SizedBox(Some(8.0), None)),
+            inflexible(
+                button("revoke", move |_s: &mut CatalogState| {
+                    token_reset_clock();
+                    active_sig.set(true);
+                })
+                .style(ButtonStyle::Danger)
+                .small(),
+            ),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center);
+
+    let row: AnyView<CatalogState> = any(AnimatedOpacity(
+        ratio,
+        SizedBox(None, Some((SCRAMBLE_ROW_H * ratio).max(0.0)))
+            .child(Padding(EdgeInsets::symmetric(4.0, 6.0), row_inner)),
+    )
+    .timing(ZERO));
+
+    let mut children = vec![
+        inflexible(label("04 Token revoke — scramble")),
+        inflexible(caption(if reduce {
+            "reduced motion — revoke collapses the row instantly, no scramble"
+        } else {
+            "revoke — characters lock left-to-right through noise, then the row collapses"
+        })),
+        gap(6.0),
+        inflexible(row),
+        gap(6.0),
+        inflexible(
+            button("Restore row", move |_s: &mut CatalogState| {
+                active_sig.set(false);
+            })
+            .small(),
+        ),
+    ];
+    if running {
+        children.push(pump());
+    }
+    block(children)
+}
+
+// ---------------------------------------------------------------------------
+// 05 — long-press charge ring → float
+// ---------------------------------------------------------------------------
+
+local_sig!(charge_progress_sig, f64, 0.0);
+local_sig!(charge_floated_sig, bool, false);
+
+/// Hold duration before the row floats (reference: "~700ms").
+const CHARGE_HOLD_MS: u64 = 700;
+/// The leading icon box's side length, in logical px.
+const CHARGE_ICON_SIZE: f64 = 26.0;
+/// The charge ring's diameter — slightly larger than the icon so the arc
+/// traces around it, matching the reference's ring-around-the-icon framing
+/// (a static position here rather than around the pointer: application code
+/// has no reach to the raw pointer coordinates `on_hold_progress` observes).
+const CHARGE_RING_SIZE: f64 = 34.0;
+/// The row's fixed height, in logical px.
+const CHARGE_ROW_H: f64 = 56.0;
+
+/// 05 long-press → float: holding the row past [`CHARGE_HOLD_MS`] fills a
+/// charge ring ([`circular_progress`]'s stroked-arc sweep, the same primitive
+/// the heartbeat ping ring uses) via
+/// `GestureDetectorView::on_hold_progress`/`GestureDetectorView::hold_threshold_ms`
+/// (task 15); reaching the threshold "floats" the row (scale 1.03 + an amber
+/// wash standing in for the reference's box-shadow — see the [module
+/// docs](self)'s substitution note — + a chip); an early lift or slop-break
+/// resets the ring to empty (the widget's own final-`0.0` contract). Tapping
+/// a floated row drops it back down.
+fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
+    let reduce = state.reduce_motion.get();
+    let progress_sig = charge_progress_sig();
+    let floated_sig = charge_floated_sig();
+    let progress = progress_sig.get();
+    let floated = floated_sig.get();
+    let holding = !floated && progress > 0.0;
+
+    let icon_bg = if floated {
+        with_alpha(amber(), 0.18)
+    } else {
+        with_alpha(muted(), 0.14)
+    };
+    let icon_fg = if floated { amber() } else { muted() };
+    let icon_box: AnyView<CatalogState> =
+        any(
+            SizedBox(Some(CHARGE_ICON_SIZE), Some(CHARGE_ICON_SIZE)).child(Stack(vec![
+                any(Image(solid_source(icon_bg)).fit(ImageFit::Fill)),
+                any(Align(
+                    Alignment::CENTER,
+                    text("▤").size(12.0).color(icon_fg),
+                )),
+            ])),
+        );
+
+    let mut icon_layers = vec![icon_box];
+    if holding && !reduce {
+        icon_layers.push(any(Align(
+            Alignment::CENTER,
+            SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE))
+                .child(circular_progress(ProgressValue::Determinate(progress))),
+        )));
+    }
+    let icon_stack: AnyView<CatalogState> =
+        any(SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE)).child(Stack(icon_layers)));
+
+    let title_col: AnyView<CatalogState> = any(FlexView::new(
+        Axis::Vertical,
+        vec![
+            inflexible(text("(untitled)").size(11.5)),
+            inflexible(text("/home/ed/dev/forgekit").size(9.5).color(muted())),
+        ],
+    ));
+
+    let chip: AnyView<CatalogState> = any(AnimatedOpacity(
+        if floated { 1.0 } else { 0.0 },
+        badge("floating", BadgeVariant::Accent),
+    )
+    .timing(ZERO));
+
+    let row_inner = FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(icon_stack),
+            inflexible(SizedBox(Some(10.0), None)),
+            flexible(1, title_col),
+            inflexible(chip),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center);
+
+    // The reference's `box-shadow` lift has no facade equivalent from
+    // application code (see the module docs' substitution note) — an
+    // opacity-faded amber wash behind the row approximates it.
+    let glow: AnyView<CatalogState> = any(AnimatedOpacity(
+        if floated { 1.0 } else { 0.0 },
+        SizedBox(None, Some(CHARGE_ROW_H))
+            .child(Image(solid_source(with_alpha(amber(), 0.10))).fit(ImageFit::Fill)),
+    )
+    .timing(ZERO));
+
+    let card: AnyView<CatalogState> = any(SizedBox(None, Some(CHARGE_ROW_H)).child(Stack(vec![
+        glow,
+        any(Padding(EdgeInsets::all(12.0), row_inner)),
+    ])));
+
+    let scaled: AnyView<CatalogState> = if reduce {
+        card
+    } else {
+        any(AnimatedScale(if floated { 1.03 } else { 1.0 }, card).timing(ZERO))
+    };
+
+    let gesture: AnyView<CatalogState> = any(GestureDetector(scaled)
+        .hold_threshold_ms(CHARGE_HOLD_MS)
+        .on_hold_progress(move |_s: &mut CatalogState, p: f64| progress_sig.set(p))
+        .on_long_press(move |_s: &mut CatalogState| {
+            floated_sig.set(true);
+            progress_sig.set(1.0);
+        })
+        .on_tap(move |_s: &mut CatalogState| {
+            if floated_sig.get_untracked() {
+                floated_sig.set(false);
+                progress_sig.set(0.0);
+            }
+        }));
+
+    block(vec![
+        inflexible(label("05 Long-press → float")),
+        inflexible(caption(if reduce {
+            "reduced motion — press and hold; floats instantly at the threshold, no ring/scale"
+        } else {
+            "press and hold the row ~700ms — a charge ring fills; lift early to cancel"
+        })),
+        gap(6.0),
+        inflexible(gesture),
+    ])
+}
+
+// ---------------------------------------------------------------------------
+// 06 — pull to refresh: rain burst
+// ---------------------------------------------------------------------------
+
+local_sig!(rain_active_sig, bool, false);
+local_clock!(rain_elapsed_ms, rain_reset_clock);
+
+/// The refresh zone's fixed size, in logical px (see the [module
+/// docs](self)'s substitution note on why this is fixed rather than
+/// measured-width-derived).
+const RAIN_ZONE_W: f64 = 260.0;
+const RAIN_ZONE_H: f64 = 56.0;
+/// Column count across [`RAIN_ZONE_W`] (the task's "~W/13" guidance, rounded).
+const RAIN_COLUMNS: u32 = 20;
+/// Total burst length (reference: "~650ms").
+const RAIN_BURST_MS: f64 = 650.0;
+/// One column's fall duration.
+const RAIN_FALL_MS: f64 = 400.0;
+/// Max per-column start stagger — chosen so `stagger + RAIN_FALL_MS` never
+/// exceeds [`RAIN_BURST_MS`] (`250 + 400 = 650`).
+const RAIN_STAGGER_MOD_MS: u32 = 250;
+/// Rain glyph charset — the reference's canvas draws raw ASCII "rain"; a small
+/// binary/symbol-leaning set reads the same at this size.
+const RAIN_CHARSET: &[u8] = b"01#$%mux";
+
+/// A column's falling character — fixed per column index (not per frame), so
+/// a column reads as one glyph raining down rather than flickering noise.
+fn rain_char(col: u32) -> char {
+    let r = lcg_next(col.wrapping_mul(0x9E37_79B1));
+    RAIN_CHARSET[(r as usize) % RAIN_CHARSET.len()] as char
+}
+
+/// A column's deterministic start delay within the burst, in `0..RAIN_STAGGER_MOD_MS`.
+fn rain_stagger(col: u32) -> f64 {
+    (col.wrapping_mul(23) % RAIN_STAGGER_MOD_MS) as f64
+}
+
+/// 06 pull to refresh — rain burst: a 56px zone (a small [`ScrollView`] whose
+/// [`ScrollView::on_refresh_release`] — task 15/scroll's pull-to-refresh
+/// trigger — fires the same handler as the "trigger refresh" button, since
+/// the gesture needs a real touch/mouse drag past the top edge to verify on
+/// desktop) bursts a fixed grid of falling glyph columns
+/// ([`RAIN_COLUMNS`], each independently staggered/timed — the "honest
+/// composition" choice over a shader quad, see the [module docs](self)),
+/// fades out, then settles on "last updated just now".
+///
+/// [`ScrollView`]: frust::ScrollView
+fn demo_rain_burst(state: &CatalogState) -> FlexChild<CatalogState> {
+    let reduce = state.reduce_motion.get();
+    let active_sig = rain_active_sig();
+    let active = active_sig.get();
+    let elapsed = if active { rain_elapsed_ms() } else { 0.0 };
+    // Reduced motion settles straight to the end-state — no falling glyphs.
+    let running = active && !reduce && elapsed < RAIN_BURST_MS;
+
+    let mut layers: Vec<AnyView<CatalogState>> =
+        vec![any(SizedBox(Some(RAIN_ZONE_W), Some(RAIN_ZONE_H)).child(
+            Image(solid_source(with_alpha(muted(), 0.05))).fit(ImageFit::Fill),
+        ))];
+    if running {
+        for col in 0..RAIN_COLUMNS {
+            let stagger = rain_stagger(col);
+            let local = elapsed - stagger;
+            if !(0.0..RAIN_FALL_MS).contains(&local) {
+                continue;
+            }
+            let p = local / RAIN_FALL_MS;
+            let x = -1.0 + 2.0 * (col as f64 + 0.5) / RAIN_COLUMNS as f64;
+            let y = -1.0 + 2.0 * p;
+            let op = (1.0 - p * 0.6).clamp(0.0, 1.0);
+            layers.push(any(Align(
+                Alignment::new(x, y),
+                AnimatedOpacity(
+                    op,
+                    text(rain_char(col).to_string()).size(9.0).color(amber()),
+                )
+                .timing(ZERO),
+            )));
+        }
+    }
+    layers.push(any(Align(
+        Alignment::CENTER,
+        text(if running {
+            "refreshing…"
+        } else {
+            "pull down to refresh"
+        })
+        .size(10.5)
+        .color(if running { amber() } else { muted() }),
+    )));
+
+    let inner: AnyView<CatalogState> =
+        any(SizedBox(Some(RAIN_ZONE_W), Some(RAIN_ZONE_H)).child(Stack(layers)));
+    let zone: AnyView<CatalogState> = any(SizedBox(Some(RAIN_ZONE_W), Some(RAIN_ZONE_H)).child(
+        scroll_view(inner).on_refresh_release(move |_s: &mut CatalogState| {
+            rain_reset_clock();
+            active_sig.set(true);
+        }),
+    ));
+
+    let mut children = vec![
+        inflexible(label("06 Pull to refresh — rain burst")),
+        inflexible(caption(
+            "pull down inside the zone (or tap trigger) — a burst of falling glyphs, then a timestamp",
+        )),
+        gap(6.0),
+        inflexible(zone),
+    ];
+    if !running {
+        children.push(inflexible(caption(if active {
+            "last updated just now"
+        } else {
+            "last updated 2 minutes ago"
+        })));
+        children.push(gap(6.0));
+    }
+    children.push(inflexible(
+        button("Trigger refresh", move |_s: &mut CatalogState| {
+            rain_reset_clock();
+            active_sig.set(true);
+        })
+        .small(),
+    ));
+    if running {
+        children.push(pump());
+    }
+    block(children)
+}
+
+// ---------------------------------------------------------------------------
 // 07 — live output indicator (waveform)
 // ---------------------------------------------------------------------------
 
@@ -683,6 +1158,12 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
             demo_attach(),
             gap(8.0),
             demo_boot(),
+            gap(8.0),
+            demo_token_scramble(state),
+            gap(8.0),
+            demo_charge_ring(state),
+            gap(8.0),
+            demo_rain_burst(state),
             gap(8.0),
             demo_waveform(state),
             gap(8.0),
