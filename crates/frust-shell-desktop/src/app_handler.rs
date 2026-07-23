@@ -62,7 +62,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
 use winit::window::{Theme as WinitTheme, Window, WindowAttributes, WindowId};
 
-use crate::paced_wake::{NextPacedWake, PacedWakeAction, next_paced_wake, paced_wake_action};
+use crate::paced_wake::{ControlFlowIntent, next_paced_wake, paced_wake_action};
 use crate::render::FrameExecutor;
 
 /// Initial preview-window size, in logical pixels.
@@ -259,6 +259,22 @@ fn finish(fatal: Option<anyhow::Error>) -> Result<()> {
     match fatal {
         Some(err) => Err(err),
         None => Ok(()),
+    }
+}
+
+/// Apply a [`ControlFlowIntent`] (the winit-free decision from the
+/// `paced_wake` module) to the live event loop. [`ControlFlowIntent::Unchanged`]
+/// is a deliberate no-op — the paint-time paced-only case leaves the loop
+/// parked on whatever it already is, for the next `about_to_wait` to
+/// resolve. Pulled out so the translation from intent to `set_control_flow`
+/// is one place shared by both the paint and `about_to_wait` call sites.
+fn apply_control_flow(event_loop: &ActiveEventLoop, intent: ControlFlowIntent) {
+    match intent {
+        ControlFlowIntent::Wait => event_loop.set_control_flow(ControlFlow::Wait),
+        ControlFlowIntent::WaitUntil(deadline) => {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline))
+        }
+        ControlFlowIntent::Unchanged => {}
     }
 }
 
@@ -806,24 +822,22 @@ where
         // scheduled its follow-up redraw for a future instant rather than the
         // next vsync. Park the loop on `WaitUntil(deadline)` so it wakes then;
         // once the deadline passes, request the redraw and revert to `Wait`.
+        // With nothing pending, defensively return to `Wait` too, so no stale
+        // `WaitUntil` can ever survive a turn (the round-1 busy-spin Critical).
         // Any other redraw source (input, a signal wake, a resize) still wakes
         // the loop immediately regardless of this timer — pacing only bounds the
         // cosmetic loop's own cadence. The decision itself lives in the pure,
-        // winit-free `paced_wake` module (see its docs) — this is a straight
-        // match over its result.
-        match paced_wake_action(self.paced_wake, Instant::now()) {
-            PacedWakeAction::None => {}
-            PacedWakeAction::Fire => {
-                self.paced_wake = None;
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-                event_loop.set_control_flow(ControlFlow::Wait);
-            }
-            PacedWakeAction::Park(deadline) => {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-            }
+        // winit-free `paced_wake` module (see its docs) — this applies its
+        // result wholesale (field, redraw, control flow are one value, so the
+        // field can never be updated without also deciding the control flow).
+        let decision = paced_wake_action(self.paced_wake, Instant::now());
+        self.paced_wake = decision.paced_wake;
+        if decision.request_redraw
+            && let Some(window) = self.window.as_ref()
+        {
+            window.request_redraw();
         }
+        apply_control_flow(event_loop, decision.control_flow);
     }
 
     fn window_event(
@@ -1102,31 +1116,28 @@ where
                 // false` (a settled loop) must clear any stale prior
                 // `paced_wake` too, not just leave it assigned only inside a
                 // `needs_frame` arm — `next_paced_wake` is driven every frame
-                // (not just the `needs_frame` ones) precisely so its `Idle` arm
-                // covers that settle case.
-                let interval = std::time::Duration::from_secs_f32(
-                    1.0 / self.theme.motion.cosmetic_loop_rate.hz(),
-                );
-                match next_paced_wake(
+                // (not just the `needs_frame` ones) precisely so its settle
+                // path covers that case: it clears the field AND returns the
+                // loop to `Wait`, never leaving a stale `WaitUntil` behind (the
+                // round-1 busy-spin Critical). The paced interval's division is
+                // computed only inside the branch that schedules (in
+                // `next_paced_wake`), so a settling frame never runs it; the
+                // rate is kept finite by `CosmeticLoopRate`'s NaN-safe clamp so
+                // that division can't panic. The decision bundles the field,
+                // the redraw, and the control flow into one value, so the field
+                // can never be updated without also deciding the control flow.
+                let decision = next_paced_wake(
                     paint_outcome.needs_frame,
                     paint_outcome.needs_frame_paced_only,
                     self.anim_pacing,
                     Instant::now(),
-                    interval,
-                ) {
-                    NextPacedWake::Scheduled(deadline) => {
-                        self.paced_wake = Some(deadline);
-                    }
-                    NextPacedWake::FireNow => {
-                        // A real transition (or the pacing kill switch)
-                        // supersedes any pending paced wake.
-                        self.paced_wake = None;
-                        window.request_redraw();
-                    }
-                    NextPacedWake::Idle => {
-                        self.paced_wake = None;
-                    }
+                    self.theme.motion.cosmetic_loop_rate.hz(),
+                );
+                self.paced_wake = decision.paced_wake;
+                if decision.request_redraw {
+                    window.request_redraw();
                 }
+                apply_control_flow(event_loop, decision.control_flow);
 
                 // A tracked signal written *during* this frame (e.g. a local
                 // task pumped above, or a write racing in from a background

@@ -116,8 +116,19 @@ impl CosmeticLoopRate {
     /// Builds a rate, clamping `hz` up to [`FLOOR_HZ`](Self::FLOOR_HZ) (no
     /// uncapped/zero value is representable). `const fn` so every
     /// [`MotionScheme`] baseline constructor below can stay `const`.
+    ///
+    /// The clamp is **NaN-safe**: a plain `hz < FLOOR_HZ` test lets `NaN`
+    /// slip through (every ordered comparison with `NaN` is `false`), so `NaN`
+    /// is caught explicitly and clamped to the floor alongside any finite
+    /// below-floor value. This matters because the desktop shell derives its
+    /// per-frame paced interval as `Duration::from_secs_f32(1.0 / hz())`, and
+    /// `from_secs_f32` panics on a `NaN` argument — clamping here guarantees a
+    /// finite, `>= FLOOR_HZ` rate so that division can never produce one. (The
+    /// equivalent `!(hz >= FLOOR_HZ)` one-liner is clearer intent-wise but
+    /// trips clippy's `neg_cmp_op_on_partial_ord`; the explicit `is_nan()`
+    /// disjunction below is the lint-clean form of the same NaN-safe clamp.)
     pub const fn new(hz: f32) -> Self {
-        if hz < Self::FLOOR_HZ {
+        if hz.is_nan() || hz < Self::FLOOR_HZ {
             Self(Self::FLOOR_HZ)
         } else {
             Self(hz)
@@ -416,6 +427,20 @@ mod tests {
     fn cosmetic_loop_rate_passes_through_above_the_floor() {
         assert_eq!(CosmeticLoopRate::new(30.0).hz(), 30.0);
         assert_eq!(CosmeticLoopRate::new(60.0).hz(), 60.0);
+    }
+
+    #[test]
+    fn cosmetic_loop_rate_clamps_nan_to_the_floor() {
+        // NaN-safe clamp: `NaN >= FLOOR` is false, so `new` clamps NaN up to
+        // the floor. The resulting rate must be finite so the desktop shell's
+        // `Duration::from_secs_f32(1.0 / hz())` per-frame interval cannot
+        // panic (`from_secs_f32` panics on a NaN argument).
+        let rate = CosmeticLoopRate::new(f32::NAN);
+        assert_eq!(rate.hz(), CosmeticLoopRate::FLOOR_HZ);
+        assert!(rate.hz().is_finite());
+        // And `1.0 / hz()` — the value that actually reaches `from_secs_f32` —
+        // is finite and positive, never NaN.
+        assert!((1.0 / rate.hz()).is_finite());
     }
 
     #[test]
