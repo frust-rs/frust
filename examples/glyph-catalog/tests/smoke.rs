@@ -15,7 +15,7 @@ use std::any::Any;
 
 use frust::{AnyView, Brightness, Theme, any, component, provide_context};
 use frust_core::FrameTime;
-use frust_core::{PaintScene, RenderRoot, View};
+use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
 use frust_core::{WindowEdgeInsets, WindowInsets};
 use frust_reactive::ReactiveRuntime;
 use frust_scene::GlyphRun;
@@ -124,7 +124,8 @@ fn setup_with_theme(brightness: Brightness) -> (Owner, Theme) {
 }
 
 /// One frame at an explicit viewport `size`: rebuild, layout (shaping real
-/// text), paint into a fresh recorder.
+/// text), paint into a fresh recorder. Returns both the recorded scene and
+/// the paint outcome (used for asserting frame-request behavior).
 fn frame_at_size<S: 'static, V: View<S>>(
     root: &mut RenderRoot<S, V>,
     logic: &mut impl FnMut(&mut S) -> V,
@@ -132,13 +133,13 @@ fn frame_at_size<S: 'static, V: View<S>>(
     tcx: &mut TextContext,
     size: Size,
     t_ms: u64,
-) -> RecScene {
+) -> (RecScene, PaintOutcome) {
     root.rebuild(logic, state);
     let tcx_any: &mut dyn Any = tcx;
     root.layout_with_text(size, tcx_any);
     let mut scene = RecScene::default();
-    root.paint(&mut scene, FrameTime::from_nanos(t_ms * 1_000_000));
-    scene
+    let outcome = root.paint(&mut scene, FrameTime::from_nanos(t_ms * 1_000_000));
+    (scene, outcome)
 }
 
 /// One frame at the module's default `(W, H)` size — the shape every
@@ -149,7 +150,7 @@ fn frame_at<S: 'static, V: View<S>>(
     state: &mut S,
     tcx: &mut TextContext,
     t_ms: u64,
-) -> RecScene {
+) -> (RecScene, PaintOutcome) {
     frame_at_size(root, logic, state, tcx, Size::new(W, H), t_ms)
 }
 
@@ -166,7 +167,7 @@ fn frame_at_with_top_inset<S: 'static, V: View<S>>(
     tcx: &mut TextContext,
     top_inset: f64,
     t_ms: u64,
-) -> RecScene {
+) -> (RecScene, PaintOutcome) {
     root.set_insets(WindowInsets::new(
         WindowEdgeInsets {
             top: top_inset,
@@ -186,7 +187,7 @@ fn every_page_mounts_and_paints() {
         let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
         let mut state = CatalogState::new();
         let mut logic = |s: &mut CatalogState| pages::current(section, s);
-        let scene = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+        let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
         assert!(
             scene.glyph_runs > 0,
             "section {section} ({label}) must paint some text",
@@ -219,7 +220,7 @@ fn every_page_mounts_at_every_size_and_brightness() {
                 root.set_theme(Box::new(theme));
                 let mut state = CatalogState::new();
                 let mut logic = |s: &mut CatalogState| pages::current(section, s);
-                let scene = frame_at_size(
+                let (scene, _outcome) = frame_at_size(
                     &mut root,
                     &mut logic,
                     &mut state,
@@ -235,7 +236,7 @@ fn every_page_mounts_at_every_size_and_brightness() {
                 // A second frame proves reconcile-in-place also survives at
                 // this size/brightness (not just first mount) — mirrors the
                 // full-shell test's own second-frame check below.
-                let scene2 = frame_at_size(
+                let (scene2, _outcome2) = frame_at_size(
                     &mut root,
                     &mut logic,
                     &mut state,
@@ -273,7 +274,7 @@ fn page_text_colors_track_brightness() {
             root.set_theme(Box::new(theme));
             let mut state = CatalogState::new();
             let mut logic = |s: &mut CatalogState| pages::current(section, s);
-            let scene = frame_at_size(
+            let (scene, _outcome) = frame_at_size(
                 &mut root,
                 &mut logic,
                 &mut state,
@@ -305,7 +306,7 @@ fn out_of_range_section_falls_back() {
     let mut state = CatalogState::new();
     // A defensive out-of-range index must still mount (foundations fallback).
     let mut logic = |s: &mut CatalogState| pages::current(99, s);
-    let scene = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
     assert!(scene.glyph_runs > 0, "the fallback page paints");
 }
 
@@ -321,7 +322,7 @@ fn full_shell_mounts_with_header_tabs_and_body() {
     let mut logic = |_s: &mut ()| any(component(CatalogApp));
     let mut state = ();
 
-    let scene = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
 
     // The header title + two toggle labels + the seven tab labels + the
     // foundations page's own text all shape glyph runs.
@@ -338,7 +339,7 @@ fn full_shell_mounts_with_header_tabs_and_body() {
     );
 
     // A second frame keeps mounting cleanly (reconcile-in-place, no panic).
-    let scene2 = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 16);
+    let (scene2, _outcome2) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 16);
     assert!(scene2.glyph_runs > 0);
 }
 
@@ -362,8 +363,8 @@ fn root_appbar_consumes_inset_without_double_padding() {
     let mut logic = |_s: &mut ()| any(component(CatalogApp));
     let mut state = ();
 
-    let zero = frame_at_with_top_inset(&mut root, &mut logic, &mut state, &mut tcx, 0.0, 0);
-    let pushed =
+    let (zero, _zero_outcome) = frame_at_with_top_inset(&mut root, &mut logic, &mut state, &mut tcx, 0.0, 0);
+    let (pushed, _pushed_outcome) =
         frame_at_with_top_inset(&mut root, &mut logic, &mut state, &mut tcx, TOP_INSET, 16);
 
     assert_eq!(
@@ -384,4 +385,23 @@ fn root_appbar_consumes_inset_without_double_padding() {
             double = TOP_INSET * 2.0,
         );
     }
+}
+
+/// Task 02-foundations-static-specimens: the foundations page must render
+/// ZERO frames at rest — its Radius scale specimens are static rounded rects,
+/// not animated skeletons. This test drives the foundations page through
+/// rebuild→layout→paint and asserts `PaintOutcome::needs_frame == false`.
+#[test]
+fn foundations_page_requests_no_frames_at_rest() {
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+    let mut state = CatalogState::new();
+    // Section 0 is the foundations page.
+    let mut logic = |s: &mut CatalogState| pages::current(0, s);
+    let (_scene, outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    assert!(
+        !outcome.needs_frame,
+        "foundations page must not request frames at rest (needs_frame must be false)",
+    );
 }
