@@ -22,7 +22,7 @@ use frust::motion::switcher::pattern_switcher;
 use frust::{
     AnyView, Axis, Brightness, Component, EdgeInsets, FlexView, Get, GetUntracked, MotionScheme,
     NavigatorController, Padding, RwSignal, Set, SizedBox, Stack, Theme, TransitionSpec, any,
-    button, inflexible, navigator, scroll_view, set_app_theme, text,
+    button, flexible, inflexible, navigator, scroll_view, set_app_theme, text,
 };
 
 use pages::SECTION_LABELS;
@@ -184,13 +184,20 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     ));
 
     // The pattern switcher swaps the section body whenever `section` (its key)
-    // changes, playing a GlyphSlide in the tap-derived direction.
+    // changes, playing a GlyphSlide in the tap-derived direction. The body
+    // must be the column's FLEXIBLE child (flex: 1): an `inflexible` child
+    // would size the scroll_view to its content's intrinsic height, so the
+    // viewport would never be smaller than the content and scrolling would
+    // never engage (found on-device 2026-07-23).
     let handles = state.clone();
-    let body = inflexible(pattern_switcher(
-        section,
-        GlyphSlide::new(slide),
-        scroll_view(pages::current(section, &handles)),
-    ));
+    let body = flexible(
+        1,
+        pattern_switcher(
+            section,
+            GlyphSlide::new(slide),
+            scroll_view(pages::current(section, &handles)),
+        ),
+    );
 
     let column = FlexView::new(
         Axis::Vertical,
