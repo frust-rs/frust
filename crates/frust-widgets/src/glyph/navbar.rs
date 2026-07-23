@@ -36,6 +36,7 @@ use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
     PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
+use crate::icon::IconData;
 use frust_text::{FontFamily, FontWeight, GenericSlot, TextContext, TextLayout, TextStyle};
 use frust_theme::{ShapeScale, Theme};
 use kurbo::{Point, Rect, Size};
@@ -100,17 +101,59 @@ fn nav_radius(theme: Option<&Theme>, size: Size) -> f64 {
     }
 }
 
-/// One declarative destination: a glyph/icon char and a micro label.
+/// One declarative destination: a glyph (char **or** vector icon) above a
+/// micro label.
 pub struct GlyphNavItem {
-    glyph: String,
+    glyph: NavItemGlyph,
     label: String,
 }
 
-/// Create a nav item rendering `glyph` above `label`.
+/// The two glyph faces a [`GlyphNavItem`] can render.
+///
+/// **Cross-platform caveat for `Char`:** a character outside the bundled
+/// Glyph fonts' coverage (IBM Plex Mono ships box-drawing U+2500–259F and
+/// `◊`, but NO Geometric Shapes circles/diamonds) resolves through the
+/// *platform's* system-font fallback — broad on Android, narrow on iOS,
+/// where uncovered codepoints render as tofu boxes. For chrome that must
+/// look identical everywhere, prefer [`glyph_nav_item_icon`] (a
+/// deterministic vector path) or restrict chars to the bundled coverage.
+enum NavItemGlyph {
+    Char(String),
+    Icon(IconData),
+}
+
+/// Create a nav item rendering the `glyph` char above `label` (see
+/// [`NavItemGlyph`]'s font-coverage caveat).
 pub fn glyph_nav_item(glyph: impl Into<String>, label: impl Into<String>) -> GlyphNavItem {
     GlyphNavItem {
-        glyph: glyph.into(),
+        glyph: NavItemGlyph::Char(glyph.into()),
         label: label.into(),
+    }
+}
+
+/// Create a nav item rendering a vector `icon` above `label` — the
+/// platform-deterministic alternative to a glyph char (no font-fallback
+/// dependency; same pixels on every OS). The icon paints as a filled path
+/// (the [`crate::icon`] contract) tinted with the item's active/inactive
+/// color, scaled into the same box a glyph char occupies.
+pub fn glyph_nav_item_icon(icon: impl Into<IconData>, label: impl Into<String>) -> GlyphNavItem {
+    GlyphNavItem {
+        glyph: NavItemGlyph::Icon(icon.into()),
+        label: label.into(),
+    }
+}
+
+impl NavItemGlyph {
+    /// Cheap same-glyph check for [`GlyphNavBarView::rebuild`]'s structural
+    /// diff — string equality for chars, [`IconData::same`] for icons (Arc
+    /// pointer / static-source identity, so a memoized app icon is stable
+    /// across per-frame rebuilds).
+    fn same(&self, other: &NavItemGlyph) -> bool {
+        match (self, other) {
+            (NavItemGlyph::Char(a), NavItemGlyph::Char(b)) => a == b,
+            (NavItemGlyph::Icon(a), NavItemGlyph::Icon(b)) => a.same(b),
+            _ => false,
+        }
     }
 }
 
@@ -182,9 +225,42 @@ impl GlyphLabel {
     }
 }
 
+/// A retained glyph slot: a shaped char run or a resolved vector icon.
+enum NavSlot {
+    Char(GlyphLabel),
+    Icon(IconData),
+}
+
+impl NavSlot {
+    fn layout(&mut self, ctx: &mut LayoutCtx, tint: Color) -> Size {
+        match self {
+            NavSlot::Char(label) => label.layout(ctx, &glyph_style(tint), None),
+            // A vector icon occupies the same square box a glyph char's face
+            // size defines — no text shaping involved.
+            NavSlot::Icon(_) => Size::new(NAV_GLYPH_SIZE as f64, NAV_GLYPH_SIZE as f64),
+        }
+    }
+
+    fn paint(&self, origin: Point, tint: Color, scene: &mut dyn PaintScene) {
+        match self {
+            NavSlot::Char(label) => label.paint(origin, scene),
+            NavSlot::Icon(data) => {
+                let (path, design) = data.resolve();
+                let scale = if design > 0.0 {
+                    NAV_GLYPH_SIZE as f64 / design
+                } else {
+                    1.0
+                };
+                let scaled = kurbo::Affine::scale(scale) * path;
+                scene.fill_path(origin, &scaled, &Brush::Solid(tint));
+            }
+        }
+    }
+}
+
 /// One retained destination.
 struct NavEntry {
-    glyph: GlyphLabel,
+    glyph: NavSlot,
     label: GlyphLabel,
     label_text: String,
     glyph_size: Size,
@@ -217,7 +293,10 @@ fn build_items(items: &[GlyphNavItem]) -> Vec<NavEntry> {
     items
         .iter()
         .map(|item| NavEntry {
-            glyph: GlyphLabel::new(item.glyph.clone()),
+            glyph: match &item.glyph {
+                NavItemGlyph::Char(s) => NavSlot::Char(GlyphLabel::new(s.clone())),
+                NavItemGlyph::Icon(data) => NavSlot::Icon(data.clone()),
+            },
             label: GlyphLabel::new(item.label.clone()),
             label_text: item.label.clone(),
             glyph_size: Size::ZERO,
@@ -265,7 +344,7 @@ impl<State: 'static> View<State> for GlyphNavBarView<State> {
                 .items
                 .iter()
                 .zip(self.items.iter())
-                .any(|(p, n)| p.glyph != n.glyph || p.label != n.label);
+                .any(|(p, n)| !p.glyph.same(&n.glyph) || p.label != n.label);
         if structural {
             element.items = build_items(&self.items);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
@@ -307,7 +386,7 @@ impl Widget for GlyphNavBarWidget {
         let mut content_height = 0.0_f64;
         for (i, entry) in self.items.iter_mut().enumerate() {
             let tint = if i == self.selected { active } else { inactive };
-            let glyph_size = entry.glyph.layout(ctx, &glyph_style(tint), None);
+            let glyph_size = entry.glyph.layout(ctx, tint);
             let label_size = entry.label.layout(ctx, &label_style(tint), None);
             entry.glyph_size = glyph_size;
             entry.label_size = label_size;
@@ -323,7 +402,7 @@ impl Widget for GlyphNavBarWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
-        let (bg, border, _, _) = resolve_nav_colors(theme);
+        let (bg, border, active, inactive) = resolve_nav_colors(theme);
         let origin = ctx.origin();
         let size = ctx.size();
 
@@ -338,14 +417,15 @@ impl Widget for GlyphNavBarWidget {
             &Brush::Solid(border),
         );
 
-        for entry in &self.items {
+        for (i, entry) in self.items.iter().enumerate() {
+            let tint = if i == self.selected { active } else { inactive };
             // Vertically center the glyph+gap+label stack.
             let stack_h = entry.glyph_size.height + NAV_ITEM_GAP + entry.label_size.height;
             let top = origin.y + (size.height - stack_h) / 2.0;
             let slot_center = origin.x + entry.slot_x + entry.slot_w / 2.0;
 
             let glyph_x = slot_center - entry.glyph_size.width / 2.0;
-            entry.glyph.paint(Point::new(glyph_x, top), scene);
+            entry.glyph.paint(Point::new(glyph_x, top), tint, scene);
 
             let label_x = slot_center - entry.label_size.width / 2.0;
             let label_y = top + entry.glyph_size.height + NAV_ITEM_GAP;
@@ -427,6 +507,7 @@ mod tests {
         rrects: Vec<(Point, Size, f64, Color)>,
         strokes: Vec<Color>,
         glyph_colors: Vec<Color>,
+        path_fills: Vec<(Point, Color)>,
     }
 
     impl PaintScene for Recorder {
@@ -438,6 +519,11 @@ mod tests {
         fn stroke_path(&mut self, _o: Point, _p: &kurbo::BezPath, _w: f64, brush: &Brush) {
             if let Brush::Solid(c) = brush {
                 self.strokes.push(*c);
+            }
+        }
+        fn fill_path(&mut self, o: Point, _p: &kurbo::BezPath, brush: &Brush) {
+            if let Brush::Solid(c) = brush {
+                self.path_fills.push((o, *c));
             }
         }
         fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
@@ -589,5 +675,72 @@ mod tests {
             .find(|(_, n)| n.role() == Role::Tab && n.label() == Some("tabs"))
             .expect("the selected item");
         assert_eq!(selected.1.is_selected(), Some(true));
+    }
+
+    // --- Vector-icon items (glyph_nav_item_icon): platform-deterministic
+    //     path fills instead of font-fallback-dependent glyph chars. ---
+
+    fn diamond_icon() -> IconData {
+        // A 10×10-design filled diamond (the `◆` shape as a path).
+        let mut p = kurbo::BezPath::new();
+        p.move_to((5.0, 0.0));
+        p.line_to((10.0, 5.0));
+        p.line_to((5.0, 10.0));
+        p.line_to((0.0, 5.0));
+        p.close_path();
+        IconData::from_path(p, 10.0)
+    }
+
+    #[test]
+    fn icon_items_paint_path_fills_with_item_tints_and_fixed_glyph_box() {
+        let view: GlyphNavBarView<Vec<usize>> = glyph_nav_bar(
+            vec![
+                glyph_nav_item_icon(diamond_icon(), "home"),
+                glyph_nav_item_icon(diamond_icon(), "you"),
+            ],
+            0,
+            |_s, _i| {},
+        );
+        let mut w = build(&view);
+        let theme = Theme::glyph_baseline();
+        layout(&mut w, Size::new(360.0, 200.0), Some(&theme));
+        // Icon slots use the fixed glyph box, no text shaping.
+        assert_eq!(
+            w.items[0].glyph_size,
+            Size::new(NAV_GLYPH_SIZE as f64, NAV_GLYPH_SIZE as f64)
+        );
+        let rec = paint(&mut w, Size::new(360.0, 46.0), Some(&theme));
+        // One filled path per icon item; the selected item carries the active
+        // tint, the other the inactive tint (both from resolve_nav_colors).
+        assert_eq!(rec.path_fills.len(), 2, "one fill_path per icon item");
+        let (_, _, active, inactive) = resolve_nav_colors(Some(&theme));
+        assert_eq!(rec.path_fills[0].1, active, "selected item tint");
+        assert_eq!(rec.path_fills[1].1, inactive, "unselected item tint");
+    }
+
+    #[test]
+    fn icon_item_rebuild_is_stable_for_a_memoized_icon() {
+        // The same IconData handle (Arc identity) must NOT read as structural
+        // on a per-frame rebuild; a fresh path (new Arc) must.
+        let shared = diamond_icon();
+        let mk = |icon: IconData| -> GlyphNavBarView<Vec<usize>> {
+            glyph_nav_bar(
+                vec![glyph_nav_item_icon(icon, "home")],
+                0,
+                |_s: &mut Vec<usize>, _i| {},
+            )
+        };
+        let a = mk(shared.clone());
+        let b = mk(shared.clone());
+        let mut w = build(&a);
+        let mut counter = 0u64;
+        let flags = View::<Vec<usize>>::rebuild(&b, &a, &mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!(flags, ChangeFlags::NONE, "same Arc => not structural");
+        let c = mk(diamond_icon());
+        let flags = View::<Vec<usize>>::rebuild(&c, &b, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(
+            flags.contains(ChangeFlags::LAYOUT),
+            "fresh Arc => structural rebuild"
+        );
     }
 }
