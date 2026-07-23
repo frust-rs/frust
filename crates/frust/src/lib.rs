@@ -81,8 +81,8 @@ pub use frust_widgets::{
     NavigatorView, Padding, PaddingView, PageBuilder, PageTransition, PopResult, Radio, RadioView,
     RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView,
     Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
-    TransitionSpec, button, checkbox, flexible, hero, icon, inflexible, keyed, navigator, radio,
-    safe_area, scroll_view, slider, text, text_input,
+    TransitionSpec, button, checkbox, flexible, hero, icon, inflexible, keyed, radio, safe_area,
+    scroll_view, slider, text, text_input,
 };
 
 /// The vendored Material Symbols starter icon set (Huddle showcase, Phase A),
@@ -189,6 +189,60 @@ mod router_glue;
 /// for the consume/dedupe and timing contracts. Call [`BackHandler::track`]
 /// from every `Component::build`.
 pub use back_glue::{BackHandler, attach_back_handler};
+
+/// Build a [`NavigatorView`] driven by `controller` — the facade's back-aware
+/// wrapper over [`frust_widgets::navigator`] (glyph-refinements task 08).
+///
+/// Interposes on the flat widget re-export: same signature and return shape, but
+/// every rebuild it *additionally* auto-wires Android/gesture back handling for
+/// `controller` — so an app using `frust::navigator` gets the full back contract
+/// (dismissable overlay dismiss → navigation pop → app exit at the root) with
+/// **zero** back-specific app code, and with `frust::handles_back` reporting
+/// whether a root-level press should fall through to the platform.
+///
+/// The wiring routes a consumed press through
+/// [`NavigatorController::request_back`] (honoring each page's back policy —
+/// pop / animated-dismiss / veto — rather than a bare pop) and computes
+/// `handles_back` from the navigator's predictive-back interest. It shares a
+/// single process-wide consumption source with any explicit [`BackHandler`] on
+/// the same controller, so constructing a `BackHandler` *and* calling
+/// `frust::navigator` (as `examples/huddle` does) still consumes each press
+/// exactly once — no double-pop. See [`back_glue`]'s module docs for the
+/// consume/dedupe and timing contracts.
+///
+/// ```no_run
+/// use frust::{AnyView, Component, NavigatorController, any, navigator, text};
+///
+/// #[derive(Default)]
+/// struct App;
+///
+/// struct AppState {
+///     nav: NavigatorController<AppState>,
+/// }
+///
+/// impl Component for App {
+///     type State = AppState;
+///
+///     fn init(&self) -> AppState {
+///         AppState { nav: NavigatorController::new() }
+///     }
+///
+///     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+///         // Back handling is automatic — no BackHandler needed.
+///         any(navigator(&state.nav, || any(text("home"))))
+///     }
+/// }
+///
+/// frust::app!(App);
+/// # fn main() {}
+/// ```
+pub fn navigator<State: 'static>(
+    controller: &NavigatorController<State>,
+    initial: impl Fn() -> AnyView<State> + 'static,
+) -> NavigatorView<State> {
+    back_glue::auto_wire(controller);
+    frust_widgets::navigator(controller, initial)
+}
 
 /// Router ⇄ deep-link auto-wiring (Phase 6b, task 08): [`router_with_deep_links`]/
 /// [`RouterDeepLinks`] resolve a [`Router`]'s start location from the process's
