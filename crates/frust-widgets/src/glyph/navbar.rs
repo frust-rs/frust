@@ -31,12 +31,12 @@
 
 use std::rc::Rc;
 
+use crate::icon::IconData;
 use frust_core::accesskit::Role;
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
     PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
-use crate::icon::IconData;
 use frust_text::{FontFamily, FontWeight, GenericSlot, TextContext, TextLayout, TextStyle};
 use frust_theme::{ShapeScale, Theme};
 use kurbo::{Point, Rect, Size};
