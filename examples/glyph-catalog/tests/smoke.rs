@@ -16,6 +16,7 @@ use std::any::Any;
 use frust::{AnyView, Brightness, Theme, any, component, provide_context};
 use frust_core::FrameTime;
 use frust_core::{PaintScene, RenderRoot, View};
+use frust_core::{WindowEdgeInsets, WindowInsets};
 use frust_reactive::ReactiveRuntime;
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
@@ -51,6 +52,11 @@ struct RecScene {
     /// DIFFERENT color sets under Dark vs Light; a hardcoded-only page paints
     /// identical sets and fails `page_text_colors_track_brightness`.
     glyph_colors: Vec<peniko::Color>,
+    /// Every glyph run's absolute Y translation, in paint order — task 18's
+    /// no-double-top-padding regression test
+    /// (`root_appbar_consumes_inset_without_double_padding`) diffs this
+    /// vector between a zero-inset and a nonzero-top-inset frame.
+    glyph_ys: Vec<f64>,
     rounded: usize,
     fills: usize,
 }
@@ -76,6 +82,7 @@ impl PaintScene for RecScene {
         if let peniko::Brush::Solid(c) = run.brush {
             self.glyph_colors.push(c);
         }
+        self.glyph_ys.push(run.transform.translation().y);
         self.glyph_runs += 1;
     }
     fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
@@ -144,6 +151,30 @@ fn frame_at<S: 'static, V: View<S>>(
     t_ms: u64,
 ) -> RecScene {
     frame_at_size(root, logic, state, tcx, Size::new(W, H), t_ms)
+}
+
+/// Like [`frame_at`], but pushes a top-edge-only [`WindowInsets`] onto `root`
+/// before the rebuild/layout/paint pass — the seam
+/// `root_appbar_consumes_inset_without_double_padding` uses to prove the root
+/// AppBar (task 18) consumes the top inset exactly once (its own height
+/// grows by `top_inset`; the body `SafeArea` below it has `.top(false)`, so it
+/// must NOT pad by `top_inset` a second time).
+fn frame_at_with_top_inset<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+    top_inset: f64,
+    t_ms: u64,
+) -> RecScene {
+    root.set_insets(WindowInsets::new(
+        WindowEdgeInsets {
+            top: top_inset,
+            ..WindowEdgeInsets::default()
+        },
+        WindowEdgeInsets::default(),
+    ));
+    frame_at(root, logic, state, tcx, t_ms)
 }
 
 #[test]
@@ -309,4 +340,48 @@ fn full_shell_mounts_with_header_tabs_and_body() {
     // A second frame keeps mounting cleanly (reconcile-in-place, no panic).
     let scene2 = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 16);
     assert!(scene2.glyph_runs > 0);
+}
+
+/// Task 18's headless no-double-top-padding regression test: the root
+/// [`glyph::app_bar`](frust::glyph::app_bar) consumes the top window inset
+/// itself (grows its own height by it), and the body `safe_area(...).top(false)`
+/// must NOT pad by that same inset a second time. Every painted glyph run's
+/// absolute Y translation should shift by exactly `top_inset` between a
+/// zero-inset and a `top_inset`-pushed frame — a run shifting by
+/// `2 * top_inset` would mean the body is ALSO padding its top edge (the bug
+/// this task fixes), and a run shifting by `0` would mean the inset isn't
+/// reaching the AppBar at all.
+#[test]
+fn root_appbar_consumes_inset_without_double_padding() {
+    const TOP_INSET: f64 = 50.0;
+    const EPS: f64 = 0.5;
+
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut logic = |_s: &mut ()| any(component(CatalogApp));
+    let mut state = ();
+
+    let zero = frame_at_with_top_inset(&mut root, &mut logic, &mut state, &mut tcx, 0.0, 0);
+    let pushed =
+        frame_at_with_top_inset(&mut root, &mut logic, &mut state, &mut tcx, TOP_INSET, 16);
+
+    assert_eq!(
+        zero.glyph_ys.len(),
+        pushed.glyph_ys.len(),
+        "the same tree must paint the same number of glyph runs before/after an inset push \
+         (a count mismatch means the tree itself reshaped, not just shifted)",
+    );
+    assert!(!zero.glyph_ys.is_empty(), "the shell paints some text");
+
+    for (i, (y0, y1)) in zero.glyph_ys.iter().zip(pushed.glyph_ys.iter()).enumerate() {
+        let delta = y1 - y0;
+        assert!(
+            (delta - TOP_INSET).abs() < EPS,
+            "glyph run {i}: expected a single top-inset shift of {TOP_INSET}px, got {delta}px \
+             (y0={y0}, y1={y1}) — a ~{double}px shift would mean the body SafeArea is ALSO \
+             padding its top edge (double top-padding regression)",
+            double = TOP_INSET * 2.0,
+        );
+    }
 }
