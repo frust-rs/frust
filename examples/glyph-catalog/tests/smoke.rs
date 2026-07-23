@@ -46,6 +46,11 @@ const BRIGHTNESSES: [Brightness; 2] = [Brightness::Dark, Brightness::Light];
 #[derive(Default)]
 struct RecScene {
     glyph_runs: usize,
+    /// Every glyph run's resolved solid brush color — the round-1 review's
+    /// hardcode tripwire: a page whose text colors are theme-resolved paints
+    /// DIFFERENT color sets under Dark vs Light; a hardcoded-only page paints
+    /// identical sets and fails `page_text_colors_track_brightness`.
+    glyph_colors: Vec<peniko::Color>,
     rounded: usize,
     fills: usize,
 }
@@ -67,7 +72,10 @@ impl PaintScene for RecScene {
     ) {
         self.rounded += 1;
     }
-    fn draw_glyph_run(&mut self, _run: GlyphRun) {
+    fn draw_glyph_run(&mut self, run: GlyphRun) {
+        if let peniko::Brush::Solid(c) = run.brush {
+            self.glyph_colors.push(c);
+        }
         self.glyph_runs += 1;
     }
     fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
@@ -93,13 +101,19 @@ fn setup() -> Owner {
 /// (falling back to `Theme::glyph_baseline()` with no context), so this is
 /// what lets the multi-brightness sweep below actually exercise each page's
 /// live-token re-resolution rather than only ever hitting the fallback.
-fn setup_with_theme(brightness: Brightness) -> Owner {
+fn setup_with_theme(brightness: Brightness) -> (Owner, Theme) {
     let owner = setup();
     let theme = Theme::builder(Theme::glyph_baseline())
         .brightness(brightness)
         .build();
-    provide_context(theme);
-    owner
+    provide_context(theme.clone());
+    // The caller must ALSO thread the theme into its RenderRoot
+    // (`root.set_theme(Box::new(theme))`): `provide_context` only serves
+    // app-code `use_context` reads; every widget-internal color resolves from
+    // the LayoutCtx/PaintCtx theme the shell threads via `set_theme`
+    // (docs/ARCHITECTURE.md's Theme delivery). Round-1 review: without this
+    // the brightness sweep silently exercised unthemed dark fallbacks.
+    (owner, theme)
 }
 
 /// One frame at an explicit viewport `size`: rebuild, layout (shaping real
@@ -168,9 +182,10 @@ fn every_page_mounts_at_every_size_and_brightness() {
                 // under any size/brightness combination, matching how the
                 // section pattern_switcher actually tears down and rebuilds
                 // a page's subtree on every section change.
-                let _owner = setup_with_theme(brightness);
+                let (_owner, theme) = setup_with_theme(brightness);
                 let mut tcx = TextContext::new();
                 let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+                root.set_theme(Box::new(theme));
                 let mut state = CatalogState::new();
                 let mut logic = |s: &mut CatalogState| pages::current(section, s);
                 let scene = frame_at_size(
@@ -203,6 +218,51 @@ fn every_page_mounts_at_every_size_and_brightness() {
                 );
             }
         }
+    }
+}
+
+/// Round-1 review Major 2: the brightness sweep must actually verify COLOR
+/// values, not just paint counts — a page that hardcoded its dark-mode text
+/// colors would paint an identical color set under both brightnesses. Every
+/// page carries at least one theme-resolved text role (headings resolve
+/// `primary`, captions `on_surface_variant`), so the per-page painted color
+/// SETS must differ between Dark and Light. (Brightness-INVARIANT ink — the
+/// term block/tooltip GlyphInk roles on the content page — is allowed to
+/// repeat across both sets; the assertion is set inequality, not disjointness.)
+#[test]
+fn page_text_colors_track_brightness() {
+    use std::collections::BTreeSet;
+    let (w, h) = SIZES[0];
+    for (section, label) in SECTION_LABELS.iter().enumerate() {
+        let mut palettes: Vec<BTreeSet<[u8; 4]>> = Vec::new();
+        for brightness in BRIGHTNESSES {
+            let (_owner, theme) = setup_with_theme(brightness);
+            let mut tcx = TextContext::new();
+            let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+            root.set_theme(Box::new(theme));
+            let mut state = CatalogState::new();
+            let mut logic = |s: &mut CatalogState| pages::current(section, s);
+            let scene = frame_at_size(
+                &mut root,
+                &mut logic,
+                &mut state,
+                &mut tcx,
+                Size::new(w, h),
+                0,
+            );
+            palettes.push(
+                scene
+                    .glyph_colors
+                    .iter()
+                    .map(|c| c.to_rgba8().to_u8_array())
+                    .collect(),
+            );
+        }
+        assert_ne!(
+            palettes[0], palettes[1],
+            "section {section} ({label}): painted text-color set is identical under Dark and \
+             Light — at least one theme-resolved role must differ (hardcoded-color regression)",
+        );
     }
 }
 
