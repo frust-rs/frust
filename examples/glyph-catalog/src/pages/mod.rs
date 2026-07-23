@@ -1,6 +1,7 @@
-//! The seven catalog sections, one module per section, mirroring the reference
+//! The eight catalog sections, one module per section, mirroring the reference
 //! builds' section list (foundations, buttons+forms, feedback, navigation,
-//! content, overlays, motion).
+//! content, overlays, motion) plus `interactions` (glyph-refinements task 19),
+//! a ninth reference build with no section-list precedent of its own.
 //!
 //! # Page-fn contract (fixed by `c01`; every fill task keeps it exactly)
 //!
@@ -36,6 +37,7 @@ pub mod buttons_forms;
 pub mod content;
 pub mod feedback;
 pub mod foundations;
+pub mod interactions;
 pub mod motion;
 pub mod navigation;
 pub mod overlays;
@@ -44,9 +46,9 @@ use frust::AnyView;
 
 use crate::CatalogState;
 
-/// The seven section tab labels, in order. Indexed by `CatalogState::section`
+/// The eight section tab labels, in order. Indexed by `CatalogState::section`
 /// and dispatched by [`current`].
-pub const SECTION_LABELS: [&str; 7] = [
+pub const SECTION_LABELS: [&str; 8] = [
     "Foundations",
     "Buttons + Forms",
     "Feedback",
@@ -54,9 +56,10 @@ pub const SECTION_LABELS: [&str; 7] = [
     "Content",
     "Overlays",
     "Motion",
+    "Interactions",
 ];
 
-/// Dispatch to the section page for `section` (0..7), falling back to
+/// Dispatch to the section page for `section` (0..8), falling back to
 /// foundations for any out-of-range index (defensive — the tab strip only ever
 /// yields a valid index).
 pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
@@ -68,6 +71,7 @@ pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
         4 => content::page(state),
         5 => overlays::page(state),
         6 => motion::page(state),
+        7 => interactions::page(state),
         _ => foundations::page(state),
     }
 }
