@@ -368,13 +368,19 @@ fn root_appbar_consumes_inset_without_double_padding() {
     let (pushed, _pushed_outcome) =
         frame_at_with_top_inset(&mut root, &mut logic, &mut state, &mut tcx, TOP_INSET, 16);
 
-    assert_eq!(
+    // The AppBar consumes the inset, so the body ScrollView's viewport is
+    // TOP_INSET shorter in the pushed frame — paint-time visible-rect culling
+    // (task 07) may therefore skip a few extra bottom-of-scroll runs there.
+    // Painted runs keep traversal order, so the pushed frame's runs are a
+    // prefix-aligned subset of the zero-inset frame's; compare that prefix.
+    // (More runs after the push would still be a reshape bug.)
+    assert!(
+        pushed.glyph_ys.len() <= zero.glyph_ys.len(),
+        "an inset push must not paint MORE glyph runs ({} -> {}) — the tree reshaped",
         zero.glyph_ys.len(),
         pushed.glyph_ys.len(),
-        "the same tree must paint the same number of glyph runs before/after an inset push \
-         (a count mismatch means the tree itself reshaped, not just shifted)",
     );
-    assert!(!zero.glyph_ys.is_empty(), "the shell paints some text");
+    assert!(!pushed.glyph_ys.is_empty(), "the shell paints some text");
 
     for (i, (y0, y1)) in zero.glyph_ys.iter().zip(pushed.glyph_ys.iter()).enumerate() {
         let delta = y1 - y0;
