@@ -25,9 +25,9 @@ use frust::glyph::{
     PaletteItem, command_palette, glyph_card, glyph_dialog, show_command_palette, show_glyph_dialog,
 };
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    NavigatorController, Padding, PageTransition, PopResult, RwSignal, Set, SizedBox, Stack, Theme,
-    TransitionSpec, any, button, flexible, inflexible, text, use_context,
+    Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
+    GetUntracked, NavigatorController, Padding, PageTransition, PopResult, RwSignal, Set, SizedBox,
+    Theme, TransitionSpec, any, button, inflexible, text, use_context,
 };
 
 use crate::CatalogState;
@@ -268,18 +268,21 @@ fn sheet_body(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
     any(FlexView::new(Axis::Vertical, children))
 }
 
-/// Pin a sheet panel to the BOTTOM of the transparent page at FULL width —
-/// a bare content view floats top-left at intrinsic size (found on-device
-/// 2026-07-23). The flexible spacer eats the remaining height (the previous
-/// page stays visible through it); `SizedBox(f64::INFINITY, _)` clamps to
-/// the page's bounded width, stretching the panel edge-to-edge.
+/// M3/Flutter bottom-sheet width convention: edge-to-edge on narrow screens,
+/// capped and horizontally centered on wide ones. Material 3 gives modal
+/// bottom sheets a 640dp max width (m3.material.io "Bottom sheets" specs;
+/// Flutter's `BottomSheet` constrains likewise) — `SizedBox` clamps the
+/// request into the incoming constraints, so `min(640, screen width)` falls
+/// out of the clamp with no measuring.
+const SHEET_MAX_WIDTH: f64 = 640.0;
+
+/// Pin a sheet panel to the BOTTOM of the transparent page — full width on
+/// phones, capped at [`SHEET_MAX_WIDTH`] and centered on larger screens
+/// (Ed's device-gate round 3; a bare view floats top-left at intrinsic size).
 fn sheet_scaffold(panel: AnyView<CatalogState>) -> AnyView<CatalogState> {
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            flexible(1, SizedBox(None, None)),
-            inflexible(Stack(vec![any(SizedBox(Some(f64::INFINITY), None)), panel])),
-        ],
+    any(Align(
+        Alignment { x: 0.0, y: 1.0 },
+        SizedBox(Some(SHEET_MAX_WIDTH), None).child(panel),
     ))
 }
 

@@ -22,9 +22,9 @@ use frust::glyph::{
 use frust::motion::patterns::{FadeScale, FadeThrough, GlyphSlide, SharedAxis, SlideDirection};
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Stack, Theme, TransitionSpec,
-    Update, any, button, flexible, inflexible, keyed, switch, text, use_context,
+    Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
+    GetUntracked, MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme,
+    TransitionSpec, Update, any, button, inflexible, keyed, switch, text, use_context,
 };
 
 use crate::CatalogState;
@@ -232,22 +232,20 @@ fn demo_modal() -> FlexChild<CatalogState> {
     ])
 }
 
-/// Bottom-anchor a sheet panel at full width over the transparent page (see
-/// `overlays.rs`'s twin — found on-device 2026-07-23: a bare view floats
-/// top-left at intrinsic size). The panel gets a surface fill so the demo
-/// text doesn't float over the page below.
+/// See `overlays.rs`'s twin: bottom-pinned, full width on phones, capped at
+/// 640dp + centered on larger screens (M3/Flutter convention; Ed's
+/// device-gate round 3). The glyph_card supplies the panel surface.
 fn sheet_scaffold(panel: AnyView<CatalogState>) -> AnyView<CatalogState> {
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            flexible(1, SizedBox(None, None)),
-            inflexible(Stack(vec![
-                any(SizedBox(Some(f64::INFINITY), None)),
-                any(frust::glyph::glyph_card::<CatalogState>().desc(panel)),
-            ])),
-        ],
+    any(Align(
+        Alignment { x: 0.0, y: 1.0 },
+        SizedBox(Some(SHEET_MAX_WIDTH), None)
+            .child(frust::glyph::glyph_card::<CatalogState>().desc(panel)),
     ))
 }
+
+/// M3 modal-bottom-sheet max width, logical px (m3.material.io specs;
+/// mirrors `overlays.rs`'s constant of the same name).
+const SHEET_MAX_WIDTH: f64 = 640.0;
 
 /// 06 bottom sheet: a transparent `SlideUp` push (enter 340ms / exit 150ms).
 fn demo_sheet() -> FlexChild<CatalogState> {
