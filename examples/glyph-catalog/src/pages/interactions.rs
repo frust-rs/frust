@@ -347,6 +347,79 @@ const HB_ROLL_MS: f64 = 300.0;
 /// Criteria #2: catalog deps unchanged).
 const HB_LATENCIES: [f64; 6] = [36.0, 52.0, 41.0, 68.0, 29.0, 44.0];
 
+/// Ping-ring [`AnimatedScale`] range: starts subtly inset (`0.6×` — a small
+/// "closed" pip) and grows well past the icon slot (`2.8×`) as it fades, the
+/// radar-expand feel the reference keyframe animates.
+const HB_RING_SCALE_MIN: f64 = 0.6;
+const HB_RING_SCALE_MAX: f64 = 2.8;
+
+/// The ping ring's own (unscaled) diameter — the box [`circular_progress`]
+/// strokes its full circle into, matching the original `SizedBox(18, 18)`.
+const HB_RING_DIAMETER: f64 = 18.0;
+
+/// Paint headroom for the ping ring (catalog-animation-performance bug 2 /
+/// task 12 — see `workflow/plans/bugs/catalog-animation-performance/research/RESEARCH.md`'s
+/// finding 9): [`AnimatedOpacity`] composites its child under
+/// [`PaintScene::push_layer`], which records ITS OWN (unscaled) layout rect
+/// as the layer's clip — captured *before* a nested [`AnimatedScale`] has
+/// pushed its scale transform, since `AnimatedOpacity` paints outermost. A
+/// `SizedBox(HB_RING_DIAMETER, HB_RING_DIAMETER)` slot therefore clips the
+/// ring to an 18×18 square the instant it scales past 1.0× — confirmed by
+/// this module's `heartbeat_ring_stays_within_its_headroom_slot_at_max_extent`
+/// recording-fake test, which found the cut is a real `push_layer` clip
+/// rect (not merely a layout-allocation illusion — the two candidate
+/// mechanisms the research doc's finding 9 left contested). The fix widens
+/// the *outer* slot the `AnimatedOpacity` itself lays out at (this constant,
+/// `>= HB_RING_DIAMETER * HB_RING_SCALE_MAX` — `18.0 * 2.8 = 50.4`, plus a
+/// small rounding margin) and centers the small unscaled ring inside it via
+/// [`Align`], so the recorded clip rect is already big enough to contain the
+/// circle at every scale up to [`HB_RING_SCALE_MAX`] — nothing left to clip.
+const HB_RING_SLOT: f64 = 52.0;
+
+/// Pure ping-ring geometry at `elapsed_in_cycle` ms into [`demo_heartbeat`]'s
+/// per-cycle clock (`reduce` suppresses the ping outright, matching
+/// `demo_heartbeat`'s own reduced-motion branch) — split out from
+/// `demo_heartbeat` so this module's effect-slot-headroom tests (task 12) can
+/// drive exact start/mid/max-extent timestamps directly instead of depending
+/// on [`hb_elapsed_ms`]'s wall clock. Returns `(ring_opacity, ring_scale)`.
+fn heartbeat_ring_state(elapsed_in_cycle: f64, reduce: bool) -> (f64, f64) {
+    let ring_active = !reduce && elapsed_in_cycle < HB_RING_MS;
+    let ring_p = if ring_active {
+        (elapsed_in_cycle / HB_RING_MS).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let ring_opacity = if ring_active {
+        0.7 * (1.0 - ring_p)
+    } else {
+        0.0
+    };
+    let ring_scale = HB_RING_SCALE_MIN + (HB_RING_SCALE_MAX - HB_RING_SCALE_MIN) * ring_p;
+    (ring_opacity, ring_scale)
+}
+
+/// Build the ping ring's view from its already-computed `(opacity, scale)`
+/// (see [`heartbeat_ring_state`]) — a [`HB_RING_SLOT`]-sized headroom
+/// [`SizedBox`], [`Align`]-centering the actual [`HB_RING_DIAMETER`] ring
+/// content, all under the same `AnimatedOpacity`-outside/`AnimatedScale`-inside
+/// nesting as before (see [`HB_RING_SLOT`]'s doc comment for why the nesting
+/// order — not just the sizing — matters here).
+fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogState> {
+    any(AnimatedOpacity(
+        ring_opacity,
+        SizedBox(Some(HB_RING_SLOT), Some(HB_RING_SLOT)).child(Align(
+            Alignment::CENTER,
+            AnimatedScale(
+                ring_scale,
+                SizedBox(Some(HB_RING_DIAMETER), Some(HB_RING_DIAMETER))
+                    .child(circular_progress(ProgressValue::Determinate(1.0))),
+            )
+            .timing(ZERO),
+        )),
+    )
+    .timing(ZERO))
+}
+
 /// 01 connection heartbeat: a radar-ping ring (a full-circle
 /// [`circular_progress`] stroke under [`AnimatedOpacity`]/[`AnimatedScale`],
 /// driven by a wall-clock read — no per-widget custom paint needed) plus a
@@ -372,29 +445,8 @@ fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
         to_latency
     };
 
-    let ring_active = !reduce && t < HB_RING_MS;
-    let ring_p = if ring_active {
-        (t / HB_RING_MS).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let ring_opacity = if ring_active {
-        0.7 * (1.0 - ring_p)
-    } else {
-        0.0
-    };
-    let ring_scale = 0.6 + (2.8 - 0.6) * ring_p;
-
-    let ring: AnyView<CatalogState> = any(AnimatedOpacity(
-        ring_opacity,
-        AnimatedScale(
-            ring_scale,
-            SizedBox(Some(18.0), Some(18.0))
-                .child(circular_progress(ProgressValue::Determinate(1.0))),
-        )
-        .timing(ZERO),
-    )
-    .timing(ZERO));
+    let (ring_opacity, ring_scale) = heartbeat_ring_state(t, reduce);
+    let ring = heartbeat_ring_view(ring_opacity, ring_scale);
 
     let row = FlexView::new(
         Axis::Horizontal,
@@ -766,6 +818,13 @@ const CHARGE_ICON_SIZE: f64 = 26.0;
 const CHARGE_RING_SIZE: f64 = 34.0;
 /// The row's fixed height, in logical px.
 const CHARGE_ROW_H: f64 = 56.0;
+/// The float glow/shadow wash's alpha (catalog-animation-performance bug 3 /
+/// task 12): bumped up from an earlier `0.10` for contrast on the Glyph dark
+/// baseline (research finding 9's "check the shadow also has visible
+/// contrast on the dark theme" note) — matches [`demo_charge_ring`]'s own
+/// floated `icon_bg` wash alpha (`0.18`) just below, a value already proven
+/// legible on this page.
+const CHARGE_GLOW_ALPHA: f32 = 0.18;
 
 /// 05 long-press → float: holding the row past [`CHARGE_HOLD_MS`] fills a
 /// charge ring ([`circular_progress`]'s stroked-arc sweep, the same primitive
@@ -855,12 +914,33 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     // The reference's `box-shadow` lift has no facade equivalent from
     // application code (see the module docs' substitution note) — an
     // opacity-faded amber wash behind the row approximates it.
-    let glow: AnyView<CatalogState> = any(AnimatedOpacity(
-        if floated { 1.0 } else { 0.0 },
-        SizedBox(None, Some(CHARGE_ROW_H))
-            .child(Image(solid_source(with_alpha(amber(), 0.10))).fit(ImageFit::Fill)),
-    )
-    .timing(ZERO));
+    //
+    // Effect-slot-headroom fix (catalog-animation-performance bug 3 / task
+    // 12): a bare `SizedBox(None, Some(CHARGE_ROW_H))` leaves its WIDTH axis
+    // unconstrained, so under this `Stack` layer's loosened-but-bounded
+    // constraint (`min` relaxed to `0`, `max` still the row's real width)
+    // `Image`'s layout falls back to its *natural* size — the 1×1 solid
+    // source — clamped to `(1px, CHARGE_ROW_H)`: a vertical hairline, not a
+    // row-wide wash (confirmed by this module's
+    // `charge_ring_glow_fills_its_row_width` recording-fake test; NOT the
+    // scale-clip mechanism this bug's research note first suspected — see
+    // that test's doc comment). `Flex`'s own `flexible(1, ..)` share
+    // computation is what actually forces a TIGHT (not just bounded) width
+    // in this widget set with no dedicated "fill" primitive, so the fix
+    // wraps the wash in a single-child horizontal `flexible(1, ..)` row:
+    // its main axis (width) is tightened to the row's full available width
+    // exactly the way a flexible flex child's main axis always is.
+    let glow_wash: AnyView<CatalogState> = any(FlexView::new(
+        Axis::Horizontal,
+        vec![flexible(
+            1,
+            SizedBox(None, Some(CHARGE_ROW_H)).child(
+                Image(solid_source(with_alpha(amber(), CHARGE_GLOW_ALPHA))).fit(ImageFit::Fill),
+            ),
+        )],
+    ));
+    let glow: AnyView<CatalogState> =
+        any(AnimatedOpacity(if floated { 1.0 } else { 0.0 }, glow_wash).timing(ZERO));
 
     let card: AnyView<CatalogState> = any(SizedBox(None, Some(CHARGE_ROW_H)).child(Stack(vec![
         glow,
@@ -1401,6 +1481,309 @@ mod tests {
             paint_needs_frame(&mut root, &mut state, &mut tcx),
             "turning animations back on (reduce_motion still off) must restore the heartbeat \
              ticker's frame request"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 12 — effect-slot headroom (catalog-animation-performance bugs 2/3)
+    // -----------------------------------------------------------------------
+
+    use kurbo::{Affine, Shape};
+
+    use super::{
+        Axis, CHARGE_ROW_H, FlexView, HB_RING_DIAMETER, HB_RING_MS, HB_RING_SCALE_MAX,
+        HB_RING_SLOT, demo_charge_ring, heartbeat_ring_state, heartbeat_ring_view,
+    };
+
+    /// A geometry-tracking `PaintScene` recorder: replays the SAME
+    /// `push_transform`/`push_layer` transform-composition logic
+    /// `frust_scene::SceneBuilder` uses internally (`docs/ARCHITECTURE.md`'s
+    /// scene seam) so a stroked/filled path or a `push_layer` clip rect can be
+    /// resolved into ABSOLUTE (post-scale) space right here, without a real
+    /// `SceneBuilder`/GPU backend — the "recording fake" `docs/CODE_STANDARDS.md`'s
+    /// Testing Patterns calls for. `origin`/`size`/`path` arguments a widget
+    /// passes into `PaintScene` are already absolute-but-UNSCALED (paint-only
+    /// `push_transform`/`push_layer` compositing never touches them — see
+    /// `frust_widgets::motion::animated`'s module docs); this recorder applies
+    /// whatever transform is active at each call to resolve the TRUE painted
+    /// extent, exactly mirroring what `SceneBuilder::push_layer`/`stroke_path`
+    /// record (`transform`, separate from the untransformed `rect`/`path`) for
+    /// the real GPU backend to compose at encode time.
+    #[derive(Default)]
+    struct SlotRecorder {
+        transform_stack: Vec<Affine>,
+        /// Every `push_layer` call's clip rect, resolved to absolute space —
+        /// an `AnimatedOpacity`'s own paint-time slot.
+        layer_rects: Vec<Rect>,
+        /// Every stroked/filled path's absolute bounding box, inflated by the
+        /// stroke's half-width for `stroke_path` (a centerline-only bbox would
+        /// under-count the real painted extent by `width / 2` per edge).
+        draw_bboxes: Vec<Rect>,
+        /// Every `draw_image` destination rect — already absolute per
+        /// `PaintScene::draw_image`'s own contract (no further transform to
+        /// apply, unlike `stroke_path`/`push_layer`'s local-then-transformed
+        /// shape).
+        image_rects: Vec<Rect>,
+        /// Every `fill_rounded_rect` rect (e.g. `badge`'s background/dot) —
+        /// used by the Acceptance Criteria #2 layout-stability test to prove
+        /// a sibling's own size stays small rather than stretching to a
+        /// widened effect slot.
+        rounded_rects: Vec<Rect>,
+    }
+
+    impl SlotRecorder {
+        fn current(&self) -> Affine {
+            *self.transform_stack.last().unwrap_or(&Affine::IDENTITY)
+        }
+
+        fn record_path(&mut self, origin: Point, path: &BezPath, inflate: f64) {
+            let local = (Affine::translate((origin.x, origin.y)) * path.clone())
+                .bounding_box()
+                .inflate(inflate, inflate);
+            self.draw_bboxes
+                .push(self.current().transform_rect_bbox(local));
+        }
+    }
+
+    impl PaintScene for SlotRecorder {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn draw_glyph_run(&mut self, _run: GlyphRun) {}
+        fn draw_image(&mut self, _data: &peniko::ImageData, dest: Rect) {
+            self.image_rects.push(dest);
+        }
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, _radius: f64, _color: Color) {
+            let local = Rect::new(
+                origin.x,
+                origin.y,
+                origin.x + size.width,
+                origin.y + size.height,
+            );
+            self.rounded_rects
+                .push(self.current().transform_rect_bbox(local));
+        }
+        fn fill_path(&mut self, origin: Point, path: &BezPath, _brush: &Brush) {
+            self.record_path(origin, path, 0.0);
+        }
+        fn stroke_path(&mut self, origin: Point, path: &BezPath, width: f64, _brush: &Brush) {
+            self.record_path(origin, path, width / 2.0);
+        }
+        fn push_layer(&mut self, origin: Point, size: Size, _alpha: f32) {
+            let local = Rect::new(
+                origin.x,
+                origin.y,
+                origin.x + size.width,
+                origin.y + size.height,
+            );
+            self.layer_rects
+                .push(self.current().transform_rect_bbox(local));
+        }
+        fn pop_layer(&mut self) {}
+        fn push_transform(&mut self, transform: Affine) {
+            let composed = self.current() * transform;
+            self.transform_stack.push(composed);
+        }
+        fn pop_transform(&mut self) {
+            if self.transform_stack.len() > 1 {
+                self.transform_stack.pop();
+            }
+        }
+    }
+
+    /// Lay out and paint a standalone `AnyView<CatalogState>` built fresh from
+    /// `make_view` (not the whole page) at `size`, returning the recorded
+    /// geometry — the isolation the tests below need to attribute every
+    /// recorded draw/layer to the one effect under test, not the rest of the
+    /// page. Mirrors `page`'s own `fn(&CatalogState) -> AnyView<CatalogState>`
+    /// shape (`paint_needs_frame`'s `logic` above) rather than a pre-built
+    /// `AnyView` — `AnyView` has no `Clone` impl, so a closure that builds a
+    /// fresh one is the only shape a `RenderRoot::rebuild` callback can take.
+    fn paint_view_into_recorder(
+        mut make_view: impl FnMut(&CatalogState) -> AnyView<CatalogState>,
+        size: Size,
+    ) -> SlotRecorder {
+        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut state = CatalogState::new();
+        let mut logic = |s: &mut CatalogState| make_view(s);
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        let tcx_any: &mut dyn Any = &mut tcx;
+        root.layout_with_text(size, tcx_any);
+        let mut scene = SlotRecorder::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        scene
+    }
+
+    /// [`heartbeat_ring_state`]'s pure math at three fixed timestamps (T0
+    /// start / T1 mid / T2 max extent — this task's Testing note) — no wall
+    /// clock, no rendering.
+    #[test]
+    fn heartbeat_ring_state_start_mid_max_extent() {
+        let (op0, scale0) = heartbeat_ring_state(0.0, false);
+        assert!(
+            (scale0 - 0.6).abs() < 1e-9,
+            "T0 start: scale should be the 0.6x minimum"
+        );
+        assert!(
+            (op0 - 0.7).abs() < 1e-9,
+            "T0 start: opacity should be the 0.7 peak"
+        );
+
+        let (op1, scale1) = heartbeat_ring_state(HB_RING_MS / 2.0, false);
+        assert!(
+            (scale1 - 1.7).abs() < 1e-9,
+            "T1 mid: scale should be the 0.6..2.8 midpoint"
+        );
+        assert!(
+            (op1 - 0.35).abs() < 1e-9,
+            "T1 mid: opacity should be the 0.7 midpoint"
+        );
+
+        let (op2, scale2) = heartbeat_ring_state(HB_RING_MS, false);
+        assert!(
+            (scale2 - HB_RING_SCALE_MAX).abs() < 1e-9,
+            "T2 max extent: scale should settle at the 2.8x maximum"
+        );
+        assert_eq!(
+            op2, 0.0,
+            "T2 max extent: the ring has fully faded by the cycle boundary"
+        );
+    }
+
+    /// The load-bearing regression guard for bug 2 (catalog-animation-performance):
+    /// at T2 max extent (`ring_scale == HB_RING_SCALE_MAX`), the ring's stroked
+    /// circle — resolved through the SAME `push_layer`(`AnimatedOpacity`) /
+    /// `push_transform`(`AnimatedScale`) composition the real paint pass uses
+    /// (see [`SlotRecorder`]'s doc comment) — must stay fully inside the
+    /// `AnimatedOpacity`'s own recorded clip rect. Before this task's fix (an
+    /// 18×18 `AnimatedOpacity` slot with the scale applied *inside* it) this
+    /// assertion fails: the clip rect stays fixed at 18×18 absolute while the
+    /// circle's recorded transform grows with it, so the circle's bbox
+    /// overflows the clip on every edge once `ring_scale > 1.0x`.
+    #[test]
+    fn heartbeat_ring_stays_within_its_headroom_slot_at_max_extent() {
+        let _owner = setup();
+        let (opacity, scale) = heartbeat_ring_state(HB_RING_MS, false);
+        assert_eq!(scale, HB_RING_SCALE_MAX);
+
+        let recorder = paint_view_into_recorder(
+            |_s| heartbeat_ring_view(opacity.max(0.3), scale),
+            Size::new(200.0, 200.0),
+        );
+
+        assert!(
+            !recorder.layer_rects.is_empty(),
+            "AnimatedOpacity must push a layer"
+        );
+        assert!(
+            !recorder.draw_bboxes.is_empty(),
+            "circular_progress must stroke the ring"
+        );
+
+        // The outermost (largest) layer rect is the AnimatedOpacity's own
+        // paint-time slot — the headroom this task allocates.
+        let slot = recorder
+            .layer_rects
+            .iter()
+            .copied()
+            .reduce(|a, b| a.union(b))
+            .expect("at least one layer rect");
+        assert!(
+            (slot.width() - HB_RING_SLOT).abs() < 1.0 && (slot.height() - HB_RING_SLOT).abs() < 1.0,
+            "the AnimatedOpacity slot should be ~{HB_RING_SLOT}x{HB_RING_SLOT}, got {}x{}",
+            slot.width(),
+            slot.height(),
+        );
+
+        for bbox in &recorder.draw_bboxes {
+            assert!(
+                slot.contains(bbox.origin()) && slot.contains(Point::new(bbox.x1, bbox.y1)),
+                "ring geometry {bbox:?} must stay within its headroom slot {slot:?} at max \
+                 extent (scale {scale}x, base diameter {HB_RING_DIAMETER}px)"
+            );
+        }
+    }
+
+    /// Acceptance Criteria #2 ("layout shift bounded: surrounding rows
+    /// visually stable, sizes asserted"): the ping ring's headroom fix grows
+    /// ONLY the ring's own layout slot (`HB_RING_DIAMETER` → `HB_RING_SLOT`,
+    /// `18px` → `52px`) — its `01 Connection heartbeat` row's
+    /// `CrossAxisAlignment::Center` keeps every sibling (the "connected"
+    /// badge, the latency text) at its own natural size, just re-centered
+    /// within the now-taller row, not stretched to match. `demo_heartbeat`'s
+    /// row layout is deterministic regardless of the wall clock (only the
+    /// ring's *paint-time* opacity/scale react to `t`; every child's *layout*
+    /// size is fixed), so this needs no controlled timestamp.
+    #[test]
+    fn heartbeat_ping_headroom_does_not_stretch_sibling_row_content() {
+        let _owner = setup();
+        let recorder = paint_view_into_recorder(
+            |s| {
+                super::any(FlexView::new(
+                    Axis::Vertical,
+                    vec![super::demo_heartbeat(s)],
+                ))
+            },
+            Size::new(390.0, 400.0),
+        );
+
+        assert!(
+            !recorder.rounded_rects.is_empty(),
+            "the connected badge must paint its rounded background/dot"
+        );
+        for r in &recorder.rounded_rects {
+            assert!(
+                r.height() < HB_RING_SLOT,
+                "sibling row content (badge background/dot, height {}) must keep its own small \
+                 size rather than stretching to the ring's {HB_RING_SLOT}px headroom slot",
+                r.height(),
+            );
+        }
+    }
+
+    /// The load-bearing regression guard for bug 3
+    /// (catalog-animation-performance): renders `demo_charge_ring` with the
+    /// row floated (glow visible) at a controlled viewport width and asserts
+    /// the glow `Image`'s drawn destination rect actually spans the row's
+    /// available width (`viewport - block()`'s 12px-per-side padding) at the
+    /// fixed [`CHARGE_ROW_H`] height — not the pre-fix 1×1-natural-size
+    /// collapse (a `SizedBox(None, ..)` width leaves `Image` unconstrained on
+    /// that axis, so it falls back to its 1×1 solid-color source's natural
+    /// size — see [`super::CHARGE_GLOW_ALPHA`]'s sibling fix in
+    /// `demo_charge_ring`'s `glow_wash`).
+    #[test]
+    fn charge_ring_glow_fills_its_row_width() {
+        let _owner = setup();
+        const W: f64 = 390.0;
+        const BLOCK_PADDING: f64 = 12.0 * 2.0;
+
+        super::charge_floated_sig().set(true);
+        let recorder = paint_view_into_recorder(
+            |s| super::any(FlexView::new(Axis::Vertical, vec![demo_charge_ring(s)])),
+            Size::new(W, 400.0),
+        );
+        super::charge_floated_sig().set(false);
+
+        let expected_w = W - BLOCK_PADDING;
+        let wide = recorder
+            .image_rects
+            .iter()
+            .find(|r| r.width() > 10.0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no wide glow image found among {:?} — the glow collapsed back to a hairline",
+                    recorder.image_rects
+                )
+            });
+        assert!(
+            (wide.width() - expected_w).abs() < 1.0,
+            "glow width should fill the row ({expected_w}px), got {}px",
+            wide.width()
+        );
+        assert!(
+            (wide.height() - CHARGE_ROW_H).abs() < 1.0,
+            "glow height should stay {CHARGE_ROW_H}px, got {}px",
+            wide.height()
         );
     }
 }
