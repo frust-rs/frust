@@ -36,6 +36,21 @@
 //! honours both (accent label + accent underline for the active tab; the muted
 //! `fg-dim` for the rest).
 //!
+//! # Horizontal overflow panning
+//!
+//! When the tabs' total intrinsic width exceeds the available width (many
+//! sections on a narrow display), the strip pans itself horizontally rather
+//! than clipping the trailing tabs off-screen — no new public API, purely
+//! automatic. Layout records the `overflow` (content − viewport) and clamps a
+//! retained `scroll_x ∈ [0, overflow]`; a wider relayout re-clamps it. A
+//! pointer drag past [`TOUCH_SLOP`] takes the gesture over as a pan (mirroring
+//! [`crate::ScrollWidget`]'s takeover), while a sub-slop press-and-release
+//! still selects the tapped tab; a horizontal scroll/wheel delta
+//! ([`WHEEL_LINE_PX`]) pans on desktop. On a confirmed selection change the
+//! newly-active tab is scrolled fully into view, matching the sliding-indicator
+//! UX. When the content fits there is zero behavioral delta (`scroll_x` stays
+//! `0`).
+//!
 //! # Why this widget doesn't nest `Text` children
 //!
 //! See [`crate::glyph::badge`]'s module docs — the per-tab dynamic color
@@ -50,7 +65,7 @@ use frust_core::accesskit::Role;
 use frust_core::anim::{AnimationController, Curve, FrameTime};
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
-    PaintScene, PointerPhase, SemanticsCtx, View, Widget,
+    PaintScene, PointerPhase, ScrollDelta, SemanticsCtx, TOUCH_SLOP, View, WHEEL_LINE_PX, Widget,
 };
 use frust_text::{FontFamily, FontWeight, GenericSlot, TextContext, TextLayout, TextStyle};
 use frust_theme::Theme;
@@ -241,6 +256,27 @@ pub struct TabsWidget {
     pressed: Option<usize>,
     /// The captured tab index, armed on `Down`, cleared on `Up`/`Cancel`.
     captured: Option<usize>,
+
+    /// Retained horizontal pan offset, always clamped to `[0, overflow]`.
+    /// Content is painted shifted left by this amount and hit-tests add it back.
+    scroll_x: f64,
+    /// How much the tabs' intrinsic width exceeds the viewport (`content −
+    /// viewport`, never negative); `0` when everything fits.
+    overflow: f64,
+    /// The available (constrained) width the strip was last laid out into —
+    /// the window used to scroll a selected tab fully into view.
+    viewport_w: f64,
+    /// Whether a `Down` armed a gesture (a tab tap and/or a pan). Set on `Down`,
+    /// cleared on `Up`/`Cancel`; the slop/pan math runs only while it is true so
+    /// a bare hover `Move` is never mistaken for a drag.
+    down_active: bool,
+    /// Whether the armed gesture crossed [`TOUCH_SLOP`] and became a pan (which
+    /// suppresses the tab tap on release).
+    panning: bool,
+    /// The `Down` position, the anchor the slop is measured from.
+    down_start: Point,
+    /// The previous pan sample, differenced to move `scroll_x` each `Move`.
+    last_pan: Point,
 }
 
 impl<State: 'static> View<State> for TabsView<State> {
@@ -271,6 +307,13 @@ impl<State: 'static> View<State> for TabsView<State> {
             pending: false,
             pressed: None,
             captured: None,
+            scroll_x: 0.0,
+            overflow: 0.0,
+            viewport_w: 0.0,
+            down_active: false,
+            panning: false,
+            down_start: Point::ZERO,
+            last_pan: Point::ZERO,
         }
     }
 
@@ -328,12 +371,39 @@ impl TabsWidget {
             .unwrap_or((0.0, 0.0))
     }
 
-    /// The tab index under a widget-local pointer position, if any.
+    /// The tab index under a widget-local pointer position, if any. The current
+    /// pan offset is added back so a hit test lands on the tab actually painted
+    /// under the cursor (paint shifts content left by `scroll_x`).
     fn hit_index(&self, pos: Point) -> Option<usize> {
+        let content = Point::new(pos.x + self.scroll_x, pos.y);
         self.tabs.iter().position(|t| {
             Rect::from_origin_size(Point::new(t.x, 0.0), Size::new(t.width, self.height))
-                .contains(pos)
+                .contains(content)
         })
+    }
+
+    /// Set the pan offset, clamped to the current pannable range `[0, overflow]`.
+    fn set_scroll_x(&mut self, value: f64) {
+        self.scroll_x = value.clamp(0.0, self.overflow);
+    }
+
+    /// Pan the minimum amount so the currently-selected tab is fully visible
+    /// within the viewport (a no-op when nothing overflows). Called from layout
+    /// on a confirmed selection change so the active tab is never off-screen.
+    fn scroll_selected_into_view(&mut self) {
+        if self.overflow <= 0.0 {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.selected) else {
+            return;
+        };
+        let left = tab.x;
+        let right = tab.x + tab.width;
+        if left < self.scroll_x {
+            self.set_scroll_x(left);
+        } else if right > self.scroll_x + self.viewport_w {
+            self.set_scroll_x(right - self.viewport_w);
+        }
     }
 
     /// Advance the slide to frame time `now`, updating [`Self::displayed`] and
@@ -380,6 +450,22 @@ impl Widget for TabsWidget {
         let height = content_height + TAB_PAD_Y * 2.0;
         self.height = height;
 
+        // Overflow panning: measure how far the intrinsic content exceeds the
+        // available width, re-clamp the retained pan against it (a wider window
+        // shrinks the overflow), and bring the selected tab into view on a
+        // confirmed selection change.
+        let viewport_w = if bc.max().width.is_finite() {
+            bc.max().width
+        } else {
+            total_width
+        };
+        self.viewport_w = viewport_w;
+        self.overflow = (total_width - viewport_w).max(0.0);
+        self.set_scroll_x(self.scroll_x);
+        if self.pending {
+            self.scroll_selected_into_view();
+        }
+
         let target = self.target_geometry();
         if !self.have_geometry {
             self.displayed = target;
@@ -417,7 +503,11 @@ impl Widget for TabsWidget {
         let origin = ctx.origin();
         let size = ctx.size();
 
-        // Strip bottom hairline, spanning the full width.
+        // Clip the strip to its own bounds so panned-out tabs don't bleed past
+        // the viewport edges (a no-op when nothing overflows).
+        scene.push_clip(origin, size);
+
+        // Strip bottom hairline, spanning the full width (fixed — not panned).
         scene.fill_rect(
             origin + Vec2::new(0.0, size.height - STRIP_BORDER_H),
             Size::new(size.width, STRIP_BORDER_H),
@@ -426,63 +516,123 @@ impl Widget for TabsWidget {
 
         // Labels: each run already carries its layout-baked color (a selection
         // change forces relayout, so the active/inactive tint is up to date).
+        // Every slot x is shifted left by the pan offset.
         for entry in &self.tabs {
             let label_y = origin.y + (size.height - entry.label_size.height) / 2.0;
-            entry
-                .label
-                .paint(Point::new(origin.x + entry.x + TAB_PAD_X, label_y), scene);
+            entry.label.paint(
+                Point::new(origin.x + entry.x + TAB_PAD_X - self.scroll_x, label_y),
+                scene,
+            );
         }
 
-        // The moving underline (accent), at the strip's bottom.
+        // The moving underline (accent), at the strip's bottom — panned with the
+        // tabs it tracks.
         let (ind_x, ind_w) = self.displayed;
         scene.fill_rect(
-            origin + Vec2::new(ind_x, size.height - INDICATOR_H),
+            origin + Vec2::new(ind_x - self.scroll_x, size.height - INDICATOR_H),
             Size::new(ind_w, INDICATOR_H),
             accent,
         );
+
+        scene.pop_clip();
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // Horizontal scroll/wheel deltas pan the strip when it overflows.
+        if let InputEvent::Scroll { delta, .. } = event {
+            if self.overflow > 0.0 {
+                let dx = match delta {
+                    ScrollDelta::Lines(x, _) => x * WHEEL_LINE_PX,
+                    ScrollDelta::Pixels(x, _) => *x,
+                };
+                if dx != 0.0 {
+                    self.set_scroll_x(self.scroll_x + dx);
+                    ctx.request_redraw();
+                    return EventResult::Handled;
+                }
+            }
+            return EventResult::Ignored;
+        }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
         match p.phase {
-            PointerPhase::Down => match self.hit_index(p.position) {
-                Some(i) => {
-                    self.pressed = Some(i);
-                    self.captured = Some(i);
-                    ctx.capture_pointer();
-                    ctx.request_redraw();
-                    EventResult::Handled
+            PointerPhase::Down => {
+                self.down_start = p.position;
+                self.panning = false;
+                match self.hit_index(p.position) {
+                    Some(i) => {
+                        self.pressed = Some(i);
+                        self.captured = Some(i);
+                        self.down_active = true;
+                        ctx.capture_pointer();
+                        ctx.request_redraw();
+                        EventResult::Handled
+                    }
+                    // A press off any tab (a gap or empty trailing space) only
+                    // arms a gesture when the strip can pan; otherwise unchanged.
+                    None if self.overflow > 0.0 => {
+                        self.pressed = None;
+                        self.captured = None;
+                        self.down_active = true;
+                        ctx.capture_pointer();
+                        EventResult::Handled
+                    }
+                    None => EventResult::Ignored,
                 }
-                None => EventResult::Ignored,
-            },
+            }
             PointerPhase::Move => {
-                let Some(cap) = self.captured else {
+                if !self.down_active {
                     return EventResult::Ignored;
-                };
-                self.pressed = (self.hit_index(p.position) == Some(cap)).then_some(cap);
-                ctx.request_redraw();
+                }
+                if self.panning {
+                    // Finger right → reveal earlier tabs → scroll_x decreases.
+                    let dx = p.position.x - self.last_pan.x;
+                    self.last_pan = p.position;
+                    self.set_scroll_x(self.scroll_x - dx);
+                    ctx.request_redraw();
+                } else if self.overflow > 0.0
+                    && (p.position.x - self.down_start.x).abs() > TOUCH_SLOP
+                {
+                    // Crossed the slop: take the gesture over as a pan and drop
+                    // any armed tab tap so the release won't fire on_select.
+                    self.panning = true;
+                    self.pressed = None;
+                    self.last_pan = p.position;
+                    ctx.request_redraw();
+                } else if let Some(cap) = self.captured {
+                    self.pressed = (self.hit_index(p.position) == Some(cap)).then_some(cap);
+                    ctx.request_redraw();
+                }
                 EventResult::Handled
             }
             PointerPhase::Up => {
-                let Some(cap) = self.captured else {
+                if !self.down_active {
                     return EventResult::Ignored;
-                };
-                if self.hit_index(p.position) == Some(cap) {
+                }
+                // A sub-slop press-and-release inside the armed tab still selects
+                // it; a pan (or a release off the tab) fires nothing.
+                if !self.panning
+                    && let Some(cap) = self.captured
+                    && self.hit_index(p.position) == Some(cap)
+                {
                     (self.on_select)(ctx, cap);
                 }
                 self.pressed = None;
                 self.captured = None;
+                self.down_active = false;
+                self.panning = false;
                 ctx.request_redraw();
                 EventResult::Handled
             }
             PointerPhase::Cancel => {
-                if self.captured.is_none() {
+                if !self.down_active {
                     return EventResult::Ignored;
                 }
                 self.pressed = None;
                 self.captured = None;
+                self.down_active = false;
+                self.panning = false;
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -730,5 +880,151 @@ mod tests {
             .find(|(_, n)| n.role() == Role::Tab && n.label() == Some("panes"))
             .expect("an unselected tab");
         assert_eq!(unselected.1.is_selected(), Some(false));
+    }
+
+    // ---- Overflow panning (cf1) --------------------------------------------
+
+    /// Lay out into a `width`-wide viewport (loose height), the seam for the
+    /// overflow-panning tests.
+    fn layout_w(w: &mut TabsWidget, theme: Option<&Theme>, width: f64) -> Size {
+        let mut tcx = TextContext::new();
+        let mut lctx = match theme {
+            Some(t) => {
+                LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), Some(t as &dyn Any))
+            }
+            None => LayoutCtx::with_text_context(&mut tcx as &mut dyn Any),
+        };
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(width, 100.0)))
+    }
+
+    /// A horizontal (x) precision scroll of `dx` logical px.
+    fn scroll_x_ev(dx: f64) -> InputEvent {
+        InputEvent::Scroll {
+            position: Point::new(1.0, 1.0),
+            delta: ScrollDelta::Pixels(dx, 0.0),
+        }
+    }
+
+    /// Dispatch `event` at `w` over a throwaway `Vec<usize>` state, returning the
+    /// selection log the callback appended to.
+    fn dispatch(w: &mut TabsWidget, events: &[InputEvent]) -> Vec<usize> {
+        let mut log: Vec<usize> = Vec::new();
+        let sa: &mut dyn Any = &mut log;
+        let mut ctx = EventCtx::new(sa, Point::ZERO, Size::new(w.viewport_w, w.height));
+        for e in events {
+            w.event(&mut ctx, e);
+        }
+        log
+    }
+
+    #[test]
+    fn narrow_width_overflows_and_pan_clamps_to_range() {
+        let view: TabsView<Vec<usize>> = tabs(labels(), 0, |_s, _i| {});
+        let mut w = build(&view);
+        layout_w(&mut w, None, 30.0);
+        assert!(w.overflow > 0.0, "a 30px viewport overflows four tabs");
+        assert_eq!(w.scroll_x, 0.0, "starts unpanned");
+
+        // A large positive wheel delta clamps to the overflow (not past the end).
+        dispatch(&mut w, &[scroll_x_ev(10_000.0)]);
+        assert_eq!(w.scroll_x, w.overflow);
+        // A large negative delta clamps back to the start.
+        dispatch(&mut w, &[scroll_x_ev(-10_000.0)]);
+        assert_eq!(w.scroll_x, 0.0);
+    }
+
+    #[test]
+    fn drag_past_slop_pans_and_does_not_select() {
+        let view: TabsView<Vec<usize>> = tabs(labels(), 0, |s: &mut Vec<usize>, i| s.push(i));
+        let mut w = build(&view);
+        layout_w(&mut w, None, 30.0);
+        let hy = w.height / 2.0;
+        // Down on tab 0, cross the slop leftward (takeover, no scroll yet), then
+        // drag further left to actually pan, and release.
+        let log = dispatch(
+            &mut w,
+            &[
+                ev(PointerPhase::Down, 25.0, hy),
+                ev(PointerPhase::Move, 0.0, hy),
+                ev(PointerPhase::Move, -30.0, hy),
+                ev(PointerPhase::Up, -30.0, hy),
+            ],
+        );
+        assert!(w.scroll_x > 0.0, "the drag panned the strip");
+        assert!(log.is_empty(), "a pan never fires on_select");
+        assert_eq!(w.selected, 0, "controlled selection is untouched");
+    }
+
+    #[test]
+    fn sub_slop_release_still_selects() {
+        let view: TabsView<Vec<usize>> = tabs(labels(), 0, |s: &mut Vec<usize>, i| s.push(i));
+        let mut w = build(&view);
+        layout_w(&mut w, None, 30.0);
+        let cx = w.tabs[0].x + w.tabs[0].width / 2.0;
+        let hy = w.height / 2.0;
+        let log = dispatch(
+            &mut w,
+            &[
+                ev(PointerPhase::Down, cx, hy),
+                // A tiny jiggle under the slop must not become a pan.
+                ev(PointerPhase::Move, cx + 5.0, hy),
+                ev(PointerPhase::Up, cx, hy),
+            ],
+        );
+        assert_eq!(w.scroll_x, 0.0, "a sub-slop press does not pan");
+        assert_eq!(log, vec![0], "the tab tap still fires");
+    }
+
+    #[test]
+    fn hit_test_respects_scroll_x() {
+        let view: TabsView<Vec<usize>> = tabs(labels(), 0, |_s, _i| {});
+        let mut w = build(&view);
+        layout_w(&mut w, None, 30.0);
+        // Pan so tab 1's left edge sits at the viewport origin.
+        w.set_scroll_x(w.tabs[1].x);
+        assert_eq!(w.scroll_x, w.tabs[1].x, "the target pan is within range");
+        // A press near the left edge now lands on tab 1, not tab 0.
+        assert_eq!(w.hit_index(Point::new(1.0, w.height / 2.0)), Some(1));
+    }
+
+    #[test]
+    fn confirmed_selection_scrolls_into_view() {
+        let prev: TabsView<Vec<usize>> = tabs(labels(), 0, |_s, _i| {});
+        let mut w = build(&prev);
+        layout_w(&mut w, None, 30.0);
+        assert_eq!(w.scroll_x, 0.0);
+        // Confirm the last tab as selected → next layout brings it into view.
+        let last = labels().len() - 1;
+        let next: TabsView<Vec<usize>> = tabs(labels(), last, |_s, _i| {});
+        let mut counter = 0u64;
+        View::<Vec<usize>>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
+        layout_w(&mut w, None, 30.0);
+        // The last tab is at the content's far right, so it pans fully to the end.
+        assert_eq!(w.scroll_x, w.overflow);
+        let right = w.tabs[last].x + w.tabs[last].width;
+        assert!(
+            right <= w.scroll_x + w.viewport_w + 0.01,
+            "last tab visible"
+        );
+    }
+
+    #[test]
+    fn wheel_delta_pans_when_overflowing() {
+        let view: TabsView<Vec<usize>> = tabs(labels(), 0, |_s, _i| {});
+        let mut w = build(&view);
+        layout_w(&mut w, None, 30.0);
+        dispatch(&mut w, &[scroll_x_ev(20.0)]);
+        assert_eq!(w.scroll_x, 20.0, "a horizontal wheel delta pans");
+    }
+
+    #[test]
+    fn fits_case_has_no_overflow_and_ignores_wheel() {
+        let view: TabsView<Vec<usize>> = tabs(labels(), 0, |_s, _i| {});
+        let mut w = build(&view);
+        layout_w(&mut w, None, 800.0);
+        assert_eq!(w.overflow, 0.0, "four tabs fit in 800px");
+        // A wheel event is ignored and never moves a non-overflowing strip.
+        dispatch(&mut w, &[scroll_x_ev(50.0)]);
+        assert_eq!(w.scroll_x, 0.0);
     }
 }

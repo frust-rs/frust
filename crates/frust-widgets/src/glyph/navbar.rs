@@ -31,12 +31,12 @@
 
 use std::rc::Rc;
 
+use crate::icon::IconData;
 use frust_core::accesskit::Role;
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
     PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
-use crate::icon::IconData;
 use frust_text::{FontFamily, FontWeight, GenericSlot, TextContext, TextLayout, TextStyle};
 use frust_theme::{ShapeScale, Theme};
 use kurbo::{Point, Rect, Size};
@@ -227,7 +227,7 @@ impl GlyphLabel {
 
 /// A retained glyph slot: a shaped char run or a resolved vector icon.
 enum NavSlot {
-    Char(GlyphLabel),
+    Char(Box<GlyphLabel>),
     Icon(IconData),
 }
 
@@ -294,7 +294,7 @@ fn build_items(items: &[GlyphNavItem]) -> Vec<NavEntry> {
         .iter()
         .map(|item| NavEntry {
             glyph: match &item.glyph {
-                NavItemGlyph::Char(s) => NavSlot::Char(GlyphLabel::new(s.clone())),
+                NavItemGlyph::Char(s) => NavSlot::Char(Box::new(GlyphLabel::new(s.clone()))),
                 NavItemGlyph::Icon(data) => NavSlot::Icon(data.clone()),
             },
             label: GlyphLabel::new(item.label.clone()),
