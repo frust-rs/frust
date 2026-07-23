@@ -205,10 +205,22 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     );
 
     // Toast host overlays the whole page (API.md's hosting note: a FIFO
-    // overlay mounted above every screen).
+    // overlay mounted above every screen). Top-CENTER with a small margin —
+    // the ToastHost sizes to the toast itself and a bare Stack child lands
+    // top-left (found on-device 2026-07-23); the reference build's toast
+    // enters from the top edge, centered.
     any(Stack(vec![
         any(column),
-        any(frust::glyph::toast_host(pending)),
+        any(frust::Align(
+            frust::Alignment { x: 0.0, y: -1.0 },
+            Padding(
+                EdgeInsets {
+                    top: 10.0,
+                    ..EdgeInsets::all(0.0)
+                },
+                frust::glyph::toast_host(pending),
+            ),
+        )),
     ]))
 }
 

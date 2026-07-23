@@ -26,8 +26,8 @@ use frust::glyph::{
 };
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    NavigatorController, Padding, PageTransition, PopResult, RwSignal, Set, SizedBox, Theme,
-    TransitionSpec, any, button, inflexible, text, use_context,
+    NavigatorController, Padding, PageTransition, PopResult, RwSignal, Set, SizedBox, Stack, Theme,
+    TransitionSpec, any, button, flexible, inflexible, text, use_context,
 };
 
 use crate::CatalogState;
@@ -268,6 +268,21 @@ fn sheet_body(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
     any(FlexView::new(Axis::Vertical, children))
 }
 
+/// Pin a sheet panel to the BOTTOM of the transparent page at FULL width —
+/// a bare content view floats top-left at intrinsic size (found on-device
+/// 2026-07-23). The flexible spacer eats the remaining height (the previous
+/// page stays visible through it); `SizedBox(f64::INFINITY, _)` clamps to
+/// the page's bounded width, stretching the panel edge-to-edge.
+fn sheet_scaffold(panel: AnyView<CatalogState>) -> AnyView<CatalogState> {
+    any(FlexView::new(
+        Axis::Vertical,
+        vec![
+            flexible(1, SizedBox(None, None)),
+            inflexible(Stack(vec![any(SizedBox(Some(f64::INFINITY), None)), panel])),
+        ],
+    ))
+}
+
 /// Wire the "Bottom sheet" button: `push_transparent_for_result` with
 /// [`PageTransition::SlideUp`] and a `glyph_card`-shaped page (the task's
 /// "card-ish sheet page") holding [`sheet_body`] — the reference build's
@@ -282,9 +297,9 @@ fn open_sheet_button(
         let card_nav = nav.clone();
         nav.push_transparent_for_result(
             move || {
-                any(glyph_card::<CatalogState>()
+                sheet_scaffold(any(glyph_card::<CatalogState>()
                     .title(text("Pane picker".to_string()).size(13.5))
-                    .desc(sheet_body(card_nav.clone())))
+                    .desc(sheet_body(card_nav.clone()))))
             },
             TransitionSpec::duration(PageTransition::SlideUp),
             move |_: &mut CatalogState, _result: PopResult| {
