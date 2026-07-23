@@ -14,10 +14,11 @@
 use std::any::Any;
 
 use frust::{
-    AnyView, Brightness, MotionScheme, NavigatorController, Set, Theme, any, component, navigator,
-    provide_context,
+    AnyView, Brightness, MotionScheme, NavigatorController, Set, Theme, TransitionSpec, any,
+    component, navigator, provide_context,
 };
 use frust_core::FrameTime;
+use frust_core::{InputEvent, PointerButton, PointerEvent, PointerPhase};
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
 use frust_core::{WindowEdgeInsets, WindowInsets};
 use frust_reactive::ReactiveRuntime;
@@ -686,4 +687,211 @@ fn appbar_variation_pages_mount_at_every_size_and_brightness() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task f5: variation-page scroll — headless repro of the device 0px-scroll bug
+// ---------------------------------------------------------------------------
+//
+// The device symptom (Xiaomi 12, build 67c334d): a pushed AppBar *variation*
+// page reports 0px scroll-offset movement despite 26 input frames reaching the
+// app, while the root Content tab scrolls fine and the back button works
+// (ruling out a stuck never-finalized push transition). The layout hypothesis
+// was REFUTED (the constraint chain is tight/finite end-to-end, mathematically
+// equivalent to the WORKING root page), so these tests attack the *event* path
+// instead: they push a real variation page through a real `RenderRoot` (the
+// desktop-shell pipeline the whole file uses), settle its Glyph push
+// transition, then dispatch a real pointer drag via `RenderRoot::event` and
+// assert the pushed page's `ScrollView` offset actually moved.
+//
+// The offset is observed through the variation page's own `on_scroll` wiring:
+// `pages::appbar::variation_scroll_collapse` feeds every offset change into the
+// `collapse_progress_sig` (`offset / 60`, clamped), read back via
+// `scroll_collapse_progress_for_test()`. A nonzero progress means the drag
+// reached the scroll widget; a zero means it died somewhere in the
+// navigator/routing chain — the exact device defect. This is the "downcast
+// introspection" (scroll.rs's own drag tests read `w.offset()`) equivalent that
+// is reachable through a `RenderRoot`, whose nested `ScrollWidget` no public
+// traversal API exposes.
+
+/// A device-realistic phone viewport (Xiaomi-12-ish portrait logical size) the
+/// scroll-repro tests push a full-screen variation page at. Reuses `SIZES[0]`'s
+/// shape but named here for the drag-coordinate math below (a `y` of 500 lands
+/// well inside the body `ScrollView`, clear of the top AppBar).
+const REPRO_SIZE: (f64, f64) = (390.0, 844.0);
+
+/// A pointer [`InputEvent`] at an absolute `(x, y)` window coordinate — the
+/// shape the desktop/Android shells build before crossing into `frust-core`
+/// (already logical-pixel; mirrors `scroll.rs`'s own `ev` test helper).
+fn pointer(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+    InputEvent::Pointer(PointerEvent {
+        phase,
+        position: Point::new(x, y),
+        button: PointerButton::Primary,
+    })
+}
+
+/// Drive a Glyph push transition to settle: paint several frames advancing the
+/// clock far past any themed transition duration, so the navigator's
+/// `paint_transition` reports `done`, the next `rebuild` finalizes it, and the
+/// stack routes events normally again (the "settled pushed page" state the
+/// device bug is observed in). Returns the clock (ms) reached.
+fn settle_push<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+    mut t_ms: u64,
+) -> u64 {
+    for _ in 0..6 {
+        t_ms += 2_000;
+        frame_at_size(
+            root,
+            logic,
+            state,
+            tcx,
+            Size::new(REPRO_SIZE.0, REPRO_SIZE.1),
+            t_ms,
+        );
+    }
+    t_ms
+}
+
+/// Dispatch a top-to-bottom vertical drag (finger moving UP the screen, so the
+/// content scrolls DOWN / offset increases) starting at `x`, through
+/// `RenderRoot::event`. The first move crosses `TOUCH_SLOP` (18px) to arm the
+/// scroll takeover; the following moves accumulate ~80px of offset, past the
+/// `COLLAPSE_SPAN_PX` (60px) that saturates `collapse_progress` to 1.0.
+fn drag_up<S: 'static, V: View<S>>(root: &mut RenderRoot<S, V>, state: &mut S, x: f64) {
+    root.event(state, &pointer(PointerPhase::Down, x, 500.0));
+    // First move: 20px > slop → takeover (no offset change yet, seeds the drag).
+    root.event(state, &pointer(PointerPhase::Move, x, 480.0));
+    // Subsequent moves accumulate offset (finger up ⇒ offset up).
+    root.event(state, &pointer(PointerPhase::Move, x, 440.0));
+    root.event(state, &pointer(PointerPhase::Move, x, 400.0));
+    root.event(state, &pointer(PointerPhase::Up, x, 400.0));
+}
+
+/// f5 acceptance criterion 1 (the missing regression test): a real drag on a
+/// **pushed** variation page — under the catalog's exact navigator config
+/// (`TransitionSpec::glyph()`, edge-swipe therefore OFF, since `pop_swipe`
+/// derives on only for the iOS-push preset) — must move the page's `ScrollView`
+/// offset. Reproduces the device scenario headlessly: if the drag died in the
+/// navigator/routing chain (the 0px defect), `collapse_progress` stays 0 and
+/// this FAILS; if scroll works, `on_scroll` fires and progress goes nonzero.
+///
+/// **Result: this PASSES** — the headless drag scrolls. The event path is
+/// sound: the settled navigator routes the whole Down/Move/Up stream to the top
+/// page, and its `ScrollView` takes the gesture over past slop exactly as the
+/// root page's does. See this task's findings report for what that localizes.
+#[test]
+fn pushed_variation_page_drag_scrolls_its_scrollview() {
+    let (_owner, theme) = setup_with_theme(Brightness::Dark);
+    let mut tcx = TextContext::new();
+    let (mut root, controller, mut state) = mount_appbar_launcher();
+    root.set_theme(Box::new(theme));
+    let ctrl = controller.clone();
+    // The catalog's real navigator config: Glyph page transition (lib.rs's
+    // `.transition(TransitionSpec::glyph())`), which leaves the edge-swipe
+    // pop gesture DISABLED (on only for the iOS-push preset).
+    let mut logic = move |_s: &mut CatalogState| {
+        any(
+            navigator(&ctrl, || pages::appbar::page(&CatalogState::new()))
+                .transition(TransitionSpec::glyph()),
+        )
+    };
+
+    // Mount the launcher, push the scroll-collapse variation, settle its push.
+    let _ = frame_at_size(
+        &mut root,
+        &mut logic,
+        &mut state,
+        &mut tcx,
+        Size::new(REPRO_SIZE.0, REPRO_SIZE.1),
+        0,
+    );
+    pages::appbar::open_scroll_collapse(&mut state);
+    let _ = settle_push(&mut root, &mut logic, &mut state, &mut tcx, 16);
+    assert_eq!(
+        controller.depth(),
+        2,
+        "the variation page must be pushed and settled"
+    );
+
+    // Deterministic baseline (the signals are thread-local and self-healing),
+    // then a real drag through the whole RenderRoot event path.
+    pages::appbar::reset_scroll_collapse_for_test();
+    assert_eq!(
+        pages::appbar::scroll_collapse_progress_for_test(),
+        0.0,
+        "baseline: the reset seam must zero the collapse progress",
+    );
+    drag_up(&mut root, &mut state, 200.0);
+
+    assert!(
+        pages::appbar::scroll_collapse_progress_for_test() > 0.0,
+        "a drag on the settled pushed variation page must move its ScrollView offset \
+         (on_scroll fires ⇒ collapse progress > 0); a 0.0 here is the device 0px-scroll defect \
+         reproduced headlessly",
+    );
+}
+
+/// f5 acceptance criteria 2 + 4 (edge-swipe-zone vertical-drag guard): a
+/// vertical drag whose `Down` lands INSIDE the left `EDGE_SWIPE_ZONE_DP` (20dp)
+/// on a pushed page — with the interactive edge-swipe pop gesture ENABLED
+/// (`.pop_swipe(true)`, the config the swipe's own investigation flagged as the
+/// prime, UNTESTED suspect) — must STILL scroll: the navigator must disarm its
+/// armed edge-swipe on the first vertical-dominant move and yield the gesture to
+/// the page's `ScrollView`, never steal it as a back-pop. A 0.0 here would mean
+/// the edge-swipe arm swallowed a vertical drag that should have scrolled.
+#[test]
+fn edge_zone_vertical_drag_still_scrolls_pushed_page() {
+    let (_owner, theme) = setup_with_theme(Brightness::Dark);
+    let mut tcx = TextContext::new();
+    let (mut root, controller, mut state) = mount_appbar_launcher();
+    root.set_theme(Box::new(theme));
+    let ctrl = controller.clone();
+    // Edge-swipe explicitly ENABLED over the Glyph transition — the arm/steal
+    // machinery the task's hypothesis suspected for drags starting in the zone.
+    let mut logic = move |_s: &mut CatalogState| {
+        any(
+            navigator(&ctrl, || pages::appbar::page(&CatalogState::new()))
+                .transition(TransitionSpec::glyph())
+                .pop_swipe(true),
+        )
+    };
+
+    let _ = frame_at_size(
+        &mut root,
+        &mut logic,
+        &mut state,
+        &mut tcx,
+        Size::new(REPRO_SIZE.0, REPRO_SIZE.1),
+        0,
+    );
+    pages::appbar::open_scroll_collapse(&mut state);
+    let _ = settle_push(&mut root, &mut logic, &mut state, &mut tcx, 16);
+    assert_eq!(
+        controller.depth(),
+        2,
+        "the variation page must be pushed and settled"
+    );
+
+    pages::appbar::reset_scroll_collapse_for_test();
+    // Down inside the left edge-swipe zone (x = 10 ≤ 20dp), then a purely
+    // vertical drag: the navigator arms the edge-swipe on Down, then must
+    // disarm on the first vertical-dominant move and let the page scroll.
+    drag_up(&mut root, &mut state, 10.0);
+
+    assert!(
+        pages::appbar::scroll_collapse_progress_for_test() > 0.0,
+        "a vertical drag starting inside the left edge-swipe zone must disarm the edge-swipe \
+         and scroll the pushed page's ScrollView (collapse progress > 0), not be stolen as a \
+         back-pop",
+    );
+    assert_eq!(
+        controller.depth(),
+        2,
+        "the vertical edge-zone drag must NOT trigger a back-pop (depth stays 2)",
+    );
 }

@@ -527,6 +527,33 @@ pub fn open_scroll_collapse(state: &mut CatalogState) {
         .push(move || variation_scroll_collapse(nav.clone()));
 }
 
+/// Read §02's scroll-collapse progress signal — the value
+/// [`variation_scroll_collapse`]'s `ScrollView::on_scroll` feeds from the live
+/// scroll offset (`(offset / COLLAPSE_SPAN_PX).clamp(0.0, 1.0)`). The headless
+/// scroll-repro regression test (`tests/smoke.rs`) reads it back after
+/// dispatching a real drag through a `RenderRoot` to prove the pushed page's
+/// `ScrollView` offset actually moved (a nonzero progress means `on_scroll`
+/// fired, i.e. the drag reached the scroll widget instead of dying in the
+/// navigator/routing chain — the exact 0px-movement defect this task probes).
+/// `pub`-for-test only, mirroring [`open_scroll_collapse`]'s own seam rationale
+/// and `interactions::start_heartbeat_for_test`'s precedent; never called from
+/// `build`.
+pub fn scroll_collapse_progress_for_test() -> f64 {
+    collapse_progress_sig().get_untracked()
+}
+
+/// Reset §02's scroll-collapse signals to their at-rest defaults — the
+/// deterministic baseline the scroll-repro test establishes *after* settling a
+/// push transition and *before* dispatching its drag, so the subsequent
+/// [`scroll_collapse_progress_for_test`] assertion reads only this drag's
+/// contribution (the signals are thread-local and self-healing, so a prior
+/// test on the same worker thread could otherwise leave a stale nonzero
+/// value). `pub`-for-test only; never called from `build`.
+pub fn reset_scroll_collapse_for_test() {
+    collapse_progress_sig().set(0.0);
+    collapse_elevated_sig().set(false);
+}
+
 // ---------------------------------------------------------------------------
 // 03 — back-nav title crossfade
 // ---------------------------------------------------------------------------
