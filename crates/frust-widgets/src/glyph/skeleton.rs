@@ -193,7 +193,9 @@ impl Widget for SkeletonWidget {
         let gradient =
             Self::sweep_gradient(origin, size.width, size.height, phase, base, highlight);
         scene.fill_rounded_rect_brush(origin, size, radius, &Brush::Gradient(gradient));
-        ctx.request_frame();
+        // A shimmer sweep is a decorative loop — its exact cadence is
+        // imperceptible, so the mobile frame gate may pace it (task 08).
+        ctx.request_frame_paced();
     }
 }
 
@@ -278,6 +280,10 @@ mod tests {
         let mut scene = RecordingScene::default();
         w.paint(&mut ctx, &mut scene);
         assert!(ctx.needs_frame());
+        assert!(
+            ctx.needs_frame_paced_only(),
+            "a shimmer sweep is a CosmeticLoop request — the frame gate must be able to pace it"
+        );
     }
 
     #[test]
