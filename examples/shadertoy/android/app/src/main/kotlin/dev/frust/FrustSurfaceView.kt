@@ -64,21 +64,6 @@ class FrustSurfaceView(context: Context) :
         private const val IME_RESYNC_FRAMES = 3
 
         /**
-         * Decoded mirror of `frust_shell_common::system_ui::SystemUiMode`
-         * (task 03, Flutter `SystemUiMode` parity) — the vocabulary
-         * [pollSystemUiState] decodes `nativeSystemUiState`'s packed `u64`
-         * into for [onSystemUiModeChanged]. `MainActivity` (task 14) applies
-         * one of these via `WindowInsetsControllerCompat`.
-         */
-        sealed class SystemUiMode {
-            object EdgeToEdge : SystemUiMode()
-            object Immersive : SystemUiMode()
-            object ImmersiveSticky : SystemUiMode()
-            object LeanBack : SystemUiMode()
-            data class Manual(val top: Boolean, val bottom: Boolean) : SystemUiMode()
-        }
-
-        /**
          * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
          * 03's `system_ui::encoded_state()` doc comment:
          * `(generation << 8) | mode_bits`, low byte: `0..=4` is the mode
@@ -97,6 +82,25 @@ class FrustSurfaceView(context: Context) :
                     bottom = (low and 0x20L) != 0L,
                 )
             }
+    }
+
+    /**
+     * Decoded mirror of `frust_shell_common::system_ui::SystemUiMode`
+     * (task 03, Flutter `SystemUiMode` parity) — the vocabulary
+     * [pollSystemUiState] decodes `nativeSystemUiState`'s packed `u64`
+     * into for [onSystemUiModeChanged]. `MainActivity` (task 14) applies
+     * one of these via `WindowInsetsControllerCompat`. Declared in the class
+     * body, NOT the companion object: Kotlin resolves companion members
+     * (`FrustSurfaceView.decodeSystemUiMode`) through the outer class name,
+     * but never companion-nested *types* — `FrustSurfaceView.SystemUiMode`
+     * only compiles with the declaration here.
+     */
+    sealed class SystemUiMode {
+        object EdgeToEdge : SystemUiMode()
+        object Immersive : SystemUiMode()
+        object ImmersiveSticky : SystemUiMode()
+        object LeanBack : SystemUiMode()
+        data class Manual(val top: Boolean, val bottom: Boolean) : SystemUiMode()
     }
 
     // JNI exports implemented by `frust-shell-android` (spec Phase 2
