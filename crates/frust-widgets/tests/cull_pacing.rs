@@ -10,12 +10,13 @@
 //! with `FrameGate` (task 06) at the shell layer, treating "offscreen
 //! (culled)" as the fact this file proves — no request bubbles at all.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, TickClass, View,
-    Widget, any,
+    BoxConstraints, BuildCtx, ChangeFlags, HeroFrames, LayoutCtx, PaintCtx, PaintScene, TickClass,
+    View, Widget, any,
 };
 use frust_widgets::{Column, FlexView};
 use kurbo::{Point, Rect, Size};
@@ -127,6 +128,28 @@ impl FlexWidgetHandle {
             pctx.constrain_visible_rect(vr);
         }
         self.0.paint(&mut pctx, &mut scene);
+        PaintClass {
+            needs_frame: pctx.needs_frame(),
+            needs_frame_paced_only: pctx.needs_frame_paced_only(),
+            class: pctx.frame_class(),
+        }
+    }
+
+    /// Like [`Self::paint_at`], but paints with a shared-element ("hero")
+    /// reporter installed over the subtree — the `ctx.hero_active()` signal
+    /// `Flex` reads to exempt every child from culling while a hero morph is in
+    /// flight. Frame requests made inside bubble back out via
+    /// `with_hero_registry`, so the returned [`PaintClass`] is read the same way.
+    fn paint_at_with_hero(&mut self, visible_rect: Option<Rect>) -> PaintClass {
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(ROW_W, ROW_H * ROWS as f64));
+        if let Some(vr) = visible_rect {
+            pctx.constrain_visible_rect(vr);
+        }
+        let registry = RefCell::new(HeroFrames::new(Point::ZERO, HashMap::new()));
+        pctx.with_hero_registry(&registry, |cctx| {
+            self.0.paint(cctx, &mut scene);
+        });
         PaintClass {
             needs_frame: pctx.needs_frame(),
             needs_frame_paced_only: pctx.needs_frame_paced_only(),
@@ -256,6 +279,33 @@ fn a_concurrent_onscreen_transition_dominates_an_onscreen_paced_loop() {
     assert_eq!(outcome.class, Some(TickClass::Transition));
     assert_eq!(counts[0].get(), 1);
     assert_eq!(counts[1].get(), 1);
+}
+
+#[test]
+fn a_hero_transition_in_flight_exempts_every_child_from_culling() {
+    // Task f3 Problem B: a hero-tagged descendant scrolled past the warm band
+    // stops reporting its morph bounds (`report_hero`) if culled. While a hero
+    // transition is in flight (a reporter installed over the subtree), `Flex`
+    // exempts EVERY child from culling — so the far-offscreen rows that
+    // `fully_offscreen_column_bubbles_no_frame_request_at_all` proves are culled
+    // *without* a hero all paint again here. This bypasses task 07's
+    // offscreen-animator suppression BY DESIGN, and only for the brief transition.
+    let (mut w, counts) = build_column(all_cosmetic());
+    let outcome = w.paint_at_with_hero(Some(far_away_viewport()));
+
+    for (i, count) in counts.iter().enumerate() {
+        assert_eq!(
+            count.get(),
+            1,
+            "row {i} is offscreen but a hero transition is in flight → it must paint"
+        );
+    }
+    assert!(
+        outcome.needs_frame,
+        "the now-painting loops bubble their continuation request"
+    );
+    assert!(outcome.needs_frame_paced_only);
+    assert_eq!(outcome.class, Some(TickClass::CosmeticLoop));
 }
 
 #[test]

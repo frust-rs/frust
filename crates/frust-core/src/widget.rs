@@ -904,6 +904,22 @@ impl<'a> PaintCtx<'a> {
         }
     }
 
+    /// Whether a shared-element ("hero") transition is currently in flight over
+    /// this subtree — i.e. an ancestor installed a hero reporter via
+    /// [`PaintCtx::with_hero_registry`], the same condition that makes
+    /// [`PaintCtx::report_hero`] record rather than no-op.
+    ///
+    /// The public, boolean sibling of the crate-private
+    /// [`PaintCtx::hero_ref`], exposed so a container that culls far-offscreen
+    /// children (a `Flex` under a `ScrollView`) can *stop* culling while a hero
+    /// is morphing: a tagged descendant scrolled beyond the warm margin would
+    /// otherwise never paint, and so never report its bounds
+    /// ([`PaintCtx::report_hero`]) for the morph. `false` in the normal case
+    /// (no transition), so culling is unaffected off the transition path.
+    pub fn hero_active(&self) -> bool {
+        self.hero.is_some()
+    }
+
     /// Run `f` with a paint context that has `registry` installed as the
     /// tagged-rect ("hero") reporter, threading this context's clock/theme/
     /// focus/geometry down unchanged. A container paints a subtree inside the
