@@ -92,7 +92,12 @@
 //! observed from `paint` (`observe_dismiss_signal`) against the shared
 //! dismiss-signal cell [`NavigatorController::request_back`] bumps (see
 //! [`BackPolicy`](crate::nav::navigator::BackPolicy)'s documented observation
-//! seam).
+//! seam). Because that pop only *enqueues* a `NavOp::Pop` (it writes no tracked
+//! signal), the same paint requests the next frame
+//! ([`PaintCtx::request_frame`]) so the enqueued pop is guaranteed a draining
+//! rebuild — otherwise a dirty-driven desktop shell idles and the mobile frame
+//! gate skips, leaving the back press dead until an unrelated later frame (see
+//! [`observe_dismiss_signal`](BottomSheetWidget::observe_dismiss_signal)).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -386,15 +391,27 @@ impl BottomSheetWidget {
     /// per bump — the `BackPolicy::DismissAnimated` seam's widget-side half
     /// (`nav::navigator::BackPolicy`'s documented observation seam). Unlike
     /// `crate::glyph::dialog`, this sheet has no enter/exit staging to route
-    /// through, so the fire is immediate (mirrors a scrim tap/handle drag). A
-    /// back request flags `PAINT`, so this always runs before the next frame
-    /// is shown.
-    fn observe_dismiss_signal(&mut self) {
+    /// through, so the fire is immediate (mirrors a scrim tap/handle drag).
+    ///
+    /// **Scheduling the draining frame.** `fire()` only *enqueues* a
+    /// `NavOp::Pop` on the controller; it writes no tracked reactive signal, so
+    /// nothing else schedules the frame that drains it. The back-request paint
+    /// that runs `fire()` therefore must itself request the next frame
+    /// ([`PaintCtx::request_frame`]) — exactly as `crate::glyph::dialog`
+    /// requests a frame past its `Dismissed` phase so the rebuild that applies
+    /// the pop runs. Without this, a dirty-driven desktop shell
+    /// (`ControlFlow::Wait`) idles and the mobile frame gate `Skip`s the next
+    /// tick (the back request's `PAINT` flag was consumed by *this* frame), so
+    /// the enqueued pop never drains until an unrelated later frame.
+    fn observe_dismiss_signal(&mut self, ctx: &mut PaintCtx) {
         if let Some((signal, fire)) = &self.dismiss_signal {
             let current = signal.get();
             if current != self.last_seen_dismiss {
                 self.last_seen_dismiss = current;
                 fire();
+                // Guarantee the enqueued pop one draining rebuild — see the
+                // `Scheduling the draining frame` note above.
+                ctx.request_frame();
             }
         }
     }
@@ -425,7 +442,7 @@ impl Widget for BottomSheetWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.observe_dismiss_signal();
+        self.observe_dismiss_signal(ctx);
         let theme = Theme::from_paint_ctx(ctx);
         // Scrim over the whole area.
         scene.fill_rect(ctx.origin(), ctx.size(), resolve_scrim(theme));
@@ -1131,11 +1148,41 @@ mod tests {
             "DismissAnimated: the stack is unchanged immediately"
         );
 
-        // The sheet has no enter/exit staging of its own — the next paint
-        // observes the bumped signal and fires the pop right away.
-        root.paint(&mut Recorder::default(), ft(400));
-        root.rebuild(&mut app, &mut state);
-        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        // The back-press rebuild flagged PAINT; this paint observes the bumped
+        // signal and fires the pop. `fire()` only *enqueues* `NavOp::Pop`, so
+        // this same paint MUST schedule the frame that drains it — asserted
+        // here BEFORE any further rebuild (the honest contract; the old test
+        // hand-called `rebuild()` here, hiding exactly this gap). The stack is
+        // still unchanged: the pop is enqueued, not yet drained.
+        let outcome = root.paint(&mut Recorder::default(), ft(400));
+        assert!(
+            outcome.needs_frame,
+            "the back-dismiss paint schedules the frame that drains its enqueued pop"
+        );
+        assert_eq!(
+            controller.depth(),
+            2,
+            "the pop is only enqueued at paint — not yet drained"
+        );
+
+        // Drive the loop ONLY via outcome-honoring frames (rebuild + layout +
+        // paint, continuing while the outcome asks for another, bounded): no
+        // manual extra rebuild. The pop drains through the shell contract
+        // alone.
+        let mut frames = 0u64;
+        loop {
+            root.rebuild(&mut app, &mut state);
+            root.layout_with_text(area, &mut tcx as &mut dyn Any);
+            let outcome = root.paint(&mut Recorder::default(), ft(500 + frames * 100));
+            frames += 1;
+            assert!(
+                frames < 20,
+                "the pop drains within a bounded number of frames"
+            );
+            if !outcome.needs_frame {
+                break;
+            }
+        }
         root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
 
         assert_eq!(
