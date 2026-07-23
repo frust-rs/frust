@@ -28,8 +28,8 @@
 
 use frust::{
     AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, GlyphInk, Image, ImageFit,
-    ImageSource, Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any, inflexible,
-    text, use_context,
+    ImageSource, Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any,
+    inflexible, text, use_context,
 };
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
@@ -240,16 +240,24 @@ fn type_specimen(view: TextView, meta: &str, label_color: Color) -> AnyView<Cata
 
 /// One radius chip: a static rounded-rect fill at `radius`, sized against
 /// [`RADIUS_CHIP_SIZE`], filled with `fill_color`, labeled underneath.
-fn radius_chip(label: &str, radius: f64, fill_color: Color, label_color: Color) -> AnyView<CatalogState> {
+fn radius_chip(
+    label: &str,
+    radius: f64,
+    fill_color: Color,
+    label_color: Color,
+) -> AnyView<CatalogState> {
     let resolved = ShapeScale::resolve(radius, RADIUS_CHIP_SIZE, RADIUS_CHIP_SIZE);
     any(Padding(
         EdgeInsets::all(8.0),
         FlexView::new(
             Axis::Vertical,
             vec![
-                inflexible(any(
-                    StaticRoundedRectView::new(RADIUS_CHIP_SIZE, RADIUS_CHIP_SIZE, resolved, fill_color)
-                )),
+                inflexible(any(StaticRoundedRectView::new(
+                    RADIUS_CHIP_SIZE,
+                    RADIUS_CHIP_SIZE,
+                    resolved,
+                    fill_color,
+                ))),
                 inflexible(any(mono_label(label.to_string(), label_color))),
             ],
         )

@@ -363,7 +363,8 @@ fn root_appbar_consumes_inset_without_double_padding() {
     let mut logic = |_s: &mut ()| any(component(CatalogApp));
     let mut state = ();
 
-    let (zero, _zero_outcome) = frame_at_with_top_inset(&mut root, &mut logic, &mut state, &mut tcx, 0.0, 0);
+    let (zero, _zero_outcome) =
+        frame_at_with_top_inset(&mut root, &mut logic, &mut state, &mut tcx, 0.0, 0);
     let (pushed, _pushed_outcome) =
         frame_at_with_top_inset(&mut root, &mut logic, &mut state, &mut tcx, TOP_INSET, 16);
 
