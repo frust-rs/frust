@@ -50,6 +50,34 @@ impl BuildMode {
             BuildMode::Release => "Release",
         }
     }
+
+    /// The cargo `--features` this mode selects when building a generated app
+    /// (release-lean plan, task 04 — Flutter-mode parity): the single source
+    /// the desktop/`cargo run`, Android (`-Pfrust.cargoFeatures`), and iOS
+    /// (`FRUST_FEATURES`) seams all thread through.
+    ///
+    /// - **debug / profile** → `["frust/perf-trace"]`: instrumentation
+    ///   (`frust-perf` frame/startup emission + the render-path probes) is
+    ///   compiled IN. Profile keeps it via THIS feature, never via a log
+    ///   level — `release_max_level_*` keys off `debug_assertions`, which the
+    ///   `[profile.profile]` inherits-release profile has OFF, so a log-level
+    ///   ceiling would wrongly silence profile perf lines (task 01's binding
+    ///   sink decision).
+    /// - **release** → `["lean"]`: the generated app's own `lean` feature,
+    ///   which forwards to `log/release_max_level_warn` — stray info/debug log
+    ///   lines are constant-folded out while warn/error crash diagnostics
+    ///   survive. `perf-trace` is absent, so a release artifact carries
+    ///   neither the emission code nor its `frust-perf` string literals.
+    ///
+    /// Never empty (every mode selects at least one feature), so the platform
+    /// encoders can treat an empty result as "not applicable" without ever
+    /// producing one here.
+    pub fn cargo_features(&self) -> &'static [&'static str] {
+        match self {
+            BuildMode::Debug | BuildMode::Profile => &["frust/perf-trace"],
+            BuildMode::Release => &["lean"],
+        }
+    }
 }
 
 /// Plain (clap-free) build flags shared by every command that produces a
@@ -300,6 +328,24 @@ mod tests {
         assert_eq!(BuildMode::Debug.xcode_configuration(), "Debug");
         assert_eq!(BuildMode::Profile.xcode_configuration(), "Profile");
         assert_eq!(BuildMode::Release.xcode_configuration(), "Release");
+    }
+
+    #[test]
+    fn cargo_features_matches_each_mode() {
+        // debug/profile compile instrumentation IN; release swaps to the
+        // `lean` log ceiling and carries no `perf-trace` (release-lean plan).
+        assert_eq!(BuildMode::Debug.cargo_features(), &["frust/perf-trace"]);
+        assert_eq!(BuildMode::Profile.cargo_features(), &["frust/perf-trace"]);
+        assert_eq!(BuildMode::Release.cargo_features(), &["lean"]);
+    }
+
+    #[test]
+    fn release_cargo_features_never_contain_perf_trace() {
+        assert!(
+            !BuildMode::Release
+                .cargo_features()
+                .contains(&"frust/perf-trace")
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ use frust_render::{
     AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
 };
 use frust_scene::{Scene, SceneBuilder};
+use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
@@ -43,7 +44,7 @@ use frust_shell_common::{
     effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
 };
 use frust_text::TextContext;
-use frust_theme::{Brightness, Theme};
+use frust_theme::{Brightness, DesignLanguage, Theme};
 use kurbo::{Affine, Point, Size};
 use ndk::native_window::NativeWindow;
 
@@ -68,6 +69,13 @@ pub struct AndroidAppHandle {
     /// renderer lives on this UI thread. Chosen once at construction.
     executor: FrameExecutor,
     text_ctx: TextContext,
+    /// Polls the process-wide app-facing pending-font registry
+    /// (`frust::register_app_fonts`, task 14) once per frame (see [`Self::frame`],
+    /// beside the theme-override poll) — draining any late registration into
+    /// `text_ctx`. Also drained once at construction ([`Self::new`], after the
+    /// background prewarm join, on this UI thread) before the first rebuild. See
+    /// `frust_shell_common::font_registry`'s module docs.
+    font_registry: FontRegistryWatcher,
     /// Reused across frames; `reset()` each frame rather than reallocated.
     scene: Scene,
     app: Box<dyn AppTree>,
@@ -804,8 +812,11 @@ impl AndroidAppHandle {
     /// frame. No `unsafe` here — the window acquisition and surface creation
     /// happen at the FFI boundary.
     ///
-    /// Seeds the M3 baseline theme (Light, until Kotlin's follow-up
-    /// `nativeSetAppearance` reports the real preference) into both delivery
+    /// Seeds the Glyph baseline theme (task 27; dark-first per
+    /// `Theme::glyph_baseline`, until Kotlin's follow-up `nativeSetAppearance`
+    /// reports the real preference — `platform_brightness` defaults `Light` and
+    /// unconditionally overwrites `theme.brightness` on that call, so a
+    /// light-preference device still ends up Glyph light) into both delivery
     /// paths (`AppTree::set_theme` for widgets, `provide_context` for app code)
     /// before the first rebuild, mirroring the desktop shell's `apply_theme`.
     /// Must be called under the root reactive `Owner` (see
@@ -829,13 +840,39 @@ impl AndroidAppHandle {
     /// this method never itself pays the font-DB load cost.
     pub(crate) fn new(
         executor: FrameExecutor,
-        text_ctx: TextContext,
+        mut text_ctx: TextContext,
         window: NativeWindow,
         physical: (u32, u32),
         scale: f32,
         mut app: Box<dyn AppTree>,
     ) -> Self {
-        let theme = Theme::m3_baseline();
+        // Construction-time font drain (task 14): apply any fonts registered via
+        // `frust::register_app_fonts` before this handle existed into the joined
+        // `TextContext`, on this (the UI) thread after the background prewarm
+        // join — NOT inside the spawned prewarm closure. `create_handle` funnels
+        // both executor paths (inline + split) through here with the already-
+        // joined `text_ctx`, so this one drain covers both. Pre-first-rebuild, so
+        // no invalidation is needed; the per-frame poll in `frame` picks up any
+        // later registration.
+        let mut font_registry = FontRegistryWatcher::new();
+        font_registry.drain_into(&mut text_ctx);
+
+        let theme = Theme::glyph_baseline();
+
+        // Bundled Glyph font auto-registration (task 27): the default theme
+        // above is the Glyph baseline, so register the bundled Space Mono /
+        // IBM Plex Mono faces (`frust_theme::glyph::font_data()` — an empty
+        // slice, so a no-op, when the `glyph-fonts` feature is off) directly
+        // into `text_ctx` before the first rebuild — same pre-first-rebuild
+        // timing as the drain above, so the first frame shapes with Glyph
+        // fonts with no relayout needed. Gated on the *default* theme's
+        // design language, not re-checked on a later `set_app_theme` swap.
+        if theme.design_language == DesignLanguage::Glyph {
+            for bytes in frust_theme::glyph::font_data() {
+                let _ = text_ctx.register_fonts(bytes.to_vec());
+            }
+        }
+
         app.set_theme(Box::new(theme.clone()));
         provide_context(theme.clone());
         app.rebuild();
@@ -851,6 +888,7 @@ impl AndroidAppHandle {
         Self {
             executor,
             text_ctx,
+            font_registry,
             scene: Scene::new(),
             app,
             physical,
@@ -1363,13 +1401,30 @@ impl AndroidAppHandle {
                 theme_or_appearance_changed = true;
             }
             Some(None) => {
-                self.theme = Theme::m3_baseline();
+                self.theme = Theme::glyph_baseline();
                 self.theme.brightness = self.platform_brightness;
                 self.theme_override_active = false;
                 self.push_theme();
                 theme_or_appearance_changed = true;
             }
             None => {}
+        }
+
+        // Poll the app-facing pending-font registry (task 14) once per frame,
+        // beside the theme poll above and before the surface-ready gate — the
+        // drain needs no renderer, so it stays in sync through surface churn.
+        // `drain_into` applies any late-registered fonts to `text_ctx` (clearing
+        // the shape cache internally) and returns whether anything registered.
+        // On a late drain, force the relayout `register_fonts` documents by
+        // re-pushing the currently-active theme through `set_theme` (via
+        // `push_theme` — the same LAYOUT|PAINT contract a theme swap uses, no new
+        // core API), so `Text`'s layout-baked shaping re-runs against the new
+        // faces; that also feeds the frame gate (`change_flags_pending`, plus the
+        // explicit `theme_or_appearance_changed` bit here per the default-to-run
+        // rule). When nothing is pending this is one cheap `Mutex` check.
+        if self.font_registry.drain_into(&mut self.text_ctx) {
+            self.push_theme();
+            theme_or_appearance_changed = true;
         }
 
         // Apply accessibility actions queued by assistive tech since the last

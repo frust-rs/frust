@@ -924,3 +924,61 @@ run this pass (deviation 3).
   this composite size on Adreno 660 (`present_us` p50 9.25ms), a real
   finding the undersized cell had masked. The Xiaomi 12 (Adreno 730) shows
   the same direction at much smaller magnitude (5.7 vs 5.3ms).
+
+### Task-09 A/B — release-vs-profile comparability bound (2026-07-23)
+
+**Purpose:** bound the delta introduced by the release-lean methodology break
+(PROTOCOL §2.5): Frust perf runs moved `--release` → `--profile` because
+release now compiles instrumentation out entirely. Run per task
+`workflow/plans/features/frust-release-lean/tasks/09-device-ab-gate.md`.
+
+**Setup / deviations (labeled):** single session, this device (serial
+`53f887ac`), 120Hz mode. Profile APK = `frust build apk --profile --define
+FRUST_TRACE_RAW=1` (25,555,162 B; `frust.cargoFeatures` → `frust/perf-trace`
+via the release-lean gradle plumbing, hand-synced into frust_bench this
+session — it sat outside task 05's `examples/*` scope). Release APK =
+`frust build apk --release` **with both trace defines deliberately passed**
+(24,926,234 B). Airplane on, `dumpsys battery unplug` spoof (USB attached
+for adb, as the 2026-07-21 pass), brightness 128, thermal gate ≤38°C
+(session range 25.1–31.9°C). **Deviation:** 12 runs in ONE block per
+scenario (no multi-day repetition); raw logs committed under
+`raw/oneplus9/frust_profile_task09/` and `frust_release_task09_oneoff/`.
+**Code-version caveat:** the 2026-07-21 release baseline ran phase-10-era
+code; today's HEAD adds the phase-11 render split, shader pre-pass, glyph
+and release-lean — the cross-methodology rows below are therefore ALSO
+cross-code-version and labeled as such.
+
+**Release genuinely cannot emit (sanity arm):** one 30s run of S1 and S3
+each on the release APK captured ZERO Rust-side perf lines despite both
+defines being passed at build time (each log holds only the app-template
+Kotlin `activity-create` marker). Release-lean verified at the emission
+level on the shipped device artifact; the `.so` strings check also passed
+on this session's artifact (0 frust-perf / 0 bench-scenario, 21
+`frust-render:` warn strings retained — `release-lean-check.sh --android`).
+
+**Frame stats (same stats.py, 10-kept-of-12 convention both sides):**
+
+| Scenario | Series | p50 (ms) | p95 | p99 | worst | missed @16.67ms | active frames |
+|---|---|---|---|---|---|---|---|
+| S1 | release 2026-07-21 (phase-10 code, v2) | 9.70 | 12.19 | 15.49 | 56.49 | 149 (0.77%) | 19,351 |
+| S1 | **profile 2026-07-23 (current HEAD, v3)** | 14.79 | 15.87 | 16.51 | 63.91 | 162 (0.79%) | 20,445 |
+| S3 | release 2026-07-21 (phase-10 code, v2) | 8.99 | 12.20 | 20.43 | 54.34 | 546 (2.76%) | 19,782 |
+| S3 | **profile 2026-07-23 (current HEAD, v3)** | 10.25 | 12.53 | 20.88 | 52.65 | 957 (3.10%) | 30,880 |
+
+**Presented-rate mode A/B (same HEAD, same conditions, HUD presented-fps):**
+release S1 **121.0 fps** vs profile S1 **121.0 fps** — 0% delta at the
+user-visible presented-frame level (screencap-verified both).
+
+**Verdict / bound:** TAILS are comparable within noise across the
+methodology break — p95 +2.7% (S3) / p99 +2.2% (S3) and p99 +6.6% (S1),
+with @16.67ms miss RATES near-identical (0.77→0.79% S1) — and the same-HEAD
+presented-fps A/B shows 0% mode delta. MEDIANS are NOT comparable
+(+52% S1, +14% S3): per the task's >5% rule this is flagged — but the S1/S3
+median shift cannot be attributed to profile-mode overhead because the code
+version moved too (phase-11 split's known pacing change; S3 processes +56%
+more frames in the same window on current HEAD). PROTOCOL §2.5's break note
+therefore stands as: **tail/jank metrics and miss rates carry across the
+break within ~3–7%; medians and raw-cadence comparisons against
+pre-2026-07-23 rows are invalid without a same-code release reference,
+which release-lean makes impossible by design — use the HUD presented-fps
+figure (parity) for mode-only questions.**

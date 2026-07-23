@@ -14,6 +14,7 @@ pub mod android_build;
 pub mod android_id;
 pub mod android_run;
 pub mod build_info;
+pub mod cargo_manifest;
 pub mod devices;
 pub mod doctor;
 pub mod ios_build;

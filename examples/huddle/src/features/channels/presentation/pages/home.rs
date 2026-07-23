@@ -915,7 +915,9 @@ fn row_action_rows(
 /// "Invites sent (mock)"; a scrim-tap cancel does nothing.
 fn show_invite_modal(nav: &NavigatorController<HuddleState>, design: DesignLanguage) {
     match design {
-        DesignLanguage::Material3 => {
+        // Glyph has no modal chrome baseline yet (task 28 replaces this) —
+        // falls through to the Material3 arm for now.
+        DesignLanguage::Material3 | DesignLanguage::Glyph => {
             let confirm_nav = nav.clone();
             show_dialog(
                 nav,

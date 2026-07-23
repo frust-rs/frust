@@ -56,11 +56,12 @@ use frust_core::{
     FrameTime, HeroDirective, HeroFrames, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene,
     PointerPhase, SpringDesc, TOUCH_SLOP, VelocityTracker, View, Widget,
 };
-use kurbo::{Point, Rect, Size, Vec2};
+use frust_theme::Theme;
+use kurbo::{Affine, Point, Rect, Size, Vec2};
 
 use super::transition::{
     Layer, PageTransition, TransitionDriver, TransitionSpec, lerp_rect, make_driver,
-    resolve_layers, settle_driver,
+    resolve_layers, resolve_spec, settle_driver,
 };
 
 // --- Edge-swipe tuning constants (see per-constant approximation notes) ------
@@ -485,6 +486,21 @@ struct ActiveTransition<State: 'static> {
     /// Page-local hero rects discovered on the **entering** page — the morph
     /// target endpoint. See [`hero_leaving`](ActiveTransition::hero_leaving).
     hero_entering: HashMap<String, Rect>,
+    /// The unresolved [`TransitionSpec`] awaiting theme resolution on the first
+    /// paint — the LAZY driver seam mirroring [`motion::switcher`](crate::motion).
+    /// A programmatic transition is staged in a `BuildCtx`
+    /// ([`start_transition`](NavigatorWidget::start_transition)), which carries
+    /// no theme, so [`Timing::ThemeDefault`](super::transition::Timing) and
+    /// `reduce_motion` cannot resolve there. `Some` until the first
+    /// [`paint_transition`](NavigatorWidget::paint_transition) resolves it
+    /// against the active [`MotionScheme`](frust_theme::MotionScheme) — via
+    /// [`resolve_spec`] — and rebuilds `driver`/`preset`/`settle_spring` before
+    /// any frame is staged; `None` thereafter (and always `None` for the
+    /// interactive edge-swipe path, whose progress is drag-held, not
+    /// theme-timed). With no theme threaded the `make_driver` fallback built at
+    /// `start_transition` (M3 defaults) stands — the unthemed behavior
+    /// `docs/CODE_STANDARDS.md` mandates.
+    pending_spec: Option<TransitionSpec>,
 }
 
 /// The interactive edge-swipe gesture state (task 05). Mirrors
@@ -617,6 +633,10 @@ impl<State: 'static> NavigatorWidget<State> {
         ctx: &mut BuildCtx<'_>,
     ) {
         self.finalize_transition(ctx);
+        // Build a fallback driver eagerly (the unthemed M3 default — current
+        // behavior), and stash the *unresolved* spec so the first paint can
+        // re-resolve `ThemeDefault` timing + `reduce_motion` against the live
+        // theme (a `BuildCtx` carries none). See `pending_spec`.
         let (driver, settle_spring) = make_driver(spec.timing);
         self.transition = Some(ActiveTransition {
             driver,
@@ -629,6 +649,7 @@ impl<State: 'static> NavigatorWidget<State> {
             restore_on_finalize: false,
             hero_leaving: HashMap::new(),
             hero_entering: HashMap::new(),
+            pending_spec: Some(spec),
         });
     }
 
@@ -751,6 +772,9 @@ impl<State: 'static> NavigatorWidget<State> {
             restore_on_finalize: false,
             hero_leaving: HashMap::new(),
             hero_entering: HashMap::new(),
+            // The swipe drives a held progress, not a theme-timed driver, so
+            // there is no deferred timing to resolve at paint.
+            pending_spec: None,
         });
         self.needs_ime_clear = true;
     }
@@ -1083,6 +1107,27 @@ impl<State: 'static> NavigatorWidget<State> {
     /// direction dictates. Requests the next frame while running; flags `settled`
     /// (finalized on the next rebuild) once the driver reaches rest.
     fn paint_transition(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // LAZY driver resolution (mirrors `motion::switcher`'s deferred driver):
+        // the first paint of a programmatic transition resolves `ThemeDefault`
+        // timing + `reduce_motion` against the active `MotionScheme` — which the
+        // `BuildCtx` that staged the transition could not reach — and rebuilds
+        // the driver, preset, and settle spring before this frame advances. With
+        // no theme threaded the `make_driver` fallback built at
+        // `start_transition` (M3 defaults) stands (docs/CODE_STANDARDS.md).
+        if let Some(spec) = self.transition.as_ref().and_then(|t| t.pending_spec) {
+            if let Some(theme) = Theme::from_paint_ctx(ctx) {
+                let resolved = resolve_spec(spec, Some(&theme.motion));
+                let (driver, settle_spring) = make_driver(resolved.timing);
+                if let Some(t) = self.transition.as_mut() {
+                    t.driver = driver;
+                    t.preset = resolved.preset;
+                    t.settle_spring = settle_spring;
+                }
+            }
+            if let Some(t) = self.transition.as_mut() {
+                t.pending_spec = None;
+            }
+        }
         let (adv, is_pop, preset, has_stashed) = {
             let t = self.transition.as_mut().expect("transition present");
             let adv = t.driver.advance(ctx.frame_time());
@@ -1292,9 +1337,23 @@ fn paint_page_heroes(
     registry.into_inner().into_captured()
 }
 
+/// Build the affine that scales uniformly by `scale` about the absolute point
+/// `pivot` — the standard translate/scale/translate-back "scale about a point"
+/// construction (mirrors `motion::switcher`'s `scale_about`).
+fn scale_about(pivot: Point, scale: f64) -> Affine {
+    Affine::translate((pivot.x, pivot.y))
+        * Affine::scale(scale)
+        * Affine::translate((-pivot.x, -pivot.y))
+}
+
 /// Paint one transition page: offset its pod origin by the layer's `dx`/`dy` (so
-/// paint and hit-testing move together), and composite at the layer's opacity
-/// via a `push_layer`/`pop_layer` pair when it is below full opacity.
+/// paint and hit-testing move together), then bracket its paint with a
+/// `push_transform` scale (about the page's paint-area centre) and a `push_layer`
+/// opacity when either differs from the identity — strict LIFO (transform outer,
+/// opacity inner). The scale realises M3 fade-through's `0.92 → 1.0` incoming
+/// scale-up (research §7.3, [`Layer::scale`](super::transition::Layer::scale));
+/// every other preset leaves `scale == 1.0`, so the transform is skipped. Mirrors
+/// `motion::switcher`'s `paint_staged_child`.
 fn paint_page_layer(
     pod: &mut ChildPod,
     ctx: &mut PaintCtx,
@@ -1304,12 +1363,23 @@ fn paint_page_layer(
 ) {
     pod.set_origin(Point::new(layer.dx, layer.dy));
     let alpha = layer.alpha.clamp(0.0, 1.0);
-    if alpha < 1.0 {
+    let has_scale = (layer.scale - 1.0).abs() > f64::EPSILON;
+    let has_alpha = alpha < 1.0;
+
+    if has_scale {
+        let origin = ctx.origin();
+        let pivot = Point::new(origin.x + area.width / 2.0, origin.y + area.height / 2.0);
+        scene.push_transform(scale_about(pivot, layer.scale));
+    }
+    if has_alpha {
         scene.push_layer(ctx.origin(), area, alpha);
-        pod.paint_child(ctx, scene);
+    }
+    pod.paint_child(ctx, scene);
+    if has_alpha {
         scene.pop_layer();
-    } else {
-        pod.paint_child(ctx, scene);
+    }
+    if has_scale {
+        scene.pop_transform();
     }
 }
 
@@ -2117,7 +2187,7 @@ mod tests {
 
     use super::super::transition::{PageTransition, Timing, TransitionSpec};
     use frust_core::Curve;
-    use frust_theme::MotionSpring;
+    use frust_theme::{MotionSpring, Theme};
     use std::time::Duration;
 
     /// A recording scene that captures each fill's (origin, size) *and* the alpha
@@ -2448,6 +2518,150 @@ mod tests {
         }
         assert_eq!(last.len(), 1, "only the revealed page remains");
         assert_eq!(last[0].1, Size::new(100.0, 100.0), "the revealed page is A");
+    }
+
+    // ---------------------------------------------------------------------
+    // Followup gf1: ThemeDefault / reduce_motion / Layer::scale wiring through
+    // the REAL navigator (the task-13 machinery the navigator now honors).
+    // ---------------------------------------------------------------------
+
+    // --- gf1(a): a `ThemeDefault` Glyph push resolves the *enter duration* from
+    //     the active MotionScheme (m3_baseline's `slow` = 500ms), not the 300ms
+    //     unthemed M3 fallback. Proven by the transition still running at 340ms
+    //     under the theme, where the unthemed control has already finalized. ---
+
+    #[test]
+    fn glyph_theme_default_resolves_enter_duration_from_scheme() {
+        // Themed: push `TransitionSpec::glyph()` (ThemeDefault timing) under the
+        // m3_baseline theme whose Glyph enter timing is the scheme's slow = 500ms.
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        root.set_theme(Box::new(Theme::m3_baseline()));
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        controller.push_with(|| sized_page(100.0, 80.0), TransitionSpec::glyph());
+        full_frame(&mut root, &mut app, &mut state, ft(0)); // seed + resolve
+        let (_f1, nf1) = full_frame(&mut root, &mut app, &mut state, ft(320));
+        let (_f2, nf2) = full_frame(&mut root, &mut app, &mut state, ft(340));
+        assert!(
+            nf1 && nf2,
+            "the theme-resolved 500ms enter duration is still running at 320/340ms"
+        );
+
+        // Control: the identical push with NO theme threaded falls back to the
+        // 300ms M3 default, which settles (ft 320) and finalizes (ft 340) — so it
+        // requests no frame at 340ms. The divergence proves the theme resolution
+        // changed the enter duration (300ms → 500ms) at first paint.
+        let ctrl2: NavigatorController<()> = NavigatorController::new();
+        let mut root2: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app2 = {
+            let c = ctrl2.clone();
+            move |_: &mut ()| navigator(&c, || sized_page(100.0, 100.0))
+        };
+        let mut s2 = ();
+        root2.rebuild(&mut app2, &mut s2);
+        root2.layout(Size::new(100.0, 100.0));
+        ctrl2.push_with(|| sized_page(100.0, 80.0), TransitionSpec::glyph());
+        full_frame(&mut root2, &mut app2, &mut s2, ft(0));
+        full_frame(&mut root2, &mut app2, &mut s2, ft(320)); // settle
+        let (_c2, nfc) = full_frame(&mut root2, &mut app2, &mut s2, ft(340)); // finalize
+        assert!(
+            !nfc,
+            "the unthemed 300ms M3 fallback has finalized by 340ms (no frame requested)"
+        );
+    }
+
+    // --- gf1(b): a Glyph push under a `reduce_motion` MotionScheme collapses per
+    //     `resolve_spec`'s contract — the 16px directional Glyph slide becomes the
+    //     non-directional M3 fade-through crossfade (no slide). ---
+
+    #[test]
+    fn reduce_motion_collapses_glyph_push_to_crossfade() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut reduced = Theme::m3_baseline();
+        reduced.motion.reduce_motion = true;
+        root.set_theme(Box::new(reduced));
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // A Glyph push normally slides the incoming page in by 16px at p=0; under
+        // reduce_motion it must collapse to the crossfade family and NOT slide.
+        controller.push_with(|| sized_page(100.0, 80.0), TransitionSpec::glyph());
+        let (f0, _) = full_frame(&mut root, &mut app, &mut state, ft(0));
+        assert_eq!(
+            fill_h(&f0, 80.0).0.x,
+            0.0,
+            "reduce_motion collapses the 16px Glyph slide to a non-directional crossfade"
+        );
+
+        // Round-1 review scale-leak guard: the reduced crossfade must also paint
+        // ZERO scale transforms mid-transition — a reduce_motion user never sees
+        // the fade-through 0.92→1.0 zoom.
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, ft(60));
+        assert_eq!(
+            scene.transforms.len(),
+            0,
+            "reduced-motion crossfade must not scale either page"
+        );
+    }
+
+    // --- gf1(c): a mid-transition M3 fade-through paint brackets the incoming
+    //     page with a `push_transform` scale < 1.0 (research §7.3's 0.92 → 1.0
+    //     scale-up), balanced LIFO; the leaving page (scale 1.0) pushes none. ---
+
+    #[test]
+    fn fade_through_paint_scales_incoming_page_below_one() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let spec = TransitionSpec::new(
+            PageTransition::M3FadeThrough,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.push_with(|| sized_page(100.0, 80.0), spec);
+
+        // Seed frame (p=0): the incoming page holds at the 0.92 fade-through start
+        // scale, so exactly one sub-unit `push_transform` brackets its paint.
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, ft(0));
+        assert_eq!(
+            scene.transforms.len(),
+            1,
+            "only the incoming (scale 0.92) page is bracketed, not the leaving one"
+        );
+        let sx = scene.transforms[0].as_coeffs()[0];
+        assert!(
+            sx < 1.0 && sx > 0.9,
+            "the incoming page is scaled below 1.0 (was {sx})"
+        );
+        assert_eq!(
+            scene.transform_pops, 1,
+            "the scale bracket is balanced (strict LIFO)"
+        );
     }
 
     // ---------------------------------------------------------------------

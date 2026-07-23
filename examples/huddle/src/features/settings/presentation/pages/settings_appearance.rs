@@ -173,14 +173,21 @@ fn design_selector(
     current: Theme,
 ) -> AnyView<AppearanceState> {
     match design_lang {
-        DesignLanguage::Material3 => any(button_group::<AppearanceState, _>(
-            DesignChoice::ALL.into_iter().map(|c| c.label()),
-            selected.index(),
-            move |st: &mut AppearanceState, idx: usize| {
-                st.controller.design.set(DesignChoice::from_index(idx));
-                spawn_apply(&st.controller, current.clone());
-            },
-        )),
+        // Glyph and Material3 share the Material `button_group` picker chrome:
+        // the Glyph catalog has no connected segmented-selector widget yet, and
+        // `button_group`'s shape (labelled slots + a `selected` index) is a fine
+        // fit for a settings toggle regardless of the active design language —
+        // this row is settings-screen chrome, not in-app Glyph surface (task 28).
+        DesignLanguage::Material3 | DesignLanguage::Glyph => {
+            any(button_group::<AppearanceState, _>(
+                DesignChoice::ALL.into_iter().map(|c| c.label()),
+                selected.index(),
+                move |st: &mut AppearanceState, idx: usize| {
+                    st.controller.design.set(DesignChoice::from_index(idx));
+                    spawn_apply(&st.controller, current.clone());
+                },
+            ))
+        }
         DesignLanguage::Cupertino => {
             let mut btns: Vec<AnyView<AppearanceState>> = Vec::new();
             for (i, choice) in DesignChoice::ALL.into_iter().enumerate() {
@@ -221,7 +228,10 @@ fn brightness_switch(
         spawn_apply(&st.controller, current.clone());
     };
     match design_lang {
-        DesignLanguage::Material3 => any(Row(vec![
+        // Glyph reuses the Material `Switch` for this toggle — the Glyph
+        // catalog has no dedicated switch widget yet, and this settings-screen
+        // control isn't itself in-app Glyph chrome (task 28).
+        DesignLanguage::Material3 | DesignLanguage::Glyph => any(Row(vec![
             any(text("Dark").size(14.0)),
             any(SizedBox(Some(8.0), None)),
             any(Switch(effective_dark, on_toggle)),

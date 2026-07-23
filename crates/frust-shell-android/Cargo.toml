@@ -62,3 +62,15 @@ accesskit_android = { workspace = true }
 # (apps bring their own view types through the macro's generics).
 [target.'cfg(target_os = "android")'.dev-dependencies]
 frust-widgets = { workspace = true }
+
+[features]
+# Opt-in perf-trace instrumentation: re-exports frust-shell-common/perf-trace
+# and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive
+# unification; the CLI is the sole enabler).
+perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
+# Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain) — see
+# `frust-shell-common`'s Cargo.toml for the shape rationale. The frust-theme
+# edge this targets only exists in the Android-gated dependency block above;
+# like `perf-trace`'s forwarding above, this is a no-op off-Android.
+glyph-fonts = ["frust-theme/glyph-fonts"]
+

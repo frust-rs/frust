@@ -42,6 +42,7 @@
 //! Android/iOS/desktop shells respectively).
 
 use std::collections::VecDeque;
+#[cfg(feature = "perf-trace")]
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -64,6 +65,36 @@ const EMIT_INTERVAL: Duration = Duration::from_secs(2);
 // ---------------------------------------------------------------------
 // On/off switch
 // ---------------------------------------------------------------------
+//
+// The whole of this module is *runtime*-switchable via [`enabled`], but that
+// runtime dial only exists when the crate's `perf-trace` cargo feature is on.
+// Without the feature every `frust-perf`/`bench-scenario` string literal and
+// its `log::info!` emission is `#[cfg]`-compiled out entirely (release-lean
+// builds), and [`enabled`]/[`raw_enabled`] collapse to inlinable `false`
+// constants so downstream `if enabled()` branches constant-fold away — the CLI
+// turns the feature on for debug/profile builds and omits it for release (the
+// Flutter-mode-parity split, see the release-lean plan). The public perf API
+// (types, constructors, `record`/`summary`/`emit_log`/`mark_scenario_*`)
+// compiles identically in both configurations; only the string-bearing
+// emission internals are gated, so no shell call site changes.
+//
+// Sink decision (feeds release-lean task 04's log-level ceiling): `frust-perf`
+// lines keep flowing through the `log` facade (`log::info!`), NOT a bypassing
+// `eprintln!`/platform sink. Rationale — this crate is deliberately
+// platform-free (no `android_logger`/NDK), so it cannot replicate each
+// platform's real channel (logcat on Android, the desktop/iOS stderr logger),
+// and moving Android's lines off logcat would break the benchmark harness's
+// log parsing; keeping `log::info!` guarantees byte-identical output on every
+// platform. The consequence task 04 MUST honor: perf is stripped from release
+// by THIS FEATURE (off ⇒ code+strings gone), never by the log level. So task
+// 04's `release_max_level_warn` must be applied to RELEASE ONLY (e.g. a
+// CLI-toggled `log/release_max_level_warn` cargo feature enabled for
+// `--release` and omitted for `--profile`), never as an always-on manifest
+// feature: `release_max_level_*` keys off `debug_assertions`, which is OFF in
+// the profile profile too, so an always-on ceiling would silence profile-mode
+// perf lines (research §Q4's trap). Release perf lines don't exist to strip
+// (feature off), so a release-only ceiling only removes stray non-perf
+// info/debug while profile keeps its `frust-perf` output intact.
 
 /// The process-wide perf-instrumentation switch, cached after the first
 /// call. `true` when either:
@@ -86,23 +117,40 @@ const EMIT_INTERVAL: Duration = Duration::from_secs(2);
 /// construct a [`FrameStats`]/[`StartupSpans`] via the explicit
 /// `*_enabled`/`begin_with` constructors instead of relying on this
 /// function's cache.
+#[cfg(feature = "perf-trace")]
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| trace_switch(option_env!("FRUST_TRACE"), runtime_trace_var().as_deref()))
 }
 
+/// The `perf-trace` feature is off: perf instrumentation is compiled out of
+/// this build, so the switch is a compile-time `false` constant — no
+/// `OnceLock`, no environment read. `#[inline]` so every downstream
+/// `if enabled()` branch constant-folds to nothing, taking the `frust-perf`
+/// emission (and its strings) with it via LLVM dead-code elimination. Build
+/// with `--features perf-trace` (what a debug/profile build does) to restore
+/// the runtime `FRUST_TRACE` switch documented above.
+#[cfg(not(feature = "perf-trace"))]
+#[inline]
+pub fn enabled() -> bool {
+    false
+}
+
 /// Reads the runtime `FRUST_TRACE` env var, isolated into its own
 /// function so [`enabled`]'s caching is the only thing that touches the
 /// process environment — [`trace_switch`] itself stays a pure, directly
-/// unit-testable function.
+/// unit-testable function. Compiled only under `perf-trace` (the only caller,
+/// [`enabled`]'s feature-on arm, is too).
+#[cfg(feature = "perf-trace")]
 fn runtime_trace_var() -> Option<String> {
     std::env::var("FRUST_TRACE").ok()
 }
 
 /// The pure decision [`enabled`] caches: non-empty and not the literal
 /// string `"0"` counts as "set" for either the compile-time or runtime
-/// value; either source being set is enough.
+/// value; either source being set is enough. Compiled only under `perf-trace`.
+#[cfg(feature = "perf-trace")]
 fn trace_switch(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
     fn is_set_non_zero(value: Option<&str>) -> bool {
         matches!(value, Some(v) if v != "0")
@@ -118,6 +166,7 @@ fn trace_switch(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
 /// — [`FrameStats::record`]'s raw per-frame line only fires when [`enabled`]
 /// is *also* true (a benchmark harness sets both `FRUST_TRACE=1` and
 /// `FRUST_TRACE_RAW=1`; see [`FrameStats::new`]).
+#[cfg(feature = "perf-trace")]
 pub fn raw_enabled() -> bool {
     static RAW_ENABLED: OnceLock<bool> = OnceLock::new();
     *RAW_ENABLED.get_or_init(|| {
@@ -128,8 +177,18 @@ pub fn raw_enabled() -> bool {
     })
 }
 
+/// The `perf-trace` feature is off: the raw-per-frame dial is compiled out
+/// alongside [`enabled`], so it is a compile-time `false` constant (see
+/// [`enabled`]'s feature-off arm for the DCE rationale).
+#[cfg(not(feature = "perf-trace"))]
+#[inline]
+pub fn raw_enabled() -> bool {
+    false
+}
+
 /// Reads the runtime `FRUST_TRACE_RAW` env var, isolated for the same reason
-/// [`runtime_trace_var`] is.
+/// [`runtime_trace_var`] is. Compiled only under `perf-trace`.
+#[cfg(feature = "perf-trace")]
 fn runtime_trace_raw_var() -> Option<String> {
     std::env::var("FRUST_TRACE_RAW").ok()
 }
@@ -283,12 +342,19 @@ pub struct FrameStats {
     enabled: bool,
     /// Raw-per-frame-export mode (Phase 9.C, see [`raw_enabled`]) — always
     /// `false` when `enabled` is `false` (the two-dial contract
-    /// [`Self::with_capacity_enabled_and_raw`] enforces).
+    /// [`Self::with_capacity_enabled_and_raw`] enforces). Only *read* by the
+    /// `perf-trace`-gated raw emission path in [`Self::record`], so it is dead
+    /// in a release-lean (feature-off) build (still written by constructors).
+    #[cfg_attr(not(feature = "perf-trace"), allow(dead_code))]
     raw: bool,
     /// Reused, cleared-and-rewritten each call so [`Self::record`]'s raw
     /// line never grows the allocation once its capacity settles —
     /// formatting only, no per-frame allocation growth (see
-    /// `docs/CODE_STANDARDS.md`'s Instrumentation conventions).
+    /// `docs/CODE_STANDARDS.md`'s Instrumentation conventions). Only ever
+    /// *read* by the `perf-trace`-gated raw emission path, so it is dead in a
+    /// release-lean (feature-off) build — the field stays (constructors still
+    /// size it) but the lint is silenced there.
+    #[cfg_attr(not(feature = "perf-trace"), allow(dead_code))]
     raw_buf: String,
     ring_capacity: usize,
     ring: VecDeque<FramePasses>,
@@ -391,6 +457,7 @@ impl FrameStats {
         }
         self.since_last_emit += total;
 
+        #[cfg(feature = "perf-trace")]
         if self.raw {
             format_raw_frame_line(&mut self.raw_buf, self.total_frames, &passes);
             log::info!("{}", self.raw_buf);
@@ -471,27 +538,34 @@ impl FrameStats {
         if !self.enabled {
             return;
         }
-        let s = self.summary();
-        log::info!(
-            "frust-perf frame n={} total_p50_ms={} total_p95_ms={} total_p99_ms={} \
-             rebuild_p95_ms={} layout_p95_ms={} paint_p95_ms={} encode_p95_ms={} \
-             acquire_p95_ms={} submit_p95_ms={} \
-             over_60hz={} over_120hz={} skipped={} total_frames={}",
-            s.frame_count,
-            s.total_p50.as_millis(),
-            s.total_p95.as_millis(),
-            s.total_p99.as_millis(),
-            s.rebuild_p95.as_millis(),
-            s.layout_p95.as_millis(),
-            s.paint_p95.as_millis(),
-            s.encode_p95.as_millis(),
-            s.acquire_p95.as_millis(),
-            s.submit_p95.as_millis(),
-            s.over_60hz_budget,
-            s.over_120hz_budget,
-            s.skipped_frames,
-            self.total_frames,
-        );
+        // The `frust-perf frame` line (and the strings it carries) exists only
+        // under `perf-trace`; the accumulator reset below is plain bookkeeping
+        // and stays in every build so [`Self::should_emit`]'s rate limit
+        // behaves identically whether or not the feature is compiled in.
+        #[cfg(feature = "perf-trace")]
+        {
+            let s = self.summary();
+            log::info!(
+                "frust-perf frame n={} total_p50_ms={} total_p95_ms={} total_p99_ms={} \
+                 rebuild_p95_ms={} layout_p95_ms={} paint_p95_ms={} encode_p95_ms={} \
+                 acquire_p95_ms={} submit_p95_ms={} \
+                 over_60hz={} over_120hz={} skipped={} total_frames={}",
+                s.frame_count,
+                s.total_p50.as_millis(),
+                s.total_p95.as_millis(),
+                s.total_p99.as_millis(),
+                s.rebuild_p95.as_millis(),
+                s.layout_p95.as_millis(),
+                s.paint_p95.as_millis(),
+                s.encode_p95.as_millis(),
+                s.acquire_p95.as_millis(),
+                s.submit_p95.as_millis(),
+                s.over_60hz_budget,
+                s.over_120hz_budget,
+                s.skipped_frames,
+                self.total_frames,
+            );
+        }
         self.since_last_emit = Duration::ZERO;
     }
 }
@@ -521,7 +595,10 @@ fn nearest_rank_percentile(sorted: &[Duration], p: u32) -> Duration {
 
 /// Log-line prefix for [`FrameStats::record`]'s raw per-frame export line —
 /// parallels the `frust-perf frame`/`frust-perf startup` prefixes
-/// [`FrameStats::emit_log`]/[`StartupSpans::emit_log`] already use.
+/// [`FrameStats::emit_log`]/[`StartupSpans::emit_log`] already use. A
+/// `frust-perf` string literal, so it compiles only under `perf-trace`
+/// (release-lean builds carry no `frust-perf` bytes).
+#[cfg(feature = "perf-trace")]
 const RAW_FRAME_PREFIX: &str = "frust-perf raw";
 
 /// Formats one `frust-perf raw` line into `buf` (cleared first) for frame
@@ -542,7 +619,9 @@ const RAW_FRAME_PREFIX: &str = "frust-perf raw";
 /// cross-baseline math. **Format v2 (Phase 10.A, 2026-07-21):** the single
 /// `encode_present_us` field of v1 was split into `encode_us` + `present_us`.
 /// Any harness parsing this line must handle the current field set; see
-/// `benchmarks/PROTOCOL.md`'s format-change note.
+/// `benchmarks/PROTOCOL.md`'s format-change note. Compiled only under
+/// `perf-trace` (it bears the `frust-perf raw` prefix).
+#[cfg(feature = "perf-trace")]
 fn format_raw_frame_line(buf: &mut String, n: u64, passes: &FramePasses) {
     use std::fmt::Write as _;
     buf.clear();
@@ -562,13 +641,16 @@ fn format_raw_frame_line(buf: &mut String, n: u64, passes: &FramePasses) {
 }
 
 /// Which edge of a benchmark scenario window [`mark_scenario_start`]/
-/// [`mark_scenario_end`] stamps.
+/// [`mark_scenario_end`] stamps. Its `bench-scenario-*` prefixes are gated
+/// string literals, so the whole enum compiles only under `perf-trace`.
+#[cfg(feature = "perf-trace")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MarkerEdge {
     Start,
     End,
 }
 
+#[cfg(feature = "perf-trace")]
 impl MarkerEdge {
     const fn prefix(self) -> &'static str {
         match self {
@@ -580,7 +662,9 @@ impl MarkerEdge {
 
 /// Formats one scenario-marker line — separated from the `mark_scenario_*`
 /// functions' logging call for the same directly-unit-testable reason
-/// [`format_raw_frame_line`] is.
+/// [`format_raw_frame_line`] is. Compiled only under `perf-trace` (it emits
+/// the `bench-scenario-*` prefixes).
+#[cfg(feature = "perf-trace")]
 fn format_scenario_marker(edge: MarkerEdge, name: &str) -> String {
     format!("{} {name}", edge.prefix())
 }
@@ -593,7 +677,9 @@ fn format_scenario_marker(edge: MarkerEdge, name: &str) -> String {
 /// rather than a method). A no-op unless both [`enabled`] and
 /// [`raw_enabled`] are `true` — the same two-dial gating
 /// [`FrameStats::new`]'s raw path uses.
+#[cfg_attr(not(feature = "perf-trace"), allow(unused_variables))]
 pub fn mark_scenario_start(name: &str) {
+    #[cfg(feature = "perf-trace")]
     if enabled() && raw_enabled() {
         log::info!("{}", format_scenario_marker(MarkerEdge::Start, name));
     }
@@ -601,7 +687,9 @@ pub fn mark_scenario_start(name: &str) {
 
 /// Stamps a `bench-scenario-end <name>` marker — see
 /// [`mark_scenario_start`]'s docs (gating and rationale are identical).
+#[cfg_attr(not(feature = "perf-trace"), allow(unused_variables))]
 pub fn mark_scenario_end(name: &str) {
+    #[cfg(feature = "perf-trace")]
     if enabled() && raw_enabled() {
         log::info!("{}", format_scenario_marker(MarkerEdge::End, name));
     }
@@ -619,7 +707,9 @@ pub fn mark_scenario_end(name: &str) {
 /// the frame series. Centralizing every bench line behind one gated sink keeps
 /// per-op emission on the same two-dial switch the markers use — a no-op unless
 /// both [`enabled`] and [`raw_enabled`] are `true`.
+#[cfg_attr(not(feature = "perf-trace"), allow(unused_variables))]
 pub fn bench_emit(line: &str) {
+    #[cfg(feature = "perf-trace")]
     if enabled() && raw_enabled() {
         log::info!("{line}");
     }
@@ -758,14 +848,21 @@ impl<C: Clock> StartupSpans<C> {
     /// every recorded span's name and millisecond delta, in insertion
     /// order. A no-op when disabled or when nothing has been recorded.
     pub fn emit_log(&self) {
-        if !self.enabled || self.spans.is_empty() {
-            return;
+        // The `frust-perf startup` line is a gated string literal; a
+        // release-lean (feature-off) build compiles the body away entirely
+        // (and `enabled` is a `false` constant there anyway). Written as a
+        // positive guard rather than an early return so the feature-off body
+        // is simply empty, with no dangling `return`.
+        if self.enabled && !self.spans.is_empty() {
+            #[cfg(feature = "perf-trace")]
+            {
+                let mut line = String::from("frust-perf startup");
+                for (name, delta) in &self.spans {
+                    line.push_str(&format!(" {name}={}ms", delta.as_millis()));
+                }
+                log::info!("{line}");
+            }
         }
-        let mut line = String::from("frust-perf startup");
-        for (name, delta) in &self.spans {
-            line.push_str(&format!(" {name}={}ms", delta.as_millis()));
-        }
-        log::info!("{line}");
     }
 }
 
@@ -775,35 +872,81 @@ mod tests {
 
     // ---------------------------------------------------------------
     // trace_switch (pure, directly testable — enabled()'s OnceLock cache
-    // is deliberately NOT re-tested here, see enabled()'s docs)
+    // is deliberately NOT re-tested here, see enabled()'s docs). The
+    // `trace_switch` decision only exists under `perf-trace`, so these run
+    // in the feature-on configuration only.
     // ---------------------------------------------------------------
 
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn trace_switch_off_when_neither_set() {
         assert!(!trace_switch(None, None));
     }
 
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn trace_switch_on_when_compile_time_set_non_zero() {
         assert!(trace_switch(Some("1"), None));
     }
 
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn trace_switch_on_when_runtime_set_non_zero() {
         assert!(trace_switch(None, Some("1")));
     }
 
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn trace_switch_off_when_either_is_literal_zero_and_other_unset() {
         assert!(!trace_switch(Some("0"), None));
         assert!(!trace_switch(None, Some("0")));
     }
 
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn trace_switch_on_when_either_source_wins() {
         // Compile-time "0" (effectively off) but runtime "1": still on.
         assert!(trace_switch(Some("0"), Some("1")));
         assert!(trace_switch(Some("1"), Some("0")));
+    }
+
+    // ---------------------------------------------------------------
+    // Compile-out switch (perf-trace off): the runtime dial collapses to a
+    // `false` constant and the whole public perf API stays callable + inert.
+    // ---------------------------------------------------------------
+
+    #[cfg(not(feature = "perf-trace"))]
+    #[test]
+    fn enabled_and_raw_enabled_are_const_false_without_feature() {
+        assert!(!enabled(), "perf-trace off ⇒ enabled() is a false constant");
+        assert!(
+            !raw_enabled(),
+            "perf-trace off ⇒ raw_enabled() is a false constant"
+        );
+    }
+
+    #[cfg(not(feature = "perf-trace"))]
+    #[test]
+    fn disabled_build_public_api_is_callable_and_inert() {
+        // Every public perf entry point still exists and is safe to call in a
+        // release-lean build — it just records/emits nothing (no shell call
+        // site changes between the two configurations).
+        let mut stats = FrameStats::new();
+        stats.record(passes(20, 5, 5, 2));
+        assert_eq!(stats.total_frames(), 0, "feature-off new() is disabled");
+        assert_eq!(stats.summary().frame_count, 0);
+        assert!(!stats.should_emit());
+        stats.emit_log(); // no-op, must not panic
+
+        let mut spans = StartupSpans::begin();
+        spans.record(SPAN_INIT_ENTRY);
+        assert!(spans.spans().is_empty(), "feature-off begin() is disabled");
+        spans.emit_log(); // no-op, must not panic
+
+        // Free-function emitters are inert no-ops (no strings compiled in).
+        mark_scenario_start("smoke");
+        mark_scenario_end("smoke");
+        bench_emit("smoke op=write");
     }
 
     // ---------------------------------------------------------------
@@ -1010,8 +1153,35 @@ mod tests {
         };
         assert_eq!(split, whole, "split reassembly must equal the whole frame");
         assert_eq!(split.total(), Duration::from_millis(22));
+    }
 
-        // The raw v3 line is byte-for-byte identical to a single-thread frame's.
+    /// The raw v3 wire line a split frame produces is byte-for-byte identical
+    /// to the single-thread frame's — asserted separately because
+    /// [`format_raw_frame_line`] is `perf-trace`-gated emission.
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn from_split_v3_wire_format_is_identical_to_single_thread() {
+        let ui = UiSpans {
+            rebuild: Duration::from_millis(2),
+            layout: Duration::from_millis(1),
+            paint: Duration::from_millis(1),
+            skipped: false,
+        };
+        let render = RenderSpans {
+            encode: Duration::from_millis(6),
+            acquire: Duration::from_millis(9),
+            submit: Duration::from_millis(3),
+        };
+        let split = FramePasses::from_split(ui, render);
+        let whole = FramePasses {
+            rebuild: Duration::from_millis(2),
+            layout: Duration::from_millis(1),
+            paint: Duration::from_millis(1),
+            encode: Duration::from_millis(6),
+            acquire: Duration::from_millis(9),
+            submit: Duration::from_millis(3),
+            skipped: false,
+        };
         let mut split_line = String::new();
         let mut whole_line = String::new();
         format_raw_frame_line(&mut split_line, 1, &split);
@@ -1078,7 +1248,9 @@ mod tests {
     /// check that [`format_raw_frame_line`]'s shape is exactly what a
     /// `key=value`-splitting harness would expect; not part of the crate's
     /// public API (the real harness is a separate process parsing
-    /// `stdout`/`logcat` text, not a Rust consumer of this module).
+    /// `stdout`/`logcat` text, not a Rust consumer of this module). Gated with
+    /// the emission it exercises.
+    #[cfg(feature = "perf-trace")]
     struct ParsedRawFrameLine {
         n: u64,
         total_us: u128,
@@ -1091,6 +1263,7 @@ mod tests {
         skipped: bool,
     }
 
+    #[cfg(feature = "perf-trace")]
     fn parse_raw_frame_line(line: &str) -> Option<ParsedRawFrameLine> {
         let rest = line.strip_prefix(RAW_FRAME_PREFIX)?.trim_start();
         let mut n = None;
@@ -1130,6 +1303,7 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn raw_frame_line_format_round_trips() {
         let mut buf = String::new();
@@ -1157,6 +1331,7 @@ mod tests {
         assert!(!parsed.skipped);
     }
 
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn raw_frame_line_represents_skipped_flag() {
         let mut buf = String::new();
@@ -1172,6 +1347,7 @@ mod tests {
         assert_eq!(parsed.n, 7);
     }
 
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn raw_enabled_record_formats_one_line_per_frame() {
         let mut stats = FrameStats::with_capacity_enabled_and_raw(4, true, true);
@@ -1208,6 +1384,7 @@ mod tests {
         assert!(stats.raw_buf.is_empty());
     }
 
+    #[cfg(feature = "perf-trace")]
     #[test]
     fn scenario_marker_format_start_and_end() {
         assert_eq!(

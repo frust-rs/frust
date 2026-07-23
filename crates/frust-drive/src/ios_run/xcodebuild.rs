@@ -30,44 +30,51 @@ pub fn app_bundle_path(root: &Path, configuration: &str) -> PathBuf {
 
 /// Runs `xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner
 /// -configuration <configuration> -sdk iphonesimulator -destination
-/// id=<udid> -derivedDataPath build/ios ARCHS=<host arch> build` in `root`,
-/// streaming each line of output through `on_line` (prefixed
-/// `[xcodebuild] `). The `ARCHS` pin (module doc comment) is unconditional —
-/// every call here targets the Simulator.
+/// id=<udid> -derivedDataPath build/ios ARCHS=<host arch> [FRUST_FEATURES=<b64>]
+/// build` in `root`, streaming each line of output through `on_line`
+/// (prefixed `[xcodebuild] `). The `ARCHS` pin (module doc comment) is
+/// unconditional — every call here targets the Simulator. `features_b64` is
+/// `ios_build::encode_features`' output (release-lean plan, task 04): the
+/// pbxproj run-script decodes it into `--features <csv>`, so a debug/profile
+/// simulator run compiles instrumentation in while a release run gets the
+/// `lean` log ceiling — the same seam `frust build` threads `FRUST_FEATURES`
+/// through. Unlike user `--define`s, the feature set is mode-derived (never a
+/// per-run user value), so threading it here doesn't reintroduce the
+/// scheme-fixed run path's deliberate no-defines contract.
 pub fn build(
     runner: &dyn ProcessRunner,
     root: &Path,
     udid: &str,
     configuration: &str,
+    features_b64: Option<&str>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Output> {
     let mut prefixed = |line: &str| on_line(&format!("[xcodebuild] {line}"));
     let destination = format!("id={udid}");
     let archs = format!("ARCHS={}", host_sim_arch());
+    let features_setting = features_b64.map(|f| format!("FRUST_FEATURES={f}"));
+    let mut args: Vec<&str> = vec![
+        "xcodebuild",
+        "-project",
+        "ios/Runner.xcodeproj",
+        "-scheme",
+        "Runner",
+        "-configuration",
+        configuration,
+        "-sdk",
+        "iphonesimulator",
+        "-destination",
+        &destination,
+        "-derivedDataPath",
+        "build/ios",
+        &archs,
+    ];
+    if let Some(setting) = features_setting.as_deref() {
+        args.push(setting);
+    }
+    args.push("build");
     runner
-        .run_streaming(
-            "xcrun",
-            &[
-                "xcodebuild",
-                "-project",
-                "ios/Runner.xcodeproj",
-                "-scheme",
-                "Runner",
-                "-configuration",
-                configuration,
-                "-sdk",
-                "iphonesimulator",
-                "-destination",
-                &destination,
-                "-derivedDataPath",
-                "build/ios",
-                &archs,
-                "build",
-            ],
-            Some(root),
-            &[],
-            &mut prefixed,
-        )
+        .run_streaming("xcrun", &args, Some(root), &[], &mut prefixed)
         .with_context(|| format!("running `xcodebuild` in `{}`", root.display()))
 }
 
@@ -80,7 +87,7 @@ mod tests {
     fn build_runs_xcodebuild_with_expected_args_and_prefixes_lines() {
         let runner = FakeProcessRunner::new().with(
             format!(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== build",
                 host_sim_arch()
             ),
             Output {
@@ -95,6 +102,7 @@ mod tests {
             Path::new("/tmp/myapp"),
             "AAAA",
             "Debug",
+            Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
             &mut |line| lines.push(line.to_string()),
         )
         .unwrap();
@@ -106,7 +114,7 @@ mod tests {
     fn build_passes_through_a_non_debug_configuration() {
         let runner = FakeProcessRunner::new().with(
             format!(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== build",
                 host_sim_arch()
             ),
             Output {
@@ -120,6 +128,7 @@ mod tests {
             Path::new("/tmp/myapp"),
             "AAAA",
             "Profile",
+            Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
             &mut |_| {},
         )
         .unwrap();
@@ -130,7 +139,7 @@ mod tests {
     fn build_surfaces_failure() {
         let runner = FakeProcessRunner::new().with(
             format!(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== build",
                 host_sim_arch()
             ),
             Output {
@@ -144,6 +153,7 @@ mod tests {
             Path::new("/tmp/myapp"),
             "AAAA",
             "Debug",
+            Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
             &mut |_| {},
         )
         .unwrap();
@@ -159,6 +169,33 @@ mod tests {
         // links a slice the run-script's single-arch Rust staticlib lacks).
         let runner = FakeProcessRunner::new().with(
             format!(
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== build",
+                host_sim_arch()
+            ),
+            Output {
+                success: true,
+                stdout: "Build succeeded".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let out = build(
+            &runner,
+            Path::new("/tmp/myapp"),
+            "AAAA",
+            "Debug",
+            Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(out.success);
+    }
+
+    #[test]
+    fn build_omits_frust_features_when_none() {
+        // With no features, the run build must match the pre-feature argv
+        // exactly (no `FRUST_FEATURES=` setting) — the `None` arm.
+        let runner = FakeProcessRunner::new().with(
+            format!(
                 "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
                 host_sim_arch()
             ),
@@ -173,6 +210,34 @@ mod tests {
             Path::new("/tmp/myapp"),
             "AAAA",
             "Debug",
+            None,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(out.success);
+    }
+
+    #[test]
+    fn build_threads_release_lean_feature_setting() {
+        // A release simulator run threads the `lean` log ceiling
+        // (base64("lean")) through `FRUST_FEATURES`, not perf-trace.
+        let runner = FakeProcessRunner::new().with(
+            format!(
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=bGVhbg== build",
+                host_sim_arch()
+            ),
+            Output {
+                success: true,
+                stdout: "Build succeeded".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let out = build(
+            &runner,
+            Path::new("/tmp/myapp"),
+            "AAAA",
+            "Release",
+            Some("bGVhbg=="),
             &mut |_| {},
         )
         .unwrap();

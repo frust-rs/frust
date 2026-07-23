@@ -16,3 +16,10 @@ frust-theme = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 image = { workspace = true }
+
+[features]
+# Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain, mirroring
+# the perf-trace chain's shape) — the root workspace edge above no longer
+# requests frust-theme's defaults, so this is one of the re-enabling edges
+# the facade's default-on `glyph-fonts` feature turns on.
+glyph-fonts = ["frust-theme/glyph-fonts"]

@@ -120,10 +120,28 @@ fn prepare_simulator_session(
     }
 
     let configuration = info.mode.xcode_configuration();
+    // Release-lean preflight (followup F2): drop an undeclared `lean` for a
+    // legacy app, warning once through this session's `on_line` sink, so the
+    // simulator build never threads `--features lean` down to `cargo`. This
+    // path calls `encode_features` directly (bypassing `ios_build::build`), so
+    // it needs its own resolve.
+    let (features, warning) =
+        crate::cargo_manifest::resolve_release_features(&project.root, info.mode);
+    if let Some(warning) = warning {
+        on_line(&warning);
+    }
+    let features_b64 = crate::ios_build::encode_features(&features);
 
     on_line(&format!("Building `{}`…", project.bundle_id));
     let build_start = Instant::now();
-    let build_out = xcodebuild::build(runner, &project.root, &device.id, configuration, on_line)?;
+    let build_out = xcodebuild::build(
+        runner,
+        &project.root,
+        &device.id,
+        configuration,
+        features_b64.as_deref(),
+        on_line,
+    )?;
     if !build_out.success {
         bail!("{}", xcodebuild_failure_message(&build_out));
     }
@@ -494,7 +512,7 @@ mod tests {
             .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
             .with(
                 format!(
-                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== build",
                     host_sim_arch()
                 ),
                 Output {
@@ -561,7 +579,7 @@ mod tests {
             .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
             .with(
                 format!(
-                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Profile -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== build",
                     host_sim_arch()
                 ),
                 ok("Build succeeded"),
@@ -577,6 +595,142 @@ mod tests {
 
         let err = run(&runner, &dir, &device(), &profile_info()).unwrap_err();
         assert!(err.to_string().contains("simctl install"), "{err}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn release_info() -> BuildInfo {
+        BuildInfo::from_args(
+            BuildArgs {
+                release: true,
+                ..BuildArgs::default()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap()
+    }
+
+    /// Followup F2, legacy direction: a `--release` simulator run against an
+    /// app whose Cargo.toml declares no `lean` feature drops it and warns once
+    /// through this session's `on_line` sink; the xcodebuild invocation carries
+    /// no `FRUST_FEATURES=` setting (the fixture omits it), so a regression that
+    /// kept `lean` would surface via the absent warning. Drives
+    /// `prepare_simulator_session` directly to observe the sink, stopping at
+    /// `simctl install` like the sibling profile-mode test.
+    #[test]
+    fn release_legacy_app_drops_lean_and_warns() {
+        let dir = unique_project_dir("f2-legacy");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+        let app_dir = dir.join("build/ios/Build/Products/Release-iphonesimulator/Runner.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let app_path = app_dir.to_string_lossy().into_owned();
+
+        let runner = FakeProcessRunner::new()
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios-sim\n"),
+            )
+            .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
+            .with(
+                format!(
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} build",
+                    host_sim_arch()
+                ),
+                ok("Build succeeded"),
+            )
+            .with(
+                format!("xcrun simctl install AAAA {app_path}"),
+                Output {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "INSTALL_FAILED_TEST_STOP".to_string(),
+                },
+            );
+
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let err = prepare_simulator_session(
+            &runner,
+            &dir,
+            &device(),
+            &release_info(),
+            &mut |l| lines.push(l.to_string()),
+            &never,
+        )
+        .err()
+        .expect("expected simctl install failure");
+        assert!(err.to_string().contains("simctl install"), "{err}");
+        assert!(
+            lines.iter().any(|l| l.contains("lean")),
+            "legacy release run must warn about the missing `lean` feature: {lines:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Followup F2, declaring direction: an app that declares `lean` keeps it —
+    /// `FRUST_FEATURES=bGVhbg==` (base64 "lean"), registered exactly, so a
+    /// regression that dropped it would produce a shorter, non-matching argv
+    /// and error early — and warns nothing.
+    #[test]
+    fn release_declaring_app_keeps_lean_without_warning() {
+        let dir = unique_project_dir("f2-declaring");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
+        )
+        .unwrap();
+        let app_dir = dir.join("build/ios/Build/Products/Release-iphonesimulator/Runner.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let app_path = app_dir.to_string_lossy().into_owned();
+
+        let runner = FakeProcessRunner::new()
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios-sim\n"),
+            )
+            .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
+            .with(
+                format!(
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=bGVhbg== build",
+                    host_sim_arch()
+                ),
+                ok("Build succeeded"),
+            )
+            .with(
+                format!("xcrun simctl install AAAA {app_path}"),
+                Output {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "INSTALL_FAILED_TEST_STOP".to_string(),
+                },
+            );
+
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let err = prepare_simulator_session(
+            &runner,
+            &dir,
+            &device(),
+            &release_info(),
+            &mut |l| lines.push(l.to_string()),
+            &never,
+        )
+        .err()
+        .expect("expected simctl install failure");
+        assert!(err.to_string().contains("simctl install"), "{err}");
+        assert!(
+            !lines.iter().any(|l| l.contains("lean")),
+            "a declaring app must not warn: {lines:?}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -658,7 +812,7 @@ mod tests {
                 ok(PHYSICAL_LIST_JSON),
             )
             .with(
-                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
                 ok("Build succeeded"),
             )
     }

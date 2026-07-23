@@ -104,6 +104,65 @@ impl Curve {
             Curve::Cubic(x1, y1, x2, y2) => cubic_bezier(x1, y1, x2, y2, t),
         }
     }
+
+    /// Confine this curve to the `[start, end]` fraction of the timeline
+    /// (Flutter's `Interval`, TweenSequence-style curve segmentation):
+    /// before `start` the result is `0.0`, at/after `end` it's `1.0`, and in
+    /// between it re-evaluates `self` at the rescaled local time
+    /// `(t - start) / (end - start)`.
+    ///
+    /// This is what lets two widgets fade through each other on one shared
+    /// controller — e.g. an outgoing element on `curve.interval(0.0, 0.3)`
+    /// and an incoming one on `curve.interval(0.3, 1.0)`.
+    ///
+    /// `start`/`end` aren't required to be `[0, 1]`-clamped or ordered here;
+    /// a degenerate or inverted interval (`end <= start`) is defined as an
+    /// instantaneous step at `start`: strictly before it the result is
+    /// `0.0`, at or after it's `1.0` (see [`SegmentedCurve::transform`]).
+    ///
+    /// Returns a [`SegmentedCurve`] rather than `Curve` itself: `Curve` is
+    /// `Copy` (relied on by [`AnimationController`], which derives `Copy`
+    /// over its own `curve: Curve` field), and an `Interval` variant holding
+    /// another `Curve` by value would make the enum infinitely-sized without
+    /// indirection (`Box`), which would forfeit that `Copy` bound — so the
+    /// segment lives in its own small `Copy` struct instead.
+    pub fn interval(self, start: f64, end: f64) -> SegmentedCurve {
+        SegmentedCurve {
+            start,
+            end,
+            inner: self,
+        }
+    }
+}
+
+/// A [`Curve`] confined to a `[start, end]` sub-interval of the timeline —
+/// the result of [`Curve::interval`]. See that method's docs for the full
+/// contract (including the degenerate `end <= start` case).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SegmentedCurve {
+    start: f64,
+    end: f64,
+    inner: Curve,
+}
+
+impl SegmentedCurve {
+    /// Evaluate the eased progress at normalized time `t` (clamped to
+    /// `[0, 1]`) — see [`Curve::interval`] for the full contract.
+    pub fn transform(self, t: f64) -> f64 {
+        let t = t.clamp(0.0, 1.0);
+        if self.end <= self.start {
+            // Degenerate/inverted interval: an instantaneous step at `start`.
+            return if t < self.start { 0.0 } else { 1.0 };
+        }
+        if t <= self.start {
+            0.0
+        } else if t >= self.end {
+            1.0
+        } else {
+            let local = (t - self.start) / (self.end - self.start);
+            self.inner.transform(local)
+        }
+    }
 }
 
 /// Evaluate a cubic-Bézier timing function at input `x ∈ [0, 1]`.
@@ -157,6 +216,74 @@ fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
         s = 0.5 * (lo + hi);
     }
     sample_y(s)
+}
+
+/// Per-item timing for a staggered reveal (Flutter's staggered-animation
+/// idiom): item `i`'s sub-animation starts at `i * per_item_delay` and runs
+/// for `item_duration`, all driven off one shared `0.0..=1.0` controller
+/// value — no per-item controller needed.
+///
+/// `per_item_delay`/`item_duration` share whatever time unit the caller
+/// picks (seconds, milliseconds, …) as long as it's consistent between the
+/// two fields and [`total_duration`](Self::total_duration)'s consumer (e.g.
+/// seeding an [`AnimationController`]'s `Duration` in the same unit).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StaggerSpec {
+    /// Time between the start of consecutive items' sub-animations.
+    pub per_item_delay: f64,
+    /// Duration of each item's own sub-animation.
+    pub item_duration: f64,
+    /// Easing curve applied within each item's local `[0, 1]` sub-progress.
+    pub item_curve: Curve,
+}
+
+impl StaggerSpec {
+    /// The total timeline length spanning all `n` items' sub-animations —
+    /// the last item starts at `(n - 1) * per_item_delay` and runs
+    /// `item_duration`, so the total is `(n - 1) * per_item_delay +
+    /// item_duration`. Use this to size an [`AnimationController`]'s
+    /// `forward` duration so one controller value drives every item.
+    /// `n == 0` has no timeline: `0.0`.
+    pub fn total_duration(&self, n: usize) -> f64 {
+        if n == 0 {
+            return 0.0;
+        }
+        (n as f64 - 1.0) * self.per_item_delay + self.item_duration
+    }
+
+    /// Item `i`'s eased progress in `[0, 1]`, given the overall controller
+    /// value `overall` (clamped to `[0, 1]`, linear across
+    /// [`total_duration`](Self::total_duration)`(n)`) and the total item
+    /// count `n`.
+    ///
+    /// Before item `i`'s local window starts, this is `0.0`; after it ends,
+    /// `1.0`; in between it re-evaluates `item_curve` at the item's local
+    /// `[0, 1]` sub-progress. A zero-length `item_duration` degenerates to
+    /// an instantaneous step at the item's start time, mirroring
+    /// [`Curve::interval`]'s degenerate case. `n == 0` (no timeline) and
+    /// `i >= n` both have no defined window, so this returns `1.0` (nothing
+    /// left to reveal).
+    pub fn item_progress(&self, overall: f64, i: usize, n: usize) -> f64 {
+        let total = self.total_duration(n);
+        if total <= 0.0 || i >= n {
+            return 1.0;
+        }
+        let overall = overall.clamp(0.0, 1.0);
+        let elapsed = overall * total;
+        let item_start = i as f64 * self.per_item_delay;
+        let item_end = item_start + self.item_duration;
+        if self.item_duration <= 0.0 {
+            return if elapsed < item_start { 0.0 } else { 1.0 };
+        }
+        if elapsed <= item_start {
+            0.0
+        } else if elapsed >= item_end {
+            1.0
+        } else {
+            let local = (elapsed - item_start) / self.item_duration;
+            self.item_curve.transform(local)
+        }
+    }
 }
 
 /// Component-wise linear interpolation between two values of the same type.
@@ -749,6 +876,148 @@ mod tests {
         // Out-of-range inputs clamp.
         assert_eq!(Curve::Linear.transform(-1.0), 0.0);
         assert_eq!(Curve::Linear.transform(2.0), 1.0);
+    }
+
+    #[test]
+    fn interval_endpoints_and_midpoint() {
+        let seg = Curve::EaseInOut.interval(0.3, 0.7);
+        // Pre-start.
+        assert_eq!(seg.transform(0.0), 0.0);
+        assert_eq!(seg.transform(0.3), 0.0);
+        assert_eq!(seg.transform(0.1), 0.0);
+        // Post-end.
+        assert_eq!(seg.transform(0.7), 1.0);
+        assert_eq!(seg.transform(0.9), 1.0);
+        assert_eq!(seg.transform(1.0), 1.0);
+        // Midpoint of the interval == midpoint of the inner curve (ease-in-out
+        // is symmetric, so its own midpoint is exactly 0.5).
+        let local_mid = 0.3 + 0.5 * (0.7 - 0.3);
+        assert!((seg.transform(local_mid) - 0.5).abs() < 1e-4);
+        // A quarter into the interval matches the inner curve at local t=0.25.
+        let local_quarter = 0.3 + 0.25 * (0.7 - 0.3);
+        assert!((seg.transform(local_quarter) - Curve::EaseInOut.transform(0.25)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn interval_linear_matches_flutter_fade_through_shape() {
+        // Fade-through staging: outgoing on [0.0, 0.3], incoming on [0.3, 1.0].
+        let out_seg = Curve::Linear.interval(0.0, 0.3);
+        let in_seg = Curve::Linear.interval(0.3, 1.0);
+        assert_eq!(out_seg.transform(0.0), 0.0);
+        assert!((out_seg.transform(0.15) - 0.5).abs() < 1e-9);
+        assert_eq!(out_seg.transform(0.3), 1.0);
+        assert_eq!(in_seg.transform(0.3), 0.0);
+        assert!((in_seg.transform(0.65) - 0.5).abs() < 1e-9);
+        assert_eq!(in_seg.transform(1.0), 1.0);
+    }
+
+    #[test]
+    fn interval_degenerate_start_equals_end_is_an_instant_step() {
+        let seg = Curve::Linear.interval(0.3, 0.3);
+        assert_eq!(seg.transform(0.0), 0.0);
+        assert_eq!(seg.transform(0.2), 0.0);
+        // Just below the step point: still 0.0.
+        assert_eq!(seg.transform(0.3), 1.0);
+        assert_eq!(seg.transform(0.5), 1.0);
+        assert_eq!(seg.transform(1.0), 1.0);
+    }
+
+    #[test]
+    fn interval_degenerate_inverted_is_an_instant_step_at_start() {
+        // end < start also degrades to the same instant-step rule.
+        let seg = Curve::Linear.interval(0.6, 0.2);
+        assert_eq!(seg.transform(0.0), 0.0);
+        assert_eq!(seg.transform(0.59), 0.0);
+        assert_eq!(seg.transform(0.6), 1.0);
+        assert_eq!(seg.transform(1.0), 1.0);
+    }
+
+    #[test]
+    fn interval_out_of_range_t_clamps_first() {
+        let seg = Curve::Linear.interval(0.3, 0.7);
+        assert_eq!(seg.transform(-1.0), 0.0);
+        assert_eq!(seg.transform(2.0), 1.0);
+    }
+
+    /// Glyph log-reveal shape: 150ms items, 90ms per-item delay, 5 items —
+    /// hand-computed against `StaggerSpec::item_progress`'s contract.
+    fn glyph_stagger() -> StaggerSpec {
+        StaggerSpec {
+            per_item_delay: 90.0,
+            item_duration: 150.0,
+            item_curve: Curve::Linear,
+        }
+    }
+
+    #[test]
+    fn stagger_total_duration_spans_last_items_window() {
+        let spec = glyph_stagger();
+        // Item 4 (last of 5) starts at 4*90=360 and runs 150ms -> ends 510.
+        assert_eq!(spec.total_duration(5), 510.0);
+        assert_eq!(spec.total_duration(1), 150.0);
+        assert_eq!(spec.total_duration(0), 0.0);
+    }
+
+    #[test]
+    fn stagger_item_progress_hand_computed_table() {
+        let spec = glyph_stagger();
+        let n = 5;
+        let total = spec.total_duration(n); // 510.0
+
+        // Item windows (start..end): 0..150, 90..240, 180..330, 270..420, 360..510.
+        // overall=0.0 -> elapsed=0: only item 0 has started (at its own start -> 0.0).
+        for i in 0..n {
+            assert_eq!(spec.item_progress(0.0, i, n), 0.0, "i={i} at overall=0.0");
+        }
+
+        // overall=1.0 -> elapsed=510: every item has reached/passed its end -> 1.0.
+        for i in 0..n {
+            assert_eq!(spec.item_progress(1.0, i, n), 1.0, "i={i} at overall=1.0");
+        }
+
+        // elapsed = 270 (item 3's start; item 2's local 90/150=0.6; item 1 and
+        // item 0 already past their end -> 1.0; item 4 not started -> 0.0).
+        let overall_270 = 270.0 / total;
+        assert_eq!(spec.item_progress(overall_270, 0, n), 1.0);
+        assert_eq!(spec.item_progress(overall_270, 1, n), 1.0);
+        assert!((spec.item_progress(overall_270, 2, n) - 0.6).abs() < 1e-9);
+        assert_eq!(spec.item_progress(overall_270, 3, n), 0.0);
+        assert_eq!(spec.item_progress(overall_270, 4, n), 0.0);
+
+        // elapsed = 45ms: only item 0 has started, at local 45/150 = 0.3.
+        let overall_45 = 45.0 / total;
+        assert!((spec.item_progress(overall_45, 0, n) - 0.3).abs() < 1e-9);
+        assert_eq!(spec.item_progress(overall_45, 1, n), 0.0);
+
+        // elapsed = 135ms: item 0 local 135/150=0.9; item 1 not started (starts
+        // at 90, so local (135-90)/150=0.3).
+        let overall_135 = 135.0 / total;
+        assert!((spec.item_progress(overall_135, 0, n) - 0.9).abs() < 1e-9);
+        assert!((spec.item_progress(overall_135, 1, n) - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stagger_item_progress_out_of_range_index_or_empty_set_is_complete() {
+        let spec = glyph_stagger();
+        // i >= n has no defined window -> fully revealed.
+        assert_eq!(spec.item_progress(0.5, 5, 5), 1.0);
+        // n == 0 has no timeline -> fully revealed.
+        assert_eq!(spec.item_progress(0.5, 0, 0), 1.0);
+    }
+
+    #[test]
+    fn stagger_zero_duration_item_is_an_instant_step() {
+        let spec = StaggerSpec {
+            per_item_delay: 100.0,
+            item_duration: 0.0,
+            item_curve: Curve::Linear,
+        };
+        let n = 3;
+        let total = spec.total_duration(n); // 2*100 + 0 = 200
+        assert_eq!(total, 200.0);
+        // Item 1 starts at 100: strictly before -> 0.0, at/after -> 1.0.
+        assert_eq!(spec.item_progress(99.0 / total, 1, n), 0.0);
+        assert_eq!(spec.item_progress(100.0 / total, 1, n), 1.0);
     }
 
     #[test]

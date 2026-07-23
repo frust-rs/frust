@@ -31,6 +31,10 @@ pub struct Invocation<'a> {
     pub current_project_version: Option<u32>,
     /// base64(`K=V;K=V`) `--define`s → `FRUST_DEFINES` (only when non-empty).
     pub defines_b64: Option<&'a str>,
+    /// base64(`feat,feat`) cargo features → `FRUST_FEATURES` (release-lean
+    /// plan, task 04); the pbxproj run-script decodes it and appends
+    /// `--features <csv>` to its `cargo build` (only when non-empty).
+    pub features_b64: Option<&'a str>,
 }
 
 /// The Xcode `ARCHS` value for a simulator build on this host. A simulator
@@ -99,6 +103,9 @@ impl Invocation<'_> {
         if let Some(defines) = self.defines_b64 {
             args.push(format!("FRUST_DEFINES={defines}"));
         }
+        if let Some(features) = self.features_b64 {
+            args.push(format!("FRUST_FEATURES={features}"));
+        }
         args.extend(self.signing_args());
         args
     }
@@ -159,6 +166,7 @@ mod tests {
             marketing_version: None,
             current_project_version: None,
             defines_b64: None,
+            features_b64: None,
         }
     }
 
@@ -269,12 +277,14 @@ mod tests {
             marketing_version: Some("1.2.3"),
             current_project_version: Some(42),
             defines_b64: Some("QUJDPTE="),
+            features_b64: Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
             ..signed()
         };
         let argv = inv.build_argv();
         assert!(argv.contains(&"MARKETING_VERSION=1.2.3".to_string()));
         assert!(argv.contains(&"CURRENT_PROJECT_VERSION=42".to_string()));
         assert!(argv.contains(&"FRUST_DEFINES=QUJDPTE=".to_string()));
+        assert!(argv.contains(&"FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ==".to_string()));
         // Ordering: overrides precede the signing args, which precede the verb.
         let mv = argv
             .iter()
@@ -297,6 +307,7 @@ mod tests {
                 .any(|a| a.starts_with("CURRENT_PROJECT_VERSION="))
         );
         assert!(!argv.iter().any(|a| a.starts_with("FRUST_DEFINES=")));
+        assert!(!argv.iter().any(|a| a.starts_with("FRUST_FEATURES=")));
     }
 
     #[test]

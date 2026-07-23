@@ -680,7 +680,9 @@ fn empty_feed_state() -> AnyView<HuddleState> {
 fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
     let spinner: AnyView<HuddleState> = match design {
         DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
-        DesignLanguage::Material3 => any(loading_indicator()),
+        // Glyph has no spinner chrome baseline yet (task 28 replaces this) —
+        // falls through to the Material3 arm for now.
+        DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
     };
     any(Padding(
         EdgeInsets::symmetric(4.0, 8.0),
@@ -700,7 +702,9 @@ fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
 fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
     let spinner: AnyView<HuddleState> = match design {
         DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
-        DesignLanguage::Material3 => any(loading_indicator()),
+        // Glyph has no spinner chrome baseline yet (task 28 replaces this) —
+        // falls through to the Material3 arm for now.
+        DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
     };
     any(Padding(
         EdgeInsets::all(8.0),

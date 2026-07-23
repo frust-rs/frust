@@ -14,63 +14,59 @@
     `on_surface_created_from_metal_layer` (`renderer.rs`) — turn a
     caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`.
   - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary
-    (`extern "system"` exports, `Box::into_raw`/`from_raw`, `ANativeWindow_fromSurface`,
-    `nativeInitPlatform`'s `JavaVM` stash), `android_app!`'s generated
-    exports, and (render-thread split, `docs/ARCHITECTURE.md`) `unsafe impl
-    Send` for `SendableWindowPtr` plus a bare `libc::setpriority` self-boost.
+    (`extern "system"` exports, `Box::into_raw`/`from_raw`,
+    `ANativeWindow_fromSurface`, `nativeInitPlatform`'s `JavaVM` stash),
+    `android_app!`'s generated exports, and the render-thread split's
+    `unsafe impl Send` for `SendableWindowPtr` plus a bare
+    `libc::setpriority` self-boost.
   - `frust-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary
     (`extern "C"` exports, `Box::into_raw`/`from_raw`, the call into
     `on_surface_created_from_metal_layer`), `ios_app!`'s generated exports,
     and the split's `unsafe impl Send` for `SendableMetalLayer` plus a bare
     `libc::pthread_set_qos_class_self_np` self-boost.
-  - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/`jobject`
-    plugins need from `ndk-context`-stored handles, one sanctioned module,
-    scoped `AttachGuard` per call.
+  - `frust-plugin`'s `android` module — reconstructs the raw
+    `JavaVM`/`jobject` plugins need from `ndk-context`-stored handles, one
+    sanctioned module, scoped `AttachGuard` per call.
   - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:`
-    calls (`objc2` marks the untyped Foundation setter unsafe;
-    `NSString`/`NSArray` are property-list-safe), each `# Safety`-noted.
+    calls (`objc2` marks the untyped Foundation setter unsafe), each
+    `# Safety`-noted.
   - `frust-secure-storage`'s `apple` backend — a confined `as_cf`
-    objc→`CFType` bridge for the Keychain/`SecAccessControl` calls, one
-    function, `# Safety`-noted.
-  - `frust-render`'s `RenderContext::create_pipeline_cache` — one `unsafe
-    { device.create_pipeline_cache(..) }` call building a `wgpu::PipelineCache`
-    from a shell-persisted, adapter-fingerprint-validated blob; wgpu's
-    `fallback: true` backstops any residual mismatch (see `docs/ARCHITECTURE.md`'s
-    GPU pipeline cache).
+    objc→`CFType` bridge for the Keychain/`SecAccessControl` calls,
+    `# Safety`-noted.
+  - `frust-render`'s `RenderContext::create_pipeline_cache` — one call
+    building a `wgpu::PipelineCache` from a shell-persisted,
+    adapter-fingerprint-validated blob (see `docs/ARCHITECTURE.md`'s GPU
+    pipeline cache).
   - `frust-drive`'s `process` module — a `kill(2)` FFI shim (std exposes no
-    `killpg`) that group-kills a streamed child's whole Unix process group;
-    one scoped declaration with a `# Safety` comment.
+    `killpg`) that group-kills a streamed child's Unix process group.
 - **No unwind across FFI.** Every platform export routes through
   `frust-shell-common`'s `guard` helper (`catch_unwind` + log, returning a
   benign default) rather than unwinding into JVM-/Swift-owned stack frames
   — a panic crossing the FFI boundary is undefined behavior, not a bug.
   `run_guarded_thread` is `guard`'s whole-thread-body counterpart: every
-  render-thread `spawn` closure (`docs/ARCHITECTURE.md`'s split) routes
-  through it, so a caught panic still exits cleanly and drains any
-  orphaned `Ack` via the owned `RenderReceiver`'s `Drop`, rather than
-  poisoning shared state.
-- **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text
-  input doesn't send individual keystrokes across the FFI boundary — the platform owns
-  composition (Gboard, CJK marked text) against a local mirror (Kotlin `Editable`/Swift
-  `NSMutableString`), then hands the framework a whole reconciled `EditingState`
-  (`nativeImeApply`/`frust_ime_apply`) and reads one back (`nativeImeState`/
-  `frust_ime_state_json`) to keep its own IME machinery synchronized — never
-  add a per-keystroke op-forwarding path; it fights the platform's own composition machine.
+  render-thread `spawn` closure routes through it, so a caught panic still
+  exits cleanly and drains any orphaned `Ack`, rather than poisoning shared
+  state.
+- **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS
+  platform text input doesn't send individual keystrokes across the FFI
+  boundary — the platform owns composition (Gboard, CJK marked text)
+  against a local mirror, then hands the framework a whole reconciled
+  `EditingState` and reads one back to keep its own IME machinery
+  synchronized — never add a per-keystroke op-forwarding path.
 - **UTF-16 at the FFI seam, bytes inside.** `EditingState`'s
   `selection_*`/`composing_*` indices are UTF-16 code-unit indexed
-  everywhere they cross a shell boundary (JNI, C-ABI, `AppTree`); convert
-  to/from byte offsets only inside `frust-text`'s `TextEditor` — a
-  shell/glue module passes indices through opaquely, never converting them.
+  everywhere they cross a shell boundary; convert to/from byte offsets only
+  inside `frust-text`'s `TextEditor` — a shell/glue module passes indices
+  through opaquely, never converting them.
 - **Hand-roll JSON at the mobile FFI boundary — no `serde` in shell crates.**
   `frust-shell-android`/`frust-shell-ios` serialize `ImeState` with a small
-  hand-written escaper/builder, keeping each shell free of a codegen
-  dependency for a handful of fixed fields.
+  hand-written escaper/builder for a handful of fixed fields.
 - **Type-erase to avoid a downstream crate dependency**, not to avoid
   writing a type. When a lower layer threads a resource owned by a higher
-  layer (e.g. `frust-core`'s `LayoutCtx` carrying `frust-text::TextContext`),
-  pass it as `&mut dyn Any` and recover it at the one call site that knows
-  the concrete type via a documented, panic-on-mismatch `downcast_mut::<T>()`
-  (the panic should say wiring bug, not runtime-data condition).
+  layer, pass it as `&mut dyn Any` and recover it at the one call site that
+  knows the concrete type via a documented, panic-on-mismatch
+  `downcast_mut::<T>()` (the panic should say wiring bug, not runtime-data
+  condition).
 - **Edition-2024 `-> impl Trait` return types capture all in-scope
   lifetimes by default.** When a function returns an `impl Trait` that
   borrows nothing from its parameters (e.g. `app_logic(&mut State) -> impl
@@ -91,18 +87,15 @@
   approximating:
 
   ```rust
-  /// Left-edge activation zone width for the interactive pop-swipe, in
-  /// logical px.
+  /// Left-edge activation zone width for the interactive pop-swipe (logical px).
   ///
-  /// **Community-approximate**: UIKit's `interactivePopGestureRecognizer`
-  /// edge zone is not a published constant; ~20dp is the value the
-  /// community-reverse-engineered reimplementations converge on.
+  /// **Community-approximate**: UIKit's edge zone isn't published; ~20dp is
+  /// where community reimplementations converge.
   const EDGE_SWIPE_ZONE_DP: f64 = 20.0;
   ```
-  This keeps the tunable visible and re-tunable in one place instead of
-  buried inline, and tells a future reader whether "fixing" a value means
-  matching a spec or just adjusting a guess — grep for
-  `Community-approximate` to find every instance.
+  This keeps the tunable visible in one place and tells a future reader
+  whether "fixing" it means matching a spec or adjusting a guess — grep
+  for `Community-approximate` to find every instance.
 
 ## Error Handling
 
@@ -136,8 +129,8 @@
 | JNI exports | `Java_<fixed_package>_<FixedClass>_native<Name>` | `Java_dev_frust_FrustSurfaceView_nativeOnFrame` |
 
 JNI export names are LAW: the package/class (`dev.frust.FrustSurfaceView`)
-is fixed across every generated app, not app-specific, so the mangled symbol
-stays stable regardless of the app's own package.
+is fixed across every generated app, so the mangled symbol stays stable
+regardless of the app's own package.
 
 ## Plugin Conventions
 
@@ -208,12 +201,11 @@ returning a `vello::*`/`wgpu::*` type.
 this is what lets the GPU backend be swapped later without touching widget
 or text code.
 
-**The one named exception:** `frust-render::DetachedSurface` (the
-render-thread split's cross-thread surface seam, `docs/ARCHITECTURE.md`)
-is a deliberate **opaque** escape valve, not a leak: its only accessor,
+**The one named exception:** `frust-render::DetachedSurface` is a
+deliberate **opaque** escape valve, not a leak — its only accessor,
 `into_surface`, is crate-private, so the wrapped `wgpu::Surface` is never
-nameable outside `frust-render` — follow this pattern (opaque newtype,
-crate-private unwrap) for any future value crossing the same boundary.
+nameable outside `frust-render`; follow the same pattern for any future
+value crossing this boundary.
 
 ### Printing directly from a `frust-drive` build/run core
 
@@ -389,34 +381,29 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
 - **Heavy work routes by shape: `spawn` (async IO) / `spawn_local` (UI-thread `!Send`) /
   `spawn_blocking` (one-off CPU) / rayon (an app-level choice, not bundled).** Calling
   `spawn_local` off the UI thread is a wiring bug, not a runtime-data condition, and panics
-  saying so (the `downcast_mut` convention above); a backgrounded iOS app pauses
-  `CADisplayLink`, so a `spawn_local` timer stalls until `frust_resume`'s next pump.
-  `use_task` composes `AsyncValue<T>` over this routing (`docs/ARCHITECTURE.md`'s Key
-  Types): a UI-thread coordinator, run under the calling component's `Owner`, hands work
-  to `spawn`/`spawn_blocking` and is the sole signal writer, ruling out a cross-thread write
-  race by construction. Cancellation is layered: owner cleanup aborts the coordinator; the
-  coordinator aborts the background `JoinHandle` via a registered `AbortHandle`; an
-  already-running `spawn_blocking` closure can't be interrupted — only its result delivery
-  is dropped.
+  saying so; a backgrounded iOS app pauses `CADisplayLink`, so a `spawn_local` timer stalls
+  until `frust_resume`'s next pump. `use_task` composes `AsyncValue<T>` over this routing: a
+  UI-thread coordinator, run under the calling component's `Owner`, hands work to
+  `spawn`/`spawn_blocking` and is the sole signal writer, ruling out a cross-thread write
+  race by construction. Cancellation is layered: owner cleanup aborts the coordinator, which
+  aborts the background `JoinHandle`; an already-running `spawn_blocking` closure can't be
+  interrupted — only its result delivery is dropped.
 - **`Component::State` holds `RwSignal`s directly; app code depends on the
   `frust` facade only, never `reactive_graph`/`any_spawner`/`frust-reactive`
   directly.** A reactive field is typed `RwSignal<T>`, read/written through
-  the facade's `Get`/`Set`/`Update` traits (`docs/ARCHITECTURE.md`'s Key
-  Types). **An `examples/*` or app crate's `Cargo.toml` depends on `frust`
-  plus plugin crates (`plugins/*`) only** — the facade never re-exports
-  plugins, an app adds them directly (Flutter's pubspec pattern; Plugin
-  Conventions below). `examples/huddle` carries a **documented**
-  `frust-core`/`kurbo`/`peniko` escape hatch for custom widgets no facade
-  widget covers yet — check whether a gap belongs in the facade first.
+  the facade's `Get`/`Set`/`Update` traits. **An `examples/*`/app crate's
+  `Cargo.toml` depends on `frust` plus plugin crates only** — the facade
+  never re-exports plugins (Plugin Conventions below); `examples/huddle`'s
+  documented `frust-core`/`kurbo`/`peniko` escape hatch is the one
+  exception, for gaps no facade widget covers yet.
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
-  untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only
-  from *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
+  untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
+  *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
   per-frame rebuild (desktop's `scope.track(|| root.rebuild(..))`, mirrored on mobile by a
-  persistent per-`AppHandle` `TrackedScope` — `docs/ARCHITECTURE.md`'s Signal-driven wake).
-  A render-relevant read taken via `*_untracked`/`get_untracked` anywhere in that path never
-  subscribes, so a later write flips no dirty flag and the shell may never repaint until an
-  unrelated input forces a frame — reserve `*_untracked` for genuine non-rendering reads, never
-  a value a `build` return depends on.
+  persistent per-`AppHandle` `TrackedScope`). A render-relevant read taken via
+  `*_untracked`/`get_untracked` anywhere in that path never subscribes, so a later write flips
+  no dirty flag and the shell may never repaint — reserve `*_untracked` for genuine
+  non-rendering reads, never a value a `build` return depends on.
 
 ## Theming & Animation Conventions
 
@@ -472,28 +459,42 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   rather than hardcoding overlay opacity, taking the **maximum** of
   concurrently-active states, never their sum. Only `pressed` is currently
   wired by any shipping widget.
+- **Glyph's token set adds three resolution precedents.** A per-status
+  color with no `ColorScheme` field (Success/Warning/Info) resolves
+  `Theme::extension::<StatusPalette>()` first — present on every baseline —
+  before a role that already has one (Error) resolves it directly.
+  `GlyphInk` is never brightness-swapped like a scheme role — it reads
+  identically on Light/Dark `glyph_baseline()`, so swapping it is a defect.
+  Accent role split: `primary`/`on_primary` is accent text/icon ink,
+  `primary_container`/`on_primary_container` is the bright fill —
+  conflating the two (Glyph light mode forces them apart) is the catalog's
+  most common accent bug.
+- **A transition pattern's default timing resolves from `Theme.motion`,
+  never a hand-rolled duration, and collapses under `reduce_motion`.**
+  `PatternSwitcher`/`AnimatedOpacity`/`AnimatedScale` resolve
+  `MotionScheme`'s duration/easing/spring tokens for their default
+  `Timing` (an explicit `.timing(...)` call always wins); every
+  pattern/wrapper substitutes a short linear crossfade under
+  `reduce_motion` instead of a bespoke reduced variant.
 
 ## Testing Patterns
 
 - **Fixture-driven tests for parsers/validators**: register canned
   `ProcessRunner`/`EnvLookup` responses keyed by the exact invocation, then
-  assert the resulting `Status`/`Validation`/`DoctorReport` (`frust-drive`'s
-  `doctor`/`devices` validators and component report).
+  assert the resulting `Status`/`Validation`/`DoctorReport`.
 - **Injectable hook seams for process-global side effects**: a function
   installing a real handler in production (`ctrlc::set_handler`, a
   filesystem watcher) takes a small `Hooks` struct defaulted to the real
-  installers (`::real()`), with a `::fake()` (`#[cfg(test)]`) no-op pair a
-  test injects instead — exercising the dispatch logic without installing
-  a real process-wide handler (`frust-cli`'s `WatchHooks`/`run_desktop_watch`).
+  installers, with a `::fake()` (`#[cfg(test)]`) no-op pair a test injects
+  instead — exercising dispatch logic without installing a real
+  process-wide handler.
 - **`#[ignore = "<reason>"]` for GPU-dependent or slow end-to-end tests.**
   The reason string must say how to run it (`cargo test -p ... --ignored`)
   and why it's excluded by default (needs a real GPU; compiles a full
-  generated dependency graph; etc.) — see `frust-render/tests/gpu_smoke.rs`,
-  `frust-cli/tests/create_e2e.rs`.
-- **Recording fakes for paint assertions**: a minimal `PaintScene`
-  implementation that pushes `(origin, size)`/`(origin, text)` tuples into
-  `Vec`s lets widget `layout`/`paint` behavior be asserted without any GPU
-  or `frust-render` dependency (`frust-core::widget` unit tests).
+  generated dependency graph; etc.).
+- **Recording fakes for paint assertions**: a minimal `PaintScene` impl
+  pushing `(origin, size)`/`(origin, text)` tuples into `Vec`s lets widget
+  `layout`/`paint` behavior be asserted without any GPU dependency.
 - **Template rendering uses `minijinja::UndefinedBehavior::Strict`**: an
   unresolved `{{ placeholder }}` is a hard render-time error, catching
   template/context drift in tests instead of a generated project.

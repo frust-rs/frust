@@ -147,7 +147,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\ncase \"$PLATFORM_NAME\" in\niphonesimulator)\nif [ \"$ARCHS\" = \"x86_64\" ]; then TRIPLE=\"x86_64-apple-ios\"; else TRIPLE=\"aarch64-apple-ios-sim\"; fi\n;;\n*)\nTRIPLE=\"aarch64-apple-ios\"\n;;\nesac\ncase \"$CONFIGURATION\" in\nRelease*)\nPROFILE_DIR=\"release\"\nCARGO_FLAGS=\"--release\"\n;;\nProfile*)\nPROFILE_DIR=\"profile\"\nCARGO_FLAGS=\"--profile profile\"\n;;\n*)\nPROFILE_DIR=\"debug\"\nCARGO_FLAGS=\"\"\n;;\nesac\nif [ -n \"${FRUST_DEFINES:-}\" ]; then\nfor kv in $(echo \"$FRUST_DEFINES\" | base64 -d | tr ';' ' '); do export \"$kv\"; done\nfi\nexport IPHONEOS_DEPLOYMENT_TARGET\ncd \"$SRCROOT/..\"\ncargo build --target \"$TRIPLE\" $CARGO_FLAGS\ncp \"target/$TRIPLE/$PROFILE_DIR/libshadertoy.a\" \"$BUILT_PRODUCTS_DIR/\"\n";
+			shellScript = "set -e\ncase \"$PLATFORM_NAME\" in\niphonesimulator)\nif [ \"$ARCHS\" = \"x86_64\" ]; then TRIPLE=\"x86_64-apple-ios\"; else TRIPLE=\"aarch64-apple-ios-sim\"; fi\n;;\n*)\nTRIPLE=\"aarch64-apple-ios\"\n;;\nesac\ncase \"$CONFIGURATION\" in\nRelease*)\nPROFILE_DIR=\"release\"\nCARGO_FLAGS=\"--release\"\n;;\nProfile*)\nPROFILE_DIR=\"profile\"\nCARGO_FLAGS=\"--profile profile\"\n;;\n*)\nPROFILE_DIR=\"debug\"\nCARGO_FLAGS=\"\"\n;;\nesac\nif [ -n \"${FRUST_DEFINES:-}\" ]; then\nfor kv in $(echo \"$FRUST_DEFINES\" | base64 -d | tr ';' ' '); do export \"$kv\"; done\nfi\nCARGO_FEATURES=\"\"\nif [ -n \"${FRUST_FEATURES:-}\" ]; then\nCARGO_FEATURES=\"--features $(echo \"$FRUST_FEATURES\" | base64 -d)\"\nfi\nexport IPHONEOS_DEPLOYMENT_TARGET\ncd \"$SRCROOT/..\"\ncargo build --target \"$TRIPLE\" $CARGO_FLAGS $CARGO_FEATURES\ncp \"target/$TRIPLE/$PROFILE_DIR/libshadertoy.a\" \"$BUILT_PRODUCTS_DIR/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -242,6 +242,7 @@
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
 				FRUST_DEFINES = "";
+				FRUST_FEATURES = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -280,6 +281,7 @@
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
 				FRUST_DEFINES = "";
+				FRUST_FEATURES = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -318,6 +320,7 @@
 				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
 				FRUST_DEFINES = "";
+				FRUST_FEATURES = "";
 				FRUST_PROFILE = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;

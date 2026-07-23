@@ -29,6 +29,17 @@
 //! typically much softer/lower-contrast than Android's Material shadows
 //! (community convention, not an Apple-published spec — same "TUNABLE, not
 //! load-bearing" caveat as the M3 mapping above applies here too).
+//!
+//! # Per-brightness shadows
+//!
+//! [`ElevationLevel`] carries **separate** light/dark [`ShadowSpec`]s
+//! (`shadow_light`/`shadow_dark`), selected via [`ElevationLevel::shadow`].
+//! [`Elevation::m3`]/[`Elevation::cupertino`] duplicate the same v1 mapping
+//! into both slots — behavior-preserving, byte-identical rendered output on
+//! either brightness. A design language whose shadow recipe actually differs
+//! by brightness (e.g. Glyph, task 15) fills the two slots independently.
+
+use crate::color::Brightness;
 
 /// Y-offset, Gaussian blur standard deviation, and shadow color alpha for
 /// one elevation level's drop shadow. All lengths in logical px; `color_alpha`
@@ -55,23 +66,38 @@ pub enum SurfaceRole {
     SurfaceContainerHighest,
 }
 
-/// One elevation level: its dp value, v1 shadow spec, and surface-container
-/// role.
+/// One elevation level: its dp value, per-brightness v1 shadow specs, and
+/// surface-container role.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ElevationLevel {
     pub dp: f64,
-    pub shadow: ShadowSpec,
+    /// Shadow rendered on [`Brightness::Light`].
+    pub shadow_light: ShadowSpec,
+    /// Shadow rendered on [`Brightness::Dark`].
+    pub shadow_dark: ShadowSpec,
     pub surface_role: SurfaceRole,
 }
 
+impl ElevationLevel {
+    /// The `ShadowSpec` to render for the given brightness.
+    pub fn shadow(&self, brightness: Brightness) -> &ShadowSpec {
+        match brightness {
+            Brightness::Light => &self.shadow_light,
+            Brightness::Dark => &self.shadow_dark,
+        }
+    }
+}
+
 const fn level(dp: f64, surface_role: SurfaceRole) -> ElevationLevel {
+    let shadow = ShadowSpec {
+        y_offset: dp / 2.0 + 1.0,
+        blur_std_dev: dp,
+        color_alpha: 0.3,
+    };
     ElevationLevel {
         dp,
-        shadow: ShadowSpec {
-            y_offset: dp / 2.0 + 1.0,
-            blur_std_dev: dp,
-            color_alpha: 0.3,
-        },
+        shadow_light: shadow,
+        shadow_dark: shadow,
         surface_role,
     }
 }
@@ -79,13 +105,15 @@ const fn level(dp: f64, surface_role: SurfaceRole) -> ElevationLevel {
 /// The Cupertino v1 shadow mapping (see module docs) — same `dp` ladder as
 /// [`level`], subtler shadow math.
 const fn cupertino_level(dp: f64, surface_role: SurfaceRole) -> ElevationLevel {
+    let shadow = ShadowSpec {
+        y_offset: dp / 4.0,
+        blur_std_dev: dp * 0.6,
+        color_alpha: 0.12,
+    };
     ElevationLevel {
         dp,
-        shadow: ShadowSpec {
-            y_offset: dp / 4.0,
-            blur_std_dev: dp * 0.6,
-            color_alpha: 0.12,
-        },
+        shadow_light: shadow,
+        shadow_dark: shadow,
         surface_role,
     }
 }
@@ -149,9 +177,23 @@ mod tests {
     #[test]
     fn shadow_mapping_is_consistent_with_dp() {
         let e = Elevation::m3();
-        assert_eq!(e.level3.shadow.y_offset, 4.0);
-        assert_eq!(e.level3.shadow.blur_std_dev, 6.0);
-        assert_eq!(e.level3.shadow.color_alpha, 0.3);
+        assert_eq!(e.level3.shadow_light.y_offset, 4.0);
+        assert_eq!(e.level3.shadow_light.blur_std_dev, 6.0);
+        assert_eq!(e.level3.shadow_light.color_alpha, 0.3);
+    }
+
+    #[test]
+    fn m3_shadow_is_identical_on_both_brightnesses() {
+        // Behavior-preserving: M3's v1 mapping doesn't branch by brightness,
+        // so both slots hold the same value and the accessor returns it
+        // either way.
+        let e = Elevation::m3();
+        assert_eq!(e.level3.shadow_light, e.level3.shadow_dark);
+        assert_eq!(
+            e.level3.shadow(Brightness::Light),
+            e.level3.shadow(Brightness::Dark)
+        );
+        assert_eq!(*e.level3.shadow(Brightness::Light), e.level3.shadow_light);
     }
 
     #[test]
@@ -175,11 +217,17 @@ mod tests {
     #[test]
     fn cupertino_shadow_is_subtler_than_m3() {
         let e = Elevation::cupertino();
-        assert_eq!(e.level3.shadow.y_offset, 1.5);
-        assert!((e.level3.shadow.blur_std_dev - 3.6).abs() < 1e-9);
-        assert_eq!(e.level3.shadow.color_alpha, 0.12);
+        assert_eq!(e.level3.shadow_light.y_offset, 1.5);
+        assert!((e.level3.shadow_light.blur_std_dev - 3.6).abs() < 1e-9);
+        assert_eq!(e.level3.shadow_light.color_alpha, 0.12);
 
         let m3 = Elevation::m3();
-        assert!(e.level3.shadow.color_alpha < m3.level3.shadow.color_alpha);
+        assert!(e.level3.shadow_light.color_alpha < m3.level3.shadow_light.color_alpha);
+    }
+
+    #[test]
+    fn cupertino_shadow_is_identical_on_both_brightnesses() {
+        let e = Elevation::cupertino();
+        assert_eq!(e.level3.shadow_light, e.level3.shadow_dark);
     }
 }

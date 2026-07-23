@@ -10,3 +10,4 @@ parley.workspace = true
 peniko.workspace = true
 kurbo.workspace = true
 frust-scene.workspace = true
+thiserror.workspace = true

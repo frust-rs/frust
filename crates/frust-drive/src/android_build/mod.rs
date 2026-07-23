@@ -101,8 +101,19 @@ fn build_with_env(
 
     signing::check_release_signing(&android_dir, info.mode)?;
 
+    // Release-lean preflight (followup F2): a legacy app that predates the
+    // `lean` feature has it dropped here — with a one-time warning routed
+    // through this print-free core's `on_line` sink — so `cargo ndk` is never
+    // handed an undeclared `--features lean` (cargo's opaque hard error). A
+    // declaring app keeps byte-identical features and warns nothing.
+    let (features, warning) =
+        crate::cargo_manifest::resolve_release_features(project_dir, info.mode);
+    if let Some(warning) = warning {
+        on_line(&warning);
+    }
+
     let task = tasks::task_name(target, info.mode, info.flavor.as_deref());
-    let props = tasks::gradle_properties(target, &info.defines);
+    let props = tasks::gradle_properties(target, &info.defines, &features);
 
     let mut args: Vec<&str> = Vec::with_capacity(1 + props.len());
     args.push(task.as_str());
@@ -451,6 +462,98 @@ mod tests {
         assert!(
             err.to_string().contains("compile error in MainActivity.kt"),
             "{err}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Followup F2, legacy direction: a `--release` build against an app whose
+    /// Cargo.toml declares no `lean` feature drops it and warns once through
+    /// `on_line`, and the Gradle invocation carries NO `-Pfrust.cargoFeatures`
+    /// prop — never an undeclared `--features lean` cargo would reject. The
+    /// gradlew fixture is registered WITHOUT the cargoFeatures prop, so a
+    /// regression that kept `lean` would surface via the absent warning.
+    #[test]
+    fn release_legacy_app_drops_lean_and_warns() {
+        let dir = unique_project_dir("f2-legacy");
+        let android_dir = dir.join("android");
+        fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+        let out_dir = android_dir.join("app/build/outputs/apk/release");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+
+        let runner = preflight_ok_runner().with(
+            "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let target = AndroidArtifact::Apk {
+            split_per_abi: false,
+            abis: vec!["arm64-v8a".to_string()],
+        };
+        let build_info = info(BuildMode::Release, None);
+        let mut lines = Vec::new();
+        let result = build_with_env(&runner, &dir, &build_info, &target, &fake_env(), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        assert_eq!(result.paths, vec![out_dir.join("app-release.apk")]);
+        assert!(
+            lines.iter().any(|l| l.contains("lean")),
+            "legacy release build must warn about the missing `lean` feature: {lines:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Followup F2, declaring direction: an app that declares `lean` keeps it —
+    /// byte-identical `-Pfrust.cargoFeatures=bGVhbg==` (base64 "lean") — and
+    /// warns nothing. The gradlew fixture is registered WITH the cargoFeatures
+    /// prop; a regression that dropped `lean` would produce a shorter argv that
+    /// fails to match, erroring the build.
+    #[test]
+    fn release_declaring_app_keeps_lean_without_warning() {
+        let dir = unique_project_dir("f2-declaring");
+        let android_dir = dir.join("android");
+        fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
+        )
+        .unwrap();
+        let out_dir = android_dir.join("app/build/outputs/apk/release");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+
+        let runner = preflight_ok_runner().with(
+            "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a \
+-Pfrust.splitPerAbi=false -Pfrust.cargoFeatures=bGVhbg==",
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let target = AndroidArtifact::Apk {
+            split_per_abi: false,
+            abis: vec!["arm64-v8a".to_string()],
+        };
+        let build_info = info(BuildMode::Release, None);
+        let mut lines = Vec::new();
+        let result = build_with_env(&runner, &dir, &build_info, &target, &fake_env(), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        assert_eq!(result.paths, vec![out_dir.join("app-release.apk")]);
+        assert!(
+            !lines.iter().any(|l| l.contains("lean")),
+            "a declaring app must not warn: {lines:?}"
         );
 
         let _ = fs::remove_dir_all(&dir);

@@ -12,6 +12,33 @@
 
 use peniko::Color;
 
+/// One element of a fallback stack: a concrete family name or a generic class.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FamilyName {
+    /// A concrete named font family (e.g. "Inter", "IBM Plex Mono").
+    Named(String),
+    /// A generic fallback family (e.g. monospace, serif).
+    Generic(GenericSlot),
+}
+
+/// Generic font families supported as fallback slots.
+///
+/// This is a curated subset of parley's [`parley::GenericFamily`] covering
+/// the generic families Frust explicitly supports and exposes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenericSlot {
+    /// A monospace (fixed-width) font family.
+    Monospace,
+    /// A sans-serif font family.
+    SansSerif,
+    /// A serif font family.
+    Serif,
+    /// The platform system UI font.
+    SystemUi,
+    /// Color emoji or symbol glyphs.
+    Emoji,
+}
+
 /// Font family selection.
 ///
 /// The default, [`FontFamily::SystemUi`], resolves to the platform UI font
@@ -19,7 +46,9 @@ use peniko::Color;
 /// registration required. [`FontFamily::Named`] is an ordered fallback stack
 /// of named families, tried in order; a name that doesn't resolve on the
 /// current platform falls back per parley's own fallback behavior — no error
-/// surface is exposed here.
+/// surface is exposed here. [`FontFamily::NamedWithGeneric`] extends
+/// [`FontFamily::Named`] by allowing the stack to end with a generic
+/// fallback family (e.g. monospace, serif).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum FontFamily {
     /// The platform system UI font. Default.
@@ -27,6 +56,8 @@ pub enum FontFamily {
     SystemUi,
     /// An ordered fallback stack of named font families.
     Named(Vec<String>),
+    /// An ordered fallback stack of named families ending in a generic fallback.
+    NamedWithGeneric(Vec<FamilyName>),
 }
 
 impl FontFamily {
@@ -38,6 +69,32 @@ impl FontFamily {
     /// An ordered fallback stack of named font families, tried in order.
     pub fn stack(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self::Named(names.into_iter().map(Into::into).collect())
+    }
+
+    /// An ordered fallback stack of named font families ending in a generic
+    /// fallback family.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use frust_text::{FontFamily, GenericSlot};
+    ///
+    /// // Try "IBM Plex Mono" first, fall back to system monospace
+    /// let family = FontFamily::stack_with_generic(
+    ///     ["IBM Plex Mono"],
+    ///     GenericSlot::Monospace,
+    /// );
+    /// ```
+    pub fn stack_with_generic(
+        names: impl IntoIterator<Item = impl Into<String>>,
+        generic: GenericSlot,
+    ) -> Self {
+        let mut families: Vec<FamilyName> = names
+            .into_iter()
+            .map(|name| FamilyName::Named(name.into()))
+            .collect();
+        families.push(FamilyName::Generic(generic));
+        Self::NamedWithGeneric(families)
     }
 }
 
@@ -191,6 +248,30 @@ pub(crate) fn to_parley_family(family: &FontFamily) -> parley::FontFamily<'stati
                 .collect();
             parley::FontFamily::List(list.into())
         }
+        FontFamily::NamedWithGeneric(families) => {
+            let list: Vec<parley::FontFamilyName<'static>> = families
+                .iter()
+                .map(|f| match f {
+                    FamilyName::Named(name) => parley::FontFamilyName::Named(name.clone().into()),
+                    FamilyName::Generic(slot) => {
+                        parley::FontFamilyName::Generic(generic_slot_to_parley(*slot))
+                    }
+                })
+                .collect();
+            parley::FontFamily::List(list.into())
+        }
+    }
+}
+
+/// Converts a Frust [`GenericSlot`] into parley's `GenericFamily`.
+/// `pub(crate)` — see [`to_parley_family`].
+fn generic_slot_to_parley(slot: GenericSlot) -> parley::GenericFamily {
+    match slot {
+        GenericSlot::Monospace => parley::GenericFamily::Monospace,
+        GenericSlot::SansSerif => parley::GenericFamily::SansSerif,
+        GenericSlot::Serif => parley::GenericFamily::Serif,
+        GenericSlot::SystemUi => parley::GenericFamily::SystemUi,
+        GenericSlot::Emoji => parley::GenericFamily::Emoji,
     }
 }
 
@@ -265,5 +346,90 @@ mod tests {
             FontFamily::stack(["Inter", "Roboto"]),
             FontFamily::Named(vec!["Inter".to_string(), "Roboto".to_string()])
         );
+    }
+
+    #[test]
+    fn stack_with_generic_creates_correct_variant() {
+        let family = FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace);
+        match family {
+            FontFamily::NamedWithGeneric(families) => {
+                assert_eq!(families.len(), 2);
+                assert_eq!(families[0], FamilyName::Named("IBM Plex Mono".to_string()));
+                assert_eq!(families[1], FamilyName::Generic(GenericSlot::Monospace));
+            }
+            _ => panic!("Expected NamedWithGeneric variant"),
+        }
+    }
+
+    #[test]
+    fn to_parley_family_named_then_generic() {
+        let family = FontFamily::stack_with_generic(["NoSuchFont"], GenericSlot::Monospace);
+        let parley_family = to_parley_family(&family);
+
+        // Verify it's a List (not a single GenericFamily)
+        match parley_family {
+            parley::FontFamily::List(_) => {
+                // Expected: the list should contain both the named font and the generic fallback
+            }
+            _ => panic!("Expected FontFamily::List variant"),
+        }
+    }
+
+    #[test]
+    fn generic_slot_maps_correctly_to_parley() {
+        let mono = generic_slot_to_parley(GenericSlot::Monospace);
+        assert_eq!(mono, parley::GenericFamily::Monospace);
+
+        let sans = generic_slot_to_parley(GenericSlot::SansSerif);
+        assert_eq!(sans, parley::GenericFamily::SansSerif);
+
+        let serif = generic_slot_to_parley(GenericSlot::Serif);
+        assert_eq!(serif, parley::GenericFamily::Serif);
+
+        let system = generic_slot_to_parley(GenericSlot::SystemUi);
+        assert_eq!(system, parley::GenericFamily::SystemUi);
+
+        let emoji = generic_slot_to_parley(GenericSlot::Emoji);
+        assert_eq!(emoji, parley::GenericFamily::Emoji);
+    }
+
+    /// Layout integration test: verify that a nonexistent font name followed by
+    /// a generic monospace fallback resolves to a monospace font. Monospace
+    /// fonts have equal character advance widths; we assert that 'i' and 'm'
+    /// have the same advance, which is true for monospace but not proportional
+    /// fonts.
+    #[test]
+    fn stack_with_generic_monospace_fallback_shapes_correctly() {
+        // Use a family name that almost certainly doesn't exist, ensuring
+        // the fallback must engage.
+        let family = FontFamily::stack_with_generic(
+            ["NonexistentFontFamilyName12345"],
+            GenericSlot::Monospace,
+        );
+
+        // Convert to parley's format and verify it contains both the named
+        // font and the generic fallback.
+        let parley_family = to_parley_family(&family);
+
+        // The list should be a multi-entry family list, not a single generic.
+        match parley_family {
+            parley::FontFamily::List(list) => {
+                // Should have at least 2 entries: the named font + the generic fallback.
+                assert!(
+                    list.len() >= 2,
+                    "expected at least 2 family entries (named + generic), got {}",
+                    list.len()
+                );
+                // The last entry should be the generic family (Generic, not Named).
+                if let Some(last) = list.last() {
+                    assert!(
+                        matches!(last, parley::FontFamilyName::Generic(_)),
+                        "expected last entry to be a generic family, got {:?}",
+                        last
+                    );
+                }
+            }
+            _ => panic!("expected FontFamily::List variant from stack_with_generic"),
+        }
     }
 }

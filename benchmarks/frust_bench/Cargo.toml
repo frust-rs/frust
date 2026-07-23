@@ -57,6 +57,21 @@ frust-shell-common = { path = "../../crates/frust-shell-common" }
 # Conventions).
 frust-shared-preferences = { path = "../../plugins/shared-preferences" }
 
+# `log` facade dependency, present only so the release-only `lean` feature
+# below can raise the compiled-in log ceiling (release-lean build mode).
+# `frust-perf` instrumentation rides `log::info!`, so the ceiling MUST be a
+# release-only opt-in and never an always-on `features = [...]` line:
+# `release_max_level_*` keys off `debug_assertions`, which the
+# `[profile.profile]` inherits-release profile has OFF, so an unconditional
+# ceiling would also silence PROFILE-mode perf output — exactly the mode that
+# must keep it. The `frust` CLI enables `--features lean` for `--release`
+# builds only (riding the same features plumbing that turns on
+# `frust/perf-trace` for debug/profile), so release strips stray info/debug
+# log lines while keeping warn/error crash diagnostics, and profile keeps its
+# `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim
+# (release-lean plan, task 04/05; frust_bench synced at task 09).
+log = "0.4"
+
 # Dev-only: the headless tests drive Frust's `RenderRoot` directly (the
 # desktop shell's own rebuild/layout/paint seam) — no GPU, no window — the
 # same harness shape as `examples/bubblebench/tests/bench.rs`.
@@ -71,6 +86,14 @@ reactive_graph = "0.2"
 # `examples/bubblebench/Cargo.toml` (see `docs/DEVELOPMENT.md`'s Version-Pin
 # Policy hand-sync rule) — see any of those manifests for the full measured
 # rationale behind `lto = "fat"` + `codegen-units = 1`.
+[features]
+# Release-lean log ceiling — see the `log` dependency above for why this is a
+# release-only opt-in rather than an unconditional manifest feature. The CLI
+# passes `--features lean` for `--release` builds; debug/profile builds omit
+# it (and enable `frust/perf-trace` instead). Mirrors
+# `templates/app/Cargo.toml.tmpl`'s block verbatim.
+lean = ["log/release_max_level_warn"]
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

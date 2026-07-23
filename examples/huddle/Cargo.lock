@@ -1137,6 +1137,7 @@ dependencies = [
  "kurbo",
  "parley",
  "peniko",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1451,6 +1452,7 @@ dependencies = [
  "frust-scene",
  "frust-text",
  "kurbo",
+ "log",
  "peniko",
  "reactive_graph",
  "tokio",

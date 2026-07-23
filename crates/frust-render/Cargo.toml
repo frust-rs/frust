@@ -22,6 +22,14 @@ vello_cpu = { workspace = true, optional = true }
 # Experimental vello_cpu-backed CPU render tier (spec Phase 6, PLAN.md D4).
 # NOT default — the GPU (vello) path is unaffected when this is off.
 cpu-tier = ["dep:vello_cpu"]
+# Opt-in perf-tracing probes (release-lean plan, task 02): gates the
+# `FRUST_TRACE`-driven surface-caps/render-path probe log lines in
+# `context.rs`. NOT default — a build without this feature compiles neither
+# the probe bodies nor their `"frust-perf ..."` string literals. The
+# `FRUST_NO_DIRECT_SURFACE`/`FRUST_NO_SHADER_EFFECTS` kill switches and the
+# uncaptured-error handler are deliberately NOT behind this feature — they
+# must keep working in a release build with no features enabled.
+perf-trace = []
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_system_properties.workspace = true

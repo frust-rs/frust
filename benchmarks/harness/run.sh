@@ -36,7 +36,7 @@
 #            delivered to the process, so `resolve_initial()` cold-selects the
 #            scenario (no s1→scenario warm-switch flash), and the app's raw
 #            `frust-perf`/`bench-scenario` stdout is captured live off
-#            `--console`. A single signed release build serves every scenario.
+#            `--console`. A single signed profile build serves every scenario.
 #   flutter: scenario is baked at build time (`--dart-define=SCENARIO=<scn>`,
 #            one profile build per scenario — Dart `String.fromEnvironment` is
 #            compile-time). Flutter's `print` routes to os_log, which neither

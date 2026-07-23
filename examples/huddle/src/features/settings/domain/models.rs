@@ -85,13 +85,15 @@ pub fn scale_type_scale(type_scale: &mut TypeScale, factor: f32) {
 }
 
 /// The design-language selection: follow the platform (`System`) or force one
-/// of the two baselines.
+/// of the three baselines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DesignChoice {
     /// Follow the platform's own Material-vs-Cupertino default (paired with
     /// `System` brightness, this clears the override entirely).
     #[default]
     System,
+    /// Force the Glyph (terminal-native) baseline app-wide.
+    Glyph,
     /// Force the Material 3 baseline app-wide.
     Material3,
     /// Force the Cupertino (iOS) baseline app-wide.
@@ -100,8 +102,9 @@ pub enum DesignChoice {
 
 impl DesignChoice {
     /// Every choice, in selector order.
-    pub const ALL: [DesignChoice; 3] = [
+    pub const ALL: [DesignChoice; 4] = [
         DesignChoice::System,
+        DesignChoice::Glyph,
         DesignChoice::Material3,
         DesignChoice::Cupertino,
     ];
@@ -110,6 +113,7 @@ impl DesignChoice {
     pub fn label(self) -> &'static str {
         match self {
             DesignChoice::System => "System",
+            DesignChoice::Glyph => "Glyph",
             DesignChoice::Material3 => "Material 3",
             DesignChoice::Cupertino => "Cupertino",
         }
@@ -137,6 +141,7 @@ impl DesignChoice {
     /// `System` (see the module docs' navigation-survival note).
     pub fn from_design_language(lang: DesignLanguage) -> Self {
         match lang {
+            DesignLanguage::Glyph => DesignChoice::Glyph,
             DesignLanguage::Material3 => DesignChoice::Material3,
             DesignLanguage::Cupertino => DesignChoice::Cupertino,
         }
@@ -231,9 +236,11 @@ pub fn compose(
     }
 
     let base = match design {
+        DesignChoice::Glyph => Theme::glyph_baseline(),
         DesignChoice::Material3 => Theme::m3_baseline(),
         DesignChoice::Cupertino => Theme::cupertino_baseline(),
         DesignChoice::System => match current.design_language {
+            DesignLanguage::Glyph => Theme::glyph_baseline(),
             DesignLanguage::Material3 => Theme::m3_baseline(),
             DesignLanguage::Cupertino => Theme::cupertino_baseline(),
         },
@@ -343,6 +350,34 @@ mod tests {
     }
 
     #[test]
+    fn forcing_glyph_applies_the_glyph_baseline() {
+        let current = Theme::m3_baseline();
+        let theme = applied(compose2(
+            DesignChoice::Glyph,
+            BrightnessChoice::System,
+            &current,
+        ));
+        assert_eq!(theme.design_language, DesignLanguage::Glyph);
+        // Brightness axis stayed `System` → inherits `current`'s (light) value,
+        // not Glyph's own dark-first default.
+        assert_eq!(theme.brightness, Brightness::Light);
+    }
+
+    #[test]
+    fn system_design_resolves_glyph_from_the_ambient_theme() {
+        // Design axis `System` against a live Glyph theme must re-resolve the
+        // Glyph baseline, not silently fall back to Material3.
+        let current = Theme::glyph_baseline();
+        let theme = applied(compose2(
+            DesignChoice::System,
+            BrightnessChoice::Dark,
+            &current,
+        ));
+        assert_eq!(theme.design_language, DesignLanguage::Glyph);
+        assert_eq!(theme.brightness, Brightness::Dark);
+    }
+
+    #[test]
     fn choice_index_round_trips() {
         for choice in DesignChoice::ALL {
             assert_eq!(DesignChoice::from_index(choice.index()), choice);
@@ -351,6 +386,10 @@ mod tests {
 
     #[test]
     fn from_ambient_never_yields_system() {
+        assert_eq!(
+            DesignChoice::from_design_language(DesignLanguage::Glyph),
+            DesignChoice::Glyph,
+        );
         assert_eq!(
             DesignChoice::from_design_language(DesignLanguage::Cupertino),
             DesignChoice::Cupertino,

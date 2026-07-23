@@ -6,6 +6,7 @@
 //! Text on macOS with no registration) and a [`parley::LayoutContext`] scratch
 //! buffer reused across layout passes.
 
+use parley::fontique::Blob;
 use parley::style::StyleProperty;
 use peniko::Brush;
 
@@ -14,6 +15,28 @@ use crate::shape_cache::{DEFAULT_CAPACITY, ShapeCache, ShapeCacheStats, ShapeKey
 use crate::style::{
     TextStyle, to_parley_family, to_parley_line_height, to_parley_style, to_parley_weight,
 };
+
+/// A font family registered via [`TextContext::register_fonts`], reported back
+/// to the caller so it can resolve widget styles against the exact name(s)
+/// fontique assigned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredFamily {
+    /// The family name fontique resolved the registered face(s) into (from
+    /// the font's own `name` table, or an override).
+    pub name: String,
+    /// How many faces (weights/styles) were registered into this family from
+    /// the supplied data.
+    pub face_count: usize,
+}
+
+/// Errors from [`TextContext::register_fonts`].
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+pub enum FontError {
+    /// The supplied bytes contained no parseable font faces (invalid, empty,
+    /// or unrecognized data).
+    #[error("font data contained no parseable faces")]
+    NoFacesFound,
+}
 
 /// Owns parley's font matching and layout scratch state.
 ///
@@ -101,6 +124,65 @@ impl TextContext {
     /// type leaks through (scene-layer purity).
     pub fn shape_cache_stats(&self) -> ShapeCacheStats {
         self.shape_cache.stats()
+    }
+
+    /// Registers font faces from raw bytes (TTF/OTF, or a TTC/OTC
+    /// collection) so they resolve by family name via
+    /// [`crate::FontFamily::named`]/[`crate::FontFamily::stack`].
+    ///
+    /// Wraps fontique's [`parley::fontique::Collection::register_fonts`]. A
+    /// registered family **shadows** a same-named system family (fontique
+    /// 0.11 semantics: the registered map is checked before the system map),
+    /// so bundling a family already present on the platform (e.g. "Roboto")
+    /// deterministically wins over the platform's own copy.
+    ///
+    /// Always clears the shape cache on success — a same-named registered
+    /// family changes shaping without changing the cache key, so any layout
+    /// shaped before this call could otherwise be served stale. Returns
+    /// [`FontError::NoFacesFound`] (no panic) for invalid/empty data, an
+    /// empty byte slice, or bytes with no faces fontique can parse.
+    ///
+    /// **Caller-visible relayout contract**: registering fonts after a shell
+    /// has already laid out text does not retroactively re-shape anything
+    /// still cached elsewhere (e.g. a widget's own retained layout) — a shell
+    /// calling this must force `ChangeFlags::LAYOUT | PAINT` the same way a
+    /// theme swap does (see `docs/ARCHITECTURE.md`'s Theme delivery), so the
+    /// next layout pass re-shapes against the newly registered faces. This
+    /// crate only owns the shape-cache half of that contract.
+    pub fn register_fonts(&mut self, data: Vec<u8>) -> Result<Vec<RegisteredFamily>, FontError> {
+        let blob = Blob::from(data);
+        let registered = self.font_ctx.collection.register_fonts(blob, None);
+        if registered.is_empty() {
+            return Err(FontError::NoFacesFound);
+        }
+
+        let families = registered
+            .into_iter()
+            .map(|(family_id, faces)| RegisteredFamily {
+                name: self
+                    .font_ctx
+                    .collection
+                    .family_name(family_id)
+                    .unwrap_or_default()
+                    .to_string(),
+                face_count: faces.len(),
+            })
+            .collect();
+
+        self.clear_shape_cache();
+        Ok(families)
+    }
+
+    /// Drops every cached shaped layout, forcing the next [`Self::layout`]
+    /// call for any (text, style) pair to re-shape from scratch.
+    ///
+    /// Exposed (not just an internal helper) for the shell late-drain path
+    /// (a shell registering fonts after startup, once widgets may already
+    /// hold cached layouts elsewhere) — [`Self::register_fonts`] already
+    /// calls this internally on success, so a caller registering fonts
+    /// doesn't need to call it separately.
+    pub fn clear_shape_cache(&mut self) {
+        self.shape_cache = ShapeCache::new(DEFAULT_CAPACITY);
     }
 
     /// Borrows the parley font and layout contexts together, for constructing a

@@ -217,8 +217,17 @@ fn prepare_session(
         split_per_abi: false,
         abis: vec![abi],
     };
+    // Release-lean preflight (followup F2): drop an undeclared `lean` for a
+    // legacy app, warning once through this session's `on_line` sink, so
+    // `cargo ndk` never sees `--features lean` it can't resolve.
+    let (features, warning) =
+        crate::cargo_manifest::resolve_release_features(&project.root, info.mode);
+    if let Some(warning) = warning {
+        on_line(&warning);
+    }
+
     let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
-    let props = crate::android_build::tasks::gradle_properties(&target, &info.defines);
+    let props = crate::android_build::tasks::gradle_properties(&target, &info.defines, &features);
 
     on_line(&format!("Building `{}`…", project.app_id));
     let build_start = Instant::now();
@@ -618,6 +627,112 @@ mod tests {
             let build_info = info(BuildMode::Release, None);
             let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Followup F2, legacy direction: a `--release` run against an app
+        /// whose Cargo.toml declares no `lean` feature drops it and warns once
+        /// through this session's `on_line` sink; the Gradle invocation carries
+        /// no `-Pfrust.cargoFeatures` prop (the fixture is registered without
+        /// it), so a regression that kept `lean` would surface via the absent
+        /// warning. Stops at `adb install` like the sibling tests.
+        #[test]
+        fn release_legacy_app_drops_lean_and_warns() {
+            let dir = unique_project_dir("f2-legacy");
+            let android_dir = dir.join("android");
+            fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+            fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+            let apk_path = out_dir
+                .join("app-release.apk")
+                .to_string_lossy()
+                .into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Release, None);
+            let never = std::sync::atomic::AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let err = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &build_info,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            )
+            .err()
+            .expect("expected adb install failure");
+            assert!(err.to_string().contains("adb install"), "{err}");
+            assert!(
+                lines.iter().any(|l| l.contains("lean")),
+                "legacy release run must warn about the missing `lean` feature: {lines:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Followup F2, declaring direction: an app that declares `lean` keeps
+        /// it — the Gradle invocation carries `-Pfrust.cargoFeatures=bGVhbg==`
+        /// (base64 "lean"), registered exactly, so a regression that dropped it
+        /// would produce a shorter, non-matching argv and error early — and
+        /// warns nothing.
+        #[test]
+        fn release_declaring_app_keeps_lean_without_warning() {
+            let dir = unique_project_dir("f2-declaring");
+            let android_dir = dir.join("android");
+            fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+            fs::write(
+                dir.join("Cargo.toml"),
+                "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
+            )
+            .unwrap();
+            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+            let apk_path = out_dir
+                .join("app-release.apk")
+                .to_string_lossy()
+                .into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a \
+-Pfrust.splitPerAbi=false -Pfrust.cargoFeatures=bGVhbg==",
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Release, None);
+            let never = std::sync::atomic::AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let err = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &build_info,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            )
+            .err()
+            .expect("expected adb install failure");
+            assert!(err.to_string().contains("adb install"), "{err}");
+            assert!(
+                !lines.iter().any(|l| l.contains("lean")),
+                "a declaring app must not warn: {lines:?}"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }

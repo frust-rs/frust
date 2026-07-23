@@ -230,8 +230,9 @@ fn resolve_shadow(theme: Option<&Theme>) -> (f64, f64, Color) {
     match theme {
         Some(theme) => {
             let level = theme.elevation.level3;
-            let color = with_alpha(theme.scheme().shadow, level.shadow.color_alpha);
-            (level.shadow.blur_std_dev, level.shadow.y_offset, color)
+            let shadow = level.shadow(theme.brightness);
+            let color = with_alpha(theme.scheme().shadow, shadow.color_alpha);
+            (shadow.blur_std_dev, shadow.y_offset, color)
         }
         None => (
             FALLBACK_SHADOW_BLUR,

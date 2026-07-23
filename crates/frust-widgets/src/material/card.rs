@@ -172,8 +172,9 @@ fn resolve_shadow(theme: Option<&Theme>) -> (f64, f64, Color) {
     match theme {
         Some(theme) => {
             let level = theme.elevation.level1;
-            let color = with_alpha(theme.scheme().shadow, level.shadow.color_alpha);
-            (level.shadow.blur_std_dev, level.shadow.y_offset, color)
+            let shadow = level.shadow(theme.brightness);
+            let color = with_alpha(theme.scheme().shadow, shadow.color_alpha);
+            (shadow.blur_std_dev, shadow.y_offset, color)
         }
         None => (
             FALLBACK_SHADOW_BLUR,
@@ -548,6 +549,36 @@ mod tests {
         assert_eq!(rec.strokes.len(), 1);
         assert_eq!(rec.strokes[0].1, STROKE_WIDTH);
         assert_eq!(rec.strokes[0].2, OUTLINE_VARIANT);
+    }
+
+    #[test]
+    fn themed_elevated_paint_shadow_is_unchanged_on_m3_light() {
+        // Task 06: `ElevationLevel::shadow` gained a per-brightness split
+        // (`shadow_light`/`shadow_dark`), and the M3 v1 mapping duplicates
+        // the same value into both slots. This pins the elevated card's
+        // rendered shadow on `Brightness::Light` to `theme.elevation.level1`'s
+        // shadow spec, byte-identical to the pre-migration single-field
+        // output.
+        let theme = Theme::m3_baseline();
+        assert_eq!(theme.brightness, frust_theme::Brightness::Light);
+        let level1 = theme.elevation.level1;
+
+        let view: CardView<()> = elevated_card(leaf_any(40.0, 20.0));
+        let mut w = build(&view);
+        let rec = paint(&mut w, Size::new(100.0, 60.0), Some(&theme));
+
+        assert_eq!(rec.shadows.len(), 1);
+        assert_eq!(rec.shadows[0].3, level1.shadow_light.blur_std_dev);
+        assert_eq!(
+            rec.shadows[0].4.components[3],
+            level1.shadow_light.color_alpha
+        );
+        // The two brightness slots are identical for M3 (behavior-preserving
+        // duplication), so the accessor call resolves to the same values.
+        assert_eq!(
+            rec.shadows[0].3,
+            level1.shadow(theme.brightness).blur_std_dev
+        );
     }
 
     #[test]

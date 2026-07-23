@@ -5,6 +5,24 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Opt-in perf instrumentation (release-lean plan, Flutter-mode parity). When
+# ON, the `perf` module's `frust-perf`/`bench-scenario` emission compiles in and
+# the `FRUST_TRACE`/`FRUST_TRACE_RAW` runtime switches are live; when OFF (the
+# default), `enabled()`/`raw_enabled()` collapse to inlinable `false` constants
+# and every `frust-perf` string literal + its `log::info!` call is `#[cfg]`-ed
+# out, so a release build carries neither the code nor the strings. The public
+# `perf` API is identical in both configurations (shells need no call-site
+# changes) — the CLI turns this on for debug/profile builds and omits it for
+# release. Additive: nothing in a release invocation enables it, so cargo's
+# feature unification keeps it off unless a build explicitly opts in.
+perf-trace = []
+# Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain). Nothing
+# in this crate is itself feature-gated on it — `font_registry` registers
+# whatever bytes a caller pushes — this is purely a pass-through edge so the
+# facade's default-on `glyph-fonts` feature reaches frust-theme.
+glyph-fonts = ["frust-theme/glyph-fonts"]
+
 [dependencies]
 # Platform-agnostic shell plumbing: no jni/ndk/winit here, so the whole crate
 # compiles on every target (host and `*-linux-android`/iOS) with no cfg

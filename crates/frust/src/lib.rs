@@ -74,8 +74,8 @@
 pub use frust_core::component::{Component, ComponentView, component};
 pub use frust_core::view::{AnyView, View, any};
 pub use frust_widgets::{
-    Align, AlignView, Alignment, Axis, Button, ButtonView, Checkbox, CheckboxView, ChildKey,
-    Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
+    Align, AlignView, Alignment, Axis, Button, ButtonStyle, ButtonView, Checkbox, CheckboxView,
+    ChildKey, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
     GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView, IconWidget, Image,
     ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment, NavigatorController,
     NavigatorView, Padding, PaddingView, PageBuilder, PageTransition, PopResult, Radio, RadioView,
@@ -144,6 +144,37 @@ pub use frust_widgets::{
     show_cupertino_alert, tab_item,
 };
 
+/// The `motion` module (glyph-design-system task 12): declarative
+/// implicit-animation wrappers (`AnimatedOpacity`/`AnimatedScale` today;
+/// `switcher`/`patterns` land in later tasks) over `frust-core`'s `anim`
+/// vocabulary. Re-exported **wholesale**
+/// (`pub use frust_widgets::motion;`), mirroring `frust_widgets::icons`'s
+/// existing wholesale-module precedent — the only other one in this facade —
+/// so later types under `frust_widgets::motion` ride along under
+/// `frust::motion::*` with no further facade edits (see that module's own
+/// docs for the full rationale).
+///
+/// ```
+/// use frust::motion::{AnimatedOpacity, AnimatedOpacityView, AnimatedScale};
+/// use frust::text;
+///
+/// let _opacity: AnimatedOpacityView<()> = AnimatedOpacity(1.0, text("hi"));
+/// let _scale: frust::motion::AnimatedScaleView<()> = AnimatedScale(1.0, text("hi"));
+/// ```
+pub use frust_widgets::motion;
+
+/// The Glyph widget catalog (glyph-design-system tasks 17/20-26): the
+/// terminal-native components with no Material/Cupertino equivalent
+/// (badges/tags/alerts, loaders + toast, nav chrome, content cards, the
+/// terminal block + tooltip, and the command-palette overlay). Re-exported
+/// **wholesale** (`pub use frust_widgets::glyph;`), following
+/// `frust_widgets::icons`/`frust_widgets::motion`'s wholesale-module
+/// precedent, so every widget a later fill task adds under
+/// `frust_widgets::glyph` rides along under `frust::glyph::*` with no further
+/// facade edit. This scaffold ships the module and its (currently doc-only)
+/// stub submodules; the widgets themselves land in the fill tasks.
+pub use frust_widgets::glyph;
+
 mod back_glue;
 mod router_glue;
 
@@ -183,9 +214,20 @@ pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 /// assert_eq!(glass.chrome.blur_radius_intent, 75.0);
 /// assert!(!glass.control.is_opaque());
 /// ```
+///
+/// Also the composable-theming surface (glyph-design-system tasks 04/05/09/11/15):
+/// [`ThemeBuilder`] (`defineTheme`/`copyWith` analog), the no-lock-in typed
+/// extension slot ([`ThemeExtensions`]) plus its first two consumers
+/// [`StatusPalette`]/[`StatusColors`] (success/warning/info) and [`GlyphInk`]
+/// (Glyph's brightness-invariant terminal/tooltip ink), and the Glyph motion
+/// vocabulary ([`MotionDurations`]/[`EasingSet`]) — all flat-re-exported so an
+/// app authors a custom theme against `frust::*` alone. The Glyph baseline
+/// itself is [`Theme::glyph_baseline`].
 pub use frust_theme::{
-    Brightness, ColorScheme, DesignLanguage, Elevation, ElevationLevel, GlassFill, GlassMaterial,
-    GlassScale, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, SurfaceRole, Theme, TypeScale,
+    Brightness, ColorScheme, DesignLanguage, EasingSet, Elevation, ElevationLevel, GlassFill,
+    GlassMaterial, GlassScale, GlyphInk, MotionDurations, MotionScheme, MotionSpring, ShadowSpec,
+    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions,
+    TypeScale,
 };
 
 /// The color type every [`ColorScheme`] role is expressed in
@@ -220,6 +262,24 @@ pub use peniko::Color;
 /// set_app_theme(Theme::cupertino_baseline());
 /// ```
 pub use frust_shell_common::{clear_app_theme, set_app_theme};
+
+/// App-facing pending-font registry (glyph-design-system task 08):
+/// [`register_app_fonts`] pushes raw font bytes (TTF/OTF, or a TTC/OTC
+/// collection) to be registered into the running shell's `TextContext` the
+/// next time it drains this registry (construction time, and once per
+/// frame -- task 14's shell wiring). See
+/// `frust_shell_common::font_registry`'s module docs for the full layering
+/// rationale and thread contract (mirrors [`set_app_theme`]'s: a plain
+/// `Mutex`-guarded process-global, callable from any thread).
+///
+/// ```no_run
+/// // Push bundled font bytes (e.g. loaded via `include_bytes!` at the app
+/// // crate's own build) before or after the app starts running; the shell
+/// // picks them up on its next drain.
+/// let font_bytes: Vec<u8> = vec![];
+/// frust::register_app_fonts(font_bytes);
+/// ```
+pub use frust_shell_common::font_registry::register_app_fonts;
 
 /// The animation vocabulary (spec §8): the shell-fed frame clock ([`FrameTime`])
 /// plus the pure easing/interpolation/spring math a widget or app advances it

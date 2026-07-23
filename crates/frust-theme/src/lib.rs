@@ -17,18 +17,26 @@
 //! Every token table below carries its own source URL and retrieval date in
 //! its module's doc comments.
 
+pub mod builder;
 pub mod color;
 pub mod elevation;
+pub mod extensions;
 pub mod glass;
+pub mod glyph;
 pub mod motion;
 pub mod shape;
+pub mod status;
 pub mod theme;
 pub mod typography;
 
+pub use builder::ThemeBuilder;
 pub use color::{Brightness, ColorScheme};
 pub use elevation::{Elevation, ElevationLevel, ShadowSpec, SurfaceRole};
+pub use extensions::ThemeExtensions;
 pub use glass::{GlassFill, GlassMaterial, GlassScale};
-pub use motion::{MotionScheme, MotionSpring};
+pub use glyph::GlyphInk;
+pub use motion::{EasingSet, MotionDurations, MotionScheme, MotionSpring};
 pub use shape::ShapeScale;
+pub use status::{StatusColors, StatusPalette};
 pub use theme::{DesignLanguage, Theme};
 pub use typography::TypeScale;

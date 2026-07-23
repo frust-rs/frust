@@ -69,3 +69,37 @@ frust-text = { workspace = true }
 # Version-Pin Policy); `frust-widgets` already depends on it non-dev, this
 # only adds the dev-only copy the facade's own tests need.
 image = { workspace = true }
+
+[features]
+# Default-on Glyph fonts (gf2, glyph-fonts opt-out chain): the root workspace
+# `frust-theme` edge sets `default-features = false`, so nothing pulls in the
+# bundled Space Mono/IBM Plex Mono bytes (`frust-theme::glyph::fonts`, ~1MB)
+# unless something in the graph asks for `frust-theme/glyph-fonts` — this is
+# that ask, on by default so a normal app build keeps today's zero-config
+# Glyph experience unchanged. An app opting out builds with
+# `default-features = false` on its own `frust` dependency (see
+# `templates/app/Cargo.toml.tmpl`'s comment) and re-adds any other default it
+# still wants (there are none today). Forwards through every direct edge to
+# frust-theme in this crate's transitive graph (mirrors the `perf-trace`
+# chain's shape below, inverted: default-ON instead of default-off); Cargo
+# applies each shell's feature per target the same way perf-trace does —
+# desktop's feature is a no-op on Android, Android/iOS's are no-ops off their
+# own target — so listing all of them is safe on every target.
+default = ["glyph-fonts"]
+glyph-fonts = [
+    "frust-widgets/glyph-fonts",
+    "frust-shell-common/glyph-fonts",
+    "frust-shell-desktop/glyph-fonts",
+    "frust-shell-android/glyph-fonts",
+    "frust-shell-ios/glyph-fonts",
+]
+# Opt-in perf-trace instrumentation: re-exports perf-trace from all three shells.
+# Empty by default (opt-in survives cargo's additive unification; the CLI is the
+# sole enabler). Cargo applies each shell's feature per target: desktop's feature
+# activates only on non-Android targets; Android/iOS features activate only on
+# their respective targets.
+perf-trace = [
+    "frust-shell-desktop/perf-trace",
+    "frust-shell-android/perf-trace",
+    "frust-shell-ios/perf-trace",
+]

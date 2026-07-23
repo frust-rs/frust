@@ -165,11 +165,21 @@ fn run_desktop_fallback(
     hooks: WatchHooks,
 ) -> Result<u8> {
     println!("No Android device connected; falling back to `cargo run` (desktop preview).");
-    let args = desktop_cargo_run_args(info);
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    // Release-lean preflight (followup F2): a legacy app (no declared `lean`)
+    // has it dropped here — with a one-time warning to stdout (the CLI
+    // front-end owns printing) — so the desktop `cargo run` never carries an
+    // undeclared `--features lean` and cargo's opaque hard error. The `frust`
+    // crate's own `perf-trace` (debug/profile) is never filtered.
+    let (features, warning) =
+        frust_drive::cargo_manifest::resolve_release_features(&cwd, info.mode);
+    if let Some(warning) = warning {
+        println!("{warning}");
+    }
+    let args = desktop_cargo_run_args_with(info, &features);
     let env = desktop_cargo_run_env(info, render_tier);
 
     if watch {
-        let cwd = std::env::current_dir().context("reading current directory")?;
         return run_desktop_watch(runner, &args, &env, &cwd, hooks);
     }
 
@@ -480,11 +490,35 @@ fn drain_available_lines(
 /// The `cargo run` argv the desktop fallback spawns: always `run`, plus the
 /// build mode's cargo profile arg (`[]`/`--profile profile`/`--release`) so
 /// a `frust run --release`/`--profile` desktop preview builds in the
-/// requested profile instead of always debug.
-fn desktop_cargo_run_args(info: &BuildInfo) -> Vec<&'static str> {
+/// requested profile instead of always debug, plus the resolved cargo
+/// `features` (`--features frust/perf-trace` for debug/profile, `--features
+/// lean` for release — release-lean plan, task 04) so the desktop preview
+/// matches the device pipelines: instrumentation compiled IN for debug/profile,
+/// the log ceiling for release.
+///
+/// `features` is the release-lean-preflight-resolved list
+/// (`frust_drive::cargo_manifest::resolve_release_features`): a legacy app
+/// whose manifest lacks `lean` arrives here with it already dropped, so the
+/// argv simply omits `--features lean` rather than passing an undeclared
+/// feature to `cargo run` (followup F2).
+fn desktop_cargo_run_args_with(info: &BuildInfo, features: &[&'static str]) -> Vec<&'static str> {
     let mut args = vec!["run"];
     args.extend_from_slice(info.mode.cargo_profile_arg());
+    for &feature in features {
+        args.push("--features");
+        args.push(feature);
+    }
     args
+}
+
+/// The pure mode → argv mapping (declaring-app / debug / profile case): every
+/// feature `BuildMode::cargo_features` selects, unfiltered. Production always
+/// goes through [`desktop_cargo_run_args_with`] with the preflight-resolved
+/// list; this thin wrapper exists for the unit tests that assert the
+/// byte-identical mapping a declaring app still gets.
+#[cfg(test)]
+fn desktop_cargo_run_args(info: &BuildInfo) -> Vec<&'static str> {
+    desktop_cargo_run_args_with(info, info.mode.cargo_features())
 }
 
 /// The env pairs [`run_desktop_fallback`]'s `cargo run` is spawned with:
@@ -630,15 +664,83 @@ mod tests {
         let info = profile_info();
         assert_eq!(
             desktop_cargo_run_args(&info),
-            vec!["run", "--profile", "profile"]
+            vec![
+                "run",
+                "--profile",
+                "profile",
+                "--features",
+                "frust/perf-trace"
+            ]
         );
         let env = desktop_cargo_run_env(&info, None);
         assert!(env.contains(&("FRUST_TRACE", "1")), "{env:?}");
     }
 
     #[test]
-    fn desktop_cargo_run_args_default_debug_is_bare_run() {
-        assert_eq!(desktop_cargo_run_args(&debug_info()), vec!["run"]);
+    fn desktop_cargo_run_args_default_debug_carries_perf_trace_feature() {
+        // Debug desktop preview compiles instrumentation in via
+        // `--features frust/perf-trace` (release-lean plan, task 04).
+        assert_eq!(
+            desktop_cargo_run_args(&debug_info()),
+            vec!["run", "--features", "frust/perf-trace"]
+        );
+    }
+
+    #[test]
+    fn desktop_cargo_run_args_release_carries_lean_not_perf_trace() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                release: true,
+                ..Default::default()
+            }
+            .into_drive(),
+            BuildMode::Debug,
+        )
+        .unwrap();
+        assert_eq!(
+            desktop_cargo_run_args(&info),
+            vec!["run", "--release", "--features", "lean"]
+        );
+    }
+
+    /// Followup F2, legacy direction: a release desktop preview whose
+    /// preflight resolved to an EMPTY feature list (a legacy app that dropped
+    /// `lean`) must produce argv with `--release` but no `--features` at all —
+    /// never an undeclared `--features lean` cargo would reject.
+    #[test]
+    fn desktop_cargo_run_args_with_dropped_lean_omits_features() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                release: true,
+                ..Default::default()
+            }
+            .into_drive(),
+            BuildMode::Debug,
+        )
+        .unwrap();
+        assert_eq!(
+            desktop_cargo_run_args_with(&info, &[]),
+            vec!["run", "--release"]
+        );
+    }
+
+    /// Followup F2, declaring direction: a declaring app resolves to
+    /// `["lean"]`, giving byte-identical argv to the pre-F2 pure mapping.
+    #[test]
+    fn desktop_cargo_run_args_with_declared_lean_matches_pure_mapping() {
+        let info = BuildInfo::from_args(
+            BuildArgs {
+                release: true,
+                ..Default::default()
+            }
+            .into_drive(),
+            BuildMode::Debug,
+        )
+        .unwrap();
+        assert_eq!(
+            desktop_cargo_run_args_with(&info, &["lean"]),
+            vec!["run", "--release", "--features", "lean"]
+        );
     }
 
     #[test]
@@ -649,7 +751,7 @@ mod tests {
         // override set; desktop_cargo_run_env's own tests above cover the
         // env-pair construction itself.
         let runner = FakeProcessRunner::new().with(
-            "cargo run",
+            "cargo run --features frust/perf-trace",
             Output {
                 success: true,
                 stdout: String::new(),

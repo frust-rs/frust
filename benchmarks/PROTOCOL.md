@@ -73,20 +73,44 @@ so those environmental controls and S7 metrics are uncontrolled/unavailable
   extensions the framework's own tracing/timeline tooling depends on, so
   it cannot be traced at all. Profile mode is Flutter's documented
   stand-in for "release-like performance, traceable."
-- **Frust runs in `--release`.** Frust has no profile-mode concept — its
-  release profile (fat LTO, `codegen-units = 1`, `strip = "symbols"`,
-  `panic = "abort"`; see `docs/DEVELOPMENT.md`'s Release-profile
-  hardening) is real production config, and instrumentation
-  (`FRUST_TRACE`/`FRUST_TRACE_RAW`) is a runtime-gated log line, not a
-  compile-mode restriction, so it costs nothing extra to leave wired in a
-  release build.
-- **The asymmetry is real and stated up front, not hidden**: Flutter
-  profile mode is close to but not identical to a Flutter release build
-  (RESEARCH.md §7). Where practical, the harness additionally records a
-  Flutter **release**-build in-app `SchedulerBinding.addTimingsCallback`
-  series as a cross-check (no service-extension dependency, so it works
-  in release) — reported alongside, never substituted for, the profile-mode
-  number that is the headline comparison.
+- **Frust runs in `--profile`.** Like Flutter, Frust now has a dedicated
+  profile mode for on-device measurement. The `--profile` build uses
+  release-level optimizations (fat LTO, `codegen-units = 1`, `strip =
+  "symbols"` at link time) with debug symbols retained, and with the
+  `perf-trace` feature enabled at compile time so `FRUST_TRACE`/`FRUST_TRACE_RAW`
+  instrumentation is compiled IN (not runtime-gated or dormant). This gives
+  **both frameworks measured in their respective profile modes** — a fairness
+  improvement: Frust is now measured under conditions closer to release
+  performance (release optimization profile) while keeping instrumentation
+  compiled in, exactly as Flutter's profile mode does. See the METHODOLOGY
+  BREAK section below for comparability notes.
+
+## 2.5 Methodology Break (2026-07-23, post–Phase-11.A)
+
+**Results recorded before 2026-07-23 are not directly comparable with results
+recorded after without an A/B measurement to bound the delta.**
+
+Prior to this protocol update, Frust benchmark scenarios ran in `--release`
+mode with instrumentation compiled in but runtime-dormant (environment checks
+bypassed the logging at call sites). Results captured under that configuration
+(dormant-instrumentation release builds) reflected release-mode performance
+with instrumentation overhead compiled in but not running.
+
+**As of 2026-07-23**, Frust benchmark scenarios run in `--profile` mode (the
+same mode used for development/debugging). This build uses release-level
+optimizations but with instrumentation (`FRUST_TRACE`/`FRUST_TRACE_RAW`)
+compiled in and **active** (not runtime-dormant). The instrumentation activity
+may introduce measurable timing overhead compared to a dormant-instrumentation
+baseline — this is analogous to the documented Flutter profile-vs-release
+difference (§2).
+
+**Comparability:** To quantify the release-vs-profile delta on Frust and ensure
+results are interpreted correctly, **task 09 (device A/B gate)** runs S1 + S3
+scenarios in both modes on a controlled device (OnePlus 9), recording both
+release and profile measurements side-by-side. That bounded delta is then
+documented in `RESULTS.md` as a deviation note for the associated run. All new
+results going forward use `--profile` and should not be directly compared
+against pre-2026-07-23 baselines without reference to the task-09 delta.
 
 ## 3. Environmental controls
 

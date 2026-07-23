@@ -5,14 +5,18 @@
 //! [`Theme::from_paint_ctx`]/[`Theme::from_layout_ctx`] wrappers below recover
 //! it in one line.
 
+use std::any::Any;
+
 use frust_core::widget::{LayoutCtx, PaintCtx};
 use frust_text::TextStyle;
 
 use crate::color::{Brightness, ColorScheme};
 use crate::elevation::Elevation;
+use crate::extensions::ThemeExtensions;
 use crate::glass::GlassScale;
 use crate::motion::MotionScheme;
 use crate::shape::ShapeScale;
+use crate::status::StatusPalette;
 use crate::typography::TypeScale;
 
 /// Which design language a [`Theme`] was built from — a `Theme` itself stays
@@ -29,6 +33,12 @@ pub enum DesignLanguage {
     Material3,
     /// Cupertino (iOS).
     Cupertino,
+    /// Glyph — this crate's own design language (PLAN.md Phase 2). Not yet
+    /// the default and has no baseline constructor yet (no
+    /// `Theme::glyph_baseline` — that lands with the Glyph token module,
+    /// task 15); this variant exists so downstream exhaustive matches can be
+    /// patched ahead of the baseline landing.
+    Glyph,
 }
 
 /// A full design-token bundle: paired light/dark color schemes, the type
@@ -48,14 +58,30 @@ pub struct Theme {
     pub glass: GlassScale,
     pub brightness: Brightness,
     pub design_language: DesignLanguage,
+    /// The no-lock-in typed extension slot (PLAN.md Phase 2 step 2, spec's
+    /// Flutter `ThemeExtension` analog) — see `crate::extensions` and
+    /// [`Theme::extension`]. `Arc`-backed internally, so cloning a `Theme`
+    /// (required at both delivery paths — the process-global override slot
+    /// and the reactive `provide_context` copy) stays cheap regardless of
+    /// how many extensions are attached.
+    pub extensions: ThemeExtensions,
 }
 
 impl Theme {
     /// The Material 3 baseline theme: baseline light/dark color schemes,
     /// the M3 type scale (built from `TextStyle::default()`), the M3 shape
     /// scale, the M3 elevation table, and the M3 Expressive motion scheme.
-    /// Starts in [`Brightness::Light`].
+    /// Starts in [`Brightness::Light`]. Attaches [`StatusPalette::m3`] as a
+    /// pre-populated extension (see [`Theme::extension`]) so
+    /// `extension::<StatusPalette>()` is always `Some` on this baseline.
+    ///
+    /// Not `const` (unlike the `ColorScheme`/`ShapeScale`/… constructors it
+    /// composes): `ThemeExtensions`' internal `HashMap` construction isn't
+    /// const-evaluable, and this constructor was already a plain `fn` before
+    /// this field existed (no caller relies on const-ness).
     pub fn m3_baseline() -> Self {
+        let mut extensions = ThemeExtensions::new();
+        extensions.insert(StatusPalette::m3());
         Self {
             light: ColorScheme::m3_baseline_light(),
             dark: ColorScheme::m3_baseline_dark(),
@@ -66,6 +92,7 @@ impl Theme {
             glass: GlassScale::opaque_material(),
             brightness: Brightness::Light,
             design_language: DesignLanguage::Material3,
+            extensions,
         }
     }
 
@@ -75,8 +102,13 @@ impl Theme {
     /// elevation table, and the Cupertino motion scheme. Starts in
     /// [`Brightness::Light`]. Shells still hardcode `Theme::m3_baseline()`
     /// as of this task — wiring a shell to pick this baseline instead is a
-    /// later task's (04) override seam, not this one's.
+    /// later task's (04) override seam, not this one's. Attaches
+    /// [`StatusPalette::m3`] as a pre-populated extension (Cupertino has no
+    /// published success/warning/info equivalent either, so it shares the
+    /// M3 default rather than going unset — see [`Theme::extension`]).
     pub fn cupertino_baseline() -> Self {
+        let mut extensions = ThemeExtensions::new();
+        extensions.insert(StatusPalette::m3());
         Self {
             light: ColorScheme::cupertino_light(),
             dark: ColorScheme::cupertino_dark(),
@@ -87,6 +119,7 @@ impl Theme {
             glass: GlassScale::ios27(),
             brightness: Brightness::Light,
             design_language: DesignLanguage::Cupertino,
+            extensions,
         }
     }
 
@@ -134,6 +167,24 @@ impl Theme {
     /// [`Theme::from_paint_ctx`].
     pub fn from_layout_ctx<'a>(ctx: &'a LayoutCtx<'_>) -> Option<&'a Theme> {
         ctx.theme_as::<Theme>()
+    }
+
+    /// Recover a typed extension previously attached via
+    /// `self.extensions.insert::<T>(..)`, or `None` if nothing of that type
+    /// was ever attached — see `crate::extensions`' module docs for the
+    /// no-lock-in rationale. A one-line convenience wrapper over
+    /// [`ThemeExtensions::get`].
+    pub fn extension<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self.extensions.get::<T>()
+    }
+
+    /// Start a [`crate::builder::ThemeBuilder`] over `self` as the baseline —
+    /// the `defineTheme`/`copyWith` analog (PLAN.md Phase 2 step 1). See
+    /// `crate::builder`'s module docs for the full layered-precedence
+    /// contract (baseline → whole-group swaps → per-token closure edits →
+    /// extensions).
+    pub fn builder(base: Theme) -> crate::builder::ThemeBuilder {
+        crate::builder::ThemeBuilder::new(base)
     }
 }
 
@@ -236,5 +287,59 @@ mod tests {
         // Light stays light — the builder isn't a one-way flip.
         let theme = Theme::m3_baseline().with_brightness(Brightness::Light);
         assert_eq!(theme.brightness, Brightness::Light);
+    }
+
+    #[test]
+    fn both_baselines_carry_a_status_palette_extension() {
+        // Acceptance criterion 1: `extension::<StatusPalette>()` is `Some`
+        // for both built-in baselines.
+        use crate::status::StatusPalette;
+
+        assert_eq!(
+            Theme::m3_baseline().extension::<StatusPalette>(),
+            Some(&StatusPalette::m3())
+        );
+        assert_eq!(
+            Theme::cupertino_baseline().extension::<StatusPalette>(),
+            Some(&StatusPalette::m3())
+        );
+    }
+
+    #[test]
+    fn custom_extension_type_round_trips() {
+        // Acceptance criterion 1: a custom user type round-trips
+        // insert -> get, alongside the pre-attached `StatusPalette`.
+        #[derive(Debug, PartialEq)]
+        struct AppTokens {
+            brand_name: &'static str,
+        }
+
+        let mut theme = Theme::m3_baseline();
+        assert!(theme.extension::<AppTokens>().is_none());
+
+        theme.extensions.insert(AppTokens { brand_name: "Acme" });
+        assert_eq!(
+            theme.extension::<AppTokens>(),
+            Some(&AppTokens { brand_name: "Acme" })
+        );
+
+        // The pre-attached extension is unaffected by inserting another type.
+        use crate::status::StatusPalette;
+        assert_eq!(
+            theme.extension::<StatusPalette>(),
+            Some(&StatusPalette::m3())
+        );
+    }
+
+    #[test]
+    fn theme_extensions_field_survives_clone() {
+        #[derive(Debug, PartialEq)]
+        struct Marker;
+
+        let mut theme = Theme::m3_baseline();
+        theme.extensions.insert(Marker);
+
+        let cloned = theme.clone();
+        assert_eq!(cloned.extension::<Marker>(), Some(&Marker));
     }
 }

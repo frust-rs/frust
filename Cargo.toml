@@ -217,7 +217,14 @@ frust-core = { path = "crates/frust-core" }
 frust-scene = { path = "crates/frust-scene" }
 frust-render = { path = "crates/frust-render" }
 frust-text = { path = "crates/frust-text" }
-frust-theme = { path = "crates/frust-theme" }
+# `default-features = false` (gf2, glyph-fonts opt-out): this is the top of
+# the real opt-out chain — frust-theme's own `glyph-fonts` default no longer
+# reaches an app build through this edge. Every consumer that needs the
+# bundled Space Mono/IBM Plex Mono bytes back re-requests them through its
+# own `glyph-fonts` feature (mirroring the perf-trace chain's shape,
+# inverted: default-ON at the facade top instead of default-off) — see
+# `crates/frust/Cargo.toml`'s `default = ["glyph-fonts"]`.
+frust-theme = { path = "crates/frust-theme", default-features = false }
 frust-widgets = { path = "crates/frust-widgets" }
 frust-reactive = { path = "crates/frust-reactive" }
 frust-plugin = { path = "crates/frust-plugin" }

@@ -39,6 +39,17 @@ clean-signals-frust = { path = "{{ frust_path }}/../../plugins/clean-signals-fru
 # --arch clean-signals`'s help text).
 clean-signals = { path = "{{ frust_path }}/../../../clean-signals-rs/crates/clean-signals" }
 
+# `log` facade dependency for the release-only `lean` feature below — mirrors
+# the default `Cargo.toml.tmpl`'s block verbatim (the `frust` CLI passes
+# `--features lean` for every `--release` build regardless of scaffold arch, so
+# this variant must declare the feature too or a release build fails on an
+# unknown feature). See `Cargo.toml.tmpl` for the full release-lean rationale.
+log = "0.4"
+
+[features]
+# Release-lean log ceiling (release-only opt-in — see `Cargo.toml.tmpl`).
+lean = ["log/release_max_level_warn"]
+
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
 # store distribution (spec §12.2). Mirrors the default template's
 # `Cargo.toml.tmpl` block verbatim (not covered by the `profile_sync`
