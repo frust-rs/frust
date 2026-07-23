@@ -20,9 +20,9 @@ pub mod pages;
 use frust::motion::patterns::{GlyphSlide, SlideDirection};
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get, GetUntracked,
-    MotionScheme, NavigatorController, Padding, RwSignal, Set, SizedBox, Stack, Theme,
-    TransitionSpec, any, button, inflexible, navigator, scroll_view, set_app_theme, text,
+    AnyView, Axis, Brightness, Component, EdgeInsets, FlexView, Get, GetUntracked, MotionScheme,
+    NavigatorController, Padding, RwSignal, Set, SizedBox, Stack, Theme, TransitionSpec, any,
+    button, inflexible, navigator, scroll_view, set_app_theme, text,
 };
 
 use pages::SECTION_LABELS;
@@ -116,7 +116,14 @@ fn header_row(state: &CatalogState) -> AnyView<CatalogState> {
     let title = inflexible(
         text("Glyph Catalog")
             .size(20.0)
-            .color(Color::from_rgb8(0xFF, 0xB6, 0x27)),
+            // Live accent-text role — resolves per-brightness (round-0 review:
+            // the fixed dark amber failed AA on the light surface).
+            .color(
+                frust::use_context::<frust::Theme>()
+                    .unwrap_or_else(frust::Theme::glyph_baseline)
+                    .scheme()
+                    .primary,
+            ),
     );
 
     let brightness_btn = inflexible(button(brightness_label, |state: &mut CatalogState| {

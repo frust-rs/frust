@@ -24,15 +24,31 @@ use frust::motion::switcher::pattern_switcher;
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
     MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme, TransitionSpec, Update,
-    any, button, inflexible, keyed, switch, text,
+    any, button, inflexible, keyed, switch, text, use_context,
 };
 
 use crate::CatalogState;
 
 /// Glyph accent amber — the reference build's `--accent-amber`.
-const AMBER: Color = Color::from_rgb8(0xFF, 0xB6, 0x27);
+/// Live-theme accent-text role (`primary`) (falls back to the Glyph baseline pre-context, mirroring
+/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
+/// broke AA under the Light toggle).
+fn amber() -> Color {
+    use_context::<Theme>()
+        .unwrap_or_else(Theme::glyph_baseline)
+        .scheme()
+        .primary
+}
 /// A muted caption ink for the per-demo timing notes.
-const MUTED: Color = Color::from_rgb8(0x9A, 0x92, 0x80);
+/// Live-theme muted-text role (`on_surface_variant`) (falls back to the Glyph baseline pre-context, mirroring
+/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
+/// broke AA under the Light toggle).
+fn muted() -> Color {
+    use_context::<Theme>()
+        .unwrap_or_else(Theme::glyph_baseline)
+        .scheme()
+        .on_surface_variant
+}
 
 /// Defines a `fn $name() -> RwSignal<$ty>` returning a screen-local signal
 /// cached in a `thread_local!` and lazily created (with self-heal, mirroring
@@ -72,12 +88,12 @@ local_sig!(boot_replay_sig, usize, 0); // 11 boot sequence
 
 /// A demo heading in accent amber.
 fn label(s: impl Into<String>) -> AnyView<CatalogState> {
-    any(text(s).size(13.0).color(AMBER))
+    any(text(s).size(13.0).color(amber()))
 }
 
 /// A muted per-demo caption (timing notes, reduced-motion pointer).
 fn caption(s: impl Into<String>) -> AnyView<CatalogState> {
-    any(text(s).size(11.0).color(MUTED))
+    any(text(s).size(11.0).color(muted()))
 }
 
 /// A fixed-height vertical spacer between demo blocks.
@@ -100,7 +116,7 @@ fn token_table(m: &MotionScheme) -> FlexChild<CatalogState> {
     let e = m.easing;
     let dur = |name: &str, ms: f64| inflexible(text(format!("{name:<11}{ms:>4.0}ms")).size(12.0));
     let ease = |name: &str, curve: String| {
-        inflexible(text(format!("{name:<9}{curve}")).size(11.0).color(MUTED))
+        inflexible(text(format!("{name:<9}{curve}")).size(11.0).color(muted()))
     };
     block(vec![
         inflexible(label("Motion tokens")),
@@ -232,7 +248,7 @@ fn demo_sheet() -> FlexChild<CatalogState> {
                         FlexView::new(
                             Axis::Vertical,
                             vec![
-                                inflexible(text("Bottom sheet").size(15.0).color(AMBER)),
+                                inflexible(text("Bottom sheet").size(15.0).color(amber())),
                                 gap(8.0),
                                 inflexible(
                                     text("Slides up at 340ms; slides back at 150ms.").size(12.0),
@@ -340,7 +356,9 @@ fn demo_log() -> FlexChild<CatalogState> {
 fn card_view(n: usize) -> AnyView<CatalogState> {
     any(Padding(
         EdgeInsets::all(24.0),
-        text(format!("Demo card {}", n + 1)).size(18.0).color(AMBER),
+        text(format!("Demo card {}", n + 1))
+            .size(18.0)
+            .color(amber()),
     ))
 }
 

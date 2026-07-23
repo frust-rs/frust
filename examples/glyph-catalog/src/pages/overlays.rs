@@ -26,21 +26,39 @@ use frust::glyph::{
 };
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    NavigatorController, Padding, PageTransition, PopResult, RwSignal, Set, SizedBox,
-    TransitionSpec, any, button, inflexible, text,
+    NavigatorController, Padding, PageTransition, PopResult, RwSignal, Set, SizedBox, Theme,
+    TransitionSpec, any, button, inflexible, text, use_context,
 };
 
 use crate::CatalogState;
 
 /// Muted subhead ink (Glyph dark `fg-muted`), matching the reference build's
 /// `.subhead` treatment for each overlay's label.
-const SUBHEAD_INK: Color = Color::from_rgb8(0xa3, 0x9c, 0x88);
+/// Live-theme muted-text role (`on_surface_variant`) (falls back to the Glyph baseline pre-context, mirroring
+/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
+/// broke AA under the Light toggle).
+fn subhead_ink() -> Color {
+    use_context::<Theme>()
+        .unwrap_or_else(Theme::glyph_baseline)
+        .scheme()
+        .on_surface_variant
+}
 /// Result-caption ink (Glyph dark accent `#ffb627`) — the same amber used for
 /// the app title in `crate::header_row`.
-const CAPTION_INK: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
+/// Live-theme accent-text role (`primary`) (falls back to the Glyph baseline pre-context, mirroring
+/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
+/// broke AA under the Light toggle).
+fn caption_ink() -> Color {
+    use_context::<Theme>()
+        .unwrap_or_else(Theme::glyph_baseline)
+        .scheme()
+        .primary
+}
 /// Pane-picker row glyph ink (matches [`CAPTION_INK`] — the reference sheet
 /// demo's `.sheet-row .g` amber glyph column).
-const SHEET_GLYPH_INK: Color = CAPTION_INK;
+fn sheet_glyph_ink() -> Color {
+    caption_ink()
+}
 
 /// The palette's + every overlay's last-result caption, bundled so a single
 /// `thread_local!` cache (see the [module docs](self)) covers both signals.
@@ -112,12 +130,12 @@ fn filter_items(query: &str) -> Vec<PaletteItem> {
 
 /// A muted section subhead (mirrors the reference build's `.subhead`).
 fn subhead(label: &str) -> AnyView<CatalogState> {
-    any(text(label.to_string()).size(11.5).color(SUBHEAD_INK))
+    any(text(label.to_string()).size(11.5).color(subhead_ink()))
 }
 
 /// The last-result caption row (empty until a dialog/palette/sheet closes).
 fn caption_view(caption: &str) -> AnyView<CatalogState> {
-    any(text(caption.to_string()).size(12.5).color(CAPTION_INK))
+    any(text(caption.to_string()).size(12.5).color(caption_ink()))
 }
 
 /// Wire the "Open dialog" button: `show_glyph_dialog` with the reference
@@ -227,7 +245,7 @@ fn sheet_row(glyph: &str, label: &str) -> FlexChild<CatalogState> {
     inflexible(FlexView::new(
         Axis::Horizontal,
         vec![
-            inflexible(text(glyph.to_string()).size(13.0).color(SHEET_GLYPH_INK)),
+            inflexible(text(glyph.to_string()).size(13.0).color(sheet_glyph_ink())),
             inflexible(SizedBox(Some(12.0), None)),
             inflexible(text(label.to_string()).size(12.5)),
         ],

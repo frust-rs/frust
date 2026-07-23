@@ -17,15 +17,23 @@ use frust::glyph::{
     glyph_list_item, stat_card, term_block, tooltip,
 };
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, Column, Component, FlexView, Row, SizedBox, any, button,
-    component, flexible, inflexible, keyed, text,
+    AnyView, Axis, ButtonStyle, Color, Column, Component, FlexView, Row, SizedBox, Theme, any,
+    button, component, flexible, inflexible, keyed, text, use_context,
 };
 
 use crate::CatalogState;
 
 /// Section-heading accent color (mirrors the shell header's amber title in
 /// `crate::header_row`).
-const SECTION_ACCENT: Color = Color::from_rgb8(0xFF, 0xB6, 0x27);
+/// Live-theme accent-text role (`primary`) (falls back to the Glyph baseline pre-context, mirroring
+/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
+/// broke AA under the Light toggle).
+fn section_accent() -> Color {
+    use_context::<Theme>()
+        .unwrap_or_else(Theme::glyph_baseline)
+        .scheme()
+        .primary
+}
 
 /// Gap between a section heading and its body, in logical px.
 const HEADING_GAP: f64 = 10.0;
@@ -44,7 +52,7 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
 /// before the next section.
 fn section(title: &str, body: AnyView<ContentDemoState>) -> AnyView<ContentDemoState> {
     any(Column(vec![
-        any(text(title).size(15.0).color(SECTION_ACCENT)),
+        any(text(title).size(15.0).color(section_accent())),
         any(SizedBox(None, Some(HEADING_GAP))),
         body,
         any(SizedBox(None, Some(SECTION_GAP))),
