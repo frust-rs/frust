@@ -63,12 +63,32 @@
 //! navigator's) concern — this widget does not police it. Pushing a second
 //! transparent page simply stacks another modal on top.
 //!
+//! # `dismissable(bool)` + back-dismiss (task 12)
+//!
+//! [`GlyphDialogView::dismissable`] (default `true`) is the single barrier
+//! flag gating the scrim tap, `Escape`, and an Android back press together —
+//! `false` disables all three (only an action button or an app-driven
+//! `controller.pop()` can still close it) and [`show_glyph_dialog`] pushes the
+//! page with
+//! [`BackPolicy::Veto`](crate::nav::navigator::BackPolicy::Veto), consuming a
+//! back press with no visible effect. `true` pushes
+//! [`BackPolicy::DismissAnimated`](crate::nav::navigator::BackPolicy::DismissAnimated):
+//! `show_glyph_dialog` hands the widget the shared dismiss-signal cell
+//! [`NavigatorController::request_back`] bumps on a back press, and the
+//! widget's `paint` pass (`observe_dismiss_signal`, mirroring
+//! [`BackPolicy`](crate::nav::navigator::BackPolicy)'s documented observation
+//! seam) compares it against the last-seen value and calls
+//! [`begin_exit`](GlyphDialogWidget::begin_exit) — the exact same staged exit
+//! a scrim/Escape cancel drives, so a back press gets the identical animation
+//! and pop-on-completion path rather than an immediate raw pop.
+//!
 //! # Semantics
 //!
 //! The whole dialog contributes one [`Role::Dialog`] container node with the
 //! accesskit **modal** flag set, labelled by the title; title/body/actions are
 //! its accesskit children (mirroring [`crate::material::dialog`]).
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -84,7 +104,7 @@ use kurbo::{Affine, Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
 use crate::Timing;
-use crate::nav::navigator::{NavigatorController, PopResult};
+use crate::nav::navigator::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use crate::nav::transition::{TransitionDriver, TransitionSpec, make_driver};
 use crate::text::{ThemeTextColor, text};
 
@@ -270,6 +290,11 @@ pub struct GlyphDialogView<State: 'static> {
     actions: Vec<AnyView<State>>,
     scrim_dismissible: bool,
     on_close: Option<OnClose>,
+    dismissable: bool,
+    /// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+    /// seam) — wired internally by [`show_glyph_dialog`], never part of the
+    /// public builder surface (see the [module docs](self)).
+    dismiss_signal: Option<Rc<Cell<u64>>>,
 }
 
 /// Create an empty Glyph dialog. Chain [`title`](GlyphDialogView::title)/
@@ -283,6 +308,8 @@ pub fn glyph_dialog<State: 'static>() -> GlyphDialogView<State> {
         actions: Vec::new(),
         scrim_dismissible: true,
         on_close: None,
+        dismissable: true,
+        dismiss_signal: None,
     }
 }
 
@@ -326,6 +353,18 @@ impl<State: 'static> GlyphDialogView<State> {
         self
     }
 
+    /// Whether this dialog can be dismissed by the user at all — the scrim
+    /// tap, `Escape`, and an Android back press (default `true`, Flutter's
+    /// `barrierDismissible` parity — see the [module docs](self)). `false`
+    /// disables all three; only an explicit action button or an app-driven
+    /// `controller.pop()` still closes it. Combines with
+    /// [`scrim_dismissible`](Self::scrim_dismissible) (both must allow a scrim
+    /// tap to cancel).
+    pub fn dismissable(mut self, dismissable: bool) -> Self {
+        self.dismissable = dismissable;
+        self
+    }
+
     /// Set the state-free close callback — invoked once, from paint, when the
     /// exit animation completes after a scrim/Escape cancel. [`show_glyph_dialog`]
     /// wires this to `controller.pop()` automatically.
@@ -364,13 +403,32 @@ pub fn show_glyph_dialog<State, B, R>(
     R: Fn(&mut State, PopResult) + 'static,
 {
     let close_ctrl = controller.clone();
-    controller.push_transparent_for_result(
+    // Peeked once, at show-time: the back policy/dismiss-signal wiring is
+    // fixed for the life of this pushed page (mirrors task 02's push-time
+    // `PushOptions` contract), even though `build` is re-invoked on every
+    // later navigator rebuild to diff the page's content.
+    let dismissable = build().dismissable;
+    let signal = dismissable.then(|| Rc::new(Cell::new(0u64)));
+    let widget_signal = signal.clone();
+    let mut options = PushOptions::transparent()
+        .transition(TransitionSpec::NONE)
+        .back(if dismissable {
+            BackPolicy::DismissAnimated
+        } else {
+            BackPolicy::Veto
+        })
+        .on_result(on_result);
+    if let Some(sig) = &signal {
+        options = options.dismiss_signal(sig.clone());
+    }
+    controller.push_with_options(
         move || {
             let ctrl = close_ctrl.clone();
-            any::<State, _>(build().on_close(move || ctrl.pop()))
+            let mut view = build().on_close(move || ctrl.pop());
+            view.dismiss_signal = widget_signal.clone();
+            any::<State, _>(view)
         },
-        TransitionSpec::NONE,
-        on_result,
+        options,
     );
 }
 
@@ -396,6 +454,13 @@ pub struct GlyphDialogWidget {
     actions: Vec<ChildPod>,
     scrim_dismissible: bool,
     on_close: Option<OnClose>,
+    dismissable: bool,
+    /// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+    /// seam) — see [`observe_dismiss_signal`](Self::observe_dismiss_signal).
+    dismiss_signal: Option<Rc<Cell<u64>>>,
+    /// The last generation observed from `dismiss_signal` (0 with no signal
+    /// wired, or a `Veto`/non-dismissable dialog).
+    last_seen_dismiss: u64,
     /// The centered panel rect in the widget's own local coordinate space.
     panel: Rect,
     phase: Phase,
@@ -460,6 +525,9 @@ impl<State: 'static> View<State> for GlyphDialogView<State> {
                 .collect(),
             scrim_dismissible: self.scrim_dismissible,
             on_close: self.on_close.clone(),
+            dismissable: self.dismissable,
+            dismiss_signal: self.dismiss_signal.clone(),
+            last_seen_dismiss: self.dismiss_signal.as_ref().map(|s| s.get()).unwrap_or(0),
             panel: Rect::ZERO,
             phase: Phase::Enter,
             driver: None,
@@ -506,6 +574,11 @@ impl<State: 'static> View<State> for GlyphDialogView<State> {
         element.scrim_dismissible = self.scrim_dismissible;
         // Closures aren't comparable; reinstall the close adapter unconditionally.
         element.on_close = self.on_close.clone();
+        element.dismissable = self.dismissable;
+        // The dismiss-signal cell's identity is fixed at push time (see
+        // `show_glyph_dialog`); reinstalling it here never disturbs
+        // `last_seen_dismiss`.
+        element.dismiss_signal = self.dismiss_signal.clone();
         flags
     }
 
@@ -529,6 +602,22 @@ impl GlyphDialogWidget {
         if matches!(self.phase, Phase::Enter | Phase::Shown) {
             self.phase = Phase::Exit;
             self.driver = None;
+        }
+    }
+
+    /// Observe the shared back-press dismiss-signal cell (see the
+    /// `dismiss_signal` field docs) and begin the exit staging exactly once
+    /// per bump — the `BackPolicy::DismissAnimated` seam's widget-side half
+    /// (`nav::navigator::BackPolicy`'s documented observation seam). A back
+    /// request flags `PAINT`, so this always runs before the next frame is
+    /// shown.
+    fn observe_dismiss_signal(&mut self) {
+        if let Some(signal) = &self.dismiss_signal {
+            let current = signal.get();
+            if current != self.last_seen_dismiss {
+                self.last_seen_dismiss = current;
+                self.begin_exit();
+            }
         }
     }
 
@@ -659,6 +748,7 @@ impl Widget for GlyphDialogWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.observe_dismiss_signal();
         let theme = Theme::from_paint_ctx(ctx);
         let (enter, exit) = resolve_timings(theme);
         let (scale, scrim_frac, animating) = self.advance(ctx.frame_time(), enter, exit);
@@ -730,9 +820,10 @@ impl Widget for GlyphDialogWidget {
         if crate::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
             return EventResult::Handled;
         }
-        // Escape (once focused) begins the exit/cancel.
+        // Escape (once focused) begins the exit/cancel — gated by `dismissable`
+        // (task 12: a non-dismissable dialog ignores it, same as the scrim).
         if let InputEvent::Key(key_event) = event {
-            if key_event.key == Key::Named(NamedKey::Escape) {
+            if self.dismissable && key_event.key == Key::Named(NamedKey::Escape) {
                 self.begin_exit();
                 return EventResult::Handled;
             }
@@ -761,7 +852,11 @@ impl Widget for GlyphDialogWidget {
                     return EventResult::Ignored;
                 }
                 let released_outside = !self.panel.contains(p.position);
-                if self.scrim_dismissible && self.scrim_down_outside && released_outside {
+                if self.dismissable
+                    && self.scrim_dismissible
+                    && self.scrim_down_outside
+                    && released_outside
+                {
                     self.begin_exit();
                 }
                 self.scrim_captured = false;
@@ -1134,6 +1229,151 @@ mod tests {
             Phase::Enter,
             "a non-dismissible scrim never begins exit"
         );
+    }
+
+    // -- Task 12: `dismissable(bool)` gates the scrim and Escape together --
+
+    #[test]
+    fn dismissable_false_gates_scrim_tap() {
+        let view: GlyphDialogView<()> = glyph_dialog().title("Hi").dismissable(false);
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 600.0)));
+
+        let mut dummy = ();
+        let dispatch = |w: &mut GlyphDialogWidget, dummy: &mut (), e: &InputEvent| {
+            let s: &mut dyn Any = dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, Size::new(400.0, 600.0));
+            w.event(&mut ctx, e)
+        };
+        dispatch(&mut w, &mut dummy, &ev(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut dummy, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(
+            w.phase,
+            Phase::Enter,
+            "dismissable(false) gates the scrim tap too"
+        );
+    }
+
+    #[test]
+    fn dismissable_false_gates_escape() {
+        let view: GlyphDialogView<()> = glyph_dialog().title("Hi").dismissable(false);
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 600.0)));
+
+        let mut dummy = ();
+        let dispatch = |w: &mut GlyphDialogWidget, dummy: &mut (), e: &InputEvent| {
+            let s: &mut dyn Any = dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, Size::new(400.0, 600.0));
+            w.event(&mut ctx, e)
+        };
+        // A press claims focus (as usual), but the subsequent Escape is gated.
+        dispatch(&mut w, &mut dummy, &ev(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut dummy, &ev(PointerPhase::Up, 5.0, 5.0));
+        dispatch(&mut w, &mut dummy, &escape_event());
+        assert_eq!(w.phase, Phase::Enter, "dismissable(false) gates Escape");
+    }
+
+    // -- Task 12: back request routes through dismissable/BackPolicy --
+
+    #[test]
+    fn back_request_dismissable_true_animates_exit_then_pops() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = app_page(&controller);
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        show_glyph_dialog(
+            &controller,
+            || glyph_dialog().title("Confirm"),
+            |state: &mut NavState, result: PopResult| state.results.push(result.take::<bool>()),
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(0.0));
+        root.paint(&mut Recorder::default(), ft_ms(400.0)); // settled: Shown
+
+        assert!(
+            controller.back_interest(),
+            "a dismissable dialog claims back interest"
+        );
+
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.depth(),
+            2,
+            "DismissAnimated: the stack is unchanged immediately"
+        );
+
+        // The next paint observes the bumped signal and begins the exit; drive
+        // it to completion the same way a scrim cancel does.
+        root.paint(&mut Recorder::default(), ft_ms(400.0));
+        assert!(
+            state.results.is_empty(),
+            "the exit animation has not finished yet"
+        );
+        root.paint(&mut Recorder::default(), ft_ms(500.0));
+        root.paint(&mut Recorder::default(), ft_ms(800.0));
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert_eq!(
+            state.results,
+            vec![None],
+            "a back request animates the exit then pops"
+        );
+        assert_eq!(controller.depth(), 1);
+    }
+
+    #[test]
+    fn back_request_dismissable_false_vetoes_stack_unchanged() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = app_page(&controller);
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        show_glyph_dialog(
+            &controller,
+            || glyph_dialog().title("Confirm").dismissable(false),
+            |state: &mut NavState, result: PopResult| state.results.push(result.take::<bool>()),
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(0.0));
+        root.paint(&mut Recorder::default(), ft_ms(400.0)); // settled: Shown
+
+        assert!(
+            controller.back_interest(),
+            "a Veto (non-dismissable) dialog still claims back interest"
+        );
+
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2, "Veto leaves the stack unchanged");
+
+        // No staging began: driving further frames still never pops.
+        root.paint(&mut Recorder::default(), ft_ms(450.0));
+        root.paint(&mut Recorder::default(), ft_ms(900.0));
+        assert!(
+            state.results.is_empty(),
+            "a non-dismissable dialog never pops on a back request"
+        );
+        assert_eq!(controller.depth(), 2);
     }
 
     #[test]
