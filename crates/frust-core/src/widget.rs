@@ -459,6 +459,15 @@ pub struct PaintCtx<'a> {
     origin: Point,
     size: Size,
     needs_frame: bool,
+    /// Whether a widget whose animation changes its *layout* (not just paint)
+    /// asked, via [`PaintCtx::request_layout`], to have layout re-run next frame.
+    /// Bubbles up through [`ChildPod::paint_child`] exactly like `needs_frame`
+    /// and out of [`crate::app::RenderRoot::paint`] as [`PaintOutcome::needs_layout`],
+    /// which folds into the render root's pending [`ChangeFlags`] so the mobile
+    /// intra-frame layout skip re-runs layout while the animation is in flight.
+    /// Deliberately opt-in: [`PaintCtx::request_frame`] alone never sets it, so
+    /// paint-only animations stay layout-free.
+    needs_layout: bool,
     ime_state: Option<ImeState>,
     /// Whether the widget being painted currently holds the focus path — seeded
     /// from its pod's recorded focus flag ([`ChildPod::is_focused`]) by
@@ -523,6 +532,7 @@ impl<'a> PaintCtx<'a> {
             origin,
             size,
             needs_frame: false,
+            needs_layout: false,
             ime_state: None,
             has_focus: false,
             frame_time: FrameTime::ZERO,
@@ -687,6 +697,35 @@ impl<'a> PaintCtx<'a> {
         self.needs_frame
     }
 
+    /// Signal that this paint advanced animation state that changes the widget's
+    /// *layout* (not just its paint), so layout must re-run next frame.
+    ///
+    /// This is the layout counterpart to [`Self::request_frame`]: a widget whose
+    /// animation only repaints (a color fade, a caret blink) calls
+    /// `request_frame` alone and stays layout-free under the mobile intra-frame
+    /// layout skip, whereas a widget whose animation resizes/repositions its
+    /// children (an expanding accordion) calls this so layout is re-run while the
+    /// animation is in flight. The flag bubbles up through
+    /// [`ChildPod::paint_child`] exactly like `needs_frame` and out of
+    /// [`crate::app::RenderRoot::paint`] as [`PaintOutcome::needs_layout`], which
+    /// folds into the render root's pending [`crate::view::ChangeFlags`]
+    /// (`LAYOUT`) so the *next* frame relayouts.
+    ///
+    /// Calling this also implies [`Self::request_frame`] (a widget animating its
+    /// layout necessarily wants another frame), so a caller needs only one call
+    /// per animating-layout frame.
+    pub fn request_layout(&mut self) {
+        self.needs_layout = true;
+        // A widget animating its layout necessarily wants another frame; setting
+        // `needs_frame` too means one call suffices per animating-layout frame.
+        self.needs_frame = true;
+    }
+
+    /// Whether a layout re-run was requested during this (sub)paint.
+    pub fn needs_layout(&self) -> bool {
+        self.needs_layout
+    }
+
     /// Publish the focused editable's current IME surface during paint.
     ///
     /// The event pass ([`EventCtx::publish_ime_state`]) refreshes the shell's
@@ -755,6 +794,7 @@ impl<'a> PaintCtx<'a> {
             origin: self.origin,
             size: self.size,
             needs_frame: false,
+            needs_layout: false,
             ime_state: None,
             has_focus: self.has_focus,
             frame_time: self.frame_time,
@@ -766,6 +806,9 @@ impl<'a> PaintCtx<'a> {
         f(&mut child);
         if child.needs_frame {
             self.needs_frame = true;
+        }
+        if child.needs_layout {
+            self.needs_layout = true;
         }
         if let Some(ime) = child.ime_state.take() {
             self.ime_state = Some(ime);
@@ -853,10 +896,20 @@ pub enum HeroDirective {
 /// shell turns it into another scheduled frame — the desktop shell via
 /// `window.request_redraw()`, the mobile shells implicitly through their
 /// continuous loop. Mirrors [`crate::event::EventOutcome`]'s `needs_redraw`.
+///
+/// `needs_layout` is whether any widget asked (via [`PaintCtx::request_layout`])
+/// to have layout re-run next frame because its animation changed its layout, not
+/// just its paint. [`crate::app::RenderRoot::paint`] folds it into the render
+/// root's pending [`crate::view::ChangeFlags`] (`LAYOUT`) so the next frame's
+/// `take_change_flags().needs_layout()` reports it — driving the mobile
+/// intra-frame layout skip to relayout while the animation is in flight.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaintOutcome {
     /// Whether the shell should schedule another frame to continue an animation.
     pub needs_frame: bool,
+    /// Whether the render root folded a layout-continuation request into its
+    /// pending change flags (a widget called [`PaintCtx::request_layout`]).
+    pub needs_layout: bool,
 }
 
 /// A retained UI element living in the widget tree.
@@ -1101,6 +1154,12 @@ impl ChildPod {
         if child_ctx.needs_frame() {
             ctx.request_frame();
         }
+        // Bubble the child's layout-continuation request the same way as
+        // `needs_frame`, so a nested widget animating its layout keeps layout
+        // re-running up the whole tree.
+        if child_ctx.needs_layout() {
+            ctx.request_layout();
+        }
         // Bubble a focused editable's republished IME surface up the paint path,
         // so `RenderRoot::paint` can refresh the shell-facing state after a
         // rebuild-driven controlled change (see `PaintCtx::publish_ime_state`).
@@ -1229,6 +1288,21 @@ mod tests {
 
         fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
             ctx.request_frame();
+        }
+    }
+
+    /// A leaf widget whose animation changes its layout: it signals
+    /// [`PaintCtx::request_layout`] on every paint — stands in for an animating
+    /// widget that resizes/repositions (e.g. an expanding accordion).
+    struct LayoutAnimator;
+
+    impl Widget for LayoutAnimator {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_layout();
         }
     }
 
@@ -1534,6 +1608,94 @@ mod tests {
         assert!(!pctx2.needs_frame());
         anim.paint_child(&mut pctx2, &mut scene);
         assert!(pctx2.needs_frame());
+    }
+
+    #[test]
+    fn request_frame_alone_does_not_set_needs_layout() {
+        // A paint-only animation (request_frame, no request_layout) must leave
+        // `needs_layout` clear — the phase-10/11 layout-skip win depends on this.
+        let mut anim = ChildPod::new(Box::new(Animator));
+        let mut lctx = LayoutCtx::new();
+        anim.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        anim.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame(), "request_frame sets needs_frame");
+        assert!(
+            !pctx.needs_layout(),
+            "request_frame alone must NOT set needs_layout"
+        );
+    }
+
+    #[test]
+    fn request_layout_implies_needs_frame() {
+        // `request_layout` also sets `needs_frame` so one call per
+        // animating-layout frame suffices.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        assert!(!ctx.needs_frame());
+        assert!(!ctx.needs_layout());
+        ctx.request_layout();
+        assert!(ctx.needs_layout());
+        assert!(ctx.needs_frame());
+    }
+
+    #[test]
+    fn child_pod_bubbles_needs_layout_from_child_paint() {
+        // A non-layout-animating child leaves the parent's layout flag clear.
+        let mut still = ChildPod::new(Box::new(FixedBox {
+            intrinsic: Size::new(10.0, 10.0),
+        }));
+        let mut lctx = LayoutCtx::new();
+        still.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        still.paint_child(&mut pctx, &mut scene);
+        assert!(!pctx.needs_layout());
+
+        // A layout-animating child bubbles its request into the parent context.
+        let mut anim = ChildPod::new(Box::new(LayoutAnimator));
+        anim.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut pctx2 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        assert!(!pctx2.needs_layout());
+        anim.paint_child(&mut pctx2, &mut scene);
+        assert!(pctx2.needs_layout());
+        // Bubbling `request_layout` also carries the implied `needs_frame`.
+        assert!(pctx2.needs_frame());
+    }
+
+    #[test]
+    fn needs_layout_bubbles_through_nested_containers() {
+        // A container holding a single `ChildPod` forwards paint via
+        // `paint_child`; a layout-animating leaf two levels deep must still
+        // surface `needs_layout` at the outermost paint context.
+        struct SingleChildContainer {
+            child: ChildPod,
+        }
+        impl Widget for SingleChildContainer {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                self.child.layout_child(ctx, bc)
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                self.child.paint_child(ctx, scene);
+            }
+        }
+
+        let inner = SingleChildContainer {
+            child: ChildPod::new(Box::new(LayoutAnimator)),
+        };
+        let mut outer = ChildPod::new(Box::new(SingleChildContainer {
+            child: ChildPod::new(Box::new(inner)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(
+            pctx.needs_layout(),
+            "needs_layout bubbles up nested containers"
+        );
+        assert!(pctx.needs_frame());
     }
 
     #[test]

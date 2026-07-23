@@ -400,6 +400,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// frame (desktop `window.request_redraw()`; the mobile continuous loops
     /// already do so). Mirrors how [`RenderRoot::event`] surfaces `needs_redraw`.
     ///
+    /// A widget whose animation changes its *layout* signals
+    /// [`PaintCtx::request_layout`] instead (or as well); that bubbles up the same
+    /// way and is folded here into the render root's pending [`ChangeFlags`]
+    /// (`LAYOUT`), so the *next* frame's
+    /// [`take_change_flags`](RenderRoot::take_change_flags)`().needs_layout()`
+    /// reports it and the mobile intra-frame layout skip relayouts while the
+    /// animation is in flight. It is also surfaced on the returned
+    /// [`PaintOutcome::needs_layout`].
+    ///
     /// `frame_time` is the shell's shared monotonic clock for this frame (spec §8:
     /// time enters `frust-core` from the shell, never `Instant::now()` here). It
     /// is seeded onto the root [`PaintCtx`] and threaded unchanged to every child
@@ -447,8 +456,19 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             {
                 self.ime_state = Some(ime);
             }
+            // Fold a bubbled `request_layout` into `pending` so the *next* frame
+            // relayouts. `pending` survives to the next frame and feeds both the
+            // frame gate (`has_pending_change_flags`) and the Android layout-skip
+            // (`take_change_flags().needs_layout()`), so no shell change is needed
+            // on any platform. Deliberately opt-in: `request_frame` alone never
+            // sets LAYOUT, keeping paint-only animations layout-free.
+            let needs_layout = ctx.needs_layout();
+            if needs_layout {
+                self.pending |= ChangeFlags::LAYOUT;
+            }
             PaintOutcome {
                 needs_frame: ctx.needs_frame(),
+                needs_layout,
             }
         } else {
             PaintOutcome::default()
@@ -928,6 +948,88 @@ mod tests {
         anim.layout(Size::new(100.0, 100.0));
         let mut scene2 = RecordingScene::default();
         assert!(anim.paint(&mut scene2, FrameTime::ZERO).needs_frame);
+    }
+
+    /// A root widget whose animation changes its layout: it requests a layout
+    /// re-run on every paint — stands in for an expanding accordion.
+    struct LayoutFrameWidget;
+    impl crate::widget::Widget for LayoutFrameWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_layout();
+        }
+    }
+
+    struct LayoutFrameView;
+    impl View<AppState> for LayoutFrameView {
+        type Element = LayoutFrameWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> LayoutFrameWidget {
+            LayoutFrameWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut LayoutFrameWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn paint_folds_request_layout_into_pending_change_flags() {
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+
+        // A root calling `request_layout` in paint surfaces it on the outcome AND
+        // folds LAYOUT into `pending`, so the NEXT frame's `take_change_flags`
+        // reports `needs_layout()`.
+        let mut anim: RenderRoot<AppState, LayoutFrameView> = RenderRoot::new();
+        anim.rebuild(&mut |_s: &mut AppState| LayoutFrameView, &mut state);
+        anim.layout(Size::new(100.0, 100.0));
+        // Drain any rebuild/layout dirtiness so we observe only paint's fold.
+        let _ = anim.take_change_flags();
+        let mut scene = RecordingScene::default();
+        let outcome = anim.paint(&mut scene, FrameTime::ZERO);
+        assert!(outcome.needs_layout, "outcome reports needs_layout");
+        // `request_layout` implies `request_frame`, so the animation still runs.
+        assert!(outcome.needs_frame, "request_layout implies needs_frame");
+        assert!(
+            anim.has_pending_change_flags(),
+            "the fold survives to the next frame"
+        );
+        assert!(
+            anim.take_change_flags().needs_layout(),
+            "next frame's take_change_flags reports needs_layout"
+        );
+    }
+
+    #[test]
+    fn paint_request_frame_only_does_not_fold_layout() {
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+
+        // A paint-only animation (request_frame, no request_layout) must NOT fold
+        // LAYOUT — the mobile layout-skip win depends on this staying opt-in.
+        let mut anim: RenderRoot<AppState, FrameView> = RenderRoot::new();
+        anim.rebuild(&mut |_s: &mut AppState| FrameView, &mut state);
+        anim.layout(Size::new(100.0, 100.0));
+        let _ = anim.take_change_flags();
+        let mut scene = RecordingScene::default();
+        let outcome = anim.paint(&mut scene, FrameTime::ZERO);
+        assert!(outcome.needs_frame);
+        assert!(
+            !outcome.needs_layout,
+            "request_frame alone: no needs_layout"
+        );
+        assert!(
+            !anim.has_pending_change_flags(),
+            "request_frame alone must not fold LAYOUT into pending"
+        );
     }
 
     /// A root widget that records the `frame_time` its paint observed, so a test
