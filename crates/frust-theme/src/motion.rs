@@ -91,6 +91,45 @@ pub struct MotionDurations {
     pub deliberate: f64,
 }
 
+/// The `CosmeticLoop` tick-rate cap (Hz) — an app-tunable pacing token
+/// (Ed's decision) consumed by the animation-performance fix's frame-gate
+/// pacing (see `workflow/plans/bugs/catalog-animation-performance`): a
+/// purely cosmetic, indefinitely-looping animation (a shimmer/pulse with no
+/// user-visible endpoint) is capped to this rate rather than repainting
+/// every display frame. **Uncapped (0/`None`) is not an allowed value** —
+/// a cosmetic loop always paces to *some* ceiling, so this type clamps any
+/// constructed value up to [`CosmeticLoopRate::FLOOR_HZ`] (10Hz), a sane
+/// floor below which a "cosmetic" loop reads as visibly stuttering rather
+/// than paced.
+///
+/// This token only *declares* the cap; nothing in `frust-theme` reads a
+/// clock or paces a loop — the frame-gate consumer (a later task in the
+/// same bug fix) is what actually honors it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CosmeticLoopRate(f32);
+
+impl CosmeticLoopRate {
+    /// The floor every constructed rate clamps up to — below this a
+    /// "cosmetic" pace reads as stutter rather than a deliberate cap.
+    pub const FLOOR_HZ: f32 = 10.0;
+
+    /// Builds a rate, clamping `hz` up to [`FLOOR_HZ`](Self::FLOOR_HZ) (no
+    /// uncapped/zero value is representable). `const fn` so every
+    /// [`MotionScheme`] baseline constructor below can stay `const`.
+    pub const fn new(hz: f32) -> Self {
+        if hz < Self::FLOOR_HZ {
+            Self(Self::FLOOR_HZ)
+        } else {
+            Self(hz)
+        }
+    }
+
+    /// The clamped rate, in Hz.
+    pub const fn hz(self) -> f32 {
+        self.0
+    }
+}
+
 /// The three-easing vocabulary Glyph's bezier-authored motion patterns are
 /// built from: `spatial` (position/size changes — may overshoot), `effects`
 /// (opacity/color changes — never overshoots), and `exit` (elements leaving
@@ -122,6 +161,14 @@ pub struct MotionScheme {
     /// reads the platform setting and threads it here lands in a later task
     /// — every baseline below defaults this to `false`.
     pub reduce_motion: bool,
+    /// The `CosmeticLoop` tick-rate cap — see [`CosmeticLoopRate`]. Every
+    /// baseline below defaults this to 30Hz; override via
+    /// [`crate::builder::ThemeBuilder::map_motion`]. `reduce_motion`
+    /// interplay: a widget that honors `reduce_motion` collapses its loop
+    /// entirely (this cap never applies then) — this token only paces the
+    /// loops that still run when `reduce_motion` is off/unhonored by that
+    /// widget.
+    pub cosmetic_loop_rate: CosmeticLoopRate,
 }
 
 impl MotionScheme {
@@ -170,6 +217,7 @@ impl MotionScheme {
                 exit: Curve::Cubic(0.3, 0.0, 1.0, 1.0),
             },
             reduce_motion: false,
+            cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
         }
     }
 
@@ -224,6 +272,7 @@ impl MotionScheme {
                 exit: Curve::EaseInOut,
             },
             reduce_motion: false,
+            cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
         }
     }
 }
@@ -341,6 +390,57 @@ mod tests {
     fn reduce_motion_defaults_to_false_on_both_baselines() {
         assert!(!MotionScheme::m3_expressive().reduce_motion);
         assert!(!MotionScheme::cupertino().reduce_motion);
+    }
+
+    #[test]
+    fn cosmetic_loop_rate_defaults_to_30hz_on_both_baselines() {
+        // Task acceptance criterion 1: default 30 on every baseline (the
+        // third, Glyph, is covered alongside its own constructor in
+        // `glyph::scales`).
+        assert_eq!(MotionScheme::m3_expressive().cosmetic_loop_rate.hz(), 30.0);
+        assert_eq!(MotionScheme::cupertino().cosmetic_loop_rate.hz(), 30.0);
+    }
+
+    #[test]
+    fn cosmetic_loop_rate_clamps_to_the_floor() {
+        assert_eq!(CosmeticLoopRate::new(0.0).hz(), CosmeticLoopRate::FLOOR_HZ);
+        assert_eq!(CosmeticLoopRate::new(-5.0).hz(), CosmeticLoopRate::FLOOR_HZ);
+        assert_eq!(CosmeticLoopRate::new(5.0).hz(), CosmeticLoopRate::FLOOR_HZ);
+        assert_eq!(
+            CosmeticLoopRate::new(CosmeticLoopRate::FLOOR_HZ).hz(),
+            CosmeticLoopRate::FLOOR_HZ
+        );
+    }
+
+    #[test]
+    fn cosmetic_loop_rate_passes_through_above_the_floor() {
+        assert_eq!(CosmeticLoopRate::new(30.0).hz(), 30.0);
+        assert_eq!(CosmeticLoopRate::new(60.0).hz(), 60.0);
+    }
+
+    #[test]
+    fn cosmetic_loop_rate_new_is_const_fn() {
+        const RATE: CosmeticLoopRate = CosmeticLoopRate::new(45.0);
+        assert_eq!(RATE.hz(), 45.0);
+    }
+
+    #[test]
+    fn theme_builder_map_motion_overrides_the_cosmetic_loop_rate() {
+        // Task acceptance criterion 1: ThemeBuilder override test.
+        use crate::theme::Theme;
+
+        let base = Theme::m3_baseline();
+        let theme = Theme::builder(base.clone())
+            .map_motion(|m| MotionScheme {
+                cosmetic_loop_rate: CosmeticLoopRate::new(15.0),
+                ..m
+            })
+            .build();
+
+        assert_eq!(theme.motion.cosmetic_loop_rate.hz(), 15.0);
+        // Nothing else in the motion group moved.
+        assert_eq!(theme.motion.fast_spatial, base.motion.fast_spatial);
+        assert_eq!(theme.motion.durations, base.motion.durations);
     }
 
     // Both constructors must stay `const fn` — a regression here is a
