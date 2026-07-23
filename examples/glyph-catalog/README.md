@@ -4,10 +4,41 @@ A standalone Frust example app showcasing the **entire Glyph design system** —
 every token scale, all 21 `frust::glyph` widgets, the `Button` styles and
 baseline form controls under the Glyph theme, and all of `frust::motion`'s
 transition patterns — faithful to the three vendored reference builds (dark,
-light, motion).
+light, motion; see `workflow/plans/features/glyph-design-system/research/` and
+this feature's own `research/INVENTORY.md`/`research/API.md`).
 
 It doubles as a living demo of `PatternSwitcher`, the navigator's Glyph page
 transitions, the brightness swap, and reduced-motion collapse.
+
+## What it shows
+
+A header (app title + a brightness toggle + a reduce-motion toggle) sits above
+a 7-tab section strip, each tab hosting one catalog section in a
+`pattern_switcher` (`GlyphSlide`) so switching tabs plays a themed slide
+transition:
+
+1. **Foundations** — live color/type/radius token specimens (every swatch
+   re-resolves from the current theme, never a hardcoded hex).
+2. **Buttons + Forms** — every `ButtonStyle`, `.small()`, a loading demo, plus
+   the baseline form controls (`text_input`, `checkbox`, `radio`, `switch`,
+   `slider`) rendered under the Glyph theme.
+3. **Feedback** — badges, dismissible tags, alerts, toast triggers, and the
+   progress/skeleton/dots loaders.
+4. **Navigation** — a standalone tabs demo, segmented control, breadcrumb, two
+   `glyph_nav_bar` strips (character glyphs vs. vector icons), and avatars.
+5. **Content** — cards, a stat-card grid, a list (doubling as the data-table
+   stand-in), an accordion, an empty state, a staggered terminal block, and a
+   tooltip.
+6. **Overlays** — a confirmation dialog, a live-filtered command palette, and
+   a `SlideUp` bottom sheet, each pushed through the shared navigator.
+7. **Motion** — all 11 reference motion demos (press feedback, toggle spring,
+   tab indicator, accordion height, modal, bottom sheet, command palette,
+   toast, staggered log reveal, a composable screen-transition picker, and a
+   boot sequence), plus a live `theme.motion` duration/easing token table and
+   a reduced-motion status note.
+
+A toast host overlays every section (Feedback's and Motion's toast triggers
+both queue into the same shared FIFO).
 
 ## Running
 
@@ -29,24 +60,176 @@ cargo build --locked && cargo test \
   && cargo clippy --all-targets -- -D warnings && cargo fmt --check
 ```
 
-## Shape
+### Screenshots / visual gate
 
-- `src/lib.rs` — the shell: `CatalogApp` (the root `Component`) and its state,
-  the root `navigator` whose home page is a header (title + brightness and
-  reduce-motion toggles) + a 7-section glyph `tabs` strip + a `pattern_switcher`
-  (GlyphSlide) hosting the current section in a `scroll_view`, all under a
-  `toast_host` overlay.
-- `src/pages/` — one module per section (foundations, buttons+forms, feedback,
-  navigation, content, overlays, motion). Each exposes
-  `page(&CatalogState) -> AnyView<CatalogState>` (the fixed page-fn contract
-  documented in `src/pages/mod.rs`); the scaffold ships placeholders that the
-  later `c02`–`c08` tasks fill in.
-- `tests/smoke.rs` — a headless `RenderRoot` build/layout/paint smoke test
-  proving the shell and every stub page mount.
+No automated pixel-diff or headless-screencap tooling exists in this repo
+(the same convention `docs/DEVELOPMENT.md` documents for every other example);
+capturing one screenshot per section is therefore a **manual gate** for a
+person at a desk, not something this task's own (sandboxed, display-less) CI
+run could produce:
+
+1. `cargo run` from this directory (desktop preview).
+2. Click each of the 7 tabs; toggle brightness (◐/◑) and reduce-motion
+   (▶/⏸) at each tab, confirming every specimen/demo repaints live (no stale
+   hardcoded color, no residual animation once reduced-motion is on).
+3. A screenshot tool of the reviewer's choice (`cmd+shift+4` on macOS, or an
+   OS screenshot utility) captures each of the 7 states for a visual diff
+   against the reference builds under
+   `workflow/plans/features/glyph-design-system/research/`.
+
+The automated gate this repo *does* ship — `tests/smoke.rs`'s
+`every_page_mounts_at_every_size_and_brightness` — headlessly proves every
+real section builds/lays out/paints without panicking at 2 viewport sizes ×
+both brightnesses (see that test's doc comment); it is a structural-soundness
+proof, not a substitute for the visual gate above.
 
 ## Theming
 
-Every shell seeds `Theme::glyph_baseline()` by default (dark-first). The header
-toggles rebuild the theme via a `ThemeBuilder` over the Glyph baseline
+Every shell seeds `Theme::glyph_baseline()` by default (dark-first). The
+header toggles rebuild the theme via a `ThemeBuilder` over the Glyph baseline
 (`.brightness(...)` + `.map_motion(...)` for the reduced-motion flag) and force
-it app-wide with `set_app_theme`.
+it app-wide with `set_app_theme`. Toggling reduced-motion collapses every
+transition pattern used across the catalog (the section `pattern_switcher`,
+the Motion page's own demo switchers, and every navigator push) to a short
+linear crossfade — a framework-level guarantee, not something this app
+implements itself.
+
+## Coverage
+
+Cross-referenced against `workflow/plans/features/glyph-catalog-example/research/INVENTORY.md`
+(the reference-build inventory) — ✓ = live in the app, N/A = documented gap
+with reason (see each page's own module docs / the owning task's Completion
+Summary for the full rationale).
+
+### §01 Foundations (`pages/foundations.rs`, `c02`)
+
+| Item | Status |
+|---|---|
+| Background ramp (bg-void → bg-hover, 6) | ✓ |
+| Accent (amber) | ✓ |
+| Semantic (cyan/success/warning/error + faint, 8) | ✓ |
+| Text: fg, fg-muted | ✓ |
+| Text: fg-dim, fg-faintest | N/A — no `ColorScheme` role (`frust_theme::glyph::color`'s own documented leftover); painting one would require a hardcoded hex, which the task forbids |
+| Borders (border, border-bright) | ✓ |
+| `StatusPalette` extension row | ✓ |
+| `GlyphInk` extension row (brightness-invariant) | ✓ |
+| Type scale (6 roles) | ✓ |
+| Radius scale (4/6/10/16/full) | ✓ |
+
+### §02 Buttons (`pages/buttons_forms.rs`, `c03`)
+
+| Item | Status |
+|---|---|
+| Primary / Secondary / Ghost / Danger / Icon | ✓ |
+| `.small()` | ✓ |
+| Loading demo | ✓ (checkbox-driven, not a timed auto-reset — no async-sleep primitive available without an out-of-scope dependency) |
+| Disabled state | N/A as a dedicated builder — `ButtonView` has no `.enabled(false)` seam; a statically-`.loading(true)` button stands in, captioned honestly |
+| Press feedback (0.96 scale) | ✓ (captioned; built into `Button` itself) |
+
+### §03 Form Controls (`pages/buttons_forms.rs`, `c03`)
+
+| Item | Status |
+|---|---|
+| Text input (prompt-style) | ✓ |
+| Textarea (`.multiline`) | ✓ |
+| Checkbox | ✓ |
+| Radio pair | ✓ |
+| Toggle switch (spring) | ✓ |
+| Select dropdown | N/A — no `frust` widget exists for it |
+| Slider with live readout | ✓ |
+
+### §04 Status + Feedback (`pages/feedback.rs`, `c04`)
+
+| Item | Status |
+|---|---|
+| Badges: Success / Warning / Error (dotted) | ✓ |
+| Badges: Neutral, Accent | ✓ |
+| Tags (dismissible) | ✓ |
+| Alerts (Info/Success/Warning/Error) | ✓ |
+| Toast triggers + 2.4s auto-dismiss caption | ✓ |
+| Toast per-variant coloring | N/A — framework gap: `glyph::toast_host`'s queue is `Vec<String>` with no variant field, so every toast paints as `ToastVariant::Plain` regardless of trigger; a future `frust-widgets` change, flagged in-page |
+| Progress bar | ✓ (fixed 65%, the task's own stated fallback option) |
+| Skeleton, dots loader | ✓ |
+
+### §05 Navigation (+ Avatar) (`pages/navigation.rs`, `c05`)
+
+| Item | Status |
+|---|---|
+| Tabs (sliding indicator) | ✓ |
+| Segmented control | ✓ |
+| Breadcrumb | ✓ |
+| Bottom nav | ✓ — mapped to `glyph_nav_bar` (no dedicated bottom-nav widget; captioned char-vs-icon item faces, the iOS tofu-risk story) |
+| Avatar (3 sizes/accents) | ✓ |
+
+### §06 Content + Data (`pages/content.rs`, `c06`)
+
+| Item | Status |
+|---|---|
+| Standard card (title/desc/footer) | ✓ |
+| Stat card grid (4-up, up/down deltas) | ✓ |
+| List item (glyph/title/sub/meta/chevron) | ✓ |
+| Data table | N/A — no dedicated Frust widget; `glyph_list` stands in, captioned as such |
+| Terminal/code block (staggered) | ✓ |
+| Accordion (3 items, 1 open) | ✓ |
+| Empty state | ✓ |
+| Tooltip (+ brightness-invariant ink caption) | ✓ |
+
+### §07 Overlays (`pages/overlays.rs`, `c07`)
+
+| Item | Status |
+|---|---|
+| Confirmation modal | ✓ |
+| Command palette (live filter) | ✓ |
+| Bottom sheet (`SlideUp` push) | ✓ |
+| Empty state | N/A here — owned by `c06`/Content, not duplicated |
+
+### Motion build — 11 demos (`pages/motion.rs`, `c08`)
+
+| # | Demo | Status |
+|---|---|---|
+| 01 | Press feedback | ✓ |
+| 02 | Toggle spring | ✓ |
+| 03 | Sliding tab indicator | ✓ |
+| 04 | Accordion height | ✓ |
+| 05 | Modal | ✓ |
+| 06 | Bottom sheet | ✓ |
+| 07 | Command palette | ✓ |
+| 08 | Toast | ✓ |
+| 09 | Staggered log reveal | ✓ |
+| 10 | Screen transition (+ composable pattern picker: FadeThrough / SharedAxis::X / FadeScale / GlyphSlide) | ✓ |
+| 11 | Boot sequence | ✓, at `term_block`'s standard ~90ms/line stagger — N/A for the reference's slower ~260ms/line cadence: no custom `GlyphStagger { per_item_delay }` is exposed on `term_block` (only `.staggered(bool)`); labeled as such in-page |
+| — | Duration/easing token table (5 durations, 3 easings) | ✓ |
+| — | Reduced-motion note | ✓ |
+
+### Components the reference inventory listed as "no direct Frust widget"
+
+`research/INVENTORY.md`'s own research pass (written before this feature's
+page-fill tasks ran) flagged 11 components as having no direct `frust`
+widget. In practice `frust-widgets`' `glyph` catalog already ships a
+purpose-built widget for all but one:
+
+| Component | Actual status |
+|---|---|
+| Tag (dismissible) | ✓ `glyph::tag` — covered, §04 |
+| Stat card | ✓ `glyph::stat_card` — covered, §06 |
+| Terminal/code block | ✓ `glyph::term_block` — covered, §06 |
+| Breadcrumb | ✓ `glyph::breadcrumb` — covered, §05 |
+| Avatar | ✓ `glyph::avatar` — covered, §05 |
+| Tooltip | ✓ `glyph::tooltip` — covered, §06 |
+| Empty state | ✓ `glyph::empty_state` — covered, §06 |
+| Command palette | ✓ `glyph::command_palette` — covered, §07/Motion |
+| Bottom navigation | ✓ (mapped to `glyph::glyph_nav_bar`, no dedicated bottom-nav widget — see §05 above) |
+| Boot sequence animation | ✓, approximated (see Motion #11 above) |
+| Staggered log reveal | ✓ `glyph::term_block(...).staggered(true)` — covered, Motion #09 |
+
+### Coverage audit result (`c09`)
+
+Walking every item in `research/INVENTORY.md` against the shipped pages found
+**no missed item requiring a new polish fix** — every checklist entry is
+either a live ✓ or a documented N/A-with-reason above (each already
+cross-checked against the actual widget source by its owning page task, and
+re-confirmed here against the merged tree). No cross-page code changes were
+needed for this task; the full own-dir gate (`cargo build --locked && cargo
+test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`)
+passes clean against all seven filled pages (see `tests/smoke.rs` for the
+automated per-page/per-size/per-brightness sweep this task added).
