@@ -24,6 +24,9 @@
 //! `.loading(bool)` shows a rotating spinner in place of the label and
 //! suppresses `on_press` while shown (disabled semantics — see
 //! [`Widget::semantics`](struct.ButtonWidget.html#impl-Widget-for-ButtonWidget)).
+//! The spinner freezes (and stops requesting frames) wherever it currently
+//! sits under `Theme.motion.reduce_motion`, the same skip-animation shape
+//! [`crate::material::loading_indicator`]'s morph loop uses.
 //!
 //! Precedence stays token-resolved (`docs/CODE_STANDARDS.md`'s Theming
 //! conventions): every fill/border/label color below is `theme > fallback`
@@ -639,6 +642,10 @@ impl Widget for ButtonWidget {
         // theme is in scope.
         let press_timing = resolve_press_timing(theme, self.pressed);
         let ink = self.style.resolve_ink(theme);
+        // Resolved now (last use of the shared `theme` borrow — see the
+        // comment above) so the `loading` branch below can check it without
+        // re-borrowing `theme` across the intervening `&mut ctx` calls.
+        let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
 
         let fill = if self.pressed {
             paint.fill_pressed
@@ -675,8 +682,14 @@ impl Widget for ButtonWidget {
         }
 
         if self.loading {
-            self.spinner.advance(ctx.frame_time());
-            ctx.request_frame();
+            // `reduce_motion` freezes the spinner wherever it currently sits
+            // and stops requesting frames — the same skip-animation shape
+            // `material::loading_indicator`'s morph loop uses (and
+            // `glyph::skeleton`'s shimmer).
+            if !reduce_motion {
+                self.spinner.advance(ctx.frame_time());
+                ctx.request_frame();
+            }
             self.paint_spinner(ctx, scene, ink);
         } else {
             self.label.paint_child(ctx, scene);
@@ -1108,6 +1121,37 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
         assert_eq!(state.presses, 0, "loading must suppress on_press");
+    }
+
+    /// `reduce_motion` freezes the loading spinner wherever it currently sits
+    /// and stops requesting frames — the same skip-animation shape
+    /// `material::loading_indicator`'s morph loop uses (catalog-animation-
+    /// performance bug task 10: without this, an always-`.loading(true)`
+    /// button — e.g. a disabled-look demo — spins forever regardless of the
+    /// header animations-off toggle forcing `Theme.motion.reduce_motion`).
+    #[test]
+    fn loading_spinner_freezes_and_stops_requesting_frames_under_reduce_motion() {
+        let mut w = widget();
+        w.loading = true;
+
+        let mut theme = frust_theme::Theme::m3_baseline();
+        theme.motion.reduce_motion = false;
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
+        let mut scene = RRectRecorder::default();
+        w.paint(&mut ctx, &mut scene);
+        assert!(
+            ctx.needs_frame(),
+            "with reduce_motion off, the loading spinner must keep requesting frames"
+        );
+
+        theme.motion.reduce_motion = true;
+        let mut ctx2 = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
+        let mut scene2 = RRectRecorder::default();
+        w.paint(&mut ctx2, &mut scene2);
+        assert!(
+            !ctx2.needs_frame(),
+            "with reduce_motion on, the loading spinner must stop requesting frames"
+        );
     }
 
     #[test]

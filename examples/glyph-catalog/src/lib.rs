@@ -6,9 +6,10 @@
 //!
 //! This module is only the **shell**: the app state, the root [`navigator`]
 //! (whose home page is a [`glyph::app_bar`](frust::glyph::app_bar) — the
-//! brand mark, "glyph catalog" title, and the brightness/reduce-motion
-//! toggles folded into its trailing actions (glyph-refinements task 18,
-//! superseding the old header-row `Row`) — over a [`safe_area`]'d body: the
+//! brand mark, "glyph catalog" title, and the brightness/reduce-motion/
+//! animations toggles folded into its trailing actions (glyph-refinements
+//! task 18, superseding the old header-row `Row`; the animations toggle is
+//! catalog-animation-performance bug task 10) — over a [`safe_area`]'d body: the
 //! 7-section tab strip plus a [`pattern_switcher`](frust::motion::switcher::pattern_switcher)
 //! hosting one of seven section pages in a [`scroll_view`], under a bare
 //! [`toast_host`](frust::glyph::toast_host) overlay (default bottom-center
@@ -77,6 +78,18 @@ pub struct CatalogState {
     /// [`app_bar`](frust::glyph::app_bar)'s `.elevated(...)` (task 18) — the
     /// same `y > 4` scrolled-shadow cue the AppBar's own reference HTML uses.
     pub elevated: RwSignal<bool>,
+    /// The header animations on/off toggle (default on;
+    /// catalog-animation-performance bug task 10). OFF means "every demo
+    /// renders its settled state — no frame requests anywhere": the toggle
+    /// is **app-forced reduce motion + demo stop**, not a parallel
+    /// mechanism — [`apply_theme`] ORs it into the same
+    /// `MotionScheme::reduce_motion` push the header reduce-motion toggle
+    /// drives (so every convention-following widget collapses for free),
+    /// and the handful of wall-clock-driven demos on
+    /// [`pages::interactions`] that bypass that theme-default collapse (see
+    /// that module's "Reduced motion" docs) OR it into their own local
+    /// `reduce` check instead of adding a second gating flag.
+    pub animations_enabled: RwSignal<bool>,
 }
 
 impl CatalogState {
@@ -92,6 +105,7 @@ impl CatalogState {
             toasts: RwSignal::new(Vec::new()),
             nav: NavigatorController::new(),
             elevated: RwSignal::new(false),
+            animations_enabled: RwSignal::new(true),
         }
     }
 }
@@ -105,8 +119,10 @@ impl Default for CatalogState {
 /// Force the app-wide theme from the current header-toggle flags: a
 /// [`ThemeBuilder`](frust::ThemeBuilder) over [`Theme::glyph_baseline`] with
 /// the chosen brightness and the reduced-motion flag mapped into its
-/// [`MotionScheme`]. Called from both header toggles so the two flags always
-/// compose (never clobber each other).
+/// [`MotionScheme`]. Called from all three header toggles so the flags
+/// always compose (never clobber each other) — `reduce_motion` here is
+/// already the *effective* flag (see [`effective_reduce_motion`]), not the
+/// raw header reduce-motion toggle.
 fn apply_theme(brightness: Brightness, reduce_motion: bool) {
     let theme = Theme::builder(Theme::glyph_baseline())
         .brightness(brightness)
@@ -115,20 +131,35 @@ fn apply_theme(brightness: Brightness, reduce_motion: bool) {
     set_app_theme(theme);
 }
 
+/// The theme's effective reduced-motion flag: ON if either the header
+/// reduce-motion toggle is set, or the animations-off toggle is set. This is
+/// the "cheapest sound wiring" the animations toggle reuses rather than
+/// inventing a parallel mechanism (see [`CatalogState::animations_enabled`]'s
+/// doc comment) — every header toggle handler recomputes this from the two
+/// raw flags and feeds it into [`apply_theme`].
+fn effective_reduce_motion(reduce_motion: bool, animations_enabled: bool) -> bool {
+    reduce_motion || !animations_enabled
+}
+
 /// Scroll offset (logical px) past which the root AppBar grows its scrolled
 /// shadow/border — mirrors the `glyph::appbar` reference HTML's `y > 4` check
 /// (see [`glyph::app_bar`](frust::glyph::app_bar)'s module docs).
 const ELEVATION_THRESHOLD_PX: f64 = 4.0;
 
 /// The root [`glyph::app_bar`](frust::glyph::app_bar): a brand-mark leading
-/// glyph, the "glyph catalog" title, and the brightness/reduce-motion toggles
-/// folded into its trailing actions — replacing the old header row's own
-/// `Row` (task 18) so the shell stacks exactly one bar. The AppBar consumes
-/// the top window inset itself (its [module docs](frust::glyph::app_bar)),
-/// so the body below never pads its own top edge.
+/// glyph, the "glyph catalog" title, and the brightness/reduce-motion/
+/// animations toggles folded into its trailing actions — replacing the old
+/// header row's own `Row` (task 18) so the shell stacks exactly one bar. The
+/// animations toggle is the third, added by catalog-animation-performance
+/// bug task 10 beside the other two (Ed's decision — see
+/// [`CatalogState::animations_enabled`]'s doc comment for what OFF means).
+/// The AppBar consumes the top window inset itself (its [module
+/// docs](frust::glyph::app_bar)), so the body below never pads its own top
+/// edge.
 fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
     let brightness = state.brightness.get();
     let reduce_motion = state.reduce_motion.get();
+    let animations_enabled = state.animations_enabled.get();
     let elevated = state.elevated.get();
 
     let brightness_label = match brightness {
@@ -136,6 +167,7 @@ fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
         Brightness::Light => "◑",
     };
     let motion_label = if reduce_motion { "⏸" } else { "▶" };
+    let animations_label = if animations_enabled { "⏵" } else { "⏹" };
 
     // Live accent-text role — resolves per-brightness (round-0 review of the
     // header row: a fixed dark amber failed AA on the light surface).
@@ -152,18 +184,36 @@ fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
             Brightness::Light => Brightness::Dark,
         };
         state.brightness.set(next);
-        apply_theme(next, state.reduce_motion.get_untracked());
+        apply_theme(
+            next,
+            effective_reduce_motion(
+                state.reduce_motion.get_untracked(),
+                state.animations_enabled.get_untracked(),
+            ),
+        );
     }));
 
     let motion_btn = any(button(motion_label, |state: &mut CatalogState| {
         let next = !state.reduce_motion.get_untracked();
         state.reduce_motion.set(next);
-        apply_theme(state.brightness.get_untracked(), next);
+        apply_theme(
+            state.brightness.get_untracked(),
+            effective_reduce_motion(next, state.animations_enabled.get_untracked()),
+        );
+    }));
+
+    let animations_btn = any(button(animations_label, |state: &mut CatalogState| {
+        let next = !state.animations_enabled.get_untracked();
+        state.animations_enabled.set(next);
+        apply_theme(
+            state.brightness.get_untracked(),
+            effective_reduce_motion(state.reduce_motion.get_untracked(), next),
+        );
     }));
 
     any(frust::glyph::app_bar::<CatalogState>("glyph catalog")
         .leading(brand)
-        .actions(vec![brightness_btn, motion_btn])
+        .actions(vec![brightness_btn, motion_btn, animations_btn])
         .elevated(elevated))
 }
 

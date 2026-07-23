@@ -13,7 +13,7 @@
 
 use std::any::Any;
 
-use frust::{AnyView, Brightness, Theme, any, component, provide_context};
+use frust::{AnyView, Brightness, MotionScheme, Set, Theme, any, component, provide_context};
 use frust_core::FrameTime;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
 use frust_core::{WindowEdgeInsets, WindowInsets};
@@ -410,5 +410,86 @@ fn foundations_page_requests_no_frames_at_rest() {
     assert!(
         !outcome.needs_frame,
         "foundations page must not request frames at rest (needs_frame must be false)",
+    );
+}
+
+/// A later checkpoint (ms) the sweep below re-paints at, well past every
+/// section's one-shot MOUNT reveal (`content`'s and `motion`'s staggered
+/// `term_block` demos included — their `GlyphStagger` cascade plays out over
+/// a fixed wall-clock span *regardless* of `reduce_motion`, which only
+/// desyncs the per-line cascade into a single fast fade rather than
+/// eliminating the reveal — see `term_block`'s module docs; the longest
+/// instance here is 5 lines, ≈510ms). "Settled state" (Acceptance Criterion
+/// #1) means at-rest AFTER any such mount-time reveal has finished, not on
+/// the very first post-mount paint.
+const SETTLE_MS: u64 = 5000;
+
+/// catalog-animation-performance bug task 10's header animations-off toggle:
+/// the coverage-sweep half of Acceptance Criterion #1 — "toggle off: headless
+/// paint of every section reports zero frame requests". Mirrors what the real
+/// toggle handler does (`lib.rs`'s `apply_theme`/`effective_reduce_motion`):
+/// force `MotionScheme::reduce_motion` through the threaded theme (the "every
+/// convention-following widget collapses" half) AND flip
+/// `CatalogState::animations_enabled` off (the half `pages::interactions`'
+/// wall-clock demos gate on directly) — every section, both brightnesses,
+/// must then paint its settled state ([`SETTLE_MS`] after mount) with zero
+/// frame requests. Interactions' heartbeat (the catalog's one demo documented
+/// to auto-repeat without input — see that module's docs) is the
+/// load-bearing case this regresses if the toggle is wired to only one of
+/// the two halves.
+#[test]
+fn every_section_requests_no_frames_with_animations_disabled() {
+    for brightness in BRIGHTNESSES {
+        let theme = Theme::builder(Theme::glyph_baseline())
+            .brightness(brightness)
+            .map_motion(|m: MotionScheme| MotionScheme {
+                reduce_motion: true,
+                ..m
+            })
+            .build();
+
+        for (section, label) in SECTION_LABELS.iter().enumerate() {
+            let _owner = setup();
+            let mut tcx = TextContext::new();
+            let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+            root.set_theme(Box::new(theme.clone()));
+            let mut state = CatalogState::new();
+            state.animations_enabled.set(false);
+            let mut logic = |s: &mut CatalogState| pages::current(section, s);
+            // First frame: mount (any one-shot entrance reveal starts here).
+            let _ = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+            // Second frame, well past SETTLE_MS: the section's true at-rest
+            // state, the one Acceptance Criterion #1 actually targets.
+            let (_scene, outcome) =
+                frame_at(&mut root, &mut logic, &mut state, &mut tcx, SETTLE_MS);
+            assert!(
+                !outcome.needs_frame,
+                "section {section} ({label}) must request zero frames once settled with \
+                 animations disabled under {brightness:?} (got needs_frame == true)",
+            );
+        }
+    }
+}
+
+/// The toggle's other half: with animations back on (the default
+/// `CatalogState`, `reduce_motion` off), the interactions section's
+/// heartbeat demo must resume requesting frames — proving the toggle
+/// actually restores animation rather than latching off.
+#[test]
+fn interactions_heartbeat_resumes_with_animations_enabled() {
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+    let mut state = CatalogState::new();
+    let interactions_section = SECTION_LABELS
+        .iter()
+        .position(|s| *s == "Interactions")
+        .expect("an Interactions section must exist");
+    let mut logic = |s: &mut CatalogState| pages::current(interactions_section, s);
+    let (_scene, outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    assert!(
+        outcome.needs_frame,
+        "with animations enabled (the default) and reduce_motion off, the heartbeat demo must \
+         request the next frame",
     );
 }

@@ -81,11 +81,15 @@
 //!
 //! # Reduced motion
 //!
-//! Every clock-driven demo checks `state.reduce_motion.get()` directly (the
+//! Every clock-driven demo checks a local `reduce` flag directly —
+//! `state.reduce_motion.get() || !state.animations_enabled.get()`, ORing the
+//! header animations-off toggle (catalog-animation-performance bug task 10)
+//! into the same check rather than adding a second gating flag (see
+//! `crate::CatalogState::animations_enabled`'s doc comment) — because the
 //! `pattern_switcher`/`AnimatedOpacity`/`AnimatedScale` wrappers only
 //! auto-collapse when resolving a *theme-default* timing, which these
 //! wall-clock-driven demos deliberately bypass via an explicit
-//! `Timing::Duration(Duration::ZERO, ..)` "immediate follower" — see [`ZERO`])
+//! `Timing::Duration(Duration::ZERO, ..)` "immediate follower" — see [`ZERO`]
 //! and skips the animated portion outright rather than fighting the built-in
 //! collapse: the heartbeat ring/latency-roll, waveform bars, and copy-burst
 //! particles all render their settled end-state instead, matching
@@ -350,7 +354,11 @@ const HB_LATENCIES: [f64; 6] = [36.0, 52.0, 41.0, 68.0, 29.0, 44.0];
 /// auto-repeats without input (Acceptance Criteria #3; the research footer's
 /// sole exception).
 fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
-    let reduce = state.reduce_motion.get();
+    // ORs the header animations-off toggle into the same local `reduce`
+    // check every wall-clock demo already gates on — the "cheapest sound
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes
+    // (catalog-animation-performance bug task 10), not a second flag.
+    let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let elapsed = hb_elapsed_ms();
     let cycle = (elapsed / HB_CYCLE_MS).floor().max(0.0) as usize;
     let t = elapsed % HB_CYCLE_MS;
@@ -659,7 +667,11 @@ fn token_name_view(rendered: String, glitching: bool) -> AnyView<CatalogState> {
 /// no `request_layout` needed since a per-frame `SizedBox` height change
 /// already marks `ChangeFlags::LAYOUT` on rebuild). "Restore row" resets.
 fn demo_token_scramble(state: &CatalogState) -> FlexChild<CatalogState> {
-    let reduce = state.reduce_motion.get();
+    // ORs the header animations-off toggle into the same local `reduce`
+    // check every wall-clock demo already gates on — the "cheapest sound
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes
+    // (catalog-animation-performance bug task 10), not a second flag.
+    let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let active_sig = token_active_sig();
     let active = active_sig.get();
 
@@ -776,7 +788,11 @@ const CHARGE_ROW_H: f64 = 56.0;
 /// self-correct the moment the *next* hold begins rather than only after a
 /// full press-release cycle completes.
 fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
-    let reduce = state.reduce_motion.get();
+    // ORs the header animations-off toggle into the same local `reduce`
+    // check every wall-clock demo already gates on — the "cheapest sound
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes
+    // (catalog-animation-performance bug task 10), not a second flag.
+    let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let progress_sig = charge_progress_sig();
     let floated_sig = charge_floated_sig();
     let progress = progress_sig.get();
@@ -939,7 +955,11 @@ fn rain_stagger(col: u32) -> f64 {
 ///
 /// [`ScrollView`]: frust::ScrollView
 fn demo_rain_burst(state: &CatalogState) -> FlexChild<CatalogState> {
-    let reduce = state.reduce_motion.get();
+    // ORs the header animations-off toggle into the same local `reduce`
+    // check every wall-clock demo already gates on — the "cheapest sound
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes
+    // (catalog-animation-performance bug task 10), not a second flag.
+    let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let active_sig = rain_active_sig();
     let active = active_sig.get();
     let elapsed = if active { rain_elapsed_ms() } else { 0.0 };
@@ -1097,7 +1117,11 @@ fn wave_row(name: &str, live: bool, reduce: bool, t: f64) -> AnyView<CatalogStat
 fn demo_waveform(state: &CatalogState) -> FlexChild<CatalogState> {
     let live_sig = wave_live_sig();
     let live = live_sig.get();
-    let reduce = state.reduce_motion.get();
+    // ORs the header animations-off toggle into the same local `reduce`
+    // check every wall-clock demo already gates on — the "cheapest sound
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes
+    // (catalog-animation-performance bug task 10), not a second flag.
+    let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let t = wave_elapsed_ms();
 
     let mut children = vec![
@@ -1341,6 +1365,42 @@ mod tests {
             !paint_needs_frame(&mut root, &mut state, &mut tcx),
             "with reduce_motion on, the heartbeat ticker is unmounted and every other demo is \
              still idle — nothing should request a frame"
+        );
+    }
+
+    /// The header animations-off toggle's counterpart to the test above
+    /// (catalog-animation-performance bug task 10): with `reduce_motion`
+    /// left OFF but `animations_enabled` turned OFF, the heartbeat ticker
+    /// must still unmount — proving the two flags OR together in the same
+    /// `reduce` check (`crate::CatalogState::animations_enabled`'s doc
+    /// comment) rather than the toggle needing `reduce_motion` set too.
+    /// Flipping `animations_enabled` back on with `reduce_motion` still off
+    /// restores the ticker, proving the toggle actually resumes animation
+    /// rather than latching off.
+    #[test]
+    fn animations_toggle_unmounts_and_restores_the_heartbeat_ticker() {
+        let _owner = setup();
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut state = CatalogState::new();
+
+        assert!(
+            paint_needs_frame(&mut root, &mut state, &mut tcx),
+            "the heartbeat demo auto-repeats and must request the next frame at rest"
+        );
+
+        state.animations_enabled.set(false);
+        assert!(
+            !paint_needs_frame(&mut root, &mut state, &mut tcx),
+            "with animations_enabled off (reduce_motion still off), the heartbeat ticker must \
+             still unmount — nothing should request a frame"
+        );
+
+        state.animations_enabled.set(true);
+        assert!(
+            paint_needs_frame(&mut root, &mut state, &mut tcx),
+            "turning animations back on (reduce_motion still off) must restore the heartbeat \
+             ticker's frame request"
         );
     }
 }
