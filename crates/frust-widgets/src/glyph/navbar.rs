@@ -227,7 +227,7 @@ impl GlyphLabel {
 
 /// A retained glyph slot: a shaped char run or a resolved vector icon.
 enum NavSlot {
-    Char(GlyphLabel),
+    Char(Box<GlyphLabel>),
     Icon(IconData),
 }
 
@@ -294,7 +294,7 @@ fn build_items(items: &[GlyphNavItem]) -> Vec<NavEntry> {
         .iter()
         .map(|item| NavEntry {
             glyph: match &item.glyph {
-                NavItemGlyph::Char(s) => NavSlot::Char(GlyphLabel::new(s.clone())),
+                NavItemGlyph::Char(s) => NavSlot::Char(Box::new(GlyphLabel::new(s.clone()))),
                 NavItemGlyph::Icon(data) => NavSlot::Icon(data.clone()),
             },
             label: GlyphLabel::new(item.label.clone()),
