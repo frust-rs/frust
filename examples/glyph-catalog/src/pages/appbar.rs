@@ -8,11 +8,22 @@
 //!
 //! # Structure
 //!
-//! Mirrors `interactions.rs`/`motion.rs`: `pub fn page(state)` + one `demo_*`
-//! fn per moment inside [`block`] scaffolds, page-local state cached in a
-//! self-healing `thread_local!` (the `local_sig!` macro, duplicated from
+//! `pub fn page(state)` is a launcher: one inline anatomy diagram
+//! ([`demo_anatomy`], the "01 Anatomy" moment, kept inline per this task's
+//! own Details) over a [`glyph_list`] of six variation rows. Each row's
+//! `on_press` routes through [`open_variation`] to one of six `open_*`
+//! functions (`pub` — see their own docs), which `state.nav.push`es a real,
+//! full-screen page built by the matching `variation_*` fn: a real
+//! [`app_bar`] at top (so inset consumption/scroll-collapse/elevation are
+//! exercised for real, not simulated inline — Ed's report this task fixes)
+//! over a [`variation_frame`]-wrapped scrollable body, with a
+//! [`back_button`] leading slot popping the *outer* (root) navigator back to
+//! this launcher. Page-local demo state is cached in a self-healing
+//! `thread_local!` (the `local_sig!` macro, duplicated from
 //! `interactions.rs`/`motion.rs`'s macro of the same shape — the existing
-//! per-module precedent, not shared across files).
+//! per-module precedent, not shared across files) exactly as it was when
+//! these six moments rendered inline, so a variation's state now simply
+//! survives a push→pop→push round-trip instead of a rebuild.
 //!
 //! # The overflow-menu anchor: a genuine escape hatch
 //!
@@ -61,16 +72,17 @@ use frust_core::{
 use kurbo::{Point, Rect, Size};
 
 use frust::glyph::{
-    BadgeVariant, BannerVariant, MenuEntry, TitleDirection, app_bar, banner_spec, large_config,
-    menu_item, menu_item_danger, menu_separator, selection_bar, show_glyph_menu,
+    BadgeVariant, BannerVariant, MenuEntry, TitleDirection, app_bar, banner_spec, glyph_list,
+    glyph_list_item, large_config, menu_item, menu_item_danger, menu_separator, selection_bar,
+    show_glyph_menu,
 };
 use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Image, ImageFit, ImageSource, Padding, PopResult, RwSignal, ScrollInfo, Set,
-    SizedBox, Theme, View, any, button, checkbox, inflexible, scroll_view, spawn_local, text,
-    use_context,
+    GetUntracked, Image, ImageFit, ImageSource, NavigatorController, Padding, PopResult, RwSignal,
+    ScrollInfo, Set, SizedBox, Theme, View, any, button, checkbox, flexible, inflexible, safe_area,
+    scroll_view, spawn_local, text, use_context,
 };
 
 use crate::CatalogState;
@@ -139,6 +151,37 @@ fn block(children: Vec<FlexChild<CatalogState>>) -> FlexChild<CatalogState> {
     inflexible(Padding(
         EdgeInsets::all(12.0),
         FlexView::new(Axis::Vertical, children),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Pushed-page frame — shared by every variation (see the module docs' "Structure")
+// ---------------------------------------------------------------------------
+
+/// A small leading "‹" icon button popping the *outer* (root) navigator back
+/// to the launcher list — every variation page's own back affordance (this
+/// task's "back working via the auto-wired navigator" acceptance criterion).
+/// `nav` is the page's own captured [`NavigatorController`] clone, threaded
+/// in by [`open_variation`] at push time (mirrors the dialog demos' push
+/// pattern this task's Details cite).
+fn back_button(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
+    any(button("\u{2039}", move |_: &mut CatalogState| nav.pop())
+        .style(ButtonStyle::Icon)
+        .small())
+}
+
+/// Wrap a variation page's real `bar` over a scrollable `body` — the pushed
+/// full-screen frame every variation shares. `bar` consumes the top window
+/// inset itself (`glyph::app_bar`'s own module docs), so `body`'s safe area
+/// disables its own top edge (`.top(false)`) to avoid double-padding it,
+/// exactly mirroring `crate::lib`'s root shell composition.
+fn variation_frame(
+    bar: AnyView<CatalogState>,
+    body: AnyView<CatalogState>,
+) -> AnyView<CatalogState> {
+    any(FlexView::new(
+        Axis::Vertical,
+        vec![inflexible(bar), flexible(1, safe_area(body).top(false))],
     ))
 }
 
@@ -446,10 +489,12 @@ fn filler_rows() -> AnyView<CatalogState> {
     ))
 }
 
-/// 02 scroll collapse: a bounded filler `ScrollView` feeding
-/// `collapse_progress`/`elevated` from its own `on_scroll` into a `.large(..)`
-/// bar with a heartbeat-style meta row.
-fn demo_scroll_collapse() -> FlexChild<CatalogState> {
+/// 02 scroll-collapse large: the real pushed page. A full-height filler
+/// `ScrollView` feeds `collapse_progress`/`elevated` from its own `on_scroll`
+/// into a `.large(..)` bar with a heartbeat-style meta row and a leading back
+/// button — the inline demo's exact bar wiring, now over real inset-consuming
+/// chrome instead of a fixed-height `SizedBox` preview.
+fn variation_scroll_collapse(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
     let progress_sig = collapse_progress_sig();
     let elevated_sig = collapse_elevated_sig();
     let progress = progress_sig.get();
@@ -457,26 +502,29 @@ fn demo_scroll_collapse() -> FlexChild<CatalogState> {
 
     let bar = app_bar::<CatalogState>("dev · session")
         .large(large_config("dev · session", collapse_meta_row()))
+        .leading(back_button(nav))
         .collapse_progress(progress)
         .elevated(elevated);
 
-    let filler = SizedBox(None, Some(180.0)).child(scroll_view(filler_rows()).on_scroll(
+    let body = any(scroll_view(filler_rows()).on_scroll(
         move |_state: &mut CatalogState, info: ScrollInfo| {
             progress_sig.set((info.offset / COLLAPSE_SPAN_PX).clamp(0.0, 1.0));
             elevated_sig.set(info.offset > ELEVATED_THRESHOLD_PX);
         },
     ));
 
-    block(vec![
-        inflexible(label("02 Scroll collapse")),
-        inflexible(caption(
-            "scroll the filler list below — the big title/meta row collapse into the compact bar",
-        )),
-        gap(6.0),
-        inflexible(bar),
-        gap(6.0),
-        inflexible(filler),
-    ])
+    variation_frame(any(bar), body)
+}
+
+/// Push [`variation_scroll_collapse`] onto the outer navigator — `pub`: the
+/// headless push/pop regression test (`tests/smoke.rs`) calls this directly,
+/// exactly mirroring how normal app code reaches it (the launcher list's
+/// `on_press`, via [`open_variation`]).
+pub fn open_scroll_collapse(state: &mut CatalogState) {
+    let nav = state.nav.clone();
+    state
+        .nav
+        .push(move || variation_scroll_collapse(nav.clone()));
 }
 
 // ---------------------------------------------------------------------------
@@ -512,20 +560,25 @@ fn backnav_screen(page: usize) -> AnyView<CatalogState> {
     }
 }
 
-/// 03 back-nav crossfade: two buttons swap the bar's title (with a direction
-/// hint) and slide a fake screen underneath via
-/// [`frust::motion::patterns::SharedAxis::X`], reversed on the "back" leg.
-fn demo_backnav() -> FlexChild<CatalogState> {
+/// 03 title crossfade / back-nav: the real pushed page. Two buttons swap the
+/// bar's title (with a direction hint) and slide a fake screen underneath via
+/// [`frust::motion::patterns::SharedAxis::X`], reversed on the "back" leg —
+/// the inline demo's exact wiring, plus a leading [`back_button`] popping the
+/// *outer* navigator (distinct from the in-page "Close session" leg, which
+/// only crossfades the title/screen, never leaves this page).
+fn variation_backnav(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
     let page_sig = backnav_page_sig();
     let back_sig = backnav_back_sig();
     let page = page_sig.get();
     let back = back_sig.get();
 
-    let bar = app_bar::<CatalogState>(BACKNAV_TITLES[page]).title_direction(if back {
-        TitleDirection::Back
-    } else {
-        TitleDirection::Forward
-    });
+    let bar = app_bar::<CatalogState>(BACKNAV_TITLES[page])
+        .leading(back_button(nav))
+        .title_direction(if back {
+            TitleDirection::Back
+        } else {
+            TitleDirection::Forward
+        });
 
     let screen = pattern_switcher(page, SharedAxis::X, backnav_screen(page)).reverse(back);
 
@@ -552,18 +605,30 @@ fn demo_backnav() -> FlexChild<CatalogState> {
         ],
     );
 
-    block(vec![
-        inflexible(label("03 Back-nav crossfade")),
-        inflexible(caption(
-            "the title crossfades in the tapped direction; the screen below slides the same way",
-        )),
-        gap(6.0),
-        inflexible(bar),
-        gap(6.0),
-        inflexible(screen),
-        gap(6.0),
-        inflexible(buttons),
-    ])
+    let body = any(scroll_view(any(FlexView::new(
+        Axis::Vertical,
+        vec![
+            inflexible(caption(
+                "the title crossfades in the tapped direction; the screen below slides the same way",
+            )),
+            gap(6.0),
+            inflexible(screen),
+            gap(12.0),
+            inflexible(buttons),
+            gap(12.0),
+            inflexible(filler_rows()),
+        ],
+    ))));
+
+    variation_frame(any(bar), body)
+}
+
+/// Push [`variation_backnav`] onto the outer navigator — see
+/// [`open_scroll_collapse`]'s doc for the `pub`-as-test-seam rationale shared
+/// by every `open_*` fn in this module.
+pub fn open_backnav(state: &mut CatalogState) {
+    let nav = state.nav.clone();
+    state.nav.push(move || variation_backnav(nav.clone()));
 }
 
 // ---------------------------------------------------------------------------
@@ -584,10 +649,12 @@ fn overflow_menu_entries() -> Vec<MenuEntry> {
     ]
 }
 
-/// 04 overflow menu: a kebab trailing icon opens
+/// 04 overflow menu: the real pushed page. A kebab trailing icon opens
 /// [`frust::glyph::show_glyph_menu`], anchored at the kebab's own painted
-/// rect via [`AnchorReporter`] (see the [module docs](self)).
-fn demo_overflow_menu() -> FlexChild<CatalogState> {
+/// rect via [`AnchorReporter`] (see the [module docs](self)) — the inline
+/// demo's exact wiring, plus a leading [`back_button`] and scrollable filler
+/// content underneath.
+fn variation_overflow(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
     let caption_sig = overflow_caption_sig();
     let result_caption = caption_sig.get();
     let target = kebab_anchor();
@@ -618,21 +685,33 @@ fn demo_overflow_menu() -> FlexChild<CatalogState> {
         target,
     ));
 
-    let bar = app_bar::<CatalogState>("dev · session").actions(vec![kebab]);
+    let bar = app_bar::<CatalogState>("dev · session")
+        .leading(back_button(nav))
+        .actions(vec![kebab]);
 
-    let mut children = vec![
-        inflexible(label("04 Overflow menu")),
-        inflexible(caption(
-            "the kebab opens a menu anchored at its own corner; scrim tap/back/Escape dismiss it",
-        )),
-        gap(6.0),
-        inflexible(bar),
-    ];
+    let mut top_children = vec![inflexible(caption(
+        "the kebab opens a menu anchored at its own corner; scrim tap/back/Escape dismiss it",
+    ))];
     if !result_caption.is_empty() {
-        children.push(gap(6.0));
-        children.push(inflexible(caption(result_caption)));
+        top_children.push(gap(6.0));
+        top_children.push(inflexible(caption(result_caption)));
     }
-    block(children)
+    top_children.push(gap(6.0));
+
+    let body = any(scroll_view(any(FlexView::new(
+        Axis::Vertical,
+        vec![block(top_children), inflexible(filler_rows())],
+    ))));
+
+    variation_frame(any(bar), body)
+}
+
+/// Push [`variation_overflow`] onto the outer navigator — see
+/// [`open_scroll_collapse`]'s doc for the `pub`-as-test-seam rationale shared
+/// by every `open_*` fn in this module.
+pub fn open_overflow(state: &mut CatalogState) {
+    let nav = state.nav.clone();
+    state.nav.push(move || variation_overflow(nav.clone()));
 }
 
 // ---------------------------------------------------------------------------
@@ -660,9 +739,11 @@ fn token_row(i: usize, checked: bool, sig: RwSignal<[bool; 3]>) -> FlexChild<Cat
     ))
 }
 
-/// 05 selection mode: three token rows with checkboxes drive
-/// `AppBarView::selection`; the widget-owned × close clears every checkbox.
-fn demo_selection() -> FlexChild<CatalogState> {
+/// 05 selection mode: the real pushed page. Three token rows with checkboxes
+/// drive `AppBarView::selection` (the widget-owned × close clears every
+/// checkbox) — the inline demo's exact wiring, plus a leading [`back_button`]
+/// and scrollable filler content underneath the token rows.
+fn variation_selection(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
     let sig = selection_checked_sig();
     let checked = sig.get();
     let count = checked.iter().filter(|c| **c).count();
@@ -678,21 +759,31 @@ fn demo_selection() -> FlexChild<CatalogState> {
         .small())])
     });
 
-    let bar = app_bar::<CatalogState>("Sessions").selection(selection);
+    let bar = app_bar::<CatalogState>("Sessions")
+        .leading(back_button(nav))
+        .selection(selection);
 
-    let mut children = vec![
-        inflexible(label("05 Selection mode")),
-        inflexible(caption(
-            "check a token to enter selection mode; \u{d7} clears",
-        )),
-        gap(6.0),
-        inflexible(bar),
-        gap(6.0),
-    ];
+    let mut children = vec![inflexible(caption(
+        "check a token to enter selection mode; \u{d7} clears",
+    ))];
+    children.push(gap(6.0));
     for (i, c) in checked.iter().enumerate() {
         children.push(token_row(i, *c, sig));
     }
-    block(children)
+    children.push(gap(12.0));
+    children.push(inflexible(filler_rows()));
+
+    let body = any(scroll_view(any(FlexView::new(Axis::Vertical, children))));
+
+    variation_frame(any(bar), body)
+}
+
+/// Push [`variation_selection`] onto the outer navigator — see
+/// [`open_scroll_collapse`]'s doc for the `pub`-as-test-seam rationale shared
+/// by every `open_*` fn in this module.
+pub fn open_selection(state: &mut CatalogState) {
+    let nav = state.nav.clone();
+    state.nav.push(move || variation_selection(nav.clone()));
 }
 
 // ---------------------------------------------------------------------------
@@ -760,9 +851,11 @@ fn start_disconnect_sequence() {
     });
 }
 
-/// 06 connection banner: "simulate disconnect" opens a warning banner with a
-/// countdown, flips to a success "reconnected" flash, then auto-hides.
-fn demo_banner() -> FlexChild<CatalogState> {
+/// 06 connection banner: the real pushed page. "Simulate disconnect" opens a
+/// warning banner with a countdown, flips to a success "reconnected" flash,
+/// then auto-hides — the inline demo's exact wiring, plus a leading
+/// [`back_button`] and scrollable filler content underneath.
+fn variation_banner(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
     let phase = banner_phase_sig().get();
 
     let banner = match phase {
@@ -774,43 +867,155 @@ fn demo_banner() -> FlexChild<CatalogState> {
         BannerPhase::Reconnected => Some(banner_spec("Reconnected", BannerVariant::Success)),
     };
 
-    let bar = app_bar::<CatalogState>("dev · session").banner(banner);
+    let bar = app_bar::<CatalogState>("dev · session")
+        .leading(back_button(nav))
+        .banner(banner);
 
-    block(vec![
-        inflexible(label("06 Connection banner")),
-        inflexible(caption(
-            "simulates a dropped connection: a countdown, then a success flash, then auto-hide",
-        )),
-        gap(6.0),
-        inflexible(bar),
-        gap(6.0),
-        inflexible(
-            button("Simulate disconnect", |_: &mut CatalogState| {
-                start_disconnect_sequence();
-            })
-            .small(),
-        ),
-    ])
+    let body = any(scroll_view(any(FlexView::new(
+        Axis::Vertical,
+        vec![
+            inflexible(caption(
+                "simulates a dropped connection: a countdown, then a success flash, then auto-hide",
+            )),
+            gap(6.0),
+            inflexible(
+                button("Simulate disconnect", |_: &mut CatalogState| {
+                    start_disconnect_sequence();
+                })
+                .small(),
+            ),
+            gap(12.0),
+            inflexible(filler_rows()),
+        ],
+    ))));
+
+    variation_frame(any(bar), body)
 }
 
-/// See the page-fn contract in [`crate::pages`].
+/// Push [`variation_banner`] onto the outer navigator — see
+/// [`open_scroll_collapse`]'s doc for the `pub`-as-test-seam rationale shared
+/// by every `open_*` fn in this module.
+pub fn open_banner(state: &mut CatalogState) {
+    let nav = state.nav.clone();
+    state.nav.push(move || variation_banner(nav.clone()));
+}
+
+// ---------------------------------------------------------------------------
+// 00 — compact + elevate-on-scroll (this task's own addition — no §-numbered
+// inline precedent; every other variation mirrors an existing research-HTML
+// section, but "a plain compact bar raising its shadow on scroll" had none of
+// its own since the inline anatomy demo (§01) never scrolled)
+// ---------------------------------------------------------------------------
+
+local_sig!(compact_elevated_sig, bool, false);
+
+/// Compact + elevate-on-scroll: a plain compact bar (no large/selection/
+/// banner face) that raises `elevated` off the filler `ScrollView`'s own
+/// `on_scroll` — the root catalog `AppBar`'s own `.elevated(...)` contract
+/// (`crate::catalog_app_bar`), demonstrated in isolation.
+fn variation_compact_elevate(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
+    let elevated_sig = compact_elevated_sig();
+    let elevated = elevated_sig.get();
+
+    let bar = app_bar::<CatalogState>("dev · session")
+        .subtitle("compact + elevate-on-scroll")
+        .leading(back_button(nav))
+        .elevated(elevated);
+
+    let body = any(scroll_view(filler_rows()).on_scroll(
+        move |_state: &mut CatalogState, info: ScrollInfo| {
+            elevated_sig.set(info.offset > ELEVATED_THRESHOLD_PX);
+        },
+    ));
+
+    variation_frame(any(bar), body)
+}
+
+/// Push [`variation_compact_elevate`] onto the outer navigator — see
+/// [`open_scroll_collapse`]'s doc for the `pub`-as-test-seam rationale shared
+/// by every `open_*` fn in this module.
+pub fn open_compact_elevate(state: &mut CatalogState) {
+    let nav = state.nav.clone();
+    state
+        .nav
+        .push(move || variation_compact_elevate(nav.clone()));
+}
+
+// ---------------------------------------------------------------------------
+// Launcher list — the section page itself (this task's Details)
+// ---------------------------------------------------------------------------
+
+/// The six variation rows, in launcher order: `(glyph, title, sub)`. Index
+/// order matches [`open_variation`]'s dispatch — keep them in lockstep.
+const VARIATIONS: [(&str, &str, &str); 6] = [
+    (
+        "01",
+        "Compact + elevate-on-scroll",
+        "raises its shadow past the scroll threshold",
+    ),
+    (
+        "02",
+        "Scroll-collapse large",
+        "the big title collapses into the compact bar",
+    ),
+    ("03", "Overflow menu", "a kebab opens an anchored menu"),
+    (
+        "04",
+        "Selection mode",
+        "checkbox rows swap in a selection bar",
+    ),
+    (
+        "05",
+        "Connection banner",
+        "a dropped-connection countdown, then a reconnect flash",
+    ),
+    (
+        "06",
+        "Title crossfade / back-nav",
+        "the title crossfades in the tapped direction",
+    ),
+];
+
+/// Route a launcher-row press (its index into [`VARIATIONS`]) to the matching
+/// `open_*` fn — the [`glyph_list`]'s `on_press` callback.
+fn open_variation(state: &mut CatalogState, index: usize) {
+    match index {
+        0 => open_compact_elevate(state),
+        1 => open_scroll_collapse(state),
+        2 => open_overflow(state),
+        3 => open_selection(state),
+        4 => open_banner(state),
+        5 => open_backnav(state),
+        _ => {}
+    }
+}
+
+/// See the page-fn contract in [`crate::pages`]. A launcher: the inline
+/// anatomy diagram (this task's "keep one inline anatomy diagram" Details)
+/// over a [`glyph_list`] of the six variation pages (see the [module
+/// docs](self)'s "Structure" section) — each row pushes a real full-screen
+/// page via [`open_variation`].
 pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
+    let items = VARIATIONS
+        .iter()
+        .map(|(glyph, title, sub)| glyph_list_item(*glyph, *title).sub(*sub).chevron(true))
+        .collect();
+
     any(Padding(
         EdgeInsets::all(16.0),
         FlexView::new(
             Axis::Vertical,
             vec![
                 demo_anatomy(),
-                gap(8.0),
-                demo_scroll_collapse(),
-                gap(8.0),
-                demo_backnav(),
-                gap(8.0),
-                demo_overflow_menu(),
-                gap(8.0),
-                demo_selection(),
-                gap(8.0),
-                demo_banner(),
+                gap(12.0),
+                inflexible(label("Variations")),
+                inflexible(caption(
+                    "each opens as a full-screen page with a real app bar — inset consumption, \
+                     scroll collapse, and back all live",
+                )),
+                gap(6.0),
+                inflexible(any(glyph_list(items)
+                    .on_press(|state: &mut CatalogState, i| open_variation(state, i)))),
             ],
         ),
     ))

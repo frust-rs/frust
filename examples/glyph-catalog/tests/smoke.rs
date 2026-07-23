@@ -13,7 +13,10 @@
 
 use std::any::Any;
 
-use frust::{AnyView, Brightness, MotionScheme, Set, Theme, any, component, provide_context};
+use frust::{
+    AnyView, Brightness, MotionScheme, NavigatorController, Set, Theme, any, component, navigator,
+    provide_context,
+};
 use frust_core::FrameTime;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
 use frust_core::{WindowEdgeInsets, WindowInsets};
@@ -492,4 +495,125 @@ fn interactions_heartbeat_resumes_with_animations_enabled() {
         "with animations enabled (the default) and reduce_motion off, the heartbeat demo must \
          request the next frame",
     );
+}
+
+/// Task 14's six `appbar::open_*` fns, in [`glyphcatalog::pages::appbar`]'s
+/// `VARIATIONS` launcher-list order — shared by both regression tests below.
+/// `pub` on the `open_*` fns exists exactly for this seam (see their own doc
+/// comments): a headless test calls them directly, mirroring how
+/// `crates/frust-widgets/src/nav/navigator.rs`'s own unit tests drive a
+/// `NavigatorController` (`controller.push(..)`/`.pop()`) rather than
+/// simulating a pixel-exact click through a composite list widget.
+const APPBAR_VARIATION_OPENERS: [fn(&mut CatalogState); 6] = [
+    pages::appbar::open_compact_elevate,
+    pages::appbar::open_scroll_collapse,
+    pages::appbar::open_overflow,
+    pages::appbar::open_selection,
+    pages::appbar::open_banner,
+    pages::appbar::open_backnav,
+];
+
+/// Mount the AppBar section's launcher list over its own fresh
+/// [`NavigatorController`] — mirrors `full_shell_mounts_with_header_tabs_and_body`'s
+/// shape, but scoped to just this section's own navigator instead of the
+/// whole [`CatalogApp`] shell (the launcher's pushed pages replace the whole
+/// screen via the SAME shared navigator the real shell also drives — see
+/// `glyphcatalog`'s module docs — so a section-scoped navigator here is a
+/// faithful stand-in, not a divergent shape).
+fn mount_appbar_launcher() -> (
+    RenderRoot<CatalogState, AnyView<CatalogState>>,
+    NavigatorController<CatalogState>,
+    CatalogState,
+) {
+    let controller: NavigatorController<CatalogState> = NavigatorController::new();
+    let mut state = CatalogState::new();
+    state.nav = controller.clone();
+    (RenderRoot::new(), controller, state)
+}
+
+/// Task 14, acceptance criterion 1: every one of the six variation pages
+/// pushes onto the section's navigator (depth 1 → 2) and pops cleanly back
+/// (depth 2 → 1), painting real content at every step — the launcher list
+/// itself, the pushed variation page, and the launcher list again after back.
+#[test]
+fn appbar_variation_pages_push_and_pop() {
+    for open in APPBAR_VARIATION_OPENERS {
+        let _owner = setup();
+        let mut tcx = TextContext::new();
+        let (mut root, controller, mut state) = mount_appbar_launcher();
+        let ctrl = controller.clone();
+        let mut logic = move |_s: &mut CatalogState| {
+            any(navigator(&ctrl, || {
+                pages::appbar::page(&CatalogState::new())
+            }))
+        };
+
+        let (launcher_scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+        assert!(launcher_scene.glyph_runs > 0, "the launcher list paints");
+        assert_eq!(controller.depth(), 1, "the launcher starts at depth 1");
+
+        // Push the variation page (mirrors the launcher row's `on_press`).
+        open(&mut state);
+        let (pushed_scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 16);
+        assert!(
+            pushed_scene.glyph_runs > 0,
+            "the pushed variation page paints",
+        );
+        assert_eq!(controller.depth(), 2, "push must increase depth to 2");
+
+        // Pop — the leading back button's own `nav.pop()` call.
+        controller.pop();
+        let (popped_scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 32);
+        assert!(
+            popped_scene.glyph_runs > 0,
+            "back pops to the launcher list, which paints again",
+        );
+        assert_eq!(controller.depth(), 1, "pop must return depth to 1");
+    }
+}
+
+/// Task 14, acceptance criterion 2: extend the coverage sweep
+/// (`every_page_mounts_at_every_size_and_brightness`'s shape) to every
+/// variation page — each must mount, lay out, and paint with no panic across
+/// both viewport sizes and both Glyph brightnesses once pushed.
+#[test]
+fn appbar_variation_pages_mount_at_every_size_and_brightness() {
+    for brightness in BRIGHTNESSES {
+        for (i, open) in APPBAR_VARIATION_OPENERS.iter().enumerate() {
+            for (w, h) in SIZES {
+                let (_owner, theme) = setup_with_theme(brightness);
+                let mut tcx = TextContext::new();
+                let (mut root, controller, mut state) = mount_appbar_launcher();
+                root.set_theme(Box::new(theme));
+                let ctrl = controller.clone();
+                let mut logic = move |_s: &mut CatalogState| {
+                    any(navigator(&ctrl, || {
+                        pages::appbar::page(&CatalogState::new())
+                    }))
+                };
+
+                let _ = frame_at_size(
+                    &mut root,
+                    &mut logic,
+                    &mut state,
+                    &mut tcx,
+                    Size::new(w, h),
+                    0,
+                );
+                open(&mut state);
+                let (scene, _outcome) = frame_at_size(
+                    &mut root,
+                    &mut logic,
+                    &mut state,
+                    &mut tcx,
+                    Size::new(w, h),
+                    16,
+                );
+                assert!(
+                    scene.glyph_runs > 0,
+                    "variation {i} must paint text at {w}x{h} under {brightness:?}",
+                );
+            }
+        }
+    }
 }
