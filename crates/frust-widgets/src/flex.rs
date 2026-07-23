@@ -14,7 +14,7 @@ use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
 };
-use kurbo::{Point, Size};
+use kurbo::{Point, Rect, Size};
 
 use crate::ChildKey;
 
@@ -401,8 +401,26 @@ impl Widget for FlexWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // Paint-time visible-rect culling: when a scroll ancestor has threaded a
+        // visible rect (see `PaintCtx::constrain_visible_rect`), skip painting any
+        // child whose absolute bounds fall fully outside it plus a one-viewport
+        // warm margin — so an offscreen animator below the fold never bubbles its
+        // `request_frame` (paint is where that happens), and near-edge content
+        // stays warm for a small scroll. `None` = no constraint → paint every
+        // child, unchanged. Culling is paint-only: layout, events, capture, and
+        // focus all route by layout geometry and are untouched.
+        let cull = ctx
+            .visible_rect()
+            .map(|vr| vr.inflate(vr.width(), vr.height()));
         // Paint in child order (first child painted first / bottom-most).
         for pod in &mut self.children {
+            if let Some(warm) = cull {
+                let child_abs =
+                    Rect::from_origin_size(ctx.origin() + pod.origin().to_vec2(), pod.size());
+                if !child_abs.overlaps(warm) {
+                    continue;
+                }
+            }
             pod.paint_child(ctx, scene);
         }
     }
@@ -568,6 +586,109 @@ mod tests {
         // Child 0 painted at x=0, child 1 at x=20 — in child order.
         assert_eq!(scene.rects[0].0, Point::new(0.0, 0.0));
         assert_eq!(scene.rects[1].0, Point::new(20.0, 0.0));
+    }
+
+    // --- Paint-time visible-rect culling (task 07) ------------------------
+
+    /// Build+lay out a 5-row vertical column of 100x100 leaves (rows at
+    /// y = 0,100,200,300,400) inside a 100x500 box.
+    fn culling_column() -> FlexWidget {
+        let view: FlexView<()> = Column(vec![
+            leaf(100.0, 100.0).into_any(),
+            leaf(100.0, 100.0).into_any(),
+            leaf(100.0, 100.0).into_any(),
+            leaf(100.0, 100.0).into_any(),
+            leaf(100.0, 100.0).into_any(),
+        ]);
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(100.0, 500.0)));
+        w
+    }
+
+    #[test]
+    fn no_visible_rect_paints_every_child() {
+        // Default (no threaded visible rect) = paint everything, unchanged.
+        let mut w = culling_column();
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 500.0));
+        w.paint(&mut pctx, &mut scene);
+        assert_eq!(scene.rects.len(), 5, "no cull → all five rows painted");
+    }
+
+    #[test]
+    fn culls_children_fully_outside_visible_rect_plus_margin() {
+        // Visible rect = the top 100px viewport at the origin. The warm margin is
+        // one viewport (100px) on each side, so the warm band is y ∈ [-100, 200].
+        // Rows at y=0/100/200 overlap it (the y=200 row touches the bottom edge,
+        // which `Rect::overlaps` counts as in); rows at y=300/400 are fully outside
+        // and culled.
+        let mut w = culling_column();
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 500.0));
+        pctx.constrain_visible_rect(Rect::from_origin_size(Point::ZERO, Size::new(100.0, 100.0)));
+        w.paint(&mut pctx, &mut scene);
+        assert_eq!(scene.rects.len(), 3, "two below-the-warm-band rows culled");
+        assert_eq!(scene.rects[0].0, Point::new(0.0, 0.0));
+        assert_eq!(scene.rects[1].0, Point::new(0.0, 100.0));
+        // The boundary row at the warm-band's exact bottom edge stays warm.
+        assert_eq!(scene.rects[2].0, Point::new(0.0, 200.0));
+    }
+
+    #[test]
+    fn margin_boundary_row_just_past_the_warm_band_is_culled() {
+        // A visible rect one pixel short of the y=200 row's top makes the warm band
+        // y ∈ [-99, 201]... instead pick a rect whose inflated band excludes row 3
+        // (y=300) but includes row 2 (y=200): rect height 50 at origin → warm band
+        // y ∈ [-50, 100]. Row 0 (0..100) and row 1 (100..200 → touches 100) stay;
+        // rows 2/3/4 are culled.
+        let mut w = culling_column();
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 500.0));
+        pctx.constrain_visible_rect(Rect::from_origin_size(Point::ZERO, Size::new(100.0, 50.0)));
+        w.paint(&mut pctx, &mut scene);
+        assert_eq!(scene.rects.len(), 2, "only the top band rows survive");
+        assert_eq!(scene.rects[0].0, Point::new(0.0, 0.0));
+        assert_eq!(scene.rects[1].0, Point::new(0.0, 100.0));
+    }
+
+    #[test]
+    fn culled_child_still_receives_events_at_its_layout_geometry() {
+        // Culling is paint-only: events route by layout geometry. Eight capturing
+        // rows (ROW_H each); paint with a tiny visible rect that culls the lower
+        // rows, then prove a tap at a culled row's geometry still captures and
+        // fires on up-inside.
+        let mut counter = 0u64;
+        let view: FlexView<Vec<u32>> = Column(vec![
+            captor(0),
+            captor(1),
+            captor(2),
+            captor(3),
+            captor(4),
+            captor(5),
+            captor(6),
+            captor(7),
+        ]);
+        let mut w = view.build(&mut ctx(&mut counter));
+        layout_column(&mut w);
+
+        // Warm band = the top row inflated by one ROW_H each side → y ∈ [-20, 40];
+        // row 7 (y 140..160) is far outside and culled from paint.
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(ROW_W, ROW_H * 8.0));
+        pctx.constrain_visible_rect(Rect::from_origin_size(Point::ZERO, Size::new(ROW_W, ROW_H)));
+        w.paint(&mut pctx, &mut scene);
+
+        // A Down at row 7's midpoint still captures despite it being culled, and
+        // the release fires it — event routing is untouched by paint culling.
+        let mut log: Vec<u32> = Vec::new();
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, row_y(7)));
+        assert!(
+            w.children[7].is_active(),
+            "a culled row still captures on Down"
+        );
+        dispatch(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, row_y(7)));
+        assert_eq!(log, vec![7], "a culled-but-laid-out row still fires on Up");
     }
 
     #[test]

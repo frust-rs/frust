@@ -566,6 +566,18 @@ pub struct PaintCtx<'a> {
     /// case (no shared-element transition in flight), so
     /// [`PaintCtx::report_hero`] is a no-op returning [`HeroDirective::Normal`].
     hero: Option<&'a RefCell<HeroFrames>>,
+    /// The absolute (global-coordinate) rectangle a scroll ancestor is currently
+    /// showing, threaded down by [`ChildPod::paint_child`] like the theme/clock so
+    /// a container can cull paint of children fully outside it. `None` (the
+    /// default) means "no viewport constraint — paint everything", so every
+    /// pre-culling behavior is unchanged. A [`ScrollView`](crate::app) sets it to
+    /// its viewport via [`PaintCtx::constrain_visible_rect`], which *intersects*
+    /// (never widens) a nested rect, so an inner scroll surface can only ever
+    /// narrow the visible region an outer one already established. Consulted by
+    /// `Flex` (see [`PaintCtx::visible_rect`]); coordinates match
+    /// [`PaintCtx::origin`]'s absolute space, so a child's absolute bounds test
+    /// directly against it.
+    visible_rect: Option<Rect>,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -590,6 +602,7 @@ impl<'a> PaintCtx<'a> {
             window_insets: WindowInsets::default(),
             presented_frames: None,
             hero: None,
+            visible_rect: None,
         }
     }
 
@@ -916,6 +929,7 @@ impl<'a> PaintCtx<'a> {
             window_insets: self.window_insets,
             presented_frames: self.presented_frames,
             hero: Some(registry),
+            visible_rect: self.visible_rect,
         };
         f(&mut child);
         if child.needs_frame {
@@ -945,6 +959,47 @@ impl<'a> PaintCtx<'a> {
     /// context (copied, so it does not hold a borrow of `self`).
     pub(crate) fn hero_ref(&self) -> Option<&'a RefCell<HeroFrames>> {
         self.hero
+    }
+
+    /// The absolute-coordinate visible rectangle a scroll ancestor has threaded
+    /// down, or `None` when no viewport constraint is in effect (paint
+    /// everything). A container that culls offscreen children (`Flex` under a
+    /// `ScrollView`) tests each child's absolute bounds against this; a widget
+    /// with no interest in culling ignores it entirely. See
+    /// [`PaintCtx::constrain_visible_rect`] for how a scroll surface sets it.
+    pub fn visible_rect(&self) -> Option<Rect> {
+        self.visible_rect
+    }
+
+    /// Constrain the threaded visible rectangle to `rect` (in absolute paint
+    /// coordinates), the seam a [`ScrollView`](crate::app) uses to publish its
+    /// viewport to descendants.
+    ///
+    /// When no rect is threaded yet this installs `rect`; when one already is
+    /// (a nested scroll surface), the two are **intersected** — the visible
+    /// region can only ever narrow, never widen, as scroll surfaces nest, so an
+    /// inner viewport never re-reveals content an outer one clipped away. The
+    /// value flows to children unchanged via [`ChildPod::paint_child`], mirroring
+    /// how `window_insets`/`theme` are threaded.
+    pub fn constrain_visible_rect(&mut self, rect: Rect) {
+        self.visible_rect = Some(match self.visible_rect {
+            Some(existing) => existing.intersect(rect),
+            None => rect,
+        });
+    }
+
+    /// Seed the visible rectangle lent by an ancestor. Called by
+    /// [`ChildPod::paint_child`] for each child, mirroring how `theme` is
+    /// threaded (copied down unchanged), so a descendant container observes the
+    /// same viewport constraint the scroll ancestor established.
+    pub(crate) fn set_visible_rect(&mut self, rect: Option<Rect>) {
+        self.visible_rect = rect;
+    }
+
+    /// The visible rectangle this context carries, for re-lending to a child
+    /// context (copied, so it holds no borrow of `self`).
+    pub(crate) fn visible_rect_ref(&self) -> Option<Rect> {
+        self.visible_rect
     }
 }
 
@@ -1271,6 +1326,11 @@ impl ChildPod {
         // wrapper nested arbitrarily deep under an installer sees it. `None` in
         // the normal case (no shared-element transition in flight).
         child_ctx.set_hero(ctx.hero_ref());
+        // Thread the scroll ancestor's visible rect down unchanged (absolute
+        // coords, so a nested container tests its children directly against it),
+        // mirroring the theme/insets. `None` in the normal case (no scroll
+        // ancestor culling), so paint descends into every child as before.
+        child_ctx.set_visible_rect(ctx.visible_rect_ref());
         // Thread the pod's recorded focus path into paint (the mirror of how
         // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
         // observes a container-routed blur that never reached its `event()`.
