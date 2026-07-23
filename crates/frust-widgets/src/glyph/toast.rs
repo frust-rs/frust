@@ -43,6 +43,26 @@
 //! clamped to the (possibly shorter) new length on the following rebuild, so
 //! this is always safe, just not automatic.
 //!
+//! # Anchoring (framework-side positioning)
+//!
+//! [`ToastHostWidget::layout`] fills the incoming max constraints (a
+//! [`crate::Stack`] loosens its children, so the host spans the whole stack)
+//! rather than sizing to the active toast's own content, and positions the
+//! toast internally per [`ToastAnchor`] (`.anchor()` on [`ToastHostView`],
+//! default [`ToastAnchor::BottomCenter`]) — apps no longer wrap the host in
+//! their own `Align`. Margins are [`EDGE_MARGIN`] (10px) from the anchored
+//! edges, additionally widened by [`frust_core::WindowInsets::padding`] on
+//! those same edges (`ctx.window_insets()`, **not** `view_insets` — IME
+//! avoidance stays out of scope for v1) so a bottom toast clears gesture-nav
+//! insets with no app-side `SafeArea`. The host itself stays
+//! **event-transparent**: it never overrides `Widget::event`, so the
+//! default no-op (`EventResult::Ignored`) lets every pointer event — inside
+//! or outside the toast's own (smaller) rect — pass through to whatever the
+//! host overlays. Enter/exit motion follows the anchored edge: bottom
+//! anchors rise from below (a positive slide offset settling to zero);
+//! top anchors drop from above (the pre-existing negative-offset motion) —
+//! see [`ToastAnchor::is_top`].
+//!
 //! # Timeline
 //!
 //! Enter: 220ms (`MotionScheme::durations.base`) with the Glyph spatial
@@ -67,7 +87,7 @@ use std::time::Duration;
 use frust_core::accesskit::Role;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, FrameTime, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    PaintCtx, PaintScene, SemanticsCtx, View, Widget, WindowEdgeInsets, any,
 };
 use frust_theme::{StatusPalette, Theme};
 use kurbo::{Affine, Point, Size};
@@ -406,16 +426,92 @@ struct ActiveToast {
     last_time: Option<FrameTime>,
 }
 
+/// Where [`ToastHostWidget`] positions the active toast within the host's
+/// (now full-bleed) bounds. See the [module docs](self)'s Anchoring section.
+///
+/// Default [`ToastAnchor::BottomCenter`] — the framework's v1 opinionated
+/// default, matching most platform toast conventions (Android's `Toast`,
+/// Material Snackbar).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ToastAnchor {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomCenter,
+    BottomRight,
+}
+
+impl ToastAnchor {
+    /// Whether `self` anchors to the top edge (`TopLeft`/`TopCenter`/
+    /// `TopRight`) rather than the bottom — the axis the enter/exit slide
+    /// direction and vertical margin both key off (see the [module
+    /// docs](self)'s Anchoring section).
+    pub fn is_top(self) -> bool {
+        matches!(
+            self,
+            ToastAnchor::TopLeft | ToastAnchor::TopCenter | ToastAnchor::TopRight
+        )
+    }
+}
+
+/// Margin from the anchored edge(s), in logical px — matches the glyph
+/// catalog's pre-this-task top margin (`lib.rs`'s `EdgeInsets { top: 10.0,
+/// .. }` wrapper this task's host-side anchoring supersedes). This task's own
+/// choice, additionally widened by [`frust_core::WindowInsets::padding`] on
+/// the anchored edges (see the [module docs](self)'s Anchoring section).
+const EDGE_MARGIN: f64 = 10.0;
+
+/// Resolve the active toast's origin within the host's `host_size`, per
+/// `anchor`, [`EDGE_MARGIN`], and the window's safe-area `insets` on the
+/// anchored edges — additive with the margin (not `max`), so e.g. a
+/// bottom-anchored toast's rest position sits `EDGE_MARGIN + insets.bottom`
+/// above the host's bottom edge.
+fn anchor_origin(
+    anchor: ToastAnchor,
+    host_size: Size,
+    toast_size: Size,
+    insets: WindowEdgeInsets,
+) -> Point {
+    let x = match anchor {
+        ToastAnchor::TopLeft | ToastAnchor::BottomLeft => EDGE_MARGIN + insets.left,
+        ToastAnchor::TopCenter | ToastAnchor::BottomCenter => {
+            (host_size.width - toast_size.width) / 2.0
+        }
+        ToastAnchor::TopRight | ToastAnchor::BottomRight => {
+            host_size.width - EDGE_MARGIN - insets.right - toast_size.width
+        }
+    };
+    let y = if anchor.is_top() {
+        EDGE_MARGIN + insets.top
+    } else {
+        host_size.height - EDGE_MARGIN - insets.bottom - toast_size.height
+    };
+    Point::new(x, y)
+}
+
 /// A declarative toast-request queue snapshot. See the [module docs](self).
 pub struct ToastHostView {
     pending: Vec<String>,
+    anchor: ToastAnchor,
 }
 
 /// Create a toast host reading `pending` (the app's FIFO request log — see
-/// [`show`]) as this rebuild's snapshot.
+/// [`show`]) as this rebuild's snapshot, anchored [`ToastAnchor::BottomCenter`]
+/// by default — see [`ToastHostView::anchor`].
 pub fn toast_host(pending: impl Into<Vec<String>>) -> ToastHostView {
     ToastHostView {
         pending: pending.into(),
+        anchor: ToastAnchor::default(),
+    }
+}
+
+impl ToastHostView {
+    /// Set the host's [`ToastAnchor`] (default [`ToastAnchor::BottomCenter`]).
+    pub fn anchor(mut self, anchor: ToastAnchor) -> Self {
+        self.anchor = anchor;
+        self
     }
 }
 
@@ -434,6 +530,7 @@ impl<State: 'static> View<State> for ToastHostView {
             queue: self.pending.clone(),
             next_index: 0,
             active: None,
+            anchor: self.anchor,
         };
         widget.maybe_advance_queue::<State>(ctx);
         widget
@@ -441,17 +538,25 @@ impl<State: 'static> View<State> for ToastHostView {
 
     fn rebuild(
         &self,
-        _prev: &Self,
+        prev: &Self,
         element: &mut ToastHostWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.queue = self.pending.clone();
         element.next_index = element.next_index.min(element.queue.len());
+        let anchor_changed = prev.anchor != self.anchor;
+        element.anchor = self.anchor;
         element.maybe_advance_queue::<State>(ctx);
         // The active child's own paint-driven animation covers redraw needs;
         // structural start/stop is comparatively rare, so this simply always
-        // reports PAINT — cheap, and correct (never under-reports).
-        ChangeFlags::PAINT
+        // reports PAINT — cheap, and correct (never under-reports). An anchor
+        // swap additionally repositions the toast, so it also forces LAYOUT
+        // (the host's own layout resolves the anchored origin, not paint).
+        if anchor_changed {
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        } else {
+            ChangeFlags::PAINT
+        }
     }
 
     fn teardown(&self, element: &mut ToastHostWidget, ctx: &mut BuildCtx<'_>) {
@@ -471,6 +576,9 @@ pub struct ToastHostWidget {
     /// Index of the next not-yet-started request in `queue`.
     next_index: usize,
     active: Option<ActiveToast>,
+    /// Where the active toast is positioned within the (full-bleed) host —
+    /// see the [module docs](self)'s Anchoring section.
+    anchor: ToastAnchor,
 }
 
 impl ToastHostWidget {
@@ -559,14 +667,44 @@ impl ToastHostWidget {
 
 impl Widget for ToastHostWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        match &mut self.active {
+        // Lay out the active toast (if any) at its own natural size first —
+        // needed both to size an unbounded host axis (below) and to position
+        // it per anchor. `bc.loosen()` mirrors the old direct pass-through
+        // (this host's incoming `bc` is already loose — `Stack` loosens its
+        // children — but loosening explicitly keeps the toast's own sizing
+        // independent of the host's now-larger, full-bleed `bc`).
+        let toast_size = match &mut self.active {
             Some(active) if !matches!(active.phase, ToastPhase::Done) => {
-                let size = active.child.layout_child(ctx, bc);
-                active.child.set_origin(Point::ZERO);
-                bc.constrain(size)
+                Some(active.child.layout_child(ctx, &bc.loosen()))
             }
-            _ => bc.constrain(Size::ZERO),
+            _ => None,
+        };
+
+        // Full-bleed: fill each bounded axis (the common case — Stack hands
+        // down the surrounding page's finite size) so the host spans the
+        // whole overlay region; shrink-wrap an unbounded axis to the active
+        // toast's own size instead (Align's Flutter-parity per-axis rule —
+        // `align.rs`'s module docs), or to zero while idle.
+        let natural = toast_size.unwrap_or(Size::ZERO);
+        let width = if bc.max().width.is_finite() {
+            bc.max().width
+        } else {
+            natural.width
+        };
+        let height = if bc.max().height.is_finite() {
+            bc.max().height
+        } else {
+            natural.height
+        };
+        let size = bc.constrain(Size::new(width, height));
+
+        if let (Some(active), Some(toast_size)) = (&mut self.active, toast_size) {
+            let insets = ctx.window_insets().padding();
+            let origin = anchor_origin(self.anchor, size, toast_size, insets);
+            active.child.set_origin(origin);
         }
+
+        size
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
@@ -574,22 +712,29 @@ impl Widget for ToastHostWidget {
         let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
         let (enter, exit) = resolve_timings(reduce_motion);
         let now = ctx.frame_time();
-        let origin = ctx.origin();
-        let size = ctx.size();
+        let host_origin = ctx.origin();
+        // Bottom anchors rise from below (a positive slide offset settling to
+        // zero); top anchors keep the pre-existing drop-from-above motion
+        // (negative offset) — see the [module docs](self)'s Anchoring section.
+        let sign = if self.anchor.is_top() { -1.0 } else { 1.0 };
 
         if let Some(shown) = self.advance(now, enter, exit) {
             let done = matches!(
                 self.active.as_ref().map(|a| a.phase),
                 Some(ToastPhase::Done)
             );
-            if !done {
-                let dy = (1.0 - shown) * -(ENTER_OFFSET_FRACTION * size.height);
+            if !done && let Some(active) = &mut self.active {
+                // The toast's own (anchored) rect, not the host's full-bleed
+                // bounds — the layer/transform below only ever cover the
+                // toast itself, keeping the rest of the (event-transparent)
+                // host untouched.
+                let toast_origin = host_origin + active.child.origin().to_vec2();
+                let toast_size = active.child.size();
+                let dy = (1.0 - shown) * sign * (ENTER_OFFSET_FRACTION * toast_size.height);
                 let alpha = shown.clamp(0.0, 1.0) as f32;
                 scene.push_transform(Affine::translate((0.0, dy)));
-                scene.push_layer(origin, size, alpha);
-                if let Some(active) = &mut self.active {
-                    active.child.paint_child(ctx, scene);
-                }
+                scene.push_layer(toast_origin, toast_size, alpha);
+                active.child.paint_child(ctx, scene);
                 scene.pop_layer();
                 scene.pop_transform();
             }
@@ -864,5 +1009,180 @@ mod tests {
         // is 0: fully faded and offset fully above the resting position.
         assert_eq!(scene.layers[0].2, 0.0);
         assert!(ctx.needs_frame());
+    }
+
+    // -- ToastHost: anchoring (task 07, framework-side positioning) -----
+
+    /// Lay `host` out under `bc` with a fresh (empty) `TextContext` — every
+    /// active toast contains a `Text` child needing one threaded (mirrors
+    /// `paint_at_enter_start_emits_translated_faded_layer`'s inline setup).
+    fn layout_host(host: &mut ToastHostWidget, bc: &BoxConstraints) -> Size {
+        use frust_core::LayoutCtx;
+        use frust_text::TextContext;
+        use std::any::Any;
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        host.layout(&mut lctx, bc)
+    }
+
+    #[test]
+    fn default_anchor_is_bottom_center() {
+        assert_eq!(ToastAnchor::default(), ToastAnchor::BottomCenter);
+    }
+
+    #[test]
+    fn default_anchor_positions_bottom_center_with_margin_no_insets() {
+        let mut host = build_host(vec!["hi".to_string()]);
+        let size = layout_host(&mut host, &BoxConstraints::tight(Size::new(400.0, 800.0)));
+        assert_eq!(size, Size::new(400.0, 800.0), "host fills the full bc");
+
+        let active = host.active.as_ref().expect("toast starts immediately");
+        let toast_size = active.child.size();
+        let origin = active.child.origin();
+
+        let center_x = origin.x + toast_size.width / 2.0;
+        assert!(
+            (center_x - 200.0).abs() < 1e-6,
+            "toast rect centers horizontally: {center_x}"
+        );
+        let bottom_edge = origin.y + toast_size.height;
+        assert!(
+            (bottom_edge - (800.0 - EDGE_MARGIN)).abs() < 1e-6,
+            "toast rect's bottom edge sits EDGE_MARGIN above the host bottom: {bottom_edge}"
+        );
+    }
+
+    #[test]
+    fn default_anchor_bottom_margin_additionally_respects_the_bottom_inset() {
+        use frust_core::{RenderRoot, WindowEdgeInsets, WindowInsets};
+        use frust_text::TextContext;
+
+        fn logic(_: &mut ()) -> ToastHostView {
+            toast_host(vec!["hi".to_string()])
+        }
+        let mut root: RenderRoot<(), ToastHostView> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.set_insets(WindowInsets::new(
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, 34.0),
+            WindowEdgeInsets::ZERO,
+        ));
+        let mut tcx = TextContext::new();
+        let size = root.layout_with_text(Size::new(400.0, 800.0), &mut tcx);
+        assert_eq!(size, Size::new(400.0, 800.0));
+
+        let id = root.root_id().expect("root built");
+        let widget = (root.tree().pod(id).expect("root pod").widget() as &dyn std::any::Any)
+            .downcast_ref::<ToastHostWidget>()
+            .expect("root is a ToastHostWidget");
+        let active = widget.active.as_ref().expect("toast starts immediately");
+        let toast_size = active.child.size();
+        let origin = active.child.origin();
+        let bottom_edge = origin.y + toast_size.height;
+        assert!(
+            (bottom_edge - (800.0 - EDGE_MARGIN - 34.0)).abs() < 1e-6,
+            "the 34px bottom inset widens the margin additively: {bottom_edge}"
+        );
+    }
+
+    #[test]
+    fn all_six_anchors_position_correctly() {
+        for anchor in [
+            ToastAnchor::TopLeft,
+            ToastAnchor::TopCenter,
+            ToastAnchor::TopRight,
+            ToastAnchor::BottomLeft,
+            ToastAnchor::BottomCenter,
+            ToastAnchor::BottomRight,
+        ] {
+            let view: ToastHostView = toast_host(vec!["hi".to_string()]).anchor(anchor);
+            let mut counter = 0u64;
+            let mut host =
+                <ToastHostView as View<()>>::build(&view, &mut BuildCtx::new(&mut counter));
+            let size = layout_host(&mut host, &BoxConstraints::tight(Size::new(400.0, 800.0)));
+            assert_eq!(size, Size::new(400.0, 800.0));
+
+            let active = host.active.as_ref().expect("toast starts immediately");
+            let toast_size = active.child.size();
+            let origin = active.child.origin();
+
+            let expected_x = match anchor {
+                ToastAnchor::TopLeft | ToastAnchor::BottomLeft => EDGE_MARGIN,
+                ToastAnchor::TopCenter | ToastAnchor::BottomCenter => {
+                    (400.0 - toast_size.width) / 2.0
+                }
+                ToastAnchor::TopRight | ToastAnchor::BottomRight => {
+                    400.0 - EDGE_MARGIN - toast_size.width
+                }
+            };
+            let expected_y = if anchor.is_top() {
+                EDGE_MARGIN
+            } else {
+                800.0 - EDGE_MARGIN - toast_size.height
+            };
+            assert!(
+                (origin.x - expected_x).abs() < 1e-6,
+                "{anchor:?}: x = {}, expected {expected_x}",
+                origin.x
+            );
+            assert!(
+                (origin.y - expected_y).abs() < 1e-6,
+                "{anchor:?}: y = {}, expected {expected_y}",
+                origin.y
+            );
+        }
+    }
+
+    #[test]
+    fn host_never_swallows_events_inside_or_outside_the_toast_rect() {
+        use frust_core::{
+            EventCtx, EventResult, InputEvent, PointerButton, PointerEvent, PointerPhase,
+        };
+        use std::any::Any;
+
+        // `ToastHostWidget` never overrides `Widget::event`, so it always
+        // falls through to the default no-op — verified explicitly here so a
+        // future accidental override (e.g. adding tap-to-dismiss) trips this
+        // test rather than silently starting to swallow taps.
+        let mut host = build_host(vec!["hi".to_string()]);
+        let mut state = ();
+        let state_any: &mut dyn Any = &mut state;
+        let mut ectx = EventCtx::new(state_any, Point::ZERO, Size::new(400.0, 800.0));
+
+        let ev = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(5.0, 5.0),
+            button: PointerButton::Primary,
+        });
+        assert_eq!(host.event(&mut ectx, &ev), EventResult::Ignored);
+    }
+
+    #[test]
+    fn enter_offset_sign_flips_between_top_and_bottom_anchors() {
+        fn early_enter_dy(anchor: ToastAnchor) -> f64 {
+            let view: ToastHostView = toast_host(vec!["hi".to_string()]).anchor(anchor);
+            let mut counter = 0u64;
+            let mut host =
+                <ToastHostView as View<()>>::build(&view, &mut BuildCtx::new(&mut counter));
+            layout_host(&mut host, &BoxConstraints::tight(Size::new(400.0, 800.0)));
+
+            let mut ctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 800.0));
+            let mut scene = RecordingScene::default();
+            host.paint(&mut ctx, &mut scene);
+            scene.transforms[0].translation().y
+        }
+
+        // At the very start of Enter (shown == 0), the slide offset is at its
+        // full magnitude — sign alone tells top from bottom.
+        let bottom_dy = early_enter_dy(ToastAnchor::BottomCenter);
+        let top_dy = early_enter_dy(ToastAnchor::TopCenter);
+        assert!(
+            bottom_dy > 0.0,
+            "a bottom anchor rises from below (positive dy): {bottom_dy}"
+        );
+        assert!(
+            top_dy < 0.0,
+            "a top anchor drops from above (negative dy): {top_dy}"
+        );
     }
 }
