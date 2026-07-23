@@ -216,25 +216,20 @@ fn toasts_row(state: &FeedbackState) -> AnyView<FeedbackState> {
     };
 
     any(Column(vec![
-        any(
-            Row(vec![
-                any(button("Plain", trigger("Plain notification"))),
-                h_gap(8.0),
-                any(button("Info", trigger("Info: sync started"))),
-                h_gap(8.0),
-                any(button("Success", trigger("Success: export complete"))),
-                h_gap(8.0),
-                any(button("Warning", trigger("Warning: approaching quota"))),
-                h_gap(8.0),
-                any(button("Error", trigger("Error: upload failed"))),
-            ])
-            .cross_axis(CrossAxisAlignment::Center),
-        ),
+        any(Row(vec![
+            any(button("Plain", trigger("Plain notification"))),
+            h_gap(8.0),
+            any(button("Info", trigger("Info: sync started"))),
+            h_gap(8.0),
+            any(button("Success", trigger("Success: export complete"))),
+            h_gap(8.0),
+            any(button("Warning", trigger("Warning: approaching quota"))),
+            h_gap(8.0),
+            any(button("Error", trigger("Error: upload failed"))),
+        ])
+        .cross_axis(CrossAxisAlignment::Center)),
         v_gap(8.0),
-        any(text(
-            "Toasts play one at a time (FIFO) and auto-dismiss after 2.4s.",
-        )
-        .size(11.0)),
+        any(text("Toasts play one at a time (FIFO) and auto-dismiss after 2.4s.").size(11.0)),
     ]))
 }
 

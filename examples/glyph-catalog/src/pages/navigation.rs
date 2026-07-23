@@ -54,8 +54,8 @@
 use std::cell::Cell;
 
 use frust::{
-    AnyView, Color, Column, EdgeInsets, Get, GetUntracked, IconSource, Padding, Row, RwSignal, Set,
-    SizedBox, Theme, any, text, use_context,
+    AnyView, Color, Column, EdgeInsets, Get, IconSource, Padding, Row, RwSignal, Set, SizedBox,
+    Theme, WithUntracked, any, text, use_context,
 };
 
 use crate::CatalogState;
@@ -107,7 +107,7 @@ fn demo_signal<T: Send + Sync + 'static>(
 ) -> RwSignal<T> {
     cell.with(|cell| {
         if let Some(sig) = cell.get()
-            && sig.try_get_untracked().is_some()
+            && sig.try_with_untracked(|_| ()).is_some()
         {
             return sig;
         }

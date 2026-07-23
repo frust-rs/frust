@@ -23,7 +23,7 @@ use frust::motion::patterns::{FadeScale, FadeThrough, GlyphSlide, SharedAxis, Sl
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    MotionScheme, PageTransition, Padding, RwSignal, Set, SizedBox, Theme, TransitionSpec, Update,
+    MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme, TransitionSpec, Update,
     any, button, inflexible, keyed, switch, text,
 };
 
@@ -99,8 +99,9 @@ fn token_table(m: &MotionScheme) -> FlexChild<CatalogState> {
     let d = m.durations;
     let e = m.easing;
     let dur = |name: &str, ms: f64| inflexible(text(format!("{name:<11}{ms:>4.0}ms")).size(12.0));
-    let ease =
-        |name: &str, curve: String| inflexible(text(format!("{name:<9}{curve}")).size(11.0).color(MUTED));
+    let ease = |name: &str, curve: String| {
+        inflexible(text(format!("{name:<9}{curve}")).size(11.0).color(MUTED))
+    };
     block(vec![
         inflexible(label("Motion tokens")),
         inflexible(caption("durations + easings, read from theme.motion")),
@@ -163,7 +164,9 @@ fn demo_tabs() -> FlexChild<CatalogState> {
     let labels = vec!["Alpha".to_string(), "Beta".to_string(), "Gamma".to_string()];
     block(vec![
         inflexible(label("03 Tab indicator")),
-        inflexible(caption("underline slides — 220ms spatial (translate X + width)")),
+        inflexible(caption(
+            "underline slides — 220ms spatial (translate X + width)",
+        )),
         gap(6.0),
         inflexible(tabs(labels, s, move |_s: &mut CatalogState, i| sel.set(i))),
     ])
@@ -217,7 +220,9 @@ fn demo_modal() -> FlexChild<CatalogState> {
 fn demo_sheet() -> FlexChild<CatalogState> {
     block(vec![
         inflexible(label("06 Bottom sheet")),
-        inflexible(caption("enter 340ms translateY (heavy overshoot) / exit 150ms")),
+        inflexible(caption(
+            "enter 340ms translateY (heavy overshoot) / exit 150ms",
+        )),
         gap(6.0),
         inflexible(button("Show bottom sheet", |s: &mut CatalogState| {
             s.nav.push_transparent_for_result(
@@ -268,9 +273,7 @@ fn demo_palette() -> FlexChild<CatalogState> {
                     ];
                     let items: Vec<PaletteItem> = all
                         .iter()
-                        .filter(|c| {
-                            needle.is_empty() || c.to_lowercase().contains(needle.as_str())
-                        })
+                        .filter(|c| needle.is_empty() || c.to_lowercase().contains(needle.as_str()))
                         .map(|c| PaletteItem::new(*c))
                         .collect();
                     command_palette(
@@ -324,7 +327,12 @@ fn demo_log() -> FlexChild<CatalogState> {
             vec![keyed(n, term_block(log_lines()).staggered(true))],
         )),
         gap(6.0),
-        inflexible(button("Replay", move |_s: &mut CatalogState| replay.update(|c| *c += 1)).small()),
+        inflexible(
+            button("Replay", move |_s: &mut CatalogState| {
+                replay.update(|c| *c += 1)
+            })
+            .small(),
+        ),
     ])
 }
 
@@ -362,7 +370,9 @@ fn demo_screen() -> FlexChild<CatalogState> {
         0 => any(pattern_switcher(c, FadeThrough, card_view(c)).reverse(b)),
         1 => any(pattern_switcher(c, SharedAxis::X, card_view(c)).reverse(b)),
         2 => any(pattern_switcher(c, FadeScale, card_view(c)).reverse(b)),
-        _ => any(pattern_switcher(c, GlyphSlide::new(SlideDirection::Left), card_view(c)).reverse(b)),
+        _ => {
+            any(pattern_switcher(c, GlyphSlide::new(SlideDirection::Left), card_view(c)).reverse(b))
+        }
     };
 
     block(vec![
@@ -425,7 +435,12 @@ fn demo_boot() -> FlexChild<CatalogState> {
             vec![keyed(n, term_block(boot_lines()).staggered(true))],
         )),
         gap(6.0),
-        inflexible(button("Replay", move |_s: &mut CatalogState| boot.update(|c| *c += 1)).small()),
+        inflexible(
+            button("Replay", move |_s: &mut CatalogState| {
+                boot.update(|c| *c += 1)
+            })
+            .small(),
+        ),
     ])
 }
 

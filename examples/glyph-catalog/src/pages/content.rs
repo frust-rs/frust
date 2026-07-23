@@ -106,11 +106,9 @@ fn card_demo() -> AnyView<ContentDemoState> {
         .footer(Row(vec![
             any(badge("stable", BadgeVariant::Success).dot(true)),
             any(SizedBox(Some(8.0), None)),
-            any(
-                button("Details", |_: &mut ContentDemoState| {})
-                    .style(ButtonStyle::Secondary)
-                    .small(),
-            ),
+            any(button("Details", |_: &mut ContentDemoState| {})
+                .style(ButtonStyle::Secondary)
+                .small()),
         ])))
 }
 
@@ -122,7 +120,10 @@ fn stat_card_grid() -> AnyView<ContentDemoState> {
         vec![
             flexible(1, stat_card("Sessions", "1,284")),
             inflexible(SizedBox(Some(STAT_GAP), None)),
-            flexible(1, stat_card("Uptime", "99.98%").delta(StatDelta::Up, "0.4%")),
+            flexible(
+                1,
+                stat_card("Uptime", "99.98%").delta(StatDelta::Up, "0.4%"),
+            ),
             inflexible(SizedBox(Some(STAT_GAP), None)),
             flexible(1, stat_card("Errors", "12").delta(StatDelta::Down, "3")),
             inflexible(SizedBox(Some(STAT_GAP), None)),
@@ -145,27 +146,25 @@ fn list_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
     );
 
     any(Column(vec![
-        any(
-            glyph_list(vec![
-                glyph_list_item("$", "deploy")
-                    .sub("main → production")
-                    .meta("2m ago")
-                    .chevron(true),
-                glyph_list_item("#", "rollback")
-                    .sub("v0.44.0 → v0.43.2")
-                    .meta("1h ago")
-                    .chevron(true),
-                glyph_list_item("~", "migrate")
-                    .sub("schema v12")
-                    .meta("3h ago")
-                    .chevron(true),
-                glyph_list_item("!", "alert")
-                    .sub("latency spike")
-                    .meta("6h ago")
-                    .chevron(true),
-            ])
-            .on_press(|state: &mut ContentDemoState, i| state.pressed_row = Some(i)),
-        ),
+        any(glyph_list(vec![
+            glyph_list_item("$", "deploy")
+                .sub("main → production")
+                .meta("2m ago")
+                .chevron(true),
+            glyph_list_item("#", "rollback")
+                .sub("v0.44.0 → v0.43.2")
+                .meta("1h ago")
+                .chevron(true),
+            glyph_list_item("~", "migrate")
+                .sub("schema v12")
+                .meta("3h ago")
+                .chevron(true),
+            glyph_list_item("!", "alert")
+                .sub("latency spike")
+                .meta("6h ago")
+                .chevron(true),
+        ])
+        .on_press(|state: &mut ContentDemoState, i| state.pressed_row = Some(i))),
         any(SizedBox(None, Some(6.0))),
         any(text(caption).size(11.0)),
     ]))
@@ -204,12 +203,7 @@ fn accordion_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
 /// One accordion panel at `index`, open iff `index == open`. Pressing its
 /// header always opens *that* panel (an exclusive group never collapses to
 /// zero open).
-fn accordion_item(
-    index: usize,
-    open: usize,
-    title: &str,
-    body: &str,
-) -> AnyView<ContentDemoState> {
+fn accordion_item(index: usize, open: usize, title: &str, body: &str) -> AnyView<ContentDemoState> {
     any(accordion(title, text(body)).open(open == index).on_toggle(
         move |state: &mut ContentDemoState| {
             state.open_accordion = index;
@@ -219,16 +213,12 @@ fn accordion_item(
 
 /// An `empty_state` panel with a glyph, title/description, and a CTA button.
 fn empty_state_demo() -> AnyView<ContentDemoState> {
-    any(
-        empty_state(
-            "No deployments yet",
-            "Trigger your first deploy to see activity here.",
-        )
-        .glyph("▪")
-        .action(
-            button("Deploy now", |_: &mut ContentDemoState| {}).style(ButtonStyle::Primary),
-        ),
+    any(empty_state(
+        "No deployments yet",
+        "Trigger your first deploy to see activity here.",
     )
+    .glyph("▪")
+    .action(button("Deploy now", |_: &mut ContentDemoState| {}).style(ButtonStyle::Primary)))
 }
 
 /// A staggered `term_block` plus a Replay button. Per API.md's semantics, a
@@ -247,18 +237,13 @@ fn term_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
     any(Column(vec![
         any(FlexView::new(
             Axis::Vertical,
-            vec![keyed(
-                state.replay_epoch,
-                term_block(lines).staggered(true),
-            )],
+            vec![keyed(state.replay_epoch, term_block(lines).staggered(true))],
         )),
         any(SizedBox(None, Some(8.0))),
-        any(
-            button("Replay", |state: &mut ContentDemoState| {
-                state.replay_epoch += 1;
-            })
-            .small(),
-        ),
+        any(button("Replay", |state: &mut ContentDemoState| {
+            state.replay_epoch += 1;
+        })
+        .small()),
     ]))
 }
 

@@ -117,7 +117,9 @@ impl Component for ButtonsFormsScreen {
 
         let content = Column(vec![
             heading("Buttons"),
-            caption("Every ButtonStyle, .small(), and the 0.96 press-feedback scale (try clicking one)."),
+            caption(
+                "Every ButtonStyle, .small(), and the 0.96 press-feedback scale (try clicking one).",
+            ),
             spacer(8.0),
             button_styles_row(),
             spacer(12.0),
@@ -125,33 +127,41 @@ impl Component for ButtonsFormsScreen {
             spacer(4.0),
             small_buttons_row(),
             spacer(16.0),
-            caption("Loading demo — toggled by the checkbox, not by pressing the button itself: .loading(true) suppresses on_press while shown (see the module docs)."),
+            caption(
+                "Loading demo — toggled by the checkbox, not by pressing the button itself: .loading(true) suppresses on_press while shown (see the module docs).",
+            ),
             spacer(4.0),
             loading_demo_row(loading),
             spacer(16.0),
-            caption("Disabled look — ButtonView has no .enabled(false) seam; .loading(true) is the only disabled-semantics builder, so it doubles here."),
+            caption(
+                "Disabled look — ButtonView has no .enabled(false) seam; .loading(true) is the only disabled-semantics builder, so it doubles here.",
+            ),
             spacer(4.0),
             disabled_demo_row(),
             spacer(24.0),
             heading("Form Controls"),
-            caption("BASELINE widgets (text_input/checkbox/radio/switch/slider) rendered under the Glyph theme — not frust::glyph::* catalog components, but themed the same way."),
+            caption(
+                "BASELINE widgets (text_input/checkbox/radio/switch/slider) rendered under the Glyph theme — not frust::glyph::* catalog components, but themed the same way.",
+            ),
             spacer(12.0),
             caption("Text input (prompt-style placeholder):"),
             spacer(4.0),
-            any(text_input(
-                input_value,
-                |s: &mut ButtonsFormsState, v: String| s.input_value.set(v),
-            )
-            .placeholder("> type a command")),
+            any(
+                text_input(input_value, |s: &mut ButtonsFormsState, v: String| {
+                    s.input_value.set(v)
+                })
+                .placeholder("> type a command"),
+            ),
             spacer(12.0),
             caption("Multiline textarea (.multiline(4)):"),
             spacer(4.0),
-            any(text_input(
-                textarea_value,
-                |s: &mut ButtonsFormsState, v: String| s.textarea_value.set(v),
-            )
-            .placeholder("Write a longer note...")
-            .multiline(4)),
+            any(
+                text_input(textarea_value, |s: &mut ButtonsFormsState, v: String| {
+                    s.textarea_value.set(v)
+                })
+                .placeholder("Write a longer note...")
+                .multiline(4),
+            ),
             spacer(12.0),
             any(checkbox(
                 checkbox_checked,
@@ -163,7 +173,9 @@ impl Component for ButtonsFormsScreen {
             spacer(4.0),
             radio_pair_row(radio_selected),
             spacer(12.0),
-            caption("Switch (spring-driven thumb travel via the theme's default_spatial spring, plus a track-color transition — toggle it):"),
+            caption(
+                "Switch (spring-driven thumb travel via the theme's default_spatial spring, plus a track-color transition — toggle it):",
+            ),
             spacer(4.0),
             any(switch(switch_on, |s: &mut ButtonsFormsState, v: bool| {
                 s.switch_on.set(v)
@@ -200,119 +212,98 @@ fn hspacer(width: f64) -> AnyView<ButtonsFormsState> {
 
 /// Every [`ButtonStyle`] variant, side by side (display-only, no-op presses).
 fn button_styles_row() -> AnyView<ButtonsFormsState> {
-    any(
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(button("Primary", |_: &mut ButtonsFormsState| {})),
-                inflexible(hspacer(8.0)),
-                inflexible(
-                    button("Secondary", |_: &mut ButtonsFormsState| {})
-                        .style(ButtonStyle::Secondary),
-                ),
-                inflexible(hspacer(8.0)),
-                inflexible(
-                    button("Ghost", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Ghost),
-                ),
-                inflexible(hspacer(8.0)),
-                inflexible(
-                    button("Danger", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Danger),
-                ),
-                inflexible(hspacer(8.0)),
-                inflexible(
-                    button("+", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Icon),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+    any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(button("Primary", |_: &mut ButtonsFormsState| {})),
+            inflexible(hspacer(8.0)),
+            inflexible(
+                button("Secondary", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Secondary),
+            ),
+            inflexible(hspacer(8.0)),
+            inflexible(button("Ghost", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Ghost)),
+            inflexible(hspacer(8.0)),
+            inflexible(button("Danger", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Danger)),
+            inflexible(hspacer(8.0)),
+            inflexible(button("+", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Icon)),
+        ],
     )
+    .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// A `.small()` Primary + Secondary pair.
 fn small_buttons_row() -> AnyView<ButtonsFormsState> {
-    any(
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(button("Small primary", |_: &mut ButtonsFormsState| {}).small()),
-                inflexible(hspacer(8.0)),
-                inflexible(
-                    button("Small secondary", |_: &mut ButtonsFormsState| {})
-                        .style(ButtonStyle::Secondary)
-                        .small(),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+    any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(button("Small primary", |_: &mut ButtonsFormsState| {}).small()),
+            inflexible(hspacer(8.0)),
+            inflexible(
+                button("Small secondary", |_: &mut ButtonsFormsState| {})
+                    .style(ButtonStyle::Secondary)
+                    .small(),
+            ),
+        ],
     )
+    .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The loading demo: a checkbox driving a Primary button's `.loading(..)`.
 fn loading_demo_row(loading: bool) -> AnyView<ButtonsFormsState> {
-    any(
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(checkbox(
-                    loading,
-                    "Loading",
-                    |s: &mut ButtonsFormsState, v: bool| s.loading.set(v),
-                )),
-                inflexible(hspacer(12.0)),
-                inflexible(
-                    button("Save changes", |_: &mut ButtonsFormsState| {}).loading(loading),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+    any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(checkbox(
+                loading,
+                "Loading",
+                |s: &mut ButtonsFormsState, v: bool| s.loading.set(v),
+            )),
+            inflexible(hspacer(12.0)),
+            inflexible(button("Save changes", |_: &mut ButtonsFormsState| {}).loading(loading)),
+        ],
     )
+    .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The disabled-look demo: a Secondary button statically shown with
 /// `.loading(true)` (see the [module docs](self) on why no dedicated
 /// disabled builder exists).
 fn disabled_demo_row() -> AnyView<ButtonsFormsState> {
-    any(
-        button("Unavailable", |_: &mut ButtonsFormsState| {})
-            .style(ButtonStyle::Secondary)
-            .loading(true),
-    )
+    any(button("Unavailable", |_: &mut ButtonsFormsState| {})
+        .style(ButtonStyle::Secondary)
+        .loading(true))
 }
 
 /// Two mutually-exclusive radios, `selected` = the currently-chosen index.
 fn radio_pair_row(selected: usize) -> AnyView<ButtonsFormsState> {
-    any(
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(
-                    radio(selected == 0, "Option A")
-                        .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(0)),
-                ),
-                inflexible(hspacer(16.0)),
-                inflexible(
-                    radio(selected == 1, "Option B")
-                        .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(1)),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+    any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(
+                radio(selected == 0, "Option A")
+                    .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(0)),
+            ),
+            inflexible(hspacer(16.0)),
+            inflexible(
+                radio(selected == 1, "Option B")
+                    .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(1)),
+            ),
+        ],
     )
+    .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The slider plus its live percentage readout.
 fn slider_row(value: f64) -> AnyView<ButtonsFormsState> {
-    any(
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(slider(value, |s: &mut ButtonsFormsState, v: f64| {
-                    s.slider_value.set(v)
-                })),
-                inflexible(hspacer(12.0)),
-                inflexible(text(format!("{:.0}%", value * 100.0)).size(13.0)),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+    any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(slider(value, |s: &mut ButtonsFormsState, v: f64| {
+                s.slider_value.set(v)
+            })),
+            inflexible(hspacer(12.0)),
+            inflexible(text(format!("{:.0}%", value * 100.0)).size(13.0)),
+        ],
     )
+    .cross_axis(CrossAxisAlignment::Center))
 }
