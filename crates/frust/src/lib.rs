@@ -263,6 +263,24 @@ pub use peniko::Color;
 /// ```
 pub use frust_shell_common::{clear_app_theme, set_app_theme};
 
+/// App-facing system-UI (system-bar) override (glyph-refinements task 03):
+/// [`set_system_ui_mode`] requests a status-/navigation-bar visibility mode —
+/// the Flutter `SystemChrome.setEnabledSystemUIMode` analog — reaching
+/// whichever shell is running the next time it polls (once per frame,
+/// mirroring [`set_app_theme`]'s delivery timing). See
+/// `frust_shell_common::system_ui`'s module docs for the full layering
+/// rationale, the thread contract (a plain `Mutex`-guarded process-global,
+/// callable from any thread), the FFI wire format tasks 09/10 export, and
+/// where Android/iOS diverge from the five-mode vocabulary.
+///
+/// ```no_run
+/// use frust::{SystemUiMode, set_system_ui_mode};
+///
+/// // Hide all system bars; an edge swipe re-shows them.
+/// set_system_ui_mode(SystemUiMode::Immersive);
+/// ```
+pub use frust_shell_common::{SystemUiMode, SystemUiOverlay, set_system_ui_mode};
+
 /// App-facing pending-font registry (glyph-design-system task 08):
 /// [`register_app_fonts`] pushes raw font bytes (TTF/OTF, or a TTC/OTC
 /// collection) to be registered into the running shell's `TextContext` the

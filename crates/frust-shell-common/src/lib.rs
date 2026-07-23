@@ -38,6 +38,7 @@ pub mod frame_gate;
 pub mod perf;
 pub mod render_split;
 pub mod resample;
+mod system_ui;
 mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
@@ -50,6 +51,10 @@ pub use render_split::{
     scene_return_channel,
 };
 pub use resample::{PointerResampler, RawPointerSample};
+pub use system_ui::{
+    SystemUiMode, SystemUiOverlay, SystemUiWatcher, current_system_ui_mode, encoded_state,
+    set_system_ui_mode,
+};
 pub use theme_override::{
     ThemeOverrideWatcher, clear_app_theme, effective_brightness_for_platform_change, set_app_theme,
     theme_override_active,
