@@ -36,14 +36,21 @@
 //!   "no wall clock" rule in `docs/CODE_STANDARDS.md`'s Theming & Animation
 //!   Conventions binds `frust-core`/`frust-widgets`, not application code —
 //!   `examples/huddle`/`examples/bubblebench` both already read `Instant`
-//!   at this tier) and mounts a tiny, invisible [`pump`] — a
-//!   [`frust::motion::AnimatedOpacity`] wrapping a
-//!   [`circular_progress`]`(`[`ProgressValue::Indeterminate`]`)`, whose
-//!   `Indeterminate` arm unconditionally calls `PaintCtx::request_frame` every
-//!   paint — to keep this page's `build` re-invoked every frame while an
-//!   animation needs to keep advancing. This is the same per-frame-rebuild
-//!   idiom the task cites (`frust_bench`'s `s6_text` `WidthPulse` pattern),
-//!   adapted to a page fn with no `Component`/`PaintCtx` of its own.
+//!   at this tier) and mounts a tiny [`FrameTicker`] — a hand-rolled
+//!   `View`/`Widget` pair (this crate's `Cargo.toml` already carries
+//!   `frust-core`/`kurbo` as real dependencies for `appbar.rs`'s
+//!   `AnchorReporter`, the same documented escape hatch) whose only job is an
+//!   unconditional `PaintCtx::request_frame` call in its own `paint` — to
+//!   keep this page's `build` re-invoked every frame while an animation needs
+//!   to keep advancing. **This replaces an earlier `pump()`**
+//!   (catalog-animation-performance bug, task 03): an invisible
+//!   `AnimatedOpacity(0.0)` wrapping an Indeterminate `circular_progress`,
+//!   riding *that* unrelated widget's own always-request-frame paint
+//!   behavior as a side effect instead of declaring the need directly.
+//!   Mounting [`frame_ticker`] is the same per-frame-rebuild idiom the task
+//!   cites (`frust_bench`'s `s6_text` `WidthPulse` pattern), adapted to a
+//!   page fn with no `Component`/`PaintCtx` of its own — now via a widget
+//!   that says what it's doing instead of exploiting one that doesn't.
 //!
 //! Task 21 adds three more, one further substitution and two implementation
 //! choices left to the implementor's call (documented per the task):
@@ -55,10 +62,13 @@
 //!   guidance.
 //! - **§05's "shadow" is an amber wash layer, not `PaintScene::draw_shadow`.**
 //!   That call is a `PaintCtx`/`Widget::paint` primitive with no facade
-//!   equivalent reachable from application code (this file composes views,
-//!   not widgets) — an `AnimatedOpacity`-faded [`Image`] wash behind the row
-//!   (the same `solid_source` technique [`demo_copy_burst`]'s flash uses)
-//!   reads as a comparable "lift" cue without it.
+//!   equivalent reachable from application code (every demo *view* in this
+//!   file composes existing facade widgets only — the sole exception is
+//!   [`FrameTicker`] above, a narrow, documented escape hatch, not a general
+//!   license to hand-roll widgets) — an `AnimatedOpacity`-faded [`Image`] wash
+//!   behind the row (the same `solid_source` technique
+//!   [`demo_copy_burst`]'s flash uses) reads as a comparable "lift" cue
+//!   without it.
 //! - **§06's rain is per-frame positioned glyph views on a fixed column
 //!   grid** (the task's "honest-composition route"), not a `draw_shader` WGSL
 //!   quad — consistent with every other demo on this page staying inside the
@@ -93,6 +103,16 @@
 //! `local_sig!` macro.
 
 use std::time::{Duration, Instant};
+
+// Low-level escape hatch (see the module docs' [`FrameTicker`] note) —
+// `frust-core`/`kurbo` back only `FrameTicker` below; every other widget in
+// this file comes from the `frust` facade. Mirrors `appbar.rs`'s
+// `AnchorReporter` — this crate's `Cargo.toml` already carries both as real
+// dependencies for that use.
+use frust_core::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+};
+use kurbo::Size;
 
 use frust::glyph::{BadgeVariant, TermLine, badge, glyph_card, term_block};
 use frust::motion::patterns::SharedAxis;
@@ -252,18 +272,56 @@ fn block(children: Vec<FlexChild<CatalogState>>) -> FlexChild<CatalogState> {
     ))
 }
 
-/// An invisible, always-requesting-a-frame pump: an
-/// [`AnimatedOpacity`]`(0.0, ..)` wrapping a
-/// [`circular_progress`]`(`[`ProgressValue::Indeterminate`]`)`, whose
-/// `Indeterminate` arm calls `PaintCtx::request_frame` unconditionally every
-/// paint (`material::progress`'s indeterminate spinner loop) — see the
-/// [module docs](self)'s wall-clock note for why a clock-driven demo needs
-/// this to keep its `page()` call re-invoked.
-fn pump() -> FlexChild<CatalogState> {
-    inflexible(AnimatedOpacity(
-        0.0,
-        SizedBox(Some(0.0), Some(0.0)).child(circular_progress(ProgressValue::Indeterminate)),
-    ))
+// ---------------------------------------------------------------------------
+// FrameTicker — the pump() replacement (see the module docs' wall-clock note)
+// ---------------------------------------------------------------------------
+
+/// A zero-size sentinel [`View`]/[`Widget`] pair whose only job is an
+/// unconditional [`PaintCtx::request_frame`] call in its own `paint` —
+/// mounted by a `demo_*` fn only while its own wall-clock animation is still
+/// running, so a request traces directly to the demo that issued it (see the
+/// [module docs](self)'s wall-clock note). Deliberately does not reuse
+/// `circular_progress(ProgressValue::Indeterminate)`'s own always-request
+/// paint behavior the way the deleted `pump()` did — that made the request
+/// an unrelated side effect instead of this widget's stated purpose.
+struct FrameTicker;
+
+impl<State: 'static> View<State> for FrameTicker {
+    type Element = FrameTickerWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> FrameTickerWidget {
+        FrameTickerWidget
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        _element: &mut FrameTickerWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        ChangeFlags::PAINT
+    }
+}
+
+/// The retained widget for a [`FrameTicker`]. See its doc comment.
+struct FrameTickerWidget;
+
+impl Widget for FrameTickerWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(Size::ZERO)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+        ctx.request_frame();
+    }
+}
+
+/// Mount a [`FrameTicker`] — call only while the caller's own wall-clock demo
+/// still needs another frame; the widget itself just asks. Mirrors the
+/// deleted `pump()`'s mount discipline: the call site (not the widget)
+/// decides when a frame is actually needed.
+fn frame_ticker() -> FlexChild<CatalogState> {
+    inflexible(FrameTicker)
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +416,7 @@ fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
         inflexible(row),
     ];
     if !reduce {
-        children.push(pump());
+        children.push(frame_ticker());
     }
     block(children)
 }
@@ -478,7 +536,7 @@ fn demo_boot() -> FlexChild<CatalogState> {
             )),
         ];
         if !chip_visible {
-            card_children.push(pump());
+            card_children.push(frame_ticker());
         }
         any(glyph_card::<CatalogState>().desc(any(FlexView::new(Axis::Vertical, card_children))))
     } else {
@@ -673,7 +731,7 @@ fn demo_token_scramble(state: &CatalogState) -> FlexChild<CatalogState> {
         ),
     ];
     if running {
-        children.push(pump());
+        children.push(frame_ticker());
     }
     block(children)
 }
@@ -957,7 +1015,7 @@ fn demo_rain_burst(state: &CatalogState) -> FlexChild<CatalogState> {
         .small(),
     ));
     if running {
-        children.push(pump());
+        children.push(frame_ticker());
     }
     block(children)
 }
@@ -1065,7 +1123,7 @@ fn demo_waveform(state: &CatalogState) -> FlexChild<CatalogState> {
         ),
     ];
     if live && !reduce {
-        children.push(pump());
+        children.push(frame_ticker());
     }
     block(children)
 }
@@ -1162,7 +1220,7 @@ fn demo_copy_burst() -> FlexChild<CatalogState> {
         inflexible(toast),
     ];
     if still_running {
-        children.push(pump());
+        children.push(frame_ticker());
     }
     block(children)
 }
@@ -1189,4 +1247,100 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
             demo_copy_burst(),
         ],
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    //! T1 headless test for the `pump()` removal (catalog-animation-performance
+    //! bug, task 03) — drives this page through the real
+    //! `RenderRoot::rebuild`/`layout_with_text`/`paint` seam (mirrors
+    //! `tests/smoke.rs`'s harness shape at module scope, since this task's
+    //! scope is this file only) and asserts `PaintOutcome::needs_frame`.
+
+    use std::any::Any;
+
+    use frust_core::{FrameTime, RenderRoot};
+    use frust_reactive::ReactiveRuntime;
+    use frust_scene::GlyphRun;
+    use frust_text::TextContext;
+    use kurbo::{BezPath, Point, Rect, Size};
+    use peniko::{Brush, Color};
+    use reactive_graph::owner::Owner;
+
+    use super::{AnyView, PaintScene, Set, page};
+    use crate::CatalogState;
+
+    /// A paint target that records nothing — only `RenderRoot::paint`'s
+    /// returned `PaintOutcome::needs_frame` is under test here.
+    struct NoopScene;
+
+    impl PaintScene for NoopScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn fill_rounded_rect(&mut self, _origin: Point, _size: Size, _radius: f64, _color: Color) {}
+        fn draw_glyph_run(&mut self, _run: GlyphRun) {}
+        fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
+        fn fill_path(&mut self, _origin: Point, _path: &BezPath, _brush: &Brush) {}
+        fn stroke_path(&mut self, _origin: Point, _path: &BezPath, _width: f64, _brush: &Brush) {}
+    }
+
+    /// Installs the reactive runtime and an ambient owner — mirrors
+    /// `tests/smoke.rs::setup`, required before `CatalogState::new()` mints
+    /// its `RwSignal`s.
+    fn setup() -> Owner {
+        let _ = ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+        let ambient = Owner::new();
+        ambient.set();
+        ambient
+    }
+
+    /// One deterministic-`FrameTime` frame of this page, rebuilt/laid-out/
+    /// painted through a real `RenderRoot` — returns whether the pass
+    /// requested another frame.
+    fn paint_needs_frame(
+        root: &mut RenderRoot<CatalogState, AnyView<CatalogState>>,
+        state: &mut CatalogState,
+        tcx: &mut TextContext,
+    ) -> bool {
+        let mut logic = |s: &mut CatalogState| page(s);
+        root.rebuild(&mut logic, state);
+        let tcx_any: &mut dyn Any = tcx;
+        root.layout_with_text(Size::new(390.0, 3000.0), tcx_any);
+        let mut scene = NoopScene;
+        root.paint(&mut scene, FrameTime::ZERO).needs_frame
+    }
+
+    /// At the demos' initial (nothing-tapped-or-held-yet) state, every
+    /// `local_sig!` bool defaults `false`, so §02-§08 are all idle and mount
+    /// no [`super::frame_ticker`] — the sole exception is §01 connection
+    /// heartbeat, the page's one demo documented to "auto-repeat without
+    /// input" (this file's module docs' Reduced motion note), which mounts
+    /// its ticker unconditionally while `!reduce_motion`. So a fresh page
+    /// paint must report `needs_frame == true` (traceable to that one
+    /// widget), and turning `reduce_motion` on — which gates the heartbeat's
+    /// own ticker mount, per `demo_heartbeat`'s `if !reduce { ... }` — must
+    /// flip it back to `false` with every other demo still idle. This is the
+    /// load-bearing regression guard for the deleted `pump()`: that hack kept
+    /// `needs_frame` `true` unconditionally regardless of `reduce_motion` or
+    /// any demo's running state, since it rode an indeterminate spinner's
+    /// paint behavior rather than a demo's own state.
+    #[test]
+    fn initial_state_requests_frames_only_from_the_heartbeat_ticker() {
+        let _owner = setup();
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut state = CatalogState::new();
+
+        assert!(
+            paint_needs_frame(&mut root, &mut state, &mut tcx),
+            "the heartbeat demo auto-repeats and must request the next frame at rest"
+        );
+
+        state.reduce_motion.set(true);
+        assert!(
+            !paint_needs_frame(&mut root, &mut state, &mut tcx),
+            "with reduce_motion on, the heartbeat ticker is unmounted and every other demo is \
+             still idle — nothing should request a frame"
+        );
+    }
 }
