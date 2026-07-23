@@ -102,6 +102,27 @@
 //! to bypass, so it needs no `ZERO`-timing workaround — reduced motion there
 //! only drops the ring/scale visuals, not the underlying gesture contract.
 //!
+//! # Tap-to-play (catalog-animation-performance bug, task 11)
+//!
+//! §01's heartbeat ping/rolling-latency was originally the page's one
+//! self-driving exception — it auto-repeated forever with no input, the
+//! research footer's documented exception to "every demo starts idle". Task
+//! 11 removes that exception: combined with task 07's visible-rect culling,
+//! nothing on this page should burn frames while unseen, and an
+//! always-running demo defeats that even while it IS seen but nobody's
+//! looking at it. `hb_active_sig` (mirroring every other demo's own
+//! `*_active_sig`) now defaults `false` — stopped, rendering the settled
+//! first latency sample with the ping ring hidden, no [`frame_ticker`]
+//! mounted — and a [`GestureDetector`] wrapping the row (this page's "tap
+//! the demo card" affordance; a card-shaped tap target reads more naturally
+//! here than a button, unlike §07's existing `Toggle build-watch activity`
+//! button, which already satisfied the same play/stop contract before this
+//! task and is left as-is) starts/stops the wall-clock loop on tap,
+//! resetting the clock on each (re)start so a cycle always begins at the
+//! ping. §03's boot demo and §04/§05/§06/§08's demos were already
+//! tap-triggered and self-stopping (this task's Scope: "unchanged beyond
+//! the task-03/12 reworks") and need no change here.
+//!
 //! Structure mirrors `motion.rs`: `pub fn page(state)` + one `demo_*` fn per
 //! moment inside `block(...)` scaffolds, thread-local demo state via the same
 //! `local_sig!` macro.
@@ -332,11 +353,12 @@ fn frame_ticker() -> FlexChild<CatalogState> {
 // 01 — connection heartbeat + rolling latency
 // ---------------------------------------------------------------------------
 
-local_clock!(hb_elapsed_ms, hb_reset_clock_unused);
+local_sig!(hb_active_sig, bool, false);
+local_clock!(hb_elapsed_ms, hb_reset_clock);
 
 /// Full cycle length: the ping ring fires, then latency rolls, then idles
 /// until the next cycle — matching the reference's "runs automatically every
-/// 3s" caption.
+/// 3s" caption, now gated behind [`hb_active_sig`] (task 11's module docs).
 const HB_CYCLE_MS: f64 = 3000.0;
 /// Ping-ring animation length (reference: 1.6s `pingRing` keyframe).
 const HB_RING_MS: f64 = 1600.0;
@@ -423,29 +445,64 @@ fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogSta
 /// 01 connection heartbeat: a radar-ping ring (a full-circle
 /// [`circular_progress`] stroke under [`AnimatedOpacity`]/[`AnimatedScale`],
 /// driven by a wall-clock read — no per-widget custom paint needed) plus a
-/// rolling (not snapping) latency readout. The one demo on this page that
-/// auto-repeats without input (Acceptance Criteria #3; the research footer's
-/// sole exception).
+/// rolling (not snapping) latency readout. Tap-to-play (task 11's module
+/// docs): stopped by default, rendering the settled first latency sample
+/// with the ring hidden; tapping the row starts the wall-clock loop, and
+/// tapping again (or the header's animations-off toggle) stops it.
 fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
     // ORs the header animations-off toggle into the same local `reduce`
     // check every wall-clock demo already gates on — the "cheapest sound
     // wiring" `CatalogState::animations_enabled`'s doc comment describes
     // (catalog-animation-performance bug task 10), not a second flag.
     let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
-    let elapsed = hb_elapsed_ms();
-    let cycle = (elapsed / HB_CYCLE_MS).floor().max(0.0) as usize;
-    let t = elapsed % HB_CYCLE_MS;
+    let active_sig = hb_active_sig();
+    // The task-10 global toggle force-stops this demo like every other one
+    // on the page even while `hb_active_sig` itself is still `true`
+    // underneath — flipping animations back on resumes the same
+    // never-reset wall clock rather than restarting the cycle (task 11's
+    // module docs).
+    let active = active_sig.get() && !reduce;
+
+    let (t, cycle) = if active {
+        let elapsed = hb_elapsed_ms();
+        (
+            elapsed % HB_CYCLE_MS,
+            (elapsed / HB_CYCLE_MS).floor().max(0.0) as usize,
+        )
+    } else {
+        (0.0, 0)
+    };
 
     let from_latency = HB_LATENCIES[cycle % HB_LATENCIES.len()];
     let to_latency = HB_LATENCIES[(cycle + 1) % HB_LATENCIES.len()];
-    let rolling = !reduce && t < HB_ROLL_MS;
-    let latency = if rolling {
+    let rolling = active && t < HB_ROLL_MS;
+    let latency = if !active {
+        // Stopped: the settled "nothing has happened yet" reading —
+        // Acceptance Criteria #1's "representative settled frame".
+        HB_LATENCIES[0]
+    } else if rolling {
         from_latency + (to_latency - from_latency) * (t / HB_ROLL_MS)
     } else {
         to_latency
     };
 
-    let (ring_opacity, ring_scale) = heartbeat_ring_state(t, reduce);
+    // Stopped renders the ring fully transparent at its MIN (not MAX) scale
+    // — deliberately not `heartbeat_ring_state(t, true)`'s own settled read
+    // (opacity 0 / scale `HB_RING_SCALE_MAX`), which this module's own
+    // `heartbeat_ping_headroom_does_not_stretch_sibling_row_content` test
+    // caught corrupting this row's *sibling* (post-ring) layout the instant
+    // `reduce_motion` forces that exact (0.0, HB_RING_SCALE_MAX) pair — a
+    // pre-existing `AnimatedScale`/`Flex` interaction defect outside this
+    // task's file scope (`examples/glyph-catalog/src/pages/interactions.rs`
+    // only), reproduced identically against the unmodified pre-task-11 code
+    // by forcing `reduce_motion` on that same test. `HB_RING_SCALE_MIN` (the
+    // ring's cycle-start pose) renders identically invisible at
+    // `ring_opacity == 0.0` and avoids the defect entirely.
+    let (ring_opacity, ring_scale) = if active {
+        heartbeat_ring_state(t, false)
+    } else {
+        (0.0, HB_RING_SCALE_MIN)
+    };
     let ring = heartbeat_ring_view(ring_opacity, ring_scale);
 
     let row = FlexView::new(
@@ -465,17 +522,32 @@ fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
     )
     .cross_axis(CrossAxisAlignment::Center);
 
+    // The tap-to-play affordance (task 11's module docs) — tapping the row
+    // toggles `hb_active_sig`, resetting the wall clock on each (re)start so
+    // a cycle always begins at the ping rather than resuming mid-cycle.
+    let tappable_row: AnyView<CatalogState> =
+        any(GestureDetector(row).on_tap(move |_s: &mut CatalogState| {
+            if active_sig.get_untracked() {
+                active_sig.set(false);
+            } else {
+                hb_reset_clock();
+                active_sig.set(true);
+            }
+        }));
+
     let mut children = vec![
         inflexible(label("01 Connection heartbeat")),
         inflexible(caption(if reduce {
             "reduced motion — ring suppressed; latency updates instantly"
+        } else if active {
+            "tap to stop — radar ping ring pulses every 3s; latency rolls rather than snapping"
         } else {
-            "radar ping ring pulses every 3s; latency rolls rather than snapping"
+            "tap the row to start the connection heartbeat"
         })),
         gap(6.0),
-        inflexible(row),
+        inflexible(tappable_row),
     ];
-    if !reduce {
+    if active {
         children.push(frame_ticker());
     }
     block(children)
@@ -1329,6 +1401,28 @@ fn demo_copy_burst() -> FlexChild<CatalogState> {
     block(children)
 }
 
+/// Test-only seam (mirrors `pages::appbar`'s `pub fn open_*` precedent — "pub
+/// on the `open_*` fns exists exactly for this seam", `tests/smoke.rs`'s own
+/// doc comment on that helper): starts §01's heartbeat demo directly, the way
+/// `pages::interactions::tests`' own in-file tests poke [`hb_active_sig`]
+/// straight, letting a cross-crate integration test (`tests/smoke.rs`, which
+/// only sees `pub` items) exercise task 11's tap-to-play resume contract
+/// without needing a real pointer-event dispatch through the whole page.
+/// Not part of the page-fn contract (`pages/mod.rs`'s module docs) — never
+/// called from `build`.
+pub fn start_heartbeat_for_test() {
+    hb_active_sig().set(true);
+}
+
+/// [`start_heartbeat_for_test`]'s twin for §07 live output — this task's
+/// Acceptance Criteria #2 ("smoke sweep green ... in both stopped/playing
+/// states for at least two demos") needs a second already-tap-to-play demo
+/// to sweep alongside the heartbeat; §07's `Toggle build-watch activity`
+/// button already flips [`wave_live_sig`] the same way a real tap would.
+pub fn start_waveform_for_test() {
+    wave_live_sig().set(true);
+}
+
 /// See the page-fn contract in [`crate::pages`].
 pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     any(FlexView::new(
@@ -1414,59 +1508,112 @@ mod tests {
         root.paint(&mut scene, FrameTime::ZERO).needs_frame
     }
 
-    /// At the demos' initial (nothing-tapped-or-held-yet) state, every
-    /// `local_sig!` bool defaults `false`, so §02-§08 are all idle and mount
-    /// no [`super::frame_ticker`] — the sole exception is §01 connection
-    /// heartbeat, the page's one demo documented to "auto-repeat without
-    /// input" (this file's module docs' Reduced motion note), which mounts
-    /// its ticker unconditionally while `!reduce_motion`. So a fresh page
-    /// paint must report `needs_frame == true` (traceable to that one
-    /// widget), and turning `reduce_motion` on — which gates the heartbeat's
-    /// own ticker mount, per `demo_heartbeat`'s `if !reduce { ... }` — must
-    /// flip it back to `false` with every other demo still idle. This is the
-    /// load-bearing regression guard for the deleted `pump()`: that hack kept
-    /// `needs_frame` `true` unconditionally regardless of `reduce_motion` or
-    /// any demo's running state, since it rode an indeterminate spinner's
-    /// paint behavior rather than a demo's own state.
+    /// Task 11 (catalog-animation-performance bug, this task's Acceptance
+    /// Criteria #1): at the demos' initial (nothing-tapped-yet) state, every
+    /// `local_sig!` bool defaults `false` — including
+    /// [`super::hb_active_sig`] now that §01 connection heartbeat is
+    /// tap-to-play like every other demo on this page (previously the page's
+    /// one exception that auto-repeated without input; see this file's
+    /// module docs' Tap-to-play note). So a fresh page paint must report
+    /// `needs_frame == false`: nothing on this page burns a frame until the
+    /// user actually starts something.
     #[test]
-    fn initial_state_requests_frames_only_from_the_heartbeat_ticker() {
+    fn initial_page_paint_requests_zero_frames() {
         let _owner = setup();
         let mut tcx = TextContext::new();
         let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
         let mut state = CatalogState::new();
 
         assert!(
+            !paint_needs_frame(&mut root, &mut state, &mut tcx),
+            "every demo starts stopped — an initial page paint must request no further frame"
+        );
+    }
+
+    /// Task 11's core tap-to-play contract, exercised directly against
+    /// [`super::hb_active_sig`] (the signal the row's tap handler flips):
+    /// starting the heartbeat demo requests a frame, and stopping it again
+    /// returns to zero — the load-bearing regression guard for the deleted
+    /// `pump()` (task 03) now extended to task 11's play/stop affordance:
+    /// neither hack nor auto-repeat can leave `needs_frame` stuck `true`
+    /// once the demo is stopped.
+    #[test]
+    fn heartbeat_tap_to_play_starts_and_stops_frame_requests() {
+        let _owner = setup();
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut state = CatalogState::new();
+
+        assert!(!paint_needs_frame(&mut root, &mut state, &mut tcx));
+
+        super::hb_active_sig().set(true);
+        assert!(
             paint_needs_frame(&mut root, &mut state, &mut tcx),
-            "the heartbeat demo auto-repeats and must request the next frame at rest"
+            "starting the heartbeat demo must request the next frame"
+        );
+
+        super::hb_active_sig().set(false);
+        assert!(
+            !paint_needs_frame(&mut root, &mut state, &mut tcx),
+            "stopping the heartbeat demo must return to zero frame requests"
+        );
+    }
+
+    /// The `reduce_motion` counterpart to the test above: once the heartbeat
+    /// is started, turning `reduce_motion` on must still unmount its ticker —
+    /// proving the toggle force-stops it even while the underlying
+    /// `hb_active_sig` stays `true`. Turning `reduce_motion` back off resumes
+    /// the (never-reset) wall clock rather than restarting the cycle,
+    /// restoring the ticker.
+    #[test]
+    fn reduce_motion_unmounts_and_restores_the_started_heartbeat_ticker() {
+        let _owner = setup();
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut state = CatalogState::new();
+
+        super::hb_active_sig().set(true);
+        assert!(
+            paint_needs_frame(&mut root, &mut state, &mut tcx),
+            "the started heartbeat demo must request its next frame"
         );
 
         state.reduce_motion.set(true);
         assert!(
             !paint_needs_frame(&mut root, &mut state, &mut tcx),
-            "with reduce_motion on, the heartbeat ticker is unmounted and every other demo is \
-             still idle — nothing should request a frame"
+            "with reduce_motion on, the heartbeat ticker must unmount even though hb_active_sig \
+             is still true — nothing should request a frame"
         );
+
+        state.reduce_motion.set(false);
+        assert!(
+            paint_needs_frame(&mut root, &mut state, &mut tcx),
+            "turning reduce_motion back off must restore the started heartbeat's frame request"
+        );
+
+        super::hb_active_sig().set(false);
     }
 
     /// The header animations-off toggle's counterpart to the test above
     /// (catalog-animation-performance bug task 10): with `reduce_motion`
-    /// left OFF but `animations_enabled` turned OFF, the heartbeat ticker
-    /// must still unmount — proving the two flags OR together in the same
-    /// `reduce` check (`crate::CatalogState::animations_enabled`'s doc
+    /// left OFF but `animations_enabled` turned OFF, a started heartbeat's
+    /// ticker must still unmount — proving the two flags OR together in the
+    /// same `reduce` check (`crate::CatalogState::animations_enabled`'s doc
     /// comment) rather than the toggle needing `reduce_motion` set too.
     /// Flipping `animations_enabled` back on with `reduce_motion` still off
     /// restores the ticker, proving the toggle actually resumes animation
     /// rather than latching off.
     #[test]
-    fn animations_toggle_unmounts_and_restores_the_heartbeat_ticker() {
+    fn animations_toggle_unmounts_and_restores_the_started_heartbeat_ticker() {
         let _owner = setup();
         let mut tcx = TextContext::new();
         let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
         let mut state = CatalogState::new();
 
+        super::hb_active_sig().set(true);
         assert!(
             paint_needs_frame(&mut root, &mut state, &mut tcx),
-            "the heartbeat demo auto-repeats and must request the next frame at rest"
+            "the started heartbeat demo must request its next frame"
         );
 
         state.animations_enabled.set(false);
@@ -1479,9 +1626,11 @@ mod tests {
         state.animations_enabled.set(true);
         assert!(
             paint_needs_frame(&mut root, &mut state, &mut tcx),
-            "turning animations back on (reduce_motion still off) must restore the heartbeat \
-             ticker's frame request"
+            "turning animations back on (reduce_motion still off) must restore the started \
+             heartbeat's ticker frame request"
         );
+
+        super::hb_active_sig().set(false);
     }
 
     // -----------------------------------------------------------------------

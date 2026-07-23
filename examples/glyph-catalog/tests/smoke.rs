@@ -436,10 +436,13 @@ const SETTLE_MS: u64 = 5000;
 /// `CatalogState::animations_enabled` off (the half `pages::interactions`'
 /// wall-clock demos gate on directly) — every section, both brightnesses,
 /// must then paint its settled state ([`SETTLE_MS`] after mount) with zero
-/// frame requests. Interactions' heartbeat (the catalog's one demo documented
-/// to auto-repeat without input — see that module's docs) is the
-/// load-bearing case this regresses if the toggle is wired to only one of
-/// the two halves.
+/// frame requests. Interactions' heartbeat (until catalog-animation-performance
+/// bug task 11, the catalog's one demo documented to auto-repeat without
+/// input — now tap-to-play and stopped by default like every other demo, see
+/// `pages::interactions`'s module docs' Tap-to-play note) was the
+/// load-bearing case this regressed if the toggle was wired to only one of
+/// the two halves; `interactions_heartbeat_resumes_with_animations_enabled`
+/// below now covers that half explicitly against a STARTED heartbeat.
 #[test]
 fn every_section_requests_no_frames_with_animations_disabled() {
     for brightness in BRIGHTNESSES {
@@ -474,10 +477,17 @@ fn every_section_requests_no_frames_with_animations_disabled() {
     }
 }
 
-/// The toggle's other half: with animations back on (the default
-/// `CatalogState`, `reduce_motion` off), the interactions section's
-/// heartbeat demo must resume requesting frames — proving the toggle
-/// actually restores animation rather than latching off.
+/// The toggle's other half — updated for catalog-animation-performance bug
+/// task 11 (`pages::interactions`'s own module docs' Tap-to-play note): the
+/// heartbeat demo, like every other demo on the page, now starts STOPPED
+/// (task 11's Acceptance Criteria #1), so a fresh Interactions mount must
+/// request zero frames regardless of the toggle. Starting the heartbeat via
+/// [`pages::interactions::start_heartbeat_for_test`] (the `pub` test seam
+/// that fn's own doc comment describes, mirroring `appbar::open_*`'s
+/// precedent) and re-painting proves the toggle's ON half (animations
+/// enabled, the default; `reduce_motion` off) still lets a STARTED heartbeat
+/// resume requesting frames — the toggle actually restores animation rather
+/// than latching off.
 #[test]
 fn interactions_heartbeat_resumes_with_animations_enabled() {
     let _owner = setup();
@@ -489,12 +499,72 @@ fn interactions_heartbeat_resumes_with_animations_enabled() {
         .position(|s| *s == "Interactions")
         .expect("an Interactions section must exist");
     let mut logic = |s: &mut CatalogState| pages::current(interactions_section, s);
+
+    let (_scene, outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    assert!(
+        !outcome.needs_frame,
+        "task 11: every demo (including the heartbeat) starts stopped — a fresh Interactions \
+         mount must request zero frames",
+    );
+
+    pages::interactions::start_heartbeat_for_test();
     let (_scene, outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
     assert!(
         outcome.needs_frame,
-        "with animations enabled (the default) and reduce_motion off, the heartbeat demo must \
-         request the next frame",
+        "with animations enabled (the default) and reduce_motion off, a STARTED heartbeat demo \
+         must request the next frame",
     );
+}
+
+/// Task 11's Acceptance Criteria #2: "smoke sweep green across
+/// sizes/brightness in both stopped/playing states for at least two demos".
+/// `every_page_mounts_at_every_size_and_brightness` above already sweeps
+/// every section — including Interactions — in its default (now STOPPED)
+/// state; this test sweeps the same size/brightness matrix again with two
+/// demos ([`pages::interactions::start_heartbeat_for_test`] and
+/// [`pages::interactions::start_waveform_for_test`], each in its own fresh
+/// mount) started, proving the PLAYING half of the same contract.
+#[test]
+fn interactions_playing_demos_mount_at_every_size_and_brightness() {
+    let starters: [fn(); 2] = [
+        pages::interactions::start_heartbeat_for_test,
+        pages::interactions::start_waveform_for_test,
+    ];
+    let interactions_section = SECTION_LABELS
+        .iter()
+        .position(|s| *s == "Interactions")
+        .expect("an Interactions section must exist");
+
+    for start in starters {
+        for brightness in BRIGHTNESSES {
+            for (w, h) in SIZES {
+                let (_owner, theme) = setup_with_theme(brightness);
+                let mut tcx = TextContext::new();
+                let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+                root.set_theme(Box::new(theme));
+                let mut state = CatalogState::new();
+                start();
+                let mut logic = |s: &mut CatalogState| pages::current(interactions_section, s);
+                let (scene, outcome) = frame_at_size(
+                    &mut root,
+                    &mut logic,
+                    &mut state,
+                    &mut tcx,
+                    Size::new(w, h),
+                    0,
+                );
+                assert!(
+                    scene.glyph_runs > 0,
+                    "Interactions must paint text at {w}x{h} under {brightness:?} while playing",
+                );
+                assert!(
+                    outcome.needs_frame,
+                    "a started demo must still request its next frame at {w}x{h} under \
+                     {brightness:?}",
+                );
+            }
+        }
+    }
 }
 
 /// Task 14's six `appbar::open_*` fns, in [`glyphcatalog::pages::appbar`]'s
