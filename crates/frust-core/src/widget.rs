@@ -445,6 +445,37 @@ impl Default for LayoutCtx<'static> {
     }
 }
 
+/// The *class* of a continuation-frame request a widget makes during paint —
+/// how urgent the next frame is, so the mobile frame gate can decide whether it
+/// may be paced (see [`crate::app::RenderRoot::paint`] and the frame gate).
+///
+/// A widget continues an animation by asking for another frame during paint
+/// ([`PaintCtx::request_frame`] / [`PaintCtx::request_frame_paced`]); this tag
+/// says whether that next frame is user-visible motion that must land on the
+/// very next vsync ([`TickClass::Transition`]) or a decorative loop whose cadence
+/// can be throttled without a perceptible glitch ([`TickClass::CosmeticLoop`]).
+///
+/// **Aggregation is a max-lattice**: `Transition` dominates `CosmeticLoop`. Over
+/// a whole paint pass, ANY [`TickClass::Transition`] request makes the frame
+/// unpaced (must run every vsync, today's behavior); only when *every* request
+/// this frame is [`TickClass::CosmeticLoop`] may the gate pace it. No request at
+/// all leaves the frame as it is today — the class is only meaningful once a
+/// frame was actually requested (see [`PaintCtx::frame_class`]).
+///
+/// The *gate-side* pacing behavior is implemented separately (the frame gate,
+/// task 06); this type is only the vocabulary a widget uses to declare intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TickClass {
+    /// A pacable decorative loop (e.g. a skeleton shimmer, an idle pulse) — the
+    /// gate may throttle its cadence when this is the *only* class requested
+    /// this frame. Never dominates a concurrent [`TickClass::Transition`].
+    CosmeticLoop,
+    /// User-visible motion that must reproduce every vsync — a page transition,
+    /// a fling, a caret blink, a layout animation. Today's `request_frame`
+    /// behavior, and the dominant class in the aggregation above.
+    Transition,
+}
+
 /// Context passed to [`Widget::paint`].
 ///
 /// Carries the widget's resolved geometry (as stored in its pod after layout) so
@@ -455,6 +486,12 @@ impl Default for LayoutCtx<'static> {
 /// [`ChildPod::paint_child`] and out of [`crate::app::RenderRoot::paint`] as a
 /// [`PaintOutcome`], mirroring how [`EventCtx::request_redraw`] surfaces through
 /// [`crate::event::EventOutcome`].
+///
+/// A frame request also carries a [`TickClass`] (see [`PaintCtx::request_frame`]
+/// vs [`PaintCtx::request_frame_paced`]): the aggregate class over the whole
+/// paint pass — Transition-dominates-CosmeticLoop — surfaces on
+/// [`PaintOutcome::needs_frame_paced_only`] for the mobile frame gate to pace a
+/// purely-cosmetic frame.
 pub struct PaintCtx<'a> {
     origin: Point,
     size: Size,
@@ -468,6 +505,18 @@ pub struct PaintCtx<'a> {
     /// Deliberately opt-in: [`PaintCtx::request_frame`] alone never sets it, so
     /// paint-only animations stay layout-free.
     needs_layout: bool,
+    /// Whether any continuation-frame request this (sub)paint was
+    /// [`TickClass::Transition`] (unpaced, must run every vsync). The
+    /// max-lattice half of the tick-class aggregation: it starts `false` and
+    /// only ever flips `true` (a [`ChildPod::paint_child`]/
+    /// [`PaintCtx::with_hero_registry`] bubble ORs it up), so ANY Transition
+    /// request over the whole pass wins. Meaningful only when `needs_frame` is
+    /// set: `needs_frame && !frame_unpaced` is the "paced-only" state the frame
+    /// gate may throttle (see [`PaintCtx::frame_class`],
+    /// [`PaintCtx::needs_frame_paced_only`]). `request_layout` implies
+    /// Transition (a layout animation is user-visible motion), and the
+    /// unchanged `request_frame` sets it too (today's every-vsync behavior).
+    frame_unpaced: bool,
     ime_state: Option<ImeState>,
     /// Whether the widget being painted currently holds the focus path — seeded
     /// from its pod's recorded focus flag ([`ChildPod::is_focused`]) by
@@ -533,6 +582,7 @@ impl<'a> PaintCtx<'a> {
             size,
             needs_frame: false,
             needs_layout: false,
+            frame_unpaced: false,
             ime_state: None,
             has_focus: false,
             frame_time: FrameTime::ZERO,
@@ -688,13 +738,72 @@ impl<'a> PaintCtx<'a> {
     /// `ControlFlow::Wait` loop would otherwise idle); the mobile shells'
     /// continuous per-frame loops already schedule the next frame and can ignore
     /// it. Mirrors [`EventCtx::request_redraw`].
+    ///
+    /// This requests a [`TickClass::Transition`] frame — the unpaced,
+    /// every-vsync class, unchanged from today's behavior. A widget whose next
+    /// frame is a *pacable* decorative loop calls [`Self::request_frame_paced`]
+    /// (or [`Self::request_frame_class`]) instead so the mobile frame gate may
+    /// throttle it.
     pub fn request_frame(&mut self) {
+        self.request_frame_class(TickClass::Transition);
+    }
+
+    /// Request a continuation frame whose next tick is a *pacable* decorative
+    /// loop ([`TickClass::CosmeticLoop`]) — a shimmer, an idle pulse, a spinner
+    /// whose exact cadence is imperceptible.
+    ///
+    /// Bubbles like [`Self::request_frame`], but leaves the frame paceable: only
+    /// if *every* request this frame is `CosmeticLoop` may the frame gate throttle
+    /// it (see [`TickClass`]'s max-lattice aggregation). Any concurrent
+    /// [`Self::request_frame`]/[`Self::request_layout`] elsewhere in the tree
+    /// re-forces every-vsync cadence, so a paced request is never a downgrade of
+    /// user-visible motion.
+    pub fn request_frame_paced(&mut self) {
+        self.request_frame_class(TickClass::CosmeticLoop);
+    }
+
+    /// Request a continuation frame of an explicit [`TickClass`] — the general
+    /// form behind [`Self::request_frame`] (Transition) and
+    /// [`Self::request_frame_paced`] (CosmeticLoop).
+    ///
+    /// Always sets `needs_frame`; a [`TickClass::Transition`] request additionally
+    /// marks the aggregate unpaced (the max-lattice OR — see [`TickClass`]). A
+    /// `CosmeticLoop` request never clears an already-unpaced aggregate.
+    pub fn request_frame_class(&mut self, class: TickClass) {
         self.needs_frame = true;
+        if class == TickClass::Transition {
+            self.frame_unpaced = true;
+        }
     }
 
     /// Whether a continuation frame was requested during this (sub)paint.
     pub fn needs_frame(&self) -> bool {
         self.needs_frame
+    }
+
+    /// The aggregate [`TickClass`] requested during this (sub)paint, or `None`
+    /// if no frame was requested.
+    ///
+    /// Follows the [`TickClass`] max-lattice: [`TickClass::Transition`] if any
+    /// request this pass was Transition-class (unpaced), else
+    /// [`TickClass::CosmeticLoop`] when at least one paced request was made and
+    /// no Transition one was. `None` means "as today — no continuation frame".
+    pub fn frame_class(&self) -> Option<TickClass> {
+        if !self.needs_frame {
+            None
+        } else if self.frame_unpaced {
+            Some(TickClass::Transition)
+        } else {
+            Some(TickClass::CosmeticLoop)
+        }
+    }
+
+    /// Whether a frame was requested and *every* request this (sub)paint was
+    /// [`TickClass::CosmeticLoop`] — the paced-only state the mobile frame gate
+    /// (task 06) may throttle. Convenience for
+    /// `frame_class() == Some(TickClass::CosmeticLoop)`.
+    pub fn needs_frame_paced_only(&self) -> bool {
+        self.needs_frame && !self.frame_unpaced
     }
 
     /// Signal that this paint advanced animation state that changes the widget's
@@ -713,12 +822,16 @@ impl<'a> PaintCtx<'a> {
     ///
     /// Calling this also implies [`Self::request_frame`] (a widget animating its
     /// layout necessarily wants another frame), so a caller needs only one call
-    /// per animating-layout frame.
+    /// per animating-layout frame. That implied frame is
+    /// [`TickClass::Transition`] (unpaced): a layout animation is user-visible
+    /// motion, so it never leaves the frame paceable.
     pub fn request_layout(&mut self) {
         self.needs_layout = true;
         // A widget animating its layout necessarily wants another frame; setting
         // `needs_frame` too means one call suffices per animating-layout frame.
-        self.needs_frame = true;
+        // A layout animation is user-visible motion, so the implied frame is
+        // Transition-class (unpaced) — mark the aggregate accordingly.
+        self.request_frame_class(TickClass::Transition);
     }
 
     /// Whether a layout re-run was requested during this (sub)paint.
@@ -795,6 +908,7 @@ impl<'a> PaintCtx<'a> {
             size: self.size,
             needs_frame: false,
             needs_layout: false,
+            frame_unpaced: false,
             ime_state: None,
             has_focus: self.has_focus,
             frame_time: self.frame_time,
@@ -809,6 +923,11 @@ impl<'a> PaintCtx<'a> {
         }
         if child.needs_layout {
             self.needs_layout = true;
+        }
+        // Max-lattice OR: any Transition request inside dominates, keeping the
+        // aggregate unpaced (mirrors `ChildPod::paint_child`'s absorb).
+        if child.frame_unpaced {
+            self.frame_unpaced = true;
         }
         if let Some(ime) = child.ime_state.take() {
             self.ime_state = Some(ime);
@@ -903,6 +1022,14 @@ pub enum HeroDirective {
 /// root's pending [`crate::view::ChangeFlags`] (`LAYOUT`) so the next frame's
 /// `take_change_flags().needs_layout()` reports it — driving the mobile
 /// intra-frame layout skip to relayout while the animation is in flight.
+///
+/// `needs_frame_paced_only` is the aggregated [`TickClass`] verdict: `true` only
+/// when a frame was requested and *every* request this frame was
+/// [`TickClass::CosmeticLoop`] (a pacable decorative loop), `false` the instant
+/// any [`TickClass::Transition`] request (including any `request_layout`) joined
+/// in. The mobile frame gate (task 06) may throttle such a purely-cosmetic frame
+/// to a lower cadence; a `false` here means the frame runs every vsync as today.
+/// Only meaningful when `needs_frame` is `true`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaintOutcome {
     /// Whether the shell should schedule another frame to continue an animation.
@@ -910,6 +1037,11 @@ pub struct PaintOutcome {
     /// Whether the render root folded a layout-continuation request into its
     /// pending change flags (a widget called [`PaintCtx::request_layout`]).
     pub needs_layout: bool,
+    /// Whether a frame was requested and every request this frame was
+    /// [`TickClass::CosmeticLoop`] — the paced-only state the mobile frame gate
+    /// may throttle (see [`PaintCtx::needs_frame_paced_only`]). Meaningful only
+    /// when `needs_frame` is set.
+    pub needs_frame_paced_only: bool,
 }
 
 /// A retained UI element living in the widget tree.
@@ -1151,12 +1283,19 @@ impl ChildPod {
         // matching the effective gating focus-path routing gives events.
         child_ctx.set_has_focus(self.focused && ctx.has_focus());
         self.widget.paint(&mut child_ctx, scene);
-        if child_ctx.needs_frame() {
-            ctx.request_frame();
+        // Bubble the child's continuation-frame request AND its tick class up
+        // unchanged: forwarding the aggregate class (rather than always calling
+        // `request_frame`, which is Transition) is what lets a purely-cosmetic
+        // subtree stay paceable through nested containers. `frame_class()` is
+        // `None` when the child asked for nothing, so a still child bubbles
+        // nothing (the max-lattice identity).
+        if let Some(class) = child_ctx.frame_class() {
+            ctx.request_frame_class(class);
         }
         // Bubble the child's layout-continuation request the same way as
         // `needs_frame`, so a nested widget animating its layout keeps layout
-        // re-running up the whole tree.
+        // re-running up the whole tree. (`request_layout` also re-forces the
+        // Transition class via `request_frame_class` above's contract.)
         if child_ctx.needs_layout() {
             ctx.request_layout();
         }
@@ -1303,6 +1442,21 @@ mod tests {
 
         fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
             ctx.request_layout();
+        }
+    }
+
+    /// A leaf widget whose animation is a *pacable* decorative loop: it signals
+    /// [`PaintCtx::request_frame_paced`] on every paint — stands in for a
+    /// shimmer/idle-pulse whose cadence the frame gate may throttle.
+    struct PacedAnimator;
+
+    impl Widget for PacedAnimator {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame_paced();
         }
     }
 
@@ -1696,6 +1850,183 @@ mod tests {
             "needs_layout bubbles up nested containers"
         );
         assert!(pctx.needs_frame());
+    }
+
+    /// A single-`ChildPod` container that forwards paint via `paint_child`,
+    /// reused by the tick-class bubbling tests below.
+    struct SingleChildContainer {
+        child: ChildPod,
+    }
+    impl Widget for SingleChildContainer {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.child.layout_child(ctx, bc)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.child.paint_child(ctx, scene);
+        }
+    }
+
+    #[test]
+    fn no_request_yields_no_frame_class() {
+        // No frame requested at all → `frame_class()` is `None` and the frame is
+        // not paced-only (as today: nothing to schedule).
+        let ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        assert!(ctx.frame_class().is_none());
+        assert!(!ctx.needs_frame());
+        assert!(!ctx.needs_frame_paced_only());
+    }
+
+    #[test]
+    fn request_frame_is_transition_unpaced() {
+        // The unchanged `request_frame` is a Transition request: it must NOT be
+        // paced-only, preserving today's every-vsync behavior for existing callers.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame();
+        assert!(ctx.needs_frame());
+        assert_eq!(ctx.frame_class(), Some(TickClass::Transition));
+        assert!(
+            !ctx.needs_frame_paced_only(),
+            "request_frame stays unpaced (Transition), unchanged behavior"
+        );
+    }
+
+    #[test]
+    fn request_frame_paced_is_cosmetic_loop() {
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced();
+        assert!(ctx.needs_frame());
+        assert_eq!(ctx.frame_class(), Some(TickClass::CosmeticLoop));
+        assert!(ctx.needs_frame_paced_only());
+    }
+
+    #[test]
+    fn transition_dominates_cosmetic_regardless_of_order() {
+        // Paced then Transition → unpaced.
+        let mut a = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        a.request_frame_paced();
+        a.request_frame();
+        assert_eq!(a.frame_class(), Some(TickClass::Transition));
+        assert!(!a.needs_frame_paced_only());
+
+        // Transition then paced → still unpaced (a CosmeticLoop never clears it).
+        let mut b = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        b.request_frame();
+        b.request_frame_paced();
+        assert_eq!(b.frame_class(), Some(TickClass::Transition));
+        assert!(!b.needs_frame_paced_only());
+    }
+
+    #[test]
+    fn request_layout_implies_transition_class() {
+        // `request_layout` is user-visible motion, so it re-forces the unpaced
+        // Transition class even if a paced request preceded it.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced();
+        assert!(ctx.needs_frame_paced_only());
+        ctx.request_layout();
+        assert_eq!(ctx.frame_class(), Some(TickClass::Transition));
+        assert!(
+            !ctx.needs_frame_paced_only(),
+            "request_layout implies Transition, leaving the frame unpaced"
+        );
+    }
+
+    #[test]
+    fn child_pod_bubbles_paced_class_from_child_paint() {
+        // A purely-cosmetic child bubbles a paced request into the parent — the
+        // parent's aggregate stays paced-only.
+        let mut anim = ChildPod::new(Box::new(PacedAnimator));
+        let mut lctx = LayoutCtx::new();
+        anim.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        anim.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame());
+        assert_eq!(pctx.frame_class(), Some(TickClass::CosmeticLoop));
+        assert!(pctx.needs_frame_paced_only());
+    }
+
+    #[test]
+    fn paced_class_bubbles_through_nested_containers() {
+        // A cosmetic-loop leaf two levels deep must still surface as paced-only
+        // at the outermost paint context (the bubbling identity of the lattice).
+        let inner = SingleChildContainer {
+            child: ChildPod::new(Box::new(PacedAnimator)),
+        };
+        let mut outer = ChildPod::new(Box::new(SingleChildContainer {
+            child: ChildPod::new(Box::new(inner)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame());
+        assert!(
+            pctx.needs_frame_paced_only(),
+            "a nested cosmetic-loop leaf stays paced-only up the tree"
+        );
+    }
+
+    #[test]
+    fn mixed_sibling_requests_aggregate_to_unpaced() {
+        // Two sibling children under one container: one paced, one Transition.
+        // The container's aggregate must be unpaced (any Transition dominates).
+        struct TwoChildContainer {
+            a: ChildPod,
+            b: ChildPod,
+        }
+        impl Widget for TwoChildContainer {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                self.a.layout_child(ctx, bc);
+                self.b.layout_child(ctx, bc)
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                self.a.paint_child(ctx, scene);
+                self.b.paint_child(ctx, scene);
+            }
+        }
+
+        let mut outer = ChildPod::new(Box::new(TwoChildContainer {
+            a: ChildPod::new(Box::new(PacedAnimator)),
+            b: ChildPod::new(Box::new(Animator)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame());
+        assert_eq!(pctx.frame_class(), Some(TickClass::Transition));
+        assert!(
+            !pctx.needs_frame_paced_only(),
+            "a mixed paced+transition sibling set aggregates to unpaced"
+        );
+    }
+
+    #[test]
+    fn with_hero_registry_bubbles_paced_class() {
+        // The hero-reporter sub-context absorbs a paced request the same way it
+        // absorbs `needs_frame`/`needs_layout`.
+        let registry = RefCell::new(HeroFrames::default());
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.with_hero_registry(&registry, |child| {
+            child.request_frame_paced();
+        });
+        assert!(ctx.needs_frame());
+        assert!(
+            ctx.needs_frame_paced_only(),
+            "with_hero_registry bubbles the paced class up"
+        );
+
+        // A Transition inside the closure dominates the outer aggregate too.
+        let mut ctx2 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx2.request_frame_paced();
+        ctx2.with_hero_registry(&registry, |child| {
+            child.request_frame();
+        });
+        assert_eq!(ctx2.frame_class(), Some(TickClass::Transition));
+        assert!(!ctx2.needs_frame_paced_only());
     }
 
     #[test]

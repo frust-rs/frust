@@ -469,6 +469,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             PaintOutcome {
                 needs_frame: ctx.needs_frame(),
                 needs_layout,
+                // Aggregate tick class: paced-only iff a frame was requested and
+                // every request was CosmeticLoop-class. The mobile frame gate
+                // (task 06) may throttle such a frame; any Transition request
+                // (including the LAYOUT-implying `request_layout` above) leaves
+                // this false so the frame runs every vsync.
+                needs_frame_paced_only: ctx.needs_frame_paced_only(),
             }
         } else {
             PaintOutcome::default()
@@ -1029,6 +1035,67 @@ mod tests {
         assert!(
             !anim.has_pending_change_flags(),
             "request_frame alone must not fold LAYOUT into pending"
+        );
+    }
+
+    /// A root whose paint requests a *pacable* cosmetic-loop frame — stands in
+    /// for a skeleton shimmer whose cadence the mobile frame gate may throttle.
+    struct PacedFrameWidget;
+    impl crate::widget::Widget for PacedFrameWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame_paced();
+        }
+    }
+
+    struct PacedFrameView;
+    impl View<AppState> for PacedFrameView {
+        type Element = PacedFrameWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PacedFrameWidget {
+            PacedFrameWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PacedFrameWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn paint_surfaces_paced_only_tick_class_on_outcome() {
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+
+        // A paced-only root surfaces `needs_frame_paced_only` on the outcome so
+        // the mobile frame gate (task 06) may throttle its cadence.
+        let mut paced: RenderRoot<AppState, PacedFrameView> = RenderRoot::new();
+        paced.rebuild(&mut |_s: &mut AppState| PacedFrameView, &mut state);
+        paced.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        let outcome = paced.paint(&mut scene, FrameTime::ZERO);
+        assert!(outcome.needs_frame);
+        assert!(
+            outcome.needs_frame_paced_only,
+            "a purely-cosmetic frame surfaces as paced-only"
+        );
+
+        // A Transition-class (`request_frame`) root is never paced-only, keeping
+        // today's every-vsync behavior for existing callers.
+        let mut anim: RenderRoot<AppState, FrameView> = RenderRoot::new();
+        anim.rebuild(&mut |_s: &mut AppState| FrameView, &mut state);
+        anim.layout(Size::new(100.0, 100.0));
+        let mut scene2 = RecordingScene::default();
+        let outcome2 = anim.paint(&mut scene2, FrameTime::ZERO);
+        assert!(outcome2.needs_frame);
+        assert!(
+            !outcome2.needs_frame_paced_only,
+            "request_frame stays unpaced (Transition)"
         );
     }
 
