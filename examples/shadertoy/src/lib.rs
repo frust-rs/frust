@@ -14,7 +14,8 @@ pub mod shaders;
 
 use frust::{
     AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get, Padding, RwSignal,
-    SizedBox, Stack, Theme, any, button, flexible, inflexible, set_app_theme, text,
+    SizedBox, Stack, SystemUiMode, Theme, any, button, flexible, inflexible, safe_area,
+    set_app_theme, set_system_ui_mode, text,
 };
 use frust_scene::ShaderProgram;
 
@@ -57,6 +58,12 @@ fn fps_color(fps: f64) -> Color {
 }
 
 /// The menu screen: a title plus one button per registered shader.
+///
+/// System UI (task 17): the menu was never meant to be immersive — bars stay
+/// visible here (`EdgeToEdge`), so the screen is wrapped in [`safe_area`] to
+/// keep its content clear of them. Entering a shader flips to
+/// `ImmersiveSticky` (see `running_screen`'s back button, which restores
+/// `EdgeToEdge` on the way out).
 fn menu_screen(state: &AppState) -> AnyView<AppState> {
     let title = text("Frust Shader Showcase").size(28.0);
 
@@ -64,6 +71,9 @@ fn menu_screen(state: &AppState) -> AnyView<AppState> {
     for (idx, (name, _)) in state.shaders.iter().enumerate() {
         rows.push(inflexible(button(*name, move |state: &mut AppState| {
             state.screen = Screen::Running(idx);
+            // Entering the shader view: go immersive-sticky (an edge swipe
+            // reveals the bars transiently, then they auto-hide again).
+            set_system_ui_mode(SystemUiMode::ImmersiveSticky);
         })));
         rows.push(inflexible(SizedBox(None, Some(12.0))));
     }
@@ -74,7 +84,7 @@ fn menu_screen(state: &AppState) -> AnyView<AppState> {
     rows.push(inflexible(hint));
 
     let menu = Padding(EdgeInsets::all(24.0), FlexView::new(Axis::Vertical, rows));
-    any(menu)
+    any(safe_area(menu))
 }
 
 /// The running screen: the shader canvas filling the window, under a HUD
@@ -97,6 +107,10 @@ fn running_screen(state: &mut AppState, idx: usize) -> AnyView<AppState> {
         vec![
             inflexible(button("< Back", |state: &mut AppState| {
                 state.screen = Screen::Menu;
+                // Restore the menu's edge-to-edge (bars-visible) system UI on
+                // the way out — the shader view's `ImmersiveSticky` (see
+                // `menu_screen`) must not leak into the menu screen.
+                set_system_ui_mode(SystemUiMode::EdgeToEdge);
             })),
             inflexible(SizedBox(Some(12.0), None)),
             inflexible(text(name).size(18.0)),
