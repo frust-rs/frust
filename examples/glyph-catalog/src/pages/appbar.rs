@@ -474,8 +474,17 @@ fn collapse_meta_row() -> AnyView<CatalogState> {
 
 /// A bounded list of filler rows — the scrollable content that drives the
 /// bar's collapse via its own `on_scroll`.
+///
+/// 64 rows, deliberately: at ~31 logical px per row this is ~2000px of
+/// content, comfortably taller than any phone viewport (~870 logical px on
+/// a 1080×2400 @ 2.75 DPR panel). The original 24 rows (~740px) barely
+/// exceeded a tall device's body height, leaving a ~70px scroll budget that
+/// read as "scroll is broken" on device and never reached the collapse
+/// span — while the 700px-tall headless test viewport made the same filler
+/// scroll generously, so every gate stayed green (the M1 device-only
+/// mystery, root-caused 2026-07-24).
 fn filler_rows() -> AnyView<CatalogState> {
-    let rows: Vec<AnyView<CatalogState>> = (1..=24)
+    let rows: Vec<AnyView<CatalogState>> = (1..=64)
         .map(|i| {
             any(Padding(
                 EdgeInsets::symmetric(0.0, 8.0),
