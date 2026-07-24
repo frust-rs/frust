@@ -532,7 +532,7 @@ impl<State: 'static> View<State> for ToastHostView {
             active: None,
             anchor: self.anchor,
         };
-        widget.maybe_advance_queue::<State>(ctx);
+        let _ = widget.maybe_advance_queue::<State>(ctx);
         widget
     }
 
@@ -546,13 +546,17 @@ impl<State: 'static> View<State> for ToastHostView {
         element.next_index = element.next_index.min(element.queue.len());
         let anchor_changed = prev.anchor != self.anchor;
         element.anchor = self.anchor;
-        element.maybe_advance_queue::<State>(ctx);
-        // The active child's own paint-driven animation covers redraw needs;
-        // structural start/stop is comparatively rare, so this simply always
-        // reports PAINT — cheap, and correct (never under-reports). An anchor
-        // swap additionally repositions the toast, so it also forces LAYOUT
-        // (the host's own layout resolves the anchored origin, not paint).
-        if anchor_changed {
+        let structural_change = element.maybe_advance_queue::<State>(ctx);
+        // The active child's own paint-driven animation covers redraw needs
+        // when nothing structural happened, so this reports plain PAINT in
+        // that case — cheap, and correct (never under-reports). Either an
+        // anchor swap (repositions the toast) or a structural queue change
+        // (a new child pod was built or the active one torn down — a fresh/
+        // absent pod has never been laid out, so it MUST be relaid-out this
+        // frame, not just repainted; see the module's diagnosis) additionally
+        // forces LAYOUT (the host's own layout resolves the anchored origin,
+        // not paint).
+        if anchor_changed || structural_change {
             ChangeFlags::LAYOUT | ChangeFlags::PAINT
         } else {
             ChangeFlags::PAINT
@@ -587,7 +591,18 @@ impl ToastHostWidget {
     /// request exists, start it. Building/tearing down a [`ChildPod`] needs
     /// a [`BuildCtx`], so this only ever runs from `build`/`rebuild` — see
     /// the [module docs](self).
-    fn maybe_advance_queue<State: 'static>(&mut self, ctx: &mut BuildCtx<'_>) {
+    ///
+    /// Returns whether the active toast was **structurally** changed — a new
+    /// child pod was built and/or the previous one torn down — as opposed to
+    /// the common case where the existing pod just keeps playing. A caller
+    /// (`rebuild`) MUST fold a `true` return into `ChangeFlags::LAYOUT`: a
+    /// freshly built pod has never been laid out, so `Widget::layout` MUST
+    /// run this frame, not just `paint` (a structural child change is a
+    /// layout-affecting event per the widget contract, not a paint-only one
+    /// — the mobile layout-skip gate honors under-reported flags literally,
+    /// see the module's diagnosis doc comment).
+    fn maybe_advance_queue<State: 'static>(&mut self, ctx: &mut BuildCtx<'_>) -> bool {
+        let mut structural_change = false;
         if matches!(
             self.active.as_ref().map(|a| a.phase),
             Some(ToastPhase::Done)
@@ -597,6 +612,7 @@ impl ToastHostWidget {
             let mut pod = active.child;
             crate::teardown_child(&view, &mut pod, ctx);
             self.next_index += 1;
+            structural_change = true;
         }
         if self.active.is_none()
             && let Some(message) = self.queue.get(self.next_index).cloned()
@@ -610,7 +626,9 @@ impl ToastHostWidget {
                 hold_elapsed: Duration::ZERO,
                 last_time: None,
             });
+            structural_change = true;
         }
+        structural_change
     }
 
     /// Advance the active toast's phase machine to frame time `now`,
@@ -719,10 +737,8 @@ impl Widget for ToastHostWidget {
         let sign = if self.anchor.is_top() { -1.0 } else { 1.0 };
 
         if let Some(shown) = self.advance(now, enter, exit) {
-            let done = matches!(
-                self.active.as_ref().map(|a| a.phase),
-                Some(ToastPhase::Done)
-            );
+            let phase = self.active.as_ref().map(|a| a.phase);
+            let done = matches!(phase, Some(ToastPhase::Done));
             if !done && let Some(active) = &mut self.active {
                 // The toast's own (anchored) rect, not the host's full-bleed
                 // bounds — the layer/transform below only ever cover the
@@ -740,8 +756,21 @@ impl Widget for ToastHostWidget {
             }
             // Kept active (even once `Done`) until the next `rebuild` tears it
             // down — one more frame ensures that rebuild actually runs (see
-            // the [module docs](self)).
-            ctx.request_frame();
+            // the [module docs](self)). Enter/Exit are genuine transitions
+            // (a user-visible endpoint driven by `TransitionDriver`) and
+            // request the unpaced class every vsync, like the one-frame
+            // tear-down poke past `Done`; Hold's only need is elapsed-time
+            // bookkeeping toward `HOLD_DURATION`, so it paces instead — the
+            // mobile frame gate throttles it to `cosmetic_loop_rate`
+            // (`docs/CODE_STANDARDS.md`'s perpetual-decorative-loop rule; a
+            // fixed-length hold isn't perpetual, but the same
+            // paint-doesn't-need-full-rate reasoning applies since nothing
+            // visible changes frame-to-frame during it).
+            if matches!(phase, Some(ToastPhase::Hold)) {
+                ctx.request_frame_paced();
+            } else {
+                ctx.request_frame();
+            }
         }
     }
 
@@ -918,6 +947,109 @@ mod tests {
         assert_eq!(active.phase, ToastPhase::Enter);
     }
 
+    // -- ToastHost: rebuild flags (the bug this task fixes — a structural
+    // queue change (start or teardown of the active pod) MUST report LAYOUT,
+    // or a layout-skip shell (Android) leaves a fresh/torn-down child pod
+    // unlaid-out — see the module's diagnosis doc comment) -----------------
+
+    #[test]
+    fn rebuild_reports_layout_when_a_pushed_toast_starts() {
+        let mut host = build_host(vec![]);
+        assert!(host.active.is_none(), "nothing queued yet");
+
+        let prev_view: ToastHostView = toast_host(vec![]);
+        let next_view: ToastHostView = toast_host(vec!["hello".to_string()]);
+        let mut counter = 0u64;
+        let flags = <ToastHostView as View<()>>::rebuild(
+            &next_view,
+            &prev_view,
+            &mut host,
+            &mut BuildCtx::new(&mut counter),
+        );
+
+        assert!(host.active.is_some(), "the pushed toast starts immediately");
+        assert!(
+            flags.needs_layout(),
+            "a newly-started toast's child pod has never been laid out — \
+             the rebuild that builds it MUST report LAYOUT, or a \
+             layout-skip shell (Android) leaves it at Size::ZERO for its \
+             whole lifecycle"
+        );
+    }
+
+    #[test]
+    fn honoring_rebuild_flags_after_a_push_always_lays_out_the_new_child() {
+        // Mirrors the Android-shaped sequence: a shell that trusts the
+        // returned ChangeFlags and only calls `layout` when they say to. If
+        // `rebuild` under-reports (PAINT-only), a shell honoring that
+        // literally paints a never-laid-out (Size::ZERO) child — this test
+        // drives exactly that shell contract and confirms the toast layer
+        // paints nonzero.
+        let mut host = build_host(vec![]);
+        let prev_view: ToastHostView = toast_host(vec![]);
+        let next_view: ToastHostView = toast_host(vec!["hello".to_string()]);
+        let mut counter = 0u64;
+        let flags = <ToastHostView as View<()>>::rebuild(
+            &next_view,
+            &prev_view,
+            &mut host,
+            &mut BuildCtx::new(&mut counter),
+        );
+
+        // The shell contract under test: only relayout when flags say so.
+        if flags.needs_layout() {
+            layout_host(&mut host, &BoxConstraints::tight(Size::new(400.0, 800.0)));
+        }
+
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 800.0));
+        let mut scene = RecordingScene::default();
+        host.paint(&mut ctx, &mut scene);
+
+        assert_eq!(scene.layers.len(), 1, "the active toast paints a layer");
+        let (_, layer_size, _) = scene.layers[0];
+        assert!(
+            layer_size.width > 0.0 && layer_size.height > 0.0,
+            "the toast layer must be nonzero — a zero size means the shell \
+             skipped layout on a flags contract it correctly honored, i.e. \
+             the bug this task fixes: {layer_size:?}"
+        );
+    }
+
+    #[test]
+    fn rebuild_reports_layout_when_a_finished_toast_tears_down() {
+        let mut host = build_host(vec!["first".to_string(), "second".to_string()]);
+        let (enter, exit) = resolve_timings(false);
+
+        // Drive fully through enter -> hold -> exit -> Done.
+        let mut t = 0.0;
+        loop {
+            host.advance(ft_ms(t), enter, exit);
+            if matches!(
+                host.active.as_ref().map(|a| a.phase),
+                Some(ToastPhase::Done)
+            ) {
+                break;
+            }
+            t += 50.0;
+            assert!(t < 10_000.0, "timeline never reached Done");
+        }
+
+        let view: ToastHostView = toast_host(vec!["first".to_string(), "second".to_string()]);
+        let mut counter = 0u64;
+        let flags = <ToastHostView as View<()>>::rebuild(
+            &view,
+            &view,
+            &mut host,
+            &mut BuildCtx::new(&mut counter),
+        );
+
+        assert!(
+            flags.needs_layout(),
+            "tearing down the finished toast and starting the next is also \
+             a structural change and must report LAYOUT"
+        );
+    }
+
     #[test]
     fn idle_host_with_no_pending_requests_requests_no_frame() {
         let mut host = build_host(vec![]);
@@ -1009,6 +1141,60 @@ mod tests {
         // is 0: fully faded and offset fully above the resting position.
         assert_eq!(scene.layers[0].2, 0.0);
         assert!(ctx.needs_frame());
+    }
+
+    #[test]
+    fn hold_phase_paces_frame_requests_but_enter_and_exit_do_not() {
+        let mut host = build_host(vec!["hi".to_string()]);
+        {
+            use frust_core::LayoutCtx;
+            use frust_text::TextContext;
+            use std::any::Any;
+            let mut tcx = TextContext::new();
+            let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+            host.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 100.0)));
+        }
+
+        // Enter (the freshly-built default phase): a genuine transition,
+        // unpaced.
+        assert_eq!(host.active.as_ref().unwrap().phase, ToastPhase::Enter);
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(300.0, 100.0));
+        let mut scene = RecordingScene::default();
+        host.paint(&mut ctx, &mut scene);
+        assert_eq!(host.active.as_ref().unwrap().phase, ToastPhase::Enter);
+        assert!(
+            !ctx.needs_frame_paced_only(),
+            "Enter is a genuine transition and must run unpaced"
+        );
+
+        // Force into Hold — mirrors the file's other tests' direct phase
+        // manipulation via `advance`/field access (same-file `tests`
+        // submodule has private-field access); elapsed-time bookkeeping only,
+        // so it must pace.
+        host.active.as_mut().unwrap().phase = ToastPhase::Hold;
+        host.active.as_mut().unwrap().last_time = None;
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(300.0, 100.0));
+        let mut scene = RecordingScene::default();
+        host.paint(&mut ctx, &mut scene);
+        assert_eq!(host.active.as_ref().unwrap().phase, ToastPhase::Hold);
+        assert!(
+            ctx.needs_frame_paced_only(),
+            "Hold's only need is elapsed-time bookkeeping toward \
+             HOLD_DURATION — it must pace to the mobile frame gate's \
+             cosmetic-loop rate"
+        );
+
+        // Force into Exit: a genuine transition again, unpaced.
+        host.active.as_mut().unwrap().phase = ToastPhase::Exit;
+        host.active.as_mut().unwrap().driver = None;
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(300.0, 100.0));
+        let mut scene = RecordingScene::default();
+        host.paint(&mut ctx, &mut scene);
+        assert_eq!(host.active.as_ref().unwrap().phase, ToastPhase::Exit);
+        assert!(
+            !ctx.needs_frame_paced_only(),
+            "Exit is a genuine transition and must run unpaced"
+        );
     }
 
     // -- ToastHost: anchoring (task 07, framework-side positioning) -----
