@@ -10,8 +10,8 @@
 //! animations toggles folded into its trailing actions (glyph-refinements
 //! task 18, superseding the old header-row `Row`; the animations toggle is
 //! catalog-animation-performance bug task 10) — over a [`safe_area`]'d body: the
-//! 7-section tab strip plus a [`pattern_switcher`](frust::motion::switcher::pattern_switcher)
-//! hosting one of seven section pages in a [`scroll_view`], under a bare
+//! 10-section tab strip plus a [`pattern_switcher`](frust::motion::switcher::pattern_switcher)
+//! hosting one of ten section pages in a [`scroll_view`], under a bare
 //! [`toast_host`](frust::glyph::toast_host) overlay (default bottom-center
 //! anchoring, no app-side positioning — glyph-refinements task 07)), and the
 //! [`frust::app!`] entry binding all three platforms. The AppBar consumes the
@@ -26,19 +26,92 @@
 //! Android/gesture back handling for the shared [`NavigatorController`]
 //! (glyph-refinements task 08).
 //!
+//! # Mode B background (platform-views task 10)
+//!
+//! The generated Android/iOS glue now turns `FRUST_TRANSLUCENT_SURFACE`/
+//! `translucentSurface` ON (this catalog is the framework's Mode B testbed —
+//! see `pages::platform_views`'s module docs) — a process-wide, compile-time
+//! choice, not one scoped to that one section. Under Mode B the frust
+//! surface's own base clear turns alpha-0 (`frust-shell-*`'s per-frame
+//! `base_color` swap), so **every** pixel no widget explicitly paints becomes
+//! a window straight through to whatever sits behind the surface — not just
+//! `platform_views`'s own deliberate slot. [`home_page`]'s root [`Stack`]
+//! therefore paints an explicit, surface-colored [`AppBackground`] as its
+//! bottom-most layer, restoring every other section's opaque look; the
+//! `platform_views` section's own slot is the one deliberate hole punched
+//! through it.
+//!
 //! Run it with `cargo run` (desktop preview) or `frust run` (Android/iOS).
 
 pub mod pages;
 
+use frust_core::{BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget};
+use kurbo::Size;
+
 use frust::motion::patterns::{GlyphSlide, SlideDirection};
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Axis, Brightness, Component, FlexView, Get, GetUntracked, MotionScheme,
-    NavigatorController, RwSignal, ScrollInfo, Set, Stack, Theme, TransitionSpec, any, button,
-    flexible, icon, icons, inflexible, navigator, safe_area, scroll_view, set_app_theme,
+    AnyView, Axis, Brightness, Color, Component, FlexView, Get, GetUntracked, MotionScheme,
+    NavigatorController, RwSignal, ScrollInfo, Set, Stack, Theme, TransitionSpec, View, any,
+    button, flexible, icon, icons, inflexible, navigator, safe_area, scroll_view, set_app_theme,
 };
 
 use pages::SECTION_LABELS;
+
+// ---------------------------------------------------------------------------
+// AppBackground — the Mode B root background layer (see the module docs'
+// "Mode B background" section)
+// ---------------------------------------------------------------------------
+
+/// A full-bleed background fill — the low-level `frust-core`/`kurbo` escape
+/// hatch (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions;
+/// `examples/huddle::ui::fill_box::FillBox` is the identical pattern, and
+/// this crate already carries both crates as sanctioned dependencies for
+/// `pages::appbar`'s `AnchorReporter`). Needed because no facade widget
+/// paints an unconditional "fill available space" rect: `Image`/`SizedBox`
+/// only tighten a child when the INCOMING constraint is already tight, and
+/// [`Stack`] hands every child a LOOSE (min-zero) constraint, so a naive
+/// background child would collapse to zero size. Declaring a large
+/// (larger-than-any-real-viewport) intrinsic size and letting
+/// [`BoxConstraints::constrain`] clamp it into whatever the `Stack` hands
+/// down is the trick — see [`AppBackgroundWidget::layout`].
+struct AppBackground(Color);
+
+/// The retained widget for an [`AppBackground`].
+struct AppBackgroundWidget(Color);
+
+/// Declared larger than any real viewport (logical px) so
+/// [`BoxConstraints::constrain`] always clamps it down to the incoming max —
+/// see [`AppBackground`]'s doc comment.
+const BACKGROUND_INTRINSIC: f64 = 1.0e7;
+
+impl<State: 'static> View<State> for AppBackground {
+    type Element = AppBackgroundWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> AppBackgroundWidget {
+        AppBackgroundWidget(self.0)
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        element: &mut AppBackgroundWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        element.0 = self.0;
+        ChangeFlags::PAINT
+    }
+}
+
+impl Widget for AppBackgroundWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(Size::new(BACKGROUND_INTRINSIC, BACKGROUND_INTRINSIC))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        scene.fill_rect(ctx.origin(), ctx.size(), self.0);
+    }
+}
 
 /// The catalog's whole reactive surface, bundled so it can be cloned into the
 /// navigator's home-page builder (which takes no state argument) and passed by
@@ -218,10 +291,11 @@ fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
 }
 
 /// The navigator's home page: the root AppBar over a safe-area'd body (the
-/// 7-section tab strip plus the pattern-switched section body in a scroll
-/// view), all under a bare toast overlay. Re-run on every rebuild (the
-/// navigator re-invokes its page builder), so the signal reads here subscribe
-/// the shell to section/brightness/elevation/toast changes.
+/// 10-section tab strip plus the pattern-switched section body in a scroll
+/// view), all under a bare toast overlay, over an [`AppBackground`] base
+/// layer (see the module docs' "Mode B background" section). Re-run on every
+/// rebuild (the navigator re-invokes its page builder), so the signal reads
+/// here subscribe the shell to section/brightness/elevation/toast changes.
 fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     let section = state.section.get();
     let slide = state.slide.get();
@@ -279,7 +353,19 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     // overlay mounted above every screen). A bare `toast_host` anchors itself
     // bottom-center with inset-aware margins — no app-side `Align`/`Padding`
     // wrapper needed (glyph-refinements task 07's framework-side anchoring).
+    //
+    // `AppBackground` is the BOTTOM-most layer (platform-views task 10 — see
+    // the module docs' "Mode B background" section): under the now-ON
+    // `FRUST_TRANSLUCENT_SURFACE`/`translucentSurface` mobile glue, an
+    // unpainted pixel anywhere in `column` would otherwise be a window
+    // straight through the surface, not just `platform_views`'s own
+    // deliberate slot.
+    let background_color = frust::use_context::<Theme>()
+        .unwrap_or_else(Theme::glyph_baseline)
+        .scheme()
+        .surface;
     any(Stack(vec![
+        any(AppBackground(background_color)),
         any(column),
         any(frust::glyph::toast_host(pending)),
     ]))

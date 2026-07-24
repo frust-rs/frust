@@ -88,4 +88,29 @@ void  frust_set_insets(
 // process-global) — see FrustViewController's `pollSystemUiState`.
 uint64_t frust_system_ui_state(void *handle);
 
+// Platform views (platform-views task 06/09 — RESEARCH.md "Platform views").
+//
+// frust_set_surface_mode requests a translucent (non-opaque) render surface.
+// Callable BEFORE frust_init (no handle arg — it writes a process-global,
+// one-way latch), which is what FrustViewController does from viewDidLoad
+// when its `translucentSurface` const is set. `translucent` is 0/1 (plain
+// uint8_t, matching frust_set_appearance's no-<stdbool.h> convention). A
+// translucent surface lets native sibling views hosted BELOW it (Mode B —
+// see FrustViewHost) composite through.
+void  frust_set_surface_mode(uint8_t translucent);
+// frust_platform_view_commands_json returns the platform-view compositor
+// command backlog accumulated since `ack_generation` as a heap-allocated
+// JSON string the CALLER MUST FREE with frust_string_free — or NULL when
+// nothing changed (generation == ack_generation), the cheap per-frame
+// no-change fast path. Rects are PHYSICAL px ([x,y,w,h] arrays);
+// byte-identical schema to Android's nativePlatformViewCommands:
+//   {"generation":N,"commands":[
+//     {"op":"create","slot":n,"viewType":"...","params":"..."},
+//     {"op":"update","slot":n,"rect":[x,y,w,h],"clip":[x,y,w,h]|null,"visible":bool},
+//     {"op":"updateParams","slot":n,"params":"..."},
+//     {"op":"dispose","slot":n}]}
+// FrustViewHost parses and applies each batch (see FrustViewController's
+// renderFrame, which polls it after frust_render_frame).
+char *frust_platform_view_commands_json(void *handle, uint64_t ack_generation);
+
 #endif /* Runner_Bridging_Header_h */

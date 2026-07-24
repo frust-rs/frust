@@ -12,6 +12,9 @@
 		ABCDABCDABCDABCDABCD0022 /* FrustView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0012 /* FrustView.swift */; };
 		ABCDABCDABCDABCDABCD0023 /* FrustViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0013 /* FrustViewController.swift */; };
 		ABCDABCDABCDABCDABCD0024 /* FrustTextInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0016 /* FrustTextInput.swift */; };
+		ABCDABCDABCDABCDABCD0028 /* FrustViewHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0018 /* FrustViewHost.swift */; };
+		ABCDABCDABCDABCDABCD0029 /* FrustPlatformViewFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0019 /* FrustPlatformViewFactory.swift */; };
+		ABCDABCDABCDABCDABCD0032 /* DemoStreamFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */; };
 		ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -24,6 +27,9 @@
 		ABCDABCDABCDABCDABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0015 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0016 /* FrustTextInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustTextInput.swift; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD0018 /* FrustViewHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustViewHost.swift; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD0019 /* FrustPlatformViewFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustPlatformViewFactory.swift; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoStreamFactory.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -72,6 +78,9 @@
 				ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */,
 				ABCDABCDABCDABCDABCD0012 /* FrustView.swift */,
 				ABCDABCDABCDABCDABCD0013 /* FrustViewController.swift */,
+				ABCDABCDABCDABCDABCD0018 /* FrustViewHost.swift */,
+				ABCDABCDABCDABCDABCD0019 /* FrustPlatformViewFactory.swift */,
+				ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */,
 				ABCDABCDABCDABCDABCD0016 /* FrustTextInput.swift */,
 				ABCDABCDABCDABCDABCD0015 /* Runner-Bridging-Header.h */,
 				ABCDABCDABCDABCDABCD0014 /* Info.plist */,
@@ -160,6 +169,9 @@
 				ABCDABCDABCDABCDABCD0021 /* SceneDelegate.swift in Sources */,
 				ABCDABCDABCDABCDABCD0022 /* FrustView.swift in Sources */,
 				ABCDABCDABCDABCDABCD0023 /* FrustViewController.swift in Sources */,
+				ABCDABCDABCDABCDABCD0028 /* FrustViewHost.swift in Sources */,
+				ABCDABCDABCDABCDABCD0029 /* FrustPlatformViewFactory.swift in Sources */,
+				ABCDABCDABCDABCDABCD0032 /* DemoStreamFactory.swift in Sources */,
 				ABCDABCDABCDABCDABCD0024 /* FrustTextInput.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

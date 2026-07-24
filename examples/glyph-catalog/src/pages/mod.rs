@@ -1,7 +1,8 @@
-//! The nine catalog sections, one module per section, mirroring the reference
+//! The ten catalog sections, one module per section, mirroring the reference
 //! builds' section list (foundations, buttons+forms, feedback, navigation,
-//! content, overlays, motion) plus `interactions` (glyph-refinements task 19)
-//! and `appbar` (glyph-refinements task 20) — two reference builds with no
+//! content, overlays, motion) plus `interactions` (glyph-refinements task 19),
+//! `appbar` (glyph-refinements task 20), and `platform_views`
+//! (platform-views task 10) — three sections with no reference-build
 //! section-list precedent of their own.
 //!
 //! # Page-fn contract (fixed by `c01`; every fill task keeps it exactly)
@@ -43,14 +44,17 @@ pub mod interactions;
 pub mod motion;
 pub mod navigation;
 pub mod overlays;
+pub mod platform_views;
 
 use frust::AnyView;
 
 use crate::CatalogState;
 
-/// The nine section tab labels, in order. Indexed by `CatalogState::section`
-/// and dispatched by [`current`].
-pub const SECTION_LABELS: [&str; 9] = [
+/// The ten section tab labels, in order. Indexed by `CatalogState::section`
+/// and dispatched by [`current`]. "Platform Views" (platform-views task 10)
+/// is the newest addition, appended at the end so every existing section's
+/// index stays stable.
+pub const SECTION_LABELS: [&str; 10] = [
     "Foundations",
     "Buttons + Forms",
     "Feedback",
@@ -60,9 +64,10 @@ pub const SECTION_LABELS: [&str; 9] = [
     "Motion",
     "Interactions",
     "AppBar",
+    "Platform Views",
 ];
 
-/// Dispatch to the section page for `section` (0..9), falling back to
+/// Dispatch to the section page for `section` (0..10), falling back to
 /// foundations for any out-of-range index (defensive — the tab strip only ever
 /// yields a valid index).
 pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
@@ -76,6 +81,7 @@ pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
         6 => motion::page(state),
         7 => interactions::page(state),
         8 => appbar::page(state),
+        9 => platform_views::page(state),
         _ => foundations::page(state),
     }
 }

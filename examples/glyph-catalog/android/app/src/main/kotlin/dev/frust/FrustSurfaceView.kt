@@ -3,6 +3,7 @@ package dev.frust
 import android.app.Activity
 import android.content.Context
 import android.content.res.Configuration
+import android.graphics.PixelFormat
 import android.os.Build
 import android.text.Editable
 import android.text.InputType
@@ -54,6 +55,26 @@ class FrustSurfaceView(context: Context) :
         init {
             System.loadLibrary("glyphcatalog")
         }
+
+        /**
+         * Compile-time opt-in for a **translucent** (Mode B) render surface,
+         * where Frust paints an alpha channel over native sibling views hosted
+         * BELOW the surface (platform-views feature). Flip to `true` for an app
+         * that composites Frust content over native `View`s
+         * ([FrustViewHost] reads this to pick the host z-order); the default
+         * `false` keeps the opaque (Mode A) surface every app has always had.
+         *
+         * When `true`, [surfaceCreated] latches the alpha surface on the Rust
+         * side via `nativeSetSurfaceMode(true)` BEFORE `nativeInit`, and the
+         * [init] block configures the `SurfaceHolder` for the exact
+         * spike-verified translucent recipe (`PixelFormat.TRANSLUCENT` +
+         * `setZOrderMediaOverlay(true)`).
+         *
+         * `true` here (platform-views task 10): this catalog is the
+         * framework's Mode B testbed — see `glyphcatalog::pages::
+         * platform_views`'s module docs.
+         */
+        const val FRUST_TRANSLUCENT_SURFACE = true
 
         /**
          * How many frames to keep re-polling the IME surface after an editor
@@ -223,6 +244,21 @@ class FrustSurfaceView(context: Context) :
     // application context (never the Activity), strictly before `nativeInit`.
     private external fun nativeInitPlatform(context: Context)
 
+    // Platform views (platform-views task 05): latch a translucent (Mode B)
+    // GPU surface BEFORE `nativeInit` creates it — a process-wide, pre-init-only
+    // one-way opt-in (a call after a surface already exists is a no-op on the
+    // Rust side). Takes no handle by design. Called from [surfaceCreated] only
+    // when [FRUST_TRANSLUCENT_SURFACE] is true.
+    private external fun nativeSetSurfaceMode(translucent: Boolean)
+
+    // Platform views (platform-views task 05): the native-sibling-compositor
+    // command backlog (task 03's differ) as JSON for [FrustViewHost] to apply,
+    // or null on the no-change fast path (or a dead handle) — Kotlin treats null
+    // as "nothing to do", keeping a steady frame allocation-free (no JSON parse).
+    // `ackGeneration` round-trips [FrustViewHost.ackedGeneration] so the differ
+    // can compact acknowledged commands. Rects in the JSON are physical px.
+    private external fun nativePlatformViewCommands(handle: Long, ackGeneration: Long): String?
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
@@ -297,6 +333,18 @@ class FrustSurfaceView(context: Context) :
      */
     var onSystemUiModeChanged: ((SystemUiMode) -> Unit)? = null
 
+    /**
+     * The native-view host `MainActivity` wires up in `onCreate` (it owns the
+     * [FrameLayout][android.widget.FrameLayout] root the host adds sibling
+     * views to). `doFrame` polls `nativePlatformViewCommands` and hands each
+     * non-null batch here (platform-views feature). The generated `MainActivity`
+     * always wires this up; the nullability is a guard for a custom shell that
+     * doesn't (and for the pre-`onCreate` window). Even an app that never hosts
+     * a platform view keeps this set — the per-frame poll then just takes the
+     * Rust side's null-on-no-change fast path (one cheap JNI call, no parse).
+     */
+    var platformViewHost: FrustViewHost? = null
+
     private val imm: InputMethodManager
         get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
 
@@ -313,10 +361,22 @@ class FrustSurfaceView(context: Context) :
         // Required for a custom editor view to receive IME focus + text input.
         isFocusable = true
         isFocusableInTouchMode = true
+        if (FRUST_TRANSLUCENT_SURFACE) {
+            // Mode B (platform-views): an alpha render surface z-ordered as a
+            // media overlay, so native sibling views hosted BELOW this view in
+            // the FrameLayout root show through the regions Frust paints
+            // transparent. The exact spike-verified translucent recipe; paired
+            // with `nativeSetSurfaceMode(true)` before `nativeInit` in
+            // [surfaceCreated].
+            holder.setFormat(PixelFormat.TRANSLUCENT)
+            setZOrderMediaOverlay(true)
+        }
         // Insets (device-parity task 08 — RESEARCH.md "Insets / SafeArea").
-        // Fires on attach and on every later system-bar/cutout/IME change;
-        // this view is the activity's entire content view (no siblings to
-        // propagate to), so the original `windowInsets` is returned unconsumed.
+        // Fires on attach and on every later system-bar/cutout/IME change.
+        // This view is the FrameLayout root's render-surface child; any native
+        // sibling views (platform-views feature) are positioned by Frust in
+        // absolute paint coordinates and do not consume insets, so the original
+        // `windowInsets` is returned unconsumed — every child still sees them.
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, windowInsets ->
             lastInsets = windowInsets
             dispatchInsets(windowInsets)
@@ -420,6 +480,13 @@ class FrustSurfaceView(context: Context) :
     override fun surfaceCreated(holder: SurfaceHolder) {
         setFrameRateHint(holder)
         if (handle == 0L) {
+            if (FRUST_TRANSLUCENT_SURFACE) {
+                // Latch the alpha surface config on the Rust side BEFORE the
+                // surface is created (platform-views task 05) — a one-way,
+                // pre-init-only opt-in paired with the holder's translucent
+                // format configured in [init].
+                nativeSetSurfaceMode(true)
+            }
             // Initialize plugin platform handles before native init.
             // The application context is stable across activity recreation and is the
             // only context-like parameter plugins need.
@@ -660,6 +727,19 @@ class FrustSurfaceView(context: Context) :
             // Per-frame system-UI poll (task 03/09/14): cheap generation-gated
             // JNI read, applied only on an actual `set_system_ui_mode` change.
             pollSystemUiState()
+            // Per-frame platform-view command poll (platform-views task 05/08):
+            // the null-return fast path keeps a no-change frame allocation-free
+            // (a null string means "nothing to do" — no JSON parse); only a
+            // non-null batch reaches the host applier. An app with no platform
+            // views still wires the host, so this runs every frame — but it's
+            // just one cheap JNI call returning null (the `nativeSystemUiState`
+            // cost bar above).
+            platformViewHost?.let { host ->
+                val commands = nativePlatformViewCommands(handle, host.ackedGeneration)
+                if (commands != null) {
+                    host.applyCommands(commands)
+                }
+            }
         }
         Choreographer.getInstance().postFrameCallback(this)
     }
