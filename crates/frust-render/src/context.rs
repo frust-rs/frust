@@ -23,6 +23,8 @@ use anyhow::{Result, anyhow};
 use std::sync::OnceLock;
 use wgpu::util::TextureBlitter;
 
+use crate::renderer::SurfaceAlphaRequest;
+
 /// The features vello's renderer opportunistically uses when the adapter
 /// exposes them — mirrors `vello::util::RenderContext::new_device` so our
 /// hand-rolled device request stays behaviourally identical to vello's, apart
@@ -287,6 +289,79 @@ fn log_render_path(
     _has_rgba8unorm: bool,
     _has_storage_binding: bool,
     _force_blit: bool,
+) {
+}
+
+/// Resolves a caller's [`SurfaceAlphaRequest`] against the live surface's
+/// reported `alpha_modes`, choosing the actual `wgpu::CompositeAlphaMode` to
+/// configure with (platform-views task 04). Kept crate-private and
+/// `wgpu`-typed: `SurfaceAlphaRequest` is the public, `wgpu`-free seam; the
+/// resolved mode itself never crosses `frust-render`'s boundary (the
+/// `DetachedSurface` opacity precedent — `docs/CODE_STANDARDS.md`'s
+/// wgpu-leak anti-pattern).
+///
+/// `Opaque` reproduces today's behavior bit-for-bit (`Auto`, unchanged for
+/// every existing caller). `TranslucentPreferred` tries, in order, `Inherit`
+/// (Android's only reported translucent mode per the spike), `PostMultiplied`
+/// (iOS's translucent mode), then `PreMultiplied` — falling back to `Auto`
+/// with a `log::warn!` when none of the three is in `capabilities.alpha_modes`
+/// (translucency silently unavailable on that surface).
+fn resolve_alpha_mode(
+    request: SurfaceAlphaRequest,
+    capabilities: &wgpu::SurfaceCapabilities,
+) -> wgpu::CompositeAlphaMode {
+    match request {
+        SurfaceAlphaRequest::Opaque => wgpu::CompositeAlphaMode::Auto,
+        SurfaceAlphaRequest::TranslucentPreferred => {
+            const PREFERRED: [wgpu::CompositeAlphaMode; 3] = [
+                wgpu::CompositeAlphaMode::Inherit,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+                wgpu::CompositeAlphaMode::PreMultiplied,
+            ];
+            PREFERRED
+                .into_iter()
+                .find(|mode| capabilities.alpha_modes.contains(mode))
+                .unwrap_or_else(|| {
+                    log::warn!(
+                        "frust-render: translucency requested but unavailable \
+                         (alpha_modes={:?}) — falling back to Auto (opaque)",
+                        capabilities.alpha_modes
+                    );
+                    wgpu::CompositeAlphaMode::Auto
+                })
+        }
+    }
+}
+
+/// Permanent (non-spike) surface-caps + chosen-alpha-mode line, logged once
+/// per surface configure (not once per process — a resize/recreate that picks
+/// a different mode is worth a fresh line, unlike the direct-to-surface probe
+/// above). Successor to the s0 spike's `frust-spike caps: ...` line
+/// (`research/SPIKE.md` §1), minus the spike prefix. Gated exactly like
+/// [`log_render_path`] so a release build (no `perf-trace` feature) stays
+/// string-free.
+#[cfg(feature = "perf-trace")]
+fn log_surface_alpha_caps(
+    capabilities: &wgpu::SurfaceCapabilities,
+    chosen: wgpu::CompositeAlphaMode,
+) {
+    if !perf_tracing_enabled() {
+        return;
+    }
+    log::info!(
+        "frust-render surface-caps: alpha_modes={:?} chosen={:?}",
+        capabilities.alpha_modes,
+        chosen
+    );
+}
+
+/// Without the `perf-trace` feature, the surface-caps/alpha line is a
+/// complete no-op — no logging, no format-string bodies compiled in.
+#[cfg(not(feature = "perf-trace"))]
+#[inline]
+fn log_surface_alpha_caps(
+    _capabilities: &wgpu::SurfaceCapabilities,
+    _chosen: wgpu::CompositeAlphaMode,
 ) {
 }
 
@@ -902,6 +977,7 @@ impl RenderContext {
         width: u32,
         height: u32,
         present_mode: wgpu::PresentMode,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<ConfiguredSurface> {
         self.ensure_device(&surface).await?;
         // The tier probe (task 06) already ran in `ensure_device`, so
@@ -917,6 +993,9 @@ impl RenderContext {
         let (has_rgba8unorm, has_storage_binding) = direct_surface_caps(&capabilities);
         let path_kind = choose_render_path(has_rgba8unorm, has_storage_binding, force_blit);
         log_render_path(path_kind, has_rgba8unorm, has_storage_binding, force_blit);
+
+        let alpha_mode = resolve_alpha_mode(alpha, &capabilities);
+        log_surface_alpha_caps(&capabilities, alpha_mode);
 
         // Direct arm: the swapchain itself is the vello render target, so it must
         // be `Rgba8Unorm` (vello's `render_to_texture` target format) and carry
@@ -954,7 +1033,7 @@ impl RenderContext {
             height,
             present_mode,
             desired_maximum_frame_latency: 2,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            alpha_mode,
             view_formats: vec![],
         };
         let path = match path_kind {
@@ -986,12 +1065,13 @@ impl RenderContext {
         width: u32,
         height: u32,
         present_mode: wgpu::PresentMode,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<ConfiguredSurface> {
         let surface = self
             .instance
             .create_surface(target)
             .map_err(|e| anyhow!("frust-render: failed to create surface: {e}"))?;
-        self.create_render_surface(surface, width, height, present_mode)
+        self.create_render_surface(surface, width, height, present_mode, alpha)
             .await
     }
 
@@ -1208,6 +1288,87 @@ mod tests {
         assert_eq!(
             decide_log_action(UNCAPTURED_ERROR_DEBUG_BUMP_PERIOD + 1),
             LogAction::Silent { debug_bump: false }
+        );
+    }
+
+    /// Builds a synthetic `wgpu::SurfaceCapabilities` reporting only the given
+    /// `alpha_modes` — the rest of the struct is irrelevant to
+    /// `resolve_alpha_mode`, which reads only that one field.
+    fn caps_with_alpha_modes(
+        alpha_modes: &[wgpu::CompositeAlphaMode],
+    ) -> wgpu::SurfaceCapabilities {
+        wgpu::SurfaceCapabilities {
+            alpha_modes: alpha_modes.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn opaque_request_always_resolves_to_auto() {
+        // `Opaque` never consults `alpha_modes` — bit-for-bit today's behavior
+        // regardless of what the surface reports.
+        for modes in [
+            [wgpu::CompositeAlphaMode::Inherit].as_slice(),
+            &[
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+            ],
+            &[wgpu::CompositeAlphaMode::Opaque],
+        ] {
+            let caps = caps_with_alpha_modes(modes);
+            assert_eq!(
+                resolve_alpha_mode(SurfaceAlphaRequest::Opaque, &caps),
+                wgpu::CompositeAlphaMode::Auto
+            );
+        }
+    }
+
+    #[test]
+    fn translucent_preferred_picks_inherit_first() {
+        // Android's shape (spike): `Inherit` is the only reported mode.
+        let caps = caps_with_alpha_modes(&[wgpu::CompositeAlphaMode::Inherit]);
+        assert_eq!(
+            resolve_alpha_mode(SurfaceAlphaRequest::TranslucentPreferred, &caps),
+            wgpu::CompositeAlphaMode::Inherit
+        );
+    }
+
+    #[test]
+    fn translucent_preferred_picks_post_multiplied_when_inherit_absent() {
+        // iOS's shape (spike): `[Opaque, PostMultiplied]` — no `Inherit`.
+        let caps = caps_with_alpha_modes(&[
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+        ]);
+        assert_eq!(
+            resolve_alpha_mode(SurfaceAlphaRequest::TranslucentPreferred, &caps),
+            wgpu::CompositeAlphaMode::PostMultiplied
+        );
+    }
+
+    #[test]
+    fn translucent_preferred_falls_back_to_auto_when_none_available() {
+        // A surface reporting only `Opaque` (no `Inherit`/`PostMultiplied`/
+        // `PreMultiplied`) can't satisfy translucency — fall back to `Auto`
+        // rather than erroring.
+        let caps = caps_with_alpha_modes(&[wgpu::CompositeAlphaMode::Opaque]);
+        assert_eq!(
+            resolve_alpha_mode(SurfaceAlphaRequest::TranslucentPreferred, &caps),
+            wgpu::CompositeAlphaMode::Auto
+        );
+    }
+
+    #[test]
+    fn translucent_preferred_falls_back_to_pre_multiplied_last() {
+        // Neither `Inherit` nor `PostMultiplied` present, but `PreMultiplied`
+        // is — the third preference in the resolution order.
+        let caps = caps_with_alpha_modes(&[
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+        ]);
+        assert_eq!(
+            resolve_alpha_mode(SurfaceAlphaRequest::TranslucentPreferred, &caps),
+            wgpu::CompositeAlphaMode::PreMultiplied
         );
     }
 }

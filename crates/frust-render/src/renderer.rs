@@ -38,6 +38,31 @@ use crate::lifecycle::{
 };
 use crate::shader_effects::{ShaderEffects, clamp_size};
 
+/// Caller-requested alpha-compositing behavior for a surface configuration
+/// (platform-views task 04) — the `frust-render` public seam a shell picks
+/// between an opaque (today's default) and a translucent-preferred surface;
+/// the resolved `wgpu::CompositeAlphaMode` itself never crosses this boundary
+/// (mirrors [`DetachedSurface`]'s opacity — see `docs/CODE_STANDARDS.md`'s
+/// wgpu-leak anti-pattern), so this type stays `kurbo`/`peniko`-free too.
+///
+/// Resolution (`crate::context::resolve_alpha_mode`) happens inside
+/// [`RenderContext::create_render_surface`](crate::context::RenderContext::create_render_surface),
+/// validated against the live surface's `SurfaceCapabilities::alpha_modes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceAlphaRequest {
+    /// Today's behavior for every existing caller: `wgpu::CompositeAlphaMode::Auto`,
+    /// bit-for-bit unchanged.
+    Opaque,
+    /// Prefer a translucent alpha-compositing mode (Mode B platform views —
+    /// see `workflow/plans/features/frust-platform-views/PLAN.md`), trying
+    /// `Inherit` (Android's only reported mode) then `PostMultiplied` (iOS's
+    /// translucent mode) then `PreMultiplied`, in that order, against the
+    /// surface's reported `alpha_modes`. Falls back to `Opaque`'s `Auto` (and
+    /// a `log::warn!`) when none of those three is available — translucency
+    /// is then silently unavailable on that surface.
+    TranslucentPreferred,
+}
+
 /// The live GPU resources of a [`SurfacePhase::SurfaceReady`] surface.
 ///
 /// The tier backend is created per surface (it is device-bound) and, with the
@@ -230,6 +255,7 @@ impl SurfaceRenderer {
         window: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
         let surface = ctx
             .create_surface(
@@ -237,6 +263,7 @@ impl SurfaceRenderer {
                 width.max(1),
                 height.max(1),
                 wgpu::PresentMode::AutoVsync,
+                alpha,
             )
             .await
             .map_err(|e| anyhow!("frust-render: failed to create render surface: {e}"))?;
@@ -266,6 +293,7 @@ impl SurfaceRenderer {
         surface: DetachedSurface,
         width: u32,
         height: u32,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
         let surface = ctx
             .create_render_surface(
@@ -273,6 +301,7 @@ impl SurfaceRenderer {
                 width.max(1),
                 height.max(1),
                 wgpu::PresentMode::AutoVsync,
+                alpha,
             )
             .await
             .map_err(|e| anyhow!("frust-render: failed to configure detached surface: {e}"))?;
@@ -300,6 +329,7 @@ impl SurfaceRenderer {
         window_ptr: *mut c_void,
         width: u32,
         height: u32,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
         // SAFETY: forwarded to the caller's `on_surface_created_from_android_window`
         // contract — `window_ptr` is a valid, acquired ANativeWindow* outliving
@@ -311,6 +341,7 @@ impl SurfaceRenderer {
                 width.max(1),
                 height.max(1),
                 wgpu::PresentMode::AutoVsync,
+                alpha,
             )
             .await
             .map_err(|e| anyhow!("frust-render: failed to configure Android surface: {e}"))?;
@@ -342,13 +373,20 @@ impl SurfaceRenderer {
         layer_ptr: *mut c_void,
         width: u32,
         height: u32,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
         // SAFETY: forwarded to the caller's `on_surface_created_from_metal_layer`
         // contract — `layer_ptr` is a valid, live CAMetalLayer* outliving the
         // surface.
         let raw = unsafe { crate::lifecycle::create_metal_surface(&ctx.instance, layer_ptr) }?;
         let surface = ctx
-            .create_render_surface(raw, width.max(1), height.max(1), wgpu::PresentMode::Fifo)
+            .create_render_surface(
+                raw,
+                width.max(1),
+                height.max(1),
+                wgpu::PresentMode::Fifo,
+                alpha,
+            )
             .await
             .map_err(|e| anyhow!("frust-render: failed to configure Metal surface: {e}"))?;
         self.install_surface(ctx, surface)

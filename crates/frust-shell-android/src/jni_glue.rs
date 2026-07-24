@@ -529,6 +529,7 @@ fn install_surface(
             window_ptr,
             width.max(1),
             height.max(1),
+            frust_render::SurfaceAlphaRequest::Opaque,
         )
     })
     .context("frust-shell-android: failed to create Android render surface")?;
@@ -925,6 +926,7 @@ fn build_inline_executor(
             window_ptr,
             physical.0,
             physical.1,
+            frust_render::SurfaceAlphaRequest::Opaque,
         )
     })
     .context("frust-shell-android: failed to create Android render surface")?;
@@ -1147,7 +1149,11 @@ pub fn native_on_surface_changed(
             // window is released.
             pollster::block_on(unsafe {
                 renderer.on_surface_created_from_android_window(
-                    render_cx, window_ptr, physical.0, physical.1,
+                    render_cx,
+                    window_ptr,
+                    physical.0,
+                    physical.1,
+                    frust_render::SurfaceAlphaRequest::Opaque,
                 )
             })
         };

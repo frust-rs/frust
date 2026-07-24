@@ -57,7 +57,7 @@ use anyhow::{Context, Result, bail};
 
 use frust_core::event::{EditingState, ImeState};
 use frust_reactive::{ReactiveRuntime, push_deep_link};
-use frust_render::{RenderContext, SurfacePhase, SurfaceRenderer};
+use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
@@ -314,6 +314,7 @@ fn install_surface(
             metal_layer,
             width.max(1),
             height.max(1),
+            SurfaceAlphaRequest::Opaque,
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
@@ -643,6 +644,7 @@ fn build_inline_executor(
             metal_layer,
             physical.0,
             physical.1,
+            SurfaceAlphaRequest::Opaque,
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
@@ -798,6 +800,7 @@ fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
                 metal_layer,
                 physical.0,
                 physical.1,
+                SurfaceAlphaRequest::Opaque,
             )
         })
     };
