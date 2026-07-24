@@ -85,6 +85,52 @@ pub use frust_widgets::{
     scroll_view, slider, text, text_input,
 };
 
+/// Platform-view embedding (platform-views feature, tasks 02/07): reserve
+/// layout space for a native view (a map, a video player, ...) composited
+/// alongside the frust surface. [`platform_view`] takes the
+/// `"dev.frust.<Factory>"`-style native factory name registered on each
+/// platform and returns a builder ([`PlatformViewView`]) over the
+/// params/size contract — flat-re-exported from `frust-widgets` so app code
+/// never names that crate directly.
+///
+/// # Paint contract (Mode B)
+///
+/// Under Mode B compositing (an app that opts in via
+/// [`request_translucent_surface`]) the frust surface itself is translucent,
+/// so **any region this slot's parent doesn't paint over is a window
+/// straight through to the native view (or the OS background) behind it** —
+/// this is the mechanism Mode B relies on, not a bug. Size/position a slot
+/// deliberately, and don't rely on an unpainted sibling region staying
+/// opaque. The generated-template scaffold (task 08/09) is the normal route
+/// into Mode B; this export exists for custom shells/tests that build their
+/// own.
+///
+/// ```no_run
+/// use frust::{AnyView, Column, Component, any, platform_view, text};
+///
+/// #[derive(Default)]
+/// struct MapDemo;
+///
+/// impl Component for MapDemo {
+///     type State = ();
+///
+///     fn init(&self) -> Self::State {}
+///
+///     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+///         any(Column(vec![
+///             any(text("map below")),
+///             any(platform_view("dev.frust.MapFactory")
+///                 .params_json(r#"{"style":"dark"}"#)
+///                 .size(320.0, 240.0)),
+///         ]))
+///     }
+/// }
+///
+/// frust::app!(MapDemo);
+/// # fn main() {}
+/// ```
+pub use frust_widgets::{PlatformViewView, platform_view};
+
 /// The vendored Material Symbols starter icon set (Huddle showcase, Phase A),
 /// flat-re-exported so app code names `frust::icons::HOME` rather than the
 /// underlying `frust-widgets` crate. Each entry is an
@@ -352,6 +398,25 @@ pub use frust_shell_common::{SystemUiMode, SystemUiOverlay, set_system_ui_mode};
 /// frust::register_app_fonts(font_bytes);
 /// ```
 pub use frust_shell_common::font_registry::register_app_fonts;
+
+/// App-facing translucent-surface opt-in (platform-views feature, task 03/07):
+/// [`request_translucent_surface`] requests that the running shell create its
+/// GPU surface with an alpha channel, so a native sibling view placed behind
+/// it (Mode B compositing — see [`platform_view`]) can show through wherever
+/// the app paints nothing. Only effective **before** the shell creates its
+/// surface (startup-time only — a call after the window/surface already
+/// exists has no effect on it); a generated project's template (task 08/09)
+/// is the normal route into Mode B and calls this automatically, so this
+/// export exists for custom shells/tests that build their own scaffold. See
+/// `frust_shell_common::surface_mode`'s module docs for the full one-way
+/// latch and thread contracts (mirrors [`set_app_theme`]'s: callable from any
+/// thread, a plain `Mutex`-guarded process-global).
+///
+/// ```no_run
+/// // Call during startup, before the shell creates its GPU surface.
+/// frust::request_translucent_surface();
+/// ```
+pub use frust_shell_common::request_translucent_surface;
 
 /// The animation vocabulary (spec §8): the shell-fed frame clock ([`FrameTime`])
 /// plus the pure easing/interpolation/spring math a widget or app advances it
