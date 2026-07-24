@@ -164,12 +164,20 @@ Structure) follow these conventions:
 
 ## Platform-View Conventions
 
-- **Mode B (translucent surface) paint contract: an unpainted region is a
-  window, not a compositor bug.** `platform_view` punches its own slot
-  rect automatically; any other chrome region left unpainted by an app
-  running under `request_translucent_surface()` shows raw OS content
-  behind the frust surface — pair translucency with an explicit opaque
-  app-root background (the catalog's `AppBackground` precedent).
+- **Mode B is a build-time host configuration, never an app Rust opt-in.**
+  The generated host's translucency constant (`FRUST_TRANSLUCENT_SURFACE`
+  on Android, `translucentSurface` on iOS) must drive the window pixel
+  format, the host's native-sibling z-order, and the
+  `declare_host_translucent_surface` call *together*, in the same branch —
+  splitting them is the exact defect review M3 fixed. App Rust has no
+  matching call; only the two shells' own FFI-glue may declare it (see
+  `docs/ARCHITECTURE.md`'s Platform-view flow).
+- **Mode B paint contract: an unpainted region is a window, not a
+  compositor bug.** `platform_view` punches its own slot rect
+  automatically; any other chrome region left unpainted by a Mode B host
+  shows raw OS content behind the frust surface — pair translucency with
+  an explicit opaque app-root background (the catalog's `AppBackground`
+  precedent).
 - **A `platform_view` slot never receives `Widget::event` (v1).** Native-view
   input is OS-routed through the host's own view hierarchy, not `EventCtx`
   — there is no hit-test/dispatch seam for a hosted view; don't add pointer
@@ -250,28 +258,26 @@ interactive widget in `frust-widgets`:
   }
   ```
 
-- **Controlled components never self-mutate.** `Checkbox`/`Slider` report the
-  *requested* value through `on_toggle`/`on_change` and leave `checked`/
-  `value` untouched until the next `rebuild` feeds the app-confirmed value
-  back down — never flip `self.checked` (or similar) inline in a handler.
-  `TextInput` is controlled too, reconciled rather than mutated:
-  `rebuild` applies the view's `value` to the widget's `TextEditor`
-  set-if-different (preserving the live selection when unchanged), so an
-  app that rejects/transforms input in `on_change` sees its own value win
-  next frame.
+- **Controlled components never self-mutate.** `Checkbox`/`Slider` report
+  the *requested* value through `on_toggle`/`on_change` and leave
+  `checked`/`value` untouched until the next `rebuild` feeds the
+  app-confirmed value back down — never flip `self.checked` (or similar)
+  inline in a handler. `TextInput` is controlled too: `rebuild` applies the
+  view's `value` to the widget's `TextEditor` set-if-different, so an app
+  that rejects/transforms input in `on_change` sees its own value win next
+  frame.
 
 - **Focus routes by recorded path, like capture; `Key`/`Ime` events never
   hit-test.** `EventCtx::request_focus`/`release_focus` record/clear the
   focused child exactly like `capture_pointer`, and a container simply
   forwards `Key`/`Ime` events to its focused child; a `Down` that doesn't
-  (re)claim focus on the child it hits blurs the chain (blur-on-outside-tap).
-  **A structural container rebuild clears capture and focus only where
-  identity is actually lost** — stable-prefix/key-matched, not a blanket
-  clear: positional reconciliation clears a path only at/after the first
-  index whose concrete type changed; keyed reconciliation clears it only
-  for a removed/type-swapped child (a key-matched reorder relocates the
-  widget, and its path, intact). `RenderRoot`'s cached
-  `focus_active`/`ime_state` self-correct on the next event pass.
+  (re)claim focus on the child it hits blurs the chain. **A structural
+  container rebuild clears capture and focus only where identity is actually
+  lost** — stable-prefix/key-matched, not a blanket clear: positional
+  reconciliation clears a path only at/after the first index whose type
+  changed; keyed reconciliation clears it only for a removed/type-swapped
+  child. `RenderRoot`'s cached `focus_active`/`ime_state` self-correct on
+  the next event pass.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key,
   view)` marks a `Flex` child list for identity-based reconciliation; once
@@ -310,10 +316,9 @@ interactive widget in `frust-widgets`:
   capture, clear their focus, and publish a cleared IME surface — in that
   order, with no bypass.** This binds any container that stops forwarding
   events to an already-interactive child (the navigator's mid-transition
-  input block is the reference impl, via `cancel_pod`/`set_active`/
-  `set_focused` — see `docs/ARCHITECTURE.md`'s Navigation flow), not just
-  `Navigator`. Skipping this leaves a child armed (a later `Up` it never
-  receives fires against a widget the container has stopped routing to) or
+  input block is the reference impl — see `docs/ARCHITECTURE.md`'s
+  Navigation flow). Skipping this leaves a child armed (a later `Up` it
+  never receives fires against a widget the container stopped routing to) or
   a stale focus/IME surface behind after the block lifts.
 
 ## Semantics Conventions
@@ -382,27 +387,23 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   unlike the throwaway `()` at the root, but the contract is identical).
 - **Heavy work routes by shape: `spawn` (async IO) / `spawn_local` (UI-thread `!Send`) /
   `spawn_blocking` (one-off CPU) / rayon (an app-level choice, not bundled).** Calling
-  `spawn_local` off the UI thread panics; a backgrounded iOS app pauses `CADisplayLink`,
-  so a `spawn_local` timer stalls until `frust_resume`'s next pump. `use_task` composes
-  `AsyncValue<T>` over this routing: a UI-thread coordinator (under the calling
-  component's `Owner`) hands work to `spawn`/`spawn_blocking` and is the sole signal
-  writer, ruling out a cross-thread write race; owner cleanup aborts it and its
-  `JoinHandle`.
+  `spawn_local` off the UI thread panics; a backgrounded iOS app pauses `CADisplayLink`, so a
+  `spawn_local` timer stalls until `frust_resume`'s next pump. `use_task` composes `AsyncValue<T>`
+  over this routing: a UI-thread coordinator hands work to `spawn`/`spawn_blocking` and is the
+  sole signal writer; owner cleanup aborts it and its `JoinHandle`.
 - **`Component::State` holds `RwSignal`s directly; app code depends on the
   `frust` facade only, never `reactive_graph`/`any_spawner`/`frust-reactive`
   directly.** A reactive field is typed `RwSignal<T>`, read/written through
   the facade's `Get`/`Set`/`Update` traits. **An `examples/*`/app crate's
   `Cargo.toml` depends on `frust` plus plugin crates only** — a documented
-  `frust-core`/`kurbo`(/`peniko`) escape hatch (`examples/huddle`,
-  `examples/glyph-catalog`) is sanctioned, for gaps no facade widget covers.
-- **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
-  untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
-  *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
-  per-frame rebuild (desktop's `scope.track(|| root.rebuild(..))`, mirrored on mobile by a
-  persistent per-`AppHandle` `TrackedScope`). A render-relevant read taken via
-  `*_untracked`/`get_untracked` anywhere in that path never subscribes, so a later write flips
-  no dirty flag and the shell may never repaint — reserve `*_untracked` for genuine
-  non-rendering reads, never a value a `build` return depends on.
+  `frust-core`/`kurbo`(/`peniko`) escape hatch is sanctioned, for gaps no
+  facade widget covers.
+- **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an untracked
+  read is a silent wake hazard, not a stale value.** `.get()` subscribes only from *inside* a live
+  `TrackedScope::track` closure; both shells guarantee this for their per-frame rebuild. A
+  render-relevant read taken via `*_untracked`/`get_untracked` anywhere in that path never
+  subscribes, so a later write flips no dirty flag and the shell may never repaint — reserve
+  `*_untracked` for genuine non-rendering reads, never a value a `build` return depends on.
 
 ## Theming & Animation Conventions
 
@@ -410,10 +411,9 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   only safe under the `set_theme` → `ChangeFlags` contract.** Most themed
   widgets resolve tokens from `PaintCtx` every paint pass and self-refresh
   on a live theme swap for free. `Text`/`TextInput` instead bake resolved
-  glyph color into the shaped layout at LAYOUT time (`docs/ARCHITECTURE.md`'s
-  Theme delivery); a widget adding layout-time-baked resolution depends on
-  relayout actually happening, so treat a theme change as forcing
-  `ChangeFlags::LAYOUT`, not just `PAINT`.
+  glyph color into the shaped layout at LAYOUT time; a widget adding
+  layout-time-baked resolution depends on relayout actually happening, so
+  treat a theme change as forcing `ChangeFlags::LAYOUT`, not just `PAINT`.
 - **Resolve theme tokens with an unthemed-fallback constant per resolved
   value.** A themed widget looks up
   `Theme::from_paint_ctx(ctx)`/`from_layout_ctx(ctx)`, falling back to a

@@ -13,7 +13,7 @@ consumed by app code via the `frust` facade crate, and example apps under
 
 | Crate | Responsibility |
 |---|---|
-| `frust-core` | Layers 1+2: the declarative `View` trait, the retained `Widget` trait, box-constraint layout, the `tree_arena`-backed widget tree, and `RenderRoot` (rebuild/layout/paint/event pass driver). Its `input` module carries the pointer/scroll event types (`InputEvent`/`PointerEvent`/`EventCtx`/`EventOutcome`) and gesture-math constants (slop, fling decay) the interactive widgets build on. Its `component` module adds `Component` — a `StatefulWidget` analog with retained local state and a per-component reactive `Owner` (see Key Types and Data Flow's Component state boundary); this is the crate's sole, deliberate `reactive_graph` dependency (see Layer Dependencies) — no executor, no tokio. Its `anim` module is the animation vocabulary (`FrameTime`, `Curve`, `Tween`, `SpringDesc`, `AnimationController` — see Key Types): plain data/math, no clock, no scheduler. Its `semantics` module (spec §9) is a pull-based accessibility pass — `Widget::semantics` defaults to a no-op so existing widgets are unaffected, and `RenderRoot::semantics` collects it post-layout into a flat `SemanticsUpdate` (see Key Types, Data Flow's Semantics pass); its `accesskit` dependency (re-exported as `frust_core::accesskit` so `frust-widgets` needs no direct dependency) is a second deliberate, narrow exception joining the `reactive_graph` one above. Its `insets` module carries `WindowInsets`/`EdgeInsets` (see Key Types) — `RenderRoot::set_insets` stores and threads them through `LayoutCtx`/`PaintCtx` exactly like `set_theme` (see Data Flow's Inset delivery). Its `widget` module also carries `PaintCtx::report_hero`/`HeroFrames`/`HeroDirective`, a tagged-rect vocabulary for shared-element ("hero") transitions threaded through paint like the semantics pass above (see Key Types, Data Flow's Navigation flow), and `PaintScene::push_transform`/`pop_transform` (default no-ops; `SceneBuilder` forwards them to its own transform stack). The same module's `TickClass` (`Transition`/`CosmeticLoop`, max-lattice aggregated across a paint pass — any `Transition` dominates) tags every `PaintCtx::request_frame`/`request_frame_paced` call and surfaces as `PaintOutcome::needs_frame_paced_only` for the mobile frame gate to pace (see Data Flow's Frame gate); `PaintCtx::visible_rect`/`constrain_visible_rect` is the absolute-coordinate viewport channel a `ScrollView` publishes and `Flex` consults to cull paint of far-offscreen children, threaded like `window_insets` (see Key Types, Data Flow's Frame pipeline). Its `widget` module also carries the platform-view frame channel: `RenderRoot::platform_view_frames()` returns the `Vec<PlatformViewFrame>` a `PlatformViewWidget` accumulates into during paint (replaced wholesale each pass, like `ime_state`), each stamped with a stable `slot_id` from `next_slot_id()`'s process-wide `AtomicU64` — a third narrow, sanctioned global-state exception beside the `reactive_graph`/`accesskit` ones above, revisited only if `BuildCtx`-threaded ids are ever needed for multi-root — and `RenderRoot::set_surface_translucent`/`PaintCtx::is_translucent()` threads the shell's RESOLVED Mode B translucency (not the request latch — see Data Flow's Platform-view flow) down to paint. |
+| `frust-core` | Layers 1+2: the declarative `View` trait, the retained `Widget` trait, box-constraint layout, the `tree_arena`-backed widget tree, and `RenderRoot` (rebuild/layout/paint/event pass driver). Its `input` module carries the pointer/scroll event types (`InputEvent`/`PointerEvent`/`EventCtx`/`EventOutcome`) and gesture-math constants (slop, fling decay) the interactive widgets build on. Its `component` module adds `Component` — a `StatefulWidget` analog with retained local state and a per-component reactive `Owner` (see Key Types and Data Flow's Component state boundary); this is the crate's sole, deliberate `reactive_graph` dependency (see Layer Dependencies) — no executor, no tokio. Its `anim` module is the animation vocabulary (`FrameTime`, `Curve`, `Tween`, `SpringDesc`, `AnimationController` — see Key Types): plain data/math, no clock, no scheduler. Its `semantics` module (spec §9) is a pull-based accessibility pass — `Widget::semantics` defaults to a no-op so existing widgets are unaffected, and `RenderRoot::semantics` collects it post-layout into a flat `SemanticsUpdate` (see Key Types, Data Flow's Semantics pass); its `accesskit` dependency (re-exported as `frust_core::accesskit` so `frust-widgets` needs no direct dependency) is a second deliberate, narrow exception joining the `reactive_graph` one above. Its `insets` module carries `WindowInsets`/`EdgeInsets` (see Key Types) — `RenderRoot::set_insets` stores and threads them through `LayoutCtx`/`PaintCtx` exactly like `set_theme` (see Data Flow's Inset delivery). Its `widget` module also carries `PaintCtx::report_hero`/`HeroFrames`/`HeroDirective`, a tagged-rect vocabulary for shared-element ("hero") transitions threaded through paint like the semantics pass above (see Key Types, Data Flow's Navigation flow), and `PaintScene::push_transform`/`pop_transform` (default no-ops; `SceneBuilder` forwards them to its own transform stack). The same module's `TickClass` (`Transition`/`CosmeticLoop`, max-lattice aggregated across a paint pass — any `Transition` dominates) tags every `PaintCtx::request_frame`/`request_frame_paced` call and surfaces as `PaintOutcome::needs_frame_paced_only` for the mobile frame gate to pace (see Data Flow's Frame gate); `PaintCtx::visible_rect`/`constrain_visible_rect` is the absolute-coordinate viewport channel a `ScrollView` publishes and `Flex` consults to cull paint of far-offscreen children, threaded like `window_insets` (see Key Types, Data Flow's Frame pipeline). Its `widget` module also carries the platform-view frame channel: `RenderRoot::platform_view_frames()` returns the `Vec<PlatformViewFrame>` a `PlatformViewWidget` accumulates into during paint (replaced wholesale each pass, like `ime_state`), each stamped with a stable `slot_id` from `next_slot_id()`'s process-wide `AtomicU64` — a third narrow, sanctioned global-state exception beside the `reactive_graph`/`accesskit` ones above, revisited only if `BuildCtx`-threaded ids are ever needed for multi-root — and `RenderRoot::set_surface_translucent`/`PaintCtx::is_translucent()` threads the shell's RESOLVED Mode B translucency (not the host's declaration latch — see Data Flow's Platform-view flow) down to paint. |
 | `frust-scene` | Layer 3: the renderer-agnostic vector scene / display list (`Scene`, `SceneBuilder`, `Command`, `GlyphRun`) — the stable seam between widgets and the GPU backend. Its `shader` module adds `ShaderProgram`, an opaque `Send` WGSL-source handle keyed by a process-unique id (alpha=1.0 v1 contract; the source stays an uninterpreted string here so the scene layer never depends on vello/wgpu — only `frust-render` compiles it); `SceneBuilder::draw_shader` records one as `Command::ShaderQuad`. |
 | `frust-render` | Layer 4: the wgpu + Vello GPU backend. Encodes a `Scene` into a `vello::Scene` and presents it to a window surface, exposed as separate `encode()`/`present()` entry points the render-thread split (see Data Flow's frame pipelines) drives from a dedicated render thread (see Key Types' `SurfaceRenderer`); a cloneable `SurfaceFactory` lets a shell create a `Send`-able `DetachedSurface` on a windowing-constrained thread and install it on another via `SurfaceRenderer::on_surface_installed` — the seam desktop's split uses to create the wgpu surface on the UI thread (winit's main-thread-only window handle) while the renderer itself lives on the render thread. An experimental, feature-gated `cpu-tier` (`vello_cpu`) fallback selects via the same `SceneSink` encode seam (see Key Types' `RenderTier`). Each configured surface also picks a render path at configure time: direct-to-surface (vello renders straight into the acquired swapchain texture, no intermediate target or blit) when the surface advertises `Rgba8Unorm`+`STORAGE_BINDING`, else the blit fallback — also forced by a `cpu-tier` selection or the `FRUST_NO_DIRECT_SURFACE` kill switch (`docs/DEVELOPMENT.md`); diagnostic probing/logging for this path selection is gated behind the same `perf-trace` feature (`docs/DEVELOPMENT.md`'s Instrumentation). Its crate-private `shader_effects` module runs a per-surface fragment-shader pre-pass at the top of `encode()`'s Gpu arm, before the Direct/Blit branch: lazy, `PipelineCache`-seeded pipelines render each `Command::ShaderQuad` into a clamped `Rgba8Unorm` offscreen target that gets composited into the frame via vello's texture-override mechanism (registered once, re-marked dirty every frame the quad is present, unregistered on drop); the CPU tier paints a placeholder fill instead. Its `pipeline_cache` module frames/validates an opaque, adapter-fingerprinted `wgpu::PipelineCache` blob a shell can persist and replay across launches (Vulkan-only — see Data Flow's GPU pipeline cache). A configured surface also resolves a `SurfaceAlphaRequest` (`Opaque`/`TranslucentPreferred`) against the platform's advertised `CompositeAlphaMode`s; when the resolved mode expects premultiplied input (Android's `Inherit`) a direct-capable surface takes `RenderPath::DirectPremultiplied` instead of `Direct` — a compute pass premultiplies vello's straight-alpha final-write output before present, since vello 0.9 always un-premultiplies there — while `PostMultiplied` (iOS) and opaque surfaces stay byte-identical. A **GPU-tier** surface forced onto the blit fallback (no `Rgba8Unorm`+`STORAGE_BINDING`, or the `FRUST_NO_DIRECT_SURFACE` kill switch, `docs/DEVELOPMENT.md`) resolves a premultiplied-expecting alpha mode as NOT translucent instead: the blit's plain texture copy has no premultiply stage, so such a surface degrades to the opaque Mode A contract (Data Flow's Platform-view flow) rather than reproducing the direct arm's fixed over-bright-fringing defect; the experimental `cpu-tier` fallback is exempt from this refusal and stays translucent-capable, since `vello_cpu`'s output is already premultiplied. |
 | `frust-text` | Text shaping: wraps Parley font matching/layout into `TextContext`/`TextStyle`/`TextLayout`, converting shaped text into `frust-scene::GlyphRun`s. `TextContext` owns a width-independent, bounded-LRU shape cache (stats via `shape_cache_stats()`) — a width change re-runs only line-breaking on the cached shaped layout, never a full re-shape. Also home to `TextEditor`, the Parley-`PlainEditor`-based editing engine `TextInput` and the platform IME bridges drive (see Key Types). Color emoji renders through the same `GlyphRun`/`draw_glyphs` path with no render-path change (vello 0.9's COLR+CPAL and sbix bitmap-strike glyph support, Parley's `GenericFamily::Emoji` fallback); CBDT is unverified pending on-device testing. `TextContext::register_fonts` registers app-supplied font bytes at runtime — shadowing a same-named system family and clearing the shape cache, the shaping half of the font-registration flow (Data Flow) — and `FontFamily::stack_with_generic` appends a terminal `GenericSlot` (Monospace/SansSerif/Serif/SystemUi/Emoji) to a named fallback stack for parley to resolve against. |
@@ -21,9 +21,9 @@ consumed by app code via the `frust` facade crate, and example apps under
 | `frust-widgets` | The baseline widget set (spec §6.4): `Text`, `Button`, `Checkbox`, `Radio`, `Slider`, `TextInput`, `Image`, `Icon`, `Row`/`Column` (`Flex`), `Stack`, `Padding`, `Align`, `SizedBox`, `ScrollView`, `GestureDetector`, `SafeArea` — each a `View`/`Widget` pair over `frust-core` + `frust-text` + `frust-theme`. Widgets resolve theme tokens at paint/layout time with an unthemed-fallback constant per resolved value (see `docs/CODE_STANDARDS.md`); `TextInput` joins `Text` in resolving its glyph color layout-time-baked (see Data Flow's Theme delivery). `SafeArea` is the v1 consumer of the inset channel (see Key Types, Data Flow's Inset delivery). Any `Flex` child list can be reconciled by explicit identity via `keyed`/`ChildKey` instead of position (see Key Types). `Icon` paints a `kurbo::BezPath` from an `IconData` source, either a user-built path or a generated `icons` module entry (41 Material Symbols vendored as SVG-path `IconSource` consts, Apache-2.0, regenerated from a real Material Symbols checkout by `scripts/gen_icons.py`). `GestureDetector` adds a paint-clock-timed long-press (fires on release or on the first post-threshold move once a press has been held past the threshold). `ScrollView` supports iOS-style drag overscroll with rubber-band resistance, observable via `on_scroll`'s `ScrollInfo` snapshot and triggerable via `on_refresh_release` (pull-to-refresh), and publishes its absolute viewport as `PaintCtx::visible_rect` (intersect-only against any outer scroll ancestor) so `Flex` can skip paint of children fully outside it plus a one-viewport warm margin — paint-only, event routing is unaffected. `ListView` adds `on_near_start` for near-start-edge pagination. `TextInput` adds a `.multiline(max_visible_lines)` wrap-width mode over its `TextEditor`, with `.submit_on_enter` controlling Enter-key behavior. Its `nav` module (spec §19) adds an imperative page-stack `Navigator` + page transitions, a declarative go_router-subset `Router`, and a `hero(tag, child)` shared-element wrapper morphing a tagged child between two pages during a transition (see Data Flow's Navigation flow) — kept in-crate (not a separate crate) because these need the same crate-private container plumbing (`ChildPod`, `build_child`/`teardown_child`, `cancel_pod`) every other container widget uses; `frust-widgets` itself stays reactive-free, so the router's deep-link signal glue lives in the `frust` facade (see Data Flow's Navigation/Deep-link flow). A `material`/`cupertino` widget catalog (AppBar, Card, Chips, Dialog, FAB, ListView/ListItem, NavigationBar, BottomSheet, Switch, progress indicators, plus Cupertino counterparts for the subset with an iOS equivalent) shares the `material::state_layer` interaction-overlay helper — same `View`/`Widget` pattern as the baseline set, still reactive-free. The `material` catalog's M3-Expressive layer (spec 6f) adds a `shape_morph` primitive (`RoundedPolygon`/`morph_path`, radial-function corner rounding) driving `LoadingIndicator`'s shape-cycling spinner and `ButtonGroup`'s press-emphasis overlay, plus `SplitButton`, `FabMenu`, floating/docked `Toolbar`, and a wavy variant of the progress indicators. The `cupertino` catalog's chrome (`navbar`, `tabbar`, capsule `button`, `switch`, `slider`'s Cupertino branch, `alert_dialog`, `action_sheet`) paints from `Theme.glass` on the Cupertino baseline, degrading to an opaque Material surface fill when `GlassMaterial::is_opaque()` (see Data Flow's Glass material tokens); `tabbar` is the first `GlassScale` consumer and drives a minimize-on-scroll state machine (the event pass sets a target off scroll-delta sign, paint drives the theme's motion spring toward it). Its `motion` module is the implicit-animation and transition-pattern vocabulary: `AnimatedOpacity`/`AnimatedScale` retarget a themed spring/duration+curve value-continuously on rebuild; `PatternSwitcher` is a keyed single-slot container staging an outgoing/incoming child under a `TransitionPattern` (`FadeThrough`, `SharedAxis`, `FadeScale`, `ContainerTransform`, `GlyphSlide`, `GlyphStagger`) — every wrapper/pattern resolves its default timing from `Theme.motion` and collapses to a short linear crossfade under `reduce_motion` (see `docs/CODE_STANDARDS.md`'s Theming conventions). Its `glyph` module is a third, token-driven widget catalog (23 widgets — appbar, badge/tag/alert, progress/skeleton/dots/toast, tabs/segmented/breadcrumb/navbar, card/stat_card/list/accordion/empty_state/avatar, term_block/tooltip, dialog/command_palette/menu) shaping its own glyph runs directly rather than nesting `Text` (no themed-role seam exists for a per-status ink from `BuildCtx`), reusing the same controlled-component/fire-on-up-inside/semantics-forwarding conventions as the other two catalogs; `menu` is the catalog's first anchored popup (a navigator transparent-page push positioned off a caller-reported window-coordinate rect, not screen-centered), and `toast`'s host now anchors itself (`ToastAnchor`, default `BottomCenter`) rather than requiring an app-side `Align` wrapper. `Button` adds a `ButtonStyle` (Primary/Secondary/Ghost/Danger/Icon) with a press-scale micro-interaction and a loading spinner, theme-resolved uniformly across all three design languages. Its `platform_view` module adds `platform_view(view_type)` (builder: `PlatformViewView`; element: `PlatformViewWidget`) — a native-sibling compositing slot that publishes a per-paint `PlatformViewFrame` and, only when the surface is translucent (Mode B), punches its own rect via `PaintScene::clear_rect`; paints nothing in Mode A — see Data Flow's Platform-view flow. |
 | `frust-reactive` | Leaf reactive substrate: the process-wide `ReactiveRuntime` (a background tokio runtime, a custom `any_spawner` executor routing `spawn`/`spawn_local`, a UI-thread local task pump, and the root reactive `Owner`) plus `TrackedScope`, the rebuild-dependency-tracking bridge that wakes a shell when a tracked signal changes (see Key Types, Data Flow's Signal-driven wake). Its `deep_link` module is a process-wide deep-link source (spec §19): a shell delivers a platform link via `push_deep_link`, app code reads it via `deep_links()`/`DeepLinks` (facade re-exports) — see Data Flow's Deep-link flow. Its `back` module is the process-wide back-press source, mirroring `deep_link`'s shape: `push_back_press`/`back_presses()` plus a `set_handles_back`/`handles_back` flag — see Data Flow's Back flow. Its `task` module is the blessed heavy-work idiom (`AsyncValue<T>`/`use_task`, see Key Types): a background+UI-thread-coordinator split scoped to a component's `Owner`, keeping every signal write on the UI thread; `spawn_blocking` is a thin facade over the runtime's blocking pool for one-off CPU work, alongside `spawn`/`spawn_local` above. Depends only on `reactive_graph`/`any_spawner`/`tokio` — no `frust-core`, no `winit`/`vello`/`wgpu`; consumed by the three shells and the `frust` facade (see Layer Dependencies). |
 | `frust-shell-desktop` | Desktop preview shell: a winit `ApplicationHandler` event loop that owns the render root and text context for `cargo run`-based development, GPU surface creation/ownership split by default across a UI thread (rebuild/layout/paint) and a dedicated render thread (encode/acquire/present) via `frust-shell-common::render_split` — see Data Flow's frame pipelines. Compiled only for non-Android targets. |
-| `frust-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_frust_FrustSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. By default its render tail also runs on a dedicated render thread the UI-side JNI callbacks hand finished scenes to — see Data Flow's Android frame pipeline. A resolved-translucent (Mode B) surface additionally calls `setZOrderOnTop(true)` and clears to an alpha-0 base color (Data Flow's Platform-view flow). |
-| `frust-shell-common` | Platform-agnostic shell plumbing shared by all three shells: the `AppTree` type-erasure (Android/iOS) that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size`/`logical_insets` FFI-boundary helpers. Depends on `frust-core`/`frust-scene`/`frust-text`/`frust-theme` (its `theme_override` module is the app-facing `set_app_theme`/`clear_app_theme` seam — see Data Flow's Theme delivery; stays reactive-free in its shipped graph, see Layer Dependencies) — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. Its `frame_gate` module is the whole-frame skip gate both mobile shells consult before rebuilding, and also paces a paint pass whose only dirtiness is a `TickClass::CosmeticLoop` request to the active theme's `cosmetic_loop_rate` via `FrameGate::decide_paced`/`FramePacing`, gated by its own `FRUST_NO_ANIM_PACING` kill switch (`docs/DEVELOPMENT.md`) separate from the skip gate's (see Data Flow's Frame gate). Its `render_split` module is the render-thread-split vocabulary every shell's default frame path now drives through (see Data Flow's frame pipelines): a depth-1 latest-wins UI→render scene channel plus a give-back slot for buffer reuse, a FIFO lifecycle-command queue, and an `Ack`/`AckWaiter` barrier pair a shell blocks the UI thread on for the commands that must complete before proceeding (surface teardown, backgrounding) — gated by the `FRUST_NO_RENDER_THREAD` kill switch (see `docs/DEVELOPMENT.md`) that reverts a shell to the pre-split single-thread path. Its `resample` module is a pure-logic `PointerResampler` that interpolates buffered pointer moves to the frame boundary (Down/Up/Cancel pass through losslessly) plus deadline-overrun helpers both mobile shells use for instrumentation, disabled via `FRUST_NO_RESAMPLE` (see `docs/DEVELOPMENT.md`). Its `perf` module is the `frust-perf` frame/startup instrumentation (`FrameStats`/`StartupSpans` — see Key Types), compiled in only under the non-default `perf-trace` feature — fully inert and string-free without it, see `docs/DEVELOPMENT.md`'s Instrumentation. Its `font_registry` module mirrors `theme_override`'s `Mutex`-slot-plus-poll shape for runtime font bytes: `register_app_fonts` (any-thread push) and a per-shell `FontRegistryWatcher::poll`/`drain_into` (destructive drain, applies each payload via `TextContext::register_fonts`) — see Data Flow's Font registration flow. Its `platform_view` module is the platform-agnostic native-sibling differ: `PlatformViewState::ingest` turns each pass's raw `PlatformViewFrame`s into a generation-stamped, acknowledgeable `ViewCommand` (Create/Update/UpdateParams/Dispose) backlog — a no-change poll is free, `acknowledge` compacts the backlog, an unacknowledged one replays whole after a surface recreation, and `suspend_all` hides every live slot on teardown — see Data Flow's Platform-view flow. Its `surface_mode` module is the Mode B opt-in: `request_translucent_surface`/`SurfaceModeWatcher::current` is a one-way latch (`Opaque`→`Translucent` only, v1) each shell reads once at surface-creation time. |
-| `frust-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `frust_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `frust-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. By default its render tail likewise runs on a dedicated render thread — see Data Flow's iOS frame pipeline. A resolved-translucent (Mode B) surface additionally sets `CAMetalLayer.isOpaque = false` (Data Flow's Platform-view flow). |
+| `frust-shell-android` | Android platform shell: the JNI runtime behind the fixed `Java_dev_frust_FrustSurfaceView_native*` symbols the generated app's Kotlin `SurfaceView` declares, plus the `android_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the desktop shell; real on Android only, inert elsewhere. By default its render tail also runs on a dedicated render thread the UI-side JNI callbacks hand finished scenes to — see Data Flow's Android frame pipeline. The generated host template's own `FRUST_TRANSLUCENT_SURFACE` constant (a build-time choice, not something Rust sets) is what calls `setZOrderOnTop(true)`, picks `PixelFormat.TRANSLUCENT`, and declares Mode B to Rust, all in one branch (Data Flow's Platform-view flow); frust's paint side only clears to an alpha-0 base color once the *resolved* seam confirms it. |
+| `frust-shell-common` | Platform-agnostic shell plumbing shared by all three shells: the `AppTree` type-erasure (Android/iOS) that lets a non-generic native handle drive any app's `State`/`app_logic`, plus the `guard`/`sanitize_scale`/`logical_size`/`logical_insets` FFI-boundary helpers. Depends on `frust-core`/`frust-scene`/`frust-text`/`frust-theme` (its `theme_override` module is the app-facing `set_app_theme`/`clear_app_theme` seam — see Data Flow's Theme delivery; stays reactive-free in its shipped graph, see Layer Dependencies) — no `jni`/`ndk`/`winit`, no `unsafe`, no FFI — so it compiles unchanged on every target. Its `frame_gate` module is the whole-frame skip gate both mobile shells consult before rebuilding, and also paces a paint pass whose only dirtiness is a `TickClass::CosmeticLoop` request to the active theme's `cosmetic_loop_rate` via `FrameGate::decide_paced`/`FramePacing`, gated by its own `FRUST_NO_ANIM_PACING` kill switch (`docs/DEVELOPMENT.md`) separate from the skip gate's (see Data Flow's Frame gate). Its `render_split` module is the render-thread-split vocabulary every shell's default frame path now drives through (see Data Flow's frame pipelines): a depth-1 latest-wins UI→render scene channel plus a give-back slot for buffer reuse, a FIFO lifecycle-command queue, and an `Ack`/`AckWaiter` barrier pair a shell blocks the UI thread on for the commands that must complete before proceeding (surface teardown, backgrounding) — gated by the `FRUST_NO_RENDER_THREAD` kill switch (see `docs/DEVELOPMENT.md`) that reverts a shell to the pre-split single-thread path. Its `resample` module is a pure-logic `PointerResampler` that interpolates buffered pointer moves to the frame boundary (Down/Up/Cancel pass through losslessly) plus deadline-overrun helpers both mobile shells use for instrumentation, disabled via `FRUST_NO_RESAMPLE` (see `docs/DEVELOPMENT.md`). Its `perf` module is the `frust-perf` frame/startup instrumentation (`FrameStats`/`StartupSpans` — see Key Types), compiled in only under the non-default `perf-trace` feature — fully inert and string-free without it, see `docs/DEVELOPMENT.md`'s Instrumentation. Its `font_registry` module mirrors `theme_override`'s `Mutex`-slot-plus-poll shape for runtime font bytes: `register_app_fonts` (any-thread push) and a per-shell `FontRegistryWatcher::poll`/`drain_into` (destructive drain, applies each payload via `TextContext::register_fonts`) — see Data Flow's Font registration flow. Its `platform_view` module is the platform-agnostic native-sibling differ: `PlatformViewState::ingest` turns each pass's raw `PlatformViewFrame`s into a generation-stamped, acknowledgeable `ViewCommand` (Create/Update/UpdateParams/Dispose) backlog — a no-change poll is free, `acknowledge` compacts the backlog, an unacknowledged one replays whole after a surface recreation, and `suspend_all` hides every live slot on teardown — see Data Flow's Platform-view flow. Its `surface_mode` module is the Mode B declaration slot: `declare_host_translucent_surface`/`SurfaceModeWatcher::current` is a one-way latch (`Opaque`→`Translucent` only, v1), callable only by the two shells' own FFI-glue modules (a host declaration, not an app request — pinned by `crates/frust/tests/surface_mode_conformance.rs`'s source scan) and read once by each shell at surface-creation time. |
+| `frust-shell-ios` | iOS platform shell: the C-ABI runtime behind the fixed `frust_*` exports the generated Swift app calls, plus the `ios_app!` macro that binds a generated app's `State`/`app_logic` to those exports. Composes the same core+scene+render+text stack as the other shells and reuses `frust-shell-common`'s plumbing; real on iOS only, inert (macro expands to nothing) elsewhere. By default its render tail likewise runs on a dedicated render thread — see Data Flow's iOS frame pipeline. The generated host's own `translucentSurface` constant is what sets `CAMetalLayer.isOpaque = false`, arranges the `FrustViewHost` subview order, and declares Mode B to Rust, together (Data Flow's Platform-view flow). |
 | `frust` | Facade crate: the public app-author API — the canonical `Component`/`app!`/`run` entry surface (spec §5.5), plus `App`/`View`/the widget vocabulary as the lower-level layer `app!` desugars to — composing the crates above into the spec's declarative call shape. Also home to `decode_image_async` (an off-thread `spawn_blocking` wrapper around `frust-widgets`' synchronous `ImageSource::decode`, composing with `use_task`) — it lives here rather than in `frust-widgets` because that crate stays reactive/tokio-free by charter (see Layer Dependencies). Depends on `frust-shell-android`, `frust-shell-ios`, and `frust-reactive` unconditionally, and on `frust-shell-desktop` only for non-Android targets; `run`/`App::run` (the desktop preview loop) are likewise non-Android-only — an Android app is driven entirely by `android_app!`/JNI, an iOS app entirely by `ios_app!`/the C-ABI exports. |
 | `frust-drive` | Drive library: the `ProcessRunner` seam (`run`/`run_streaming`/cancellable `spawn_streaming` + `StreamHandle`), device discovery, environment doctor checks — both the CLI's flat `Validator` pass/fail set and its `doctor::report` module's structured, component-level `DoctorReport` (`build_report`, one `Component`/`ComponentStatus` per toolchain piece grouped by area, each with zero or more structured fix commands) rolled up with a non-blocking-platform-gap model (core Rust toolchain/cargo gates the rollup; Android/iOS/Desktop gaps cap it at `Partial`, never `Missing`) — the `BuildInfo` mode/flavor/defines funnel (sans the clap-derived `BuildArgs`, which stays CLI-side), the Android (Gradle/cargo-ndk) and iOS (xcodebuild/devicectl) run/build pipelines, and the project scaffold/template renderer. `spawn_streaming`'s lines ride a bounded, drop-oldest ring buffer (a `LineReceiver` counting `dropped_lines()`) with the child's stderr merged into the same stream, so a slow consumer can't stall the producer and no output is silently inherited to a caller's own tty. Every build/run core is print-free — output flows only through an `on_line` sink argument passed down from the front-end, never a bare `println!` (see `docs/CODE_STANDARDS.md`'s Anti-patterns); the CLI front-end owns printing, the TUI routes the same sink into a session's log tab. Its `plugin` module holds the static `known_plugins()` registry and idempotent `add_plugin()` — the post-scaffold mechanism (format-preserving Cargo.toml/manifest/plist/Kotlin-file edits) a plugin's OS-side contributions are applied through (see Data Flow's Plugin flow). Consumed by `frust-cli` and `frust-tui`; no framework-crate or clap dependency. |
 | `frust-tui` | Mouse-first ratatui TEA workbench: `engine` (pure `AppState`/`Message`/`update`, returning an `Effect` for the impure actions `update` itself can't perform — stop/launch a session, clipboard copy — that the runner enacts; an mpsc-channeled `Engine`), `ui` (layout/views/theme/a per-frame mouse-region registry with hover, an ANSI-aware session log view — renders `&AppState` only, never mutates the engine), `supervise` (the session-supervision layer: a session is keyed by project root × device target × build mode, moving through a `Configuring→Building→Installing→Running→Exited`/`Killed` lifecycle inferred tolerantly from streamed output; a std drain thread per session bridges `frust-drive`'s blocking `spawn_streaming` handle into a bounded tokio mpsc the engine selects on, coalescing each ready burst of lines into one `Lines` batch send and applying a drop-newest + counted-overflow policy on a full channel — one layer above `frust-drive`'s drop-oldest ring, see the `ProcessRunner` row below), and a tokio-driven `runner` (terminal lifecycle, crossterm event loop, dirty-frame skip, effect enactment). Layered on this triad as further `ActiveModal`/overlay state, not a new tier: a bootstrap wizard projecting `frust-drive`'s doctor report into a guided-fix flow (auto-runnable fixes run as an ad-hoc supervised session, re-preflighting on exit); a fuzzy command palette + toast stack (the palette's command registry doubles as the single source a generated help overlay renders from); right-click context menus and drag regions (sidebar resize, log scrollbar) riding the same mouse-region registry; a per-session perf sparkline panel parsing `frust-perf` trace lines out of that session's log stream; and an Add Plugin dialog (a key / sidebar / palette command) walking Select→Options→Applying→Report over `frust-drive::plugin::add_plugin`. Depends on `frust-drive` only; no other framework crate. |
@@ -70,21 +70,18 @@ persistence); a plugin only reads `frust-plugin`'s handles back. A
 crates, never any other `frust-*` framework crate; a **facade plugin**
 depends on `frust` alone, above the whole graph. Either way the facade
 never depends on or re-exports a plugin — an app adds one directly to its
-own `Cargo.toml`, the Flutter-pubspec model (`docs/CODE_STANDARDS.md`'s
-Plugin Conventions).
+own `Cargo.toml` (`docs/CODE_STANDARDS.md`'s Plugin Conventions).
 
 **`frust-reactive` is a leaf substrate**, consumed by the three shells and
 the `frust` facade — never by `frust-core`/`frust-scene`/`frust-widgets`.
-**`frust-core` depends on `reactive_graph` directly** (not
-`frust-reactive`) for exactly one purpose — `Component`'s per-instance
-`Owner` — a narrow layering exception, not a general reactive dependency:
-`frust-core` has no runtime, executor, or tokio dependency.
+**`frust-core` depends on `reactive_graph` directly** (not `frust-reactive`)
+for exactly one purpose — `Component`'s per-instance `Owner` — a narrow
+exception, not a general reactive dependency: no runtime/executor/tokio.
 **`frust-shell-common` stays reactive-free in its shipped graph** (core +
-scene + text + theme; a test-only `reactive_graph` dev-dependency backs
-the root-owner regression test and never reaches consumers); the mobile
-shells own their own reactive wiring (`ReactiveRuntime::init`/`pump_local`
-called from `frust-shell-android`/`-ios`), keeping shell-common's
-zero-`unsafe`, compiles-everywhere charter intact.
+scene + text + theme, zero-`unsafe`, compiles everywhere); the mobile
+shells own their own reactive wiring instead
+(`ReactiveRuntime::init`/`pump_local` called from
+`frust-shell-android`/`-ios`).
 
 **Scene-layer purity rule:** `frust-scene`'s and `frust-text`'s public APIs
 expose only `kurbo`/`peniko` types — `vello`/`wgpu` types are forbidden
@@ -92,11 +89,9 @@ there so the GPU backend stays swappable. `vello`/`wgpu` types are confined
 to `frust-render`, surfacing only at its surface-creation/installation seams
 (`on_surface_created*`/`on_surface_installed`) and `encode_scene`;
 `DetachedSurface` keeps `wgpu::Surface` opaque even at its cross-thread
-seam (see `docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern).
-
-`frust-cli` has no compile-time dependency on the rendering stack — a
-separate tool that generates/inspects Frust projects, not a framework
-consumer.
+seam (see `docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern). `frust-cli`
+has no compile-time dependency on the rendering stack — a separate tool
+that generates/inspects Frust projects, not a framework consumer.
 
 ## Data Flow
 
@@ -142,54 +137,50 @@ consumer.
    `focus_active` — a guard against resurrecting a surface a blur already
    cleared.
 5. The finished `Scene` is encoded (`frust_render::encode_scene`) into a
-   `vello::Scene` and presented to the window surface by `SurfaceRenderer`,
-   which is the spec §8.1 surface lifecycle state machine
-   (`SurfacePhase::NoSurface/SurfaceReady/SurfaceLost`,
+   `vello::Scene` and presented by `SurfaceRenderer`, the spec §8.1 surface
+   lifecycle state machine (`SurfacePhase::NoSurface/SurfaceReady/SurfaceLost`,
    `FrameOutcome::Rendered/Skipped/Redraw/SurfaceLost`) shared by every
-   shell: a surface can be destroyed and recreated at any time (window
-   close, or Android rotation/backgrounding), and rendering is a no-op
-   outside `SurfaceReady`. By default this tail is split off onto a
-   dedicated render thread via `frust-shell-common::render_split` (module
-   row above); `FRUST_NO_RENDER_THREAD` (`docs/DEVELOPMENT.md`) reverts to
-   the pre-split single-thread path. Winit's window handle is
-   main-thread-only, so the UI thread creates the wgpu surface via
-   `SurfaceFactory` and hands the render thread a `DetachedSurface` to
-   install, round-tripping the same way on `SurfaceLost`; a first-install
-   failure is fatal.
+   shell: a surface can be destroyed/recreated at any time (window close,
+   Android rotation/backgrounding), and rendering is a no-op outside
+   `SurfaceReady`. By default this tail is split onto a dedicated render
+   thread via `frust-shell-common::render_split` (module row above);
+   `FRUST_NO_RENDER_THREAD` (`docs/DEVELOPMENT.md`) reverts to the
+   pre-split single-thread path — winit's main-thread-only window handle is
+   why the UI thread creates the surface and the render thread installs it
+   (Key Types' `SurfaceFactory` row), round-tripping the same way on
+   `SurfaceLost`; a first-install failure is fatal.
 
 **Semantics pass:** `RenderRoot::semantics` (spec §9) walks the tree
 post-layout via `ChildPod::semantics_child` into a flat `SemanticsUpdate`
 (node map, root/focus ids, each node keyed by a stable per-pod id);
 `semantics_generation` lets a shell skip re-pushing an unchanged tree (iOS
-also serves a cached snapshot to a newly-activated screen reader so gating
-never starves a VoiceOver connect). `RenderRoot::perform_accessibility_action`
-routes a platform action back through the **normal event path** by
-synthesizing pointer events at the target node's bounds, so any
-fire-on-up-inside widget is operable with no widget-side changes. All
-three shells push `SemanticsUpdate`s into a platform accesskit adapter
-(`accesskit_winit`/`accesskit_android`/`accesskit_ios` — see
-`docs/DEVELOPMENT.md`'s compile-gate note); a modal flag plus a
-keyboard-operability convention (claim focus on first pointer interaction,
-dismiss on a focus-routed `Key(Escape)`, desktop only) cover the catalog's
-five modal/menu widgets.
+also serves a cached snapshot to a newly-activated screen reader).
+`RenderRoot::perform_accessibility_action` routes a platform action back
+through the **normal event path** by synthesizing pointer events at the
+target node's bounds, so any fire-on-up-inside widget is operable with no
+widget-side changes. All three shells push `SemanticsUpdate`s into a
+platform accesskit adapter (`accesskit_winit`/`accesskit_android`/
+`accesskit_ios` — see `docs/DEVELOPMENT.md`'s compile-gate note); a modal
+flag plus a keyboard-operability convention (claim focus on first pointer
+interaction, dismiss on a focus-routed `Key(Escape)`, desktop only) cover
+the catalog's five modal/menu widgets.
 
 **Signal-driven wake:** a write to a tracked signal fires the process-wide
 `FrameWaker` (`frust-reactive`; coalesced — N writes between tracked
-rebuilds produce one wake); every `spawn_local` task wake, including one
-from a background thread (e.g. a tokio timer), fires the same `FrameWaker`
-through the executor's composite waker. On desktop the waker sends a
-`ShellUserEvent::SignalsDirty` through the winit `EventLoopProxy`, which
-pumps the reactive runtime's UI-thread local task queue
-(`ReactiveRuntime::pump_local`) and requests a redraw; the next
-`RedrawRequested` re-tracks from scratch. The mobile shells need no nudge
-step — `Choreographer`/`CADisplayLink` already drive a continuous loop —
-but both pump local tasks once per frame before the surface-readiness
-gate, and again at touch/IME entry points. **The set side of this
-contract is a persistent `TrackedScope` each mobile `AppHandle` wraps its
-per-frame rebuild in**: only a rebuild run *inside* one subscribes its
-signal reads, so only then does a later write flip the process-wide
-`signals_dirty` flag the mobile shells drain once per frame as a
-frame-gate input (see Frame gate below).
+rebuilds produce one wake); every `spawn_local` task wake, including a
+background-thread one, fires the same `FrameWaker` through the executor's
+composite waker. On desktop the waker sends a `ShellUserEvent::SignalsDirty`
+through the winit `EventLoopProxy`, which pumps the reactive runtime's
+UI-thread local task queue (`ReactiveRuntime::pump_local`) and requests a
+redraw; the next `RedrawRequested` re-tracks from scratch. The mobile
+shells need no nudge step — `Choreographer`/`CADisplayLink` already drive a
+continuous loop — but both pump local tasks once per frame before the
+surface-readiness gate, and again at touch/IME entry points. **The set side
+of this contract is a persistent `TrackedScope` each mobile `AppHandle`
+wraps its per-frame rebuild in**: only a rebuild run *inside* one subscribes
+its signal reads, so only then does a later write flip the process-wide
+`signals_dirty` flag the mobile shells drain once per frame as a frame-gate
+input (see Frame gate below).
 
 **Component state boundary:** a `Component` (`frust-core::component`) is a
 `StatefulWidget` analog — retained local state living in the widget tree
@@ -219,17 +210,15 @@ A shell re-pushes both paths together on a brightness change (desktop's
 also force the active `Theme` via `frust::set_app_theme`/`clear_app_theme`
 (`frust-shell-common::theme_override`, a process-global override slot each
 shell polls once per frame, winning over the platform preference until
-cleared — e.g. the widget catalog's design-language toggle). All three
-shells seed `Theme::glyph_baseline()` by default and gate a one-time
-`glyph::font_data()` registration when `design_language` is `Glyph` (see
-Font registration flow). Resolution timing is asymmetric: most themed
-widgets re-read the theme from `PaintCtx` every paint and self-refresh on
-a live swap for free, but `Text`/`TextInput` bake resolved glyph color
-into the shaped layout at LAYOUT time — correct under the mobile
-layout-skip gate (Frame gate below) only because `RenderRoot::set_theme`
-marks `ChangeFlags::LAYOUT | PAINT`, forcing the relayout baked color
-depends on even on an otherwise-skipped frame (`docs/CODE_STANDARDS.md`'s
-Theming conventions).
+cleared). All three shells seed `Theme::glyph_baseline()` by default and
+gate a one-time `glyph::font_data()` registration when `design_language` is
+`Glyph` (see Font registration flow). Resolution timing is asymmetric: most
+themed widgets re-read the theme from `PaintCtx` every paint and
+self-refresh on a live swap for free, but `Text`/`TextInput` bake resolved
+glyph color into the shaped layout at LAYOUT time — correct under the
+mobile layout-skip gate (Frame gate below) only because
+`RenderRoot::set_theme` forces `ChangeFlags::LAYOUT | PAINT` even on an
+otherwise-skipped frame (`docs/CODE_STANDARDS.md`'s Theming conventions).
 
 **Font registration flow:** `frust::register_app_fonts(bytes)` (facade)
 pushes into `frust-shell-common::font_registry`'s process-global pending
@@ -241,66 +230,61 @@ contract Theme delivery's brightness swap uses), so a late-arriving font
 always relayouts text depending on it; mobile also flags the frame gate's
 `theme_or_appearance_changed` input directly. `frust-shell-common::system_ui`
 mirrors this shape for `frust::set_system_ui_mode` (Flutter `SystemChrome`
-parity), applied by each shell's `SystemUiWatcher::poll` once per frame
-(see Key Types' `android_app!`/`IosAppHandle` rows for the mobile peek
-getter).
+parity), applied by each shell's `SystemUiWatcher::poll` once per frame.
 
 **Inset delivery:** a shell converts platform-reported system-bar/cutout/IME
 occlusion into logical `WindowInsets` via the FFI-boundary `logical_insets`
 helper and delivers it two ways, mirroring Theme delivery: to widgets,
-threaded concrete (not type-erased — `Copy` scalar data) via
+threaded concrete (`Copy` scalar data) via
 `RenderRoot::set_insets`/`window_insets()`; to app code, `provide_context`d
 under the reactive root `Owner`. `WindowInsets::padding()` derives the
 actually-safe edge as `max(0, view_padding − view_insets)` per edge
-(Flutter's `ViewPadding`/`ViewInsets` provenance), so an IME overlap
-zeroes the affected edge instead of double-padding. `set_insets` is
+(Flutter's `ViewPadding`/`ViewInsets` provenance), so an IME overlap zeroes
+the affected edge instead of double-padding. `set_insets` is
 `PartialEq`-guarded and marks `ChangeFlags::LAYOUT | PAINT` only on an
-actual change — the same forced-relayout contract as Theme delivery.
+actual change, the same forced-relayout contract as Theme delivery.
 `SafeArea` (Key Types) is the sole widget consumer of `padding()`.
 
 **Glass material tokens:** `frust-theme::glass` (spec 6f) is pure data — no
 scene/reactive dependency, and no blur is rendered here. `GlassScale`
 bundles three tiers (`chrome`/`bar`/`control`), each a `GlassMaterial`
-recipe of a `blur_radius_intent` (future-backend contract; `0.0` = opaque,
+recipe of a `blur_radius_intent` (future-backend contract; `0.0` = opaque
 since pinned vello 0.9 has no backdrop-blur primitive), fill-wash stacks,
 a specular hairline alpha, and a drop shadow. `Theme.glass` carries one
 `GlassScale` per baseline (`ios27` Cupertino, `opaque_material` M3), so a
 widget branches on `GlassMaterial::is_opaque()` rather than
 `DesignLanguage` directly; the `cupertino` chrome widgets are the first
-consumers, degrading to an opaque Material fill when not on the glass
-branch — a deliberate static approximation pending a render-backend
-upgrade.
+consumers, degrading to an opaque Material fill off the glass branch — a
+deliberate static approximation pending a render-backend upgrade.
 
 **Event pipeline:** an `InputEvent` (a `PointerEvent` down/move/up/cancel, or
 a scroll delta — already translated into **logical**, density-independent
 coordinates by the shell) enters the tree through `RenderRoot::event`,
-which builds a root `EventCtx` over the type-erased app state and
-dispatches to the root widget. Containers own their children directly as
-`ChildPod`s — a `Vec` or named fields, not arena nodes — and route an event
-down by translating it into each child's local space
-(`ChildPod::event_child`); a deliberate divergence from the arena-backed
-`WidgetTree`, which stays single-root. Pointer **capture** and **focus**
-are each a recorded path (not a global registry) that
-`EventCtx::capture_pointer`/`request_focus` set on `Down`/claim and that
-subsequent moves or `Key`/`Ime` events route straight back through with no
-hit test; a structural container rebuild force-releases a path (synthetic
-`Cancel` for capture, dropped IME for focus) only for a child whose
-identity was actually lost — a stable-prefix or key-matched survivor (Key
-Types' `ChildKey` row) keeps its path across the rebuild
-(`docs/CODE_STANDARDS.md`'s Interaction Semantics). The focused widget's
-`ImeState` is published via `EventCtx`/`PaintCtx::publish_ime_state` and
-surfaced to shells as `RenderRoot::ime_state()`/`AppTree::ime_state()`; a
-platform IME bridge pushes a reconciled `EditingState` back via
-`AppTree::ime_apply`. Interactive widgets hold their view-declared
-callback as an **erased closure** (`Rc<dyn Fn(&mut State)>` boxed into
+which builds a root `EventCtx` over the type-erased app state and dispatches
+to the root widget. Containers own their children directly as `ChildPod`s
+— a `Vec` or named fields, not arena nodes — and route an event down by
+translating it into each child's local space (`ChildPod::event_child`); a
+deliberate divergence from the arena-backed `WidgetTree`, which stays
+single-root. Pointer **capture** and **focus** are each a recorded path
+(not a global registry) that `EventCtx::capture_pointer`/`request_focus`
+set on `Down`/claim and that subsequent moves or `Key`/`Ime` events route
+straight back through with no hit test; a structural container rebuild
+force-releases a path (synthetic `Cancel` for capture, dropped IME for
+focus) only for a child whose identity was actually lost — a stable-prefix
+or key-matched survivor (Key Types' `ChildKey` row) keeps its path across
+the rebuild (`docs/CODE_STANDARDS.md`'s Interaction Semantics). The focused
+widget's `ImeState` is published via `EventCtx`/`PaintCtx::publish_ime_state`
+and surfaced to shells as `RenderRoot::ime_state()`/`AppTree::ime_state()`;
+a platform IME bridge pushes a reconciled `EditingState` back via
+`AppTree::ime_apply`. Interactive widgets hold their view-declared callback
+as an **erased closure** (`Rc<dyn Fn(&mut State)>` boxed into
 `Box<dyn FnMut(&mut EventCtx)>`), so `frust-core`/`frust-widgets` carry no
 knowledge of the concrete app-state type. The pass never rebuilds or
 repaints — it returns `EventOutcome { handled, needs_redraw }`, and the
 shell runs rebuild→layout→paint afterward only if warranted: desktop is
-**dirty-driven** (one `window.request_redraw()`, keeping idle CPU near
-zero under `winit`'s `ControlFlow::Wait`) while Android/iOS run a
-**continuous** per-frame loop regardless — same `event` call, different
-redraw scheduling.
+**dirty-driven** (one `window.request_redraw()`, idle CPU near zero under
+`winit`'s `ControlFlow::Wait`) while Android/iOS run a **continuous**
+per-frame loop regardless — same `event` call, different redraw scheduling.
 
 **Frame gate:** the mobile shells' Choreographer/`CADisplayLink` callbacks
 keep firing every tick; `frust-shell-common::frame_gate`'s `FrameGate`
@@ -308,14 +292,13 @@ decides whether one actually reproduces a frame, from a small OR-list of
 dirtiness signals (pending input, pending `ChangeFlags`, an in-flight
 `PaintOutcome::needs_frame`, a theme/appearance change, the reactive
 `signals_dirty` flag above, pointer capture/focus, an accessibility action,
-or post-resume warmup) bundled into `FrameInputs`; any true signal forces
-`Run`, else `Skip` — a `Skip` does no rebuild/layout/paint/present work
-and counts as a skipped frame in `FrameStats` (outside the render-thread
-split, where it goes unrecorded — `docs/DEVELOPMENT.md`'s skip-count
-caveat). `FRUST_NO_FRAME_GATE=1` forces every tick to `Run`. On a `Run`,
-Android also skips layout unless change flags report `needs_layout()`,
-first frame, or resize; iOS still relayouts every `Run` (the finer skip
-isn't wired there yet). A `Run` triggered only by a paced
+post-resume warmup) bundled into `FrameInputs`; any true signal forces
+`Run`, else `Skip` (no rebuild/layout/paint/present work, counted in
+`FrameStats` outside the render-thread split — `docs/DEVELOPMENT.md`'s
+skip-count caveat). `FRUST_NO_FRAME_GATE=1` forces every tick to `Run`. On
+a `Run`, Android also skips layout unless change flags report
+`needs_layout()`, first frame, or resize; iOS still relayouts every `Run`
+(the finer skip isn't wired there yet). A `Run` triggered only by a paced
 (`TickClass::CosmeticLoop`) request is further throttled to
 `MotionScheme::cosmetic_loop_rate` by `FrameGate::decide_paced`; all other
 dirtiness above still forces an immediate `Run`, and `FRUST_NO_ANIM_PACING`
@@ -350,12 +333,11 @@ intra-frame skip isn't wired here). A resize export resizes the existing
 `SurfaceRenderer` surface in place (the `CAMetalLayer` Swift owns survives
 the app lifetime); a lost surface recreates itself from the retained layer
 pointer. The render tail also runs on its own thread by default: `pause`
-blocks on the `Ack` barrier, `destroy` joins the thread after teardown,
-and its GPU tail runs inside an autorelease-pool drain (no UIKit runloop
+blocks on the `Ack` barrier, `destroy` joins the thread after teardown, and
+its GPU tail runs inside an autorelease-pool drain (no UIKit runloop
 provides one) so a suspended app's Metal submission can't get the process
 killed. Export surface mirrors Android's shape (`IosAppHandle`/`ios_app!`
-row in Key Types; iOS has no back export) and its fatal-flag contract on a
-first-install failure.
+row in Key Types; iOS has no back export) and fatal-flag contract.
 
 **Plugin flow:** a plugin reaches the OS the way any in-process Rust code
 would — through FFI crates directly, no per-plugin wrapper or
@@ -424,24 +406,42 @@ template (Kotlin/Swift), which resolves each command's `viewType` to a
 factory (`docs/CODE_STANDARDS.md`'s naming contract) and applies the batch
 to its native view hierarchy.
 
-Two modes gate a slot's paint. **Mode A** (native view atop an opaque frust
-surface) needs no cooperation — it simply covers its rect. **Mode B** punches
-its rect (`PaintScene::clear_rect`, gated on `PaintCtx::is_translucent()`),
-hoisted by the shared encode walk (`frust-render::convert`) past any enclosing
-clip/layer group to root and composited as an opaque-fill `Compose::DestOut`
-(vello's own `Compose::Clear` is group-local/tile-granular and would
-never reach a scrolled/clipped ancestor's backdrop un-hoisted). That
-gate keys off a **resolved** translucency, never the request:
-`frust::request_translucent_surface` (`frust-shell-common::surface_mode`)
-is a one-way `Opaque`→`Translucent` request latch the platform may refuse
-(no matching `CompositeAlphaMode`, or a GPU-tier blit-fallback surface,
-Module Structure's `frust-render` row); `PaintCtx::is_translucent()` instead
-reflects `SurfaceRenderer::surface_resolved_translucent`, read after every
-surface (re)install and published cross-thread via an `Arc<AtomicBool>`
-on both mobile shells' render-thread split (default on iOS too) — seeded
-from the request for frame 1, re-resolved (cleared on a failed install)
-each later install — so a refusal degrades to Mode A instead of punching
-an unbacked hole.
+Two modes gate a slot's paint, and Mode B is a **build-time host choice**,
+not something frust decides: the generated host template's own constant
+(`FRUST_TRANSLUCENT_SURFACE` on Android, `translucentSurface` on iOS) drives
+the window pixel format, the host's native-sibling z-order, and a one-way
+call into `declare_host_translucent_surface` (`frust-shell-common::surface_mode`)
+— a host *declaration*, not an app request; the facade never exposes it
+(only the two shells' FFI-glue modules may call it, pinned by
+`crates/frust/tests/surface_mode_conformance.rs`). **Mode A** (native view
+atop an opaque frust surface) needs no cooperation — it simply covers its
+rect. **Mode B** punches its rect (`PaintScene::clear_rect`, gated on
+`PaintCtx::is_translucent()`), hoisted by the shared encode walk
+(`frust-render::convert`) past any enclosing clip/layer group to root and
+composited as an opaque-fill `Compose::DestOut` (vello's own
+`Compose::Clear` is group-local/tile-granular and would never reach a
+scrolled/clipped ancestor's backdrop un-hoisted).
+
+The *paint*-side gate is a separate, downstream question from the
+declaration above: it keys off a **resolved** translucency, which the
+platform (not the host declaration) may refuse — no matching
+`CompositeAlphaMode`, or a GPU-tier blit-fallback surface (Module
+Structure's `frust-render` row). `PaintCtx::is_translucent()` reflects
+`SurfaceRenderer::surface_resolved_translucent`, read after every surface
+(re)install and published cross-thread via an `Arc<AtomicBool>` on both
+mobile shells' render-thread split (default on iOS too) — seeded from the
+declaration for frame 1, re-resolved (cleared on a failed install) each
+later install.
+
+**The degrade on refusal is partial, not graceful.** On a resolved refusal
+frust stops punching and clears opaque (the paint-side Mode A contract), but
+the host's z-order stays fixed at build time — a Mode B host's native
+sibling is still arranged *behind* the now-opaque frust surface, so it goes
+invisible rather than reappearing atop it. Nothing today tells the host to
+re-parent (that needs a first Rust→host push the command channel doesn't
+carry yet — filed, deferred:
+`followups/review-fix-2/03-host-refusal-notification-DEFERRED.md`); the
+only fix today is rebuilding the host in Mode A.
 
 **CLI flow:** `Cli` (clap) parses into a `Command`, dispatched by
 `commands::dispatch`, which builds one `RealProcessRunner` and injects it
