@@ -68,7 +68,7 @@ use crate::app::{AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, 
 use crate::ffi_support::{
     ImeJsonState, PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
     load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
-    platform_view_commands_up_to_date, write_pipeline_cache_atomic,
+    platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
 };
 
 /// Startup-span name (task 13): the persisted pipeline-cache blob has been read
@@ -179,6 +179,11 @@ static ANY_SURFACE_CREATED: AtomicBool = AtomicBool::new(false);
 /// latch itself never reverts once set — a stale cached `false` read before
 /// a same-process `nativeSetSurfaceMode(true)` call would otherwise survive
 /// past it.
+///
+/// This produces the REQUEST only. Whether the surface actually came up
+/// translucent is a separate, per-install value the UI thread reads from the
+/// `translucent_resolved` flag [`install_surface`] publishes (review finding
+/// M1) — never re-derive "am I translucent?" from this function.
 fn surface_alpha_request() -> frust_render::SurfaceAlphaRequest {
     match SurfaceModeWatcher::current() {
         SurfaceMode::Translucent => frust_render::SurfaceAlphaRequest::TranslucentPreferred,
@@ -530,6 +535,7 @@ fn install_surface(
     cache_path: Option<&Path>,
     startup_spans: &mut Option<StartupSpans>,
     first_install: bool,
+    translucent_resolved: &AtomicBool,
 ) -> Result<()> {
     // Load + seed the pipeline cache before the surface (and thus vello's
     // renderer + pipeline cache) is created — first install only. The cache
@@ -563,6 +569,19 @@ fn install_surface(
         )
     })
     .context("frust-shell-android: failed to create Android render surface")?;
+
+    // Publish the surface's RESOLVED translucency to the UI thread (review
+    // finding M1): `surface_alpha_request()` above is only what we ASKED for —
+    // `frust-render` resolves it against the platform's advertised alpha modes
+    // and can fall back to an opaque swapchain. The UI thread reads this flag
+    // every frame (`AndroidAppHandle::sync_translucent_resolved`) before
+    // choosing the base color and pushing `set_surface_translucent`, so a
+    // fallback degrades to the Mode A contract instead of `DestOut`-punching
+    // black rectangles. Written on EVERY (re)install, never only the first.
+    publish_resolved_translucency(
+        translucent_resolved,
+        Some(renderer.surface_resolved_translucent()),
+    );
 
     if first_install {
         if let Some(spans) = startup_spans.as_mut() {
@@ -611,6 +630,15 @@ const THREAD_PRIORITY_DISPLAY: libc::c_int = -4;
 /// otherwise leaves a permanent black screen with no platform signal). Later
 /// reinstall failures stay log-only.
 ///
+/// `translucent_resolved` is the resolved-translucency seam (review finding
+/// M1): this thread creates the surface, so only it can see whether the
+/// requested translucent alpha mode was actually granted. It stores the
+/// outcome on every (re)install (and clears it on a failed one) for the UI
+/// thread — which owns the `RenderRoot` and the per-frame base color — to read
+/// each frame. Seeded from the REQUEST by
+/// [`spawn_split_executor`], so the common (capable) case is Mode B from frame
+/// 1 and only a real resolution can downgrade it.
+///
 /// [`UiSpans`]: frust_shell_common::perf::UiSpans
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableWindowPtr>,
@@ -619,6 +647,7 @@ pub(crate) fn render_loop(
     fatal: Arc<AtomicBool>,
     scene_return: SceneReturnSender<Scene>,
     presented: Arc<AtomicU64>,
+    translucent_resolved: Arc<AtomicBool>,
 ) {
     // Render-thread priority self-boost (phase-11 fix F6): raise this dedicated
     // render thread to the display band so a busy UI thread can't starve the GPU
@@ -682,9 +711,16 @@ pub(crate) fn render_loop(
                         cache_path.as_deref(),
                         &mut startup_spans,
                         first_install,
+                        &translucent_resolved,
                     ) {
                         Ok(()) => first_install_done = true,
                         Err(err) => {
+                            // A failed (re)install leaves no surface whose
+                            // translucency we can vouch for — clear the flag
+                            // rather than leaving the previous surface's value
+                            // standing (review M1: never punch a hole you
+                            // can't prove is a window).
+                            publish_resolved_translucency(&translucent_resolved, None);
                             log::error!(
                                 "frust-shell-android: render-thread surface install failed: {err:#}"
                             );
@@ -867,10 +903,35 @@ fn create_handle(
     // Both retain `window` in `AndroidAppHandle` (the UI thread owns the
     // `NativeWindow` and releases it only after the render thread — split — acks
     // dropping the surface built from its pointer).
+    // The resolved-translucency seam (review finding M1). SEEDED FROM THE
+    // REQUEST: the surface is created asynchronously on the render thread in
+    // the default split, and an all-but-certain grant (the shipped Android
+    // config resolves `Inherit`) should not cost a Mode-A flash on frame 1 —
+    // so the optimistic value stands until the render thread reports a real
+    // resolution, which can only ever downgrade it. One clone per surface
+    // owner (render thread or inline renderer), one in the handle for the UI
+    // thread's per-frame read.
+    let translucent_resolved = Arc::new(AtomicBool::new(
+        SurfaceModeWatcher::current() == SurfaceMode::Translucent,
+    ));
+
     let (executor, text_ctx) = if render_thread_enabled() {
-        spawn_split_executor(startup_spans, &window, physical, scale, cache_dir)
+        spawn_split_executor(
+            startup_spans,
+            &window,
+            physical,
+            scale,
+            cache_dir,
+            Arc::clone(&translucent_resolved),
+        )
     } else {
-        build_inline_executor(startup_spans, &window, physical, cache_dir)?
+        build_inline_executor(
+            startup_spans,
+            &window,
+            physical,
+            cache_dir,
+            &translucent_resolved,
+        )?
     };
 
     // Process-once (the runtime's own `OnceLock` provides that property; a
@@ -895,7 +956,15 @@ fn create_handle(
     // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
     let handle = rt.with_owner(|| {
         let app = make_app();
-        AndroidAppHandle::new(executor, text_ctx, window, physical, scale, app)
+        AndroidAppHandle::new(
+            executor,
+            text_ctx,
+            window,
+            physical,
+            scale,
+            translucent_resolved,
+            app,
+        )
     });
 
     // SAFETY: hand a uniquely-owned boxed handle to the JVM as `jlong`; it is
@@ -916,6 +985,7 @@ fn build_inline_executor(
     window: &NativeWindow,
     physical: (u32, u32),
     cache_dir: Option<String>,
+    translucent_resolved: &AtomicBool,
 ) -> Result<(FrameExecutor, TextContext)> {
     let mut renderer = frust_render::SurfaceRenderer::new();
 
@@ -967,6 +1037,15 @@ fn build_inline_executor(
     })
     .context("frust-shell-android: failed to create Android render surface")?;
 
+    // Replace the request-seeded optimism with the real resolution (review
+    // finding M1) — on this path the renderer lives on the UI thread, so the
+    // handle's per-frame sync re-reads it from the renderer anyway; storing it
+    // here keeps the flag correct for the construction-time push too.
+    publish_resolved_translucency(
+        translucent_resolved,
+        Some(renderer.surface_resolved_translucent()),
+    );
+
     startup_spans.record(perf::SPAN_ADAPTER_READY);
     startup_spans.record(perf::SPAN_DEVICE_READY);
     startup_spans.record(perf::SPAN_RENDERER_READY);
@@ -1002,6 +1081,7 @@ fn spawn_split_executor(
     physical: (u32, u32),
     scale: jfloat,
     cache_dir: Option<String>,
+    translucent_resolved: Arc<AtomicBool>,
 ) -> (FrameExecutor, TextContext) {
     // Font/`TextContext` warmup (phase 10.D) stays UI-side — layout runs on the
     // UI thread. The GPU work is off-thread now, so this join's ordering vs GPU
@@ -1048,6 +1128,7 @@ fn spawn_split_executor(
                     fatal_render,
                     scene_return_tx,
                     presented_render,
+                    translucent_resolved,
                 )
             })
         })
@@ -1434,6 +1515,11 @@ pub fn native_system_ui_state(handle: jlong) -> jlong {
 /// no-op for the current surface — it cannot retroactively change a format
 /// already chosen. `translucent == false` is always a no-op too: there is
 /// nothing to "un-latch".
+///
+/// Latching only sets the *request*: a device advertising no translucent
+/// alpha mode still comes up opaque, and the paint contract follows the
+/// RESOLVED outcome (`frust_render::SurfaceRenderer::surface_resolved_translucent`,
+/// review finding M1), not this latch.
 pub fn native_set_surface_mode(translucent: jboolean) {
     guard("nativeSetSurfaceMode", (), || {
         if !translucent {

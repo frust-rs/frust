@@ -412,6 +412,13 @@ pub use frust_shell_common::font_registry::register_app_fonts;
 /// latch and thread contracts (mirrors [`set_app_theme`]'s: callable from any
 /// thread, a plain `Mutex`-guarded process-global).
 ///
+/// **A request, not a guarantee.** A platform whose surface advertises no
+/// translucent alpha mode refuses it; the shell then logs a warning and the
+/// app degrades to Mode A compositing (an opaque surface with the native view
+/// drawn on top, no hole punch) rather than presenting black slot rectangles.
+/// Pair Mode B with an explicit opaque app-root background either way — see
+/// `docs/CODE_STANDARDS.md`'s platform-view paint contract.
+///
 /// ```no_run
 /// // Call during startup, before the shell creates its GPU surface.
 /// frust::request_translucent_surface();

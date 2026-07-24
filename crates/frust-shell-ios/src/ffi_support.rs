@@ -440,16 +440,96 @@ fn push_command_json(out: &mut String, cmd: &PlatformViewCommand) {
     }
 }
 
+/// Append one [`PvRect`] as the wire array `[x,y,w,h]`, **sanitizing any
+/// non-finite component to `0`** — `NaN`/`±inf` have no JSON representation
+/// and would emit an unparseable token, breaking the whole batch for the Swift
+/// host. Parity with `frust-shell-android`'s `platform_view_rect_json`
+/// (review Minor 13) and with [`push_num_or_null`]'s caret guard above.
 fn push_rect_json(out: &mut String, rect: PvRect) {
     out.push('[');
-    let _ = write!(out, "{}", rect.x);
+    push_finite(out, rect.x);
     out.push(',');
-    let _ = write!(out, "{}", rect.y);
+    push_finite(out, rect.y);
     out.push(',');
-    let _ = write!(out, "{}", rect.w);
+    push_finite(out, rect.w);
     out.push(',');
-    let _ = write!(out, "{}", rect.h);
+    push_finite(out, rect.h);
     out.push(']');
+}
+
+/// Append `v` as a JSON number, substituting a finite `0` for a non-finite
+/// value (see [`push_rect_json`]). A rect is a required field (unlike the
+/// optional caret), so it degrades to `0` rather than `null`, matching
+/// Android's `json_number`.
+fn push_finite(out: &mut String, v: f64) {
+    if v.is_finite() {
+        let _ = write!(out, "{v}");
+    } else {
+        out.push('0');
+    }
+}
+
+/// Publish a surface (re)install's **resolved** translucency onto the shared,
+/// cross-thread flag the UI thread reads each frame (review finding M1).
+///
+/// `resolved` is `Some(translucent)` for a successful install — the value
+/// `frust_render::SurfaceRenderer::surface_resolved_translucent` reports for
+/// the surface that just went live — and `None` for a FAILED one, which stores
+/// `false`: with no surface whose alpha mode we can vouch for, the safe
+/// contract is the opaque Mode A one (never punch a hole you can't prove is a
+/// window), and leaving the previous surface's value standing would be exactly
+/// the stale-truth bug this seam exists to remove.
+///
+/// `Release` pairs with [`read_resolved_translucency`]'s `Acquire` so the UI
+/// thread observing a store also observes everything the render thread did
+/// before it.
+#[inline]
+pub(crate) fn publish_resolved_translucency(
+    flag: &std::sync::atomic::AtomicBool,
+    resolved: Option<bool>,
+) {
+    flag.store(
+        resolved.unwrap_or(false),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+/// The UI-thread half of [`publish_resolved_translucency`]: read the live
+/// surface's resolved translucency before choosing this frame's base color and
+/// pushing `RenderRoot::set_surface_translucent`.
+///
+/// Until the render thread's first install lands, this reads the
+/// construction-time seed — the app's REQUEST — so the capable common case
+/// renders Mode B from frame 1; a fallback downgrades it within one frame of
+/// the install (the one-optimistic-frame window, documented at the field).
+#[inline]
+pub(crate) fn read_resolved_translucency(flag: &std::sync::atomic::AtomicBool) -> bool {
+    flag.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// This frame's base clear color, chosen from the surface's **resolved**
+/// translucency (review finding M1).
+///
+/// A surface that really came up translucent clears to `transparent` so a
+/// native sibling view behind it shows through wherever nothing painted (Mode
+/// B); everything else — including a translucency request the platform
+/// refused — clears to the theme's opaque surface color, exactly as before
+/// platform views existed.
+///
+/// Generic over the color type purely so this decision stays host-testable:
+/// `peniko` is an iOS-gated dependency of this crate, and this module compiles
+/// on every host (see the crate docs' Layering note).
+#[inline]
+pub(crate) fn base_clear_color<C>(
+    resolved_translucent: bool,
+    transparent: C,
+    opaque_surface: C,
+) -> C {
+    if resolved_translucent {
+        transparent
+    } else {
+        opaque_surface
+    }
 }
 
 #[cfg(test)]
@@ -773,6 +853,71 @@ mod tests {
         let json = platform_view_commands_json(1, 0, &commands).unwrap();
         assert!(json.contains(r#""viewType":"dev.frust.\"Weird\"""#));
         assert!(json.contains(r#""params":"line1\nline2""#));
+    }
+
+    #[test]
+    fn platform_view_rect_json_sanitizes_non_finite_components() {
+        // Android parity (review Minor 13): a `NaN`/`inf` rect component must
+        // never emit an unparseable JSON token — the Swift host parses the
+        // whole batch, so one bad number would drop every command in it.
+        let commands = vec![PlatformViewCommand::Update {
+            slot_id: 1,
+            rect: PvRect {
+                x: f64::NAN,
+                y: f64::INFINITY,
+                w: f64::NEG_INFINITY,
+                h: 4.0,
+            },
+            clip: Some(PvRect {
+                x: 0.0,
+                y: f64::NAN,
+                w: 2.0,
+                h: 3.0,
+            }),
+            visible: true,
+        }];
+        let json = platform_view_commands_json(1, 0, &commands).unwrap();
+        assert!(json.contains(r#""rect":[0,0,0,4]"#), "{json}");
+        assert!(json.contains(r#""clip":[0,0,2,3]"#), "{json}");
+        assert!(!json.contains("NaN") && !json.contains("inf"), "{json}");
+    }
+
+    #[test]
+    fn resolved_translucency_handoff_survives_a_fake_install_sequence() {
+        // The Arc<AtomicBool> handoff the render-thread split runs on (review
+        // finding M1), driven with FAKE installs so it is host-testable (the
+        // real `install_surface` needs a GPU and a `CAMetalLayer`).
+        //
+        // Seeded from the REQUEST: the app asked for translucency, so frame 1
+        // renders Mode B optimistically rather than flashing opaque while the
+        // render thread is still creating the surface.
+        let flag = std::sync::atomic::AtomicBool::new(true);
+        assert!(read_resolved_translucency(&flag));
+
+        // A real resolution can only ever downgrade it: this device advertised
+        // no translucent alpha mode, so the surface came up opaque.
+        publish_resolved_translucency(&flag, Some(false));
+        assert!(
+            !read_resolved_translucency(&flag),
+            "the UI thread must observe a render-thread downgrade"
+        );
+        assert_eq!(
+            base_clear_color(read_resolved_translucency(&flag), "TRANSPARENT", "surface"),
+            "surface",
+            "a fallback-to-opaque surface keeps the opaque theme base color"
+        );
+
+        // A capable re-install / self-healed recreate restores Mode B.
+        publish_resolved_translucency(&flag, Some(true));
+        assert_eq!(
+            base_clear_color(read_resolved_translucency(&flag), "TRANSPARENT", "surface"),
+            "TRANSPARENT"
+        );
+
+        // A FAILED recreate clears it rather than leaving the previous
+        // surface's `true` standing.
+        publish_resolved_translucency(&flag, None);
+        assert!(!read_resolved_translucency(&flag));
     }
 
     #[test]

@@ -40,9 +40,8 @@ use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, Start
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
-    RenderSender, SceneFrame, SceneReturnReceiver, SurfaceMode, SurfaceModeWatcher, SurfaceSize,
-    ThemeOverrideWatcher, ViewCommand, effective_brightness_for_platform_change, logical_insets,
-    logical_size, sanitize_scale,
+    RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher, ViewCommand,
+    effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, DesignLanguage, Theme};
@@ -236,18 +235,30 @@ pub struct AndroidAppHandle {
     /// force-hidden on backgrounding via [`Self::suspend_platform_views`]
     /// (`nativeOnPause`).
     platform_view_state: PlatformViewState,
-    /// Whether this handle's GPU surface was created with an alpha channel —
-    /// a one-time read, at construction, of the process-wide
-    /// [`SurfaceModeWatcher`] latch (task 03) that `crate::jni_glue`'s
-    /// surface-creation call sites separately resolve into a
-    /// `SurfaceAlphaRequest` for the actual `wgpu` surface config. Cached
-    /// here (rather than re-read every frame) because the latch is one-way —
-    /// once observed `Translucent` at construction it can never revert — so
-    /// [`Self::frame`]'s per-frame base_color swap (the app.rs:1690 site)
-    /// needs no fresh lock. Drives that swap to `TRANSPARENT` instead of the
-    /// theme's opaque surface color, so a native sibling view placed behind
-    /// this surface shows through wherever nothing painted.
-    translucent: bool,
+    /// Whether this handle's GPU surface **actually came up** translucent
+    /// (alpha-channel, Mode B) — the RESOLVED capability, not the
+    /// [`SurfaceModeWatcher`] request latch (review finding M1).
+    ///
+    /// The latch says what the app *asked* for; `frust-render` resolves that
+    /// against the platform's advertised alpha modes and can silently fall
+    /// back to an opaque swapchain
+    /// ([`SurfaceRenderer::surface_resolved_translucent`] is the truth). Keying
+    /// the base-color swap and `RenderRoot::set_surface_translucent` off the
+    /// request instead would clear to `TRANSPARENT` and let every
+    /// `platform_view` slot `DestOut`-punch its rect on an opaque surface —
+    /// black rectangles. So the invariant "fixed before the surface exists,
+    /// never changes" is **false**: a (re)install can downgrade this.
+    ///
+    /// An `Arc<AtomicBool>` (the `fatal`/`presented` cross-thread pattern)
+    /// because in the default render-thread split the surface is created on
+    /// the RENDER thread while this (UI) thread owns the `RenderRoot` and the
+    /// per-frame base color. **Seeded from the request at construction** so the
+    /// overwhelmingly common (capable) case renders Mode B correctly from frame
+    /// 1 with no flicker; only a real render-thread resolution may downgrade
+    /// it, within one frame of the install (see [`Self::sync_translucent_resolved`]).
+    ///
+    /// [`SurfaceRenderer::surface_resolved_translucent`]: frust_render::SurfaceRenderer::surface_resolved_translucent
+    translucent_resolved: Arc<AtomicBool>,
 }
 
 /// One finished frame's payload crossing the UI→render-thread handoff in the
@@ -876,6 +887,7 @@ impl AndroidAppHandle {
         window: NativeWindow,
         physical: (u32, u32),
         scale: f32,
+        translucent_resolved: Arc<AtomicBool>,
         mut app: Box<dyn AppTree>,
     ) -> Self {
         // Construction-time font drain (task 14): apply any fonts registered via
@@ -906,11 +918,16 @@ impl AndroidAppHandle {
         }
 
         app.set_theme(Box::new(theme.clone()));
-        // Thread the one-way translucent-surface latch into the render root so
+        // Thread the surface's RESOLVED translucency into the render root so
         // the platform-view hole-punch clears each Mode B slot's rect (research
-        // VERIFY.md D1). Read once here, mirroring the `translucent` field below;
-        // the latch is fixed before the surface exists so this never changes.
-        app.set_surface_translucent(SurfaceModeWatcher::current() == SurfaceMode::Translucent);
+        // VERIFY.md D1) — and only when the surface really came up translucent
+        // (review M1). At construction the split's surface may still be
+        // installing render-side, so this reads the request-seeded flag; the
+        // per-frame `sync_translucent_resolved` below re-reads it every frame
+        // and downgrades within one frame of a fallback.
+        app.set_surface_translucent(crate::ffi_support::read_resolved_translucency(
+            &translucent_resolved,
+        ));
         provide_context(theme.clone());
         app.rebuild();
         let mut executor = executor;
@@ -951,8 +968,36 @@ impl AndroidAppHandle {
             last_frame_time_nanos: None,
             deadline_overruns: 0,
             platform_view_state: PlatformViewState::new(),
-            translucent: SurfaceModeWatcher::current() == SurfaceMode::Translucent,
+            translucent_resolved,
         }
+    }
+
+    /// Re-read the live surface's RESOLVED translucency and push it into the
+    /// render root, returning it for this frame's base-color choice (review
+    /// finding M1).
+    ///
+    /// Two sources, one flag:
+    /// - **Inline** (`FRUST_NO_RENDER_THREAD`): the renderer lives on this
+    ///   thread, so its `surface_resolved_translucent()` is authoritative and
+    ///   is copied into the shared flag here — never stale, even after a failed
+    ///   reinstall (the renderer still describes whatever surface is live).
+    /// - **Split** (default): the render thread stored the resolution when it
+    ///   installed the surface; this is a plain atomic load.
+    ///
+    /// Cheap enough to call every frame: one enum match plus one atomic load,
+    /// and [`AppTree::set_surface_translucent`] is no-op-if-unchanged (it marks
+    /// `ChangeFlags::PAINT` only on an actual flip, which is exactly what makes
+    /// a downgrade repaint without the punch).
+    fn sync_translucent_resolved(&mut self) -> bool {
+        if let FrameExecutor::Inline(inline) = &self.executor {
+            crate::ffi_support::publish_resolved_translucency(
+                &self.translucent_resolved,
+                Some(inline.renderer.surface_resolved_translucent()),
+            );
+        }
+        let resolved = crate::ffi_support::read_resolved_translucency(&self.translucent_resolved);
+        self.app.set_surface_translucent(resolved);
+        resolved
     }
 
     /// Attach the accesskit Android adapter to the host `FrustSurfaceView`
@@ -1179,6 +1224,11 @@ impl AndroidAppHandle {
         // sibling-view hierarchy from scratch rather than assuming any prior
         // placement survived.
         self.platform_view_state.reset_for_surface_recreate();
+        // The new surface re-resolves its alpha mode from scratch (review M1);
+        // the render thread stores the outcome when it installs. Re-push
+        // whatever is known now — the next `frame` re-reads it, so a
+        // downgrade lands within one frame of the install.
+        self.sync_translucent_resolved();
     }
 
     /// Record the window + physical size backing a freshly (re)created surface.
@@ -1204,6 +1254,11 @@ impl AndroidAppHandle {
         // See `split_recreate_surface`'s matching call: a new surface means a
         // fresh native-view hierarchy on the Kotlin side (task 05).
         self.platform_view_state.reset_for_surface_recreate();
+        // Inline recreate: the renderer on this thread already holds the new
+        // surface, so this reads its freshly RESOLVED translucency (review M1)
+        // — a recreate that fell back to opaque degrades to Mode A here rather
+        // than punching black holes for the rest of the process.
+        self.sync_translucent_resolved();
     }
 
     /// Resize the live surface in place (same window, new dimensions). Safe: no
@@ -1531,6 +1586,15 @@ impl AndroidAppHandle {
             return;
         }
 
+        // Resolved-translucency sync (review finding M1), before the gate
+        // inputs are gathered: a render-thread fallback-to-opaque flips
+        // `RenderRoot::set_surface_translucent` to `false`, which marks
+        // `ChangeFlags::PAINT` and therefore forces THIS frame to run (via
+        // `change_flags_pending` below) and repaint without the hole punch.
+        // The returned value also drives the base color further down, so the
+        // clear color and the punch contract can never disagree.
+        let translucent_resolved = self.sync_translucent_resolved();
+
         // Reactive signals-dirty (task 07), drained only past the surface-ready
         // gate — mirroring the iOS shell — so a signal written during a
         // not-ready window is never consumed by a tick that can't render; it is
@@ -1774,17 +1838,18 @@ impl AndroidAppHandle {
             paint: paint_time,
             skipped: false,
         };
-        // Platform-views translucent mode (task 05): a surface latched
-        // translucent at construction (`self.translucent`) must clear to
-        // alpha-0, not the theme's opaque surface color, so a native
-        // sibling view placed behind it shows through wherever this frame
-        // painted nothing (Mode B — see `docs/ARCHITECTURE.md`/the
-        // platform-views PLAN). Unlatched: bit-for-bit today's behavior.
-        let base_color = if self.translucent {
-            peniko::Color::TRANSPARENT
-        } else {
-            self.theme.scheme().surface
-        };
+        // Platform-views translucent mode (task 05, corrected by review M1): a
+        // surface that RESOLVED translucent (`translucent_resolved`, read at
+        // the top of this frame — not the request latch) must clear to alpha-0,
+        // not the theme's opaque surface color, so a native sibling view placed
+        // behind it shows through wherever this frame painted nothing (Mode B —
+        // see `docs/ARCHITECTURE.md`/the platform-views PLAN). Opaque —
+        // requested-but-unavailable included: bit-for-bit today's behavior.
+        let base_color = crate::ffi_support::base_clear_color(
+            translucent_resolved,
+            peniko::Color::TRANSPARENT,
+            self.theme.scheme().surface,
+        );
         let size = SurfaceSize {
             width: self.physical.0,
             height: self.physical.1,

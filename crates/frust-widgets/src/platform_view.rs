@@ -31,8 +31,11 @@
 //!
 //! The widget can't see the surface mode directly (that lives in the shell); it
 //! reads the threaded [`PaintCtx::is_translucent`] flag instead (the render root
-//! seeds it from the shell's one-way surface-mode latch). Punching is therefore
-//! gated on that flag — Mode A keeps the paints-nothing behavior. In every mode
+//! seeds it from the surface's **resolved** translucency — what the GPU backend
+//! actually granted, not the app's one-way surface-mode request, so a platform
+//! that refuses translucency degrades to Mode A rather than punching holes in
+//! an opaque swapchain). Punching is therefore gated on that flag — Mode A
+//! keeps the paints-nothing behavior. In every mode
 //! [`PlatformViewWidget::paint`] also *publishes* the [`PlatformViewFrame`]
 //! describing where/how the native view should be placed; the actual
 //! composition happens downstream (task 03's differ, the per-shell channel
@@ -559,6 +562,71 @@ mod tests {
         );
         // The frame is still published in both modes.
         assert_eq!(pctx.take_platform_views().len(), 1);
+    }
+
+    // -- resolved-translucency flip (review M1) -----------------------------
+
+    /// Count the `ClearRect` commands in a real display list — the punch as the
+    /// GPU backend will actually see it, one level below the recording
+    /// `PaintScene` the tests above use (the t11-redo D4 lesson: a
+    /// recording-level assertion missed a real defect in this exact path).
+    fn clear_rects(scene: &frust_scene::Scene) -> usize {
+        scene
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, frust_scene::Command::ClearRect { .. }))
+            .count()
+    }
+
+    #[test]
+    fn a_resolved_translucency_downgrade_stops_the_punch_in_the_real_display_list() {
+        // Review finding M1: the shells now push the surface's RESOLVED
+        // translucency (`SurfaceRenderer::surface_resolved_translucent`), not
+        // the request latch, so a surface that asked for translucency and
+        // fell back to an opaque swapchain flips this to `false` — and the
+        // punch must stop, or the `DestOut` composite zeroes real pixels and
+        // presents black rectangles.
+        fn logic(_: &mut ()) -> PlatformViewView {
+            platform_view("dev.frust.MapFactory").size(100.0, 80.0)
+        }
+
+        let mut root: frust_core::RenderRoot<(), PlatformViewView> = frust_core::RenderRoot::new();
+        let mut state = ();
+        let mut scene = frust_scene::Scene::new();
+
+        // Frame 1: the surface resolved translucent (Mode B) — the slot punches.
+        root.set_surface_translucent(true);
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            root.paint(&mut builder, frust_core::FrameTime::ZERO);
+        }
+        assert_eq!(
+            clear_rects(&scene),
+            1,
+            "a translucent-resolved surface must punch exactly one slot rect"
+        );
+
+        // Frame 2: a (re)install resolved OPAQUE — the shell pushes `false`.
+        root.set_surface_translucent(false);
+        assert!(
+            root.has_pending_change_flags(),
+            "a translucency downgrade must mark the tree dirty so the next \
+             frame actually repaints without the punch"
+        );
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+        scene.reset();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            root.paint(&mut builder, frust_core::FrameTime::ZERO);
+        }
+        assert_eq!(
+            clear_rects(&scene),
+            0,
+            "an opaque-resolved surface must encode no punch at all (Mode A)"
+        );
     }
 
     #[cfg(debug_assertions)]

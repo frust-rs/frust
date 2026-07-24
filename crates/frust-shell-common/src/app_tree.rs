@@ -163,11 +163,15 @@ pub trait AppTree {
     /// "Mode B"), threaded into every subsequent paint pass (delegates to
     /// [`RenderRoot::set_surface_translucent`]).
     ///
-    /// A shell reads its process-wide surface-mode latch once
-    /// ([`crate::SurfaceModeWatcher`] — the mode is one-way, fixed before the
-    /// surface is created) and pushes it here at construction; the platform-view
-    /// hole-punch then clears each slot's rect on a translucent surface so an
-    /// opaque app backdrop doesn't seal the hole (see
+    /// A shell pushes the surface's **resolved** translucency here — what
+    /// `frust_render::SurfaceRenderer::surface_resolved_translucent` reports
+    /// after an install, NOT the [`crate::SurfaceModeWatcher`] request latch
+    /// (review finding M1: a translucency request the platform refuses must
+    /// degrade to the opaque Mode A contract, or the punch presents black
+    /// rectangles). Both mobile shells re-read it every frame, so a
+    /// render-thread fallback downgrades within one frame. The platform-view
+    /// hole-punch then clears each slot's rect on a genuinely translucent
+    /// surface so an opaque app backdrop doesn't seal the hole (see
     /// [`RenderRoot::set_surface_translucent`]). Desktop leaves the default
     /// (opaque). Defaulted to a **no-op** so existing [`AppTree`] impls compile
     /// unchanged; the concrete tree overrides it — mirrors

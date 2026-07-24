@@ -1074,6 +1074,43 @@ mod tests {
     }
 
     #[test]
+    fn mode_a_scene_encodes_no_clear_rect_even_with_a_slot_sized_region() {
+        // Review finding M1's encode-level half: when the surface's RESOLVED
+        // translucency is `false` (an opaque swapchain — including a
+        // `TranslucentPreferred` request that fell back, see context.rs's
+        // `forced_mismatch_translucent_request_resolves_not_translucent`), the
+        // slot widget emits NO `ClearRect`, so the encode walk must produce no
+        // `clear_rect` on the sink at all — nothing gets `DestOut`-zeroed and
+        // the slot region simply keeps whatever painted there (Mode A: the
+        // native view covers it from on top).
+        //
+        // Asserted at ENCODE level rather than at the recording-`PaintScene`
+        // level deliberately (the t11-redo D4 lesson: a recording-level test
+        // missed a real defect in this exact punch path).
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let backdrop = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let slot = Rect::new(50.0, 50.0, 150.0, 150.0);
+        builder.fill_rect(backdrop, Brush::Solid(RED));
+        // A Mode A slot paints nothing of its own; the scene carries only the
+        // app's own content over the slot's region.
+        builder.push_clip(slot);
+        builder.pop_clip();
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert!(
+            !sink
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::ClearRect { .. })),
+            "an opaque-resolved surface must encode no punch: {:?}",
+            sink.events
+        );
+    }
+
+    #[test]
     fn clear_rect_punches_beneath_a_backdrop_fill_preserving_order() {
         // The exact D1 shape: an opaque backdrop fill, then a slot clear over
         // part of it — the clear must encode AFTER the fill so it erases it.

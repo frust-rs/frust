@@ -243,16 +243,22 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
     /// Store whether the shell's GPU surface is translucent (alpha-channel,
     /// "Mode B"), threaded into every subsequent paint pass and recovered by
-    /// widgets through [`crate::widget::PaintCtx::is_translucent`]. A shell reads
-    /// its surface-mode latch once (the mode is one-way, fixed pre-surface —
-    /// see `frust-shell-common::surface_mode`) and pushes it here; every desktop
-    /// app leaves the default `false` (opaque, "Mode A").
+    /// widgets through [`crate::widget::PaintCtx::is_translucent`]. A shell
+    /// pushes the surface's **resolved** translucency here — what the GPU
+    /// backend reports after the surface is installed, not what the app
+    /// requested via `frust-shell-common::surface_mode`'s latch: a translucency
+    /// request the platform refuses must degrade to the opaque contract, or
+    /// every `platform_view` slot punches a hole in an opaque swapchain
+    /// (black rectangles). Every desktop app leaves the default `false`
+    /// (opaque, "Mode A").
     ///
     /// Marks `PAINT` pending on an actual change (`PartialEq`-guarded, mirroring
     /// [`RenderRoot::set_insets`]'s no-op guard): translucency is read purely at
     /// paint time (the hole-punch runs in `paint`, never baked at layout), so a
-    /// flip must repaint but need not relayout. In practice the latch never
-    /// changes after startup, so this is belt-and-suspenders.
+    /// flip must repaint but need not relayout. A flip is rare but **real**: a
+    /// surface (re)install can resolve differently from the previous one, and
+    /// both mobile shells re-push this every frame (the no-op-if-unchanged
+    /// guard is what makes that free).
     pub fn set_surface_translucent(&mut self, translucent: bool) {
         if self.surface_translucent == translucent {
             return;

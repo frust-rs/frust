@@ -470,9 +470,112 @@ pub(crate) fn resolve_preinit<T>(joined: Option<Option<T>>, fresh: impl FnOnce()
     }
 }
 
+/// Publish a surface (re)install's **resolved** translucency onto the shared,
+/// cross-thread flag the UI thread reads each frame (review finding M1).
+///
+/// `resolved` is `Some(translucent)` for a successful install — the value
+/// `frust_render::SurfaceRenderer::surface_resolved_translucent` reports for
+/// the surface that just went live — and `None` for a FAILED one, which stores
+/// `false`: with no surface whose alpha mode we can vouch for, the safe
+/// contract is the opaque Mode A one (never punch a hole you can't prove is a
+/// window), and leaving the previous surface's value standing would be exactly
+/// the stale-truth bug this seam exists to remove.
+///
+/// `Release` pairs with [`read_resolved_translucency`]'s `Acquire` so the UI
+/// thread observing a store also observes everything the render thread did
+/// before it.
+#[inline]
+pub(crate) fn publish_resolved_translucency(
+    flag: &std::sync::atomic::AtomicBool,
+    resolved: Option<bool>,
+) {
+    flag.store(
+        resolved.unwrap_or(false),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+/// The UI-thread half of [`publish_resolved_translucency`]: read the live
+/// surface's resolved translucency before choosing this frame's base color and
+/// pushing `RenderRoot::set_surface_translucent`.
+///
+/// Until the render thread's first install lands, this reads the
+/// construction-time seed — the app's REQUEST — so the capable common case
+/// renders Mode B from frame 1; a fallback downgrades it within one frame of
+/// the install (the one-optimistic-frame window, documented at the field).
+#[inline]
+pub(crate) fn read_resolved_translucency(flag: &std::sync::atomic::AtomicBool) -> bool {
+    flag.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// This frame's base clear color, chosen from the surface's **resolved**
+/// translucency (review finding M1).
+///
+/// A surface that really came up translucent clears to `transparent` so a
+/// native sibling view behind it shows through wherever nothing painted (Mode
+/// B); everything else — including a translucency request the platform
+/// refused — clears to the theme's opaque surface color, exactly as before
+/// platform views existed.
+///
+/// Generic over the color type purely so this decision stays host-testable:
+/// `peniko` is an Android-gated dependency of this crate, and this module
+/// compiles on every host (see the module docs).
+#[inline]
+pub(crate) fn base_clear_color<C>(
+    resolved_translucent: bool,
+    transparent: C,
+    opaque_surface: C,
+) -> C {
+    if resolved_translucent {
+        transparent
+    } else {
+        opaque_surface
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn resolved_translucency_handoff_survives_a_fake_install_sequence() {
+        // The Arc<AtomicBool> handoff the render-thread split runs on (review
+        // finding M1), driven here with FAKE installs so it is host-testable
+        // (the real `install_surface` needs a GPU and an `ANativeWindow`).
+        //
+        // Seeded from the REQUEST: the app asked for translucency, so frame 1
+        // renders Mode B optimistically rather than flashing opaque while the
+        // render thread is still creating the surface.
+        let flag = AtomicBool::new(true);
+        assert!(read_resolved_translucency(&flag));
+
+        // A real resolution can only ever downgrade it: this device advertised
+        // no translucent alpha mode, so the surface came up opaque.
+        publish_resolved_translucency(&flag, Some(false));
+        assert!(
+            !read_resolved_translucency(&flag),
+            "the UI thread must observe a render-thread downgrade"
+        );
+        assert_eq!(
+            base_clear_color(read_resolved_translucency(&flag), "TRANSPARENT", "surface"),
+            "surface",
+            "a fallback-to-opaque surface keeps the opaque theme base color"
+        );
+
+        // A capable reinstall (e.g. after a rotation) restores Mode B.
+        publish_resolved_translucency(&flag, Some(true));
+        assert!(read_resolved_translucency(&flag));
+        assert_eq!(
+            base_clear_color(read_resolved_translucency(&flag), "TRANSPARENT", "surface"),
+            "TRANSPARENT"
+        );
+
+        // A FAILED reinstall clears it rather than leaving the previous
+        // surface's `true` standing.
+        publish_resolved_translucency(&flag, None);
+        assert!(!read_resolved_translucency(&flag));
+    }
 
     #[test]
     fn resolve_preinit_adopts_a_ready_context() {

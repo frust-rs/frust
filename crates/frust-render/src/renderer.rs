@@ -59,7 +59,14 @@ pub enum SurfaceAlphaRequest {
     /// translucent mode) then `PreMultiplied`, in that order, against the
     /// surface's reported `alpha_modes`. Falls back to `Opaque`'s `Auto` (and
     /// a `log::warn!`) when none of those three is available — translucency
-    /// is then silently unavailable on that surface.
+    /// is then unavailable on that surface.
+    ///
+    /// **This is a request, not an outcome.** Never key a paint contract off
+    /// it: read
+    /// [`SurfaceRenderer::surface_resolved_translucent`](SurfaceRenderer::surface_resolved_translucent)
+    /// after the surface is installed instead (review finding M1 — a fallback
+    /// must degrade to the opaque Mode A contract, or the hole punch presents
+    /// black rectangles on an opaque swapchain).
     TranslucentPreferred,
 }
 
@@ -227,6 +234,39 @@ impl SurfaceRenderer {
         let (cache, key) = ready.pipeline_cache.as_ref()?;
         let data = cache.get_data()?;
         Some(crate::pipeline_cache::frame(key, &data))
+    }
+
+    /// Whether the **live** surface actually resolved to a translucent
+    /// (alpha-compositing) mode — the truth a shell's Mode B paint contract
+    /// must key off, replacing the `SurfaceAlphaRequest` it *asked* for
+    /// (review finding M1).
+    ///
+    /// [`SurfaceAlphaRequest::TranslucentPreferred`] is a *preference*: the
+    /// configure step resolves it against the platform's advertised alpha modes
+    /// and silently degrades to an opaque swapchain (with a `log::warn!`) when
+    /// none is available. A shell that clears its base color to `TRANSPARENT`
+    /// and lets `platform_view` slots punch their rects on the strength of the
+    /// request alone then presents black rectangles on that opaque swapchain.
+    /// Reading this after every successful `on_surface_created*`/
+    /// [`on_surface_installed`](Self::on_surface_installed) — and re-reading it
+    /// after every recreate — is what makes a fallback degrade to the Mode A
+    /// contract (opaque base, no punch) instead.
+    ///
+    /// `false` outside [`SurfacePhase::SurfaceReady`]: with no live surface
+    /// there is nothing translucent to composite against, and `false` is the
+    /// safe (Mode A) default — never punch a hole you can't prove is a window.
+    ///
+    /// Deliberately **not** named `is_surface_translucent`: `RenderRoot` (which
+    /// sits on the other side of this same call chain) already owns a method by
+    /// that name for the *pushed* flag, and a shell threads this value straight
+    /// into it. The signature is `wgpu`-free, like every other value crossing
+    /// this crate's boundary (`docs/CODE_STANDARDS.md`'s wgpu-leak
+    /// anti-pattern).
+    pub fn surface_resolved_translucent(&self) -> bool {
+        match &self.state {
+            SurfaceState::Ready(ready) => ready.surface.resolved_translucent,
+            SurfaceState::NoSurface | SurfaceState::Lost => false,
+        }
     }
 
     /// The current lifecycle phase (spec §8.1).
@@ -1169,6 +1209,16 @@ mod tests {
     fn starts_with_no_surface() {
         let renderer = SurfaceRenderer::new();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+    }
+
+    #[test]
+    fn resolved_translucent_is_false_without_a_live_surface() {
+        // The Mode A default (review finding M1): with no surface installed
+        // there is nothing proven translucent, so a shell reading this before
+        // its first install keeps the opaque paint contract rather than
+        // punching holes it can't back.
+        let renderer = SurfaceRenderer::new();
+        assert!(!renderer.surface_resolved_translucent());
     }
 
     #[test]

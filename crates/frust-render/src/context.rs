@@ -333,6 +333,35 @@ fn resolve_alpha_mode(
     }
 }
 
+/// Whether a **resolved** `wgpu::CompositeAlphaMode` actually composites the
+/// surface's alpha against what is behind it — i.e. whether the surface really
+/// came up translucent ("Mode B"), as opposed to what the caller *requested*.
+///
+/// This is the wgpu-free truth behind [`ConfiguredSurface::resolved_translucent`]
+/// and, through it,
+/// [`SurfaceRenderer::surface_resolved_translucent`](crate::SurfaceRenderer::surface_resolved_translucent):
+/// [`resolve_alpha_mode`] can silently degrade a
+/// [`SurfaceAlphaRequest::TranslucentPreferred`] to `Auto` when the platform
+/// advertises no translucent mode, and a shell that kept keying its paint
+/// contract off the *request* would then clear to `TRANSPARENT` and punch its
+/// platform-view slots via `DestOut` against an OPAQUE swapchain — presenting
+/// black rectangles (review finding M1). Keying off this instead degrades to
+/// the Mode A contract (opaque base, no punch).
+///
+/// The three translucent modes are exactly [`resolve_alpha_mode`]'s preference
+/// list — `Inherit` (Android), `PostMultiplied` (iOS), `PreMultiplied`;
+/// `Opaque`/`Auto` ignore the surface's alpha entirely and are therefore *not*
+/// translucent (`Auto` is what every opaque caller and every fallback resolves
+/// to).
+fn alpha_mode_is_translucent(mode: wgpu::CompositeAlphaMode) -> bool {
+    matches!(
+        mode,
+        wgpu::CompositeAlphaMode::Inherit
+            | wgpu::CompositeAlphaMode::PostMultiplied
+            | wgpu::CompositeAlphaMode::PreMultiplied
+    )
+}
+
 /// Whether pixels presented to a swapchain configured with this composite
 /// alpha mode must be **premultiplied** before present.
 ///
@@ -686,6 +715,17 @@ pub(crate) struct ConfiguredSurface {
     pub(crate) surface: wgpu::Surface<'static>,
     pub(crate) config: wgpu::SurfaceConfiguration,
     pub(crate) path: RenderPath,
+    /// Whether this surface **actually** came up translucent — the wgpu-free
+    /// projection of `config.alpha_mode` through [`alpha_mode_is_translucent`],
+    /// computed once at configure time (the mode never changes for a live
+    /// surface; a resize reconfigures with the same `config`).
+    ///
+    /// Stored as a plain `bool` rather than re-derived from `config.alpha_mode`
+    /// at each read so the value a shell observes through
+    /// [`SurfaceRenderer::surface_resolved_translucent`](crate::SurfaceRenderer::surface_resolved_translucent)
+    /// crosses this crate's boundary with no `wgpu` type in the signature
+    /// (`docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern).
+    pub(crate) resolved_translucent: bool,
 }
 
 /// Given the build-config-derived instance flags and whether the process is
@@ -1248,6 +1288,11 @@ impl RenderContext {
             surface,
             config,
             path,
+            // The RESOLVED translucency, not the request: a
+            // `TranslucentPreferred` that fell back to `Auto` above lands here
+            // as `false`, which is what the shells' paint contract keys off
+            // (review finding M1 — see `alpha_mode_is_translucent`).
+            resolved_translucent: alpha_mode_is_translucent(alpha_mode),
         };
         self.configure_surface(&configured);
         Ok(configured)
@@ -1576,6 +1621,79 @@ mod tests {
             resolve_alpha_mode(SurfaceAlphaRequest::TranslucentPreferred, &caps),
             wgpu::CompositeAlphaMode::PreMultiplied
         );
+    }
+
+    #[test]
+    fn resolved_translucency_is_true_only_for_the_three_translucent_modes() {
+        // The wgpu-free projection the shells' paint contract keys off
+        // (review finding M1): exactly `resolve_alpha_mode`'s preference list.
+        for mode in [
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+        ] {
+            assert!(alpha_mode_is_translucent(mode), "{mode:?}");
+        }
+        // `Auto` is what BOTH an opaque request and a failed translucent
+        // resolution land on — neither composites alpha.
+        for mode in [
+            wgpu::CompositeAlphaMode::Auto,
+            wgpu::CompositeAlphaMode::Opaque,
+        ] {
+            assert!(!alpha_mode_is_translucent(mode), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn forced_mismatch_translucent_request_resolves_not_translucent() {
+        // The review's mandatory forced-mismatch bar (M1): a surface whose
+        // advertised capabilities carry NO translucent mode, asked for
+        // translucency. The request is honored as far as it can be (`Auto`),
+        // but the RESOLVED translucency — the value
+        // `SurfaceRenderer::surface_resolved_translucent` hands the shells — is
+        // `false`, so the shells keep the opaque (Mode A) paint contract: an
+        // opaque base color and no `ClearRect` punch (the encode-level half of
+        // this claim lives in `convert.rs`'s
+        // `mode_a_scene_encodes_no_clear_rect_even_with_a_slot_sized_region`).
+        for modes in [
+            [wgpu::CompositeAlphaMode::Opaque].as_slice(),
+            &[wgpu::CompositeAlphaMode::Auto],
+            &[],
+        ] {
+            let caps = caps_with_alpha_modes(modes);
+            let resolved = resolve_alpha_mode(SurfaceAlphaRequest::TranslucentPreferred, &caps);
+            assert_eq!(resolved, wgpu::CompositeAlphaMode::Auto, "{modes:?}");
+            assert!(
+                !alpha_mode_is_translucent(resolved),
+                "a fallback-to-opaque surface must never report translucent ({modes:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn happy_path_translucent_request_resolves_translucent() {
+        // The shipped configs stay unchanged: Android (`Inherit`-only) and iOS
+        // (`[Opaque, PostMultiplied]`) both resolve to a translucent mode, so
+        // the punch + transparent base keep running exactly as today.
+        for modes in [
+            [wgpu::CompositeAlphaMode::Inherit].as_slice(),
+            &[
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+            ],
+        ] {
+            let resolved = resolve_alpha_mode(
+                SurfaceAlphaRequest::TranslucentPreferred,
+                &caps_with_alpha_modes(modes),
+            );
+            assert!(alpha_mode_is_translucent(resolved), "{modes:?}");
+        }
+        // An opaque request never reports translucent, whatever the surface
+        // advertises.
+        assert!(!alpha_mode_is_translucent(resolve_alpha_mode(
+            SurfaceAlphaRequest::Opaque,
+            &caps_with_alpha_modes(&[wgpu::CompositeAlphaMode::Inherit]),
+        )));
     }
 
     #[test]

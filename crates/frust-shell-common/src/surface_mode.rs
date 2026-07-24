@@ -25,6 +25,24 @@
 //! "last seen" cursor; `current` is an associated function, a plain peek at
 //! the process-wide slot.
 //!
+//! # This latch is the REQUEST, not the outcome
+//!
+//! What an app asks for here is not necessarily what it gets. Each shell
+//! translates this latch into a `frust_render::SurfaceAlphaRequest`, and
+//! `frust-render` resolves *that* against the platform's advertised
+//! `CompositeAlphaMode`s at configure time — falling back to an opaque
+//! swapchain (with a `log::warn!`) when the platform advertises no translucent
+//! mode. **The resolved truth lives at a different seam**:
+//! `frust_render::SurfaceRenderer::surface_resolved_translucent`, read by each
+//! shell after every surface (re)install and threaded into
+//! `RenderRoot::set_surface_translucent` (review finding M1).
+//!
+//! So: read this latch to decide what to *request*; never to decide whether to
+//! paint the Mode B contract (a transparent base clear, a `platform_view`
+//! hole punch). Keying paint off the request means a fallback clears to
+//! `TRANSPARENT` and `DestOut`-punches every slot rect on an OPAQUE
+//! swapchain — black rectangles instead of a graceful degrade to Mode A.
+//!
 //! # Latch contract (one-way, v1)
 //!
 //! [`request_translucent_surface`] only ever moves the slot from
@@ -39,6 +57,11 @@
 //! would have to plumb a full surface-recreation round-trip through each
 //! shell's `SurfacePhase` state machine (`docs/ARCHITECTURE.md`'s frame
 //! pipeline) — not a slot-shape change.
+//!
+//! One-way applies to the REQUEST only. The *resolved* state above is not
+//! one-way and is not fixed before the surface exists: every (re)install
+//! re-resolves it, and a failed install clears it — which is exactly why the
+//! shells re-read it per frame rather than caching it at construction.
 //!
 //! # Thread contract
 //!
@@ -80,6 +103,10 @@ static SURFACE_MODE: Mutex<SurfaceMode> = Mutex::new(SurfaceMode::Opaque);
 /// Must be called before the running shell's surface-creation path reads
 /// [`SurfaceModeWatcher::current`] (see the module docs) — calling it after
 /// the surface already exists has no effect on that surface.
+///
+/// Requesting translucency does not guarantee it: the platform may refuse
+/// (see the module docs' *This latch is the REQUEST, not the outcome*), in
+/// which case the app degrades to the opaque Mode A contract.
 pub fn request_translucent_surface() {
     let mut slot = SURFACE_MODE.lock().unwrap_or_else(|e| e.into_inner());
     *slot = SurfaceMode::Translucent;

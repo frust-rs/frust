@@ -71,7 +71,7 @@ use crate::accessibility::IosA11yAdapter;
 use crate::app::{
     FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, SplitExecutor, render_scene,
 };
-use crate::ffi_support::CaretRect;
+use crate::ffi_support::{CaretRect, publish_resolved_translucency};
 
 /// Startup-span name (phase 10.D): `create_handle` is about to join the
 /// background font-preload thread [`create_handle`] spawned at the top of its
@@ -305,6 +305,7 @@ fn install_surface(
     startup_spans: &mut Option<StartupSpans>,
     first_install: bool,
     alpha: SurfaceAlphaRequest,
+    translucent_resolved: &AtomicBool,
 ) -> Result<()> {
     // SAFETY: `metal_layer` is the Swift-owned `CAMetalLayer*` the UI thread's
     // `IosAppHandle` keeps alive until `frust_destroy` — which joins THIS render
@@ -320,6 +321,18 @@ fn install_surface(
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
+    // Publish the surface's RESOLVED translucency to the UI thread (review
+    // finding M1): `alpha` above is only what we ASKED for — `frust-render`
+    // resolves it against the layer's advertised alpha modes and can fall back
+    // to an opaque swapchain. The UI thread reads this flag every frame
+    // (`IosAppHandle::sync_translucent_resolved`) before choosing the base
+    // color and pushing `set_surface_translucent`, so a fallback degrades to
+    // the Mode A contract instead of `DestOut`-punching black rectangles.
+    // Written on EVERY (re)install, including the render-side self-heal.
+    publish_resolved_translucency(
+        translucent_resolved,
+        Some(renderer.surface_resolved_translucent()),
+    );
     if first_install && let Some(spans) = startup_spans.as_mut() {
         spans.record(perf::SPAN_ADAPTER_READY);
         spans.record(perf::SPAN_DEVICE_READY);
@@ -355,6 +368,15 @@ fn install_surface(
 /// failure — an incapable GPU/driver — is unrecoverable and otherwise leaves a
 /// permanent black screen with no platform signal). Later reinstall/self-heal
 /// failures stay log-only.
+///
+/// `translucent_resolved` is the resolved-translucency seam (review finding
+/// M1): this thread creates the surface — including the self-heal above — so
+/// only it can see whether the requested translucent alpha mode was actually
+/// granted. It stores the outcome on every (re)install (and clears it on a
+/// failed one) for the UI thread, which owns the `RenderRoot` and the
+/// per-frame base color, to read each frame. Seeded from the REQUEST by
+/// [`spawn_split_executor`], so the common (capable) case is Mode B from frame
+/// 1 and only a real resolution can downgrade it.
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableMetalLayer>,
     startup_spans: StartupSpans,
@@ -362,6 +384,7 @@ pub(crate) fn render_loop(
     scene_return: SceneReturnSender<Scene>,
     presented: Arc<AtomicU64>,
     alpha: SurfaceAlphaRequest,
+    translucent_resolved: Arc<AtomicBool>,
 ) {
     // Render-thread QoS self-boost (phase-11 fix F6): tag this dedicated render
     // thread as user-interactive so the scheduler treats its GPU submit work at
@@ -416,12 +439,19 @@ pub(crate) fn render_loop(
                         &mut startup_spans,
                         first_install,
                         alpha,
+                        &translucent_resolved,
                     ) {
                         Ok(()) => {
                             first_install_done = true;
                             recreate_failures = 0;
                         }
                         Err(err) => {
+                            // A failed (re)install leaves no surface whose
+                            // translucency we can vouch for — clear the flag
+                            // rather than leaving the previous surface's value
+                            // standing (review M1: never punch a hole you
+                            // can't prove is a window).
+                            publish_resolved_translucency(&translucent_resolved, None);
                             log::error!(
                                 "frust-shell-ios: render-thread surface install failed: {err:#}"
                             );
@@ -509,9 +539,14 @@ pub(crate) fn render_loop(
                         &mut startup_spans,
                         false,
                         alpha,
+                        &translucent_resolved,
                     ) {
                         Ok(()) => recreate_failures = 0,
                         Err(err) => {
+                            // Same clear-on-failure contract as the install arm
+                            // above (review M1) — a failed self-heal must not
+                            // leave the lost surface's translucency standing.
+                            publish_resolved_translucency(&translucent_resolved, None);
                             recreate_failures = recreate_failures.saturating_add(1);
                             log::error!(
                                 "frust-shell-ios: render-thread surface recreate failed \
@@ -572,9 +607,11 @@ fn create_handle(
     // surface is created: `frust_set_surface_mode` must be called before
     // `frust_init` for it to take effect (see
     // `frust_shell_common::surface_mode`'s module docs — a one-way,
-    // pre-surface-creation latch). Resolved once here and threaded through
-    // both executor paths' surface-creation call sites plus the handle's own
-    // base-color/recreate logic. Per task 04's resolution table,
+    // pre-surface-creation latch). Mapped once here and threaded through both
+    // executor paths' surface-creation call sites plus the handle's recreate
+    // logic — this is the REQUEST only; the base color and the hole-punch
+    // contract follow the RESOLVED outcome (`translucent_resolved` below,
+    // review finding M1). Per task 04's resolution table,
     // `TranslucentPreferred` resolves to `PostMultiplied` on Metal — the
     // spike-verified shipping mode (see `SurfaceAlphaRequest`'s doc comment
     // for the alpha-semantics caveat: vello outputs premultiplied, and
@@ -601,10 +638,37 @@ fn create_handle(
     // Both retain `metal_layer` in `IosAppHandle` (Swift owns it and releases it
     // only after `frust_destroy` — which, in the split, joins the render thread
     // first, dropping the surface built from the pointer).
+    // The resolved-translucency seam (review finding M1). SEEDED FROM THE
+    // REQUEST: the surface is created asynchronously on the render thread in
+    // the default split, and an all-but-certain grant (Metal resolves
+    // `PostMultiplied`) should not cost a Mode-A flash on frame 1 — so the
+    // optimistic value stands until the render thread reports a real
+    // resolution, which can only ever downgrade it. One clone per surface
+    // owner (render thread or inline renderer), one in the handle for the UI
+    // thread's per-frame read.
+    let translucent_resolved = Arc::new(AtomicBool::new(
+        alpha == SurfaceAlphaRequest::TranslucentPreferred,
+    ));
+
     let (executor, text_ctx) = if render_thread_enabled() {
-        spawn_split_executor(startup, metal_layer, physical, scale, font_preinit, alpha)
+        spawn_split_executor(
+            startup,
+            metal_layer,
+            physical,
+            scale,
+            font_preinit,
+            alpha,
+            Arc::clone(&translucent_resolved),
+        )
     } else {
-        build_inline_executor(startup, metal_layer, physical, font_preinit, alpha)?
+        build_inline_executor(
+            startup,
+            metal_layer,
+            physical,
+            font_preinit,
+            alpha,
+            &translucent_resolved,
+        )?
     };
 
     // Process-wide reactive runtime init (idempotent — `ReactiveRuntime::init`'s
@@ -636,7 +700,16 @@ fn create_handle(
     // it here, the split records it render-side on the first handed-off scene.
     let handle = rt.with_owner(|| {
         let app = make_app();
-        IosAppHandle::new(executor, text_ctx, metal_layer, physical, scale, alpha, app)
+        IosAppHandle::new(
+            executor,
+            text_ctx,
+            metal_layer,
+            physical,
+            scale,
+            alpha,
+            translucent_resolved,
+            app,
+        )
     });
 
     // SAFETY: hand a uniquely-owned boxed handle to Swift as a raw pointer; it is
@@ -654,6 +727,7 @@ fn build_inline_executor(
     physical: (u32, u32),
     font_preinit: std::thread::JoinHandle<TextContext>,
     alpha: SurfaceAlphaRequest,
+    translucent_resolved: &AtomicBool,
 ) -> Result<(FrameExecutor, TextContext)> {
     let mut render_cx = RenderContext::new();
     let mut renderer = SurfaceRenderer::new();
@@ -671,6 +745,14 @@ fn build_inline_executor(
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
+    // Replace the request-seeded optimism with the real resolution (review
+    // finding M1) — on this path the renderer lives on the UI thread, so the
+    // handle's per-frame sync re-reads it from the renderer anyway; storing it
+    // here keeps the flag correct for the construction-time push too.
+    publish_resolved_translucency(
+        translucent_resolved,
+        Some(renderer.surface_resolved_translucent()),
+    );
     // `RenderContext::ensure_device` creates the adapter, the logical device, and
     // this call's surface/renderer readiness in one async chain with no
     // finer-grained seam — all three spans land at this single point (an
@@ -711,6 +793,7 @@ fn spawn_split_executor(
     scale: f32,
     font_preinit: std::thread::JoinHandle<TextContext>,
     alpha: SurfaceAlphaRequest,
+    translucent_resolved: Arc<AtomicBool>,
 ) -> (FrameExecutor, TextContext) {
     // Font/`TextContext` warmup (phase 10.D) stays UI-side — layout runs on the UI
     // thread. The GPU work is off-thread now, so this join's ordering vs surface
@@ -765,6 +848,7 @@ fn spawn_split_executor(
                     scene_return_tx,
                     presented_render,
                     alpha,
+                    translucent_resolved,
                 )
             })
         })
@@ -1260,6 +1344,11 @@ pub fn system_ui_state(handle: *mut c_void) -> u64 {
 /// null handle here since the read never touches one. A call after the
 /// surface already exists has no effect on that surface (the latch is
 /// read once, at surface-creation time, inside [`create_handle`]).
+///
+/// Latching only sets the *request*: a layer advertising no translucent alpha
+/// mode still comes up opaque, and the paint contract follows the RESOLVED
+/// outcome ([`SurfaceRenderer::surface_resolved_translucent`], review finding
+/// M1), not this latch.
 pub fn set_surface_mode(translucent: u8) {
     guard("frust_set_surface_mode", (), || {
         if translucent != 0 {

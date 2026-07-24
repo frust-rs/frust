@@ -231,15 +231,36 @@ pub struct IosAppHandle {
     /// (plan phase 10.C.2). **Instrumentation only** — accumulated and logged
     /// (`frust-perf deadline`) behind [`perf::enabled`]; never drops work.
     deadline_overruns: u64,
-    /// The resolved surface-alpha request this handle's surface was (or, for
-    /// the split, will be) created with (platform-views task 06) — latched
-    /// once at construction from `SurfaceModeWatcher::current()` (read in
-    /// [`crate::ffi_glue::create_handle`], before any surface exists). Drives
-    /// [`Self::frame`]'s base-color swap (an opaque theme surface color vs.
-    /// alpha-0, letting a native sibling view behind this one show through)
-    /// and is read back by [`crate::ffi_glue::recover_surface`] so an inline
-    /// surface recreate uses the same request the initial surface did.
+    /// The surface-alpha **request** this handle's surface was (or, for the
+    /// split, will be) created with (platform-views task 06) — latched once at
+    /// construction from `SurfaceModeWatcher::current()` (read in
+    /// [`crate::ffi_glue::create_handle`], before any surface exists) and read
+    /// back by [`crate::ffi_glue::recover_surface`] so an inline surface
+    /// recreate asks for the same alpha mode the initial surface did.
+    ///
+    /// **A request, not an outcome**: it does NOT drive the paint contract —
+    /// [`Self::translucent_resolved`] does (review finding M1).
     surface_alpha: SurfaceAlphaRequest,
+    /// Whether this handle's surface **actually came up** translucent — the
+    /// RESOLVED capability behind [`Self::frame`]'s base-color swap and
+    /// `RenderRoot::set_surface_translucent` (review finding M1).
+    ///
+    /// `frust-render` resolves [`Self::surface_alpha`] against the platform's
+    /// advertised alpha modes and can silently fall back to an opaque
+    /// swapchain; keying the transparent base color and the `platform_view`
+    /// hole punch off the request alone would then `DestOut`-zero real pixels
+    /// and present black rectangles. So the "fixed before the surface exists,
+    /// never changes" invariant is **false** — a (re)install can downgrade
+    /// this, and every install path re-resolves it.
+    ///
+    /// An `Arc<AtomicBool>` (the `fatal`/`presented` cross-thread pattern)
+    /// because in the default render-thread split the surface is created — and
+    /// self-healed after a `SurfaceLost` — on the RENDER thread, while this (UI)
+    /// thread owns the `RenderRoot` and the per-frame base color. **Seeded from
+    /// the request at construction** so the capable common case renders Mode B
+    /// from frame 1 with no flicker; only a real resolution may downgrade it,
+    /// observed within one frame (see [`Self::sync_translucent_resolved`]).
+    translucent_resolved: Arc<AtomicBool>,
     /// The platform-view command differ (platform-views task 06): turns the
     /// tree's per-paint-pass [`frust_core::widget::PlatformViewFrame`]s into
     /// the idempotent command backlog `frust_platform_view_commands_json`
@@ -821,6 +842,7 @@ impl IosAppHandle {
         physical: (u32, u32),
         scale: f32,
         surface_alpha: SurfaceAlphaRequest,
+        translucent_resolved: Arc<AtomicBool>,
         mut app: Box<dyn AppTree>,
     ) -> Self {
         // Construction-time font drain (task 14): apply any fonts registered via
@@ -851,12 +873,16 @@ impl IosAppHandle {
         }
 
         app.set_theme(Box::new(theme.clone()));
-        // Thread the translucent-surface request into the render root so the
-        // platform-view hole-punch clears each Mode B slot's rect (research
-        // VERIFY.md D1 — cross-platform). Read once here from the resolved
-        // `surface_alpha` (fixed before the surface exists), mirroring the
-        // `base_color` swap in `frame`.
-        app.set_surface_translucent(surface_alpha == SurfaceAlphaRequest::TranslucentPreferred);
+        // Thread the surface's RESOLVED translucency into the render root so
+        // the platform-view hole-punch clears each Mode B slot's rect (research
+        // VERIFY.md D1 — cross-platform) only when the surface really came up
+        // translucent (review M1). At construction the split's surface may
+        // still be installing render-side, so this reads the request-seeded
+        // flag; `frame`'s per-frame `sync_translucent_resolved` re-reads it and
+        // downgrades within one frame of a fallback.
+        app.set_surface_translucent(crate::ffi_support::read_resolved_translucency(
+            &translucent_resolved,
+        ));
         provide_context(theme.clone());
         app.rebuild();
         let mut executor = executor;
@@ -899,8 +925,37 @@ impl IosAppHandle {
             last_frame_time_nanos: None,
             deadline_overruns: 0,
             surface_alpha,
+            translucent_resolved,
             platform_views: PlatformViewState::new(),
         }
+    }
+
+    /// Re-read the live surface's RESOLVED translucency and push it into the
+    /// render root, returning it for this frame's base-color choice (review
+    /// finding M1).
+    ///
+    /// Two sources, one flag:
+    /// - **Inline** (`FRUST_NO_RENDER_THREAD`): the renderer lives on this
+    ///   thread, so its `surface_resolved_translucent()` is authoritative and
+    ///   is copied into the shared flag here — never stale, even after a failed
+    ///   recreate (the renderer still describes whatever surface is live).
+    /// - **Split** (default): the render thread stored the resolution when it
+    ///   installed (or self-healed) the surface; this is a plain atomic load.
+    ///
+    /// Cheap enough to call every frame: one enum match plus one atomic load,
+    /// and [`AppTree::set_surface_translucent`] is no-op-if-unchanged (marking
+    /// `ChangeFlags::PAINT` only on an actual flip — which is what makes a
+    /// downgrade repaint without the punch).
+    fn sync_translucent_resolved(&mut self) -> bool {
+        if let FrameExecutor::Inline(inline) = &self.executor {
+            crate::ffi_support::publish_resolved_translucency(
+                &self.translucent_resolved,
+                Some(inline.renderer.surface_resolved_translucent()),
+            );
+        }
+        let resolved = crate::ffi_support::read_resolved_translucency(&self.translucent_resolved);
+        self.app.set_surface_translucent(resolved);
+        resolved
     }
 
     /// Store the accesskit adapter for the app's `FrustView` (phase-6d task 05).
@@ -1120,6 +1175,11 @@ impl IosAppHandle {
         // ticks against the fresh surface must run even before their change
         // signals are observable (spec §14 phase 7, task 18).
         self.frame_gate.note_resumed();
+        // The recreated surface re-resolved its alpha mode from scratch (review
+        // M1) — on this (inline) path the renderer on this thread already holds
+        // it, so a recreate that fell back to opaque degrades to Mode A right
+        // here rather than punching black holes for the rest of the process.
+        self.sync_translucent_resolved();
     }
 
     /// Resize the live surface in place (rotation / bounds change). The
@@ -1399,6 +1459,16 @@ impl IosAppHandle {
             return;
         }
 
+        // Resolved-translucency sync (review finding M1), before the gate
+        // inputs are gathered below: a render-thread fallback-to-opaque (or a
+        // self-healed recreate that resolved differently) flips
+        // `RenderRoot::set_surface_translucent` to `false`, which marks
+        // `ChangeFlags::PAINT` and so forces THIS frame to run
+        // (`change_flags_pending`) and repaint without the hole punch. The
+        // returned value also drives the base color below, so the clear color
+        // and the punch contract can never disagree.
+        let translucent_resolved = self.sync_translucent_resolved();
+
         // Drain any queued accessibility actions (VoiceOver activations, etc.)
         // BEFORE the rebuild below, so a state change an action makes is picked up
         // by this very frame — the same "mutate now, rebuild next" model touch/IME
@@ -1637,18 +1707,19 @@ impl IosAppHandle {
             paint,
             skipped: false,
         };
-        // Mode B translucent base clear (platform-views task 06): a
-        // translucent-latched surface clears to alpha-0 instead of the
-        // theme's opaque surface color, so a native sibling view placed
-        // behind this one shows through wherever the tree paints nothing
-        // (Mode B paint contract — the app must paint every chrome surface
-        // explicitly, per the plan's spike lesson). Unlatched (the default)
-        // is bit-for-bit today's behavior.
-        let base_color = if self.surface_alpha == SurfaceAlphaRequest::TranslucentPreferred {
-            peniko::Color::TRANSPARENT
-        } else {
-            self.theme.scheme().surface
-        };
+        // Mode B translucent base clear (platform-views task 06, corrected by
+        // review M1): a surface that RESOLVED translucent (`translucent_resolved`,
+        // read at the top of this frame — not the request latch) clears to
+        // alpha-0 instead of the theme's opaque surface color, so a native
+        // sibling view placed behind this one shows through wherever the tree
+        // paints nothing (Mode B paint contract — the app must paint every
+        // chrome surface explicitly, per the plan's spike lesson). Opaque —
+        // requested-but-refused included — is bit-for-bit today's behavior.
+        let base_color = crate::ffi_support::base_clear_color(
+            translucent_resolved,
+            peniko::Color::TRANSPARENT,
+            self.theme.scheme().surface,
+        );
         let size = SurfaceSize {
             width: self.physical.0,
             height: self.physical.1,
