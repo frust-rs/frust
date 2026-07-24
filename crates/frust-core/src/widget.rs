@@ -12,6 +12,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use frust_scene::{GlyphRun, SceneBuilder, ShaderProgram};
 use kurbo::{Affine, BezPath, Point, Rect, Size};
@@ -578,6 +579,15 @@ pub struct PaintCtx<'a> {
     /// [`PaintCtx::origin`]'s absolute space, so a child's absolute bounds test
     /// directly against it.
     visible_rect: Option<Rect>,
+    /// [`PlatformViewFrame`]s published this (sub)paint via
+    /// [`PaintCtx::publish_platform_view`], in paint order.
+    ///
+    /// Unlike `ime_state` above (an `Option` — at most one focused editable
+    /// publishes per pass), this is a `Vec`: any number of platform-view slots
+    /// can paint in the same pass, so [`ChildPod::paint_child`] must EXTEND it
+    /// from each child rather than overwrite, or every slot but the last
+    /// child's would silently vanish. See [`PaintCtx::publish_platform_view`].
+    platform_views: Vec<PlatformViewFrame>,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -603,6 +613,7 @@ impl<'a> PaintCtx<'a> {
             presented_frames: None,
             hero: None,
             visible_rect: None,
+            platform_views: Vec::new(),
         }
     }
 
@@ -872,6 +883,25 @@ impl<'a> PaintCtx<'a> {
         self.ime_state.take()
     }
 
+    /// Publish a platform-view child's paint-time frame (task 02's
+    /// `PlatformViewSlot`) for this paint pass.
+    ///
+    /// Pushes onto a `Vec` rather than setting an `Option` — deliberately NOT
+    /// the same shape as [`PaintCtx::publish_ime_state`]. IME state has a
+    /// single focused surface at most, so an overwrite is correct there; a
+    /// platform view has no such "the" instance, so two slots publishing in
+    /// one pass must both survive. [`ChildPod::paint_child`] bubbles this by
+    /// `extend`, never overwrite, for exactly that reason.
+    pub fn publish_platform_view(&mut self, frame: PlatformViewFrame) {
+        self.platform_views.push(frame);
+    }
+
+    /// Take (and clear) every platform-view frame published during this
+    /// (sub)paint, in paint order.
+    pub fn take_platform_views(&mut self) -> Vec<PlatformViewFrame> {
+        std::mem::take(&mut self.platform_views)
+    }
+
     /// Report a tagged ("hero") element's absolute paint `bounds` and read back
     /// what it should do this frame.
     ///
@@ -946,6 +976,7 @@ impl<'a> PaintCtx<'a> {
             presented_frames: self.presented_frames,
             hero: Some(registry),
             visible_rect: self.visible_rect,
+            platform_views: Vec::new(),
         };
         f(&mut child);
         if child.needs_frame {
@@ -962,6 +993,11 @@ impl<'a> PaintCtx<'a> {
         if let Some(ime) = child.ime_state.take() {
             self.ime_state = Some(ime);
         }
+        // EXTEND, never overwrite — mirrors `ChildPod::paint_child`'s absorb;
+        // see `PaintCtx::publish_platform_view`'s doc comment for why this
+        // channel is a `Vec` merge rather than the `ime_state` `Option` merge
+        // above.
+        self.platform_views.extend(child.platform_views);
     }
 
     /// Seed the hero reporter lent by an ancestor. Called by
@@ -1077,6 +1113,58 @@ pub enum HeroDirective {
         /// The absolute destination rect the hero's bounds morph onto.
         dest: Rect,
     },
+}
+
+/// A process-wide monotonic counter backing [`next_slot_id`].
+static NEXT_SLOT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate a fresh, stable platform-view slot id.
+///
+/// Called once per widget instance at construction (task 02's
+/// `PlatformViewSlot`) — the same stability class as [`ChildPod`]'s
+/// semantics base id: identity that must survive a tree reorder, so it is
+/// never derived from tree position. A flat process-wide counter rather than
+/// a per-[`crate::app::RenderRoot`] allocator, since a widget has no
+/// `RenderRoot` handle to draw one from at construction time.
+pub fn next_slot_id() -> u64 {
+    NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A platform-view child's paint-time frame — everything a shell's native
+/// compositor (task 03) needs to place, size, clip, and dispose a native
+/// sibling view for one paint pass.
+///
+/// All rects are logical px, **absolute window coordinates** — the same
+/// space [`PaintCtx::report_hero`] callers use, built from the painting
+/// pod's [`PaintCtx::origin`]/[`PaintCtx::size`]. Frames are
+/// paint-pass-scoped: [`crate::app::RenderRoot::paint`] replaces the whole
+/// collection every pass, so a slot that didn't paint this pass (a culled
+/// subtree) simply has no frame in
+/// [`crate::app::RenderRoot::platform_view_frames`] — task 03's differ owns
+/// absent-means-hide/dispose semantics, not this crate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlatformViewFrame {
+    /// Stable per-widget-instance id, allocated once via [`next_slot_id`] at
+    /// construction — never derived from tree position, so a reorder keeps
+    /// identity.
+    pub slot_id: u64,
+    /// `"dev.frust.<Factory>"` convention naming which native view factory
+    /// creates this slot's platform view.
+    pub view_type: String,
+    /// Opaque creation params for the native factory (may be empty).
+    pub params_json: String,
+    /// Bumped by the widget (task 02) whenever `params_json` changes; this
+    /// crate only ever carries the number through.
+    pub params_generation: u64,
+    /// Absolute paint bounds.
+    pub rect: Rect,
+    /// `visible_rect` (see [`PaintCtx::visible_rect`]) intersected with
+    /// `rect`, or `None` when fully visible — no scroll ancestor is clipping
+    /// it.
+    pub clip: Option<Rect>,
+    /// `false` ⇒ hidden (offscreen/culled by the widget itself, distinct from
+    /// simply being absent from the collection this pass).
+    pub visible: bool,
 }
 
 /// The result of a whole [`crate::app::RenderRoot::paint`] pass.
@@ -1381,6 +1469,12 @@ impl ChildPod {
         if let Some(ime) = child_ctx.take_ime_state() {
             ctx.publish_ime_state(ime);
         }
+        // Bubble any platform-view frames published this paint by EXTENDING
+        // the parent's Vec — deliberately NOT the `ime_state` overwrite shape
+        // above. Two sibling slots publishing in the same pass must both
+        // survive; an Option-based merge here would silently drop every slot
+        // but the last child painted (see `PaintCtx::publish_platform_view`).
+        ctx.platform_views.extend(child_ctx.take_platform_views());
     }
 
     /// Collect the child's semantics, translating the current absolute origin
@@ -1838,6 +1932,126 @@ mod tests {
         assert!(!pctx2.needs_frame());
         anim.paint_child(&mut pctx2, &mut scene);
         assert!(pctx2.needs_frame());
+    }
+
+    /// A leaf widget that publishes a fixed [`PlatformViewFrame`] on every
+    /// paint, unless `should_publish` is false — the `false` arm stands in for
+    /// a slot that didn't paint this pass (culled subtree), exercising the
+    /// "no publishers this pass" acceptance criterion at the `RenderRoot`
+    /// level (see `app.rs`'s tests).
+    struct PlatformViewProbe {
+        slot_id: u64,
+        should_publish: bool,
+    }
+
+    impl Widget for PlatformViewProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            if self.should_publish {
+                ctx.publish_platform_view(PlatformViewFrame {
+                    slot_id: self.slot_id,
+                    view_type: "dev.frust.Probe".to_string(),
+                    params_json: String::new(),
+                    params_generation: 0,
+                    rect: Rect::from_origin_size(ctx.origin(), ctx.size()),
+                    clip: None,
+                    visible: true,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn child_pod_extends_platform_views_never_overwrites() {
+        // Two slots publishing across two `paint_child` calls in one pass must
+        // BOTH survive, in paint order — the regression test for the
+        // Option-overwrite hazard: an ime_state-shaped merge here would leave
+        // only the second slot's frame (see `PaintCtx::publish_platform_view`'s
+        // doc comment).
+        let mut lctx = LayoutCtx::new();
+
+        let mut first = ChildPod::new(Box::new(PlatformViewProbe {
+            slot_id: 1,
+            should_publish: true,
+        }));
+        first.set_origin(Point::new(0.0, 0.0));
+        first.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        let mut second = ChildPod::new(Box::new(PlatformViewProbe {
+            slot_id: 2,
+            should_publish: true,
+        }));
+        second.set_origin(Point::new(20.0, 0.0));
+        second.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 100.0));
+        first.paint_child(&mut pctx, &mut scene);
+        second.paint_child(&mut pctx, &mut scene);
+
+        let frames = pctx.take_platform_views();
+        assert_eq!(
+            frames.len(),
+            2,
+            "both slots' frames must survive, not just the last-painted one"
+        );
+        assert_eq!(frames[0].slot_id, 1);
+        assert_eq!(frames[1].slot_id, 2);
+    }
+
+    /// A container widget wrapping a single child pod at a fixed offset —
+    /// stands in for `frust-widgets::Padding` to test that a published frame's
+    /// rect compounds correctly under nesting rather than staying local to the
+    /// innermost pod.
+    struct TranslatingWrapper {
+        child: ChildPod,
+    }
+
+    impl Widget for TranslatingWrapper {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.child.layout_child(ctx, bc)
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.child.paint_child(ctx, scene);
+        }
+    }
+
+    #[test]
+    fn platform_view_frame_rect_is_absolute_under_nested_translation() {
+        // Wrap a publishing probe under two levels of translation — an inner
+        // pod at (5, 7) inside a wrapper placed at (100, 200) — the published
+        // rect must land in ABSOLUTE window coordinates (the same space
+        // `PaintCtx::report_hero` callers use), not local to either level.
+        let mut lctx = LayoutCtx::new();
+
+        let inner = ChildPod::new(Box::new(PlatformViewProbe {
+            slot_id: 9,
+            should_publish: true,
+        }));
+        let mut wrapper = TranslatingWrapper { child: inner };
+        wrapper.child.set_origin(Point::new(5.0, 7.0));
+        wrapper
+            .child
+            .layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        let mut outer = ChildPod::new(Box::new(wrapper));
+        outer.set_origin(Point::new(100.0, 200.0));
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 400.0));
+        outer.paint_child(&mut pctx, &mut scene);
+
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].rect,
+            Rect::from_origin_size(Point::new(105.0, 207.0), Size::new(10.0, 10.0))
+        );
     }
 
     #[test]
