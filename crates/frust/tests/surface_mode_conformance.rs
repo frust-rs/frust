@@ -145,18 +145,64 @@ fn facade_does_not_reexport_the_translucency_declaration() {
     let contents =
         fs::read_to_string(&facade).unwrap_or_else(|e| panic!("reading {}: {e}", facade.display()));
 
+    // A `pub use` may span several lines as a brace group:
+    //
+    //     pub use frust_shell_common::{
+    //         declare_host_translucent_surface,
+    //     };
+    //
+    // so scanning only lines that *start* with `pub use` would never visit the
+    // banned name on a continuation line. Track brace depth from the opening
+    // `pub use` until its terminating `;` and scan the whole statement.
+    let mut in_pub_use = false;
+    let mut depth: i32 = 0;
     for (i, line) in contents.lines().enumerate() {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with("pub use") {
+        if !in_pub_use && !trimmed.starts_with("pub use") {
             continue;
         }
+        in_pub_use = true;
         assert!(
-            !trimmed.contains("declare_host_translucent_surface")
-                && !trimmed.contains("request_translucent_surface"),
+            !line.contains("declare_host_translucent_surface")
+                && !line.contains("request_translucent_surface"),
             "crates/frust/src/lib.rs:{}: facade re-exports the translucency-declaration fn — \
              app Rust must never be able to set this latch (review M3). Line: {}",
             i + 1,
             line.trim()
         );
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if depth <= 0 && line.contains(';') {
+            in_pub_use = false;
+            depth = 0;
+        }
     }
+}
+
+/// The multi-line-group blind spot the round-2 review flagged: a grouped
+/// `pub use` must be caught on its continuation lines, not just its first.
+#[test]
+fn facade_reexport_scan_sees_multi_line_groups() {
+    let planted = "pub use frust_shell_common::{\n    declare_host_translucent_surface,\n};\n";
+    let mut in_pub_use = false;
+    let mut depth: i32 = 0;
+    let mut visited_banned = false;
+    for line in planted.lines() {
+        let trimmed = line.trim_start();
+        if !in_pub_use && !trimmed.starts_with("pub use") {
+            continue;
+        }
+        in_pub_use = true;
+        if line.contains("declare_host_translucent_surface") {
+            visited_banned = true;
+        }
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if depth <= 0 && line.contains(';') {
+            in_pub_use = false;
+            depth = 0;
+        }
+    }
+    assert!(
+        visited_banned,
+        "the scan walk must visit continuation lines of a grouped `pub use`"
+    );
 }
