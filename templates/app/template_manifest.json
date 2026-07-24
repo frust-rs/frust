@@ -63,6 +63,8 @@
   "ios.tmpl/Runner/SceneDelegate.swift",
   "ios.tmpl/Runner/FrustView.swift",
   "ios.tmpl/Runner/FrustViewController.swift",
+  "ios.tmpl/Runner/FrustViewHost.swift",
+  "ios.tmpl/Runner/FrustPlatformViewFactory.swift",
   "ios.tmpl/Runner/FrustTextInput.swift",
   "ios.tmpl/Runner/Assets.xcassets/Contents.json",
   "ios.tmpl/Runner/Assets.xcassets/AppIcon.appiconset/Contents.json",

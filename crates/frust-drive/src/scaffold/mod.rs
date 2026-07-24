@@ -622,6 +622,132 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
+    /// Platform-views task 09: the generated iOS project registers the two
+    /// new platform-view host Swift sources (`FrustViewHost.swift`,
+    /// `FrustPlatformViewFactory.swift`) in every pbxproj section exactly
+    /// once, and the pbxproj is structurally well-formed (balanced sections,
+    /// no duplicate object ids). Host-runnable: this checks the *rendered*
+    /// text without needing `xcodebuild` (which `create_ios.rs` gates on
+    /// macOS). The Swift compile gate itself is owed to a macOS run (task 11).
+    #[test]
+    fn generate_ios_pbxproj_registers_platform_view_host_files_well_formed() {
+        let dest = unique_temp_dir("ios-pbxproj-platform-views");
+        let ctx = test_context();
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        // Both new Swift sources landed on disk, copied verbatim.
+        assert!(dest.join("ios/Runner/FrustViewHost.swift").exists());
+        assert!(
+            dest.join("ios/Runner/FrustPlatformViewFactory.swift")
+                .exists()
+        );
+        // The host code + factory protocol carry their load-bearing shapes.
+        let host = fs::read_to_string(dest.join("ios/Runner/FrustViewHost.swift")).unwrap();
+        assert!(host.contains("frust_platform_view_commands_json"), "{host}");
+        assert!(host.contains("NSClassFromString"), "{host}");
+        assert!(
+            host.contains("CATransaction.setDisableActions(true)"),
+            "{host}"
+        );
+        let factory =
+            fs::read_to_string(dest.join("ios/Runner/FrustPlatformViewFactory.swift")).unwrap();
+        assert!(
+            factory.contains("@objc public protocol FrustPlatformViewFactory"),
+            "{factory}"
+        );
+        assert!(
+            factory.contains("func createView(paramsJson: String) -> UIView"),
+            "{factory}"
+        );
+
+        // The controller wires the translucent opt-in + host poll (task 09).
+        let controller =
+            fs::read_to_string(dest.join("ios/Runner/FrustViewController.swift")).unwrap();
+        assert!(
+            controller.contains("frust_set_surface_mode(1)"),
+            "{controller}"
+        );
+        assert!(
+            controller.contains("platformViewHost?.poll(handle: handle)"),
+            "{controller}"
+        );
+        // The bridging header gained the two additive C decls.
+        let bridging =
+            fs::read_to_string(dest.join("ios/Runner/Runner-Bridging-Header.h")).unwrap();
+        assert!(
+            bridging.contains("void  frust_set_surface_mode(uint8_t translucent);"),
+            "{bridging}"
+        );
+        assert!(
+            bridging.contains(
+                "char *frust_platform_view_commands_json(void *handle, uint64_t ack_generation);"
+            ),
+            "{bridging}"
+        );
+
+        let pbxproj =
+            fs::read_to_string(dest.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+
+        // Each new file is registered exactly once per section: build file,
+        // file reference, group child, and sources build phase.
+        for file in ["FrustViewHost.swift", "FrustPlatformViewFactory.swift"] {
+            let build_file_def = format!("/* {file} in Sources */ = {{isa = PBXBuildFile;");
+            let file_ref_def = format!("/* {file} */ = {{isa = PBXFileReference;");
+            let group_child = format!("/* {file} */,");
+            let sources_phase_ref = format!("/* {file} in Sources */,");
+            assert_eq!(
+                pbxproj.matches(&build_file_def).count(),
+                1,
+                "`{file}` PBXBuildFile definition should appear once:\n{pbxproj}"
+            );
+            assert_eq!(
+                pbxproj.matches(&file_ref_def).count(),
+                1,
+                "`{file}` PBXFileReference definition should appear once:\n{pbxproj}"
+            );
+            assert_eq!(
+                pbxproj.matches(&group_child).count(),
+                1,
+                "`{file}` group child should appear once:\n{pbxproj}"
+            );
+            assert_eq!(
+                pbxproj.matches(&sources_phase_ref).count(),
+                1,
+                "`{file}` sources-phase reference should appear once:\n{pbxproj}"
+            );
+        }
+
+        // Balanced: every `/* Begin X section */` has a matching `/* End */`.
+        assert_eq!(
+            pbxproj.matches("/* Begin ").count(),
+            pbxproj.matches("/* End ").count(),
+            "unbalanced PBX sections:\n{pbxproj}"
+        );
+
+        // No duplicate object ids: every `<id> ... = {isa = ...}` definition
+        // line introduces a unique id (a copy/paste dup makes Xcode reject the
+        // project). Reference lines inside `files = (...)`/`children = (...)`
+        // don't contain `= {isa = ` so they're excluded.
+        let mut ids: Vec<&str> = pbxproj
+            .lines()
+            .filter(|line| line.contains("= {isa = "))
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            total,
+            "duplicate PBX object id(s) in generated pbxproj:\n{pbxproj}"
+        );
+
+        // No template placeholders survived rendering.
+        assert!(!pbxproj.contains("{{"), "{pbxproj}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
     /// Task 07 acceptance criterion 2: with no `[deeplink]` config, the
     /// rendered Android manifest must be byte-identical to the pre-task
     /// rendering (no `android:launchMode`, no second `<intent-filter>`).
