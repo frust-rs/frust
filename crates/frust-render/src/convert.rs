@@ -1190,7 +1190,7 @@ mod tests {
         builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
         builder.pop_layer();
         builder.pop_clip();
-        // The hole-punch's `Compose::Clear` layer must round-trip through the
+        // The hole-punch's `Compose::DestOut` layer must round-trip through the
         // real `vello::Scene` sink without panicking (the acceptance criterion).
         builder.clear_rect(Rect::new(2.0, 2.0, 8.0, 8.0));
 

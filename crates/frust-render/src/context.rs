@@ -389,6 +389,46 @@ fn alpha_mode_needs_premultiply(mode: wgpu::CompositeAlphaMode) -> bool {
     )
 }
 
+/// Whether a configured surface must **refuse** translucency because its
+/// chosen render path cannot deliver the premultiplied output the resolved
+/// alpha mode expects (review finding M2 / AI-2, following on M1's
+/// resolved-translucency seam above).
+///
+/// [`RenderPathKind::Blit`]'s `TextureBlitter::copy` is a plain texture copy
+/// — there is no shader stage to premultiply in, unlike the
+/// [`RenderPathKind::Direct`] arm's [`RenderPath::DirectPremultiplied`]
+/// compute pass. So a **GPU-tier** surface forced onto the blit arm (no
+/// `Rgba8Unorm`+`STORAGE_BINDING`, or `FRUST_NO_DIRECT_SURFACE`) that
+/// resolves a premultiplied-expecting alpha mode (`Inherit`/`PreMultiplied`,
+/// [`alpha_mode_needs_premultiply`]) would feed vello's straight-alpha blit
+/// output straight to a premultiplied-expecting compositor — the same
+/// over-bright fringing defect D3 fixed on the direct arm
+/// (`research/VERIFY.md`). Rather than build an unverifiable
+/// premultiplying blitter (blit targets lack `STORAGE_BINDING`, so it would
+/// need new machinery), the adopted fix is refusal: such a surface resolves
+/// NOT translucent, degrading the app to Mode A (opaque base, no
+/// platform-view punch) instead of silently fringing.
+///
+/// **`cpu-tier` is expressly exempt** — it also forces the blit arm
+/// (`force_blit` above), but its `vello_cpu` output is already
+/// premultiplied (verified: `cpu_tier.rs:108-113`'s `PremulRgba8` sample
+/// type), so cpu-tier Blit+`Inherit` is correct *today* and must keep
+/// resolving translucent; forcing it opaque would be a self-inflicted
+/// regression. The `tier` parameter is what gates this exemption.
+///
+/// Pure decision, kept separate from `create_render_surface`'s wgpu
+/// resources so it is host-testable without a GPU, mirroring
+/// [`choose_render_path`]'s split.
+fn blit_translucency_refused(
+    path_kind: RenderPathKind,
+    alpha_mode: wgpu::CompositeAlphaMode,
+    tier: crate::tier::RenderTier,
+) -> bool {
+    path_kind == RenderPathKind::Blit
+        && alpha_mode_needs_premultiply(alpha_mode)
+        && tier == crate::tier::RenderTier::Gpu
+}
+
 /// Permanent (non-spike) surface-caps + chosen-alpha-mode line, logged once
 /// per surface configure (not once per process — a resize/recreate that picks
 /// a different mode is worth a fresh line, unlike the direct-to-surface probe
@@ -718,7 +758,10 @@ pub(crate) struct ConfiguredSurface {
     /// Whether this surface **actually** came up translucent — the wgpu-free
     /// projection of `config.alpha_mode` through [`alpha_mode_is_translucent`],
     /// computed once at configure time (the mode never changes for a live
-    /// surface; a resize reconfigures with the same `config`).
+    /// surface; a resize reconfigures with the same `config`), *except* when
+    /// [`blit_translucency_refused`] forces it to `false` (review finding M2:
+    /// a GPU-tier blit-fallback surface cannot deliver the premultiplied
+    /// output such an alpha mode expects — `cpu-tier` is exempt).
     ///
     /// Stored as a plain `bool` rather than re-derived from `config.alpha_mode`
     /// at each read so the value a shell observes through
@@ -1284,15 +1327,26 @@ impl RenderContext {
                 }
             }
         };
+        let resolved_translucent =
+            if blit_translucency_refused(path_kind, alpha_mode, self.selected_tier()) {
+                log::warn!(
+                    "frust-render: GPU-tier blit-fallback surface cannot deliver premultiplied \
+                 output (alpha_mode={alpha_mode:?}) — refusing translucency, app degrades to \
+                 Mode A"
+                );
+                false
+            } else {
+                // The RESOLVED translucency, not the request: a
+                // `TranslucentPreferred` that fell back to `Auto` above lands here
+                // as `false`, which is what the shells' paint contract keys off
+                // (review finding M1 — see `alpha_mode_is_translucent`).
+                alpha_mode_is_translucent(alpha_mode)
+            };
         let configured = ConfiguredSurface {
             surface,
             config,
             path,
-            // The RESOLVED translucency, not the request: a
-            // `TranslucentPreferred` that fell back to `Auto` above lands here
-            // as `false`, which is what the shells' paint contract keys off
-            // (review finding M1 — see `alpha_mode_is_translucent`).
-            resolved_translucent: alpha_mode_is_translucent(alpha_mode),
+            resolved_translucent,
         };
         self.configure_surface(&configured);
         Ok(configured)
@@ -1720,6 +1774,78 @@ mod tests {
         assert!(!alpha_mode_needs_premultiply(
             wgpu::CompositeAlphaMode::Auto
         ));
+    }
+
+    #[test]
+    fn gpu_tier_blit_refuses_premultiplied_expecting_translucency() {
+        // Review finding M2 (AI-2): a GPU-tier surface forced onto the blit
+        // arm (no Rgba8Unorm+STORAGE_BINDING) that resolves a
+        // premultiplied-expecting alpha mode (Android's `Inherit`) must
+        // refuse translucency — the blit arm's plain `TextureBlitter::copy`
+        // has no premultiply stage, so presenting it straight would
+        // reproduce defect D3.
+        assert!(blit_translucency_refused(
+            RenderPathKind::Blit,
+            wgpu::CompositeAlphaMode::Inherit,
+            crate::tier::RenderTier::Gpu,
+        ));
+        assert!(blit_translucency_refused(
+            RenderPathKind::Blit,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            crate::tier::RenderTier::Gpu,
+        ));
+    }
+
+    #[test]
+    fn cpu_tier_blit_stays_translucent_capable() {
+        // The regression guard that matters most: cpu-tier ALSO forces the
+        // blit arm (`force_blit`), but `vello_cpu`'s output is already
+        // premultiplied (`cpu_tier.rs:108-113`'s `PremulRgba8`), so refusal
+        // must NOT fire for it — forcing it opaque would be a
+        // self-inflicted regression on a path that is correct today.
+        assert!(!blit_translucency_refused(
+            RenderPathKind::Blit,
+            wgpu::CompositeAlphaMode::Inherit,
+            crate::tier::RenderTier::Cpu,
+        ));
+        assert!(!blit_translucency_refused(
+            RenderPathKind::Blit,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            crate::tier::RenderTier::Cpu,
+        ));
+    }
+
+    #[test]
+    fn blit_refusal_never_fires_for_non_premultiplied_modes_or_direct_path() {
+        // Straight-expecting/alpha-ignoring modes never need refusal, on
+        // either path kind.
+        for mode in [
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::Auto,
+        ] {
+            assert!(!blit_translucency_refused(
+                RenderPathKind::Blit,
+                mode,
+                crate::tier::RenderTier::Gpu
+            ));
+        }
+        // The Direct arm is unaffected regardless of tier/mode — it already
+        // has its own premultiply pass (`RenderPath::DirectPremultiplied`),
+        // so byte-identical direct-path behavior is preserved.
+        for mode in [
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::Auto,
+        ] {
+            assert!(!blit_translucency_refused(
+                RenderPathKind::Direct,
+                mode,
+                crate::tier::RenderTier::Gpu
+            ));
+        }
     }
 
     /// The exact defect-D3 arithmetic the [`PremultiplyPass`] shader performs,

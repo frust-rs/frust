@@ -105,18 +105,22 @@ pub enum Command {
     PopLayer,
     /// Clear an axis-aligned rectangle to full transparency (alpha 0) under a
     /// transform, erasing everything already drawn beneath it in this scene —
-    /// a real destination-clearing composite (`Compose::Clear`), not a skipped
-    /// paint.
+    /// a real destination-clearing composite, not a skipped paint.
     ///
     /// The platform-view hole-punch is the sole v1 producer (see
     /// `frust-core`'s `PaintScene::clear_rect`): a translucent-surface (Mode B)
     /// slot punches its rect so an opaque app backdrop painted below it (the
     /// catalog's `AppBackground`) doesn't seal the hole the hosted native view
-    /// shows through. Lowered to a `Compose::Clear` layer over `rect` in
-    /// `frust-render::convert`. The clear only becomes visible on a surface
-    /// that actually carries an alpha channel; on an opaque surface the
-    /// transparency is disregarded (vello's surface contract), which is why the
-    /// producer gates it on the translucent flag rather than punching always.
+    /// shows through. `frust-render::convert` lowers this to a destination-out
+    /// composite (an opaque fill erasing color and alpha wherever it covers),
+    /// hoisted to the scene root past any enclosing clip/opacity group so a
+    /// nested slot's punch isn't confined to its own group's content — the
+    /// exact composite mode and hoist mechanics are `frust-render`'s to name
+    /// (scene-layer purity: no vello types here). The clear only becomes
+    /// visible on a surface that actually carries an alpha channel; on an
+    /// opaque surface the transparency is disregarded (vello's surface
+    /// contract), which is why the producer gates it on the translucent flag
+    /// rather than punching always.
     ClearRect { rect: Rect, transform: Affine },
     /// Fill or stroke an arbitrary vector path (e.g. an arc), under a
     /// transform.
