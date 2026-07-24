@@ -386,3 +386,155 @@ async fn run_shader() {
         "shader pre-pass produced an uncaptured validation error: {scope_err:?}"
     );
 }
+
+/// Pixel-level regression test for the Mode B hole punch (platform-views
+/// t11-fix 01 + the t11-redo D4 follow-up): a `clear_rect` recorded INSIDE a
+/// clip/opacity layer group must still erase an opaque backdrop painted
+/// OUTSIDE the group (the encode walk hoists the punch to root — a
+/// group-local erase would be sealed in by the group composite), and the
+/// erase must be PIXEL-EXACT at a 16-px-tile-UNALIGNED edge (vello 0.9's
+/// `Compose::Clear` bleeds to whole boundary tiles, which is why the punch
+/// uses `Compose::DestOut`; both defects were first caught on-device).
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+fn clear_rect_punches_pixel_exact_through_a_layer_group() {
+    pollster::block_on(run_clear_probe());
+}
+
+async fn run_clear_probe() {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .expect("no compatible GPU adapter");
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("frust clear-rect probe"),
+            required_features: adapter.features() & wgpu::Features::CLEAR_TEXTURE,
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        })
+        .await
+        .expect("failed to create device");
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frust clear-rect probe target"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Opaque backdrop at ROOT; the punch inside a full-surface layer group,
+    // with its right edge one px past a 16-px tile boundary (SIZE/2 + 1).
+    let punch_edge = (SIZE / 2 + 1) as f64;
+    let mut fk_scene = Scene::new();
+    {
+        let mut builder = SceneBuilder::new(&mut fk_scene);
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
+            Brush::Solid(RED),
+        );
+        builder.push_layer(kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64), 1.0);
+        builder.clear_rect(kurbo::Rect::new(0.0, 0.0, punch_edge, SIZE as f64));
+        builder.pop_layer();
+    }
+    let mut vello_scene = vello::Scene::new();
+    encode_scene(&fk_scene, &mut vello_scene);
+
+    let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
+        .expect("failed to create vello renderer");
+    renderer
+        .render_to_texture(
+            &device,
+            &queue,
+            &vello_scene,
+            &view,
+            &vello::RenderParams {
+                base_color: peniko::color::palette::css::TRANSPARENT,
+                width: SIZE,
+                height: SIZE,
+                antialiasing_method: vello::AaConfig::Area,
+            },
+        )
+        .expect("render_to_texture failed");
+
+    let bytes_per_row = SIZE * 4;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("frust clear-rect probe readback"),
+        size: (bytes_per_row * SIZE) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| {
+        let _ = tx.send(res);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll failed");
+    rx.recv()
+        .expect("map channel closed")
+        .expect("buffer map failed");
+
+    let data = slice.get_mapped_range();
+    let mid_row = ((SIZE / 2) * bytes_per_row) as usize;
+    let px = |x: u32| {
+        let i = mid_row + (x * 4) as usize;
+        (data[i], data[i + 1], data[i + 2], data[i + 3])
+    };
+    // Inside the punch: fully erased, through the group, over the backdrop.
+    assert_eq!(px(SIZE / 4), (0, 0, 0, 0), "punch centre must be erased");
+    assert_eq!(
+        px(SIZE / 2),
+        (0, 0, 0, 0),
+        "last px inside the unaligned edge must be erased"
+    );
+    // Just past the edge, INSIDE the same 16-px tile: the backdrop must
+    // survive untouched (the Compose::Clear tile bleed this test pins down).
+    for x in [SIZE / 2 + 1, SIZE / 2 + 4, SIZE / 2 + 14] {
+        let (r, _, _, a) = px(x);
+        assert!(
+            r > 200 && a > 200,
+            "backdrop at x={x} (same tile as the punch edge) must stay opaque red, got {:?}",
+            px(x)
+        );
+    }
+}

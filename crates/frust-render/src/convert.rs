@@ -116,6 +116,26 @@ pub(crate) fn encode_into_with_shaders(
     shader_images: &HashMap<(u64, u32, u32), ImageData>,
     adapter_max: u32,
 ) {
+    // Active clip/opacity group stack, tracked so a `ClearRect` can be HOISTED
+    // to the root: a `Compose::Clear` inside a vello layer group only clears
+    // that group's own accumulated content — anything painted OUTSIDE the
+    // group (an app-root backdrop below a scroll_view's clip) survives the
+    // group composite, defeating the Mode B hole punch (t11-redo defect D4,
+    // pixel-proven in `tests/gpu_smoke.rs`). On `ClearRect` the walk pops
+    // every open group, emits the clear at root — bounded by the intersection
+    // of the popped groups' clip bounds so a partially-scrolled slot still
+    // clips to its viewport — then re-pushes the same groups and continues.
+    // Content painted before the slot (any nesting) is cleared; content
+    // painted after (overlapping chrome) composites over the hole as before.
+    // Caveat: an opacity group split this way composites its two halves
+    // independently (a transient, transition-only artifact where translucent
+    // group content overlaps a slot mid-animation — documented tradeoff).
+    enum Group {
+        Clip,
+        Layer(f32),
+    }
+    let mut groups: Vec<(Group, Affine, Rect)> = Vec::new();
+
     for command in scene.commands() {
         match command {
             Command::FillRect {
@@ -137,8 +157,14 @@ pub(crate) fn encode_into_with_shaders(
                 transform,
             } => sink.stroke_line(*transform, brush, *p0, *p1, *width),
             Command::GlyphRun(run) => sink.draw_glyph_run(run),
-            Command::PushClip { rect, transform } => sink.push_clip(*transform, rect),
-            Command::PopClip => sink.pop_clip(),
+            Command::PushClip { rect, transform } => {
+                groups.push((Group::Clip, *transform, *rect));
+                sink.push_clip(*transform, rect);
+            }
+            Command::PopClip => {
+                groups.pop();
+                sink.pop_clip();
+            }
             Command::Image {
                 data,
                 dest,
@@ -157,9 +183,43 @@ pub(crate) fn encode_into_with_shaders(
                 rect,
                 alpha,
                 transform,
-            } => sink.push_layer(*transform, rect, *alpha),
-            Command::PopLayer => sink.pop_layer(),
-            Command::ClearRect { rect, transform } => sink.clear_rect(*transform, rect),
+            } => {
+                groups.push((Group::Layer(*alpha), *transform, *rect));
+                sink.push_layer(*transform, rect, *alpha);
+            }
+            Command::PopLayer => {
+                groups.pop();
+                sink.pop_layer();
+            }
+            Command::ClearRect { rect, transform } if groups.is_empty() => {
+                sink.clear_rect(*transform, rect);
+            }
+            Command::ClearRect { rect, transform } => {
+                // Hoist to root (see the `groups` doc above): bound the punch
+                // by every open group's clip bbox, pop them all, clear, then
+                // re-push. Bboxes are exact for the axis-aligned transforms
+                // frust emits (translate/scale); a rotated clip would bound
+                // conservatively.
+                let mut punch = transform.transform_rect_bbox(*rect);
+                for (_, t, r) in &groups {
+                    punch = punch.intersect(t.transform_rect_bbox(*r));
+                }
+                if punch.width() > 0.0 && punch.height() > 0.0 {
+                    for (kind, ..) in groups.iter().rev() {
+                        match kind {
+                            Group::Clip => sink.pop_clip(),
+                            Group::Layer(_) => sink.pop_layer(),
+                        }
+                    }
+                    sink.clear_rect(Affine::IDENTITY, &punch);
+                    for (kind, t, r) in &groups {
+                        match kind {
+                            Group::Clip => sink.push_clip(*t, r),
+                            Group::Layer(alpha) => sink.push_layer(*t, r, *alpha),
+                        }
+                    }
+                }
+            }
             Command::Path {
                 path,
                 style,
@@ -325,19 +385,27 @@ impl SceneSink for vello::Scene {
     }
 
     fn clear_rect(&mut self, transform: Affine, rect: &Rect) {
-        // The hole-punch: a layer pushed with a `Compose::Clear` blend zeroes
-        // (color *and* alpha) the region it covers when popped, regardless of
-        // source or backdrop — a real destination-clearing composite, unlike a
-        // transparent fill (which composites over the backdrop, a visual no-op).
-        // Fill the clip inside the layer so it has full geometric coverage
-        // across `rect`, guaranteeing the Clear applies to the whole rectangle
-        // rather than only where drawn geometry happened to land. The Clear
-        // ignores the fill's color, so any opaque brush works.
+        // The hole-punch: a layer whose composite is `Compose::DestOut` with an
+        // OPAQUE fill erases the destination (color *and* alpha) exactly where
+        // the source covers — `dst' = dst·(1−src.a)`, so a full-alpha fill
+        // zeroes the rect while the fill's own antialiased coverage keeps the
+        // erase pixel-exact at the edges. Deliberately NOT `Compose::Clear`:
+        // vello 0.9 applies Clear at 16-px-tile granularity, ignoring the
+        // layer's per-pixel clip coverage in boundary tiles, which bleeds the
+        // punch up to 15 px past an unaligned rect edge (t11-redo defect D4;
+        // pixel-proven by `tests/gpu_smoke.rs`'s unaligned-edge probe on Metal
+        // and as a visible ring on cupid). DestOut weights the erase by the
+        // source's own alpha, so unpainted pixels in a boundary tile are
+        // untouched by construction.
+        //
+        // Fill the clip inside the layer so the erase has full geometric
+        // coverage across `rect` (the color is irrelevant — only alpha drives
+        // DestOut).
         //
         // `self.push_layer`/`vello::Scene::pop_layer` resolve to vello's own
         // inherent methods, not this `SceneSink` impl (see the note on the
         // `push_layer` impl above — re-verify after any vello bump).
-        let blend = peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::Clear);
+        let blend = peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::DestOut);
         self.push_layer(Fill::NonZero, blend, 1.0, transform, rect);
         self.fill(
             Fill::NonZero,
