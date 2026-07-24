@@ -14,6 +14,7 @@ use frust_core::anim::FrameTime;
 use frust_core::event::{EditingState, EventOutcome, ImeEvent, ImeState, InputEvent};
 use frust_core::insets::WindowInsets;
 use frust_core::view::{ChangeFlags, View};
+use frust_core::widget::PlatformViewFrame;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, SemanticsUpdate};
 use kurbo::Size;
 
@@ -189,6 +190,19 @@ pub trait AppTree {
         node_id: u64,
         action: accesskit::Action,
     ) -> EventOutcome;
+
+    /// The [`PlatformViewFrame`]s the tree published during the most recent
+    /// [`AppTree::paint`] pass (delegates to
+    /// [`RenderRoot::platform_view_frames`]) — the source a mobile shell's
+    /// [`crate::platform_view::PlatformViewState::ingest`] feeds from once per
+    /// RUN frame, after paint (platform-views task 05/06).
+    ///
+    /// Defaulted to an empty slice so existing [`AppTree`] impls compile
+    /// unchanged, mirroring [`AppTree::set_insets`]'s default-no-op shape;
+    /// the concrete tree overrides it to forward to `RenderRoot`.
+    fn platform_view_frames(&self) -> &[PlatformViewFrame] {
+        &[]
+    }
 }
 
 /// Concrete [`AppTree`] holding one app's state, logic and retained root.
@@ -281,6 +295,10 @@ where
     ) -> EventOutcome {
         self.root
             .perform_accessibility_action(&mut self.state, accesskit::NodeId(node_id), action)
+    }
+
+    fn platform_view_frames(&self) -> &[PlatformViewFrame] {
+        self.root.platform_view_frames()
     }
 }
 
@@ -418,6 +436,14 @@ mod tests {
             unimplemented!()
         }
         // set_insets deliberately NOT overridden — exercises the default no-op.
+    }
+
+    #[test]
+    fn app_tree_platform_view_frames_defaults_to_empty_slice() {
+        // Compiles (the default impl exists) and is a benign empty read — a
+        // pre-platform-views `AppTree` impl is unaffected.
+        let tree = MinimalTree;
+        assert!(tree.platform_view_frames().is_empty());
     }
 
     #[test]

@@ -58,16 +58,17 @@ use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_l
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
-    AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceSize, guard,
-    next_render_phase, render_channel, render_thread_enabled, run_guarded_thread,
-    scene_return_channel,
+    AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceMode,
+    SurfaceModeWatcher, SurfaceSize, ViewCommand, guard, next_render_phase, render_channel,
+    render_thread_enabled, request_translucent_surface, run_guarded_thread, scene_return_channel,
 };
 use frust_text::TextContext;
 
 use crate::app::{AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor};
 use crate::ffi_support::{
-    ImeJsonState, build_ime_state_json, load_pipeline_cache, normalize_ime_indices,
-    pipeline_cache_differs, pipeline_cache_path, write_pipeline_cache_atomic,
+    ImeJsonState, PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
+    load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
+    platform_view_commands_up_to_date, write_pipeline_cache_atomic,
 };
 
 /// Startup-span name (task 13): the persisted pipeline-cache blob has been read
@@ -155,6 +156,35 @@ static PLATFORM_INIT: Once = Once::new();
 /// stays valid for the process lifetime (a dropped `Global` would invalidate
 /// it). Set exactly once, under [`PLATFORM_INIT`]; never taken out or dropped.
 static CONTEXT_GLOBAL: OnceLock<Global<JObject<'static>>> = OnceLock::new();
+
+/// Process-wide "a surface has begun being created" flag (platform-views
+/// task 05): stored `true` at the top of [`create_handle`], read by
+/// [`native_set_surface_mode`] to warn on a too-late latch call. The
+/// translucent-surface opt-in ([`frust_shell_common::surface_mode`]'s module
+/// docs' Latch contract) is pre-init-only — the surface format is fixed at
+/// creation — so a call after this flag flips has no effect on the current
+/// surface; best-effort (this flag flips once per process, at the first
+/// `nativeInit`, not per-handle).
+static ANY_SURFACE_CREATED: AtomicBool = AtomicBool::new(false);
+
+/// Resolve the [`frust_render::SurfaceAlphaRequest`] a surface-creation call
+/// should pass, from the process-wide translucent-surface latch
+/// ([`SurfaceModeWatcher::current`], platform-views task 03/05):
+/// [`SurfaceMode::Translucent`] resolves to
+/// [`frust_render::SurfaceAlphaRequest::TranslucentPreferred`] (task 04's
+/// capability-probed resolution table then picks the actual
+/// `wgpu::CompositeAlphaMode`), [`SurfaceMode::Opaque`] (the default) to
+/// today's unchanged [`frust_render::SurfaceAlphaRequest::Opaque`]. Read
+/// fresh at each surface-creation call site rather than cached, since the
+/// latch itself never reverts once set — a stale cached `false` read before
+/// a same-process `nativeSetSurfaceMode(true)` call would otherwise survive
+/// past it.
+fn surface_alpha_request() -> frust_render::SurfaceAlphaRequest {
+    match SurfaceModeWatcher::current() {
+        SurfaceMode::Translucent => frust_render::SurfaceAlphaRequest::TranslucentPreferred,
+        SurfaceMode::Opaque => frust_render::SurfaceAlphaRequest::Opaque,
+    }
+}
 
 /// `JNI_OnLoad`: the JVM calls this once when the native library is loaded, well
 /// before the first `nativeInit` (task 19, spec §14 phase 7.E). It captures the
@@ -529,7 +559,7 @@ fn install_surface(
             window_ptr,
             width.max(1),
             height.max(1),
-            frust_render::SurfaceAlphaRequest::Opaque,
+            surface_alpha_request(),
         )
     })
     .context("frust-shell-android: failed to create Android render surface")?;
@@ -803,6 +833,12 @@ fn create_handle(
     cache_dir: Option<String>,
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> Result<jlong> {
+    // Mark that a surface has begun being created in this process (task 05):
+    // read by `native_set_surface_mode` to warn on a too-late latch call. Set
+    // unconditionally here, before the fallible steps below, since the latch
+    // contract only cares "was init attempted", not whether it succeeded.
+    ANY_SURFACE_CREATED.store(true, Ordering::Release);
+
     // Cold-start span recorder (task 08, spec §14 phase 7.A). `begin()` marks
     // the epoch; every span below is a delta from here, closed out by the first
     // successful render. A no-op recorder (allocates nothing further) when
@@ -926,7 +962,7 @@ fn build_inline_executor(
             window_ptr,
             physical.0,
             physical.1,
-            frust_render::SurfaceAlphaRequest::Opaque,
+            surface_alpha_request(),
         )
     })
     .context("frust-shell-android: failed to create Android render surface")?;
@@ -1153,7 +1189,7 @@ pub fn native_on_surface_changed(
                     window_ptr,
                     physical.0,
                     physical.1,
-                    frust_render::SurfaceAlphaRequest::Opaque,
+                    surface_alpha_request(),
                 )
             })
         };
@@ -1235,12 +1271,17 @@ pub fn native_on_resume(handle: jlong) {
     });
 }
 
-/// `nativeOnPause`: activity paused. Bookkeeping only in v0 (see [`native_on_resume`]).
+/// `nativeOnPause`: activity paused. Bookkeeping only in v0 (see
+/// [`native_on_resume`]), plus (platform-views task 05) hiding every
+/// currently-visible platform-view slot: a backgrounded app's native
+/// sibling views should disappear with it rather than linger on top of
+/// whatever now shows behind the (possibly composited-away) frust surface.
 pub fn native_on_pause(handle: jlong) {
     guard("nativeOnPause", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
-        if unsafe { handle_mut(handle) }.is_some() {
+        if let Some(app) = unsafe { handle_mut(handle) } {
             log::debug!("frust-shell-android: onPause");
+            app.suspend_platform_views();
         }
     });
 }
@@ -1378,6 +1419,152 @@ pub fn native_system_ui_state(handle: jlong) -> jlong {
         }
         frust_shell_common::encoded_state() as jlong
     })
+}
+
+/// `nativeSetSurfaceMode`: latch a translucent (alpha-channel) GPU surface
+/// before the surface is created (platform-views task 05).
+///
+/// The generated Kotlin glue calls this **before** `nativeInit` (template
+/// task 08's contract) — forwarding straight to
+/// [`request_translucent_surface`], the process-wide, one-way pre-init latch
+/// (`frust_shell_common::surface_mode`'s module docs' Latch contract: the
+/// surface format is fixed at creation, so there is no "revert" call and no
+/// live re-flip). A call after [`ANY_SURFACE_CREATED`] is already set (i.e.
+/// after some `nativeInit` in this process has begun) is logged and is a
+/// no-op for the current surface — it cannot retroactively change a format
+/// already chosen. `translucent == false` is always a no-op too: there is
+/// nothing to "un-latch".
+pub fn native_set_surface_mode(translucent: jboolean) {
+    guard("nativeSetSurfaceMode", (), || {
+        if !translucent {
+            return;
+        }
+        if ANY_SURFACE_CREATED.load(Ordering::Acquire) {
+            log::warn!(
+                "frust-shell-android: nativeSetSurfaceMode(true) called after a surface \
+                 already exists in this process; the translucent-surface latch is \
+                 pre-init-only (v1) and has no effect on the current surface"
+            );
+            return;
+        }
+        request_translucent_surface();
+    });
+}
+
+/// `nativePlatformViewCommands`: return the native-sibling-compositor command
+/// backlog (task 03's differ) as JSON, for Kotlin's per-frame poll —
+/// mirrors [`native_ime_state`]'s shape exactly (fresh JSON per call,
+/// JNI-owned `JString`, guard-wrapped, `null` on a missing handle).
+///
+/// `ack_generation` is the generation Kotlin's own last successful poll
+/// returned (round-tripped back on the next call, `0` on the first ever
+/// poll); this first [`AndroidAppHandle::acknowledge_platform_view_commands`]s
+/// it — compacting the differ's backlog
+/// (`frust_shell_common::platform_view`'s module docs' Generation/
+/// acknowledgement section) — then serializes the resulting
+/// `(generation, &[ViewCommand])` snapshot. A negative `ack_generation`
+/// (untrusted JNI input) clamps to `0` rather than wrapping through the
+/// `as u64` cast.
+///
+/// **Frozen JSON wire contract** (byte-identical, served by task 06's iOS
+/// shell too — see [`build_platform_view_commands_json`]):
+///
+/// ```text
+/// {"generation":7,"commands":[
+///  {"op":"create","slot":3,"viewType":"dev.frust.XFactory","params":"{...}"},
+///  {"op":"update","slot":3,"rect":[x,y,w,h],"clip":[x,y,w,h]|null,"visible":true},
+///  {"op":"updateParams","slot":3,"params":"{...}"},
+///  {"op":"dispose","slot":3}]}
+/// ```
+///
+/// Rects are **PHYSICAL px** — [`platform_view_commands_to_json`] multiplies
+/// the differ's logical-px rects by this handle's stored scale factor at
+/// this boundary (the physical-at-FFI/logical-inside rule, applied outbound
+/// — mirrors [`native_on_insets_changed`]'s inbound direction) so Kotlin does
+/// zero density math.
+///
+/// Returns a null `jstring` on the no-change fast path
+/// ([`platform_view_commands_up_to_date`] — the `nativeSystemUiState`
+/// cheapness bar: a no-change poll costs one JNI call and no allocation) or
+/// when there is no live native handle.
+pub fn native_platform_view_commands(
+    mut env: EnvUnowned,
+    handle: jlong,
+    ack_generation: jlong,
+) -> jstring {
+    guard("nativePlatformViewCommands", std::ptr::null_mut(), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return std::ptr::null_mut();
+        };
+        let ack_generation = ack_generation.max(0) as u64;
+        app.acknowledge_platform_view_commands(ack_generation);
+        let (generation, commands) = app.platform_view_commands();
+        if platform_view_commands_up_to_date(generation, ack_generation) {
+            return std::ptr::null_mut(); // no-change fast path
+        }
+        let json_commands = platform_view_commands_to_json(commands, app.sanitized_scale());
+        let json = build_platform_view_commands_json(generation, &json_commands);
+        env.with_env(|env| Ok::<JObject, jni::errors::Error>(JString::new(env, &json)?.into()))
+            .resolve::<LogErrorAndDefault>()
+            .into_raw()
+    })
+}
+
+/// Map the differ's [`ViewCommand`] backlog (task 03) onto the host-testable
+/// [`PlatformViewCommandJson`] the JSON builder consumes, converting each
+/// rect/clip from the differ's logical px to **physical** px at this FFI
+/// boundary — mirrors [`ime_state_to_json`]'s caret-rect conversion.
+fn platform_view_commands_to_json(
+    commands: &[ViewCommand],
+    scale: f64,
+) -> Vec<PlatformViewCommandJson> {
+    commands
+        .iter()
+        .map(|cmd| match cmd {
+            ViewCommand::Create {
+                slot_id,
+                view_type,
+                params_json,
+            } => PlatformViewCommandJson::Create {
+                slot_id: *slot_id,
+                view_type: view_type.clone(),
+                params_json: params_json.clone(),
+            },
+            ViewCommand::Update {
+                slot_id,
+                rect,
+                clip,
+                visible,
+            } => PlatformViewCommandJson::Update {
+                slot_id: *slot_id,
+                rect: scale_rect(*rect, scale),
+                clip: clip.map(|c| scale_rect(c, scale)),
+                visible: *visible,
+            },
+            ViewCommand::UpdateParams {
+                slot_id,
+                params_json,
+            } => PlatformViewCommandJson::UpdateParams {
+                slot_id: *slot_id,
+                params_json: params_json.clone(),
+            },
+            ViewCommand::Dispose { slot_id } => {
+                PlatformViewCommandJson::Dispose { slot_id: *slot_id }
+            }
+        })
+        .collect()
+}
+
+/// Scale one differ rect (logical px) to physical px, as the `(x, y, width,
+/// height)` tuple [`PlatformViewCommandJson`]'s JSON builder expects.
+fn scale_rect(rect: kurbo::Rect, scale: f64) -> (f32, f32, f32, f32) {
+    (
+        (rect.x0 * scale) as f32,
+        (rect.y0 * scale) as f32,
+        (rect.width() * scale) as f32,
+        (rect.height() * scale) as f32,
+    )
 }
 
 /// `nativeOnDeepLink`: deliver a platform deep link (cold-start, forwarded

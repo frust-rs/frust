@@ -341,6 +341,35 @@ impl PlatformViewState {
         self.push_batch(batch)
     }
 
+    /// Force every currently-visible live slot to `Update { visible: false }`
+    /// right now, regardless of its `missing_streak` — the backgrounding
+    /// replay a shell calls when the app is about to lose the foreground
+    /// (Android's `nativeOnPause`, task 05) and wants every native sibling
+    /// hidden immediately rather than waiting out
+    /// [`HIDE_AFTER_MISSING_FRAMES`] naturally (which may never even start
+    /// counting if the surface simply stops producing frames while
+    /// backgrounded, rather than the tree stopping publishing). A slot
+    /// already hidden — or no live slots at all — contributes nothing, so
+    /// this is a no-op (`false`) in that case. Mirrors
+    /// [`reset_for_surface_recreate`](Self::reset_for_surface_recreate)'s
+    /// shape (one pass over `live`, one [`push_batch`](Self::push_batch)
+    /// call) but the opposite direction: hide, not re-create.
+    pub fn suspend_all(&mut self) -> bool {
+        let mut batch = Vec::new();
+        for (&slot_id, entry) in self.live.iter_mut() {
+            if entry.last_visible {
+                batch.push(ViewCommand::Update {
+                    slot_id,
+                    rect: entry.last_rect,
+                    clip: entry.last_clip,
+                    visible: false,
+                });
+                entry.last_visible = false;
+            }
+        }
+        self.push_batch(batch)
+    }
+
     /// Snapshot for a shell's peek getter: the current generation plus the
     /// **entire** not-yet-acknowledged command backlog (not just the latest
     /// ingest's batch) — see the module docs' Generation/acknowledgement
@@ -722,6 +751,43 @@ mod tests {
         // Retiring an already-gone (or never-created) slot is a no-op.
         assert!(!state.retire(1));
         assert!(!state.retire(999));
+    }
+
+    #[test]
+    fn suspend_all_hides_every_visible_live_slot() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[
+            frame(1, r(0.0, 0.0, 10.0, 10.0), true),
+            frame(2, r(20.0, 0.0, 30.0, 10.0), false), // already hidden
+        ]);
+        state.acknowledge(state.commands().0);
+
+        let changed = state.suspend_all();
+        assert!(changed);
+        let (_, cmds) = state.commands();
+        // Only slot 1 (previously visible) gets a Hide; slot 2 was already
+        // hidden, so it emits nothing.
+        assert_eq!(
+            cmds,
+            &[ViewCommand::Update {
+                slot_id: 1,
+                rect: r(0.0, 0.0, 10.0, 10.0),
+                clip: None,
+                visible: false,
+            }]
+        );
+
+        // A second call with nothing left visible is a no-op.
+        state.acknowledge(state.commands().0);
+        assert!(!state.suspend_all());
+        assert_eq!(state.commands().1, &[]);
+    }
+
+    #[test]
+    fn suspend_all_with_no_live_slots_is_a_no_op() {
+        let mut state = PlatformViewState::new();
+        assert!(!state.suspend_all());
+        assert_eq!(state.commands(), (0, &[][..]));
     }
 
     #[test]
