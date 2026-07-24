@@ -254,7 +254,10 @@ impl Widget for PlatformViewWidget {
         // paint-time cull uses, so a slot that merely shares an edge with the
         // viewport still counts as visible.
         let (clip, visible) = match ctx.visible_rect() {
-            Some(visible_rect) => (Some(visible_rect.intersect(rect)), visible_rect.overlaps(rect)),
+            Some(visible_rect) => (
+                Some(visible_rect.intersect(rect)),
+                visible_rect.overlaps(rect),
+            ),
             None => (None, true),
         };
 
@@ -304,7 +307,12 @@ mod tests {
         element: &mut PlatformViewWidget,
     ) -> ChangeFlags {
         let mut counter = 0u64;
-        <PlatformViewView as View<()>>::rebuild(next, prev, element, &mut BuildCtx::new(&mut counter))
+        <PlatformViewView as View<()>>::rebuild(
+            next,
+            prev,
+            element,
+            &mut BuildCtx::new(&mut counter),
+        )
     }
 
     /// A no-op recording scene — these tests only inspect the published
@@ -440,7 +448,7 @@ mod tests {
     fn parent_culling_of_the_whole_subtree_yields_no_frame_at_all() {
         let mut counter = 0u64;
         let row: FlexView<()> = Row(vec![any(
-            platform_view("dev.frust.MapFactory").size(50.0, 50.0),
+            platform_view("dev.frust.MapFactory").size(50.0, 50.0)
         )]);
         let mut widget = row.build(&mut BuildCtx::new(&mut counter));
         let mut lctx = LayoutCtx::new();
@@ -494,8 +502,14 @@ mod tests {
         let swapped = platform_view("dev.frust.OtherFactory").params_json("a");
         rebuild(&prev, &swapped, &mut w);
 
-        assert_ne!(w.slot_id, old_slot_id, "a view_type swap must allocate a new slot id");
-        assert_eq!(w.params_generation, 0, "a swap resets generation like a fresh build");
+        assert_ne!(
+            w.slot_id, old_slot_id,
+            "a view_type swap must allocate a new slot id"
+        );
+        assert_eq!(
+            w.params_generation, 0,
+            "a swap resets generation like a fresh build"
+        );
         assert_eq!(w.view_type, "dev.frust.OtherFactory");
     }
 
