@@ -142,6 +142,117 @@ impl std::fmt::Debug for PopResult {
     }
 }
 
+/// How a page participates in a back press routed through
+/// [`NavigatorController::request_back`] (Android hardware/gesture back, task
+/// 08's facade wiring). A page declares its policy when pushed via
+/// [`PushOptions::back`]; every existing push defaults to [`Pop`](Self::Pop).
+///
+/// This is *internal* routing vocabulary — the user-facing overlay builder is
+/// `dismissable(bool)` (tasks 11/12/16), which maps `true → DismissAnimated` and
+/// `false → Veto` when the overlay pushes its transparent page.
+///
+/// # The DismissAnimated observation seam
+///
+/// A [`DismissAnimated`](Self::DismissAnimated) page does *not* pop on the back
+/// press itself; instead the navigator increments the page's
+/// [`dismiss_signal`](PushOptions::dismiss_signal) generation counter, which the
+/// page's own widget subtree observes (comparing the shared `Rc<Cell<u64>>`
+/// against a last-seen value on its next paint/event) and turns into its own
+/// `begin_exit` staging — the overlay then pops *itself* on exit completion via
+/// its existing on-close path. This keeps `frust-widgets` reactive-free (a plain
+/// shared cell, mirroring [`NavigatorController::depth`]'s
+/// `Rc<Cell<usize>>`) — no `frust-reactive` dependency crosses into this crate.
+/// An overlay helper (`show_command_palette`/`show_dialog`/`show_bottom_sheet`)
+/// wires the seam by creating one cell, handing a clone to the overlay widget it
+/// builds *and* into [`PushOptions::dismiss_signal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackPolicy {
+    /// The default: a back press pops this page (the normal
+    /// [`pop`](NavigatorController::pop) path, transitions preserved). A back
+    /// press at the root (this being the only page) is a safe no-op.
+    Pop,
+    /// A dismissable overlay: a back press fires the page's
+    /// [`dismiss_signal`](PushOptions::dismiss_signal) (see the seam above)
+    /// rather than popping — the stack is unchanged immediately, and the overlay
+    /// animates its own exit before popping itself.
+    DismissAnimated,
+    /// A non-dismissable overlay (a modal barrier): a back press is *consumed*
+    /// (the page claims it, so it never bubbles to the platform) but does
+    /// nothing — the stack is unchanged and no signal fires.
+    Veto,
+}
+
+/// Options for [`NavigatorController::push_with_options`], carrying a pushed
+/// page's opacity, back-press [`BackPolicy`], optional per-op transition
+/// override, optional result callback, and (for a
+/// [`DismissAnimated`](BackPolicy::DismissAnimated) overlay) the shared
+/// dismiss-signal cell the navigator bumps on a back request.
+///
+/// Construct with [`opaque`](Self::opaque)/[`transparent`](Self::transparent),
+/// then chain the builder setters. The existing `push*` methods are unchanged —
+/// they push with [`BackPolicy::Pop`] and no dismiss signal.
+pub struct PushOptions<State: 'static> {
+    opaque: bool,
+    back: BackPolicy,
+    transition: Option<TransitionSpec>,
+    on_result: Option<ResultCallback<State>>,
+    dismiss_signal: Option<Rc<Cell<u64>>>,
+}
+
+impl<State: 'static> PushOptions<State> {
+    /// Options for an **opaque** page (the page below is culled while covered).
+    /// Defaults: [`BackPolicy::Pop`], navigator-default transition, no result
+    /// callback, no dismiss signal.
+    pub fn opaque() -> Self {
+        Self {
+            opaque: true,
+            back: BackPolicy::Pop,
+            transition: None,
+            on_result: None,
+            dismiss_signal: None,
+        }
+    }
+
+    /// Options for a **transparent** page (e.g. a dialog/sheet/palette overlay —
+    /// the page below stays visible). Same defaults as [`opaque`](Self::opaque)
+    /// otherwise.
+    pub fn transparent() -> Self {
+        Self {
+            opaque: false,
+            ..Self::opaque()
+        }
+    }
+
+    /// Set the page's back-press [`BackPolicy`] (default [`BackPolicy::Pop`]).
+    pub fn back(mut self, policy: BackPolicy) -> Self {
+        self.back = policy;
+        self
+    }
+
+    /// Override the navigator's default transition for this push only.
+    pub fn transition(mut self, spec: TransitionSpec) -> Self {
+        self.transition = Some(spec);
+        self
+    }
+
+    /// Register a result callback invoked with `&mut State` when this page is
+    /// later popped (carrying the pop's [`PopResult`]) — the same delivery the
+    /// [`push_for_result`](NavigatorController::push_for_result) path uses.
+    pub fn on_result(mut self, callback: impl Fn(&mut State, PopResult) + 'static) -> Self {
+        self.on_result = Some(Rc::new(callback));
+        self
+    }
+
+    /// Supply the shared generation cell the navigator increments when a
+    /// [`DismissAnimated`](BackPolicy::DismissAnimated) back press routes to this
+    /// page (see [`BackPolicy`]'s observation seam). Ignored for the other
+    /// policies.
+    pub fn dismiss_signal(mut self, signal: Rc<Cell<u64>>) -> Self {
+        self.dismiss_signal = Some(signal);
+        self
+    }
+}
+
 /// One queued navigation op, recorded by the [`NavigatorController`] and drained
 /// (in order) by [`NavigatorView::rebuild`].
 enum NavOp<State: 'static> {
@@ -152,11 +263,20 @@ enum NavOp<State: 'static> {
         on_result: Option<ResultCallback<State>>,
         /// Per-op transition override (`None` → the navigator's default).
         transition: Option<TransitionSpec>,
+        /// How a back press treats this page (default [`BackPolicy::Pop`]).
+        back: BackPolicy,
+        /// The shared generation cell bumped on a
+        /// [`DismissAnimated`](BackPolicy::DismissAnimated) back press.
+        dismiss_signal: Option<Rc<Cell<u64>>>,
     },
     /// Pop the top page (never the last/root page), delivering `result` to the
     /// popped page's pusher-registered callback. A pop *reverses* the popped
     /// page's own stored transition (no override slot).
     Pop { result: PopResult },
+    /// Route a back press through the top page's [`BackPolicy`] (task 02):
+    /// [`Pop`](BackPolicy::Pop) pops, [`DismissAnimated`](BackPolicy::DismissAnimated)
+    /// fires the page's dismiss signal, [`Veto`](BackPolicy::Veto) consumes it.
+    RequestBack,
     /// Replace the top page in place.
     Replace {
         builder: PageBuilder<State>,
@@ -186,6 +306,17 @@ pub struct NavigatorController<State: 'static> {
     /// not a signal — a shell/facade polls it at rebuild time (see the timing
     /// note in `frust-reactive::back`).
     depth: Rc<Cell<usize>>,
+    /// Whether a back press should be *claimed* by the navigator ahead-of-time
+    /// (predictive-back parity, task 02) — published by the attached
+    /// [`NavigatorWidget`] alongside [`depth`](Self::depth). `true` iff the stack
+    /// is poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
+    /// [`Pop`](BackPolicy::Pop) (a dismissable/veto overlay claims back even at
+    /// the root). This is the signal task 08's facade back handler computes
+    /// `handles_back` from — it differs from [`can_pop`](Self::can_pop) exactly
+    /// in the depth-1-with-overlay case, where a raw pop would do nothing but the
+    /// overlay still owns the press. Same plain `Rc<Cell<_>>` (reactive-free)
+    /// polled-at-rebuild contract as `depth`.
+    back_interest: Rc<Cell<bool>>,
 }
 
 impl<State: 'static> Clone for NavigatorController<State> {
@@ -193,6 +324,7 @@ impl<State: 'static> Clone for NavigatorController<State> {
         Self {
             ops: Rc::clone(&self.ops),
             depth: Rc::clone(&self.depth),
+            back_interest: Rc::clone(&self.back_interest),
         }
     }
 }
@@ -209,6 +341,7 @@ impl<State: 'static> NavigatorController<State> {
         Self {
             ops: Rc::new(RefCell::new(Vec::new())),
             depth: Rc::new(Cell::new(0)),
+            back_interest: Rc::new(Cell::new(false)),
         }
     }
 
@@ -236,6 +369,22 @@ impl<State: 'static> NavigatorController<State> {
     /// mis-predicted root-level back never removes the last page.
     pub fn can_pop(&self) -> bool {
         self.depth.get() > 1
+    }
+
+    /// Whether the navigator claims the next back press ahead-of-time
+    /// (predictive-back parity, task 02) — `true` iff the stack is poppable
+    /// **or** the top page declares a non-[`Pop`](BackPolicy::Pop) policy (a
+    /// dismissable/veto overlay). Task 08's facade back handler reads this
+    /// (in preference to [`can_pop`](Self::can_pop)) to compute the shell's
+    /// `handles_back`, so a dismissable overlay at the root still consumes back
+    /// rather than exiting the app.
+    ///
+    /// **Advisory**, published at the last rebuild like [`depth`](Self::depth) —
+    /// a query racing a same-frame stack change sees the previous value; the
+    /// navigator's own [`request_back`](Self::request_back) routing stays
+    /// authoritative regardless (see `frust-reactive::back`'s timing note).
+    pub fn back_interest(&self) -> bool {
+        self.back_interest.get()
     }
 
     /// Push an **opaque** page built by `builder` on top of the stack, using the
@@ -307,9 +456,32 @@ impl<State: 'static> NavigatorController<State> {
         self.push_impl(builder, false, Some(Rc::new(on_result)), Some(transition));
     }
 
+    /// Push a page with an explicit [`PushOptions`] — the full-control variant
+    /// carrying a back-press [`BackPolicy`] (and, for a
+    /// [`DismissAnimated`](BackPolicy::DismissAnimated) overlay, its dismiss
+    /// signal) alongside opacity/transition/result. The dismissable-overlay
+    /// helpers (tasks 11/12/16) push through this; every other `push*` method
+    /// pushes with [`BackPolicy::Pop`].
+    pub fn push_with_options(
+        &self,
+        builder: impl Fn() -> AnyView<State> + 'static,
+        options: PushOptions<State>,
+    ) {
+        self.enqueue(NavOp::Push {
+            builder: Rc::new(builder),
+            opaque: options.opaque,
+            on_result: options.on_result,
+            transition: options.transition,
+            back: options.back,
+            dismiss_signal: options.dismiss_signal,
+        });
+    }
+
     /// Shared push-op construction every `push*` method above funnels through —
     /// the five public variants differ only in which of `opaque`/`on_result`/
-    /// `transition` they fix vs. expose.
+    /// `transition` they fix vs. expose. All push with [`BackPolicy::Pop`] and
+    /// no dismiss signal; a page wanting a different policy uses
+    /// [`push_with_options`](Self::push_with_options).
     fn push_impl(
         &self,
         builder: impl Fn() -> AnyView<State> + 'static,
@@ -322,6 +494,8 @@ impl<State: 'static> NavigatorController<State> {
             opaque,
             on_result,
             transition,
+            back: BackPolicy::Pop,
+            dismiss_signal: None,
         });
     }
 
@@ -337,6 +511,24 @@ impl<State: 'static> NavigatorController<State> {
     /// [`push_for_result`](Self::push_for_result) callback.
     pub fn pop_with_result(&self, result: PopResult) {
         self.enqueue(NavOp::Pop { result });
+    }
+
+    /// Route a back press through the top page's [`BackPolicy`] (task 02, the
+    /// entry task 08's facade back handler drives instead of a bare
+    /// [`pop`](Self::pop)):
+    ///
+    /// - [`Pop`](BackPolicy::Pop) → a normal pop (transitions preserved; a safe
+    ///   no-op at the root);
+    /// - [`DismissAnimated`](BackPolicy::DismissAnimated) → fires the top page's
+    ///   dismiss signal (stack unchanged; the overlay animates its own exit and
+    ///   pops itself), see [`BackPolicy`]'s observation seam;
+    /// - [`Veto`](BackPolicy::Veto) → the press is consumed but nothing happens.
+    ///
+    /// Recorded like every other op and applied at the next rebuild (never
+    /// self-mutating mid-event). Whether this call *would* claim the press is
+    /// [`back_interest`](Self::back_interest).
+    pub fn request_back(&self) {
+        self.enqueue(NavOp::RequestBack);
     }
 
     /// Replace the top page in place with an opaque page built by `builder`,
@@ -443,6 +635,16 @@ struct PageEntry<State: 'static> {
     /// page is later popped (a pop animates the popped page's own transition
     /// backwards, Flutter-parity: a route carries its transition).
     transition: TransitionSpec,
+    /// How a back press routed through
+    /// [`request_back`](NavigatorController::request_back) treats this page
+    /// (task 02). Pushed pages set it via [`PushOptions::back`]; the root and
+    /// replaced pages default to [`BackPolicy::Pop`].
+    back: BackPolicy,
+    /// The shared generation cell a
+    /// [`DismissAnimated`](BackPolicy::DismissAnimated) back press increments so
+    /// the page's own widget subtree observes it (see [`BackPolicy`]'s seam).
+    /// `None` for any page that did not supply one.
+    dismiss_signal: Option<Rc<Cell<u64>>>,
 }
 
 /// The single in-flight page transition a [`NavigatorWidget`] owns (Flutter
@@ -560,20 +762,38 @@ pub struct NavigatorWidget<State: 'static> {
     last_frame_time: FrameTime,
     /// The shared depth slot published to the [`NavigatorController`] every
     /// `build`/`rebuild` (device-parity task 05). A clone of the controller's
-    /// `Rc<Cell<usize>>`, updated by [`publish_depth`](Self::publish_depth)
+    /// `Rc<Cell<usize>>`, updated by [`publish_state`](Self::publish_state)
     /// after every stack mutation so `NavigatorController::can_pop` reads the
     /// authoritative page count.
     depth: Rc<Cell<usize>>,
+    /// The shared back-interest slot published to the [`NavigatorController`]
+    /// alongside `depth` (task 02). A clone of the controller's
+    /// `Rc<Cell<bool>>`, recomputed by [`publish_state`](Self::publish_state)
+    /// from the current depth + top-page [`BackPolicy`] after every stack
+    /// mutation so `NavigatorController::back_interest` is authoritative.
+    back_interest: Rc<Cell<bool>>,
+}
+
+/// Whether the navigator should claim a back press ahead-of-time (task 02): the
+/// stack is poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
+/// [`Pop`](BackPolicy::Pop). Pure so it is unit-testable directly, including the
+/// depth-1-with-overlay case a raw `can_pop` cannot express.
+fn compute_back_interest(depth: usize, top_policy: BackPolicy) -> bool {
+    depth > 1 || top_policy != BackPolicy::Pop
 }
 
 impl<State: 'static> NavigatorWidget<State> {
-    /// Publish the current page-stack depth to the shared controller slot
-    /// (device-parity task 05). Called after every stack mutation — at the end
-    /// of `apply_ops`, and at the end of `build`/`rebuild` (so a transition
-    /// finalize that changed the stack is reflected too) — so
-    /// `NavigatorController::depth`/`can_pop` read the authoritative count.
-    fn publish_depth(&self) {
+    /// Publish the current page-stack depth **and** back-interest to the shared
+    /// controller slots (task 02, extending device-parity task 05's depth
+    /// publish). Called after every stack mutation — at the end of `apply_ops`,
+    /// and at the end of `build`/`rebuild` (so a transition finalize that changed
+    /// the stack is reflected too) — so `NavigatorController::depth`/`can_pop`/
+    /// `back_interest` read authoritative values.
+    fn publish_state(&self) {
         self.depth.set(self.pages.len());
+        let top_policy = self.pages.last().map(|p| p.back).unwrap_or(BackPolicy::Pop);
+        self.back_interest
+            .set(compute_back_interest(self.pages.len(), top_policy));
     }
 
     /// The index of the topmost **opaque** page — the bottom of the visible
@@ -951,6 +1171,69 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
+    /// Pop the top page (the shared body of [`NavOp::Pop`] and a
+    /// [`BackPolicy::Pop`] back request), delivering `result` to the popped
+    /// page's pusher-registered callback. A pop of the last/root page is a safe
+    /// no-op (the navigator always keeps one page; the result payload is
+    /// dropped). Transitions are preserved: an animated page animates out and is
+    /// torn down on settle. Returns the accumulated dirtiness.
+    fn apply_pop(&mut self, result: PopResult, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        let mut flags = ChangeFlags::NONE;
+        if self.pages.len() > 1 {
+            self.cancel_top();
+            // Disarm any pending edge-swipe: this pop shrinks the stack, so an arm
+            // captured before it must not later steal an interactive pop against
+            // the now-shallower stack (mirrors the `cancel_top` contract).
+            self.edge.armed = false;
+            let mut popped = self.pages.pop().expect("len checked > 1");
+            let spec = popped.transition;
+            if let Some(callback) = popped.on_result.take() {
+                self.pending_results.push((callback, result));
+            }
+            self.needs_ime_clear = true;
+            if spec.is_animated() {
+                // Keep the popped page alive & painted, animating out; torn down
+                // on settle (a pop reverses its transition).
+                self.start_transition(spec, true, Some(popped), ctx);
+            } else {
+                crate::teardown_child(&popped.view, &mut popped.pod, ctx);
+            }
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        flags
+    }
+
+    /// Route a back press through the top page's [`BackPolicy`] (task 02):
+    ///
+    /// - [`Pop`](BackPolicy::Pop) → a normal [`apply_pop`](Self::apply_pop) (the
+    ///   existing path, transitions preserved; a no-op at the root);
+    /// - [`DismissAnimated`](BackPolicy::DismissAnimated) → increment the top
+    ///   page's dismiss-signal generation (the page's own subtree observes it
+    ///   and begins its exit, then pops itself); the stack is unchanged now, so
+    ///   only `PAINT` is flagged (a repaint is needed for the page to observe the
+    ///   bump);
+    /// - [`Veto`](BackPolicy::Veto) → the press is *consumed* (the page claimed
+    ///   it via `back_interest`, so it never reached the platform) but nothing
+    ///   happens — no signal, no stack change, no dirtiness.
+    fn apply_request_back(&mut self, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        let policy = self.pages.last().map(|p| p.back).unwrap_or(BackPolicy::Pop);
+        match policy {
+            BackPolicy::Pop => self.apply_pop(PopResult::empty(), ctx),
+            BackPolicy::DismissAnimated => {
+                if let Some(top) = self.pages.last()
+                    && let Some(signal) = &top.dismiss_signal
+                {
+                    // Bump exactly once per request — the page compares the shared
+                    // generation against its last-seen value and stages its exit.
+                    signal.set(signal.get().wrapping_add(1));
+                }
+                ChangeFlags::PAINT
+            }
+            // Consumed, but no visible change and no stack mutation.
+            BackPolicy::Veto => ChangeFlags::NONE,
+        }
+    }
+
     /// Drain and apply the controller's queued ops (structural changes only),
     /// building/tearing down pods through `ctx`. Returns the accumulated dirtiness.
     fn apply_ops(&mut self, ops: Vec<NavOp<State>>, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
@@ -962,6 +1245,8 @@ impl<State: 'static> NavigatorWidget<State> {
                     opaque,
                     on_result,
                     transition,
+                    back,
+                    dismiss_signal,
                 } => {
                     let spec = self.effective_spec(transition);
                     self.cancel_top();
@@ -978,6 +1263,8 @@ impl<State: 'static> NavigatorWidget<State> {
                         opaque,
                         on_result,
                         transition: spec,
+                        back,
+                        dismiss_signal,
                     });
                     self.needs_ime_clear = true;
                     // A push's leaving page (now at `len - 2`) stays in the stack;
@@ -988,30 +1275,10 @@ impl<State: 'static> NavigatorWidget<State> {
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
                 NavOp::Pop { result } => {
-                    // A navigator always keeps its root page; a pop of the last
-                    // page is a no-op (its result payload is dropped).
-                    if self.pages.len() > 1 {
-                        self.cancel_top();
-                        // Disarm any pending edge-swipe: this pop shrinks the
-                        // stack, so an arm captured before it must not later steal
-                        // an interactive pop against the now-shallower stack
-                        // (mirrors the `cancel_top` capture/focus-clearing contract).
-                        self.edge.armed = false;
-                        let mut popped = self.pages.pop().expect("len checked > 1");
-                        let spec = popped.transition;
-                        if let Some(callback) = popped.on_result.take() {
-                            self.pending_results.push((callback, result));
-                        }
-                        self.needs_ime_clear = true;
-                        if spec.is_animated() {
-                            // Keep the popped page alive & painted, animating out;
-                            // torn down on settle (a pop reverses its transition).
-                            self.start_transition(spec, true, Some(popped), ctx);
-                        } else {
-                            crate::teardown_child(&popped.view, &mut popped.pod, ctx);
-                        }
-                        flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-                    }
+                    flags |= self.apply_pop(result, ctx);
+                }
+                NavOp::RequestBack => {
+                    flags |= self.apply_request_back(ctx);
                 }
                 NavOp::Replace {
                     builder,
@@ -1034,6 +1301,10 @@ impl<State: 'static> NavigatorWidget<State> {
                             opaque,
                             on_result: None,
                             transition: spec,
+                            // A replaced page pops on back like the root — an
+                            // overlay uses `push_with_options`, never replace.
+                            back: BackPolicy::Pop,
+                            dismiss_signal: None,
                         };
                         if spec.is_animated() {
                             // Stash the old top and animate the new one in over it
@@ -1054,6 +1325,8 @@ impl<State: 'static> NavigatorWidget<State> {
                             opaque,
                             on_result: None,
                             transition: spec,
+                            back: BackPolicy::Pop,
+                            dismiss_signal: None,
                         });
                     }
                     self.needs_ime_clear = true;
@@ -1061,9 +1334,10 @@ impl<State: 'static> NavigatorWidget<State> {
                 }
             }
         }
-        // Publish the (possibly changed) stack depth so `NavigatorController::
-        // can_pop` reflects this batch of ops (device-parity task 05).
-        self.publish_depth();
+        // Publish the (possibly changed) stack depth + back-interest so
+        // `NavigatorController::can_pop`/`back_interest` reflect this batch of
+        // ops (device-parity task 05 / back-request task 02).
+        self.publish_state();
         flags
     }
 
@@ -1397,6 +1671,9 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 opaque: true,
                 on_result: None,
                 transition: self.default_transition,
+                // The root page always pops on back (never an overlay policy).
+                back: BackPolicy::Pop,
+                dismiss_signal: None,
             }],
             pending_results: Vec::new(),
             needs_ime_clear: false,
@@ -1406,16 +1683,17 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             edge: EdgeSwipe::new(),
             last_frame_time: FrameTime::ZERO,
             depth: Rc::clone(&self.controller.depth),
+            back_interest: Rc::clone(&self.controller.back_interest),
         };
         // Apply any ops the app queued before the first frame.
         let ops = self.controller.drain();
         if !ops.is_empty() {
             widget.apply_ops(ops, ctx);
         }
-        // Publish the initial (post-any-queued-ops) depth so `can_pop` is
-        // authoritative from the first frame, even if no ops ran (device-parity
-        // task 05).
-        widget.publish_depth();
+        // Publish the initial (post-any-queued-ops) depth + back-interest so
+        // `can_pop`/`back_interest` are authoritative from the first frame, even
+        // if no ops ran (device-parity task 05 / back-request task 02).
+        widget.publish_state();
         widget
     }
 
@@ -1455,11 +1733,12 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             flags |= crate::rebuild_child(&entry.view, &next_view, &mut entry.pod, ctx);
             entry.view = next_view;
         }
-        // Republish depth at rebuild time — the rebuild-time refresh contract
-        // the back handler relies on (device-parity task 05). A settled-
-        // transition finalize (step 1b) above can change the stack, so publish
-        // once more here after `apply_ops` already did.
-        element.publish_depth();
+        // Republish depth + back-interest at rebuild time — the rebuild-time
+        // refresh contract the back handler relies on (device-parity task 05 /
+        // back-request task 02). A settled-transition finalize (step 1b) above
+        // can change the stack, so publish once more here after `apply_ops`
+        // already did.
+        element.publish_state();
         flags
     }
 
@@ -2179,6 +2458,200 @@ mod tests {
         assert_eq!(PopResult::of(7u8).take::<i64>(), None);
         assert!(PopResult::empty().is_empty());
         assert_eq!(PopResult::empty().take::<u8>(), None);
+    }
+
+    // ---------------------------------------------------------------------
+    // Task 02: back-request routing + per-page dismiss policy.
+    // ---------------------------------------------------------------------
+
+    // --- Criterion 4 (pure): back_interest is depth>1 OR a non-Pop top policy.
+    //     Tested directly so the depth-1-with-overlay case (which `can_pop`
+    //     cannot express) is covered without needing a depth-1 overlay through
+    //     the push API. ---
+    #[test]
+    fn compute_back_interest_covers_depth_and_policy() {
+        // Root only: not poppable, plain Pop policy -> no interest (a root back
+        // must bubble to the platform).
+        assert!(!compute_back_interest(1, BackPolicy::Pop));
+        // Depth 2 (plain pages): poppable -> interest.
+        assert!(compute_back_interest(2, BackPolicy::Pop));
+        // Root + a Veto overlay: not poppable, but the overlay claims back.
+        assert!(compute_back_interest(1, BackPolicy::Veto));
+        // Root + a dismissable overlay: same — it wants the press to animate out.
+        assert!(compute_back_interest(1, BackPolicy::DismissAnimated));
+    }
+
+    // --- Criterion 4 (integration): the controller publishes back_interest
+    //     through a real rebuild for the reachable cases. ---
+    #[test]
+    fn back_interest_publishes_through_the_controller() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(10.0, 10.0))
+        };
+        let mut state = ();
+
+        // Root only: false.
+        root.rebuild(&mut app, &mut state);
+        assert!(!controller.back_interest(), "root only -> no back interest");
+
+        // Depth 2 (a plain page): true (poppable).
+        controller.push(|| sized_page(20.0, 20.0));
+        root.rebuild(&mut app, &mut state);
+        assert!(controller.back_interest(), "depth 2 -> back interest");
+
+        // Root + a Veto overlay (pop back to root, then push a Veto page): still
+        // depth 2 here, so this exercises the reachable overlay case.
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        controller.push_with_options(
+            || sized_page(30.0, 30.0),
+            PushOptions::transparent().back(BackPolicy::Veto),
+        );
+        root.rebuild(&mut app, &mut state);
+        assert!(
+            controller.back_interest(),
+            "a Veto overlay claims back interest"
+        );
+    }
+
+    // --- Criterion 1: request_back on a plain (Pop-policy) stack pops one page,
+    //     and the pop transition is preserved (routes through the same animated
+    //     pop path as `pop()`). ---
+    #[test]
+    fn request_back_pops_plain_page_preserving_transition() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Push B with an animated iOS transition, then settle the push.
+        controller.push_with(
+            || sized_page(100.0, 60.0),
+            TransitionSpec::new(
+                PageTransition::IosPush,
+                Timing::Duration(Duration::from_millis(100), Curve::Linear),
+            ),
+        );
+        for t in [0u64, 50, 150, 300] {
+            full_frame(&mut root, &mut app, &mut state, ft(t));
+        }
+        assert_eq!(controller.depth(), 2, "B pushed");
+
+        // A back request routes through the popped page's own transition: both
+        // pages paint during the animated pop (transition preserved).
+        controller.request_back();
+        let (f0, _) = full_frame(&mut root, &mut app, &mut state, ft(1000));
+        assert!(
+            f0.iter().any(|(_, s, _)| (s.height - 100.0).abs() < 1e-9),
+            "A paints during the pop"
+        );
+        assert!(
+            f0.iter().any(|(_, s, _)| (s.height - 60.0).abs() < 1e-9),
+            "B (leaving) still paints during the pop"
+        );
+
+        // Drive to completion: only A remains (depth back to 1).
+        for t in [1050u64, 1150, 1300] {
+            full_frame(&mut root, &mut app, &mut state, ft(t));
+        }
+        assert_eq!(controller.depth(), 1, "request_back popped one page");
+    }
+
+    // --- Criterion 1b: request_back at the root (Pop policy, depth 1) is a safe
+    //     no-op. ---
+    #[test]
+    fn request_back_at_root_is_a_noop() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(10.0, 10.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 1);
+
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 1, "root back does not pop the root");
+    }
+
+    // --- Criterion 2: a DismissAnimated top page leaves the stack unchanged and
+    //     fires its observable dismiss signal exactly once per request. ---
+    #[test]
+    fn request_back_dismiss_animated_fires_signal_once_no_pop() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+
+        // Push a transparent, dismissable overlay carrying a shared dismiss
+        // signal (the seam the overlay widget would observe).
+        let signal = Rc::new(Cell::new(0u64));
+        controller.push_with_options(
+            || sized_page(20.0, 20.0),
+            PushOptions::transparent()
+                .back(BackPolicy::DismissAnimated)
+                .dismiss_signal(signal.clone()),
+        );
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2, "overlay pushed");
+        assert_eq!(signal.get(), 0, "no back yet");
+
+        // First back request: signal fires once, stack unchanged.
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2, "DismissAnimated does not pop");
+        assert_eq!(signal.get(), 1, "signal fired exactly once");
+
+        // Second back request: fires again (once more), still no pop.
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2);
+        assert_eq!(signal.get(), 2, "signal fired once per request");
+    }
+
+    // --- Criterion 3: a Veto top page consumes the press without changing the
+    //     stack and without firing any signal. ---
+    #[test]
+    fn request_back_veto_consumes_without_change() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+
+        // A non-dismissable overlay: Veto policy, still carrying a signal to prove
+        // it is NOT fired.
+        let signal = Rc::new(Cell::new(0u64));
+        controller.push_with_options(
+            || sized_page(20.0, 20.0),
+            PushOptions::transparent()
+                .back(BackPolicy::Veto)
+                .dismiss_signal(signal.clone()),
+        );
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2);
+
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2, "Veto leaves the stack unchanged");
+        assert_eq!(signal.get(), 0, "Veto fires no dismiss signal");
     }
 
     // ---------------------------------------------------------------------

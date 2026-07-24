@@ -202,7 +202,9 @@ impl Widget for ProgressWidget {
             radius,
             &Brush::Gradient(gradient),
         );
-        ctx.request_frame();
+        // The shimmer overlay is a decorative loop — its exact cadence is
+        // imperceptible, so the mobile frame gate may pace it (task 08).
+        ctx.request_frame_paced();
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -331,6 +333,10 @@ mod tests {
         assert!(
             ctx.needs_frame(),
             "an active shimmer must request another frame"
+        );
+        assert!(
+            ctx.needs_frame_paced_only(),
+            "the shimmer is a CosmeticLoop request — the frame gate must be able to pace it"
         );
     }
 

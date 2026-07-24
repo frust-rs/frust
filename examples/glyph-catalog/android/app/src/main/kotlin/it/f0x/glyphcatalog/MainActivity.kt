@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import dev.frust.FrustSurfaceView
 
 /**
@@ -46,6 +48,15 @@ import dev.frust.FrustSurfaceView
  * disables itself and re-dispatches so the next-priority callback in the
  * chain runs — `ComponentActivity`'s own default handler, which finishes
  * the activity — then re-enables itself for the next press.
+ *
+ * System UI / SystemChrome (task 03/09/14/17 — RESEARCH.md "Insets /
+ * SafeArea / SystemChrome", Flutter `SystemChrome.setEnabledSystemUIMode`
+ * parity): this Activity owns the `Window` a `WindowInsetsControllerCompat`
+ * needs, so [FrustSurfaceView] (which owns `doFrame` and therefore the
+ * per-frame poll) hands a decoded mode to [applySystemUiMode] via
+ * [FrustSurfaceView.onSystemUiModeChanged], wired up in [onCreate]. The
+ * catalog gains this capability (glue sync only) — it makes no
+ * `frust::set_system_ui_mode` call of its own yet, so the poll never fires.
  */
 class MainActivity : ComponentActivity() {
     private lateinit var surfaceView: FrustSurfaceView
@@ -61,6 +72,7 @@ class MainActivity : ComponentActivity() {
         Log.i("frust", "frust-perf activity-create")
         WindowCompat.setDecorFitsSystemWindows(window, false)
         surfaceView = FrustSurfaceView(this)
+        surfaceView.onSystemUiModeChanged = ::applySystemUiMode
         setContentView(surfaceView)
         surfaceView.onDeepLink(intent?.data?.toString())
 
@@ -76,6 +88,56 @@ class MainActivity : ComponentActivity() {
                 }
             },
         )
+    }
+
+    /**
+     * Apply a decoded [FrustSurfaceView.SystemUiMode] via
+     * `WindowInsetsControllerCompat` (task 03/09/14/17 — RESEARCH.md "Insets /
+     * SafeArea / SystemChrome"), Flutter `SystemChrome.setEnabledSystemUIMode`
+     * parity. Mirrors [FrustSurfaceView]'s own `updateSystemBarsAppearance`
+     * (same `WindowCompat.getInsetsController` call, driving bar visibility
+     * here instead of icon contrast there).
+     *
+     * `LeanBack` has no `WindowInsetsControllerCompat` tap-to-reveal
+     * equivalent — like `Immersive`, it maps to
+     * [WindowInsetsControllerCompat.BEHAVIOR_DEFAULT] (any edge swipe
+     * reveals the bars); only `ImmersiveSticky` gets the transient-swipe
+     * behavior. See `frust_shell_common::system_ui`'s module docs (task 03)
+     * for the full platform-parity notes, including the Android 16/API
+     * 36+ forced-edge-to-edge caveat this Activity cannot work around.
+     */
+    private fun applySystemUiMode(mode: FrustSurfaceView.SystemUiMode) {
+        val controller = WindowCompat.getInsetsController(window, surfaceView)
+        when (mode) {
+            is FrustSurfaceView.SystemUiMode.EdgeToEdge -> {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+            is FrustSurfaceView.SystemUiMode.Immersive -> {
+                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            }
+            is FrustSurfaceView.SystemUiMode.ImmersiveSticky -> {
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            }
+            is FrustSurfaceView.SystemUiMode.LeanBack -> {
+                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            }
+            is FrustSurfaceView.SystemUiMode.Manual -> {
+                if (mode.top) {
+                    controller.show(WindowInsetsCompat.Type.statusBars())
+                } else {
+                    controller.hide(WindowInsetsCompat.Type.statusBars())
+                }
+                if (mode.bottom) {
+                    controller.show(WindowInsetsCompat.Type.navigationBars())
+                } else {
+                    controller.hide(WindowInsetsCompat.Type.navigationBars())
+                }
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

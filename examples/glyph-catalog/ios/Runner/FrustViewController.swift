@@ -46,6 +46,24 @@ final class FrustViewController: UIViewController {
     /// keyboard in) so [pushInsets] can recombine both on every push.
     private var keyboardViewInsetBottom: CGFloat = 0
 
+    /// The last system-UI slot generation observed by [pollSystemUiState]
+    /// (task 03/10's `frust::set_system_ui_mode` override — RESEARCH.md
+    /// "Insets / SafeArea / SystemChrome"). Starts at `0`, matching the
+    /// slot's initial (never-requested) generation, so an app that never
+    /// calls the API never flips [statusBarHidden]/[homeIndicatorAutoHidden]
+    /// away from their platform-default `false`.
+    private var lastSystemUiGeneration: UInt64 = 0
+
+    /// Decoded `frust::set_system_ui_mode` state (task 03/10/14/17). Both
+    /// default `false` — the platform's own default (status bar visible,
+    /// home indicator not auto-hidden) — until [pollSystemUiState] observes
+    /// a real generation. Read back by [prefersStatusBarHidden] /
+    /// [prefersHomeIndicatorAutoHidden] below. The catalog gains this
+    /// capability (glue sync only) — it makes no `frust::set_system_ui_mode`
+    /// call of its own yet, so the poll never fires.
+    private var statusBarHidden = false
+    private var homeIndicatorAutoHidden = false
+
     override func loadView() {
         view = FrustView()
     }
@@ -317,8 +335,60 @@ final class FrustViewController: UIViewController {
         displayLink = link
     }
 
+    // MARK: - System UI / SystemChrome (task 03/09/10/14/17 — RESEARCH.md
+    // "Insets / SafeArea / SystemChrome")
+
+    /// Per-tick poll of the process-wide system-UI override slot
+    /// (`frust::set_system_ui_mode`) — decodes `frust_system_ui_state`'s
+    /// packed `(generation, mode)` `u64` and updates
+    /// [statusBarHidden]/[homeIndicatorAutoHidden] only when the generation
+    /// has advanced since the last poll, then nudges UIKit to re-query both
+    /// via `setNeedsStatusBarAppearanceUpdate()` /
+    /// `setNeedsUpdateOfHomeIndicatorAutoHidden()`. Generation `0` (never
+    /// called) applies nothing — platform defaults stand until the app calls
+    /// the API. See task 10's `frust_system_ui_state` doc comment (Rust
+    /// side) for the full iOS mapping table: every hiding mode
+    /// (`Immersive`/`ImmersiveSticky`/`LeanBack`) collapses to the same
+    /// status-bar-hidden + home-indicator-auto-hide behavior (iOS has no
+    /// sticky/non-sticky or lean-back distinction, and no *force*-hide of
+    /// the home indicator); `Manual { top, bottom }` splits status bar
+    /// (`!top`) from home-indicator auto-hide (`!bottom`).
+    private func pollSystemUiState() {
+        guard let handle else { return }
+        let encoded = frust_system_ui_state(handle)
+        let generation = encoded >> 8
+        guard generation != lastSystemUiGeneration else { return }
+        lastSystemUiGeneration = generation
+        guard generation != 0 else { return }
+
+        let low = encoded & 0xFF
+        let discriminant = low & 0x0F
+        switch discriminant {
+        case 0:  // EdgeToEdge
+            statusBarHidden = false
+            homeIndicatorAutoHidden = false
+        case 1, 2, 3:  // Immersive / ImmersiveSticky / LeanBack
+            statusBarHidden = true
+            homeIndicatorAutoHidden = true
+        default:  // Manual { top, bottom }
+            let top = (low & 0x10) != 0
+            let bottom = (low & 0x20) != 0
+            statusBarHidden = !top
+            homeIndicatorAutoHidden = !bottom
+        }
+        setNeedsStatusBarAppearanceUpdate()
+        setNeedsUpdateOfHomeIndicatorAutoHidden()
+    }
+
+    override var prefersStatusBarHidden: Bool { statusBarHidden }
+
+    override var prefersHomeIndicatorAutoHidden: Bool { homeIndicatorAutoHidden }
+
     @objc private func renderFrame(_ link: CADisplayLink) {
         guard let handle else { return }
+        // Cheap, generation-gated per-tick poll (task 03/09/10/14/17):
+        // applied only on an actual `set_system_ui_mode` change.
+        pollSystemUiState()
         // `link.timestamp` is a `CFTimeInterval` (seconds); the Rust side wants
         // the shell-owned monotonic frame clock in nanoseconds (spec §8). The
         // f64 * 1e9 multiply/round is tolerated here because Rust only ever

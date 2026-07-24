@@ -75,7 +75,31 @@
 //! This sheet has no `StateLayer` surface of its own (the scrim, panel, and
 //! drag handle are plain fills, not an M3 interactive surface) — there is
 //! nothing here for `StateLayer::set_focused` to wire into.
+//!
+//! # `dismissable(bool)` + back-dismiss (task 12)
+//!
+//! [`BottomSheetView::dismissable`] (default `true`) is Flutter's
+//! `isDismissible`+`enableDrag` collapsed into one v1 flag (spec parity,
+//! task 12's Scope): `false` disables the scrim tap, the handle drag (a drag
+//! past the threshold simply settles back without firing `on_dismiss`), and
+//! `Escape`, and [`show_bottom_sheet`] pushes the page with
+//! [`BackPolicy::Veto`](crate::nav::navigator::BackPolicy::Veto) so a back
+//! press is consumed with no effect. `true` pushes
+//! [`BackPolicy::DismissAnimated`](crate::nav::navigator::BackPolicy::DismissAnimated):
+//! unlike [`crate::glyph::dialog`], this sheet has no widget-internal
+//! enter/exit staging to route through — a back press instead fires the same
+//! state-free pop [`show_bottom_sheet`] wires the scrim/drag/Escape paths to,
+//! observed from `paint` (`observe_dismiss_signal`) against the shared
+//! dismiss-signal cell [`NavigatorController::request_back`] bumps (see
+//! [`BackPolicy`](crate::nav::navigator::BackPolicy)'s documented observation
+//! seam). Because that pop only *enqueues* a `NavOp::Pop` (it writes no tracked
+//! signal), the same paint requests the next frame
+//! ([`PaintCtx::request_frame`]) so the enqueued pop is guaranteed a draining
+//! rebuild — otherwise a dirty-driven desktop shell idles and the mobile frame
+//! gate skips, leaving the back press dead until an unrelated later frame (see
+//! [`observe_dismiss_signal`](BottomSheetWidget::observe_dismiss_signal)).
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use frust_core::accesskit::Role;
@@ -87,7 +111,7 @@ use frust_theme::Theme;
 use kurbo::{Point, Rect, RoundedRect, RoundedRectRadii, Shape, Size};
 use peniko::{Brush, Color};
 
-use crate::nav::navigator::{NavigatorController, PopResult};
+use crate::nav::navigator::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use crate::nav::transition::{PageTransition, TransitionSpec};
 
 /// Scrim opacity behind a modal bottom sheet (M3 spec: 32%, matching the
@@ -176,11 +200,22 @@ fn finite_or_zero(v: f64) -> f64 {
 /// A view-held, typed scrim/drag-dismiss callback (erased on build).
 type OnDismiss<State> = Rc<dyn Fn(&mut State)>;
 
+/// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+/// seam) paired with the state-free pop it fires — see the
+/// [module docs](self)'s `dismissable(bool)` section.
+type DismissSignal = (Rc<Cell<u64>>, Rc<dyn Fn()>);
+
 /// A declarative modal M3 bottom sheet wrapping a single content child. See the
 /// [module docs](self).
 pub struct BottomSheetView<State: 'static> {
     content: AnyView<State>,
     on_dismiss: Option<OnDismiss<State>>,
+    dismissable: bool,
+    /// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+    /// seam) plus the state-free pop it fires — wired internally by
+    /// [`show_bottom_sheet`], never part of the public builder surface (see
+    /// the [module docs](self)).
+    dismiss_signal: Option<DismissSignal>,
 }
 
 /// Wrap `content` in a modal bottom sheet. Chain
@@ -190,6 +225,8 @@ pub fn bottom_sheet<State: 'static, V: View<State>>(content: V) -> BottomSheetVi
     BottomSheetView {
         content: any(content),
         on_dismiss: None,
+        dismissable: true,
+        dismiss_signal: None,
     }
 }
 
@@ -199,6 +236,16 @@ impl<State: 'static> BottomSheetView<State> {
     /// `controller.pop()` automatically.
     pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
         self.on_dismiss = Some(Rc::new(on_dismiss));
+        self
+    }
+
+    /// Whether this sheet can be dismissed by the user at all — the scrim
+    /// tap, the handle drag, `Escape`, and an Android back press (default
+    /// `true`; see the [module docs](self)). `false` disables all four; only
+    /// an explicit close control the app wires through its own content still
+    /// dismisses it.
+    pub fn dismissable(mut self, dismissable: bool) -> Self {
+        self.dismissable = dismissable;
         self
     }
 }
@@ -228,13 +275,37 @@ pub fn show_bottom_sheet<State, B, R>(
     R: Fn(&mut State, PopResult) + 'static,
 {
     let dismiss_ctrl = controller.clone();
-    controller.push_transparent_for_result(
+    let signal_ctrl = controller.clone();
+    // Peeked once, at show-time: the back policy/dismiss-signal wiring is
+    // fixed for the life of this pushed page (mirrors task 02's push-time
+    // `PushOptions` contract, and `crate::glyph::dialog::show_glyph_dialog`'s
+    // identical peek), even though `build` is re-invoked on every later
+    // navigator rebuild to diff the page's content.
+    let dismissable = build().dismissable;
+    let signal = dismissable.then(|| Rc::new(Cell::new(0u64)));
+    let widget_signal = signal.clone();
+    let mut options = PushOptions::transparent()
+        .transition(TransitionSpec::duration(PageTransition::SlideUp))
+        .back(if dismissable {
+            BackPolicy::DismissAnimated
+        } else {
+            BackPolicy::Veto
+        })
+        .on_result(on_result);
+    if let Some(sig) = &signal {
+        options = options.dismiss_signal(sig.clone());
+    }
+    controller.push_with_options(
         move || {
             let ctrl = dismiss_ctrl.clone();
-            any::<State, _>(build().on_dismiss(move |_state: &mut State| ctrl.pop()))
+            let mut view = build().on_dismiss(move |_state: &mut State| ctrl.pop());
+            if let Some(sig) = &widget_signal {
+                let sctrl = signal_ctrl.clone();
+                view.dismiss_signal = Some((sig.clone(), Rc::new(move || sctrl.pop())));
+            }
+            any::<State, _>(view)
         },
-        TransitionSpec::duration(PageTransition::SlideUp),
-        on_result,
+        options,
     );
 }
 
@@ -242,6 +313,14 @@ pub fn show_bottom_sheet<State, B, R>(
 pub struct BottomSheetWidget {
     content: ChildPod,
     on_dismiss: Option<crate::ErasedCallback>,
+    dismissable: bool,
+    /// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+    /// seam) plus its state-free pop — see
+    /// [`observe_dismiss_signal`](Self::observe_dismiss_signal).
+    dismiss_signal: Option<DismissSignal>,
+    /// The last generation observed from `dismiss_signal` (0 with no signal
+    /// wired, or a `Veto`/non-dismissable sheet).
+    last_seen_dismiss: u64,
     /// The bottom-anchored panel rect in the widget's own local coordinate
     /// space (computed at layout, read for scrim/handle hit-testing at event
     /// time).
@@ -268,6 +347,13 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
         BottomSheetWidget {
             content: crate::build_child(&self.content, ctx),
             on_dismiss: self.on_dismiss.as_ref().map(crate::erase_callback),
+            dismissable: self.dismissable,
+            dismiss_signal: self.dismiss_signal.clone(),
+            last_seen_dismiss: self
+                .dismiss_signal
+                .as_ref()
+                .map(|(sig, _)| sig.get())
+                .unwrap_or(0),
             panel: Rect::ZERO,
             handle_target: Rect::ZERO,
             drag_active: false,
@@ -286,11 +372,48 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
         let flags = crate::rebuild_child(&prev.content, &self.content, &mut element.content, ctx);
         // Closures aren't comparable — reinstall the dismiss adapter cheaply.
         element.on_dismiss = self.on_dismiss.as_ref().map(crate::erase_callback);
+        element.dismissable = self.dismissable;
+        // The dismiss-signal cell's identity is fixed at push time (see
+        // `show_bottom_sheet`); reinstalling it here never disturbs
+        // `last_seen_dismiss`.
+        element.dismiss_signal = self.dismiss_signal.clone();
         flags
     }
 
     fn teardown(&self, element: &mut BottomSheetWidget, ctx: &mut BuildCtx<'_>) {
         crate::teardown_child(&self.content, &mut element.content, ctx);
+    }
+}
+
+impl BottomSheetWidget {
+    /// Observe the shared back-press dismiss-signal cell (see the
+    /// `dismiss_signal` field docs) and fire its state-free pop exactly once
+    /// per bump — the `BackPolicy::DismissAnimated` seam's widget-side half
+    /// (`nav::navigator::BackPolicy`'s documented observation seam). Unlike
+    /// `crate::glyph::dialog`, this sheet has no enter/exit staging to route
+    /// through, so the fire is immediate (mirrors a scrim tap/handle drag).
+    ///
+    /// **Scheduling the draining frame.** `fire()` only *enqueues* a
+    /// `NavOp::Pop` on the controller; it writes no tracked reactive signal, so
+    /// nothing else schedules the frame that drains it. The back-request paint
+    /// that runs `fire()` therefore must itself request the next frame
+    /// ([`PaintCtx::request_frame`]) — exactly as `crate::glyph::dialog`
+    /// requests a frame past its `Dismissed` phase so the rebuild that applies
+    /// the pop runs. Without this, a dirty-driven desktop shell
+    /// (`ControlFlow::Wait`) idles and the mobile frame gate `Skip`s the next
+    /// tick (the back request's `PAINT` flag was consumed by *this* frame), so
+    /// the enqueued pop never drains until an unrelated later frame.
+    fn observe_dismiss_signal(&mut self, ctx: &mut PaintCtx) {
+        if let Some((signal, fire)) = &self.dismiss_signal {
+            let current = signal.get();
+            if current != self.last_seen_dismiss {
+                self.last_seen_dismiss = current;
+                fire();
+                // Guarantee the enqueued pop one draining rebuild — see the
+                // `Scheduling the draining frame` note above.
+                ctx.request_frame();
+            }
+        }
     }
 }
 
@@ -319,6 +442,7 @@ impl Widget for BottomSheetWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.observe_dismiss_signal(ctx);
         let theme = Theme::from_paint_ctx(ctx);
         // Scrim over the whole area.
         scene.fill_rect(ctx.origin(), ctx.size(), resolve_scrim(theme));
@@ -361,7 +485,10 @@ impl Widget for BottomSheetWidget {
                 PointerPhase::Up => {
                     let dy = p.position.y - self.drag_start_y;
                     let threshold = self.panel.height() * DRAG_DISMISS_FRACTION;
-                    if dy > threshold
+                    // dismissable(false): drag-to-dismiss is disabled — a past-
+                    // threshold drag simply settles back without firing.
+                    if self.dismissable
+                        && dy > threshold
                         && let Some(on_dismiss) = self.on_dismiss.as_mut()
                     {
                         on_dismiss(ctx);
@@ -385,7 +512,8 @@ impl Widget for BottomSheetWidget {
             match p.phase {
                 PointerPhase::Up => {
                     let released_outside = !self.panel.contains(p.position);
-                    if self.scrim_down_outside
+                    if self.dismissable
+                        && self.scrim_down_outside
                         && released_outside
                         && let Some(on_dismiss) = self.on_dismiss.as_mut()
                     {
@@ -410,6 +538,7 @@ impl Widget for BottomSheetWidget {
                 // deeper focus path (mirrors an action's own routing
                 // precedence on `material::dialog`).
                 if let InputEvent::Key(key_event) = event
+                    && self.dismissable
                     && key_event.key == Key::Named(NamedKey::Escape)
                     && !self.content.is_focused()
                     && let Some(on_dismiss) = self.on_dismiss.as_mut()
@@ -470,7 +599,8 @@ mod tests {
     use crate::nav::transition::TransitionSpec;
     use crate::test_support::leaf_any;
     use frust_core::{
-        KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, RenderRoot, any as core_any,
+        FrameTime, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, RenderRoot,
+        any as core_any,
     };
     use frust_text::TextContext;
     use std::any::Any;
@@ -489,6 +619,10 @@ mod tests {
             modifiers: Modifiers::default(),
             repeat: false,
         })
+    }
+
+    fn ft(ms: u64) -> FrameTime {
+        FrameTime::from_nanos(ms * 1_000_000)
     }
 
     fn build(view: &BottomSheetView<()>) -> BottomSheetWidget {
@@ -692,6 +826,51 @@ mod tests {
         assert_eq!(state.dismissed, 1);
     }
 
+    // --- Task 12: `dismissable(false)` gates the scrim + drag together. ---
+
+    fn laid_out_non_dismissable_flag_sheet() -> BottomSheetWidget {
+        let view: BottomSheetView<Flag> = bottom_sheet(leaf_any_flag(300.0, 200.0))
+            .on_dismiss(|s: &mut Flag| s.dismissed += 1)
+            .dismissable(false);
+        let mut w = build_flag(&view);
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 600.0)));
+        w
+    }
+
+    #[test]
+    fn dismissable_false_gates_handle_drag_dismiss() {
+        let mut w = laid_out_non_dismissable_flag_sheet();
+        // panel height = 48 + 200 = 248; threshold = 124 — well past it.
+        let handle_y = w.panel.y0 + 10.0;
+        let mut state = Flag::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Move, 200.0, handle_y + 200.0),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Up, 200.0, handle_y + 200.0),
+        );
+        assert_eq!(
+            state.dismissed, 0,
+            "dismissable(false): a past-threshold drag settles back without firing"
+        );
+    }
+
+    #[test]
+    fn dismissable_false_gates_scrim_tap() {
+        let mut w = laid_out_non_dismissable_flag_sheet();
+        let mut state = Flag::default();
+        assert!(!w.panel.contains(Point::new(5.0, 5.0)));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.dismissed, 0, "dismissable(false) gates the scrim tap");
+    }
+
     // --- Navigator integration: scrim tap pops with an empty result. ---
 
     #[derive(Default)]
@@ -863,6 +1042,203 @@ mod tests {
             state.results.is_empty(),
             "Escape without prior focus is a no-op"
         );
+    }
+
+    // --- Task 12: `dismissable(false)` gates Escape too (via the navigator). ---
+
+    #[test]
+    fn dismissable_false_gates_escape_via_navigator() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || core_any::<NavState, _>(bg_page(400.0, 600.0)))
+            }
+        };
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        {
+            let dismiss = controller.clone();
+            controller.push_transparent_for_result(
+                move || {
+                    let d = dismiss.clone();
+                    core_any::<NavState, _>(
+                        bottom_sheet(bg_page(400.0, 200.0))
+                            .dismissable(false)
+                            .on_dismiss(move |_s: &mut NavState| d.pop()),
+                    )
+                },
+                TransitionSpec::NONE,
+                |state: &mut NavState, result: PopResult| {
+                    state.results.push(result.take::<i32>());
+                },
+            );
+        }
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        // A short handle-strip press claims focus (unaffected by
+        // `dismissable`), but the subsequent Escape is gated.
+        let handle_y = area.height - 248.0 + 10.0;
+        root.event(&mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+        root.event(&mut state, &ev(PointerPhase::Up, 200.0, handle_y + 10.0));
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        root.event(&mut state, &escape_event());
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert!(
+            state.results.is_empty(),
+            "dismissable(false) gates Escape too"
+        );
+    }
+
+    // --- Task 12: back request routes through dismissable/BackPolicy. ---
+
+    #[test]
+    fn back_request_dismissable_true_dismisses_via_navigator() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || core_any::<NavState, _>(bg_page(400.0, 600.0)))
+            }
+        };
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        show_bottom_sheet(
+            &controller,
+            || bottom_sheet(bg_page(400.0, 200.0)),
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<i32>());
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        // Settle the SlideUp entrance (300ms M3 default).
+        for t in [0u64, 100, 200, 300, 350] {
+            root.paint(&mut Recorder::default(), ft(t));
+        }
+
+        assert!(
+            controller.back_interest(),
+            "a dismissable sheet claims back interest"
+        );
+
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.depth(),
+            2,
+            "DismissAnimated: the stack is unchanged immediately"
+        );
+
+        // The back-press rebuild flagged PAINT; this paint observes the bumped
+        // signal and fires the pop. `fire()` only *enqueues* `NavOp::Pop`, so
+        // this same paint MUST schedule the frame that drains it — asserted
+        // here BEFORE any further rebuild (the honest contract; the old test
+        // hand-called `rebuild()` here, hiding exactly this gap). The stack is
+        // still unchanged: the pop is enqueued, not yet drained.
+        let outcome = root.paint(&mut Recorder::default(), ft(400));
+        assert!(
+            outcome.needs_frame,
+            "the back-dismiss paint schedules the frame that drains its enqueued pop"
+        );
+        assert_eq!(
+            controller.depth(),
+            2,
+            "the pop is only enqueued at paint — not yet drained"
+        );
+
+        // Drive the loop ONLY via outcome-honoring frames (rebuild + layout +
+        // paint, continuing while the outcome asks for another, bounded): no
+        // manual extra rebuild. The pop drains through the shell contract
+        // alone.
+        let mut frames = 0u64;
+        loop {
+            root.rebuild(&mut app, &mut state);
+            root.layout_with_text(area, &mut tcx as &mut dyn Any);
+            let outcome = root.paint(&mut Recorder::default(), ft(500 + frames * 100));
+            frames += 1;
+            assert!(
+                frames < 20,
+                "the pop drains within a bounded number of frames"
+            );
+            if !outcome.needs_frame {
+                break;
+            }
+        }
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert_eq!(
+            state.results,
+            vec![None],
+            "a back request dismisses the sheet"
+        );
+        assert_eq!(controller.depth(), 1);
+    }
+
+    #[test]
+    fn back_request_dismissable_false_vetoes_stack_unchanged() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || core_any::<NavState, _>(bg_page(400.0, 600.0)))
+            }
+        };
+        let mut state = NavState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        show_bottom_sheet(
+            &controller,
+            || bottom_sheet(bg_page(400.0, 200.0)).dismissable(false),
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<i32>());
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        for t in [0u64, 100, 200, 300, 350] {
+            root.paint(&mut Recorder::default(), ft(t));
+        }
+
+        assert!(
+            controller.back_interest(),
+            "a Veto (non-dismissable) sheet still claims back interest"
+        );
+
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2, "Veto leaves the stack unchanged");
+
+        root.paint(&mut Recorder::default(), ft(450));
+        root.paint(&mut Recorder::default(), ft(900));
+        assert!(
+            state.results.is_empty(),
+            "a non-dismissable sheet never pops on a back request"
+        );
+        assert_eq!(controller.depth(), 2);
     }
 
     // A minimal opaque page for the navigator integration test.

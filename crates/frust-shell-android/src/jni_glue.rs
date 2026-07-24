@@ -1350,6 +1350,30 @@ pub fn native_set_appearance(handle: jlong, dark: jboolean) {
     });
 }
 
+/// `nativeSystemUiState`: return the process-wide system-UI override slot's
+/// packed `(generation, mode)` state (task 09) for Kotlin's `doFrame` to poll,
+/// mirroring the proven `nativeImeState`-in-`doFrame` per-frame-poll idiom.
+///
+/// Returns [`frust_shell_common::encoded_state`] verbatim — the packing
+/// scheme (`(generation << 8) | mode_bits`) and its unit tests live in
+/// `frust_shell_common::system_ui`'s module docs, which task 14's Kotlin
+/// decoder is written against; this export is a thin, `guard`-wrapped
+/// one-liner over that already-tested encoding fn, per this task's contract.
+/// The slot is process-global (task 03), not per-handle, so no
+/// `AndroidAppHandle` lookup is needed beyond the standard liveness check
+/// every native call makes: a missing handle returns `0` (generation `0`,
+/// `EdgeToEdge` — "nothing to apply", matching the slot's own initial state
+/// per the module docs) rather than a live peek, so a torn-down native side
+/// never reports a stale mode as pending.
+pub fn native_system_ui_state(handle: jlong) -> jlong {
+    guard("nativeSystemUiState", 0, || {
+        if !crate::ffi_support::handle_is_live(handle) {
+            return 0;
+        }
+        frust_shell_common::encoded_state() as jlong
+    })
+}
+
 /// `nativeOnDeepLink`: deliver a platform deep link (cold-start, forwarded
 /// from `MainActivity.onCreate`'s `intent?.data`, or running, from
 /// `MainActivity.onNewIntent` — see `templates/app/android.tmpl`'s

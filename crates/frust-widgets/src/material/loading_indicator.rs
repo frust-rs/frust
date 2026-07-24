@@ -187,11 +187,17 @@ impl Widget for LoadingIndicatorWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
+        let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
         let color = Self::resolve_color(theme);
         let size = ctx.size();
         let origin = ctx.origin();
 
-        self.step(ctx.frame_time());
+        // `reduce_motion` freezes the morph cycle wherever it currently sits
+        // and stops requesting frames — the same skip-animation shape
+        // `glyph::skeleton`'s shimmer uses.
+        if !reduce_motion {
+            self.step(ctx.frame_time());
+        }
         let t = Self::morph_t(self.last_phase);
         let from = &SHAPE_CYCLE[self.index];
         let to = &SHAPE_CYCLE[(self.index + 1) % SHAPE_CYCLE.len()];
@@ -201,8 +207,12 @@ impl Widget for LoadingIndicatorWidget {
         let path = morph_path(from, to, t, center, radius);
         scene.fill_path(Point::ZERO, &path, &Brush::Solid(color));
 
-        // Always looping — keep requesting frames.
-        ctx.request_frame();
+        if !reduce_motion {
+            // A perpetually looping morph is a decorative loop — its exact
+            // cadence is imperceptible, so the mobile frame gate may pace it
+            // (task 08).
+            ctx.request_frame_paced();
+        }
     }
 }
 
@@ -269,7 +279,30 @@ mod tests {
                 Some(PathEl::ClosePath)
             ));
             assert!(ctx.needs_frame(), "a loop must keep requesting frames");
+            assert!(
+                ctx.needs_frame_paced_only(),
+                "the morph loop is a CosmeticLoop request — the frame gate must be able to pace it"
+            );
         }
+    }
+
+    #[test]
+    fn reduce_motion_freezes_the_morph_and_stops_requesting_frames() {
+        let mut theme = Theme::m3_baseline();
+        theme.motion.reduce_motion = true;
+        let mut w = build();
+        for _ in 0..3 {
+            let mut ctx = PaintCtx::new(Point::ZERO, Size::new(LOADING_DIAMETER, LOADING_DIAMETER))
+                .with_theme(&theme);
+            let mut scene = RecordingScene::default();
+            w.paint(&mut ctx, &mut scene);
+            assert_eq!(scene.fills.len(), 1, "still paints a frozen shape");
+            assert!(
+                !ctx.needs_frame(),
+                "reduce_motion must not request a continuation frame"
+            );
+        }
+        assert_eq!(w.index, 0, "reduce_motion never advances the shape index");
     }
 
     #[test]

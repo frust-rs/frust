@@ -5,13 +5,26 @@
 //! reference builds (dark, light, motion).
 //!
 //! This module is only the **shell**: the app state, the root [`navigator`]
-//! (whose home page is a header + glyph [`tabs`](frust::glyph::tabs) strip +
-//! a [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting
-//! one of seven section pages in a [`scroll_view`], under a
-//! [`toast_host`](frust::glyph::toast_host) overlay), and the [`frust::app!`]
-//! entry binding all three platforms. The section pages themselves live in
-//! [`pages`] — each a `page(&CatalogState) -> AnyView<CatalogState>` filled in
-//! by a later task (see `pages/mod.rs` for the page-fn contract).
+//! (whose home page is a [`glyph::app_bar`](frust::glyph::app_bar) — the
+//! brand mark, "glyph catalog" title, and the brightness/reduce-motion/
+//! animations toggles folded into its trailing actions (glyph-refinements
+//! task 18, superseding the old header-row `Row`; the animations toggle is
+//! catalog-animation-performance bug task 10) — over a [`safe_area`]'d body: the
+//! 7-section tab strip plus a [`pattern_switcher`](frust::motion::switcher::pattern_switcher)
+//! hosting one of seven section pages in a [`scroll_view`], under a bare
+//! [`toast_host`](frust::glyph::toast_host) overlay (default bottom-center
+//! anchoring, no app-side positioning — glyph-refinements task 07)), and the
+//! [`frust::app!`] entry binding all three platforms. The AppBar consumes the
+//! top window inset itself, so the body's [`safe_area`] disables its own top
+//! edge (`.top(false)`) to avoid double-padding it. The section pages
+//! themselves live in [`pages`] — each a `page(&CatalogState) ->
+//! AnyView<CatalogState>` filled in by a later task (see `pages/mod.rs` for
+//! the page-fn contract).
+//!
+//! Back-dismiss (a pushed overlay/page, then the root navigator) works with
+//! **zero** catalog code — `frust::navigator` (imported below) auto-wires
+//! Android/gesture back handling for the shared [`NavigatorController`]
+//! (glyph-refinements task 08).
 //!
 //! Run it with `cargo run` (desktop preview) or `frust run` (Android/iOS).
 
@@ -20,9 +33,9 @@ pub mod pages;
 use frust::motion::patterns::{GlyphSlide, SlideDirection};
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Axis, Brightness, Component, EdgeInsets, FlexView, Get, GetUntracked, MotionScheme,
-    NavigatorController, Padding, RwSignal, Set, SizedBox, Stack, Theme, TransitionSpec, any,
-    button, flexible, inflexible, navigator, scroll_view, set_app_theme, text,
+    AnyView, Axis, Brightness, Component, FlexView, Get, GetUntracked, MotionScheme,
+    NavigatorController, RwSignal, ScrollInfo, Set, Stack, Theme, TransitionSpec, any, button,
+    flexible, icon, icons, inflexible, navigator, safe_area, scroll_view, set_app_theme,
 };
 
 use pages::SECTION_LABELS;
@@ -59,6 +72,24 @@ pub struct CatalogState {
     /// palette, a bottom sheet — filled by `c07`) can push onto the same
     /// root stack this shell mounts.
     pub nav: NavigatorController<CatalogState>,
+    /// Whether the active section body has scrolled past
+    /// [`ELEVATION_THRESHOLD_PX`], fed by the body `scroll_view`'s
+    /// `on_scroll` and consumed by the root
+    /// [`app_bar`](frust::glyph::app_bar)'s `.elevated(...)` (task 18) — the
+    /// same `y > 4` scrolled-shadow cue the AppBar's own reference HTML uses.
+    pub elevated: RwSignal<bool>,
+    /// The header animations on/off toggle (default on;
+    /// catalog-animation-performance bug task 10). OFF means "every demo
+    /// renders its settled state — no frame requests anywhere": the toggle
+    /// is **app-forced reduce motion + demo stop**, not a parallel
+    /// mechanism — [`apply_theme`] ORs it into the same
+    /// `MotionScheme::reduce_motion` push the header reduce-motion toggle
+    /// drives (so every convention-following widget collapses for free),
+    /// and the handful of wall-clock-driven demos on
+    /// [`pages::interactions`] that bypass that theme-default collapse (see
+    /// that module's "Reduced motion" docs) OR it into their own local
+    /// `reduce` check instead of adding a second gating flag.
+    pub animations_enabled: RwSignal<bool>,
 }
 
 impl CatalogState {
@@ -73,6 +104,8 @@ impl CatalogState {
             slide: RwSignal::new(SlideDirection::Left),
             toasts: RwSignal::new(Vec::new()),
             nav: NavigatorController::new(),
+            elevated: RwSignal::new(false),
+            animations_enabled: RwSignal::new(true),
         }
     }
 }
@@ -86,8 +119,10 @@ impl Default for CatalogState {
 /// Force the app-wide theme from the current header-toggle flags: a
 /// [`ThemeBuilder`](frust::ThemeBuilder) over [`Theme::glyph_baseline`] with
 /// the chosen brightness and the reduced-motion flag mapped into its
-/// [`MotionScheme`]. Called from both header toggles so the two flags always
-/// compose (never clobber each other).
+/// [`MotionScheme`]. Called from all three header toggles so the flags
+/// always compose (never clobber each other) — `reduce_motion` here is
+/// already the *effective* flag (see [`effective_reduce_motion`]), not the
+/// raw header reduce-motion toggle.
 fn apply_theme(brightness: Brightness, reduce_motion: bool) {
     let theme = Theme::builder(Theme::glyph_baseline())
         .brightness(brightness)
@@ -96,70 +131,97 @@ fn apply_theme(brightness: Brightness, reduce_motion: bool) {
     set_app_theme(theme);
 }
 
-/// The header: app title plus the brightness and reduce-motion toggle buttons.
-/// Each toggle flips its signal AND re-applies the theme via [`apply_theme`]
-/// so the swap is visible immediately.
-fn header_row(state: &CatalogState) -> AnyView<CatalogState> {
+/// The theme's effective reduced-motion flag: ON if either the header
+/// reduce-motion toggle is set, or the animations-off toggle is set. This is
+/// the "cheapest sound wiring" the animations toggle reuses rather than
+/// inventing a parallel mechanism (see [`CatalogState::animations_enabled`]'s
+/// doc comment) — every header toggle handler recomputes this from the two
+/// raw flags and feeds it into [`apply_theme`].
+fn effective_reduce_motion(reduce_motion: bool, animations_enabled: bool) -> bool {
+    reduce_motion || !animations_enabled
+}
+
+/// Scroll offset (logical px) past which the root AppBar grows its scrolled
+/// shadow/border — mirrors the `glyph::appbar` reference HTML's `y > 4` check
+/// (see [`glyph::app_bar`](frust::glyph::app_bar)'s module docs).
+const ELEVATION_THRESHOLD_PX: f64 = 4.0;
+
+/// The root [`glyph::app_bar`](frust::glyph::app_bar): a brand-mark leading
+/// glyph, the "glyph catalog" title, and the brightness/reduce-motion/
+/// animations toggles folded into its trailing actions — replacing the old
+/// header row's own `Row` (task 18) so the shell stacks exactly one bar. The
+/// animations toggle is the third, added by catalog-animation-performance
+/// bug task 10 beside the other two (Ed's decision — see
+/// [`CatalogState::animations_enabled`]'s doc comment for what OFF means).
+/// The AppBar consumes the top window inset itself (its [module
+/// docs](frust::glyph::app_bar)), so the body below never pads its own top
+/// edge.
+fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
     let brightness = state.brightness.get();
     let reduce_motion = state.reduce_motion.get();
+    let animations_enabled = state.animations_enabled.get();
+    let elevated = state.elevated.get();
 
     let brightness_label = match brightness {
-        Brightness::Dark => "◐ Dark",
-        Brightness::Light => "◑ Light",
+        Brightness::Dark => "◐",
+        Brightness::Light => "◑",
     };
-    let motion_label = if reduce_motion {
-        "⏸ Motion off"
-    } else {
-        "▶ Motion on"
-    };
+    let motion_label = if reduce_motion { "⏸" } else { "▶" };
+    let animations_label = if animations_enabled { "⏵" } else { "⏹" };
 
-    let title = inflexible(
-        text("Glyph Catalog")
-            .size(20.0)
-            // Live accent-text role — resolves per-brightness (round-0 review:
-            // the fixed dark amber failed AA on the light surface).
-            .color(
-                frust::use_context::<frust::Theme>()
-                    .unwrap_or_else(frust::Theme::glyph_baseline)
-                    .scheme()
-                    .primary,
-            ),
-    );
+    // Live accent-text role — resolves per-brightness (round-0 review of the
+    // header row: a fixed dark amber failed AA on the light surface).
+    let accent = frust::use_context::<frust::Theme>()
+        .unwrap_or_else(frust::Theme::glyph_baseline)
+        .scheme()
+        .primary;
 
-    let brightness_btn = inflexible(button(brightness_label, |state: &mut CatalogState| {
+    let brand = any(icon(icons::PALETTE).size(20.0).color(accent));
+
+    let brightness_btn = any(button(brightness_label, |state: &mut CatalogState| {
         let next = match state.brightness.get_untracked() {
             Brightness::Dark => Brightness::Light,
             Brightness::Light => Brightness::Dark,
         };
         state.brightness.set(next);
-        apply_theme(next, state.reduce_motion.get_untracked());
+        apply_theme(
+            next,
+            effective_reduce_motion(
+                state.reduce_motion.get_untracked(),
+                state.animations_enabled.get_untracked(),
+            ),
+        );
     }));
 
-    let motion_btn = inflexible(button(motion_label, |state: &mut CatalogState| {
+    let motion_btn = any(button(motion_label, |state: &mut CatalogState| {
         let next = !state.reduce_motion.get_untracked();
         state.reduce_motion.set(next);
-        apply_theme(state.brightness.get_untracked(), next);
+        apply_theme(
+            state.brightness.get_untracked(),
+            effective_reduce_motion(next, state.animations_enabled.get_untracked()),
+        );
     }));
 
-    any(Padding(
-        EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                title,
-                inflexible(SizedBox(Some(12.0), None)),
-                brightness_btn,
-                inflexible(SizedBox(Some(8.0), None)),
-                motion_btn,
-            ],
-        ),
-    ))
+    let animations_btn = any(button(animations_label, |state: &mut CatalogState| {
+        let next = !state.animations_enabled.get_untracked();
+        state.animations_enabled.set(next);
+        apply_theme(
+            state.brightness.get_untracked(),
+            effective_reduce_motion(state.reduce_motion.get_untracked(), next),
+        );
+    }));
+
+    any(frust::glyph::app_bar::<CatalogState>("glyph catalog")
+        .leading(brand)
+        .actions(vec![brightness_btn, motion_btn, animations_btn])
+        .elevated(elevated))
 }
 
-/// The navigator's home page: header, the 7-section tab strip, the
-/// pattern-switched section body in a scroll view, all under a toast overlay.
-/// Re-run on every rebuild (the navigator re-invokes its page builder), so the
-/// signal reads here subscribe the shell to section/brightness/toast changes.
+/// The navigator's home page: the root AppBar over a safe-area'd body (the
+/// 7-section tab strip plus the pattern-switched section body in a scroll
+/// view), all under a bare toast overlay. Re-run on every rebuild (the
+/// navigator re-invokes its page builder), so the signal reads here subscribe
+/// the shell to section/brightness/elevation/toast changes.
 fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     let section = state.section.get();
     let slide = state.slide.get();
@@ -188,39 +250,38 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     // must be the column's FLEXIBLE child (flex: 1): an `inflexible` child
     // would size the scroll_view to its content's intrinsic height, so the
     // viewport would never be smaller than the content and scrolling would
-    // never engage (found on-device 2026-07-23).
+    // never engage (found on-device 2026-07-23). `on_scroll` feeds the root
+    // AppBar's `elevated` flag (task 18) off the body's own offset.
     let handles = state.clone();
     let body = flexible(
         1,
         pattern_switcher(
             section,
             GlyphSlide::new(slide),
-            scroll_view(pages::current(section, &handles)),
+            scroll_view(pages::current(section, &handles)).on_scroll(
+                move |state: &mut CatalogState, info: ScrollInfo| {
+                    state.elevated.set(info.offset > ELEVATION_THRESHOLD_PX);
+                },
+            ),
         ),
     );
 
+    // Bottom/left/right edges only — the AppBar above already consumes the
+    // top inset, so padding it again here would double-pad (module docs).
+    let body_column = safe_area(FlexView::new(Axis::Vertical, vec![tab_strip, body])).top(false);
+
     let column = FlexView::new(
         Axis::Vertical,
-        vec![inflexible(header_row(state)), tab_strip, body],
+        vec![inflexible(catalog_app_bar(state)), flexible(1, body_column)],
     );
 
     // Toast host overlays the whole page (API.md's hosting note: a FIFO
-    // overlay mounted above every screen). Top-CENTER with a small margin —
-    // the ToastHost sizes to the toast itself and a bare Stack child lands
-    // top-left (found on-device 2026-07-23); the reference build's toast
-    // enters from the top edge, centered.
+    // overlay mounted above every screen). A bare `toast_host` anchors itself
+    // bottom-center with inset-aware margins — no app-side `Align`/`Padding`
+    // wrapper needed (glyph-refinements task 07's framework-side anchoring).
     any(Stack(vec![
         any(column),
-        any(frust::Align(
-            frust::Alignment { x: 0.0, y: -1.0 },
-            Padding(
-                EdgeInsets {
-                    top: 10.0,
-                    ..EdgeInsets::all(0.0)
-                },
-                frust::glyph::toast_host(pending),
-            ),
-        )),
+        any(frust::glyph::toast_host(pending)),
     ]))
 }
 
@@ -241,6 +302,11 @@ impl Component for CatalogApp {
         // Clone the reactive handle into the navigator's stateless home-page
         // builder; the controller is shared so overlay pages push onto this
         // same stack. Glyph page transitions for any pushed overlay.
+        //
+        // `frust::navigator` (not `frust_widgets::navigator`) — the facade
+        // wrapper auto-wires Android/gesture back handling for `state.nav`
+        // (glyph-refinements task 08), so back-dismiss (overlay → pop → app
+        // exit at the root) works with zero catalog-side back code.
         let handles = state.clone();
         any(navigator(&state.nav, move || home_page(&handles)).transition(TransitionSpec::glyph()))
     }

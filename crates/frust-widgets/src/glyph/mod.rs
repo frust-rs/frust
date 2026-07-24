@@ -43,6 +43,7 @@
 
 pub mod accordion;
 pub mod alert;
+pub mod appbar;
 pub mod avatar;
 pub mod badge;
 pub mod breadcrumb;
@@ -52,6 +53,7 @@ pub mod dialog;
 pub mod dots;
 pub mod empty_state;
 pub mod list;
+pub mod menu;
 pub mod navbar;
 pub mod progress;
 pub mod segmented;
@@ -65,6 +67,7 @@ pub mod tooltip;
 
 pub use accordion::*;
 pub use alert::*;
+pub use appbar::*;
 pub use avatar::*;
 pub use badge::*;
 pub use breadcrumb::*;
@@ -74,6 +77,7 @@ pub use dialog::*;
 pub use dots::*;
 pub use empty_state::*;
 pub use list::*;
+pub use menu::*;
 pub use navbar::*;
 pub use progress::*;
 pub use segmented::*;

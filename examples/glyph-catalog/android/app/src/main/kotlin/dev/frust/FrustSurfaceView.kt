@@ -62,6 +62,45 @@ class FrustSurfaceView(context: Context) :
          * (a couple of frames) covers the one-frame rebuild latency with slack.
          */
         private const val IME_RESYNC_FRAMES = 3
+
+        /**
+         * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
+         * 03's `system_ui::encoded_state()` doc comment:
+         * `(generation << 8) | mode_bits`, low byte: `0..=4` is the mode
+         * discriminant, bit 4 (`0x10`) = Manual's `top`, bit 5 (`0x20`) =
+         * Manual's `bottom`) into a [SystemUiMode]. `low` must already be
+         * masked to the low byte by the caller.
+         */
+        private fun decodeSystemUiMode(low: Long): SystemUiMode =
+            when ((low and 0x0FL).toInt()) {
+                0 -> SystemUiMode.EdgeToEdge
+                1 -> SystemUiMode.Immersive
+                2 -> SystemUiMode.ImmersiveSticky
+                3 -> SystemUiMode.LeanBack
+                else -> SystemUiMode.Manual(
+                    top = (low and 0x10L) != 0L,
+                    bottom = (low and 0x20L) != 0L,
+                )
+            }
+    }
+
+    /**
+     * Decoded mirror of `frust_shell_common::system_ui::SystemUiMode`
+     * (task 03, Flutter `SystemUiMode` parity) — the vocabulary
+     * [pollSystemUiState] decodes `nativeSystemUiState`'s packed `u64`
+     * into for [onSystemUiModeChanged]. `MainActivity` (task 14) applies
+     * one of these via `WindowInsetsControllerCompat`. Declared in the class
+     * body, NOT the companion object: Kotlin resolves companion members
+     * (`FrustSurfaceView.decodeSystemUiMode`) through the outer class name,
+     * but never companion-nested *types* — `FrustSurfaceView.SystemUiMode`
+     * only compiles with the declaration here.
+     */
+    sealed class SystemUiMode {
+        object EdgeToEdge : SystemUiMode()
+        object Immersive : SystemUiMode()
+        object ImmersiveSticky : SystemUiMode()
+        object LeanBack : SystemUiMode()
+        data class Manual(val top: Boolean, val bottom: Boolean) : SystemUiMode()
     }
 
     // JNI exports implemented by `frust-shell-android` (spec Phase 2
@@ -171,6 +210,13 @@ class FrustSurfaceView(context: Context) :
     // next rebuild) — see [dispatchBackPress].
     private external fun nativeOnBackPress(handle: Long): Boolean
 
+    // System UI / SystemChrome (task 03/09 — RESEARCH.md "Insets / SafeArea /
+    // SystemChrome"): returns the process-wide `frust::set_system_ui_mode`
+    // override slot's packed `(generation, mode)` state
+    // (`frust_shell_common::system_ui::encoded_state()`'s doc comment has the
+    // exact bit layout) for [pollSystemUiState] to decode.
+    private external fun nativeSystemUiState(handle: Long): Long
+
     // Plugin platform initialization: deliver the
     // application Context to the native side so `frust-plugin`'s handles
     // can be initialized. Called once from [surfaceCreated] with the
@@ -230,6 +276,26 @@ class FrustSurfaceView(context: Context) :
      * not come at all if nothing about the insets actually changed).
      */
     private var lastInsets: WindowInsetsCompat? = null
+
+    /**
+     * The last system-UI slot generation observed by [pollSystemUiState]
+     * (task 03/09's `frust::set_system_ui_mode` override). Starts at `0`,
+     * matching the slot's initial (never-requested) generation, so an app
+     * that never calls the API never fires [onSystemUiModeChanged].
+     */
+    private var lastSystemUiGeneration: Long = 0
+
+    /**
+     * Set by `MainActivity` (which owns the `Window` a
+     * `WindowInsetsControllerCompat` needs) to receive a decoded
+     * [SystemUiMode] whenever [pollSystemUiState] observes a fresh
+     * `frust::set_system_ui_mode` call (task 14). `null` until the Activity
+     * wires it up in `onCreate`; a mode observed before that is dropped —
+     * mirrors this file's other startup-race cases (e.g. [pendingDeepLink]),
+     * though in practice `onCreate` wires this listener up well before the
+     * first Choreographer frame can observe a real generation change.
+     */
+    var onSystemUiModeChanged: ((SystemUiMode) -> Unit)? = null
 
     private val imm: InputMethodManager
         get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
@@ -518,6 +584,25 @@ class FrustSurfaceView(context: Context) :
         }
     }
 
+    /**
+     * Per-frame poll of the process-wide system-UI override slot
+     * (`frust::set_system_ui_mode`, task 03/09) — decodes
+     * `nativeSystemUiState`'s packed `(generation, mode)` `u64` and hands a
+     * decoded [SystemUiMode] to [onSystemUiModeChanged] only when the
+     * generation has advanced since the last poll (mirrors
+     * [pollImeAfterDispatch]'s per-frame shape: a cheap JNI long read, the
+     * proven idiom in this exact callback). Generation `0` (never called)
+     * applies nothing — platform defaults stand until the app calls the API.
+     */
+    private fun pollSystemUiState() {
+        val encoded = nativeSystemUiState(handle)
+        val generation = encoded ushr 8
+        if (generation == lastSystemUiGeneration) return
+        lastSystemUiGeneration = generation
+        if (generation == 0L) return
+        onSystemUiModeChanged?.invoke(decodeSystemUiMode(encoded and 0xFFL))
+    }
+
     private fun parseImeState(json: String?): ImeWireState? {
         if (json == null) return null
         return try {
@@ -572,6 +657,9 @@ class FrustSurfaceView(context: Context) :
             // field's published state; a no-op when they already match, so normal
             // typing never triggers a spurious restart.
             pollImeAfterDispatch()
+            // Per-frame system-UI poll (task 03/09/14): cheap generation-gated
+            // JNI read, applied only on an actual `set_system_ui_mode` change.
+            pollSystemUiState()
         }
         Choreographer.getInstance().postFrameCallback(this)
     }

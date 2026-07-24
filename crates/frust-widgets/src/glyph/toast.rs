@@ -43,6 +43,26 @@
 //! clamped to the (possibly shorter) new length on the following rebuild, so
 //! this is always safe, just not automatic.
 //!
+//! # Anchoring (framework-side positioning)
+//!
+//! [`ToastHostWidget::layout`] fills the incoming max constraints (a
+//! [`crate::Stack`] loosens its children, so the host spans the whole stack)
+//! rather than sizing to the active toast's own content, and positions the
+//! toast internally per [`ToastAnchor`] (`.anchor()` on [`ToastHostView`],
+//! default [`ToastAnchor::BottomCenter`]) — apps no longer wrap the host in
+//! their own `Align`. Margins are [`EDGE_MARGIN`] (10px) from the anchored
+//! edges, additionally widened by [`frust_core::WindowInsets::padding`] on
+//! those same edges (`ctx.window_insets()`, **not** `view_insets` — IME
+//! avoidance stays out of scope for v1) so a bottom toast clears gesture-nav
+//! insets with no app-side `SafeArea`. The host itself stays
+//! **event-transparent**: it never overrides `Widget::event`, so the
+//! default no-op (`EventResult::Ignored`) lets every pointer event — inside
+//! or outside the toast's own (smaller) rect — pass through to whatever the
+//! host overlays. Enter/exit motion follows the anchored edge: bottom
+//! anchors rise from below (a positive slide offset settling to zero);
+//! top anchors drop from above (the pre-existing negative-offset motion) —
+//! see [`ToastAnchor::is_top`].
+//!
 //! # Timeline
 //!
 //! Enter: 220ms (`MotionScheme::durations.base`) with the Glyph spatial
@@ -67,7 +87,7 @@ use std::time::Duration;
 use frust_core::accesskit::Role;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, FrameTime, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    PaintCtx, PaintScene, SemanticsCtx, View, Widget, WindowEdgeInsets, any,
 };
 use frust_theme::{StatusPalette, Theme};
 use kurbo::{Affine, Point, Size};
@@ -406,16 +426,92 @@ struct ActiveToast {
     last_time: Option<FrameTime>,
 }
 
+/// Where [`ToastHostWidget`] positions the active toast within the host's
+/// (now full-bleed) bounds. See the [module docs](self)'s Anchoring section.
+///
+/// Default [`ToastAnchor::BottomCenter`] — the framework's v1 opinionated
+/// default, matching most platform toast conventions (Android's `Toast`,
+/// Material Snackbar).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ToastAnchor {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomCenter,
+    BottomRight,
+}
+
+impl ToastAnchor {
+    /// Whether `self` anchors to the top edge (`TopLeft`/`TopCenter`/
+    /// `TopRight`) rather than the bottom — the axis the enter/exit slide
+    /// direction and vertical margin both key off (see the [module
+    /// docs](self)'s Anchoring section).
+    pub fn is_top(self) -> bool {
+        matches!(
+            self,
+            ToastAnchor::TopLeft | ToastAnchor::TopCenter | ToastAnchor::TopRight
+        )
+    }
+}
+
+/// Margin from the anchored edge(s), in logical px — matches the glyph
+/// catalog's pre-this-task top margin (`lib.rs`'s `EdgeInsets { top: 10.0,
+/// .. }` wrapper this task's host-side anchoring supersedes). This task's own
+/// choice, additionally widened by [`frust_core::WindowInsets::padding`] on
+/// the anchored edges (see the [module docs](self)'s Anchoring section).
+const EDGE_MARGIN: f64 = 10.0;
+
+/// Resolve the active toast's origin within the host's `host_size`, per
+/// `anchor`, [`EDGE_MARGIN`], and the window's safe-area `insets` on the
+/// anchored edges — additive with the margin (not `max`), so e.g. a
+/// bottom-anchored toast's rest position sits `EDGE_MARGIN + insets.bottom`
+/// above the host's bottom edge.
+fn anchor_origin(
+    anchor: ToastAnchor,
+    host_size: Size,
+    toast_size: Size,
+    insets: WindowEdgeInsets,
+) -> Point {
+    let x = match anchor {
+        ToastAnchor::TopLeft | ToastAnchor::BottomLeft => EDGE_MARGIN + insets.left,
+        ToastAnchor::TopCenter | ToastAnchor::BottomCenter => {
+            (host_size.width - toast_size.width) / 2.0
+        }
+        ToastAnchor::TopRight | ToastAnchor::BottomRight => {
+            host_size.width - EDGE_MARGIN - insets.right - toast_size.width
+        }
+    };
+    let y = if anchor.is_top() {
+        EDGE_MARGIN + insets.top
+    } else {
+        host_size.height - EDGE_MARGIN - insets.bottom - toast_size.height
+    };
+    Point::new(x, y)
+}
+
 /// A declarative toast-request queue snapshot. See the [module docs](self).
 pub struct ToastHostView {
     pending: Vec<String>,
+    anchor: ToastAnchor,
 }
 
 /// Create a toast host reading `pending` (the app's FIFO request log — see
-/// [`show`]) as this rebuild's snapshot.
+/// [`show`]) as this rebuild's snapshot, anchored [`ToastAnchor::BottomCenter`]
+/// by default — see [`ToastHostView::anchor`].
 pub fn toast_host(pending: impl Into<Vec<String>>) -> ToastHostView {
     ToastHostView {
         pending: pending.into(),
+        anchor: ToastAnchor::default(),
+    }
+}
+
+impl ToastHostView {
+    /// Set the host's [`ToastAnchor`] (default [`ToastAnchor::BottomCenter`]).
+    pub fn anchor(mut self, anchor: ToastAnchor) -> Self {
+        self.anchor = anchor;
+        self
     }
 }
 
@@ -434,24 +530,37 @@ impl<State: 'static> View<State> for ToastHostView {
             queue: self.pending.clone(),
             next_index: 0,
             active: None,
+            anchor: self.anchor,
         };
-        widget.maybe_advance_queue::<State>(ctx);
+        let _ = widget.maybe_advance_queue::<State>(ctx);
         widget
     }
 
     fn rebuild(
         &self,
-        _prev: &Self,
+        prev: &Self,
         element: &mut ToastHostWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.queue = self.pending.clone();
         element.next_index = element.next_index.min(element.queue.len());
-        element.maybe_advance_queue::<State>(ctx);
-        // The active child's own paint-driven animation covers redraw needs;
-        // structural start/stop is comparatively rare, so this simply always
-        // reports PAINT — cheap, and correct (never under-reports).
-        ChangeFlags::PAINT
+        let anchor_changed = prev.anchor != self.anchor;
+        element.anchor = self.anchor;
+        let structural_change = element.maybe_advance_queue::<State>(ctx);
+        // The active child's own paint-driven animation covers redraw needs
+        // when nothing structural happened, so this reports plain PAINT in
+        // that case — cheap, and correct (never under-reports). Either an
+        // anchor swap (repositions the toast) or a structural queue change
+        // (a new child pod was built or the active one torn down — a fresh/
+        // absent pod has never been laid out, so it MUST be relaid-out this
+        // frame, not just repainted; see the module's diagnosis) additionally
+        // forces LAYOUT (the host's own layout resolves the anchored origin,
+        // not paint).
+        if anchor_changed || structural_change {
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        } else {
+            ChangeFlags::PAINT
+        }
     }
 
     fn teardown(&self, element: &mut ToastHostWidget, ctx: &mut BuildCtx<'_>) {
@@ -471,6 +580,9 @@ pub struct ToastHostWidget {
     /// Index of the next not-yet-started request in `queue`.
     next_index: usize,
     active: Option<ActiveToast>,
+    /// Where the active toast is positioned within the (full-bleed) host —
+    /// see the [module docs](self)'s Anchoring section.
+    anchor: ToastAnchor,
 }
 
 impl ToastHostWidget {
@@ -479,7 +591,18 @@ impl ToastHostWidget {
     /// request exists, start it. Building/tearing down a [`ChildPod`] needs
     /// a [`BuildCtx`], so this only ever runs from `build`/`rebuild` — see
     /// the [module docs](self).
-    fn maybe_advance_queue<State: 'static>(&mut self, ctx: &mut BuildCtx<'_>) {
+    ///
+    /// Returns whether the active toast was **structurally** changed — a new
+    /// child pod was built and/or the previous one torn down — as opposed to
+    /// the common case where the existing pod just keeps playing. A caller
+    /// (`rebuild`) MUST fold a `true` return into `ChangeFlags::LAYOUT`: a
+    /// freshly built pod has never been laid out, so `Widget::layout` MUST
+    /// run this frame, not just `paint` (a structural child change is a
+    /// layout-affecting event per the widget contract, not a paint-only one
+    /// — the mobile layout-skip gate honors under-reported flags literally,
+    /// see the module's diagnosis doc comment).
+    fn maybe_advance_queue<State: 'static>(&mut self, ctx: &mut BuildCtx<'_>) -> bool {
+        let mut structural_change = false;
         if matches!(
             self.active.as_ref().map(|a| a.phase),
             Some(ToastPhase::Done)
@@ -489,6 +612,7 @@ impl ToastHostWidget {
             let mut pod = active.child;
             crate::teardown_child(&view, &mut pod, ctx);
             self.next_index += 1;
+            structural_change = true;
         }
         if self.active.is_none()
             && let Some(message) = self.queue.get(self.next_index).cloned()
@@ -502,7 +626,9 @@ impl ToastHostWidget {
                 hold_elapsed: Duration::ZERO,
                 last_time: None,
             });
+            structural_change = true;
         }
+        structural_change
     }
 
     /// Advance the active toast's phase machine to frame time `now`,
@@ -559,14 +685,44 @@ impl ToastHostWidget {
 
 impl Widget for ToastHostWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        match &mut self.active {
+        // Lay out the active toast (if any) at its own natural size first —
+        // needed both to size an unbounded host axis (below) and to position
+        // it per anchor. `bc.loosen()` mirrors the old direct pass-through
+        // (this host's incoming `bc` is already loose — `Stack` loosens its
+        // children — but loosening explicitly keeps the toast's own sizing
+        // independent of the host's now-larger, full-bleed `bc`).
+        let toast_size = match &mut self.active {
             Some(active) if !matches!(active.phase, ToastPhase::Done) => {
-                let size = active.child.layout_child(ctx, bc);
-                active.child.set_origin(Point::ZERO);
-                bc.constrain(size)
+                Some(active.child.layout_child(ctx, &bc.loosen()))
             }
-            _ => bc.constrain(Size::ZERO),
+            _ => None,
+        };
+
+        // Full-bleed: fill each bounded axis (the common case — Stack hands
+        // down the surrounding page's finite size) so the host spans the
+        // whole overlay region; shrink-wrap an unbounded axis to the active
+        // toast's own size instead (Align's Flutter-parity per-axis rule —
+        // `align.rs`'s module docs), or to zero while idle.
+        let natural = toast_size.unwrap_or(Size::ZERO);
+        let width = if bc.max().width.is_finite() {
+            bc.max().width
+        } else {
+            natural.width
+        };
+        let height = if bc.max().height.is_finite() {
+            bc.max().height
+        } else {
+            natural.height
+        };
+        let size = bc.constrain(Size::new(width, height));
+
+        if let (Some(active), Some(toast_size)) = (&mut self.active, toast_size) {
+            let insets = ctx.window_insets().padding();
+            let origin = anchor_origin(self.anchor, size, toast_size, insets);
+            active.child.set_origin(origin);
         }
+
+        size
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
@@ -574,29 +730,47 @@ impl Widget for ToastHostWidget {
         let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
         let (enter, exit) = resolve_timings(reduce_motion);
         let now = ctx.frame_time();
-        let origin = ctx.origin();
-        let size = ctx.size();
+        let host_origin = ctx.origin();
+        // Bottom anchors rise from below (a positive slide offset settling to
+        // zero); top anchors keep the pre-existing drop-from-above motion
+        // (negative offset) — see the [module docs](self)'s Anchoring section.
+        let sign = if self.anchor.is_top() { -1.0 } else { 1.0 };
 
         if let Some(shown) = self.advance(now, enter, exit) {
-            let done = matches!(
-                self.active.as_ref().map(|a| a.phase),
-                Some(ToastPhase::Done)
-            );
-            if !done {
-                let dy = (1.0 - shown) * -(ENTER_OFFSET_FRACTION * size.height);
+            let phase = self.active.as_ref().map(|a| a.phase);
+            let done = matches!(phase, Some(ToastPhase::Done));
+            if !done && let Some(active) = &mut self.active {
+                // The toast's own (anchored) rect, not the host's full-bleed
+                // bounds — the layer/transform below only ever cover the
+                // toast itself, keeping the rest of the (event-transparent)
+                // host untouched.
+                let toast_origin = host_origin + active.child.origin().to_vec2();
+                let toast_size = active.child.size();
+                let dy = (1.0 - shown) * sign * (ENTER_OFFSET_FRACTION * toast_size.height);
                 let alpha = shown.clamp(0.0, 1.0) as f32;
                 scene.push_transform(Affine::translate((0.0, dy)));
-                scene.push_layer(origin, size, alpha);
-                if let Some(active) = &mut self.active {
-                    active.child.paint_child(ctx, scene);
-                }
+                scene.push_layer(toast_origin, toast_size, alpha);
+                active.child.paint_child(ctx, scene);
                 scene.pop_layer();
                 scene.pop_transform();
             }
             // Kept active (even once `Done`) until the next `rebuild` tears it
             // down — one more frame ensures that rebuild actually runs (see
-            // the [module docs](self)).
-            ctx.request_frame();
+            // the [module docs](self)). Enter/Exit are genuine transitions
+            // (a user-visible endpoint driven by `TransitionDriver`) and
+            // request the unpaced class every vsync, like the one-frame
+            // tear-down poke past `Done`; Hold's only need is elapsed-time
+            // bookkeeping toward `HOLD_DURATION`, so it paces instead — the
+            // mobile frame gate throttles it to `cosmetic_loop_rate`
+            // (`docs/CODE_STANDARDS.md`'s perpetual-decorative-loop rule; a
+            // fixed-length hold isn't perpetual, but the same
+            // paint-doesn't-need-full-rate reasoning applies since nothing
+            // visible changes frame-to-frame during it).
+            if matches!(phase, Some(ToastPhase::Hold)) {
+                ctx.request_frame_paced();
+            } else {
+                ctx.request_frame();
+            }
         }
     }
 
@@ -773,6 +947,109 @@ mod tests {
         assert_eq!(active.phase, ToastPhase::Enter);
     }
 
+    // -- ToastHost: rebuild flags (the bug this task fixes — a structural
+    // queue change (start or teardown of the active pod) MUST report LAYOUT,
+    // or a layout-skip shell (Android) leaves a fresh/torn-down child pod
+    // unlaid-out — see the module's diagnosis doc comment) -----------------
+
+    #[test]
+    fn rebuild_reports_layout_when_a_pushed_toast_starts() {
+        let mut host = build_host(vec![]);
+        assert!(host.active.is_none(), "nothing queued yet");
+
+        let prev_view: ToastHostView = toast_host(vec![]);
+        let next_view: ToastHostView = toast_host(vec!["hello".to_string()]);
+        let mut counter = 0u64;
+        let flags = <ToastHostView as View<()>>::rebuild(
+            &next_view,
+            &prev_view,
+            &mut host,
+            &mut BuildCtx::new(&mut counter),
+        );
+
+        assert!(host.active.is_some(), "the pushed toast starts immediately");
+        assert!(
+            flags.needs_layout(),
+            "a newly-started toast's child pod has never been laid out — \
+             the rebuild that builds it MUST report LAYOUT, or a \
+             layout-skip shell (Android) leaves it at Size::ZERO for its \
+             whole lifecycle"
+        );
+    }
+
+    #[test]
+    fn honoring_rebuild_flags_after_a_push_always_lays_out_the_new_child() {
+        // Mirrors the Android-shaped sequence: a shell that trusts the
+        // returned ChangeFlags and only calls `layout` when they say to. If
+        // `rebuild` under-reports (PAINT-only), a shell honoring that
+        // literally paints a never-laid-out (Size::ZERO) child — this test
+        // drives exactly that shell contract and confirms the toast layer
+        // paints nonzero.
+        let mut host = build_host(vec![]);
+        let prev_view: ToastHostView = toast_host(vec![]);
+        let next_view: ToastHostView = toast_host(vec!["hello".to_string()]);
+        let mut counter = 0u64;
+        let flags = <ToastHostView as View<()>>::rebuild(
+            &next_view,
+            &prev_view,
+            &mut host,
+            &mut BuildCtx::new(&mut counter),
+        );
+
+        // The shell contract under test: only relayout when flags say so.
+        if flags.needs_layout() {
+            layout_host(&mut host, &BoxConstraints::tight(Size::new(400.0, 800.0)));
+        }
+
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 800.0));
+        let mut scene = RecordingScene::default();
+        host.paint(&mut ctx, &mut scene);
+
+        assert_eq!(scene.layers.len(), 1, "the active toast paints a layer");
+        let (_, layer_size, _) = scene.layers[0];
+        assert!(
+            layer_size.width > 0.0 && layer_size.height > 0.0,
+            "the toast layer must be nonzero — a zero size means the shell \
+             skipped layout on a flags contract it correctly honored, i.e. \
+             the bug this task fixes: {layer_size:?}"
+        );
+    }
+
+    #[test]
+    fn rebuild_reports_layout_when_a_finished_toast_tears_down() {
+        let mut host = build_host(vec!["first".to_string(), "second".to_string()]);
+        let (enter, exit) = resolve_timings(false);
+
+        // Drive fully through enter -> hold -> exit -> Done.
+        let mut t = 0.0;
+        loop {
+            host.advance(ft_ms(t), enter, exit);
+            if matches!(
+                host.active.as_ref().map(|a| a.phase),
+                Some(ToastPhase::Done)
+            ) {
+                break;
+            }
+            t += 50.0;
+            assert!(t < 10_000.0, "timeline never reached Done");
+        }
+
+        let view: ToastHostView = toast_host(vec!["first".to_string(), "second".to_string()]);
+        let mut counter = 0u64;
+        let flags = <ToastHostView as View<()>>::rebuild(
+            &view,
+            &view,
+            &mut host,
+            &mut BuildCtx::new(&mut counter),
+        );
+
+        assert!(
+            flags.needs_layout(),
+            "tearing down the finished toast and starting the next is also \
+             a structural change and must report LAYOUT"
+        );
+    }
+
     #[test]
     fn idle_host_with_no_pending_requests_requests_no_frame() {
         let mut host = build_host(vec![]);
@@ -864,5 +1141,234 @@ mod tests {
         // is 0: fully faded and offset fully above the resting position.
         assert_eq!(scene.layers[0].2, 0.0);
         assert!(ctx.needs_frame());
+    }
+
+    #[test]
+    fn hold_phase_paces_frame_requests_but_enter_and_exit_do_not() {
+        let mut host = build_host(vec!["hi".to_string()]);
+        {
+            use frust_core::LayoutCtx;
+            use frust_text::TextContext;
+            use std::any::Any;
+            let mut tcx = TextContext::new();
+            let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+            host.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 100.0)));
+        }
+
+        // Enter (the freshly-built default phase): a genuine transition,
+        // unpaced.
+        assert_eq!(host.active.as_ref().unwrap().phase, ToastPhase::Enter);
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(300.0, 100.0));
+        let mut scene = RecordingScene::default();
+        host.paint(&mut ctx, &mut scene);
+        assert_eq!(host.active.as_ref().unwrap().phase, ToastPhase::Enter);
+        assert!(
+            !ctx.needs_frame_paced_only(),
+            "Enter is a genuine transition and must run unpaced"
+        );
+
+        // Force into Hold — mirrors the file's other tests' direct phase
+        // manipulation via `advance`/field access (same-file `tests`
+        // submodule has private-field access); elapsed-time bookkeeping only,
+        // so it must pace.
+        host.active.as_mut().unwrap().phase = ToastPhase::Hold;
+        host.active.as_mut().unwrap().last_time = None;
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(300.0, 100.0));
+        let mut scene = RecordingScene::default();
+        host.paint(&mut ctx, &mut scene);
+        assert_eq!(host.active.as_ref().unwrap().phase, ToastPhase::Hold);
+        assert!(
+            ctx.needs_frame_paced_only(),
+            "Hold's only need is elapsed-time bookkeeping toward \
+             HOLD_DURATION — it must pace to the mobile frame gate's \
+             cosmetic-loop rate"
+        );
+
+        // Force into Exit: a genuine transition again, unpaced.
+        host.active.as_mut().unwrap().phase = ToastPhase::Exit;
+        host.active.as_mut().unwrap().driver = None;
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(300.0, 100.0));
+        let mut scene = RecordingScene::default();
+        host.paint(&mut ctx, &mut scene);
+        assert_eq!(host.active.as_ref().unwrap().phase, ToastPhase::Exit);
+        assert!(
+            !ctx.needs_frame_paced_only(),
+            "Exit is a genuine transition and must run unpaced"
+        );
+    }
+
+    // -- ToastHost: anchoring (task 07, framework-side positioning) -----
+
+    /// Lay `host` out under `bc` with a fresh (empty) `TextContext` — every
+    /// active toast contains a `Text` child needing one threaded (mirrors
+    /// `paint_at_enter_start_emits_translated_faded_layer`'s inline setup).
+    fn layout_host(host: &mut ToastHostWidget, bc: &BoxConstraints) -> Size {
+        use frust_core::LayoutCtx;
+        use frust_text::TextContext;
+        use std::any::Any;
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        host.layout(&mut lctx, bc)
+    }
+
+    #[test]
+    fn default_anchor_is_bottom_center() {
+        assert_eq!(ToastAnchor::default(), ToastAnchor::BottomCenter);
+    }
+
+    #[test]
+    fn default_anchor_positions_bottom_center_with_margin_no_insets() {
+        let mut host = build_host(vec!["hi".to_string()]);
+        let size = layout_host(&mut host, &BoxConstraints::tight(Size::new(400.0, 800.0)));
+        assert_eq!(size, Size::new(400.0, 800.0), "host fills the full bc");
+
+        let active = host.active.as_ref().expect("toast starts immediately");
+        let toast_size = active.child.size();
+        let origin = active.child.origin();
+
+        let center_x = origin.x + toast_size.width / 2.0;
+        assert!(
+            (center_x - 200.0).abs() < 1e-6,
+            "toast rect centers horizontally: {center_x}"
+        );
+        let bottom_edge = origin.y + toast_size.height;
+        assert!(
+            (bottom_edge - (800.0 - EDGE_MARGIN)).abs() < 1e-6,
+            "toast rect's bottom edge sits EDGE_MARGIN above the host bottom: {bottom_edge}"
+        );
+    }
+
+    #[test]
+    fn default_anchor_bottom_margin_additionally_respects_the_bottom_inset() {
+        use frust_core::{RenderRoot, WindowEdgeInsets, WindowInsets};
+        use frust_text::TextContext;
+
+        fn logic(_: &mut ()) -> ToastHostView {
+            toast_host(vec!["hi".to_string()])
+        }
+        let mut root: RenderRoot<(), ToastHostView> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.set_insets(WindowInsets::new(
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, 34.0),
+            WindowEdgeInsets::ZERO,
+        ));
+        let mut tcx = TextContext::new();
+        let size = root.layout_with_text(Size::new(400.0, 800.0), &mut tcx);
+        assert_eq!(size, Size::new(400.0, 800.0));
+
+        let id = root.root_id().expect("root built");
+        let widget = (root.tree().pod(id).expect("root pod").widget() as &dyn std::any::Any)
+            .downcast_ref::<ToastHostWidget>()
+            .expect("root is a ToastHostWidget");
+        let active = widget.active.as_ref().expect("toast starts immediately");
+        let toast_size = active.child.size();
+        let origin = active.child.origin();
+        let bottom_edge = origin.y + toast_size.height;
+        assert!(
+            (bottom_edge - (800.0 - EDGE_MARGIN - 34.0)).abs() < 1e-6,
+            "the 34px bottom inset widens the margin additively: {bottom_edge}"
+        );
+    }
+
+    #[test]
+    fn all_six_anchors_position_correctly() {
+        for anchor in [
+            ToastAnchor::TopLeft,
+            ToastAnchor::TopCenter,
+            ToastAnchor::TopRight,
+            ToastAnchor::BottomLeft,
+            ToastAnchor::BottomCenter,
+            ToastAnchor::BottomRight,
+        ] {
+            let view: ToastHostView = toast_host(vec!["hi".to_string()]).anchor(anchor);
+            let mut counter = 0u64;
+            let mut host =
+                <ToastHostView as View<()>>::build(&view, &mut BuildCtx::new(&mut counter));
+            let size = layout_host(&mut host, &BoxConstraints::tight(Size::new(400.0, 800.0)));
+            assert_eq!(size, Size::new(400.0, 800.0));
+
+            let active = host.active.as_ref().expect("toast starts immediately");
+            let toast_size = active.child.size();
+            let origin = active.child.origin();
+
+            let expected_x = match anchor {
+                ToastAnchor::TopLeft | ToastAnchor::BottomLeft => EDGE_MARGIN,
+                ToastAnchor::TopCenter | ToastAnchor::BottomCenter => {
+                    (400.0 - toast_size.width) / 2.0
+                }
+                ToastAnchor::TopRight | ToastAnchor::BottomRight => {
+                    400.0 - EDGE_MARGIN - toast_size.width
+                }
+            };
+            let expected_y = if anchor.is_top() {
+                EDGE_MARGIN
+            } else {
+                800.0 - EDGE_MARGIN - toast_size.height
+            };
+            assert!(
+                (origin.x - expected_x).abs() < 1e-6,
+                "{anchor:?}: x = {}, expected {expected_x}",
+                origin.x
+            );
+            assert!(
+                (origin.y - expected_y).abs() < 1e-6,
+                "{anchor:?}: y = {}, expected {expected_y}",
+                origin.y
+            );
+        }
+    }
+
+    #[test]
+    fn host_never_swallows_events_inside_or_outside_the_toast_rect() {
+        use frust_core::{
+            EventCtx, EventResult, InputEvent, PointerButton, PointerEvent, PointerPhase,
+        };
+        use std::any::Any;
+
+        // `ToastHostWidget` never overrides `Widget::event`, so it always
+        // falls through to the default no-op — verified explicitly here so a
+        // future accidental override (e.g. adding tap-to-dismiss) trips this
+        // test rather than silently starting to swallow taps.
+        let mut host = build_host(vec!["hi".to_string()]);
+        let mut state = ();
+        let state_any: &mut dyn Any = &mut state;
+        let mut ectx = EventCtx::new(state_any, Point::ZERO, Size::new(400.0, 800.0));
+
+        let ev = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(5.0, 5.0),
+            button: PointerButton::Primary,
+        });
+        assert_eq!(host.event(&mut ectx, &ev), EventResult::Ignored);
+    }
+
+    #[test]
+    fn enter_offset_sign_flips_between_top_and_bottom_anchors() {
+        fn early_enter_dy(anchor: ToastAnchor) -> f64 {
+            let view: ToastHostView = toast_host(vec!["hi".to_string()]).anchor(anchor);
+            let mut counter = 0u64;
+            let mut host =
+                <ToastHostView as View<()>>::build(&view, &mut BuildCtx::new(&mut counter));
+            layout_host(&mut host, &BoxConstraints::tight(Size::new(400.0, 800.0)));
+
+            let mut ctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 800.0));
+            let mut scene = RecordingScene::default();
+            host.paint(&mut ctx, &mut scene);
+            scene.transforms[0].translation().y
+        }
+
+        // At the very start of Enter (shown == 0), the slide offset is at its
+        // full magnitude — sign alone tells top from bottom.
+        let bottom_dy = early_enter_dy(ToastAnchor::BottomCenter);
+        let top_dy = early_enter_dy(ToastAnchor::TopCenter);
+        assert!(
+            bottom_dy > 0.0,
+            "a bottom anchor rises from below (positive dy): {bottom_dy}"
+        );
+        assert!(
+            top_dy < 0.0,
+            "a top anchor drops from above (negative dy): {top_dy}"
+        );
     }
 }

@@ -1164,6 +1164,48 @@ pub fn on_deep_link(handle: *mut c_void, url: *const c_char) {
     });
 }
 
+/// `frust_system_ui_state`: peek the process-wide system-UI override slot
+/// (task 03, `frust_shell_common::system_ui`) for `FrustViewController`'s
+/// per-`CADisplayLink`-tick poll, returning [`encoded_state`]'s packed
+/// `(generation, mode)` `u64` verbatim — the packing scheme and its tests
+/// live in `frust-shell-common` (see task 03's module docs for the exact bit
+/// layout).
+///
+/// Takes `handle` and ignores it: the slot is process-global (a shell-wide
+/// override, not a per-app-instance one — mirrors [`crate::app::IosAppHandle`]
+/// carrying no such state of its own), but every other export in this crate's
+/// surface takes the opaque handle as its first argument, so this follows
+/// that shape for calling-convention uniformity rather than being the one
+/// no-argument export — a caller-side no-op branch on a live handle isn't
+/// needed either way since the read never touches it.
+///
+/// # iOS semantic mapping (RESEARCH.md §6)
+///
+/// `FrustViewController` (task 14) decodes the returned `u64` and, on a
+/// generation change, stores the decoded flags and calls
+/// `setNeedsStatusBarAppearanceUpdate()` / `setNeedsUpdateOfHomeIndicatorAutoHidden()`
+/// so UIKit re-queries `prefersStatusBarHidden`/`prefersHomeIndicatorAutoHidden`
+/// next layout pass:
+///
+/// | [`frust_shell_common::SystemUiMode`] | status bar | home indicator |
+/// |---|---|---|
+/// | `Immersive` / `ImmersiveSticky` / `LeanBack` | hidden | auto-hidden |
+/// | `Manual { top, bottom }` | hidden iff `!top` | auto-hidden iff `!bottom` |
+/// | `EdgeToEdge` | visible | not auto-hidden |
+///
+/// iOS has no sticky/non-sticky or lean-back distinction and no *force*-hide
+/// of the home indicator — every hiding mode above folds to the same
+/// status-bar-hidden + home-indicator-auto-hide behavior, and the system
+/// (not the app) decides when a swipe re-reveals it (see
+/// `frust_shell_common::system_ui`'s module docs, "Platform behavior
+/// differences").
+pub fn system_ui_state(handle: *mut c_void) -> u64 {
+    guard("frust_system_ui_state", 0, || {
+        let _ = handle;
+        frust_shell_common::encoded_state()
+    })
+}
+
 /// `frust_destroy`: reclaim and drop the boxed handle (which drops the surface;
 /// the Swift-owned layer is released separately, afterwards). Idempotent from
 /// Swift's side because it nulls its handle right after calling this.

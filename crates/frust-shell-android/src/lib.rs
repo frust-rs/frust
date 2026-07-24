@@ -76,7 +76,7 @@ pub mod __jni {
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (spec §10.1, Makepad `app_main!` precedent).
 ///
-/// Stamps out the sixteen `Java_dev_frust_FrustSurfaceView_native*` symbols
+/// Stamps out the seventeen `Java_dev_frust_FrustSurfaceView_native*` symbols
 /// the Kotlin `FrustSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
@@ -93,7 +93,10 @@ pub mod __jni {
 /// `nativeOnInsetsChanged` delivers the platform window insets (SafeArea), and
 /// `nativeOnBackPress` routes a hardware/gesture back press through the framework
 /// (returning whether it consumed it). `nativeOnSurfaceChanged` also gained a
-/// trailing `density` argument in the same task. `nativeInit` also
+/// trailing `density` argument in the same task. `nativeSystemUiState` (task
+/// 09) returns the app-facing `frust::set_system_ui_mode` override slot's
+/// packed `(generation, mode)` state for a per-frame Kotlin poll, additive
+/// over the sixteen exports above it. `nativeInit` also
 /// initializes the process-wide [`frust_reactive::ReactiveRuntime`] (see
 /// [`jni_glue::native_init`]) before the state factory runs, so a `State`'s own
 /// construction may already create signals/controllers.
@@ -380,6 +383,22 @@ macro_rules! android_app {
             handle: $crate::__jni::jlong,
         ) -> $crate::__jni::jboolean {
             $crate::jni_glue::native_on_back_press(handle)
+        }
+
+        /// JNI `nativeSystemUiState`: return the process-wide system-UI
+        /// override slot's packed `(generation, mode)` state (task 09) for
+        /// Kotlin's `doFrame` to poll each frame, generation-gated like
+        /// `nativeImeState`'s established per-frame-poll idiom, and apply via
+        /// `WindowInsetsControllerCompat` on change (task 14 wires the Kotlin
+        /// decoder). Additive: older generated Kotlin that never calls this is
+        /// unaffected.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeSystemUiState<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jlong {
+            $crate::jni_glue::native_system_ui_state(handle)
         }
     };
 }

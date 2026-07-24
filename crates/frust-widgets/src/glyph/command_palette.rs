@@ -32,21 +32,45 @@
 //! phase and fires the state-free close callback only once the exit completes
 //! (from paint — sound because `NavigatorController::pop` merely enqueues an op).
 //!
-//! # Focus lands in the input on open
+//! # Focus lands in the input on open, never on a scrim-bound dismiss
 //!
-//! On the palette's **first event pass** it routes a synthetic tap into its
-//! [`TextInput`](crate::TextInput) child, claiming focus so typing flows into the
-//! field with no explicit tap. (Frust has no focus-on-*appear* seam yet — see
-//! [`crate::material::dialog`]'s auto-focus note — so "on open" is realized at
-//! the first event the modal receives; the navigator's modal contract guarantees
-//! that is the palette.) Dismissal tears down the page, which clears the field's
-//! focus/IME per the suppressing-container contract.
+//! Frust has no focus-on-*appear* seam yet (focus can only be claimed from an
+//! event pass — see [`crate::material::dialog`]'s auto-focus note) — so "on
+//! open" is realized at the palette's **first event pass**, routing a synthetic
+//! tap into its [`TextInput`](crate::TextInput) child so typing flows into the
+//! field with no explicit tap. The one-shot is guarded against the outside-tap
+//! dismiss flash a naive "first event" trigger produces: an outside `Down` is
+//! itself the start of a scrim-dismiss gesture, so the guard skips the
+//! autofocus routing exactly when the first event *is* that `Down` (checked by
+//! [`CommandPaletteWidget::is_scrim_down`]) — the keyboard never flashes up
+//! only to be dismissed by the same gesture's `Up`. Any other first event
+//! (including a tap on the input/a row) still claims focus immediately.
+//! Dismissal tears down the page, which clears the field's focus/IME per the
+//! suppressing-container contract.
+//!
+//! # Dismissable, and back-press parity
+//!
+//! [`dismissable(bool)`](CommandPaletteView::dismissable) (default `true`)
+//! governs every non-explicit dismissal path together: scrim tap, Escape, and
+//! a routed back press. `false` makes the palette a modal barrier — scrim tap
+//! and Escape become no-ops, and [`show_command_palette`] pushes the page with
+//! [`BackPolicy::Veto`] (a back press is consumed but changes nothing). `true`
+//! (the default) keeps scrim/Escape dismissing as before, and the page pushes
+//! with [`BackPolicy::DismissAnimated`]: a routed back press bumps a shared
+//! dismiss-signal generation cell rather than popping the stack directly; the
+//! widget compares it against its last-seen value once per paint (see
+//! [`BackPolicy`]'s observation seam) and stages the same animated
+//! [`begin_exit`](CommandPaletteWidget::begin_exit) a scrim/Escape cancel does,
+//! popping itself via [`on_close`](CommandPaletteView::on_close) only once the
+//! exit completes. The explicit close paths (`on_close`, a row's `on_select`)
+//! always work regardless of `dismissable`.
 //!
 //! # Only one floating layer
 //!
 //! At most one palette/overlay at a time is the app's/navigator's concern, not
 //! this widget's (mirrors [`crate::glyph::dialog`]).
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -64,7 +88,7 @@ use kurbo::{Affine, Point, Rect, RoundedRect, Shape, Size, Vec2};
 use peniko::{Brush, Color};
 
 use crate::Timing;
-use crate::nav::navigator::{NavigatorController, PopResult};
+use crate::nav::navigator::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use crate::nav::transition::{TransitionDriver, TransitionSpec, make_driver};
 use crate::text_input;
 
@@ -280,8 +304,12 @@ pub struct CommandPaletteView<State: 'static> {
     items: Vec<PaletteItem>,
     on_query: OnQuery<State>,
     on_select: OnSelect<State>,
-    scrim_dismissible: bool,
+    dismissable: bool,
     on_close: Option<OnClose>,
+    /// The shared back-press dismiss-signal cell (see the [module docs](self)'s
+    /// Dismissable section). Wired by [`show_command_palette`]; `None` when the
+    /// palette is built/tested standalone, outside a navigator push.
+    dismiss_signal: Option<Rc<Cell<u64>>>,
 }
 
 /// Create a command palette over `items`, streaming query changes to `on_query`
@@ -305,8 +333,9 @@ where
         items,
         on_query: Rc::new(on_query),
         on_select: Rc::new(on_select),
-        scrim_dismissible: true,
+        dismissable: true,
         on_close: None,
+        dismiss_signal: None,
     }
 }
 
@@ -323,17 +352,32 @@ impl<State: 'static> CommandPaletteView<State> {
         self
     }
 
-    /// Whether a tap on the scrim cancels the palette (default `true`).
-    pub fn scrim_dismissible(mut self, dismissible: bool) -> Self {
-        self.scrim_dismissible = dismissible;
+    /// Whether the palette can be dismissed by a scrim tap, Escape, or a
+    /// routed back press (default `true`) — see the [module docs](self)'s
+    /// Dismissable section. `false` turns the palette into a modal barrier for
+    /// all three; the explicit close paths (`on_close`, a row's `on_select`)
+    /// keep working either way. [`show_command_palette`] reads this to choose
+    /// the pushed page's [`BackPolicy`].
+    pub fn dismissable(mut self, dismissable: bool) -> Self {
+        self.dismissable = dismissable;
         self
     }
 
     /// Set the state-free close callback (see [`crate::glyph::dialog`]). Fired
-    /// once from paint when the exit animation completes after a scrim/Escape
-    /// cancel; [`show_command_palette`] wires it to `controller.pop()`.
+    /// once from paint when the exit animation completes after a scrim/Escape/
+    /// back-dismiss cancel; [`show_command_palette`] wires it to
+    /// `controller.pop()`.
     pub fn on_close<F: Fn() + 'static>(mut self, on_close: F) -> Self {
         self.on_close = Some(Rc::new(on_close));
+        self
+    }
+
+    /// Wire the shared back-press dismiss-signal cell (see the
+    /// [module docs](self)'s Dismissable section and [`BackPolicy`]'s
+    /// observation seam). Internal wiring [`show_command_palette`] performs —
+    /// not meant to be called directly by app code.
+    pub fn dismiss_signal(mut self, signal: Rc<Cell<u64>>) -> Self {
+        self.dismiss_signal = Some(signal);
         self
     }
 }
@@ -359,8 +403,11 @@ fn input_view<State: 'static>(
 }
 
 /// Push `build`'s palette as a transparent navigator page and register
-/// `on_result` for the value it pops with. The scrim/Escape cancel is wired to
-/// `controller.pop()` (an empty [`PopResult`]).
+/// `on_result` for the value it pops with. The scrim/Escape/back cancel is
+/// wired to `controller.pop()` (an empty [`PopResult`]); the pushed page's
+/// [`BackPolicy`] follows the built palette's
+/// [`dismissable`](CommandPaletteView::dismissable) flag — see the
+/// [module docs](self)'s Dismissable section.
 pub fn show_command_palette<State, B, R>(
     controller: &NavigatorController<State>,
     build: B,
@@ -371,13 +418,32 @@ pub fn show_command_palette<State, B, R>(
     R: Fn(&mut State, PopResult) + 'static,
 {
     let close_ctrl = controller.clone();
-    controller.push_transparent_for_result(
+    // Peek the configured `dismissable` flag once, up front, to pick the
+    // pushed page's back-press policy — a pure read of the (side-effect-free)
+    // builder, mirroring `NavigatorController::push_with_options`'s contract
+    // that a page's back policy is fixed at push time.
+    let dismissable = build().dismissable;
+    let back_policy = if dismissable {
+        BackPolicy::DismissAnimated
+    } else {
+        BackPolicy::Veto
+    };
+    let dismiss_signal = Rc::new(Cell::new(0u64));
+    let signal_for_options = dismiss_signal.clone();
+    controller.push_with_options(
         move || {
             let ctrl = close_ctrl.clone();
-            any::<State, _>(build().on_close(move || ctrl.pop()))
+            any::<State, _>(
+                build()
+                    .on_close(move || ctrl.pop())
+                    .dismiss_signal(dismiss_signal.clone()),
+            )
         },
-        TransitionSpec::NONE,
-        on_result,
+        PushOptions::transparent()
+            .transition(TransitionSpec::NONE)
+            .back(back_policy)
+            .dismiss_signal(signal_for_options)
+            .on_result(on_result),
     );
 }
 
@@ -445,8 +511,14 @@ pub struct CommandPaletteWidget {
     items: Vec<PaletteItem>,
     rows: Vec<Row>,
     on_select: crate::ErasedArgCallback<usize>,
-    scrim_dismissible: bool,
+    dismissable: bool,
     on_close: Option<OnClose>,
+    /// The shared back-press dismiss-signal cell (see the [module docs](self)'s
+    /// Dismissable section); `None` outside a navigator push.
+    dismiss_signal: Option<Rc<Cell<u64>>>,
+    /// The last dismiss-signal generation this widget has observed and acted
+    /// on (see [`Widget::paint`]'s observation check).
+    last_seen_dismiss: u64,
     /// Panel + input-row rects in the widget's own local coordinate space.
     panel: Rect,
     input_rect: Rect,
@@ -489,8 +561,10 @@ impl<State: 'static> View<State> for CommandPaletteView<State> {
             items: self.items.clone(),
             rows: make_rows(&self.items),
             on_select: crate::erase_callback_arg(&self.on_select),
-            scrim_dismissible: self.scrim_dismissible,
+            dismissable: self.dismissable,
             on_close: self.on_close.clone(),
+            last_seen_dismiss: self.dismiss_signal.as_ref().map(|s| s.get()).unwrap_or(0),
+            dismiss_signal: self.dismiss_signal.clone(),
             panel: Rect::ZERO,
             input_rect: Rect::ZERO,
             row_rects: Vec::new(),
@@ -518,9 +592,18 @@ impl<State: 'static> View<State> for CommandPaletteView<State> {
             element.rows = make_rows(&self.items);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
-        element.scrim_dismissible = self.scrim_dismissible;
+        element.dismissable = self.dismissable;
         element.on_select = crate::erase_callback_arg(&self.on_select);
         element.on_close = self.on_close.clone();
+        // A new/changed dismiss-signal identity resets the last-seen generation
+        // to its current value, so swapping in a fresh cell never misfires an
+        // exit from a stale comparison.
+        let signal_changed = self.dismiss_signal.as_ref().map(Rc::as_ptr)
+            != element.dismiss_signal.as_ref().map(Rc::as_ptr);
+        if signal_changed {
+            element.last_seen_dismiss = self.dismiss_signal.as_ref().map(|s| s.get()).unwrap_or(0);
+        }
+        element.dismiss_signal = self.dismiss_signal.clone();
         flags
     }
 
@@ -582,10 +665,24 @@ impl CommandPaletteWidget {
         self.row_rects.iter().position(|r| r.contains(pos))
     }
 
-    /// Route a synthetic tap into the input to claim focus on the first event —
-    /// see the [module docs](self)'s focus note. Uses a Down+Up through
-    /// [`crate::route_event_single`] so the input's capture is cleanly released
-    /// and the focus request propagates up the modal chain.
+    /// Whether `event` is the `Down` half of a scrim-dismiss gesture (outside
+    /// both the input row and every result row) — see the [module docs](self)'s
+    /// focus note. Used to guard the first-event autofocus so an outside tap's
+    /// `Down` never flashes the keyboard up only for its `Up` to dismiss it.
+    fn is_scrim_down(&self, event: &InputEvent) -> bool {
+        let InputEvent::Pointer(p) = event else {
+            return false;
+        };
+        p.phase == PointerPhase::Down
+            && !self.input_rect.contains(p.position)
+            && self.row_at(p.position).is_none()
+    }
+
+    /// Route a synthetic tap into the input to claim focus on the first
+    /// (non-scrim-dismiss) event — see the [module docs](self)'s focus note.
+    /// Uses a Down+Up through [`crate::route_event_single`] so the input's
+    /// capture is cleanly released and the focus request propagates up the
+    /// modal chain.
     fn autofocus_input(&mut self, ctx: &mut EventCtx) {
         // A point just inside the input pod's own bounds (its origin is offset
         // past the prompt glyph), so `route_event_single` actually routes into it.
@@ -680,6 +777,19 @@ impl Widget for CommandPaletteWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // Observe a routed back-press dismiss-signal bump (see the
+        // [module docs](self)'s Dismissable section and `BackPolicy`'s
+        // observation seam): the navigator flags only `PAINT` dirty on a
+        // `DismissAnimated` back request, so this is the one place the widget
+        // can notice it and stage the same animated exit a scrim/Escape
+        // cancel does.
+        if let Some(generation) = self.dismiss_signal.as_ref().map(|s| s.get())
+            && generation != self.last_seen_dismiss
+        {
+            self.last_seen_dismiss = generation;
+            self.begin_exit();
+        }
+
         let theme = Theme::from_paint_ctx(ctx);
         let (enter, exit) = resolve_timings(theme);
         let (scale, scrim_frac, animating) = self.advance(ctx.frame_time(), enter, exit);
@@ -767,19 +877,26 @@ impl Widget for CommandPaletteWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Auto-focus the input on the first event pass (see the module docs).
+        // Auto-focus the input on the first event pass — unless that very
+        // first event is the `Down` half of a scrim-dismiss gesture (see the
+        // module docs' focus note and `is_scrim_down`): claiming focus there
+        // would flash the keyboard up only for the matching `Up` to dismiss it.
         if !self.autofocused {
             self.autofocused = true;
-            self.autofocus_input(ctx);
+            if !self.is_scrim_down(event) {
+                self.autofocus_input(ctx);
+            }
         }
 
         // Focus-routed events (Key/Ime) go to the input — except Escape, which
-        // cancels the palette.
+        // cancels the palette when dismissable (a no-op, consumed, otherwise).
         if event.is_focus_routed() {
             if let InputEvent::Key(k) = event
                 && k.key == Key::Named(NamedKey::Escape)
             {
-                self.begin_exit();
+                if self.dismissable {
+                    self.begin_exit();
+                }
                 return EventResult::Handled;
             }
             return crate::route_event_single(&mut self.input, ctx, event);
@@ -827,7 +944,7 @@ impl Widget for CommandPaletteWidget {
                 }
                 if self.scrim_captured {
                     let outside = !self.panel.contains(p.position);
-                    if self.scrim_dismissible && outside {
+                    if self.dismissable && outside {
                         self.begin_exit();
                     }
                     self.scrim_captured = false;
@@ -940,6 +1057,36 @@ mod tests {
             w.input.is_focused(),
             "the input claims focus on the first event"
         );
+    }
+
+    #[test]
+    fn scrim_down_as_the_first_event_never_claims_focus_and_still_dismisses() {
+        let view: CommandPaletteView<AppState> = command_palette(
+            items(3),
+            |s: &mut AppState, q| s.queries.push(q),
+            |s: &mut AppState, i: usize| s.selected.push(i),
+        );
+        let mut w = build_widget(&view);
+        layout(&mut w);
+        w.phase = Phase::Shown;
+        assert!(!w.input.is_focused());
+
+        let mut state = AppState::default();
+        // A scrim tap (well outside the panel) delivered as the palette's very
+        // first event: Down must not autofocus (no keyboard flash), and the
+        // matching Up still begins the exit (the dismiss itself still works).
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 2.0, 2.0));
+        assert!(w.autofocused, "the first-event gate still trips once");
+        assert!(
+            !w.input.is_focused(),
+            "a scrim Down never claims focus, even as the first event"
+        );
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 2.0, 2.0));
+        assert!(
+            !w.input.is_focused(),
+            "no focus claim occurs anywhere in the scrim Down+Up sequence"
+        );
+        assert_eq!(w.phase, Phase::Exit, "the scrim tap still begins the exit");
     }
 
     #[test]
@@ -1070,6 +1217,129 @@ mod tests {
         assert_eq!(closed.get(), 0, "on_close waits for the exit to finish");
         w.advance(ft_ms(300.0), enter, exit);
         assert_eq!(closed.get(), 1);
+    }
+
+    // -- dismissable(false): scrim + Escape are no-ops, close still works ---
+
+    #[test]
+    fn dismissable_false_blocks_scrim_tap() {
+        let view: CommandPaletteView<AppState> = command_palette(
+            items(1),
+            |s: &mut AppState, q| s.queries.push(q),
+            |s: &mut AppState, i: usize| s.selected.push(i),
+        )
+        .dismissable(false);
+        let mut w = build_widget(&view);
+        layout(&mut w);
+        let mut state = AppState::default();
+        w.phase = Phase::Shown;
+
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 2.0, 2.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 2.0, 2.0));
+        assert_eq!(
+            w.phase,
+            Phase::Shown,
+            "a scrim tap is a no-op when not dismissable"
+        );
+    }
+
+    #[test]
+    fn dismissable_false_blocks_escape() {
+        let view: CommandPaletteView<AppState> = command_palette(
+            items(1),
+            |s: &mut AppState, q| s.queries.push(q),
+            |s: &mut AppState, i: usize| s.selected.push(i),
+        )
+        .dismissable(false);
+        let mut w = build_widget(&view);
+        layout(&mut w);
+        let mut state = AppState::default();
+        w.phase = Phase::Shown;
+
+        let escape = InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Escape),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        });
+        let result = dispatch(&mut w, &mut state, &escape);
+        assert_eq!(
+            w.phase,
+            Phase::Shown,
+            "Escape is a no-op when not dismissable"
+        );
+        assert_eq!(result, EventResult::Handled, "Escape is still consumed");
+    }
+
+    #[test]
+    fn dismissable_false_still_allows_on_select_close() {
+        let view: CommandPaletteView<AppState> = command_palette(
+            items(3),
+            |s: &mut AppState, q| s.queries.push(q),
+            |s: &mut AppState, i: usize| s.selected.push(i),
+        )
+        .dismissable(false);
+        let mut w = build_widget(&view);
+        layout(&mut w);
+        let mut state = AppState::default();
+
+        let r = w.row_rects[0];
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Down, r.center().x, r.center().y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Up, r.center().x, r.center().y),
+        );
+        assert_eq!(
+            state.selected,
+            vec![0],
+            "the explicit row-select close path always works"
+        );
+    }
+
+    // -- Back-press parity: dismiss-signal observation -----------------
+
+    #[test]
+    fn dismiss_signal_bump_begins_exit_on_next_paint() {
+        let signal = Rc::new(Cell::new(0u64));
+        let view: CommandPaletteView<AppState> = command_palette(
+            items(1),
+            |s: &mut AppState, q| s.queries.push(q),
+            |s: &mut AppState, i: usize| s.selected.push(i),
+        )
+        .dismiss_signal(signal.clone());
+        let mut w = build_widget(&view);
+        layout(&mut w);
+        w.phase = Phase::Shown;
+
+        let mut rec = Recorder::default();
+        let area = Size::new(800.0, 600.0);
+        let mut pctx = PaintCtx::new(Point::ZERO, area);
+        w.paint(&mut pctx, &mut rec);
+        assert_eq!(w.phase, Phase::Shown, "no bump yet — nothing happens");
+
+        // A routed back press bumps the shared generation cell.
+        signal.set(signal.get() + 1);
+        let mut pctx = PaintCtx::new(Point::ZERO, area);
+        w.paint(&mut pctx, &mut rec);
+        assert_eq!(
+            w.phase,
+            Phase::Exit,
+            "the widget observes the bump on its next paint and begins exit"
+        );
+
+        // A second paint with no further bump must not re-trigger.
+        w.phase = Phase::Shown;
+        let mut pctx = PaintCtx::new(Point::ZERO, area);
+        w.paint(&mut pctx, &mut rec);
+        assert_eq!(
+            w.phase,
+            Phase::Shown,
+            "an already-observed generation never re-triggers"
+        );
     }
 
     // -- Recording-scene token assertions (dark + light) ----------------
@@ -1250,6 +1520,97 @@ mod tests {
         assert!(
             !root.is_pointer_captured(),
             "no capture survives the dismiss"
+        );
+    }
+
+    #[test]
+    fn back_request_animates_exit_then_pops_when_dismissable() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = app_page(&controller);
+        let mut state = NavState::default();
+        let area = Size::new(800.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        show_command_palette(
+            &controller,
+            || command_palette(items(3), |_s: &mut NavState, _q| {}, |_s, _i| {}),
+            |state: &mut NavState, result: PopResult| state.results.push(result.take::<usize>()),
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(0.0));
+        root.paint(&mut Recorder::default(), ft_ms(300.0));
+        assert_eq!(controller.depth(), 2);
+
+        // Route a back press (task 02's entry point) instead of a scrim tap.
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        assert_eq!(
+            controller.depth(),
+            2,
+            "DismissAnimated leaves the stack unchanged immediately"
+        );
+
+        // The widget observes the dismiss-signal bump on its next paint and
+        // stages an animated exit, popping itself once it completes.
+        root.paint(&mut Recorder::default(), ft_ms(400.0));
+        root.paint(&mut Recorder::default(), ft_ms(700.0));
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+
+        assert_eq!(
+            state.results,
+            vec![None],
+            "back-dismiss pops with an empty result"
+        );
+        assert_eq!(controller.depth(), 1, "the palette page is gone");
+    }
+
+    #[test]
+    fn back_request_is_vetoed_when_not_dismissable() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = app_page(&controller);
+        let mut state = NavState::default();
+        let area = Size::new(800.0, 600.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        show_command_palette(
+            &controller,
+            || {
+                command_palette(items(3), |_s: &mut NavState, _q| {}, |_s, _i| {})
+                    .dismissable(false)
+            },
+            |state: &mut NavState, result: PopResult| state.results.push(result.take::<usize>()),
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(0.0));
+        root.paint(&mut Recorder::default(), ft_ms(300.0));
+        assert_eq!(controller.depth(), 2);
+
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(400.0));
+
+        assert_eq!(
+            controller.depth(),
+            2,
+            "Veto leaves the stack unchanged — the back press is consumed but nothing happens"
+        );
+        assert!(
+            state.results.is_empty(),
+            "no pop, so no result callback fires"
         );
     }
 

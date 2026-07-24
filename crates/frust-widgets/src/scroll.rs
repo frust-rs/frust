@@ -42,7 +42,7 @@ use frust_core::{
     PointerPhase, ScrollDelta, SemanticsCtx, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX,
     Widget, any, fling_decay, fling_displacement,
 };
-use kurbo::{Point, Size};
+use kurbo::{Point, Rect, Size};
 
 use crate::{ErasedArgCallback, ErasedCallback};
 
@@ -596,6 +596,11 @@ impl Widget for ScrollWidget {
         self.pump_fling(ctx);
         scene.push_clip(ctx.origin(), ctx.size());
         self.sync_child_origin();
+        // Publish this viewport as the paint-time visible rect (absolute coords),
+        // so a `Flex` in the scrolled content can cull children fully below/above
+        // the fold — suppressing offscreen animators' frame requests. Intersects
+        // (never widens) any rect an outer scroll surface already threaded down.
+        ctx.constrain_visible_rect(Rect::from_origin_size(ctx.origin(), ctx.size()));
         self.child.paint_child(ctx, scene);
         scene.pop_clip();
     }
@@ -953,6 +958,66 @@ mod tests {
         assert!(
             scroll_widget(&root).offset() > before,
             "the fling advanced from the injected paint frame time"
+        );
+    }
+
+    /// A perpetual animator: requests a continuation frame on every paint.
+    /// Stands in for an offscreen shimmer/spinner whose frame requests
+    /// paint-time culling must suppress (task 07).
+    struct Ticker;
+    struct TickerWidget;
+    impl View<()> for Ticker {
+        type Element = TickerWidget;
+        fn build(&self, _c: &mut BuildCtx<'_>) -> TickerWidget {
+            TickerWidget
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut TickerWidget, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for TickerWidget {
+        fn layout(&mut self, _c: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 100.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _s: &mut dyn PaintScene) {
+            ctx.request_frame();
+        }
+    }
+
+    #[test]
+    fn offscreen_flex_animator_culled_until_scrolled_into_view() {
+        // End-to-end frame suppression (task 07 AC #2): a perpetual animator below
+        // the fold in a Column inside a ScrollView is culled from paint, so its
+        // request_frame never bubbles and the root PaintOutcome asks for no
+        // continuation frame. Scroll it into view and the requests resume.
+        use frust_core::RenderRoot;
+
+        fn logic(_: &mut ()) -> ScrollView<()> {
+            // A 1000px spacer, then a 100px perpetual animator (content 1100 tall).
+            scroll_view(crate::Column(vec![any(leaf(100.0, 1000.0)), any(Ticker)]))
+        }
+        let mut root: RenderRoot<(), ScrollView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let mut sink = NullScene;
+        // At rest (offset 0) the animator sits at y=1000, far below the warm band
+        // (viewport 100 + one-viewport margin → y ∈ [-100, 200]); it is culled, so
+        // no continuation frame is requested.
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(
+            !outcome.needs_frame,
+            "an offscreen animator's frame request is culled"
+        );
+
+        // Scroll to the bottom (wheel clamps to max_offset = 1000): the animator
+        // comes into view and its request_frame bubbles out of paint again.
+        root.event(&mut state, &scroll(50.0, false, 5000.0));
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(
+            outcome.needs_frame,
+            "scrolling the animator into view resumes its frame requests"
         );
     }
 

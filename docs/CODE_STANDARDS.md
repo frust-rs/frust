@@ -44,9 +44,8 @@
   benign default) rather than unwinding into JVM-/Swift-owned stack frames
   — a panic crossing the FFI boundary is undefined behavior, not a bug.
   `run_guarded_thread` is `guard`'s whole-thread-body counterpart: every
-  render-thread `spawn` closure routes through it, so a caught panic still
-  exits cleanly and drains any orphaned `Ack`, rather than poisoning shared
-  state.
+  render-thread `spawn` closure routes through it, so a caught panic exits
+  cleanly and drains any orphaned `Ack` instead of poisoning shared state.
 - **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS
   platform text input doesn't send individual keystrokes across the FFI
   boundary — the platform owns composition (Gboard, CJK marked text)
@@ -296,22 +295,11 @@ interactive widget in `frust-widgets`:
   capture, clear their focus, and publish a cleared IME surface — in that
   order, with no bypass.** This binds any container that stops forwarding
   events to an already-interactive child (the navigator's mid-transition
-  input block is the reference impl — see `docs/ARCHITECTURE.md`'s
-  Navigation flow), not just `Navigator`:
-
-  ```rust
-  fn cancel_top(&mut self) {
-      if let Some(top) = self.pages.last_mut() {
-          // synthetic Cancel first, then focus
-          if top.pod.is_active() { crate::cancel_pod(&mut top.pod); top.pod.set_active(false); }
-          if top.pod.is_focused() { top.pod.set_focused(false); }
-      }
-      // then: publish a cleared ImeState on the next paint
-  }
-  ```
-  Skipping this leaves a child armed (a later `Up` it never receives fires
-  against a widget the container has stopped routing to) or a stale
-  focus/IME surface behind after the block lifts.
+  input block is the reference impl, via `cancel_pod`/`set_active`/
+  `set_focused` — see `docs/ARCHITECTURE.md`'s Navigation flow), not just
+  `Navigator`. Skipping this leaves a child armed (a later `Up` it never
+  receives fires against a widget the container has stopped routing to) or
+  a stale focus/IME surface behind after the block lifts.
 
 ## Semantics Conventions
 
@@ -338,9 +326,9 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   here; that integration lives in a shell, not `frust-core`.
 - **A platform adapter gates its pushes on `semantics_generation`/
   `semantics_if_changed`, not on pushing every frame unconditionally.** All
-  three shipping adapters compare the last-seen generation before
-  rebuilding a `TreeUpdate`; iOS additionally serves a cached snapshot to a
-  newly-activated screen reader so gating never starves a VoiceOver connect.
+  three shipping adapters compare the last-seen generation before rebuilding
+  a `TreeUpdate`; iOS also serves a cached snapshot to a newly-activated
+  screen reader so gating never starves a VoiceOver connect.
 
 ## Instrumentation & Frame-Gate Conventions
 
@@ -350,8 +338,7 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   `perf::enabled()` once per frame into a local bool and gate every
   `Instant::now()` read behind it (`bool::then(Instant::now)`) on
   FFI-sensitive paths (Android/iOS) so a disabled build takes zero clock
-  reads, not just zero recording. Span names are `perf::SPAN_*` consts, not
-  string literals, so every shell logs the same names.
+  reads. Span names are `perf::SPAN_*` consts, not string literals.
 - **Frame-gate inputs default to must-run, never to skip.** A `FrameInputs`
   field with no precise signal should stay `true`/fed conservatively rather
   than guessed `false` — over-running costs a wasted frame, over-skipping
@@ -380,22 +367,21 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   unlike the throwaway `()` at the root, but the contract is identical).
 - **Heavy work routes by shape: `spawn` (async IO) / `spawn_local` (UI-thread `!Send`) /
   `spawn_blocking` (one-off CPU) / rayon (an app-level choice, not bundled).** Calling
-  `spawn_local` off the UI thread is a wiring bug, not a runtime-data condition, and panics
-  saying so; a backgrounded iOS app pauses `CADisplayLink`, so a `spawn_local` timer stalls
-  until `frust_resume`'s next pump. `use_task` composes `AsyncValue<T>` over this routing: a
-  UI-thread coordinator, run under the calling component's `Owner`, hands work to
+  `spawn_local` off the UI thread panics (a wiring bug, not a runtime-data condition); a
+  backgrounded iOS app pauses `CADisplayLink`, so a `spawn_local` timer stalls until
+  `frust_resume`'s next pump. `use_task` composes `AsyncValue<T>` over this routing: a
+  UI-thread coordinator (under the calling component's `Owner`) hands work to
   `spawn`/`spawn_blocking` and is the sole signal writer, ruling out a cross-thread write
-  race by construction. Cancellation is layered: owner cleanup aborts the coordinator, which
-  aborts the background `JoinHandle`; an already-running `spawn_blocking` closure can't be
-  interrupted — only its result delivery is dropped.
+  race; owner cleanup aborts it and its `JoinHandle` — an already-running `spawn_blocking`
+  closure can't be interrupted, only its result delivery dropped.
 - **`Component::State` holds `RwSignal`s directly; app code depends on the
   `frust` facade only, never `reactive_graph`/`any_spawner`/`frust-reactive`
   directly.** A reactive field is typed `RwSignal<T>`, read/written through
   the facade's `Get`/`Set`/`Update` traits. **An `examples/*`/app crate's
   `Cargo.toml` depends on `frust` plus plugin crates only** — the facade
-  never re-exports plugins (Plugin Conventions below); `examples/huddle`'s
-  documented `frust-core`/`kurbo`/`peniko` escape hatch is the one
-  exception, for gaps no facade widget covers yet.
+  never re-exports plugins (Plugin Conventions below); a documented
+  `frust-core`/`kurbo`(/`peniko`) escape hatch (`examples/huddle`,
+  `examples/glyph-catalog`) is sanctioned, for gaps no facade widget covers.
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
   untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
   *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
@@ -434,9 +420,9 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
 - **A contested or unsourced design fact is resolved against a primary
   source and cited with a retrieval date, not left as a guess.** When a
   research doc's claim lacks (or conflicts with) a citable primary source,
-  fetch the primary source and record `<source>, retrieved <date>` in the
-  module doc, alongside the existing **Community-approximate** marker
-  (above) for values that stay genuinely unsourced.
+  fetch it and record `<source>, retrieved <date>` in the module doc,
+  alongside the **Community-approximate** marker (above) for values that
+  stay genuinely unsourced.
 - **Event-pass code never reads a theme — `EventCtx` carries none.** Only
   `LayoutCtx`/`PaintCtx` thread a theme; a metric an event handler also needs
   (hit-test padding, caret geometry) stays a plain constant read from both
@@ -452,23 +438,26 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   holds an `anim::AnimationController`, calls `advance(ctx.frame_time())` once
   per paint, reads `value()`, and — while `advance` returns `true` — calls
   `PaintCtx::request_frame()` so the shell schedules the next frame; there is
-  no ambient ticker.
+  no ambient ticker. **A layout-affecting animation calls `request_layout()`
+  instead** (it implies `request_frame`) — reserve bare `request_frame` for an
+  animation that only repaints (color fade, caret blink), or the mobile
+  intra-frame layout skip silently leaves it unresized (see
+  `docs/ARCHITECTURE.md`'s Frame pipeline).
 - **State-layer opacity has one source: `material::state_layer`'s constants.**
   `HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/`DRAGGED_OPACITY` (M3
   `StateTokens`) live in that one module; a catalog widget imports them
   rather than hardcoding overlay opacity, taking the **maximum** of
   concurrently-active states, never their sum. Only `pressed` is currently
   wired by any shipping widget.
-- **Glyph's token set adds three resolution precedents.** A per-status
-  color with no `ColorScheme` field (Success/Warning/Info) resolves
-  `Theme::extension::<StatusPalette>()` first — present on every baseline —
-  before a role that already has one (Error) resolves it directly.
-  `GlyphInk` is never brightness-swapped like a scheme role — it reads
-  identically on Light/Dark `glyph_baseline()`, so swapping it is a defect.
+- **Glyph's token set adds three resolution precedents.** A per-status color
+  with no `ColorScheme` field (Success/Warning/Info) resolves
+  `Theme::extension::<StatusPalette>()` first, before a role that already has
+  one (Error) resolves it directly. `GlyphInk` is never brightness-swapped
+  like a scheme role — it reads identically on Light/Dark `glyph_baseline()`.
   Accent role split: `primary`/`on_primary` is accent text/icon ink,
-  `primary_container`/`on_primary_container` is the bright fill —
-  conflating the two (Glyph light mode forces them apart) is the catalog's
-  most common accent bug.
+  `primary_container`/`on_primary_container` is the bright fill — conflating
+  the two (Glyph light mode forces them apart) is the catalog's most common
+  accent bug.
 - **A transition pattern's default timing resolves from `Theme.motion`,
   never a hand-rolled duration, and collapses under `reduce_motion`.**
   `PatternSwitcher`/`AnimatedOpacity`/`AnimatedScale` resolve
@@ -476,6 +465,17 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   `Timing` (an explicit `.timing(...)` call always wins); every
   pattern/wrapper substitutes a short linear crossfade under
   `reduce_motion` instead of a bespoke reduced variant.
+- **A perpetual decorative loop calls `PaintCtx::request_frame_paced`
+  (`TickClass::CosmeticLoop`), never bare `request_frame`.** `request_frame`
+  stays `TickClass::Transition` (unpaced) — correct for a spring, a finite
+  transition, or anything with a user-visible endpoint (`request_layout`
+  always implies `Transition`). A shimmer/spinner/pulse with no endpoint
+  requests the paced class instead, letting the mobile frame gate throttle
+  it to `MotionScheme::cosmetic_loop_rate` (`docs/ARCHITECTURE.md`'s Frame
+  gate), and must still honor `reduce_motion` like any other loop (freeze
+  in place, stop requesting frames). **Input-driven frames are never
+  paced** — a paced request only ever comes from a perpetual paint-time
+  loop, never from `EventCtx`.
 
 ## Testing Patterns
 

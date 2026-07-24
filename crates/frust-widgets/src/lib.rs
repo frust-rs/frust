@@ -65,8 +65,8 @@ pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
 pub use nav::hero::{HeroView, HeroWidget, hero};
 pub use nav::navigator::{
-    NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult, ResultCallback,
-    navigator,
+    BackPolicy, NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult,
+    PushOptions, ResultCallback, navigator,
 };
 pub use nav::path::{Location, PathPattern, RouteParams};
 pub use nav::router::{

@@ -35,7 +35,7 @@ pub use elevation::{Elevation, ElevationLevel, ShadowSpec, SurfaceRole};
 pub use extensions::ThemeExtensions;
 pub use glass::{GlassFill, GlassMaterial, GlassScale};
 pub use glyph::GlyphInk;
-pub use motion::{EasingSet, MotionDurations, MotionScheme, MotionSpring};
+pub use motion::{CosmeticLoopRate, EasingSet, MotionDurations, MotionScheme, MotionSpring};
 pub use shape::ShapeScale;
 pub use status::{StatusColors, StatusPalette};
 pub use theme::{DesignLanguage, Theme};

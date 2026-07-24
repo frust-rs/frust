@@ -62,6 +62,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
 use winit::window::{Theme as WinitTheme, Window, WindowAttributes, WindowId};
 
+use crate::paced_wake::{ControlFlowIntent, next_paced_wake, paced_wake_action};
 use crate::render::FrameExecutor;
 
 /// Initial preview-window size, in logical pixels.
@@ -206,6 +207,8 @@ where
         theme_override: ThemeOverrideWatcher::new(),
         theme_override_active: false,
         font_registry: FontRegistryWatcher::new(),
+        paced_wake: None,
+        anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
     };
 
     // Construction-time font drain (task 14): apply any fonts registered via
@@ -256,6 +259,22 @@ fn finish(fatal: Option<anyhow::Error>) -> Result<()> {
     match fatal {
         Some(err) => Err(err),
         None => Ok(()),
+    }
+}
+
+/// Apply a [`ControlFlowIntent`] (the winit-free decision from the
+/// `paced_wake` module) to the live event loop. [`ControlFlowIntent::Unchanged`]
+/// is a deliberate no-op — the paint-time paced-only case leaves the loop
+/// parked on whatever it already is, for the next `about_to_wait` to
+/// resolve. Pulled out so the translation from intent to `set_control_flow`
+/// is one place shared by both the paint and `about_to_wait` call sites.
+fn apply_control_flow(event_loop: &ActiveEventLoop, intent: ControlFlowIntent) {
+    match intent {
+        ControlFlowIntent::Wait => event_loop.set_control_flow(ControlFlow::Wait),
+        ControlFlowIntent::WaitUntil(deadline) => {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline))
+        }
+        ControlFlowIntent::Unchanged => {}
     }
 }
 
@@ -516,6 +535,21 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// `run_desktop`, before the first frame). See
     /// `frust_shell_common::font_registry`'s module docs.
     font_registry: FontRegistryWatcher,
+    /// Animation pacing (frame-gate pacing): the desktop shell has no skip gate
+    /// (it is dirty-driven under `ControlFlow::Wait`), so it paces a paced-only
+    /// decorative loop by scheduling a *delayed* redraw instead of the immediate
+    /// `request_redraw` a `needs_frame` normally triggers. When a paint returns
+    /// `needs_frame_paced_only` and nothing else needs the next frame, this
+    /// holds the `Instant` the next paced redraw is due; `about_to_wait` parks
+    /// the loop on `ControlFlow::WaitUntil(that)` and fires the redraw when it
+    /// elapses. `None` when no paced redraw is pending.
+    paced_wake: Option<Instant>,
+    /// Whether animation pacing is enabled (the [`FRUST_NO_ANIM_PACING`] kill
+    /// switch, resolved once at construction). When `false` a paced-only frame
+    /// falls back to the immediate `request_redraw` every-vsync path.
+    ///
+    /// [`FRUST_NO_ANIM_PACING`]: frust_shell_common::frame_gate::NO_ANIM_PACING_VAR
+    anim_pacing: bool,
 }
 
 impl<State, Logic, V> ShellHandler<State, Logic, V>
@@ -777,12 +811,33 @@ where
         self.executor.destroy_surface();
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Drain any UI-thread local tasks that became runnable while dispatching
         // this batch of events, before the loop parks on `Wait`. Cheap no-op
         // when the queue is empty; a task that writes a signal here re-dirties a
         // scope and fires the waker, which re-arms the loop rather than parking.
         self.runtime.pump_local();
+
+        // Animation pacing (frame-gate pacing): a paced-only decorative loop
+        // scheduled its follow-up redraw for a future instant rather than the
+        // next vsync. Park the loop on `WaitUntil(deadline)` so it wakes then;
+        // once the deadline passes, request the redraw and revert to `Wait`.
+        // With nothing pending, defensively return to `Wait` too, so no stale
+        // `WaitUntil` can ever survive a turn (the round-1 busy-spin Critical).
+        // Any other redraw source (input, a signal wake, a resize) still wakes
+        // the loop immediately regardless of this timer — pacing only bounds the
+        // cosmetic loop's own cadence. The decision itself lives in the pure,
+        // winit-free `paced_wake` module (see its docs) — this applies its
+        // result wholesale (field, redraw, control flow are one value, so the
+        // field can never be updated without also deciding the control flow).
+        let decision = paced_wake_action(self.paced_wake, Instant::now());
+        self.paced_wake = decision.paced_wake;
+        if decision.request_redraw
+            && let Some(window) = self.window.as_ref()
+        {
+            window.request_redraw();
+        }
+        apply_control_flow(event_loop, decision.control_flow);
     }
 
     fn window_event(
@@ -1049,9 +1104,40 @@ where
                 // `ControlFlow::Wait` would otherwise idle with no pending input,
                 // so we keep frames coming with an explicit redraw request until
                 // the animation reaches rest and stops signalling.
-                if paint_outcome.needs_frame {
+                //
+                // Animation pacing (frame-gate pacing): when the request is a
+                // paced-only decorative loop (`needs_frame_paced_only` — a
+                // shimmer/pulse/spinner with no concurrent transition), schedule
+                // the follow-up redraw a `cosmetic_loop_rate` interval out rather
+                // than every vsync. The desktop shell has no skip gate, so it
+                // paces via a delayed wake (`about_to_wait` parks on
+                // `WaitUntil`). A `Transition` request (or the pacing kill
+                // switch) keeps the immediate every-frame path. `needs_frame ==
+                // false` (a settled loop) must clear any stale prior
+                // `paced_wake` too, not just leave it assigned only inside a
+                // `needs_frame` arm — `next_paced_wake` is driven every frame
+                // (not just the `needs_frame` ones) precisely so its settle
+                // path covers that case: it clears the field AND returns the
+                // loop to `Wait`, never leaving a stale `WaitUntil` behind (the
+                // round-1 busy-spin Critical). The paced interval's division is
+                // computed only inside the branch that schedules (in
+                // `next_paced_wake`), so a settling frame never runs it; the
+                // rate is kept finite by `CosmeticLoopRate`'s NaN-safe clamp so
+                // that division can't panic. The decision bundles the field,
+                // the redraw, and the control flow into one value, so the field
+                // can never be updated without also deciding the control flow.
+                let decision = next_paced_wake(
+                    paint_outcome.needs_frame,
+                    paint_outcome.needs_frame_paced_only,
+                    self.anim_pacing,
+                    Instant::now(),
+                    self.theme.motion.cosmetic_loop_rate.hz(),
+                );
+                self.paced_wake = decision.paced_wake;
+                if decision.request_redraw {
                     window.request_redraw();
                 }
+                apply_control_flow(event_loop, decision.control_flow);
 
                 // A tracked signal written *during* this frame (e.g. a local
                 // task pumped above, or a write racing in from a background
