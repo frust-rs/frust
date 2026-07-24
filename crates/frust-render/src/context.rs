@@ -333,6 +333,33 @@ fn resolve_alpha_mode(
     }
 }
 
+/// Whether pixels presented to a swapchain configured with this composite
+/// alpha mode must be **premultiplied** before present.
+///
+/// vello 0.9's fine stage accumulates in premultiplied space but
+/// un-premultiplies at its final write — `rgba_sep = vec4(fg.rgb * (1/fg.a),
+/// fg.a)` in `vello_shaders-0.9.0/shader/fine.wgsl` (the `textureStore` at
+/// line ~1394) — so `render_to_texture`'s output carries **straight**
+/// (non-premultiplied) alpha. A compositor that expects premultiplied alpha
+/// then over-brightens every partial-alpha pixel by `1/a`. The two
+/// premultiplied-expecting modes are `PreMultiplied` and — the shipped Android
+/// translucent case — `Inherit`: on Android the only reported translucent
+/// mode is `Inherit`, under which SurfaceFlinger blends a `TRANSLUCENT`
+/// SurfaceView premultiplied (defect D3, `research/VERIFY.md`: a 50%-alpha
+/// `#FFF176` reached SurfaceFlinger stored straight `#FFF176@128` instead of
+/// premultiplied `#807B3B@128`, compositing over-bright over a Mode B hole).
+///
+/// `PostMultiplied` (iOS's translucent mode) expects straight alpha — vello's
+/// output is already correct there — and `Opaque`/`Auto` ignore alpha
+/// entirely, so all three take vello's output unchanged. See
+/// [`PremultiplyPass`], the direct-path fix this gates.
+fn alpha_mode_needs_premultiply(mode: wgpu::CompositeAlphaMode) -> bool {
+    matches!(
+        mode,
+        wgpu::CompositeAlphaMode::PreMultiplied | wgpu::CompositeAlphaMode::Inherit
+    )
+}
+
 /// Permanent (non-spike) surface-caps + chosen-alpha-mode line, logged once
 /// per surface configure (not once per process — a resize/recreate that picks
 /// a different mode is worth a fresh line, unlike the direct-to-surface probe
@@ -470,6 +497,140 @@ impl DetachedSurface {
     }
 }
 
+/// Straight-alpha → premultiplied-alpha conversion compute pass for the direct
+/// render path's translucent, premultiplied-expecting arm
+/// ([`RenderPath::DirectPremultiplied`]).
+///
+/// vello 0.9 outputs **straight** alpha (see [`alpha_mode_needs_premultiply`]);
+/// a `PreMultiplied`/`Inherit` swapchain needs it premultiplied. This pass
+/// reads the straight vello output as a sampled texture and writes
+/// `(rgb*a, a)` into the swapchain (a write-only `rgba8unorm` storage texture —
+/// the same `STORAGE_BINDING` the direct path already configures the swapchain
+/// with). Portable: sampled read + write-only storage, no in-place read-write
+/// storage (which `rgba8unorm` does not support).
+pub(crate) struct PremultiplyPass {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+/// WGSL for [`PremultiplyPass`]: premultiply every texel of a straight-alpha
+/// source into a premultiplied destination. One invocation per pixel; the
+/// bounds guard covers a surface whose dimensions are not a multiple of the
+/// workgroup size.
+const PREMULTIPLY_WGSL: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn premultiply(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(dst);
+    if gid.x >= dims.x || gid.y >= dims.y {
+        return;
+    }
+    let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+    let c = textureLoad(src, coord, 0);
+    textureStore(dst, coord, vec4<f32>(c.rgb * c.a, c.a));
+}
+"#;
+
+impl PremultiplyPass {
+    /// Compute workgroup edge (matches `@workgroup_size(8, 8)` in
+    /// [`PREMULTIPLY_WGSL`]); dispatch counts round up against it.
+    const WORKGROUP: u32 = 8;
+
+    /// Builds the compute pipeline + bind-group layout. Cheap enough to build
+    /// once per surface configure (a rare event), like the blit arm's
+    /// [`TextureBlitter`].
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("frust-render premultiply module"),
+            source: wgpu::ShaderSource::Wgsl(PREMULTIPLY_WGSL.into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("frust-render premultiply binds"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("frust-render premultiply layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("frust-render premultiply pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("premultiply"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+
+    /// Records the straight→premultiplied compute pass into `encoder`: reads
+    /// `src_view` (vello's straight output) and writes premultiplied pixels
+    /// into `dst_view` (the acquired swapchain texture). The caller submits
+    /// `encoder`.
+    pub(crate) fn record(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        dst_view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frust-render premultiply bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(dst_view),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("frust-render premultiply pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            width.div_ceil(Self::WORKGROUP),
+            height.div_ceil(Self::WORKGROUP),
+            1,
+        );
+    }
+}
+
 /// The per-frame render path a [`ConfiguredSurface`] carries — the resources
 /// specific to the chosen arm (see [`RenderPathKind`]).
 ///
@@ -484,6 +645,28 @@ pub(crate) enum RenderPath {
     /// texture directly (deliverable 1). Eliminates the intermediate texture and
     /// the per-frame blit pass.
     Direct,
+    /// Direct-to-surface for a **premultiplied-expecting translucent** swapchain
+    /// (`Inherit`/`PreMultiplied` alpha mode — see
+    /// [`alpha_mode_needs_premultiply`], platform-views defect D3). vello's
+    /// output is straight-alpha, but such a compositor blends premultiplied, so
+    /// the frame cannot be presented straight from `render_to_texture`. vello
+    /// instead renders into `intermediate_view` (in `encode`, where it already
+    /// exists — unlike the swapchain), then [`Self::DirectPremultiplied`]'s
+    /// `premultiply` compute pass writes `(rgb*a, a)` into the acquired
+    /// swapchain texture (in `submit`). Opaque and `PostMultiplied` surfaces
+    /// never take this arm (they stay [`Self::Direct`], byte-identical). Still
+    /// the direct family (`STORAGE_BINDING` swapchain, no `RENDER_ATTACHMENT`
+    /// blit) — the extra pass is one compute dispatch over the frame, paid only
+    /// by the translucent surfaces that need it.
+    ///
+    /// Only `intermediate_view` is stored, not the backing `wgpu::Texture`: a
+    /// `TextureView` refcounts its texture alive internally, and unlike the blit
+    /// arm's `target_texture` (which cpu-tier writes into via `write_texture`)
+    /// nothing here needs the texture handle — this arm is GPU-tier only.
+    DirectPremultiplied {
+        intermediate_view: wgpu::TextureView,
+        premultiply: PremultiplyPass,
+    },
     /// Blit fallback: vello renders into `target_view`, then `blitter` copies
     /// `target_texture` into the acquired swapchain texture each frame. Also the
     /// `cpu-tier` upload target (`COPY_DST`, see [`create_targets`]).
@@ -1037,6 +1220,20 @@ impl RenderContext {
             view_formats: vec![],
         };
         let path = match path_kind {
+            // A premultiplied-expecting translucent swapchain (`Inherit`/
+            // `PreMultiplied`) cannot take vello's straight output directly —
+            // it needs a premultiply pass (defect D3). Such surfaces get an
+            // intermediate vello renders into plus the compute pass that
+            // premultiplies it into the swapchain. Opaque/`PostMultiplied`
+            // surfaces skip all of this and stay byte-identical on `Direct`.
+            RenderPathKind::Direct if alpha_mode_needs_premultiply(alpha_mode) => {
+                let (_intermediate_texture, intermediate_view) =
+                    create_targets(width, height, &handle.device);
+                RenderPath::DirectPremultiplied {
+                    intermediate_view,
+                    premultiply: PremultiplyPass::new(&handle.device),
+                }
+            }
             RenderPathKind::Direct => RenderPath::Direct,
             RenderPathKind::Blit => {
                 let (target_texture, target_view) = create_targets(width, height, &handle.device);
@@ -1082,23 +1279,32 @@ impl RenderContext {
             .configure(&self.device_handle().device, &surface.config);
     }
 
-    /// Resizes `surface` in place and reconfigures the swapchain. On the blit
-    /// arm the intermediate target texture is recreated at the new size; the
-    /// direct arm has no intermediate, so only the swapchain config changes. Zero
-    /// dimensions are rejected upstream.
+    /// Resizes `surface` in place and reconfigures the swapchain. The blit arm
+    /// and the direct-premultiplied arm each recreate their intermediate target
+    /// texture at the new size; the plain direct arm has no intermediate, so
+    /// only the swapchain config changes. Zero dimensions are rejected upstream.
     pub(crate) fn resize_surface(&self, surface: &mut ConfiguredSurface, width: u32, height: u32) {
         surface.config.width = width;
         surface.config.height = height;
-        if let RenderPath::Blit {
-            target_texture,
-            target_view,
-            ..
-        } = &mut surface.path
-        {
-            let (new_texture, new_view) =
-                create_targets(width, height, &self.device_handle().device);
-            *target_texture = new_texture;
-            *target_view = new_view;
+        match &mut surface.path {
+            RenderPath::Blit {
+                target_texture,
+                target_view,
+                ..
+            } => {
+                let (new_texture, new_view) =
+                    create_targets(width, height, &self.device_handle().device);
+                *target_texture = new_texture;
+                *target_view = new_view;
+            }
+            RenderPath::DirectPremultiplied {
+                intermediate_view, ..
+            } => {
+                let (_new_texture, new_view) =
+                    create_targets(width, height, &self.device_handle().device);
+                *intermediate_view = new_view;
+            }
+            RenderPath::Direct => {}
         }
         self.configure_surface(surface);
     }
@@ -1370,5 +1576,273 @@ mod tests {
             resolve_alpha_mode(SurfaceAlphaRequest::TranslucentPreferred, &caps),
             wgpu::CompositeAlphaMode::PreMultiplied
         );
+    }
+
+    #[test]
+    fn premultiply_gated_on_premultiplied_expecting_modes() {
+        // The two premultiplied-expecting modes need the pass (defect D3):
+        // `Inherit` is Android's translucent mode (SurfaceFlinger blends
+        // premultiplied); `PreMultiplied` is explicit.
+        assert!(alpha_mode_needs_premultiply(
+            wgpu::CompositeAlphaMode::Inherit
+        ));
+        assert!(alpha_mode_needs_premultiply(
+            wgpu::CompositeAlphaMode::PreMultiplied
+        ));
+        // Straight-expecting (iOS `PostMultiplied`) and alpha-ignoring
+        // (`Opaque`/`Auto`, every opaque surface) take vello's output unchanged
+        // — the pass must never touch them, or the opaque path stops being
+        // byte-identical.
+        assert!(!alpha_mode_needs_premultiply(
+            wgpu::CompositeAlphaMode::PostMultiplied
+        ));
+        assert!(!alpha_mode_needs_premultiply(
+            wgpu::CompositeAlphaMode::Opaque
+        ));
+        assert!(!alpha_mode_needs_premultiply(
+            wgpu::CompositeAlphaMode::Auto
+        ));
+    }
+
+    /// The exact defect-D3 arithmetic the [`PremultiplyPass`] shader performs,
+    /// as an always-run reference (no GPU): a 50%-alpha `#FFF176` painted over
+    /// a Mode B hole must reach a premultiplied-expecting compositor stored
+    /// premultiplied (`~#807B3B@128`), NOT straight (`#FFF176@128` — the
+    /// over-bright value the device measured before this fix,
+    /// `research/VERIFY.md` D3). Encodes the predicted-correct pixel the device
+    /// re-check (task 04) must confirm.
+    #[test]
+    fn d3_premultiply_math_matches_verify_predictions() {
+        // `premultiply` in PREMULTIPLY_WGSL is `rgb * a` in normalized [0,1];
+        // in 8-bit that is `round(c * a / 255)`.
+        fn premul8(c: u8, a: u8) -> u8 {
+            ((u32::from(c) * u32::from(a) + 127) / 255) as u8
+        }
+
+        // 50%-alpha #FFF176 (the spike's ghost button). a=128 ≈ 0.502.
+        let (r, g, b, a) = (0xFF, 0xF1, 0x76, 128);
+        let premul = [premul8(r, a), premul8(g, a), premul8(b, a), a];
+        // Straight (the WRONG, over-bright value) keeps rgb at full intensity.
+        assert_eq!([r, g, b, a], [0xFF, 0xF1, 0x76, 128]);
+        // Premultiplied is materially darker per channel — this is the fix.
+        assert_eq!(premul, [0x80, 0x79, 0x3B, 128]);
+        // Within a couple of LSB of VERIFY D3's stated `~#807B3B@128`.
+        assert!((i16::from(premul[1]) - 0x7B).abs() <= 2);
+
+        // A second point on the curve: 25%-alpha opaque-magenta debris fill
+        // (D3's `#E4..FF`-class over-bright). a=64 ≈ 0.251.
+        let a = 64;
+        assert_eq!(
+            [premul8(0xFF, a), premul8(0x00, a), premul8(0xFF, a), a],
+            [0x40, 0x00, 0x40, 64]
+        );
+        // Fully-opaque pixels are premultiply-invariant — this is why the
+        // opaque path stays byte-identical and in-scene blends over opaque
+        // content already composite correctly (VERIFY D3).
+        assert_eq!(
+            [premul8(0xFF, 255), premul8(0xF1, 255), premul8(0x76, 255)],
+            [0xFF, 0xF1, 0x76]
+        );
+    }
+
+    /// Real-GPU end-to-end confirmation of the defect-D3 fix on this host's
+    /// Vulkan adapter: vello's `render_to_texture` emits **straight** alpha, and
+    /// [`PremultiplyPass`] converts it to premultiplied — the exact operation
+    /// [`RenderPath::DirectPremultiplied`] inserts before presenting a
+    /// premultiplied-expecting translucent swapchain (Android `Inherit`). No
+    /// on-screen surface exists headlessly, so this drives the two GPU halves
+    /// (vello output + the compute pass) directly against owned textures rather
+    /// than through `submit`.
+    ///
+    /// Encodes VERIFY D3's `#FFF176@128` prediction: asserts (a) vello stores
+    /// the fill STRAIGHT (`r≈255`, proving the diagnosis — the output really is
+    /// non-premultiplied), then (b) the pass stores it PREMULTIPLIED
+    /// (`r≈128 = round(255 * 128/255)`, proving the fix), each within a couple
+    /// of LSB of the value derived from vello's own readback.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn premultiply_pass_converts_vello_straight_output_to_premultiplied() {
+        pollster::block_on(run());
+
+        async fn run() {
+            const SIZE: u32 = 64; // 64*4 = 256-byte rows: no copy-padding math.
+
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .expect("no compatible GPU adapter");
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust premultiply test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+
+            let make_tex = |label: &str, extra: wgpu::TextureUsages| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: SIZE,
+                        height: SIZE,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC
+                        | extra,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_formats: &[],
+                })
+            };
+            // vello's straight output target (also the premultiply pass's read
+            // source), and the pass's write destination (the "swapchain").
+            let straight_tex = make_tex("straight (vello)", wgpu::TextureUsages::empty());
+            let straight_view = straight_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let premul_tex = make_tex("premultiplied (out)", wgpu::TextureUsages::empty());
+            let premul_view = premul_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // A 50%-alpha #FFF176 fill over a fully-transparent base — the
+            // spike's ghost button over a Mode B hole (alpha-0 behind).
+            let mut fk_scene = frust_scene::Scene::new();
+            {
+                let mut builder = frust_scene::SceneBuilder::new(&mut fk_scene);
+                builder.fill_rect(
+                    kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
+                    peniko::Brush::Solid(peniko::Color::from_rgba8(0xFF, 0xF1, 0x76, 128)),
+                );
+            }
+            let mut vello_scene = vello::Scene::new();
+            crate::encode_scene(&fk_scene, &mut vello_scene);
+            let mut renderer = vello::Renderer::new(&device, vello::RendererOptions::default())
+                .expect("failed to create vello renderer");
+            renderer
+                .render_to_texture(
+                    &device,
+                    &queue,
+                    &vello_scene,
+                    &straight_view,
+                    &vello::RenderParams {
+                        base_color: peniko::Color::TRANSPARENT,
+                        width: SIZE,
+                        height: SIZE,
+                        antialiasing_method: vello::AaConfig::Area,
+                    },
+                )
+                .expect("render_to_texture failed");
+
+            // Run the fix: straight → premultiplied into the destination.
+            let pass = PremultiplyPass::new(&device);
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            pass.record(
+                &device,
+                &mut encoder,
+                &straight_view,
+                &premul_view,
+                SIZE,
+                SIZE,
+            );
+            queue.submit([encoder.finish()]);
+
+            let straight = read_centre(&device, &queue, &straight_tex, SIZE).await;
+            let premul = read_centre(&device, &queue, &premul_tex, SIZE).await;
+
+            // (a) vello stored STRAIGHT alpha: rgb near full intensity, a≈128.
+            // This is the diagnosis — the un-premultiply in fine.wgsl.
+            assert!(
+                straight[0] >= 250 && (i16::from(straight[3]) - 128).abs() <= 2,
+                "expected vello straight output (~#FFF176@128), got {straight:?}"
+            );
+            // (b) the pass stored PREMULTIPLIED alpha, derived from vello's own
+            // straight readback so the assertion is robust to vello's rounding:
+            // premul_c ≈ round(straight_c * a/255).
+            let a = u32::from(straight[3]);
+            for ch in 0..3 {
+                let expected = ((u32::from(straight[ch]) * a + 127) / 255) as i16;
+                assert!(
+                    (i16::from(premul[ch]) - expected).abs() <= 2,
+                    "channel {ch}: premultiplied {} not within 2 LSB of expected {expected} \
+                     (straight {straight:?} -> premul {premul:?})",
+                    premul[ch]
+                );
+            }
+            // Alpha is unchanged by premultiply; red must have visibly darkened
+            // (255 -> ~128), proving the pass actually ran.
+            assert_eq!(premul[3], straight[3], "premultiply must not change alpha");
+            assert!(
+                premul[0] < 160,
+                "red should be premultiplied down toward 128, got {}",
+                premul[0]
+            );
+        }
+
+        /// Copies the centre texel of `tex` back to the CPU as `[r,g,b,a]`.
+        async fn read_centre(
+            device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            tex: &wgpu::Texture,
+            size: u32,
+        ) -> [u8; 4] {
+            let bytes_per_row = size * 4;
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("frust premultiply readback"),
+                size: u64::from(bytes_per_row * size),
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(size),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([encoder.finish()]);
+
+            let slice = buffer.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx.send(res);
+            });
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("device poll failed");
+            rx.recv()
+                .expect("map channel closed")
+                .expect("buffer map failed");
+            let data = slice.get_mapped_range();
+            let centre = ((size / 2) * bytes_per_row + (size / 2) * 4) as usize;
+            [
+                data[centre],
+                data[centre + 1],
+                data[centre + 2],
+                data[centre + 3],
+            ]
+        }
     }
 }

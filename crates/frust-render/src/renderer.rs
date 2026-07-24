@@ -645,6 +645,39 @@ impl SurfaceRenderer {
                         // Carry `base_color` to `submit`, where the render runs.
                         *pending_base_color = Some(base_color);
                     }
+                    // Direct-premultiplied (translucent, premultiplied-expecting —
+                    // defect D3): unlike the plain direct arm, the intermediate
+                    // already exists at encode time, so vello renders into it now
+                    // (like the blit arm); `submit`'s premultiply compute pass then
+                    // writes `(rgb*a, a)` into the acquired swapchain texture.
+                    RenderPath::DirectPremultiplied {
+                        intermediate_view, ..
+                    } => {
+                        vello_scene.reset();
+                        convert::encode_scene_with_shaders(
+                            scene,
+                            vello_scene,
+                            &shader_images,
+                            adapter_max,
+                        );
+                        let params = vello::RenderParams {
+                            base_color,
+                            width: ready.surface.config.width,
+                            height: ready.surface.config.height,
+                            antialiasing_method: vello::AaConfig::Area,
+                        };
+                        renderer
+                            .render_to_texture(
+                                &device_handle.device,
+                                &device_handle.queue,
+                                vello_scene,
+                                intermediate_view,
+                                &params,
+                            )
+                            .map_err(|e| {
+                                anyhow!("frust-render: vello render_to_texture failed: {e}")
+                            })?;
+                    }
                     // Blit fallback: render into the intermediate `Rgba8Unorm` target
                     // now; the acquire/blit/present tail (see `submit`) copies it to
                     // the swapchain.
@@ -932,6 +965,32 @@ impl SurfaceRenderer {
                     ));
                 }
             },
+            // Direct-premultiplied (defect D3): vello already rendered the
+            // straight-alpha frame into the intermediate in `encode`; premultiply
+            // it into the acquired swapchain texture so a premultiplied-expecting
+            // compositor (Android `Inherit`) blends it correctly. No blit, no
+            // intermediate→swapchain copy beyond this single compute dispatch.
+            RenderPath::DirectPremultiplied {
+                intermediate_view,
+                premultiply,
+                ..
+            } => {
+                let mut encoder =
+                    device_handle
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("frust-render premultiply"),
+                        });
+                premultiply.record(
+                    &device_handle.device,
+                    &mut encoder,
+                    intermediate_view,
+                    &swapchain_view,
+                    surface.config.width,
+                    surface.config.height,
+                );
+                device_handle.queue.submit([encoder.finish()]);
+            }
             // Blit fallback: copy the intermediate target (filled in `encode`)
             // into the swapchain texture and submit.
             RenderPath::Blit {
