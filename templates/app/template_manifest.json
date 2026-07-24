@@ -34,6 +34,8 @@
   "android.tmpl/app/src/main/AndroidManifest.xml.tmpl",
   "android.tmpl/app/src/main/kotlin/androidIdentifier/MainActivity.kt.tmpl",
   "android.tmpl/app/src/main/kotlin/dev/frust/FrustSurfaceView.kt.tmpl",
+  "android.tmpl/app/src/main/kotlin/dev/frust/FrustPlatformViewFactory.kt.tmpl",
+  "android.tmpl/app/src/main/kotlin/dev/frust/FrustViewHost.kt.tmpl",
   "android.tmpl/app/src/main/java/dev/accesskit/android/Delegate.java",
   "android.tmpl/app/src/main/res/mipmap-mdpi/ic_launcher.png",
   "android.tmpl/app/src/main/res/mipmap-mdpi/ic_launcher_round.png",
