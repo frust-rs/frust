@@ -66,9 +66,12 @@ class FrustSurfaceView(context: Context) :
          *
          * When `true`, [surfaceCreated] latches the alpha surface on the Rust
          * side via `nativeSetSurfaceMode(true)` BEFORE `nativeInit`, and the
-         * [init] block configures the `SurfaceHolder` for the exact
-         * spike-verified translucent recipe (`PixelFormat.TRANSLUCENT` +
-         * `setZOrderMediaOverlay(true)`).
+         * [init] block configures the `SurfaceHolder` for the translucent
+         * recipe (`PixelFormat.TRANSLUCENT` + `setZOrderOnTop(true)`). The
+         * on-top z-order (surface above the window) is needed for native
+         * sibling views to composite; media-overlay below-window arrangement
+         * erased them. Input routing is unchanged (SurfaceView does not consume
+         * input; device-verified on §A row 10 of VERIFY.md).
          */
         const val FRUST_TRANSLUCENT_SURFACE = false
 
@@ -358,14 +361,13 @@ class FrustSurfaceView(context: Context) :
         isFocusable = true
         isFocusableInTouchMode = true
         if (FRUST_TRANSLUCENT_SURFACE) {
-            // Mode B (platform-views): an alpha render surface z-ordered as a
-            // media overlay, so native sibling views hosted BELOW this view in
-            // the FrameLayout root show through the regions Frust paints
-            // transparent. The exact spike-verified translucent recipe; paired
-            // with `nativeSetSurfaceMode(true)` before `nativeInit` in
-            // [surfaceCreated].
+            // Mode B (platform-views): an alpha render surface z-ordered on top
+            // of the window, so native sibling views hosted in the FrameLayout
+            // root BELOW this view show through the regions Frust paints
+            // transparent. Paired with `nativeSetSurfaceMode(true)` before
+            // `nativeInit` in [surfaceCreated].
             holder.setFormat(PixelFormat.TRANSLUCENT)
-            setZOrderMediaOverlay(true)
+            setZOrderOnTop(true)
         }
         // Insets (device-parity task 08 — RESEARCH.md "Insets / SafeArea").
         // Fires on attach and on every later system-bar/cutout/IME change.
