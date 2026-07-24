@@ -20,7 +20,13 @@
 //! lifecycle vocabulary, gated by [`render_thread_enabled`], plus
 //! [`scene_return_channel`]'s reverse give-back slot restoring buffer reuse
 //! across the split) the shells split the frame pipeline across (plan phase
-//! 11.B).
+//! 11.B). The [`platform_view`] module is the differ turning `frust-core`'s
+//! per-paint-pass platform-view frames into an idempotent
+//! [`ViewCommand`]/[`PlatformViewState`] backlog both mobile shells' FFI peek
+//! getters serve (platform-views task 03), and [`surface_mode`] is the
+//! process-global translucent-surface opt-in latch
+//! ([`request_translucent_surface`]/[`SurfaceModeWatcher`]) each shell's
+//! surface-creation path reads pre-configure.
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
 //! (retained tree / `RenderRoot`) plus `frust-scene`/`frust-text`/
@@ -36,8 +42,10 @@ mod ffi_support;
 pub mod font_registry;
 pub mod frame_gate;
 pub mod perf;
+pub mod platform_view;
 pub mod render_split;
 pub mod resample;
+mod surface_mode;
 mod system_ui;
 mod theme_override;
 
@@ -46,6 +54,7 @@ pub use ffi_support::{guard, logical_insets, logical_size, run_guarded_thread, s
 pub use frame_gate::{
     FrameDecision, FrameGate, FrameInputs, FramePacing, anim_pacing_kill_switch_engaged,
 };
+pub use platform_view::{PlatformViewState, ViewCommand};
 pub use render_split::{
     Ack, AckWaiter, FrameMeta, NO_RENDER_THREAD_VAR, RenderBatch, RenderCommand, RenderEvent,
     RenderPhase, RenderReceiver, RenderSender, SceneFrame, SceneReturnReceiver, SceneReturnSender,
@@ -53,6 +62,7 @@ pub use render_split::{
     scene_return_channel,
 };
 pub use resample::{PointerResampler, RawPointerSample};
+pub use surface_mode::{SurfaceMode, SurfaceModeWatcher, request_translucent_surface};
 pub use system_ui::{
     SystemUiMode, SystemUiOverlay, SystemUiWatcher, current_system_ui_mode, encoded_state,
     set_system_ui_mode,
