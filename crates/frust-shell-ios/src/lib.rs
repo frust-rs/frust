@@ -65,7 +65,7 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (spec §10.2, Makepad `app_main!` precedent).
 ///
-/// Stamps out the fifteen `frust_*` symbols the generated Swift app declares
+/// Stamps out the seventeen `frust_*` symbols the generated Swift app declares
 /// (the seven lifecycle/input exports, the three text-input exports —
 /// `frust_ime_apply`, `frust_ime_state_json`, `frust_string_free` —
 /// `frust_set_appearance` (task 08's dark-mode export),
@@ -73,9 +73,13 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// `frust_init_accessibility` (phase-6d task 05's accesskit adapter
 /// attach — the one export whose UIView pointer the CAMetalLayer-only
 /// `frust_init` cannot supply), `frust_set_insets` (device-parity
-/// task 06's SafeArea inset delivery), plus `frust_system_ui_state`
+/// task 06's SafeArea inset delivery), `frust_system_ui_state`
 /// (glyph-refinements task 10's system-UI override peek — see
-/// `ffi_glue::system_ui_state`)), each delegating to the non-generic runtime in
+/// `ffi_glue::system_ui_state`), plus `frust_set_surface_mode` and
+/// `frust_platform_view_commands_json` (platform-views task 06's
+/// translucent-surface opt-in latch and command-backlog peek getter — see
+/// `ffi_glue::set_surface_mode`/`ffi_glue::platform_view_commands_json`)),
+/// each delegating to the non-generic runtime in
 /// [`ffi_glue`]. `frust_init` constructs the app's erased view tree and returns
 /// an opaque handle; the rest operate on that handle. It also initializes the
 /// process-wide
@@ -301,6 +305,32 @@ macro_rules! ios_app {
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_system_ui_state(handle: *mut ::core::ffi::c_void) -> u64 {
             $crate::ffi_glue::system_ui_state(handle)
+        }
+
+        /// `frust_set_surface_mode`: latch the process-wide translucent-surface
+        /// opt-in (platform-views task 06) — callable BEFORE `frust_init`.
+        /// `translucent` is `0`/`1` (no `<stdbool.h>` precedent in this crate's
+        /// ABI, mirroring `frust_set_appearance`'s `dark: u8`). Takes no handle:
+        /// the slot is process-global.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_set_surface_mode(translucent: u8) {
+            $crate::ffi_glue::set_surface_mode(translucent)
+        }
+
+        /// `frust_platform_view_commands_json`: the platform-view command
+        /// backlog (platform-views task 06) as a heap-allocated JSON C string
+        /// the caller must release with `frust_string_free`. `ack_generation`
+        /// is the generation the caller last finished applying (`0` on the
+        /// first call); returns null on the no-change fast path
+        /// (`generation == ack_generation`) or with no live handle.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_platform_view_commands_json(
+            handle: *mut ::core::ffi::c_void,
+            ack_generation: u64,
+        ) -> *mut ::core::ffi::c_char {
+            $crate::ffi_glue::platform_view_commands_json(handle, ack_generation)
         }
     };
 }

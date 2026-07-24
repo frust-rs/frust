@@ -305,6 +305,37 @@ impl PlatformViewState {
         self.push_batch(batch)
     }
 
+    /// Backgrounding path (platform-views tasks 05/06): synthesize
+    /// `Update { visible: false }` for every currently-live, currently-visible
+    /// slot **immediately**, regardless of its missing streak. A shell calls
+    /// this on the platform's backgrounding hook (Android's `onPause`, iOS's
+    /// `frust_pause`) — while backgrounded, paint doesn't run, so
+    /// [`ingest`](Self::ingest) is never called to drive the ordinary
+    /// [`HIDE_AFTER_MISSING_FRAMES`]-streak Hide path; without this explicit
+    /// call a backgrounded native sibling view would stay visible (and,
+    /// depending on the platform, keep rendering/consuming resources) until the
+    /// app resumes and repaints. A slot already hidden (`last_visible ==
+    /// false`) emits nothing for it, so calling this on an already-suspended
+    /// state (or with no live slots) is a cheap no-op. The `Update` reuses
+    /// each slot's last-known rect/clip — no `frames` argument, unlike
+    /// [`ingest`](Self::ingest) — since backgrounding doesn't produce a fresh
+    /// paint pass to source one from.
+    pub fn suspend_all(&mut self) -> bool {
+        let mut batch = Vec::new();
+        for (&slot_id, entry) in self.live.iter_mut() {
+            if entry.last_visible {
+                batch.push(ViewCommand::Update {
+                    slot_id,
+                    rect: entry.last_rect,
+                    clip: entry.last_clip,
+                    visible: false,
+                });
+                entry.last_visible = false;
+            }
+        }
+        self.push_batch(batch)
+    }
+
     /// Explicit retire: dispose `slot_id` right now regardless of its missing
     /// streak, for a shell with a real teardown signal (see the module docs'
     /// Widget teardown detection tradeoff). A no-op (returns `false`) if
@@ -337,35 +368,6 @@ impl PlatformViewState {
                 clip: entry.last_clip,
                 visible: entry.last_visible,
             });
-        }
-        self.push_batch(batch)
-    }
-
-    /// Force every currently-visible live slot to `Update { visible: false }`
-    /// right now, regardless of its `missing_streak` — the backgrounding
-    /// replay a shell calls when the app is about to lose the foreground
-    /// (Android's `nativeOnPause`, task 05) and wants every native sibling
-    /// hidden immediately rather than waiting out
-    /// [`HIDE_AFTER_MISSING_FRAMES`] naturally (which may never even start
-    /// counting if the surface simply stops producing frames while
-    /// backgrounded, rather than the tree stopping publishing). A slot
-    /// already hidden — or no live slots at all — contributes nothing, so
-    /// this is a no-op (`false`) in that case. Mirrors
-    /// [`reset_for_surface_recreate`](Self::reset_for_surface_recreate)'s
-    /// shape (one pass over `live`, one [`push_batch`](Self::push_batch)
-    /// call) but the opposite direction: hide, not re-create.
-    pub fn suspend_all(&mut self) -> bool {
-        let mut batch = Vec::new();
-        for (&slot_id, entry) in self.live.iter_mut() {
-            if entry.last_visible {
-                batch.push(ViewCommand::Update {
-                    slot_id,
-                    rect: entry.last_rect,
-                    clip: entry.last_clip,
-                    visible: false,
-                });
-                entry.last_visible = false;
-            }
         }
         self.push_batch(batch)
     }
@@ -737,6 +739,83 @@ mod tests {
                 params_json: "{\"a\":2}".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn suspend_all_hides_every_visible_slot_immediately() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[
+            frame(1, r(0.0, 0.0, 10.0, 10.0), true),
+            frame(2, r(20.0, 0.0, 30.0, 10.0), true),
+        ]);
+        state.acknowledge(state.commands().0);
+
+        // No missing streak at all — suspend_all fires on the very next call,
+        // unlike the ordinary ingest-driven Hide path.
+        let changed = state.suspend_all();
+        assert!(changed);
+        let (_, cmds) = state.commands();
+        assert_eq!(
+            cmds,
+            &[
+                ViewCommand::Update {
+                    slot_id: 1,
+                    rect: r(0.0, 0.0, 10.0, 10.0),
+                    clip: None,
+                    visible: false,
+                },
+                ViewCommand::Update {
+                    slot_id: 2,
+                    rect: r(20.0, 0.0, 30.0, 10.0),
+                    clip: None,
+                    visible: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn suspend_all_skips_already_hidden_slots() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), false)]);
+        state.acknowledge(state.commands().0);
+
+        // The only live slot is already visible:false — nothing to emit.
+        let changed = state.suspend_all();
+        assert!(!changed);
+        assert_eq!(state.commands().1, &[]);
+    }
+
+    #[test]
+    fn suspend_all_on_no_live_slots_is_a_noop() {
+        let mut state = PlatformViewState::new();
+        assert!(!state.suspend_all());
+        assert_eq!(state.commands().0, 0);
+    }
+
+    #[test]
+    fn revive_after_suspend_all_is_a_plain_update() {
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.acknowledge(state.commands().0);
+        state.suspend_all();
+        state.acknowledge(state.commands().0);
+
+        // The slot reappears in the next real ingest (e.g. the first frame
+        // after resume) — an ordinary Update, no re-Create.
+        let changed = state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        assert!(changed);
+        let (_, cmds) = state.commands();
+        assert_eq!(
+            cmds,
+            &[ViewCommand::Update {
+                slot_id: 1,
+                rect: r(0.0, 0.0, 10.0, 10.0),
+                clip: None,
+                visible: true,
+            }]
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, ViewCommand::Create { .. })));
     }
 
     #[test]

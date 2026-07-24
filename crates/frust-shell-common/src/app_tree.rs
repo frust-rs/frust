@@ -192,14 +192,16 @@ pub trait AppTree {
     ) -> EventOutcome;
 
     /// The [`PlatformViewFrame`]s the tree published during the most recent
-    /// [`AppTree::paint`] pass (delegates to
-    /// [`RenderRoot::platform_view_frames`]) — the source a mobile shell's
-    /// [`crate::platform_view::PlatformViewState::ingest`] feeds from once per
-    /// RUN frame, after paint (platform-views task 05/06).
+    /// paint pass (platform-views tasks 05/06; delegates to
+    /// [`RenderRoot::platform_view_frames`]). A shell's peek-getter path feeds
+    /// this into a [`crate::platform_view::PlatformViewState`]'s
+    /// [`ingest`](crate::platform_view::PlatformViewState::ingest) after each
+    /// RUN frame's paint (never on a gate-`Skip`, per that method's
+    /// skip-safety contract).
     ///
     /// Defaulted to an empty slice so existing [`AppTree`] impls compile
-    /// unchanged, mirroring [`AppTree::set_insets`]'s default-no-op shape;
-    /// the concrete tree overrides it to forward to `RenderRoot`.
+    /// unchanged; the concrete tree overrides it — mirrors
+    /// [`AppTree::set_insets`]'s default-no-op precedent.
     fn platform_view_frames(&self) -> &[PlatformViewFrame] {
         &[]
     }
