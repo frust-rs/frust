@@ -24,8 +24,10 @@
 //! per-paint-pass platform-view frames into an idempotent
 //! [`ViewCommand`]/[`PlatformViewState`] backlog both mobile shells' FFI peek
 //! getters serve (platform-views task 03), and [`surface_mode`] is the
-//! process-global translucent-surface opt-in latch
-//! ([`request_translucent_surface`]/[`SurfaceModeWatcher`]) each shell's
+//! process-global translucent-surface latch
+//! ([`declare_host_translucent_surface`]/[`SurfaceModeWatcher`]) — settable
+//! only by each shell's own JNI/C-ABI host-glue callback, never re-exported
+//! past this crate (review-fix-2 t01, review M3) — each shell's
 //! surface-creation path reads pre-configure.
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
@@ -62,7 +64,7 @@ pub use render_split::{
     scene_return_channel,
 };
 pub use resample::{PointerResampler, RawPointerSample};
-pub use surface_mode::{SurfaceMode, SurfaceModeWatcher, request_translucent_surface};
+pub use surface_mode::{SurfaceMode, SurfaceModeWatcher, declare_host_translucent_surface};
 pub use system_ui::{
     SystemUiMode, SystemUiOverlay, SystemUiWatcher, current_system_ui_mode, encoded_state,
     set_system_ui_mode,

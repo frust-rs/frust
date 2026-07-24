@@ -1330,29 +1330,36 @@ pub fn system_ui_state(handle: *mut c_void) -> u64 {
     })
 }
 
-/// `frust_set_surface_mode`: latch the process-wide translucent-surface
-/// opt-in (platform-views task 06) — see
+/// `frust_set_surface_mode`: declare the process-wide translucent-surface
+/// latch (platform-views task 06) — see
 /// `frust_shell_common::surface_mode`'s module docs for the one-way,
 /// pre-surface-creation latch contract. `translucent` is `0`/`1` (no
 /// `<stdbool.h>` precedent in this crate's ABI — mirrors
 /// [`set_appearance`]'s `dark: u8`).
 ///
-/// Callable **before** `frust_init` — the generated `FrustViewController`
-/// (task 09) calls this ahead of constructing the native handle. Takes no
-/// handle argument: the slot is process-global (mirrors
-/// [`system_ui_state`]'s shape), and there is nothing to guard against a
-/// null handle here since the read never touches one. A call after the
-/// surface already exists has no effect on that surface (the latch is
-/// read once, at surface-creation time, inside [`create_handle`]).
+/// Callable **only** from the generated `FrustViewController`'s
+/// `translucentSurface`-gated branch (task 09) — the same branch that
+/// already set `CAMetalLayer.isOpaque = false` and arranged the
+/// native-sibling subview order — and always **before** `frust_init`, ahead
+/// of constructing the native handle. Calling this without that layer
+/// configuration already in place is a host-template bug, not a supported
+/// opt-in (review M3); this is why the underlying
+/// `declare_host_translucent_surface` is not re-exported past
+/// `frust-shell-common`. Takes no handle argument: the slot is
+/// process-global (mirrors [`system_ui_state`]'s shape), and there is
+/// nothing to guard against a null handle here since the read never touches
+/// one. A call after the surface already exists has no effect on that
+/// surface (the latch is read once, at surface-creation time, inside
+/// [`create_handle`]).
 ///
-/// Latching only sets the *request*: a layer advertising no translucent alpha
+/// Declaring only sets the *request*: a layer advertising no translucent alpha
 /// mode still comes up opaque, and the paint contract follows the RESOLVED
 /// outcome ([`SurfaceRenderer::surface_resolved_translucent`], review finding
 /// M1), not this latch.
 pub fn set_surface_mode(translucent: u8) {
     guard("frust_set_surface_mode", (), || {
         if translucent != 0 {
-            frust_shell_common::request_translucent_surface();
+            frust_shell_common::declare_host_translucent_surface();
         }
     });
 }

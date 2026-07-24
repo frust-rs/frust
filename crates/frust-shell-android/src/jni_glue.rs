@@ -59,8 +59,9 @@ use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
     AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceMode,
-    SurfaceModeWatcher, SurfaceSize, ViewCommand, guard, next_render_phase, render_channel,
-    render_thread_enabled, request_translucent_surface, run_guarded_thread, scene_return_channel,
+    SurfaceModeWatcher, SurfaceSize, ViewCommand, declare_host_translucent_surface, guard,
+    next_render_phase, render_channel, render_thread_enabled, run_guarded_thread,
+    scene_return_channel,
 };
 use frust_text::TextContext;
 
@@ -1502,21 +1503,28 @@ pub fn native_system_ui_state(handle: jlong) -> jlong {
     })
 }
 
-/// `nativeSetSurfaceMode`: latch a translucent (alpha-channel) GPU surface
+/// `nativeSetSurfaceMode`: declare a translucent (alpha-channel) GPU surface
 /// before the surface is created (platform-views task 05).
 ///
-/// The generated Kotlin glue calls this **before** `nativeInit` (template
+/// The generated Kotlin glue calls this **only** from the same
+/// `FRUST_TRANSLUCENT_SURFACE`-gated branch that already set
+/// `SurfaceHolder`'s `PixelFormat.TRANSLUCENT` and arranged the
+/// native-sibling z-order, and always **before** `nativeInit` (template
 /// task 08's contract) — forwarding straight to
-/// [`request_translucent_surface`], the process-wide, one-way pre-init latch
-/// (`frust_shell_common::surface_mode`'s module docs' Latch contract: the
-/// surface format is fixed at creation, so there is no "revert" call and no
-/// live re-flip). A call after [`ANY_SURFACE_CREATED`] is already set (i.e.
-/// after some `nativeInit` in this process has begun) is logged and is a
-/// no-op for the current surface — it cannot retroactively change a format
-/// already chosen. `translucent == false` is always a no-op too: there is
-/// nothing to "un-latch".
+/// [`declare_host_translucent_surface`], the process-wide, one-way pre-init
+/// latch (`frust_shell_common::surface_mode`'s module docs' Latch contract:
+/// the surface format is fixed at creation, so there is no "revert" call and
+/// no live re-flip). Calling this from anywhere other than that host-glue
+/// branch — e.g. without the matching `PixelFormat` already set — is a
+/// host-template bug, not a supported opt-in (review M3); this is why the
+/// underlying function is not re-exported past `frust-shell-common`. A call
+/// after [`ANY_SURFACE_CREATED`] is already set (i.e. after some
+/// `nativeInit` in this process has begun) is logged and is a no-op for the
+/// current surface — it cannot retroactively change a format already
+/// chosen. `translucent == false` is always a no-op too: there is nothing to
+/// "un-latch".
 ///
-/// Latching only sets the *request*: a device advertising no translucent
+/// Declaring only sets the *request*: a device advertising no translucent
 /// alpha mode still comes up opaque, and the paint contract follows the
 /// RESOLVED outcome (`frust_render::SurfaceRenderer::surface_resolved_translucent`,
 /// review finding M1), not this latch.
@@ -1533,7 +1541,7 @@ pub fn native_set_surface_mode(translucent: jboolean) {
             );
             return;
         }
-        request_translucent_surface();
+        declare_host_translucent_surface();
     });
 }
 

@@ -20,6 +20,16 @@ final class FrustViewController: UIViewController {
     /// fresh scaffold's surface is fully opaque and unchanged. Read once,
     /// before `frust_init` (via `frust_set_surface_mode`), and never mutated
     /// — the surface's alpha mode is fixed for the process lifetime.
+    ///
+    /// **This constant is the whole Mode B switch: it must drive
+    /// `CAMetalLayer.isOpaque`, the `FrustViewHost` subview ordering, AND the
+    /// `frust_set_surface_mode` declaration below, together.** Flipping only
+    /// some of them is a defect — the Rust side trusts
+    /// `frust_set_surface_mode(1)` as proof the layer is *already*
+    /// translucent (review M3); calling it without `isOpaque = false` already
+    /// set reintroduces the exact black-rectangle bug that finding fixed.
+    /// This is also why there is no app-Rust equivalent call — only this
+    /// file may declare translucency.
     private let translucentSurface = false
 
     private var forgeView: FrustView { view as! FrustView }

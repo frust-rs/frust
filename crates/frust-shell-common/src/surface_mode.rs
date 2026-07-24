@@ -1,5 +1,6 @@
-//! App-facing translucent-surface opt-in slot (task 03):
-//! [`request_translucent_surface`]/[`SurfaceModeWatcher::current`].
+//! HOST-declared translucent-surface slot (task 03; renamed under
+//! review-fix-2 t01, review M3):
+//! [`declare_host_translucent_surface`]/[`SurfaceModeWatcher::current`].
 //!
 //! # The gap this closes
 //!
@@ -10,8 +11,11 @@
 //! can show through wherever frust paints nothing. That surface-format choice
 //! happens once, at surface-creation time, well before any app code runs — so
 //! there is no "widget asks for translucency" moment the way there is for,
-//! say, `set_app_theme`. An app (or the platform-views facade glue, task 07)
-//! instead calls [`request_translucent_surface`] during startup, and each
+//! say, `set_app_theme`. **Only the generated host glue** (Android's
+//! `jni_glue::native_set_surface_mode`, iOS's `ffi_glue::set_surface_mode`)
+//! calls [`declare_host_translucent_surface`] during startup, from the same
+//! branch that already set `SurfaceHolder`'s `PixelFormat.TRANSLUCENT` /
+//! `CAMetalLayer.isOpaque = false` on the native window itself — and each
 //! shell's surface-creation path (task 04) reads
 //! [`SurfaceModeWatcher::current`] **before** configuring the surface.
 //!
@@ -25,40 +29,61 @@
 //! "last seen" cursor; `current` is an associated function, a plain peek at
 //! the process-wide slot.
 //!
-//! # This latch is the REQUEST, not the outcome
+//! # This latch is a HOST DECLARATION, not the outcome (review M3)
 //!
-//! What an app asks for here is not necessarily what it gets. Each shell
+//! Setting this latch is a claim by the host glue that the native window is
+//! *already* configured translucent — **calling it from anywhere else, or
+//! without that window configuration already in place, is a host-template
+//! bug** (review M3's exact vector: an app opting in from Rust alone with no
+//! matching host window config). That is why [`declare_host_translucent_surface`]
+//! is not re-exported past `frust-shell-common` — see the Callers section.
+//!
+//! Declaring it doesn't fully decide the outcome either. Each shell
 //! translates this latch into a `frust_render::SurfaceAlphaRequest`, and
 //! `frust-render` resolves *that* against the platform's advertised
 //! `CompositeAlphaMode`s at configure time — falling back to an opaque
 //! swapchain (with a `log::warn!`) when the platform advertises no translucent
-//! mode. **The resolved truth lives at a different seam**:
-//! `frust_render::SurfaceRenderer::surface_resolved_translucent`, read by each
-//! shell after every surface (re)install and threaded into
-//! `RenderRoot::set_surface_translucent` (review finding M1).
+//! mode, and the GPU-tier blit fallback (review M2) can further refuse a
+//! premultiply-expecting mode it can't reproduce. **The resolved truth lives
+//! at a different seam**: `frust_render::SurfaceRenderer::surface_resolved_translucent`,
+//! read by each shell after every surface (re)install and threaded into
+//! `RenderRoot::set_surface_translucent` (review finding M1) — that seam
+//! still governs paint, unchanged by this rename.
 //!
 //! So: read this latch to decide what to *request*; never to decide whether to
 //! paint the Mode B contract (a transparent base clear, a `platform_view`
-//! hole punch). Keying paint off the request means a fallback clears to
-//! `TRANSPARENT` and `DestOut`-punches every slot rect on an OPAQUE
-//! swapchain — black rectangles instead of a graceful degrade to Mode A.
+//! hole punch). Keying paint off the declaration alone (ignoring the M1/M2
+//! resolved seam) means a fallback clears to `TRANSPARENT` and
+//! `DestOut`-punches every slot rect on an OPAQUE swapchain — black
+//! rectangles instead of a graceful degrade to Mode A.
+//!
+//! # Callers (review M3's fix)
+//!
+//! [`declare_host_translucent_surface`] is called **only** by
+//! `frust-shell-android::jni_glue`'s `native_set_surface_mode` and
+//! `frust-shell-ios::ffi_glue`'s `set_surface_mode` — the fixed JNI/C-ABI
+//! exports the generated host template's Kotlin/Swift calls in the same
+//! branch it sets `PixelFormat.TRANSLUCENT`/`isOpaque = false` and arranges
+//! the native-sibling z-order. It is deliberately **not** re-exported from
+//! the `frust` facade: an app Rust call with no matching host window config
+//! was review M3's reachable black-rectangle vector, so that capability was
+//! removed rather than documented around.
 //!
 //! # Latch contract (one-way, v1)
 //!
-//! [`request_translucent_surface`] only ever moves the slot from
+//! [`declare_host_translucent_surface`] only ever moves the slot from
 //! [`SurfaceMode::Opaque`] to [`SurfaceMode::Translucent`] — there is no
-//! `request_opaque_surface`/"undo" call, and once observed as
-//! `Translucent` it never reverts. This is deliberate, not an oversight: the
-//! surface format is fixed at creation (the platform APIs above expose no
-//! supported runtime toggle), so "reverting" would mean destroying and
-//! recreating the whole surface — out of scope for v1, and nothing in the
-//! plan needs it (an app either wants platform-view compositing for the
-//! process's lifetime, or it doesn't). A future version needing a live flip
-//! would have to plumb a full surface-recreation round-trip through each
-//! shell's `SurfacePhase` state machine (`docs/ARCHITECTURE.md`'s frame
-//! pipeline) — not a slot-shape change.
+//! "undo" call, and once observed as `Translucent` it never reverts. This is
+//! deliberate, not an oversight: the surface format is fixed at creation (the
+//! platform APIs above expose no supported runtime toggle), so "reverting"
+//! would mean destroying and recreating the whole surface — out of scope for
+//! v1, and nothing in the plan needs it (an app either wants platform-view
+//! compositing for the process's lifetime, or it doesn't). A future version
+//! needing a live flip would have to plumb a full surface-recreation
+//! round-trip through each shell's `SurfacePhase` state machine
+//! (`docs/ARCHITECTURE.md`'s frame pipeline) — not a slot-shape change.
 //!
-//! One-way applies to the REQUEST only. The *resolved* state above is not
+//! One-way applies to the DECLARATION only. The *resolved* state above is not
 //! one-way and is not fixed before the surface exists: every (re)install
 //! re-resolves it, and a failed install clears it — which is exactly why the
 //! shells re-read it per frame rather than caching it at construction.
@@ -66,7 +91,7 @@
 //! # Thread contract
 //!
 //! Like [`crate::theme_override::set_app_theme`]/
-//! [`crate::system_ui::set_system_ui_mode`], [`request_translucent_surface`]
+//! [`crate::system_ui::set_system_ui_mode`], [`declare_host_translucent_surface`]
 //! is callable from any thread — a plain `Mutex` guards the slot. In
 //! practice it must be called before the shell's surface-creation path reads
 //! [`SurfaceModeWatcher::current`] (startup-time only — see the module docs
@@ -95,19 +120,29 @@ pub enum SurfaceMode {
 /// doesn't apply here.
 static SURFACE_MODE: Mutex<SurfaceMode> = Mutex::new(SurfaceMode::Opaque);
 
-/// Request a translucent (alpha-channel) GPU surface. Callable from any
-/// thread (see the module docs' Thread contract), and idempotent — calling
-/// it more than once, or after the surface already latched translucent, has
-/// no additional effect.
+/// Declare that the native host window has already been configured
+/// translucent (`PixelFormat.TRANSLUCENT`/`isOpaque = false`) so this
+/// shell's next GPU surface should be created with an alpha channel too.
+///
+/// **Called only by the generated host glue** (`jni_glue::native_set_surface_mode`
+/// on Android, `ffi_glue::set_surface_mode` on iOS), from the same branch
+/// that actually configured the window — see the module docs' Callers
+/// section. Calling this without that window configuration in place is a
+/// host-template bug, not a supported app-Rust opt-in (review M3).
+///
+/// Callable from any thread (see the module docs' Thread contract), and
+/// idempotent — calling it more than once, or after the surface already
+/// latched translucent, has no additional effect.
 ///
 /// Must be called before the running shell's surface-creation path reads
 /// [`SurfaceModeWatcher::current`] (see the module docs) — calling it after
 /// the surface already exists has no effect on that surface.
 ///
-/// Requesting translucency does not guarantee it: the platform may refuse
-/// (see the module docs' *This latch is the REQUEST, not the outcome*), in
-/// which case the app degrades to the opaque Mode A contract.
-pub fn request_translucent_surface() {
+/// Declaring translucency does not guarantee the resolved outcome: the
+/// platform may refuse (see the module docs' *This latch is a HOST
+/// DECLARATION, not the outcome*), in which case the app degrades to the
+/// opaque Mode A contract.
+pub fn declare_host_translucent_surface() {
     let mut slot = SURFACE_MODE.lock().unwrap_or_else(|e| e.into_inner());
     *slot = SurfaceMode::Translucent;
 }
@@ -156,32 +191,44 @@ mod tests {
         assert_eq!(SurfaceModeWatcher::current(), SurfaceMode::Opaque);
     }
 
+    /// Acceptance criterion #2 (review-fix-2 t01): the default is Opaque
+    /// with no host call at all — same assertion as `defaults_to_opaque`
+    /// above, spelled out explicitly since it's the acceptance-mandated
+    /// case (no `declare_host_translucent_surface()` call anywhere in this
+    /// test body).
     #[test]
-    fn request_latches_translucent() {
+    fn opaque_by_default_with_no_host_declaration() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_slot();
+        assert_eq!(SurfaceModeWatcher::current(), SurfaceMode::Opaque);
+    }
+
+    #[test]
+    fn declaration_latches_translucent() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot();
 
-        request_translucent_surface();
+        declare_host_translucent_surface();
         assert_eq!(SurfaceModeWatcher::current(), SurfaceMode::Translucent);
     }
 
     #[test]
-    fn repeated_requests_are_idempotent() {
+    fn repeated_declarations_are_idempotent() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot();
 
-        request_translucent_surface();
-        request_translucent_surface();
+        declare_host_translucent_surface();
+        declare_host_translucent_surface();
         assert_eq!(SurfaceModeWatcher::current(), SurfaceMode::Translucent);
     }
 
     #[test]
-    fn request_from_a_spawned_thread_is_observed() {
+    fn declaration_from_a_spawned_thread_is_observed() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot();
 
         thread::spawn(|| {
-            request_translucent_surface();
+            declare_host_translucent_surface();
         })
         .join()
         .unwrap();

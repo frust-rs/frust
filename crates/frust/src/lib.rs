@@ -95,15 +95,22 @@ pub use frust_widgets::{
 ///
 /// # Paint contract (Mode B)
 ///
-/// Under Mode B compositing (an app that opts in via
-/// [`request_translucent_surface`]) the frust surface itself is translucent,
-/// so **any region this slot's parent doesn't paint over is a window
-/// straight through to the native view (or the OS background) behind it** —
-/// this is the mechanism Mode B relies on, not a bug. Size/position a slot
+/// Under Mode B compositing the frust surface itself is translucent, so
+/// **any region this slot's parent doesn't paint over is a window straight
+/// through to the native view (or the OS background) behind it** — this is
+/// the mechanism Mode B relies on, not a bug. Size/position a slot
 /// deliberately, and don't rely on an unpainted sibling region staying
-/// opaque. The generated-template scaffold (task 08/09) is the normal route
-/// into Mode B; this export exists for custom shells/tests that build their
-/// own.
+/// opaque.
+///
+/// Mode B is selected by the generated host's `FRUST_TRANSLUCENT_SURFACE`
+/// (Android)/`translucentSurface` (iOS) build-time constant — **not** from
+/// Rust: that constant drives, in one host-glue branch, the native window's
+/// pixel format (`PixelFormat.TRANSLUCENT`/`CAMetalLayer.isOpaque = false`),
+/// the native-sibling z-order/subview arrangement, and the
+/// `nativeSetSurfaceMode`/`frust_set_surface_mode` call together (review
+/// M3/M4 — flipping only some of these is a host-template defect). There is
+/// no app-Rust opt-in call; the generated project's template (task 08/09) is
+/// the sole route into Mode B.
 ///
 /// ```no_run
 /// use frust::{AnyView, Column, Component, any, platform_view, text};
@@ -399,31 +406,15 @@ pub use frust_shell_common::{SystemUiMode, SystemUiOverlay, set_system_ui_mode};
 /// ```
 pub use frust_shell_common::font_registry::register_app_fonts;
 
-/// App-facing translucent-surface opt-in (platform-views feature, task 03/07):
-/// [`request_translucent_surface`] requests that the running shell create its
-/// GPU surface with an alpha channel, so a native sibling view placed behind
-/// it (Mode B compositing — see [`platform_view`]) can show through wherever
-/// the app paints nothing. Only effective **before** the shell creates its
-/// surface (startup-time only — a call after the window/surface already
-/// exists has no effect on it); a generated project's template (task 08/09)
-/// is the normal route into Mode B and calls this automatically, so this
-/// export exists for custom shells/tests that build their own scaffold. See
-/// `frust_shell_common::surface_mode`'s module docs for the full one-way
-/// latch and thread contracts (mirrors [`set_app_theme`]'s: callable from any
-/// thread, a plain `Mutex`-guarded process-global).
-///
-/// **A request, not a guarantee.** A platform whose surface advertises no
-/// translucent alpha mode refuses it; the shell then logs a warning and the
-/// app degrades to Mode A compositing (an opaque surface with the native view
-/// drawn on top, no hole punch) rather than presenting black slot rectangles.
-/// Pair Mode B with an explicit opaque app-root background either way — see
-/// `docs/CODE_STANDARDS.md`'s platform-view paint contract.
-///
-/// ```no_run
-/// // Call during startup, before the shell creates its GPU surface.
-/// frust::request_translucent_surface();
-/// ```
-pub use frust_shell_common::request_translucent_surface;
+// No app-facing translucent-surface opt-in lives here (review-fix-2 t01,
+// review M3): Mode B is a build-time HOST configuration selected by the
+// generated template's `FRUST_TRANSLUCENT_SURFACE`/`translucentSurface`
+// constant, never a runtime Rust call — see [`platform_view`]'s Mode B
+// section above. `frust_shell_common::declare_host_translucent_surface`
+// exists only for the generated host glue (Android's `nativeSetSurfaceMode`,
+// iOS's `frust_set_surface_mode`) to call from the same branch that already
+// configured the native window translucent, and is deliberately not
+// re-exported past that crate.
 
 /// The animation vocabulary (spec §8): the shell-fed frame clock ([`FrameTime`])
 /// plus the pure easing/interpolation/spring math a widget or app advances it

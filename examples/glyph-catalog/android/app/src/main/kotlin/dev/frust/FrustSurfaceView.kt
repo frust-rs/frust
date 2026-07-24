@@ -73,6 +73,16 @@ class FrustSurfaceView(context: Context) :
          * erased them. Input routing is unchanged (SurfaceView does not consume
          * input; device-verified on §A row 10 of VERIFY.md).
          *
+         * **This constant is the whole Mode B switch: it must drive the
+         * `SurfaceHolder` pixel format, the [FrustViewHost] z-order
+         * arrangement, AND the `nativeSetSurfaceMode` declaration together.**
+         * Flipping only some of them is a defect — the Rust side trusts
+         * `nativeSetSurfaceMode(true)` as proof the window is *already*
+         * translucent (review M3); calling it without the matching
+         * `PixelFormat.TRANSLUCENT` reintroduces the exact black-rectangle bug
+         * that finding fixed. This is also why there is no app-Rust
+         * equivalent call — only this file may declare translucency.
+         *
          * `true` here (platform-views task 10): this catalog is the
          * framework's Mode B testbed — see `glyphcatalog::pages::
          * platform_views`'s module docs.
