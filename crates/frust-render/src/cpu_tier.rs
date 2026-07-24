@@ -300,6 +300,29 @@ impl SceneSink for CpuSink<'_> {
         self.ctx.pop_layer();
     }
 
+    fn clear_rect(&mut self, transform: Affine, rect: &Rect) {
+        // The hole-punch: a clip layer with a `Compose::Clear` blend zeroes the
+        // region on pop (see `convert.rs`'s vello impl). Fill the clip so the
+        // layer has full coverage across `rect`; the Clear ignores the fill's
+        // color, so any opaque paint works.
+        self.ctx.set_transform(transform);
+        let clip = rect.to_path(FLATTEN_TOLERANCE);
+        self.ctx.push_layer(
+            Some(&clip),
+            Some(peniko::BlendMode::new(
+                peniko::Mix::Normal,
+                peniko::Compose::Clear,
+            )),
+            None,
+            None,
+            None,
+        );
+        self.ctx.set_fill_rule(Fill::NonZero);
+        self.ctx.set_paint(Color::BLACK);
+        self.ctx.fill_rect(rect);
+        self.ctx.pop_layer();
+    }
+
     fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath) {
         self.ctx.set_transform(transform);
         self.ctx.set_fill_rule(Fill::NonZero);

@@ -16,13 +16,24 @@
 //!
 //! # Paint contract (Mode A / Mode B)
 //!
-//! This widget **paints nothing itself in v1**. Under Mode B (a translucent
-//! frust surface composited over the native view) the transparent hole a
-//! caller sees at the slot's bounds is simply the base surface's alpha-0
-//! showing through — nobody paints here, by design. Under Mode A (an opaque
-//! native sibling view placed on top of the frust surface) the native view
-//! physically covers this region regardless of what frust paints underneath.
-//! Either way, [`PlatformViewWidget::paint`] only ever *publishes* the frame
+//! Under **Mode A** (an opaque native sibling view placed on top of the frust
+//! surface) this widget **paints nothing**: the native view physically covers
+//! this region regardless of what frust paints underneath, so punching a hole
+//! would only risk erasing real app content. Under **Mode B** (a translucent
+//! frust surface composited over the native view) the slot must **actively
+//! clear its rect** ([`PaintScene::clear_rect`]) so the hole survives an opaque
+//! app backdrop painted below it (the catalog's `AppBackground`, or any app-root
+//! fill). The earlier "paints nothing in Mode B" contract was
+//! device-disproven: a translucent app whose page fills the screen sealed every
+//! hole opaque, and the hosted native view could never show (research VERIFY.md
+//! D1). The clear is a real destination-clearing composite, not a skipped paint,
+//! so it erases whatever the backdrop drew beneath the slot.
+//!
+//! The widget can't see the surface mode directly (that lives in the shell); it
+//! reads the threaded [`PaintCtx::is_translucent`] flag instead (the render root
+//! seeds it from the shell's one-way surface-mode latch). Punching is therefore
+//! gated on that flag — Mode A keeps the paints-nothing behavior. In every mode
+//! [`PlatformViewWidget::paint`] also *publishes* the [`PlatformViewFrame`]
 //! describing where/how the native view should be placed; the actual
 //! composition happens downstream (task 03's differ, the per-shell channel
 //! tasks). See `docs/CODE_STANDARDS.md`'s platform-view paint-contract entry
@@ -272,8 +283,25 @@ impl Widget for PlatformViewWidget {
             visible,
         });
 
-        // v1 paint contract: nothing else is painted here (see the module's
-        // Paint contract section) except the debug-only fill aid.
+        // Mode B hole-punch (research VERIFY.md D1): on a translucent surface,
+        // actively clear the slot's rect so an opaque app backdrop painted below
+        // it (the catalog's `AppBackground`) doesn't seal the hole the hosted
+        // native view shows through. Gated on the threaded translucent flag —
+        // Mode A (opaque) keeps the paints-nothing contract, since a clear there
+        // would erase real app content behind the slot (and be disregarded by an
+        // opaque surface anyway; see `PaintScene::clear_rect`). The clear covers
+        // the full slot rect, not the scroll-intersected `clip`: the shell-side
+        // differ clips the native view to `clip`, so over-clearing beyond the
+        // visible viewport is harmless (nothing composites there) and keeps the
+        // punch geometry identical to the published `rect`.
+        if ctx.is_translucent() {
+            scene.clear_rect(ctx.origin(), ctx.size());
+        }
+
+        // Nothing else is painted here (see the module's Paint contract section)
+        // except the debug-only fill aid, which paints OVER any punch so the
+        // reserved region stays visible on desktop (where no native host and no
+        // translucent surface exist).
         #[cfg(debug_assertions)]
         if self.debug_fill {
             scene.fill_rect(ctx.origin(), ctx.size(), DEBUG_FILL_COLOR);
@@ -315,14 +343,28 @@ mod tests {
         )
     }
 
-    /// A no-op recording scene — these tests only inspect the published
-    /// `PlatformViewFrame`s, never any actual draw commands.
+    /// A recording scene capturing the draw ops (in order) the punch tests
+    /// assert on; the frame-shape tests ignore `ops` and inspect the published
+    /// `PlatformViewFrame`s instead.
     #[derive(Default)]
-    struct NullScene;
+    struct NullScene {
+        ops: Vec<SceneOp>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum SceneOp {
+        Clear { origin: Point, size: Size },
+        Fill { origin: Point, size: Size },
+    }
 
     impl PaintScene for NullScene {
-        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: peniko::Color) {}
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: peniko::Color) {
+            self.ops.push(SceneOp::Fill { origin, size });
+        }
         fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn clear_rect(&mut self, origin: Point, size: Size) {
+            self.ops.push(SceneOp::Clear { origin, size });
+        }
     }
 
     // -- layout --------------------------------------------------------
@@ -368,7 +410,7 @@ mod tests {
         pod.set_origin(Point::new(-15.0, -25.0));
         pod.layout_child(&mut lctx, &BoxConstraints::loose(Size::new(1000.0, 1000.0)));
 
-        let mut scene = NullScene;
+        let mut scene = NullScene::default();
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(2000.0, 2000.0));
         pod.paint_child(&mut pctx, &mut scene);
 
@@ -393,7 +435,7 @@ mod tests {
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 100.0)));
 
-        let mut scene = NullScene;
+        let mut scene = NullScene::default();
         let mut pctx = PaintCtx::new(Point::new(50.0, 0.0), Size::new(100.0, 100.0));
         pctx.constrain_visible_rect(Rect::from_origin_size(Point::ZERO, Size::new(100.0, 100.0)));
         w.paint(&mut pctx, &mut scene);
@@ -416,7 +458,7 @@ mod tests {
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 100.0)));
 
-        let mut scene = NullScene;
+        let mut scene = NullScene::default();
         // Slot paints at (200, 0)-(300, 100); visible rect covers only
         // (0,0)-(100,100) — no overlap at all.
         let mut pctx = PaintCtx::new(Point::new(200.0, 0.0), Size::new(100.0, 100.0));
@@ -435,7 +477,7 @@ mod tests {
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 100.0)));
 
-        let mut scene = NullScene;
+        let mut scene = NullScene::default();
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 100.0));
         w.paint(&mut pctx, &mut scene);
 
@@ -454,7 +496,7 @@ mod tests {
         let mut lctx = LayoutCtx::new();
         widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(1000.0, 1000.0)));
 
-        let mut scene = NullScene;
+        let mut scene = NullScene::default();
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(1000.0, 1000.0));
         // Far outside even the one-viewport warm margin `Flex` extends the
         // cull test by, so the child never paints at all.
@@ -468,6 +510,86 @@ mod tests {
         assert!(
             frames.is_empty(),
             "a culled subtree must publish no frame at all, not a hidden one"
+        );
+    }
+
+    // -- Mode B hole-punch (D1) ---------------------------------------------
+
+    #[test]
+    fn translucent_surface_punches_the_slot_rect() {
+        // Mode B: the slot actively clears its rect so an opaque backdrop below
+        // it doesn't seal the hole (research VERIFY.md D1).
+        let view = platform_view("dev.frust.MapFactory").size(100.0, 80.0);
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 80.0)));
+
+        let mut scene = NullScene::default();
+        let mut pctx =
+            PaintCtx::new(Point::new(20.0, 30.0), Size::new(100.0, 80.0)).with_translucent(true);
+        w.paint(&mut pctx, &mut scene);
+
+        assert_eq!(
+            scene.ops,
+            vec![SceneOp::Clear {
+                origin: Point::new(20.0, 30.0),
+                size: Size::new(100.0, 80.0),
+            }],
+            "a translucent slot must clear its own absolute rect"
+        );
+    }
+
+    #[test]
+    fn opaque_surface_does_not_punch_mode_a_unchanged() {
+        // Mode A (the default): paints-nothing must be preserved — a punch there
+        // would erase real app content behind the slot.
+        let view = platform_view("dev.frust.MapFactory").size(100.0, 80.0);
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 80.0)));
+
+        let mut scene = NullScene::default();
+        // No `.with_translucent(true)` — opaque Mode A.
+        let mut pctx = PaintCtx::new(Point::new(20.0, 30.0), Size::new(100.0, 80.0));
+        w.paint(&mut pctx, &mut scene);
+
+        assert!(
+            scene.ops.is_empty(),
+            "an opaque-surface slot must paint nothing (no punch), Mode A unchanged"
+        );
+        // The frame is still published in both modes.
+        assert_eq!(pctx.take_platform_views().len(), 1);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_fill_paints_over_the_punch_on_a_translucent_surface() {
+        // Desktop debug affordance: with the surface translucent AND debug_fill
+        // on, the clear runs first, then the magenta fill over it.
+        let view = platform_view("dev.frust.MapFactory")
+            .size(100.0, 80.0)
+            .debug_fill();
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 80.0)));
+
+        let mut scene = NullScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 80.0)).with_translucent(true);
+        w.paint(&mut pctx, &mut scene);
+
+        assert_eq!(
+            scene.ops,
+            vec![
+                SceneOp::Clear {
+                    origin: Point::ZERO,
+                    size: Size::new(100.0, 80.0),
+                },
+                SceneOp::Fill {
+                    origin: Point::ZERO,
+                    size: Size::new(100.0, 80.0),
+                },
+            ],
+            "debug_fill must paint OVER the punch, not under it"
         );
     }
 
@@ -534,7 +656,7 @@ mod tests {
         let mut lctx = LayoutCtx::new();
         widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(1000.0, 1000.0)));
 
-        let mut scene = NullScene;
+        let mut scene = NullScene::default();
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(1000.0, 1000.0));
         widget.paint(&mut pctx, &mut scene);
         let before = pctx.take_platform_views();

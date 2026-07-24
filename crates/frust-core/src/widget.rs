@@ -184,6 +184,24 @@ pub trait PaintScene {
     /// [`PaintScene::push_layer`].
     fn pop_layer(&mut self) {}
 
+    /// Clear an axis-aligned rectangle (at `origin`/`size`) to full
+    /// transparency (alpha 0), erasing everything already painted below it in
+    /// this scene — a real destination-clearing composite, not merely skipping
+    /// paint over the region.
+    ///
+    /// The platform-view hole-punch (`frust-widgets`' `PlatformViewWidget`) is
+    /// the sole v1 consumer: on a translucent (Mode B) surface a slot punches
+    /// its rect so an opaque app backdrop painted below it (the catalog's
+    /// `AppBackground`) doesn't seal the hole the hosted native view shows
+    /// through. Gated on [`PaintCtx::is_translucent`] by the widget — clearing
+    /// on an opaque surface would erase real app content, and the clear is
+    /// disregarded there anyway (see [`frust_scene::Command::ClearRect`]).
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation records a real
+    /// [`frust_scene::Command::ClearRect`].
+    fn clear_rect(&mut self, _origin: Point, _size: Size) {}
+
     /// Fill an arbitrary vector path (e.g. an arc — see
     /// [`frust_scene::arc_path`]) at `origin`, using the nonzero winding
     /// rule and `brush`.
@@ -289,6 +307,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn pop_layer(&mut self) {
         SceneBuilder::pop_layer(self);
+    }
+
+    fn clear_rect(&mut self, origin: Point, size: Size) {
+        SceneBuilder::clear_rect(self, rect_at(origin, size));
     }
 
     fn fill_path(&mut self, origin: Point, path: &BezPath, brush: &Brush) {
@@ -588,6 +610,15 @@ pub struct PaintCtx<'a> {
     /// from each child rather than overwrite, or every slot but the last
     /// child's would silently vanish. See [`PaintCtx::publish_platform_view`].
     platform_views: Vec<PlatformViewFrame>,
+    /// Whether the shell created a translucent (alpha-channel, "Mode B") GPU
+    /// surface for this frame, threaded down by the render root
+    /// ([`crate::app::RenderRoot::paint`], seeded from
+    /// [`crate::app::RenderRoot::set_surface_translucent`]) and copied into each
+    /// child by [`ChildPod::paint_child`], mirroring `theme`/`window_insets`.
+    /// `false` in the normal opaque ("Mode A") case, bare-core tests, and every
+    /// desktop app. Read by the platform-view hole-punch (see
+    /// [`PaintCtx::is_translucent`]).
+    translucent: bool,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -614,6 +645,7 @@ impl<'a> PaintCtx<'a> {
             hero: None,
             visible_rect: None,
             platform_views: Vec::new(),
+            translucent: false,
         }
     }
 
@@ -622,6 +654,16 @@ impl<'a> PaintCtx<'a> {
     /// known theme; the render root threads it via [`PaintCtx::set_theme`].
     pub fn with_theme(mut self, theme: &'a dyn Any) -> Self {
         self.theme = Some(theme);
+        self
+    }
+
+    /// Mark this paint pass as running against a translucent ("Mode B") surface.
+    /// Chainable builder mirroring [`PaintCtx::with_theme`] — used by widget unit
+    /// tests exercising the platform-view hole-punch; the render root threads the
+    /// real flag via [`PaintCtx::set_translucent`] (see
+    /// [`PaintCtx::is_translucent`]).
+    pub fn with_translucent(mut self, translucent: bool) -> Self {
+        self.translucent = translucent;
         self
     }
 
@@ -977,6 +1019,7 @@ impl<'a> PaintCtx<'a> {
             hero: Some(registry),
             visible_rect: self.visible_rect,
             platform_views: Vec::new(),
+            translucent: self.translucent,
         };
         f(&mut child);
         if child.needs_frame {
@@ -1052,6 +1095,27 @@ impl<'a> PaintCtx<'a> {
     /// context (copied, so it holds no borrow of `self`).
     pub(crate) fn visible_rect_ref(&self) -> Option<Rect> {
         self.visible_rect
+    }
+
+    /// Whether the shell created a translucent (alpha-channel, "Mode B") GPU
+    /// surface for this frame — threaded from the render root and copied down to
+    /// every descendant like the theme/insets.
+    ///
+    /// `false` in the normal opaque ("Mode A") case, bare-core tests, and every
+    /// desktop app. The platform-view hole-punch reads it: a slot only clears
+    /// its rect ([`PaintScene::clear_rect`]) when this is `true`, so punching
+    /// never erases app content on an opaque surface (see `frust-widgets`'
+    /// `PlatformViewWidget::paint`).
+    pub fn is_translucent(&self) -> bool {
+        self.translucent
+    }
+
+    /// Seed the shell's surface-translucency flag. Called by
+    /// [`crate::app::RenderRoot::paint`] at the root and by
+    /// [`ChildPod::paint_child`] for each child, mirroring how `theme` is
+    /// threaded (copied down unchanged).
+    pub(crate) fn set_translucent(&mut self, translucent: bool) {
+        self.translucent = translucent;
     }
 }
 
@@ -1435,6 +1499,10 @@ impl ChildPod {
         // mirroring the theme/insets. `None` in the normal case (no scroll
         // ancestor culling), so paint descends into every child as before.
         child_ctx.set_visible_rect(ctx.visible_rect_ref());
+        // Thread the shell's surface-translucency flag down unchanged (copied
+        // bool, global and origin-independent), mirroring the theme/insets — the
+        // platform-view hole-punch reads it (see `PaintCtx::is_translucent`).
+        child_ctx.set_translucent(ctx.is_translucent());
         // Thread the pod's recorded focus path into paint (the mirror of how
         // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
         // observes a container-routed blur that never reached its `event()`.

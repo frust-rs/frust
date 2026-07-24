@@ -851,6 +851,12 @@ impl IosAppHandle {
         }
 
         app.set_theme(Box::new(theme.clone()));
+        // Thread the translucent-surface request into the render root so the
+        // platform-view hole-punch clears each Mode B slot's rect (research
+        // VERIFY.md D1 — cross-platform). Read once here from the resolved
+        // `surface_alpha` (fixed before the surface exists), mirroring the
+        // `base_color` swap in `frame`.
+        app.set_surface_translucent(surface_alpha == SurfaceAlphaRequest::TranslucentPreferred);
         provide_context(theme.clone());
         app.rebuild();
         let mut executor = executor;

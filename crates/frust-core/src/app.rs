@@ -97,6 +97,15 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// ticking presented count never forces a relayout or feeds the mobile frame
     /// gate.
     presented_frames: Option<u64>,
+    /// Whether the shell created a translucent (alpha-channel, "Mode B") GPU
+    /// surface, threaded into every subsequent paint pass and recovered by
+    /// widgets through [`crate::widget::PaintCtx::is_translucent`]. A plain
+    /// `bool` core stores by value (like the insets); `false` (opaque, "Mode A")
+    /// until a shell pushes one via [`RenderRoot::set_surface_translucent`] — the
+    /// supported default for every desktop app and bare-core test. The
+    /// platform-view hole-punch is the sole reader: a slot clears its rect only
+    /// on a translucent surface (see `frust-widgets`' `PlatformViewWidget`).
+    surface_translucent: bool,
     /// The persistent, never-reused per-pod semantics base-id allocator's next
     /// value (phase-6d D1). Seeded at `2` (ids `0`/`1` reserved: `0` keeps
     /// `NonZeroU64` valid, `1` is the [`ROOT_NODE_ID`] window node), advanced as
@@ -135,6 +144,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             theme: None,
             insets: WindowInsets::default(),
             presented_frames: None,
+            surface_translucent: false,
             // Ids 0 and 1 are reserved (see the field doc); pods start at 2.
             semantics_alloc: Cell::new(2),
             root_semantics_id: Cell::new(None),
@@ -229,6 +239,31 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// `None` if no shell has pushed one.
     pub fn presented_frames(&self) -> Option<u64> {
         self.presented_frames
+    }
+
+    /// Store whether the shell's GPU surface is translucent (alpha-channel,
+    /// "Mode B"), threaded into every subsequent paint pass and recovered by
+    /// widgets through [`crate::widget::PaintCtx::is_translucent`]. A shell reads
+    /// its surface-mode latch once (the mode is one-way, fixed pre-surface —
+    /// see `frust-shell-common::surface_mode`) and pushes it here; every desktop
+    /// app leaves the default `false` (opaque, "Mode A").
+    ///
+    /// Marks `PAINT` pending on an actual change (`PartialEq`-guarded, mirroring
+    /// [`RenderRoot::set_insets`]'s no-op guard): translucency is read purely at
+    /// paint time (the hole-punch runs in `paint`, never baked at layout), so a
+    /// flip must repaint but need not relayout. In practice the latch never
+    /// changes after startup, so this is belt-and-suspenders.
+    pub fn set_surface_translucent(&mut self, translucent: bool) {
+        if self.surface_translucent == translucent {
+            return;
+        }
+        self.surface_translucent = translucent;
+        self.pending |= ChangeFlags::PAINT;
+    }
+
+    /// Whether the shell's GPU surface is currently marked translucent.
+    pub fn is_surface_translucent(&self) -> bool {
+        self.surface_translucent
     }
 
     /// Whether a captured pointer gesture is currently in flight.
@@ -443,6 +478,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let insets = self.insets;
         // Same disjoint `Copy` read: the presented-frame count threaded to widgets.
         let presented_frames = self.presented_frames;
+        // Same disjoint `Copy` read: the surface-translucency flag the
+        // platform-view hole-punch reads (see `PaintCtx::is_translucent`).
+        let surface_translucent = self.surface_translucent;
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             // Seed the shared shell clock so the whole paint pass sees one time.
@@ -455,6 +493,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // Thread the shell's presented-frame count down (global; a widget
             // measuring FPS differences it — see `PaintCtx::presented_frames`).
             ctx.set_presented_frames(presented_frames);
+            // Thread the surface-translucency flag down (global; the
+            // platform-view hole-punch gates its rect-clear on it — see
+            // `PaintCtx::is_translucent`).
+            ctx.set_translucent(surface_translucent);
             // Seed the root widget's paint-time focus from the cached focus path
             // so a leaf-root editable observes its own focus; deeper focus is
             // threaded per-pod by `ChildPod::paint_child`.

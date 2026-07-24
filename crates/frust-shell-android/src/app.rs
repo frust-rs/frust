@@ -906,6 +906,11 @@ impl AndroidAppHandle {
         }
 
         app.set_theme(Box::new(theme.clone()));
+        // Thread the one-way translucent-surface latch into the render root so
+        // the platform-view hole-punch clears each Mode B slot's rect (research
+        // VERIFY.md D1). Read once here, mirroring the `translucent` field below;
+        // the latch is fixed before the surface exists so this never changes.
+        app.set_surface_translucent(SurfaceModeWatcher::current() == SurfaceMode::Translucent);
         provide_context(theme.clone());
         app.rebuild();
         let mut executor = executor;

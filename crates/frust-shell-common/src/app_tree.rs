@@ -159,6 +159,21 @@ pub trait AppTree {
     /// [`AppTree`] impls compile unchanged; the concrete tree overrides it.
     fn set_presented_frames(&mut self, _presented: u64) {}
 
+    /// Store whether the shell's GPU surface is translucent (alpha-channel,
+    /// "Mode B"), threaded into every subsequent paint pass (delegates to
+    /// [`RenderRoot::set_surface_translucent`]).
+    ///
+    /// A shell reads its process-wide surface-mode latch once
+    /// ([`crate::SurfaceModeWatcher`] — the mode is one-way, fixed before the
+    /// surface is created) and pushes it here at construction; the platform-view
+    /// hole-punch then clears each slot's rect on a translucent surface so an
+    /// opaque app backdrop doesn't seal the hole (see
+    /// [`RenderRoot::set_surface_translucent`]). Desktop leaves the default
+    /// (opaque). Defaulted to a **no-op** so existing [`AppTree`] impls compile
+    /// unchanged; the concrete tree overrides it — mirrors
+    /// [`AppTree::set_insets`]'s default-no-op precedent.
+    fn set_surface_translucent(&mut self, _translucent: bool) {}
+
     /// Collect the accessibility tree for the current frame (spec §9, phase-6d),
     /// for a shell to push into its platform `accesskit_*` adapter. Delegates to
     /// [`RenderRoot::semantics`]; must run **after** [`AppTree::layout`] so node
@@ -276,6 +291,10 @@ where
 
     fn set_presented_frames(&mut self, presented: u64) {
         self.root.set_presented_frames(presented);
+    }
+
+    fn set_surface_translucent(&mut self, translucent: bool) {
+        self.root.set_surface_translucent(translucent);
     }
 
     fn semantics(&mut self) -> SemanticsUpdate {
