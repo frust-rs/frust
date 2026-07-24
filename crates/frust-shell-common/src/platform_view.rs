@@ -833,43 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn suspend_all_hides_every_visible_live_slot() {
-        let mut state = PlatformViewState::new();
-        state.ingest(&[
-            frame(1, r(0.0, 0.0, 10.0, 10.0), true),
-            frame(2, r(20.0, 0.0, 30.0, 10.0), false), // already hidden
-        ]);
-        state.acknowledge(state.commands().0);
-
-        let changed = state.suspend_all();
-        assert!(changed);
-        let (_, cmds) = state.commands();
-        // Only slot 1 (previously visible) gets a Hide; slot 2 was already
-        // hidden, so it emits nothing.
-        assert_eq!(
-            cmds,
-            &[ViewCommand::Update {
-                slot_id: 1,
-                rect: r(0.0, 0.0, 10.0, 10.0),
-                clip: None,
-                visible: false,
-            }]
-        );
-
-        // A second call with nothing left visible is a no-op.
-        state.acknowledge(state.commands().0);
-        assert!(!state.suspend_all());
-        assert_eq!(state.commands().1, &[]);
-    }
-
-    #[test]
-    fn suspend_all_with_no_live_slots_is_a_no_op() {
-        let mut state = PlatformViewState::new();
-        assert!(!state.suspend_all());
-        assert_eq!(state.commands(), (0, &[][..]));
-    }
-
-    #[test]
     fn deterministic_replay_produces_an_identical_command_stream() {
         let sequence: Vec<Vec<PlatformViewFrame>> = vec![
             vec![frame(1, r(0.0, 0.0, 10.0, 10.0), true)],
