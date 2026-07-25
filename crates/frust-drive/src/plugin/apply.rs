@@ -961,4 +961,136 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// The frust repo root, located robustly off `CARGO_MANIFEST_DIR`
+    /// (`crates/frust-drive`) rather than the process CWD — this test must
+    /// pass regardless of where `cargo test` is invoked from.
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// Discover every in-repo Android consumer under `examples/` and
+    /// `benchmarks/` — a direct subdirectory counts if it looks like a
+    /// frust-scaffolded Android project (carries both `Cargo.toml` and an
+    /// `android/` Gradle project). Discovered dynamically rather than
+    /// hard-coded: a project added later is automatically covered, and one
+    /// removed (as `bubblebench` was) is simply absent from the listing
+    /// rather than a failure — `fs::read_dir` on a since-deleted `examples/*`
+    /// entry can't produce it, and a missing `examples/`/`benchmarks/`
+    /// directory itself is tolerated the same way.
+    fn discover_android_consumers(repo_root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for parent in ["examples", "benchmarks"] {
+            let Ok(entries) = fs::read_dir(repo_root.join(parent)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path.join(CARGO_TOML_REL).is_file()
+                    && path.join(SETTINGS_GRADLE_REL).is_file()
+                    && path.join(APP_BUILD_GRADLE_REL).is_file()
+                {
+                    out.push(path);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Copy only the files `add_plugin` reads/writes for the
+    /// `secure-storage` + `biometric-gate` contribution set (`Cargo.toml`,
+    /// the Android manifest, the iOS plist, and the two Gradle files) from a
+    /// real consumer project into a fresh tempdir, preserving their
+    /// project-relative layout.
+    ///
+    /// Deliberately **not** a whole-directory copy: an in-repo Android
+    /// consumer carries multi-gigabyte Gradle/cargo-ndk build output
+    /// (`android/app/build`, `android/app/src/main/jniLibs`) that
+    /// `add_plugin` never touches and a test must never copy, and the real
+    /// project must never be mutated in place.
+    fn copy_consumer_files(src_root: &Path, dest_root: &Path) -> std::io::Result<()> {
+        for rel in [
+            CARGO_TOML_REL,
+            MANIFEST_REL,
+            PLIST_REL,
+            SETTINGS_GRADLE_REL,
+            APP_BUILD_GRADLE_REL,
+        ] {
+            let src = src_root.join(rel);
+            let dest = dest_root.join(rel);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&src, &dest)?;
+        }
+        Ok(())
+    }
+
+    /// The regression guard for the drift `F3` fixed: `add_plugin`'s tests
+    /// above only ever exercise a **freshly scaffolded** project, which by
+    /// construction always carries the `// frust:plugin-includes`/
+    /// `// frust:plugin-dependencies` anchors `Contribution::GradleModule`
+    /// hard-requires — so they are structurally incapable of catching an
+    /// existing in-repo consumer drifting away from them (exactly how
+    /// `glyph-catalog` and `layer-bench` shipped without either anchor).
+    ///
+    /// This drives the real `add_plugin` path — not a grep — against a
+    /// tempdir copy of every in-repo Android consumer, so a future project
+    /// that ships without the anchors fails **this** test with a message
+    /// naming the project and the missing anchor, instead of silently
+    /// failing Add Plugin at demo time.
+    #[test]
+    fn every_in_repo_android_consumer_accepts_add_plugin() {
+        let repo_root = repo_root();
+        let consumers = discover_android_consumers(&repo_root);
+        assert!(
+            !consumers.is_empty(),
+            "expected to discover at least one in-repo Android consumer under \
+             examples/ or benchmarks/ (repo root resolved to {})",
+            repo_root.display()
+        );
+
+        for (i, consumer) in consumers.iter().enumerate() {
+            let display = consumer
+                .strip_prefix(&repo_root)
+                .unwrap_or(consumer)
+                .display()
+                .to_string();
+
+            let dest = unique_temp_dir(&format!("consumer-{i}"));
+            fs::create_dir_all(&dest).unwrap();
+            copy_consumer_files(consumer, &dest).unwrap_or_else(|e| {
+                panic!("failed to copy {display}'s plugin-relevant files into a tempdir: {e}")
+            });
+
+            match add_plugin(&dest, "secure-storage", &["biometric-gate"]) {
+                Ok(report) => {
+                    assert!(
+                        report
+                            .items
+                            .iter()
+                            .all(|i| i.outcome == AddOutcome::Applied),
+                        "{display}: expected every contribution to apply cleanly \
+                         against an unmodified copy, got {report:?}"
+                    );
+                }
+                Err(PluginAddError::MalformedProjectFile(file)) => {
+                    panic!(
+                        "{display} is missing a plugin anchor in `{file}` — \
+                         `add_plugin` requires `{SETTINGS_ANCHOR}` in \
+                         `{SETTINGS_GRADLE_REL}` and `{APP_DEPS_ANCHOR}` in \
+                         `{APP_BUILD_GRADLE_REL}` (see \
+                         `templates/app/android.tmpl` for the canonical \
+                         placement, or `examples/huddle`'s android/ for a \
+                         working in-repo example)"
+                    );
+                }
+                Err(e) => panic!("{display}: add_plugin failed unexpectedly: {e}"),
+            }
+
+            let _ = fs::remove_dir_all(&dest);
+        }
+    }
 }
