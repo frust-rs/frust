@@ -113,6 +113,36 @@ pub enum Contribution {
         /// `"plugins/secure-storage/platform/android"`.
         rel_path: &'static str,
     },
+    /// A plugin's local Swift package added to the generated app's
+    /// `ios/Runner.xcodeproj/project.pbxproj` as a second package reference
+    /// beside the embedding's `FrustEmbedding` — the iOS counterpart of
+    /// [`Contribution::GradleModule`].
+    ///
+    /// One contribution, **six** pbxproj sites, **one** [`AddItem`] (the
+    /// `GradleModule` precedent, widened): the `PBXBuildFile` object and its
+    /// entry in the Frameworks build phase, the target's
+    /// `packageProductDependencies` entry, the project's `packageReferences`
+    /// entry, and the `XCLocalSwiftPackageReference` /
+    /// `XCSwiftPackageProductDependency` objects themselves. A half-applied
+    /// state completes the missing sites and reports [`AddOutcome::Applied`];
+    /// only a fully-wired project reports [`AddOutcome::AlreadyPresent`].
+    ///
+    /// The whole edit is built in memory, re-scanned, and written once — a
+    /// half-edited `project.pbxproj` will not open in Xcode.
+    SwiftPackageRef {
+        /// The Swift package *and* product name, e.g. `"FrustCamera"` — both
+        /// the `XCLocalSwiftPackageReference` comment and the
+        /// `XCSwiftPackageProductDependency`'s `productName`, matching how the
+        /// embedding's own wiring names `FrustEmbedding`.
+        package_name: &'static str,
+        /// The package directory, relative to the frust repo root, e.g.
+        /// `"plugins/camera/platform/ios/FrustCamera"` — resolved exactly like
+        /// a [`Contribution::GradleModule`]'s `rel_path`, since the written
+        /// `relativePath` is resolved by Xcode against the directory
+        /// *containing* the `.xcodeproj` (`<project>/ios/`), one level below
+        /// the project root a relative `frust` path dep is written against.
+        rel_path: &'static str,
+    },
 }
 
 impl Contribution {
@@ -127,6 +157,9 @@ impl Contribution {
             Contribution::PlistEntry { key, .. } => format!("Info.plist key `{key}`"),
             Contribution::GradleModule { gradle_name, .. } => {
                 format!("Gradle module `{gradle_name}`")
+            }
+            Contribution::SwiftPackageRef { package_name, .. } => {
+                format!("Xcode Swift package `{package_name}`")
             }
         }
     }
@@ -198,6 +231,31 @@ pub enum PluginAddError {
     /// No `frust = {{ path = ... }}` dependency to derive plugin paths from.
     #[error("no `frust = {{ path = ... }}` dependency to derive plugin paths from")]
     NoFrustDependency,
+    /// A freshly minted `project.pbxproj` object id is already in use.
+    /// Unreachable while the mint scans the same file it writes, but a
+    /// collision would silently redefine an existing object — the one
+    /// corruption an idempotent applier must never risk — so it fails loudly
+    /// instead ([`Contribution::SwiftPackageRef`]).
+    #[error(
+        "project file `{file}` already uses minted pbxproj object id `{id}` (refusing to overwrite)"
+    )]
+    PbxIdCollision { file: String, id: String },
+    /// The `ABCD…00NN` object-id space of a `project.pbxproj` is full (`NN` is
+    /// two hex digits, so 256 ids) — nothing is written.
+    #[error("project file `{file}` has no free `…00NN` pbxproj object id left")]
+    PbxIdSpaceExhausted { file: String },
+    /// A [`Contribution::SwiftPackageRef`]'s in-memory edit failed its own
+    /// re-scan: one of the six sites is missing or carries a mismatched id, so
+    /// the file is left untouched rather than written half-wired.
+    #[error(
+        "Swift package `{package}` wiring for `{file}` failed verification (site `{site}`); \
+         nothing was written"
+    )]
+    PbxWiringNotVerified {
+        file: String,
+        package: String,
+        site: String,
+    },
     /// A required sibling checkout (facade plugin) is not on disk.
     #[error("required sibling checkout `{sibling}` not found (expected at `{}`)", .expected.display())]
     SiblingCheckoutMissing { sibling: String, expected: PathBuf },
