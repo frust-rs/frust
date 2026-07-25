@@ -5,8 +5,10 @@
 //! runtime from a HUD button row.
 //!
 //! Task 02 lands the scaffold: the driver, the registry, S1 (animation storm,
-//! ported from `examples/bubblebench`) and S7 (cold start + idle). S2–S6 and S8
-//! are compiling stubs each filled by tasks 03/04 in place.
+//! ported from the since-removed `examples/bubblebench`; see
+//! `scenarios::s1_animation`'s module doc for the provenance) and S7 (cold
+//! start + idle). S2–S6 and S8 are compiling stubs each filled by tasks 03/04
+//! in place.
 //!
 //! Measure a run with `FRUST_TRACE=1 FRUST_TRACE_RAW=1` — the shell emits one
 //! parseable `frust-perf raw ...` line per frame plus the driver's

@@ -1,16 +1,19 @@
 //! S1 — Animation storm (the bubblebench workload).
 //!
-//! A 1:1 embedded copy of `examples/bubblebench`'s S1 workload:
-//! physics-driven gradient bubbles (seed 42) with shaped text runs, repainted
-//! every frame, plus a Pause/Play + Reset + FPS HUD. The physics
-//! ([`physics`]) and canvas widget ([`chart`]) are **copied** into this
+//! A 1:1 embedded copy of the former `examples/bubblebench` example's S1
+//! workload: physics-driven gradient bubbles (seed 42) with shaped text runs,
+//! repainted every frame, plus a Pause/Play + Reset + FPS HUD. The physics
+//! ([`physics`]) and canvas widget ([`chart`]) were **copied** into this
 //! package rather than path-included from `examples/bubblebench` (PLAN 9.E's
-//! "embed or path-include" choice — embed): bubblebench is a standalone crate
-//! excluded from the root workspace, and a cross-package `#[path]` include of
-//! its source would couple this benchmark to that example's on-disk layout.
-//! The copy keeps `frust_bench` self-contained; the shared physics constants
-//! and per-frame paint workload stay byte-identical to the repro (see
-//! `physics.rs`'s own module doc for the flutter/flutter#180958 provenance),
+//! "embed or path-include" choice — embed): bubblebench was a standalone
+//! crate excluded from the root workspace, and a cross-package `#[path]`
+//! include of its source would have coupled this benchmark to that example's
+//! on-disk layout. That embed choice paid off: bubblebench itself was
+//! removed (2026-07-25, redundant with — and, unlike — this scenario, which
+//! renders correctly) once this copy proved self-contained, with no
+//! path-dependent consumer left behind. The shared physics constants
+//! and per-frame paint workload stay byte-identical to the original repro
+//! (see `physics.rs`'s own module doc for the flutter/flutter#180958 provenance),
 //! **except** bubble geometry: radius and initial cluster spread are
 //! fractions of the SafeArea-inset play area's `min(width, height)`, and
 //! bubble **count** is derived from the play area (not fixed) so the field

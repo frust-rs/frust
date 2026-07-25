@@ -1,6 +1,7 @@
 //! Shadertoy — a Frust shader showcase: WGSL fragment-shader ports painted
 //! full-screen through the [`shader_view::ShaderView`] escape-hatch widget,
-//! behind a menu picker and a bubblebench-style FPS HUD.
+//! behind a menu picker and an FPS HUD in the same style as
+//! `benchmarks/frust_bench`'s S1 scenario.
 //!
 //! See [`shaders`] for the WGSL sources/registry and [`shader_view`] for the
 //! animated canvas widget; this module is only the shell — app state, the
@@ -22,7 +23,7 @@ use frust_scene::ShaderProgram;
 use shader_view::shader_view;
 
 /// The FPS readout's traffic-light thresholds — same values as
-/// `examples/bubblebench`'s HUD.
+/// `benchmarks/frust_bench`'s S1 scenario HUD.
 const FPS_RED_BELOW: f64 = 30.0;
 const FPS_ORANGE_BELOW: f64 = 55.0;
 
@@ -46,7 +47,7 @@ pub struct AppState {
 }
 
 /// The FPS traffic-light color for a measured rate — red below 30, orange
-/// below 55, green otherwise (matches `examples/bubblebench`).
+/// below 55, green otherwise (matches `benchmarks/frust_bench`'s S1 scenario).
 fn fps_color(fps: f64) -> Color {
     if fps > 0.0 && fps < FPS_RED_BELOW {
         Color::from_rgb8(0xEF, 0x53, 0x50)
@@ -148,7 +149,7 @@ fn app_logic(state: &mut AppState) -> AnyView<AppState> {
 }
 
 /// The root [`Component`] (spec §5.5): builds the shader registry once and
-/// forces the dark M3 theme, matching `examples/bubblebench`'s shell.
+/// forces the dark M3 theme, matching `benchmarks/frust_bench`'s shell.
 #[derive(Default)]
 pub struct ShadertoyApp;
 

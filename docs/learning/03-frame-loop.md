@@ -44,7 +44,7 @@ Three things make this loop what it is:
 ### 3.1 — Match the trace to the code
 
 ```bash
-cd examples/bubblebench && FRUST_TRACE=1 cargo run
+cd benchmarks/frust_bench && FRUST_TRACE=1 cargo run
 ```
 
 You'll get one startup line, then periodic (~2s) summaries:
@@ -59,8 +59,8 @@ For each field, find the `Instant::now()` pair that produced it
 ≈1027/1031 encode, ≈1046/1055 present). Questions to answer from your own
 numbers:
 
-- Where does bubblebench spend its frame — paint (CPU command recording) or
-  encode (vello translate + GPU submit)? Which did you *expect*?
+- Where does the S1 animation storm spend its frame — paint (CPU command
+  recording) or encode (vello translate + GPU submit)? Which did you *expect*?
 - Why is `present_p95` often the biggest number, and why is that *not* a
   problem? (It's the vsync/swapchain wait, not work — the encode/present
   split exists precisely so you don't misread blocking-on-vsync as cost.)
@@ -77,10 +77,11 @@ understood rather than just checked.
 
 ### 3.3 — Watch rebuild get cheaper than you think
 
-In bubblebench, the physics runs in *paint* (the chart widget), but the HUD
-label rebuilds only when the FPS signal writes (~1×/sec). Add a
-`log::info!` counter inside `app_logic` (`examples/bubblebench/src/lib.rs`)
-and one inside the chart's `paint`. Compare rates while idle vs. while
+In the S1 scenario, the physics runs in *paint* (the chart widget), but the
+HUD label rebuilds only when the FPS signal writes (~1×/sec). Add a
+`log::info!` counter inside `BenchApp::build`
+(`benchmarks/frust_bench/src/lib.rs`) and one inside the chart's `paint`.
+Compare rates while idle vs. while
 dragging. You're watching the view/widget split do its job: cheap descriptors
 re-made per frame only when *something* wants a frame, retained widgets doing
 the heavy lifting.
@@ -89,7 +90,7 @@ the heavy lifting.
 
 vello's own docs (chapter 5 tells you where they live on disk) warn that an
 un-reset retained scene grows until it crashes the host. Don't actually ship
-this — but commenting the `scene.reset()` call and watching bubblebench's
+this — but commenting the `scene.reset()` call and watching the S1 scenario's
 encode times climb frame-over-frame is a memorable way to learn what the
 display list *is*. Revert immediately.
 

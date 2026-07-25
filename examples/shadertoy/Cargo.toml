@@ -2,7 +2,7 @@
 # `[workspace] exclude`) so the generated Android/iOS projects resolve a
 # project-local `target/` dir and the `[profile.*]` blocks below take effect
 # (they only apply in a workspace root) — the same shape as
-# `examples/bubblebench`/`examples/huddle`.
+# `examples/huddle`.
 [workspace]
 
 [package]
@@ -28,7 +28,7 @@ frust = { path = "../../crates/frust" }
 # `frust-core` + `frust-scene` + `kurbo` + `peniko`: the facade's documented
 # "low-level escape hatch" (see `docs/ARCHITECTURE.md`, `docs/CODE_STANDARDS.md`'s
 # State & Reactivity Conventions), the same production dependency
-# `examples/bubblebench`/`examples/huddle` carry for hand-rolled widgets. Here
+# `examples/huddle` carries for hand-rolled widgets. Here
 # it backs the `ShaderProgram` widget (task 06) — a custom `View`/`Widget`
 # pair painting a fragment-shader-driven fill directly through
 # `frust-scene`'s `PaintScene`/`Command` vocabulary, which no facade widget
@@ -57,11 +57,10 @@ peniko = "0.6.1"
 log = "0.4"
 
 # Headless integration-test harness only (`tests/showcase.rs`, task 06):
-# drives `RenderRoot`/`Component` directly (mirroring
-# `examples/bubblebench`'s `tests/bench.rs`) without a live shell, so it
-# needs the reactive runtime/owner types and the text-shaping context the
-# desktop shell would otherwise supply. Same literal specs as bubblebench's
-# `[dev-dependencies]`.
+# drives `RenderRoot`/`Component` directly (mirroring `examples/huddle`'s own
+# headless `tests/*.rs`) without a live shell, so it needs the reactive
+# runtime/owner types and the text-shaping context the desktop shell would
+# otherwise supply. Same literal specs as huddle's `[dev-dependencies]`.
 [dev-dependencies]
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-text = { path = "../../crates/frust-text" }

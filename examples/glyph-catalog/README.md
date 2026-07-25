@@ -52,7 +52,7 @@ frust run -d <device-id>
 
 This is a standalone package (its own `[workspace]` root and `Cargo.lock`,
 excluded from the Frust root workspace — the same shape as
-`examples/bubblebench`), so build/test/gate it from **this directory**, never
+`examples/huddle`), so build/test/gate it from **this directory**, never
 with `-p` from the repo root:
 
 ```bash

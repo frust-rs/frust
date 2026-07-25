@@ -70,7 +70,7 @@ under `FRUST_NO_FRAME_GATE=1`, some `FrameInputs` signal is under-reporting.)
 The nastiest real bug class this gate creates: a signal read via
 `get_untracked()` inside `build` never subscribes, so a later write never
 sets `signals_dirty`, so the gate happily skips forever — a *frozen UI*,
-not a stale value. Reproduce it in a scratch huddle/bubblebench component:
+not a stale value. Reproduce it in a scratch huddle/`frust_bench` component:
 change one `get()` powering visible text to `get_untracked()`, run on
 device, trigger the write from a timer. The UI updates only when you touch
 the screen (input forces a `Run`). Revert, and you'll never mis-diagnose

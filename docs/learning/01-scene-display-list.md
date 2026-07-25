@@ -92,11 +92,12 @@ has exact anchors), temporarily add:
 log::info!("frame commands: {}", self.scene.commands().len());
 ```
 
-then `FRUST_LOG=info cargo run` in `examples/bubblebench`. Watch the count:
-60 bubbles × (gradient fill + stroke + 2 glyph runs) + HUD. Now pause the sim
-(Pause button) — does the count change? Why not? (Hint: painting is not
-gated on *change* at this layer; skipping is the shells' job — chapters 3
-and 7.)
+then `FRUST_LOG=info cargo run` in `benchmarks/frust_bench` (S1, the
+animation-storm scenario, runs by default). Watch the count: a play-area-
+derived bubble field × (gradient fill + stroke + 2 glyph runs) + HUD. Now
+pause the sim (Pause button) — does the count change? Why not? (Hint:
+painting is not gated on *change* at this layer; skipping is the shells' job
+— chapters 3 and 7.)
 
 ## What to notice before moving on
 

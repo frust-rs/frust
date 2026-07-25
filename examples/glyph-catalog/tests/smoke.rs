@@ -1,7 +1,7 @@
 //! Headless smoke test: drive the real `RenderRoot` rebuild→layout→paint seam
 //! (the desktop shell's own pipeline) against a recording paint target — no
-//! GPU, no window — mirroring `examples/bubblebench/tests/bench.rs`'s harness
-//! shape.
+//! GPU, no window — mirroring `examples/huddle`'s own headless `tests/*.rs`
+//! harness shape.
 //!
 //! These tests prove the shell scaffold and every section page (now all
 //! filled by `c02`-`c08`, not stubs) mount, lay out, and paint without

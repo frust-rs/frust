@@ -1,16 +1,19 @@
 /// S1 — animation storm. The bubblebench workload (flutter/flutter#180958):
 /// radial-gradient bubbles + two shaped text runs each, repainted every frame
 /// with per-frame physics. A 1:1 port of the frust side's
-/// `examples/bubblebench` physics + paint (same constants, same phase order,
-/// same seed), so both apps render identical content. Bubble **count** is
-/// derived per play area (spec v3, [s1BubbleCountFor]) so the field settles
-/// instead of staying jam-packed — capped at [s1BubbleCountCap].
+/// `benchmarks/frust_bench/src/scenarios/s1_animation.rs` physics + paint
+/// (same constants, same phase order, same seed), so both apps render
+/// identical content. Bubble **count** is derived per play area (spec v3,
+/// [s1BubbleCountFor]) so the field settles instead of staying jam-packed —
+/// capped at [s1BubbleCountCap].
 ///
 /// "Perpetual" per PLAN 9.E: the physics steps and the full bubble scene
 /// repaints every frame for the entire run window (the harness controls
-/// duration) — the settle gate the interactive bubblebench uses is deliberately
-/// NOT applied here, so the per-frame gradient-fill + text-shaping cost is
-/// sustained. That per-frame repaint cost is the thing under test.
+/// duration) — the settle gate the original interactive bubblebench example
+/// (now removed; its workload lives on self-contained in the frust-side
+/// scenario referenced above) used is deliberately NOT applied here, so the
+/// per-frame gradient-fill + text-shaping cost is sustained. That per-frame
+/// repaint cost is the thing under test.
 library;
 
 import 'dart:math' as math;
@@ -21,7 +24,8 @@ import 'package:flutter/scheduler.dart' show Ticker;
 import '../bench/datasets.dart';
 import '../bench/rng.dart';
 
-/// The physics simulation — a port of `bubblebench/src/physics.rs`. Bubble
+/// The physics simulation — a port of
+/// `benchmarks/frust_bench/src/scenarios/s1_animation.rs`. Bubble
 /// geometry follows the canonical S1 size-parity spec (see [s1RadiusMinFrac] in
 /// `datasets.dart`, the contract home): radius + cluster spread are fractions
 /// of `min(playWidth, playHeight)`, the SafeArea-inset play region.

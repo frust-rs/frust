@@ -89,7 +89,7 @@ way.
 
 ### 4.4 — See vello's own noise
 
-`FRUST_LOG=debug cargo run` (bubblebench) surfaces the vello/wgpu log lines
+`FRUST_LOG=debug cargo run` (`benchmarks/frust_bench`) surfaces the vello/wgpu log lines
 the desktop logger normally suppresses (`crates/frust-shell-desktop/src/logger.rs`
 ≈103). This is the dial you'll want turned when chapter 5 makes you
 curious what the renderer is complaining about.

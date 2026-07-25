@@ -28,11 +28,11 @@ the mechanism working in this repo.
 
 ```bash
 cargo build --workspace --locked && cargo test --workspace   # the repo's verify gate
-(cd examples/bubblebench && cargo run)                        # your primary lab vehicle
+(cd benchmarks/frust_bench && cargo run)                      # your primary lab vehicle
 ```
 
-If bubblebench opens a window full of physics-driven gradient bubbles with an
-FPS meter, you're ready.
+If `frust_bench` opens a window full of physics-driven gradient bubbles (the
+S1 scenario, which runs by default) with an FPS meter, you're ready.
 
 ## The pipeline, end to end (the map you'll fill in)
 
@@ -62,7 +62,7 @@ chapter 7. Measuring all of it is chapter 8.
 | # | Lab | You will |
 |---|-----|----------|
 | [1](01-scene-display-list.md) | The display list | Build a `Scene` by hand in a unit test; read every `Command` variant |
-| [2](02-widget-paint.md) | Paint your own pixels | Modify bubblebench's canvas widget; write a custom widget; assert paint output GPU-free |
+| [2](02-widget-paint.md) | Paint your own pixels | Modify the S1 bubble-chart's canvas widget; write a custom widget; assert paint output GPU-free |
 | [3](03-frame-loop.md) | Anatomy of a frame | Trace one desktop frame from `RedrawRequested` to `present()`, matching `FRUST_TRACE` output line-by-line to code |
 | [4](04-encode-present.md) | Scene → GPU | Read the `Command`→vello translation; flip the CPU render tier; watch surface lifecycle states |
 | [5](05-vello-internals.md) | Inside vello 0.9 | Read the actual WGSL compute stages from your local cargo registry; map them to the sort-middle architecture |
