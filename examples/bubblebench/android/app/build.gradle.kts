@@ -106,8 +106,9 @@ android {
                 )
             }
             // R8 + resource shrink (Phase 7 task 12): the Kotlin/Java side is
-            // small (one view, one vendored accesskit delegate) so the dex win
-            // is modest, but shipping unminified release code is not the
+            // small (this app's `MainActivity` plus the `:frust-embedding`
+            // module) so the dex win is modest, but shipping unminified
+            // release code is not the
             // Frust default. `proguard-rules.pro` carries the two keep
             // rules R8 needs beyond AGP's own default rule set (JNI-bound
             // classes it can't otherwise prove are live) — see that file's
@@ -158,6 +159,21 @@ android {
     //     create("dev")  { dimension = "env"; applicationIdSuffix = ".dev" }
     //     create("prod") { dimension = "env" }
     // }
+}
+
+// Frust's Android embedding: the Kotlin host (`FrustActivity`,
+// `FrustSurfaceView`, `FrustViewHost`, the vendored accesskit delegate) this
+// app's `MainActivity` extends, plus the JNI declarations the Rust side
+// exports against. Included by path — see `settings.gradle.kts` and
+// `gradle.properties`' `frust.embedding.dir`.
+//
+// `androidx.core` (edge-to-edge, inset merging, bar-icon contrast) and
+// `androidx.activity` (`ComponentActivity`, `onBackPressedDispatcher`) are
+// re-exported transitively by the module's `api` declarations, so this app
+// declares neither directly.
+dependencies {
+    implementation(project(":frust-embedding"))
+    // frust:plugin-dependencies — plugin-contributed dependencies go below.
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each
