@@ -1263,7 +1263,7 @@ pub fn set_insets(
 /// `SceneDelegate.scene(_:willConnectTo:options:)`'s
 /// `connectionOptions.urlContexts`, or running, from
 /// `SceneDelegate.scene(_:openURLContexts:)` — see
-/// `templates/app/ios.tmpl`'s `SceneDelegate`/`FrustViewController`
+/// `platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustSceneDelegate.swift`/`FrustViewController.swift`
 /// queue-until-handle-ready contract, task 07) into the process-wide
 /// deep-link source ([`frust_reactive::push_deep_link`]).
 ///

@@ -105,8 +105,8 @@ pub struct AndroidAppHandle {
     /// appearance ownership (task 05): starts [`Brightness::Light`] here and is
     /// flipped by [`Self::set_appearance`] once Kotlin reports the platform's
     /// real dark-mode preference (`nativeSetAppearance`, called right after
-    /// `nativeInit` returns a handle — see `templates/app/android.tmpl`'s
-    /// `FrustSurfaceView.surfaceCreated`).
+    /// `nativeInit` returns a handle — see `platform/android/frust-embedding/src/main/kotlin/dev/frust/
+    /// FrustSurfaceView.kt`'s `surfaceCreated`).
     theme: Theme,
     /// The last window insets pushed to the render root (device-parity task 06),
     /// in logical px. Retained so [`Self::set_insets`] can skip a no-op push

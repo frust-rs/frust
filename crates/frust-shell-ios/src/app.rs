@@ -137,7 +137,7 @@ pub struct IosAppHandle {
     /// flipped by [`Self::set_appearance`] once Swift reports the platform's
     /// real dark-mode preference (`frust_set_appearance`, called right after
     /// `frust_init` returns a handle and again from `traitCollectionDidChange`
-    /// — see `templates/app/ios.tmpl`'s `FrustViewController`).
+    /// — see `platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustViewController.swift`).
     theme: Theme,
     /// Polls the process-wide app-facing theme override slot
     /// (`frust::set_app_theme`/`clear_app_theme`, task 6c-04) once per

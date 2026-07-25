@@ -1662,9 +1662,9 @@ fn scale_rect(rect: kurbo::Rect, scale: f64) -> (f32, f32, f32, f32) {
 }
 
 /// `nativeOnDeepLink`: deliver a platform deep link (cold-start, forwarded
-/// from `MainActivity.onCreate`'s `intent?.data`, or running, from
-/// `MainActivity.onNewIntent` — see `templates/app/android.tmpl`'s
-/// `MainActivity`/`FrustSurfaceView` queue-until-handle-ready contract,
+/// from `FrustActivity.onCreate`'s `intent?.data`, or running, from
+/// `FrustActivity.onNewIntent` — see `platform/android/frust-embedding/src/main/kotlin/dev/frust/`'s
+/// `FrustActivity`/`FrustSurfaceView` queue-until-handle-ready contract,
 /// task 07) into the process-wide deep-link source
 /// ([`frust_reactive::push_deep_link`]).
 ///
