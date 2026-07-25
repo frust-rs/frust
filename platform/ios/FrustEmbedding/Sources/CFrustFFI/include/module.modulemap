@@ -1,0 +1,4 @@
+module CFrustFFI {
+    header "frust_ffi.h"
+    export *
+}
