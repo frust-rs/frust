@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The USE_BIOMETRIC permission travels with this module: the Android manifest
+  merger folds it into any app that depends on `:frust-secure-storage`, so a
+  consuming app never edits its own AndroidManifest.xml and the permission
+  cannot outlive the plugin. It is a normal install-time permission — nothing
+  to request at runtime.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.securestorage`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+</manifest>

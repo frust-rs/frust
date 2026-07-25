@@ -1,4 +1,4 @@
-package dev.frust
+package dev.frust.securestorage
 
 import android.content.Context
 import android.hardware.biometrics.BiometricManager
@@ -9,15 +9,26 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Canonical `frust-secure-storage` biometric helper.
+ * The `frust-secure-storage` biometric helper.
  *
  * The framework `BiometricPrompt.AuthenticationCallback` is an abstract class,
  * and JNI cannot subclass a Java/Kotlin class at runtime, so this tiny helper
- * must exist as app bytecode. Copy it VERBATIM into a generated app at
- * `app/src/main/kotlin/dev/frust/FrustBiometric.kt` (or let the frust TUI
- * "Add Plugin" dialog do it) — the package/class name `dev.frust.FrustBiometric`
- * is a hard contract the Rust backend looks up through the application
- * classloader.
+ * must exist as bytecode in the installed app.
+ *
+ * Nothing copies this file anywhere: it ships as part of this plugin's own
+ * `com.android.library` module (`plugins/secure-storage/platform/android`),
+ * which `frust tui`'s "Add Plugin" dialog wires into a generated project as
+ * `:frust-secure-storage` (see the plugin `README.md` for the by-hand
+ * equivalent). The module's manifest carries the `USE_BIOMETRIC` permission and
+ * its `consumer-rules.pro` carries the R8 keep rule, so a consuming app edits
+ * neither of its own.
+ *
+ * The package/class name `dev.frust.securestorage.FrustBiometric` — and the
+ * [authenticate] signature below — are a hard contract: the Rust backend
+ * (`plugins/secure-storage/src/android.rs`, `HELPER_CLASS_BINARY`) looks the
+ * class up by that exact string through the application classloader. `dev.frust`
+ * itself belongs exclusively to the `frust-embedding` module; every plugin takes
+ * a subpackage.
  *
  * [authenticate] is called over JNI on a background thread (the plugin's
  * never-on-the-UI-thread invariant). It posts the system prompt to the main
