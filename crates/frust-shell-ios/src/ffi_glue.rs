@@ -69,7 +69,8 @@ use frust_text::TextContext;
 
 use crate::accessibility::IosA11yAdapter;
 use crate::app::{
-    FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, SplitExecutor, render_scene,
+    FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, PresentHandoff, SplitExecutor,
+    render_scene,
 };
 use crate::ffi_support::{CaretRect, publish_resolved_translucency};
 
@@ -377,6 +378,14 @@ fn install_surface(
 /// per-frame base color, to read each frame. Seeded from the REQUEST by
 /// [`spawn_split_executor`], so the common (capable) case is Mode B from frame
 /// 1 and only a real resolution can downgrade it.
+///
+/// `present` is the render side of the present-sync handoff (camera task 13):
+/// when the host armed it, this thread hands each submitted frame to the UI
+/// thread to present inside the platform-view `CATransaction` instead of
+/// presenting here (see [`crate::app::PresentHandoff`]). Any parked frame is
+/// dropped around a surface (re)install below — it belongs to a swapchain that
+/// no longer exists.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableMetalLayer>,
     startup_spans: StartupSpans,
@@ -385,6 +394,7 @@ pub(crate) fn render_loop(
     presented: Arc<AtomicU64>,
     alpha: SurfaceAlphaRequest,
     translucent_resolved: Arc<AtomicBool>,
+    present: Arc<PresentHandoff>,
 ) {
     // Render-thread QoS self-boost (phase-11 fix F6): tag this dedicated render
     // thread as user-interactive so the scheduler treats its GPU submit work at
@@ -430,6 +440,11 @@ pub(crate) fn render_loop(
                     metal_layer = Some(ptr);
                     physical = (size.width, size.height);
                     let first_install = !first_install_done;
+                    // Present-sync (task 13): a frame parked for the UI thread
+                    // belongs to the swapchain about to be replaced — drop it
+                    // rather than let the next tick present a frame from a dead
+                    // surface.
+                    present.clear();
                     match install_surface(
                         &mut renderer,
                         &mut render_cx,
@@ -521,6 +536,10 @@ pub(crate) fn render_loop(
                     &mut startup_spans,
                     perf_on,
                     &presented,
+                    // Present-sync: park this frame under its own id so the UI
+                    // thread can tell the platform-view release gate which
+                    // frame it just put on screen (task 13).
+                    Some((&present, frame.meta.frame_id)),
                 );
 
                 // iOS self-heals a lost surface from the retained layer (nothing
@@ -530,6 +549,10 @@ pub(crate) fn render_loop(
                     && recreate_failures < crate::ffi_support::MAX_RECREATE_ATTEMPTS
                     && let Some(ptr) = metal_layer
                 {
+                    // Same reason as the `SurfaceCreated` arm above: nothing
+                    // parked for the old (lost) swapchain may survive into the
+                    // new one.
+                    present.clear();
                     match install_surface(
                         &mut renderer,
                         &mut render_cx,
@@ -650,6 +673,16 @@ fn create_handle(
         alpha == SurfaceAlphaRequest::TranslucentPreferred,
     ));
 
+    // Read the present-sync latch (camera task 13) beside the translucency one
+    // above, and for the same reason: `frust_set_present_sync` must precede
+    // `frust_init`, and the choice is fixed for the surface's lifetime. Armed,
+    // the render thread parks each submitted frame for the UI thread to present
+    // inside the platform-view `CATransaction` (see `PresentHandoff`); unarmed
+    // — the default — the slot is inert and the render tail is byte-for-byte
+    // today's. Never armed on the inline path: that tail already presents on
+    // the UI thread.
+    let present = Arc::new(PresentHandoff::new(present_sync_enabled()));
+
     let (executor, text_ctx) = if render_thread_enabled() {
         spawn_split_executor(
             startup,
@@ -659,6 +692,7 @@ fn create_handle(
             font_preinit,
             alpha,
             Arc::clone(&translucent_resolved),
+            present,
         )
     } else {
         build_inline_executor(
@@ -794,6 +828,7 @@ fn spawn_split_executor(
     font_preinit: std::thread::JoinHandle<TextContext>,
     alpha: SurfaceAlphaRequest,
     translucent_resolved: Arc<AtomicBool>,
+    present: Arc<PresentHandoff>,
 ) -> (FrameExecutor, TextContext) {
     // Font/`TextContext` warmup (phase 10.D) stays UI-side — layout runs on the UI
     // thread. The GPU work is off-thread now, so this join's ordering vs surface
@@ -829,6 +864,12 @@ fn spawn_split_executor(
     let presented = Arc::new(AtomicU64::new(0));
     let presented_render = Arc::clone(&presented);
 
+    // Present-sync handoff (task 13): one clone into the render thread (parks
+    // each submitted frame when armed), one in the `SplitExecutor` for the UI
+    // thread's `frust_present_frame` to take from. Same `Arc`-shared-slot shape
+    // as the two counters above — no channel, no protocol.
+    let present_render = Arc::clone(&present);
+
     // Move `startup` (init_entry + font spans already recorded) into the render
     // thread, which owns the rest of the startup line. The raw `metal_layer`
     // pointer is NOT captured by the closure (it is `!Send`); it crosses the
@@ -849,6 +890,7 @@ fn spawn_split_executor(
                     presented_render,
                     alpha,
                     translucent_resolved,
+                    present_render,
                 )
             })
         })
@@ -869,6 +911,7 @@ fn spawn_split_executor(
             fatal,
             scene_return_rx,
             presented,
+            present,
         )),
         text_ctx,
     )
@@ -1360,6 +1403,72 @@ pub fn set_surface_mode(translucent: u8) {
     guard("frust_set_surface_mode", (), || {
         if translucent != 0 {
             frust_shell_common::declare_host_translucent_surface();
+        }
+    });
+}
+
+/// The process-global present-sync latch (camera task 13), written by
+/// [`set_present_sync`] and read once per handle in [`create_handle`].
+///
+/// Deliberately **iOS-local** rather than a `frust-shell-common` module beside
+/// `surface_mode`: the two platforms need opposite corrections for the same
+/// defect — Android delays the *view* to meet the surface (the frame-id gate),
+/// iOS delays the *surface* to meet the view — so a shared "platform-view sync"
+/// knob would be structurally wrong (PLAN.md's no-shared-knob constraint,
+/// `research/SPIKE-SYNC.md` §3.4.1). Nothing outside this shell can observe or
+/// set it.
+static PRESENT_SYNC: AtomicBool = AtomicBool::new(false);
+
+/// `frust_set_present_sync`: declare that this host presents the frust surface
+/// inside the `CATransaction` that commits hosted platform-view geometry
+/// (camera task 13) — the iOS shipping form of `research/SPIKE-SYNC.md`'s rung
+/// 1, **with the render-thread split left on**.
+///
+/// `enabled` is `0`/`1` (the same no-`<stdbool.h>` convention as
+/// [`set_surface_mode`]/[`set_appearance`]). Takes no handle: the slot is
+/// process-global and must be latched **before** `frust_init`, since it is read
+/// once when the handle's executor is built.
+///
+/// Callable **only** from `FrustViewController`'s
+/// `synchronizesPresentWithPlatformViews`-gated branch — the same branch that
+/// sets `CAMetalLayer.presentsWithTransaction = true`. The two must move
+/// together, exactly like the `translucentSurface` seam above: arming this
+/// without the layer flag defers each present by a tick for no benefit (a
+/// plain, eager present issued late), and setting the layer flag without arming
+/// this stops presentation dead under the split (the drawable is handed to a
+/// thread that commits no transaction — measured, §3.2). Neither half is
+/// reachable from app Rust; this is a host build-time choice.
+///
+/// The UI thread must then call `frust_present_frame` once per display-link
+/// tick, after `FrustViewHost.poll` — see [`present_frame`].
+pub fn set_present_sync(enabled: u8) {
+    guard("frust_set_present_sync", (), || {
+        PRESENT_SYNC.store(enabled != 0, Ordering::Release);
+    });
+}
+
+/// Read the present-sync latch (see [`PRESENT_SYNC`]) at handle-construction
+/// time.
+fn present_sync_enabled() -> bool {
+    PRESENT_SYNC.load(Ordering::Acquire)
+}
+
+/// `frust_present_frame`: present the frame the render thread parked for the UI
+/// thread — the UI-thread half of present-sync (camera task 13, see
+/// [`set_present_sync`]).
+///
+/// Swift calls this once per `CADisplayLink` tick, **after**
+/// `FrustViewHost.poll` has applied this frame's platform-view geometry, so the
+/// `[drawable present]` and the sibling views' geometry land in one
+/// `CATransaction` committed by this thread. Cheap and safe to call
+/// unconditionally: with present-sync unarmed (the default), on the inline
+/// render path, or on a gate-skipped tick, nothing is ever parked and this is a
+/// mutex check plus a return. A null/dead handle is a benign no-op.
+pub fn present_frame(handle: *mut c_void) {
+    guard("frust_present_frame", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.present_pending_frame();
         }
     });
 }

@@ -35,6 +35,34 @@ open class FrustViewController: UIViewController {
     /// host-side seam may declare translucency.
     open var translucentSurface: Bool { false }
 
+    /// Opt into presenting the Frust surface inside the same `CATransaction`
+    /// that commits hosted platform-view geometry, so a native sibling view
+    /// and the Frust content under/over it move together while scrolling
+    /// (camera task 13; measured in `research/SPIKE-SYNC.md` §3.2/§3.5).
+    /// Override with `true` in an app's `FrustViewController` subclass when it
+    /// hosts `platform_view` slots inside a scroller — the case the desync is
+    /// visible in. `false` by default: an app with no hosted views gains
+    /// nothing and would pay a `waitUntilScheduled` on the main thread every
+    /// frame. Read once, before the first frame, and never mutated.
+    ///
+    /// **iOS's correction is the mirror of Android's, and this is the only
+    /// knob for it.** iOS's native sibling *lags* Frust's content, so the fix
+    /// is to hold frust's *present* back to meet the geometry — not to delay
+    /// the view (Android's frame-id gate does that, for the opposite sign of
+    /// error). Do not try to share one "platform-view sync" switch across the
+    /// two platforms.
+    ///
+    /// **This value must drive `CAMetalLayer.presentsWithTransaction` AND the
+    /// `frust_set_present_sync` declaration together**, in the one branch
+    /// below — the same all-or-nothing rule `translucentSurface` carries.
+    /// Setting only the layer flag stops presentation dead (the render thread
+    /// hands the drawable over on a thread that commits no transaction, so it
+    /// never reaches the compositor — measured, §3.2); declaring only the Rust
+    /// half just defers each present by a tick for no benefit. The
+    /// render-thread split stays ON either way — this is *not* a
+    /// `FRUST_NO_RENDER_THREAD` switch.
+    open var synchronizesPresentWithPlatformViews: Bool { false }
+
     private var forgeView: FrustView { view as! FrustView }
     private var displayLink: CADisplayLink?
     private var handle: UnsafeMutableRawPointer?
@@ -52,6 +80,14 @@ open class FrustViewController: UIViewController {
     // request and re-logging the failure. If a transient failure mode is
     // ever introduced on the Rust side, this is the place to revisit.
     private var initFailed = false
+
+    /// Whether [synchronizesPresentWithPlatformViews] was armed — latched in
+    /// `viewDidLoad`, in the same branch that declared it to Rust and set the
+    /// layer flag, so the per-tick `renderFrame` path reads a stored `Bool`
+    /// instead of re-dispatching an overridable property every frame (and so
+    /// the "read once, never mutated" contract is structural rather than a
+    /// comment).
+    private var presentSyncArmed = false
 
     /// A deep link delivered (by `SceneDelegate`) before `frust_init` has
     /// returned a handle — cold-start links routinely arrive this early,
@@ -161,6 +197,19 @@ open class FrustViewController: UIViewController {
             frust_set_surface_mode(1)
             forgeView.isOpaque = false
             forgeView.metalLayer.isOpaque = false
+        }
+
+        // Present-sync opt-in (camera task 13, spike §3.5's rung 1 in its
+        // shipping form): latch the process-global declaration BEFORE the first
+        // `frust_init` (like the surface mode above) and set the layer flag that
+        // makes Metal defer the drawable to a CATransaction — together, in this
+        // one branch. From here the render thread stops presenting and parks
+        // each finished frame for `renderFrame` to present below. No-op in the
+        // default scaffold (`synchronizesPresentWithPlatformViews == false`).
+        if synchronizesPresentWithPlatformViews {
+            frust_set_present_sync(1)
+            forgeView.metalLayer.presentsWithTransaction = true
+            presentSyncArmed = true
         }
 
         // Bridge the view's raw touch callbacks into the native tree (spec §9).
@@ -497,7 +546,30 @@ open class FrustViewController: UIViewController {
         // batch (create/reposition/dispose native sibling views) right after
         // the Frust surface has painted, so native views and Frust content
         // land in the same visual frame. Cheap when idle (null poll).
-        platformViewHost?.poll(handle: handle)
+        //
+        // Present-sync (camera task 13): when armed, Frust's own
+        // `[drawable present]` and the sibling geometry that frame painted must
+        // commit in ONE transaction, on this (the committing) thread — that is
+        // the entire contract `presentsWithTransaction` asks for.
+        //
+        // **Order is load-bearing: present FIRST, then poll.**
+        // `frust_present_frame` presents the frame the render thread parked
+        // (typically the previous tick's, since the render thread runs a tick
+        // behind) and records its id; the `poll` that follows then releases
+        // exactly *that* frame's geometry batch and no later one — so pixels
+        // and geometry that belong together land in the same commit. Polling
+        // first would pair this tick's geometry with the previous tick's pixels
+        // and merely invert the desync. Unarmed, this is byte-for-byte the
+        // previous behavior: poll alone, inside UIKit's own implicit
+        // main-thread transaction.
+        if presentSyncArmed {
+            CATransaction.begin()
+            frust_present_frame(handle)
+            platformViewHost?.poll(handle: handle)
+            CATransaction.commit()
+        } else {
+            platformViewHost?.poll(handle: handle)
+        }
     }
 
     @objc private func appWillResignActive() {
