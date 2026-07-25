@@ -1,0 +1,435 @@
+//! `frust-camera`: a platform-independent camera API — permission, preview,
+//! still capture, and a YUV/BGRA image stream — CameraX on Android
+//! (`dev.frust.camera.FrustCameraHost`, driven over this plugin's own JNI
+//! surface), AVFoundation on iOS (driven from Rust directly via
+//! `objc2-av-foundation`, no Swift camera glue).
+//!
+//! # Charter: a platform plugin
+//!
+//! Like [`frust-shared-preferences`](../frust_shared_preferences/index.html)
+//! and
+//! [`frust-secure-storage`](../frust_secure_storage/index.html), this is a
+//! **platform plugin** (see `docs/ARCHITECTURE.md`'s Module Structure): it
+//! depends on `frust-plugin` plus FFI crates only, and carries **no other
+//! `frust-*` framework dependency**. An app adds this crate to its own
+//! `Cargo.toml` alongside `frust`; the facade does not depend on or
+//! re-export it.
+//!
+//! # Preview is a platform view, not a widget
+//!
+//! Unlike a typical plugin, this crate never paints its own preview.
+//! [`CameraSession::preview_view_type`] returns the `viewType` string an app
+//! feeds straight into `frust::platform_view` (the `frust-widgets`
+//! `platform_view` module) — the native-sibling compositing slot
+//! `workflow/plans/features/frust-camera/PLAN.md`'s Phase 0 device-proved.
+//! The string is deliberately **target-gated** (platform-views W5 finding,
+//! restated on [`CameraSession::preview_view_type`]'s doc): Android returns a
+//! fully-qualified class name, iOS a bare runtime name — never one shared
+//! literal.
+//!
+//! # Phased delivery
+//!
+//! This module lands as the **crate + frozen contract** (Plan Phase 1
+//! preamble, task 02): the full public API and the Android JNI export
+//! surface compile and are documented, but every backend operation beyond
+//! the target-gated [`CameraSession::preview_view_type`] constant reports
+//! [`CameraError::Platform`] ("not yet implemented") rather than driving a
+//! real camera. Later phases fill the real backends behind this same API:
+//! [`android`] (task 06, CameraX via `FrustCameraHost.kt`), [`apple`] (task
+//! 07, AVFoundation), the image stream (task 09, both backends). On every
+//! other target — desktop preview, wasm, anything without a camera backend —
+//! [`unsupported`] fails every call soft with
+//! [`CameraError::PlatformNotInitialized`], never a panic (the
+//! `frust-shared-preferences` old-scaffold-degrade shape).
+//!
+//! # Blocking API — pair with `spawn_blocking`
+//!
+//! [`Camera::request_permission`] blocks on the platform permission
+//! machinery (a system dialog on Android; `AVCaptureDevice`'s
+//! `requestAccessForMediaType:completionHandler:` bridged to a blocking call
+//! on iOS). Like `frust-secure-storage`'s gated calls, callers pair it with
+//! `frust_reactive::spawn_blocking` — never call it on the UI thread.
+
+// Platform backends (Plan Phase 1 preamble lands the crate + frozen contract;
+// Phases 1-3 / tasks 06/07/09 fill the real implementations behind the same
+// `SessionBackend` trait). Every real target routes through `Camera::open`'s
+// selection point below.
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_vendor = "apple")]
+mod apple;
+#[cfg(not(any(target_os = "android", target_vendor = "apple")))]
+mod unsupported;
+
+use std::path::Path;
+use std::sync::Arc;
+
+/// Which physical camera to open.
+///
+/// Maps to CameraX's `CameraSelector.LENS_FACING_*` on Android (`Back` = 1,
+/// `Front` = 0 — `androidx.camera.core.CameraSelector`, a published
+/// constant, not community-approximate) and `AVCaptureDevice.Position` on
+/// iOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Lens {
+    /// The rear-facing camera — the default for still capture.
+    Back,
+    /// The front-facing (selfie) camera.
+    Front,
+}
+
+/// The capture/preview resolution to request.
+///
+/// v1 is intentionally minimal — [`CameraSession::preview_aspect_ratio`]
+/// tells the app how to size its preview slot regardless of which variant
+/// was requested, so [`Resolution`] only needs to steer the platform's own
+/// selection, never dictate exact output dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Resolution {
+    /// The platform's own default selection (CameraX's un-configured
+    /// `Preview`/`ImageCapture` resolution strategy; AVFoundation's
+    /// `AVCaptureSessionPresetHigh`).
+    Auto,
+    /// A specific target size, best-effort (CameraX `ResolutionSelector`;
+    /// the nearest AVFoundation `AVCaptureSessionPreset` on iOS). A platform
+    /// may deliver a different actual size — always read it back from the
+    /// delivered frame/photo, never assume this round-trips exactly.
+    Explicit {
+        /// Target width in pixels.
+        width: u32,
+        /// Target height in pixels.
+        height: u32,
+    },
+}
+
+/// The result of [`Camera::request_permission`].
+///
+/// Mirrors the Android JNI contract's `requestPermission` return codes
+/// (`0`/`1`/`2`/`3` — see the [`android`] module doc's contract table);
+/// iOS's `AVAuthorizationStatus` collapses onto the same four variants
+/// (`authorized`/`denied`+`restricted`/n/a/`notDetermined`, the last two
+/// folded per iOS having no "no cached Activity yet" concept).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PermissionStatus {
+    /// The app may use the camera.
+    Granted,
+    /// The user (or a device policy) denied access.
+    Denied,
+    /// No cached Activity exists yet to show the system permission dialog
+    /// (Android-specific — see the module doc's *Preview is a platform
+    /// view* / PLAN.md's permission-plumbing risk: request again once a
+    /// `platform_view` preview slot exists).
+    NeedsUi,
+    /// The system dialog is showing; the resolved status arrives
+    /// asynchronously (Android: `nativeOnPermissionResult`).
+    Pending,
+}
+
+/// A delivered image-stream frame's pixel format (task 09) — v1 is exactly
+/// the two Flutter `camera`-parity formats: Android `ImageFormat.YUV_420_888`
+/// / iOS `kCVPixelFormatType_420YpCbCr8BiPlanarFullRange` ("420f") for
+/// [`Yuv420`](Self::Yuv420), and a packed 32-bit BGRA buffer for
+/// [`Bgra`](Self::Bgra).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImageFormat {
+    /// YUV 4:2:0, planar (Android) or bi-planar (iOS) — 2-3
+    /// [`ImagePlane`]s depending on platform packing.
+    Yuv420,
+    /// Packed 32-bit BGRA — 1 [`ImagePlane`].
+    Bgra,
+}
+
+/// One image plane of a delivered [`ImageFrame`] (task 09): a **borrowed**,
+/// zero-copy view onto the platform's own buffer, valid only for the
+/// duration of the [`CameraSession::start_image_stream`] callback — see that
+/// method's close-deadline contract.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ImagePlane<'a> {
+    /// The plane's raw bytes (`GetDirectBufferAddress` on Android,
+    /// `CVPixelBufferGetBaseAddressOfPlane` on iOS — both zero-copy).
+    pub data: &'a [u8],
+    /// Bytes between the start of consecutive rows.
+    pub row_stride: usize,
+    /// Bytes between consecutive pixels within a row (Android's
+    /// `Plane.pixelStride`; always `1` for a tightly-packed iOS plane).
+    pub pixel_stride: usize,
+}
+
+/// One delivered camera frame (task 09).
+///
+/// # Close-deadline contract
+///
+/// [`CameraSession::start_image_stream`]'s callback receives this by
+/// reference: every [`ImagePlane::data`] slice borrows the platform's own
+/// in-flight buffer, held open only until the callback **returns**. The
+/// callback must copy or fully consume the data before returning — Android's
+/// `ImageProxy.close()` runs only after the JNI call back into Kotlin
+/// completes, and with `STRATEGY_KEEP_ONLY_LATEST` a deferred `close()`
+/// stalls every subsequent frame (only one may be in flight). Never store an
+/// [`ImageFrame`]/[`ImagePlane`] past the callback's return.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ImageFrame<'a> {
+    /// The frame's pixel format — always the format requested via
+    /// [`CameraSession::start_image_stream`].
+    pub format: ImageFormat,
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Clockwise rotation, in degrees, needed to present the frame upright
+    /// (device-orientation-dependent).
+    pub rotation_degrees: i32,
+    /// The frame's planes, in platform-native order (1 for
+    /// [`ImageFormat::Bgra`], 2-3 for [`ImageFormat::Yuv420`]).
+    pub planes: &'a [ImagePlane<'a>],
+}
+
+/// A [`CameraSession::start_image_stream`] frame callback. Runs on a
+/// plugin-owned thread (Android's `ImageAnalysis` executor; iOS's serial
+/// sample-buffer-delegate queue) — **never** the UI thread, and never do a
+/// signal write from inside it (`docs/CODE_STANDARDS.md`'s heavy-work
+/// routing rule); hand frames off via `frust_reactive::use_task` or a
+/// signal write scheduled back onto the UI thread.
+pub type ImageFrameCallback = dyn Fn(&ImageFrame<'_>) + Send + 'static;
+
+/// Errors from a [`Camera`]/[`CameraSession`] operation.
+///
+/// `thiserror`-derived per `docs/CODE_STANDARDS.md`: callers match on the
+/// variant (e.g. distinguishing [`Self::PermissionDenied`] from
+/// [`Self::InUse`] to decide whether to prompt the user or just retry)
+/// rather than only displaying it.
+#[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
+pub enum CameraError {
+    /// The camera permission was denied (a synchronous convenience some
+    /// operations report directly, distinct from
+    /// [`PermissionStatus::Denied`]'s async probe result).
+    #[error("camera permission was denied")]
+    PermissionDenied,
+
+    /// This platform has no camera backend at all ([`unsupported`]'s
+    /// fail-soft contract — desktop preview, wasm, anything not Android or
+    /// Apple), or, on Android, the host shell never installed the
+    /// `(JavaVM, Context)` platform handles this crate's JNI calls need (an
+    /// old scaffold predating `nativeInitPlatform`). Never a panic.
+    #[error("camera platform not initialized")]
+    PlatformNotInitialized,
+
+    /// The camera is already open elsewhere (another [`CameraSession`], or
+    /// another app holding exclusive access).
+    #[error("the camera is already in use")]
+    InUse,
+
+    /// An operation was attempted on a [`CameraSession`] after
+    /// [`CameraSession::close`].
+    #[error("the camera session is closed")]
+    SessionClosed,
+
+    /// An underlying file I/O operation failed (e.g.
+    /// [`CameraSession::take_picture`] writing to an unwritable path).
+    #[error("camera I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// A backend-specific failure that isn't one of the above — including,
+    /// during this crate's phased delivery, an operation this phase hasn't
+    /// wired up yet ("not yet implemented" — see the module doc's *Phased
+    /// delivery*).
+    #[error("camera platform error: {0}")]
+    Platform(String),
+}
+
+/// One backend implementation — [`android`]'s `AndroidSession` on Android,
+/// [`apple`]'s `AppleSession` on Apple targets. [`unsupported`] never
+/// constructs one: every [`Camera`] call fails before a session would exist.
+///
+/// Crate-private and deliberately mirrors [`CameraSession`]'s public shape
+/// one-to-one — [`CameraSession`] is a thin dispatch wrapper over this.
+pub(crate) trait SessionBackend: Send + Sync {
+    /// See [`CameraSession::preview_view_type`].
+    fn preview_view_type(&self) -> &'static str;
+    /// See [`CameraSession::params_json`].
+    fn params_json(&self) -> String;
+    /// See [`CameraSession::preview_aspect_ratio`].
+    fn preview_aspect_ratio(&self) -> f32;
+    /// See [`CameraSession::take_picture`].
+    fn take_picture(&self, path: &Path) -> Result<(), CameraError>;
+    /// See [`CameraSession::start_image_stream`].
+    fn start_image_stream(
+        &self,
+        format: ImageFormat,
+        on_frame: Box<ImageFrameCallback>,
+    ) -> Result<(), CameraError>;
+    /// See [`CameraSession::stop_image_stream`].
+    fn stop_image_stream(&self);
+    /// See [`CameraSession::close`].
+    fn close(&self);
+}
+
+/// The camera entry point — no instance, just [`Self::request_permission`]
+/// and [`Self::open`].
+pub struct Camera;
+
+impl Camera {
+    /// Request camera permission, blocking until the platform resolves it
+    /// (or reports [`PermissionStatus::NeedsUi`]/
+    /// [`PermissionStatus::Pending`] — see that type's docs).
+    ///
+    /// Pair with `frust_reactive::spawn_blocking`; never call on the UI
+    /// thread (module doc's *Blocking API*).
+    ///
+    /// # Errors
+    /// [`CameraError::PlatformNotInitialized`] on a platform with no camera
+    /// backend, or an old Android scaffold predating `nativeInitPlatform`.
+    /// During this crate's current phase (module doc's *Phased delivery*),
+    /// every Android/Apple call also reports
+    /// [`CameraError::Platform`]`("not yet implemented")` — the permission
+    /// backends land in tasks 06/07.
+    pub fn request_permission() -> Result<PermissionStatus, CameraError> {
+        #[cfg(target_os = "android")]
+        {
+            android::request_permission()
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            apple::request_permission()
+        }
+        #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
+        {
+            unsupported::request_permission()
+        }
+    }
+
+    /// Open a [`CameraSession`] on the given [`Lens`] at the requested
+    /// [`Resolution`] (best-effort — see that type's docs).
+    ///
+    /// Session configuration is asynchronous on every real backend (CameraX,
+    /// AVFoundation): a returned [`CameraSession`] does not yet guarantee a
+    /// live camera — read [`CameraSession::preview_aspect_ratio`] (`0.0`
+    /// until the platform reports its first frame geometry) and drive
+    /// [`Self::request_permission`] alongside it, per PLAN.md's permission-
+    /// plumbing note (permission is requested once a `platform_view` preview
+    /// slot exists, not necessarily before `open`).
+    ///
+    /// # Errors
+    /// [`CameraError::PlatformNotInitialized`] on a platform with no camera
+    /// backend (module doc's *Phased delivery*: on Android/Apple this
+    /// crate's current phase instead succeeds and returns an inert session
+    /// whose capture/stream operations report
+    /// [`CameraError::Platform`]`("not yet implemented")`).
+    // Split by target at the function level (rather than an early-return
+    // arm inside one body) so neither cfg configuration leaves the other's
+    // dead branch for clippy's `needless_return`/`unreachable_code` to trip
+    // over — each version below is a complete, self-contained definition.
+    #[cfg(any(target_os = "android", target_vendor = "apple"))]
+    pub fn open(lens: Lens, resolution: Resolution) -> Result<CameraSession, CameraError> {
+        #[cfg(target_os = "android")]
+        let backend: Arc<dyn SessionBackend> =
+            Arc::new(android::AndroidSession::open(lens, resolution)?);
+        #[cfg(target_vendor = "apple")]
+        let backend: Arc<dyn SessionBackend> =
+            Arc::new(apple::AppleSession::open(lens, resolution)?);
+
+        Ok(CameraSession { backend })
+    }
+
+    /// No camera backend exists on this target at all (module doc's
+    /// *Phased delivery*) — fail soft before ever constructing a session,
+    /// matching [`unsupported::request_permission`]'s arm above.
+    #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
+    pub fn open(lens: Lens, resolution: Resolution) -> Result<CameraSession, CameraError> {
+        let _ = (lens, resolution);
+        unsupported::open()
+    }
+}
+
+/// An open camera — preview slot wiring, still capture, and (task 09) an
+/// image stream. Cheap to hold; every operation dispatches to the platform
+/// backend [`Camera::open`] selected.
+pub struct CameraSession {
+    backend: Arc<dyn SessionBackend>,
+}
+
+impl CameraSession {
+    /// The `viewType` string to pass to `frust::platform_view` for this
+    /// session's live preview slot.
+    ///
+    /// **Target-gated — never one shared literal** (platform-views W5
+    /// finding, `docs/CODE_STANDARDS.md`'s Naming Conventions LAW): Android
+    /// returns the fully-qualified `"dev.frust.camera.CameraPreviewFactory"`
+    /// (the embedding module's `FrustViewHost` resolves it via the app
+    /// classloader), iOS the bare `"CameraPreviewFactory"` (resolved via
+    /// `NSClassFromString`). This value is real today, independent of the
+    /// rest of this crate's phased-delivery stub bodies (module doc).
+    pub fn preview_view_type(&self) -> &'static str {
+        self.backend.preview_view_type()
+    }
+
+    /// The current preview-slot parameters, as JSON — the payload an app
+    /// threads into `platform_view(...).params(...)` so a params update
+    /// (e.g. a session id change) reaches the native factory without a
+    /// slot teardown/recreate.
+    pub fn params_json(&self) -> String {
+        self.backend.params_json()
+    }
+
+    /// The live preview's width/height aspect ratio, or `0.0` before the
+    /// platform has reported its first frame geometry (Android: before the
+    /// first `TransformationInfo`; matches the JNI contract's
+    /// `previewAspectRatio` return-code table). An app sizes its preview
+    /// slot off this value rather than a fixed aspect.
+    pub fn preview_aspect_ratio(&self) -> f32 {
+        self.backend.preview_aspect_ratio()
+    }
+
+    /// Capture a still photo to `path`. Completion is asynchronous on the
+    /// real backends (Android: `nativeOnPictureTaken`); this call reports
+    /// only whether the capture request itself was accepted.
+    ///
+    /// # Errors
+    /// [`CameraError::SessionClosed`] after [`Self::close`].
+    /// [`CameraError::Io`] if `path` can't be written. During this crate's
+    /// current phase (module doc's *Phased delivery*),
+    /// [`CameraError::Platform`]`("not yet implemented")` on every real
+    /// backend — task 06 (Android) / task 07 (iOS) wire the capture.
+    pub fn take_picture(&self, path: &Path) -> Result<(), CameraError> {
+        self.backend.take_picture(path)
+    }
+
+    /// Start delivering [`ImageFrame`]s of the requested [`ImageFormat`] to
+    /// `on_frame` at camera rate, lossy-latest (a slow consumer drops
+    /// frames rather than queuing). See [`ImageFrame`]'s close-deadline
+    /// contract and [`ImageFrameCallback`]'s threading contract.
+    ///
+    /// # Errors
+    /// [`CameraError::SessionClosed`] after [`Self::close`]. During this
+    /// crate's current phase (module doc's *Phased delivery*),
+    /// [`CameraError::Platform`]`("not yet implemented")` on every real
+    /// backend — task 09 wires the stream on both platforms.
+    pub fn start_image_stream(
+        &self,
+        format: ImageFormat,
+        on_frame: impl Fn(&ImageFrame<'_>) + Send + 'static,
+    ) -> Result<(), CameraError> {
+        self.backend.start_image_stream(format, Box::new(on_frame))
+    }
+
+    /// Stop a stream started with [`Self::start_image_stream`], without
+    /// touching the preview. A no-op if no stream is running.
+    pub fn stop_image_stream(&self) {
+        self.backend.stop_image_stream();
+    }
+
+    /// Close the session and release the camera. A no-op if already closed;
+    /// every subsequent [`CameraSession`] method call reports
+    /// [`CameraError::SessionClosed`] once the real backends (task 06/07)
+    /// track live/closed state.
+    pub fn close(&self) {
+        self.backend.close();
+    }
+}
