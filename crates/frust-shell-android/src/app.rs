@@ -37,6 +37,7 @@ use frust_render::{
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
+use frust_shell_common::platform_view::FramePairing;
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
@@ -235,6 +236,20 @@ pub struct AndroidAppHandle {
     /// force-hidden on backgrounding via [`Self::suspend_platform_views`]
     /// (`nativeOnPause`).
     platform_view_state: PlatformViewState,
+    /// The release gate's frame pairing (camera task 01): which frust frame
+    /// produced each of the differ's command batches, so
+    /// [`Self::platform_view_commands`] hands Kotlin only the batches whose
+    /// geometry is already **on screen**. Recorded right after each RUN frame's
+    /// ingest (the frame about to be submitted is the one that painted it),
+    /// drained on acknowledgement, and cleared wholesale when the frames it
+    /// refers to stop being meaningful (backgrounding, surface recreation) —
+    /// see [`FramePairing`]'s Lifecycle note.
+    ///
+    /// Always on: a hosted view otherwise runs 3–5 frames ahead of the frust
+    /// content it is pinned to while scrolling, and the gate measured strictly
+    /// better than the ungated path on both Phase-0 test devices with zero
+    /// overshoot on either (SPIKE-SYNC §2.5/§2.6.1) — so there is no dial.
+    platform_view_due: FramePairing,
     /// Whether this handle's GPU surface **actually came up** translucent
     /// (alpha-channel, Mode B) — the RESOLVED capability, not the
     /// [`SurfaceModeWatcher`] request latch (review finding M1).
@@ -291,6 +306,46 @@ pub(crate) enum FrameExecutor {
     Split(SplitExecutor),
 }
 
+/// What the render side publishes about the frames it has actually PRESENTED,
+/// read by the UI thread — one instance shared by both sides through an `Arc`,
+/// the same no-channel/no-protocol pattern as the `fatal` flag.
+///
+/// Two values, because they answer two different questions and one cannot
+/// substitute for the other:
+///
+/// - `count` — **how many** frames reached the screen (task 10), pushed into
+///   `AppTree::set_presented_frames` so an FPS-measuring widget reports the
+///   presented rate rather than the Choreographer's paint cadence.
+/// - `frame_id` — **which** frame is on screen, the platform-view release
+///   gate's input ([`AndroidAppHandle::platform_view_commands`]). The count
+///   cannot answer this: the UI→render channel is depth-1 latest-wins, so
+///   scenes the UI thread submitted are routinely overtaken and never rendered,
+///   and the two clocks drift apart by exactly the dropped frames (SPIKE-SYNC
+///   §2.5).
+#[derive(Debug, Default)]
+pub(crate) struct PresentTracker {
+    count: AtomicU64,
+    frame_id: AtomicU64,
+}
+
+impl PresentTracker {
+    /// Record one presented frame. `fetch_max` on the id rather than `store`:
+    /// ids only ever move forward, and a late write must never walk the release
+    /// gate backwards.
+    fn record_present(&self, frame_id: u64) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.frame_id.fetch_max(frame_id, Ordering::Relaxed);
+    }
+
+    fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    fn frame_id(&self) -> u64 {
+        self.frame_id.load(Ordering::Relaxed)
+    }
+}
+
 /// The single-thread fallback executor (kill switch engaged): the
 /// [`RenderContext`]/[`SurfaceRenderer`] and all perf recording live on the UI
 /// thread, exactly as the pre-split shell did.
@@ -302,11 +357,17 @@ pub(crate) struct InlineExecutor {
     /// `Option::take`n on the first successful present (records
     /// [`perf::SPAN_FIRST_FRAME_PRESENTED`] + emits), `None` thereafter.
     startup_spans: Option<StartupSpans>,
-    /// Running count of presented frames (task 10). Inline renders on the UI
-    /// thread, so this is bumped and read on the same thread — the `Arc<Atomic>`
-    /// shape matches the split's cross-thread counter so `FrameExecutor` reads
-    /// both variants uniformly.
-    presented: Arc<AtomicU64>,
+    /// Monotonically increasing per-frame id, the inline mirror of
+    /// [`SplitExecutor::frame_id`]. Inline renders synchronously and drops no
+    /// scene, so submitted and presented ids stay in lockstep — the release
+    /// gate then reads one uniform signal across both arms with no special
+    /// case.
+    frame_id: u64,
+    /// What this executor has presented (task 10 + the release gate). Inline
+    /// renders on the UI thread, so this is written and read on the same
+    /// thread — the `Arc` shape matches the split's cross-thread tracker so
+    /// [`FrameExecutor`] reads both variants uniformly.
+    presented: Arc<PresentTracker>,
 }
 
 impl InlineExecutor {
@@ -324,7 +385,8 @@ impl InlineExecutor {
             renderer,
             frame_stats: FrameStats::new(),
             startup_spans: Some(startup_spans),
-            presented: Arc::new(AtomicU64::new(0)),
+            frame_id: 0,
+            presented: Arc::new(PresentTracker::default()),
         }
     }
 
@@ -338,6 +400,7 @@ impl InlineExecutor {
         ui: UiSpans,
         perf_on: bool,
     ) -> Duration {
+        self.frame_id += 1;
         render_scene(
             &mut self.renderer,
             &self.render_cx,
@@ -348,6 +411,7 @@ impl InlineExecutor {
             &mut self.startup_spans,
             perf_on,
             &self.presented,
+            self.frame_id,
         )
     }
 
@@ -422,12 +486,14 @@ pub(crate) struct SplitExecutor {
     /// [`Self::scene_return`] on the next [`Self::take_reusable_scene`] call
     /// so that buffer is reused too, rather than dropped.
     spare_scene: Option<Scene>,
-    /// Running count of presented frames (task 10): one clone here (read by the
-    /// UI thread before paint via `FrameExecutor::presented_frames`), one on the
-    /// render thread ([`crate::jni_glue::render_loop`], which bumps it on each
-    /// `FrameOutcome::Rendered`). A plain `Arc<AtomicU64>` — no channel/protocol,
-    /// mirroring the `fatal`-flag pattern.
-    presented: Arc<AtomicU64>,
+    /// What the render side has presented (task 10 + the release gate): one
+    /// clone here (read by the UI thread before paint via
+    /// `FrameExecutor::presented_frames`/`presented_frame_id`), one on the
+    /// render thread ([`crate::jni_glue::render_loop`], which records into it on
+    /// each `FrameOutcome::Rendered`). A plain `Arc` — no channel/protocol,
+    /// mirroring the `fatal`-flag pattern. See [`PresentTracker`] for why the
+    /// count alone is not enough.
+    presented: Arc<PresentTracker>,
 }
 
 impl SplitExecutor {
@@ -436,7 +502,7 @@ impl SplitExecutor {
         join: JoinHandle<()>,
         fatal: Arc<AtomicBool>,
         scene_return: SceneReturnReceiver<Scene>,
-        presented: Arc<AtomicU64>,
+        presented: Arc<PresentTracker>,
     ) -> Self {
         Self {
             sender: Some(sender),
@@ -572,8 +638,30 @@ impl FrameExecutor {
     /// the counter with their render side via an `Arc<AtomicU64>`.
     fn presented_frames(&self) -> u64 {
         match self {
-            FrameExecutor::Inline(inline) => inline.presented.load(Ordering::Relaxed),
-            FrameExecutor::Split(split) => split.presented.load(Ordering::Relaxed),
+            FrameExecutor::Inline(inline) => inline.presented.count(),
+            FrameExecutor::Split(split) => split.presented.count(),
+        }
+    }
+
+    /// The id of the last frame the render side actually PRESENTED — the
+    /// platform-view release gate's "is the frame that produced this geometry
+    /// on screen yet?" input (see [`PresentTracker`]).
+    fn presented_frame_id(&self) -> u64 {
+        match self {
+            FrameExecutor::Inline(inline) => inline.presented.frame_id(),
+            FrameExecutor::Split(split) => split.presented.frame_id(),
+        }
+    }
+
+    /// The id of the last frame **handed to** the render side — the gate's
+    /// submission cursor, against which a batch whose own frame was dropped by
+    /// the latest-wins channel is declared stale (`MAX_FRAMES_IN_FLIGHT`). The
+    /// next frame to be submitted is therefore this + 1, which is the id a
+    /// batch ingested during that frame's paint is paired with.
+    fn submitted_frame_id(&self) -> u64 {
+        match self {
+            FrameExecutor::Inline(inline) => inline.frame_id,
+            FrameExecutor::Split(split) => split.frame_id,
         }
     }
 
@@ -647,7 +735,12 @@ pub(crate) fn render_scene(
     frame_stats: &mut FrameStats,
     startup_spans: &mut Option<StartupSpans>,
     perf_on: bool,
-    presented: &AtomicU64,
+    presented: &PresentTracker,
+    // The id of the frame this scene came from (`FrameMeta::frame_id` in the
+    // split, the inline executor's own counter otherwise) — published on an
+    // actual present so a platform-view geometry batch can be paired back to
+    // the frame that produced it (the release gate; see `PresentTracker`).
+    frame_id: u64,
 ) -> Duration {
     // Encode span (GPU/CPU encode, no swapchain touch).
     let encode_start = perf_on.then(Instant::now);
@@ -697,8 +790,10 @@ pub(crate) fn render_scene(
         }
         Ok(FrameOutcome::Rendered) => {
             // A presented frame: bump the shared counter the UI thread reads
-            // before paint (task 10). `Skipped` presents nothing, so it doesn't.
-            presented.fetch_add(1, Ordering::Relaxed);
+            // before paint (task 10) and publish WHICH frame is now on screen
+            // for the platform-view release gate. `Skipped` presents nothing,
+            // so it does neither.
+            presented.record_present(frame_id);
             // First successful present: close out the cold-start recorder once.
             if let Some(mut spans) = startup_spans.take() {
                 spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
@@ -968,6 +1063,7 @@ impl AndroidAppHandle {
             last_frame_time_nanos: None,
             deadline_overruns: 0,
             platform_view_state: PlatformViewState::new(),
+            platform_view_due: FramePairing::new(),
             translucent_resolved,
         }
     }
@@ -1222,8 +1318,11 @@ impl AndroidAppHandle {
         // behind it) is gone — replay Create+Update for every currently-live
         // platform-view slot (task 05) so the native side rebuilds its whole
         // sibling-view hierarchy from scratch rather than assuming any prior
-        // placement survived.
+        // placement survived. The replay supersedes every held batch, and the
+        // frames those batches were paired with belong to the surface that just
+        // went away — so the pairing goes with it (camera task 01).
         self.platform_view_state.reset_for_surface_recreate();
+        self.platform_view_due.clear();
         // The new surface re-resolves its alpha mode from scratch (review M1);
         // the render thread stores the outcome when it installs. Re-push
         // whatever is known now — the next `frame` re-reads it, so a
@@ -1252,8 +1351,10 @@ impl AndroidAppHandle {
         self.surface_dirty = true;
         self.frame_gate.note_resumed();
         // See `split_recreate_surface`'s matching call: a new surface means a
-        // fresh native-view hierarchy on the Kotlin side (task 05).
+        // fresh native-view hierarchy on the Kotlin side (task 05), and the
+        // release-gate pairing refers to the old surface's frames.
         self.platform_view_state.reset_for_surface_recreate();
+        self.platform_view_due.clear();
         // Inline recreate: the renderer on this thread already holds the new
         // surface, so this reads its freshly RESOLVED translucency (review M1)
         // — a recreate that fell back to opaque degrades to Mode A here rather
@@ -1344,22 +1445,42 @@ impl AndroidAppHandle {
     /// [`PlatformViewState::suspend_all`].
     pub(crate) fn suspend_platform_views(&mut self) {
         self.platform_view_state.suspend_all();
+        // While backgrounded no further frame is painted or presented, so a
+        // pairing recorded before the pause would hold this hide behind a frame
+        // that never lands. The gate is a smoothing device, not a correctness
+        // barrier — drop it so the hide goes out on the next poll.
+        self.platform_view_due.clear();
     }
 
-    /// Peek the differ's not-yet-acknowledged command backlog (task 05) —
-    /// delegates to [`PlatformViewState::commands`]. The
-    /// `nativePlatformViewCommands` JNI export's read half; pair with
-    /// [`Self::acknowledge_platform_view_commands`], called first per the
+    /// Peek the differ's releasable command backlog (task 05, gated by camera
+    /// task 01). The `nativePlatformViewCommands` JNI export's read half; pair
+    /// with [`Self::acknowledge_platform_view_commands`], called first per the
     /// differ's acknowledge-then-peek contract.
+    ///
+    /// Not the *whole* backlog: a batch is held until the frust frame that
+    /// painted its geometry is actually on screen, so a hosted native view
+    /// moves with the frust content it is pinned to instead of 3–5 frames ahead
+    /// of it while scrolling ([`Self::platform_view_due`], SPIKE-SYNC §2.5).
+    /// Held commands are not lost — the poll is idempotent and re-serves them
+    /// the moment their frame lands (or the moment the staleness escape hatch
+    /// declares that frame dropped). Kotlin needs no change: it applies exactly
+    /// what it is handed and acks the generation it is told.
     pub(crate) fn platform_view_commands(&self) -> (u64, &[ViewCommand]) {
-        self.platform_view_state.commands()
+        let releasable = self.platform_view_due.releasable_generation(
+            self.executor.presented_frame_id(),
+            self.executor.submitted_frame_id(),
+        );
+        self.platform_view_state.commands_up_to(releasable)
     }
 
     /// Tell the differ the native side has finished applying everything
     /// through `generation` (task 05) — delegates to
-    /// [`PlatformViewState::acknowledge`].
+    /// [`PlatformViewState::acknowledge`], and drops the matching release-gate
+    /// bookkeeping so it tracks the live backlog rather than growing for the
+    /// process lifetime.
     pub(crate) fn acknowledge_platform_view_commands(&mut self, generation: u64) {
         self.platform_view_state.acknowledge(generation);
+        self.platform_view_due.acknowledge(generation);
     }
 
     /// This handle's device pixel ratio, sanitized the same way every other
@@ -1811,14 +1932,25 @@ impl AndroidAppHandle {
         // differ (task 03/05), right after paint — the source paint just
         // populated. Never reached on a Skip (this whole block is behind the
         // gate's early `return` above), so the differ's skip-safety contract
-        // (a rect can't "move" during a skip) holds by construction. The
-        // `bool` return (whether anything changed) is unused: there is no
-        // "push to Kotlin now" path — `nativePlatformViewCommands` is a poll
+        // (a rect can't "move" during a skip) holds by construction. There is
+        // no "push to Kotlin now" path — `nativePlatformViewCommands` is a poll
         // Kotlin drives from its own per-frame callback, mirroring
         // `nativeImeState`/`nativeSystemUiState`.
-        let _ = self
+        //
+        // When the differ produced something, pair that batch with the frame
+        // that painted it — the one submitted just below, i.e. the submission
+        // cursor plus one — so the release gate holds the batch until that
+        // frame is on screen (camera task 01). Both statements sit behind the
+        // gate's early `return`, so a Skip records nothing AND submits nothing:
+        // the recorded id can never run ahead of what will actually be sent.
+        if self
             .platform_view_state
-            .ingest(self.app.platform_view_frames());
+            .ingest(self.app.platform_view_frames())
+        {
+            let (generation, _) = self.platform_view_state.commands();
+            self.platform_view_due
+                .record(generation, self.executor.submitted_frame_id() + 1);
+        }
 
         // Hand the finished frame to the render-path executor (plan phase 11.B).
         // The inline fallback runs the encode→acquire→submit tail synchronously

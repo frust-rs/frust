@@ -40,7 +40,7 @@
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread::JoinHandle;
 
@@ -65,7 +65,9 @@ use frust_shell_common::{
 };
 use frust_text::TextContext;
 
-use crate::app::{AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor};
+use crate::app::{
+    AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, PresentTracker, SplitExecutor,
+};
 use crate::ffi_support::{
     ImeJsonState, PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
     load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
@@ -647,7 +649,7 @@ pub(crate) fn render_loop(
     cache_dir: Option<String>,
     fatal: Arc<AtomicBool>,
     scene_return: SceneReturnSender<Scene>,
-    presented: Arc<AtomicU64>,
+    presented: Arc<PresentTracker>,
     translucent_resolved: Arc<AtomicBool>,
 ) {
     // Render-thread priority self-boost (phase-11 fix F6): raise this dedicated
@@ -787,6 +789,11 @@ pub(crate) fn render_loop(
                     &mut startup_spans,
                     perf_on,
                     &presented,
+                    // Which frame this scene is — the UI thread stamped it into
+                    // `FrameMeta` at submission; `render_scene` publishes it back
+                    // out on an actual present, for the platform-view release
+                    // gate to pair a geometry batch against (camera task 01).
+                    frame.meta.frame_id,
                 );
             }
             // Give the drained scene back for the UI thread to reclaim (review
@@ -1107,10 +1114,11 @@ fn spawn_split_executor(
     let fatal = Arc::new(AtomicBool::new(false));
     let fatal_render = Arc::clone(&fatal);
 
-    // Presented-frame counter (task 10): one clone drives into the render thread
-    // (bumped on each `FrameOutcome::Rendered`), one stays in the `SplitExecutor`
-    // for the UI thread to read before paint. Mirrors the `fatal` flag's shape.
-    let presented = Arc::new(AtomicU64::new(0));
+    // Present bookkeeping (task 10's counter + camera task 01's presented frame
+    // id): one clone drives into the render thread (recorded on each
+    // `FrameOutcome::Rendered`), one stays in the `SplitExecutor` for the UI
+    // thread to read before paint. Mirrors the `fatal` flag's shape.
+    let presented = Arc::new(PresentTracker::default());
     let presented_render = Arc::clone(&presented);
 
     // Move `startup_spans` (init_entry + font spans already recorded) into the
