@@ -1,4 +1,5 @@
 import UIKit
+import FrustEmbedding
 
 // Catalog-local (glyph-catalog only, not part of the template) native-view
 // factory for the "Platform Views" section's Mode B demo slot
