@@ -33,6 +33,12 @@ android {
 
     defaultConfig {
         minSdk = 24
+
+        // Merged into every consuming app's R8 configuration by AGP — the
+        // module-owned keep rules for `dev.frust.FrustSurfaceView` (JNI-referenced)
+        // and `dev.accesskit.android.Delegate` (classloader-referenced) live here
+        // instead of accumulating in a generated app's own proguard-rules.pro.
+        consumerProguardFiles("consumer-rules.pro")
     }
 
     // No BuildConfig, matching the app template (which never enables the
