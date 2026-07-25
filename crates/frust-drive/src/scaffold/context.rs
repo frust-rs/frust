@@ -51,6 +51,11 @@ impl TemplateContext {
                 "deeplink_host",
                 self.deeplink_host.clone().unwrap_or_default(),
             ),
+            (
+                "frust_embedding_android_dir",
+                self.frust_embedding_android_dir(),
+            ),
+            ("frust_embedding_ios_dir", self.frust_embedding_ios_dir()),
         ])
     }
 
@@ -100,6 +105,30 @@ impl TemplateContext {
     /// would reject.
     pub(crate) fn validate_ios_identifier(&self) -> Result<(), crate::ios_id::IdError> {
         crate::ios_id::validate(&self.ios_identifier())
+    }
+
+    /// The Android embedding Gradle library module's location, derived from
+    /// `frust_path` the same way `plugin::apply::plugin_dep_path` derives a
+    /// plugin crate directory: `frust` resolves to the facade crate dir
+    /// (`crates/frust`), two levels below the repo root, so
+    /// `{frust_path}/../../platform/android/frust-embedding` reaches the
+    /// module directory. This carries the same machine-specific
+    /// developer-checkout path `frust_path` itself already carries — no new
+    /// class of problem — and is a placeholder for a published Maven
+    /// coordinate once the embedding module ships to a registry
+    /// post-crates.io.
+    pub fn frust_embedding_android_dir(&self) -> String {
+        format!("{}/../../platform/android/frust-embedding", self.frust_path)
+    }
+
+    /// The iOS embedding Swift package's location, derived from `frust_path`
+    /// the same way as [`Self::frust_embedding_android_dir`] above. Carries
+    /// the same machine-specific developer-checkout path `frust_path` itself
+    /// already carries — no new class of problem — and is a placeholder for
+    /// a published Swift package reference once the embedding package ships
+    /// to a registry post-crates.io.
+    pub fn frust_embedding_ios_dir(&self) -> String {
+        format!("{}/../../platform/ios/FrustEmbedding", self.frust_path)
     }
 }
 
@@ -374,5 +403,56 @@ mod tests {
         let vars = ctx.render_vars();
         assert_eq!(vars.get("deeplink_scheme").unwrap(), "myapp");
         assert_eq!(vars.get("deeplink_host").unwrap(), "open");
+    }
+
+    #[test]
+    fn embedding_dirs_derive_from_frust_path() {
+        let ctx = test_context(); // frust_path = "/path/to/frust"
+        assert_eq!(
+            ctx.frust_embedding_android_dir(),
+            "/path/to/frust/../../platform/android/frust-embedding"
+        );
+        assert_eq!(
+            ctx.frust_embedding_ios_dir(),
+            "/path/to/frust/../../platform/ios/FrustEmbedding"
+        );
+    }
+
+    #[test]
+    fn embedding_dirs_are_render_vars_not_path_vars() {
+        let ctx = test_context();
+        let render_vars = ctx.render_vars();
+        assert_eq!(
+            render_vars.get("frust_embedding_android_dir").unwrap(),
+            &ctx.frust_embedding_android_dir()
+        );
+        assert_eq!(
+            render_vars.get("frust_embedding_ios_dir").unwrap(),
+            &ctx.frust_embedding_ios_dir()
+        );
+
+        let path_vars = ctx.path_vars();
+        assert!(!path_vars.contains_key("frust_embedding_android_dir"));
+        assert!(!path_vars.contains_key("frust_embedding_ios_dir"));
+    }
+
+    #[test]
+    fn embedding_dirs_preserve_absolute_or_relative_form() {
+        let mut ctx = test_context();
+        ctx.frust_path = "/absolute/frust".into();
+        assert!(ctx.frust_embedding_android_dir().starts_with('/'));
+        assert!(ctx.frust_embedding_ios_dir().starts_with('/'));
+
+        ctx.frust_path = "../relative/frust".into();
+        assert!(!ctx.frust_embedding_android_dir().starts_with('/'));
+        assert!(!ctx.frust_embedding_ios_dir().starts_with('/'));
+        assert_eq!(
+            ctx.frust_embedding_android_dir(),
+            "../relative/frust/../../platform/android/frust-embedding"
+        );
+        assert_eq!(
+            ctx.frust_embedding_ios_dir(),
+            "../relative/frust/../../platform/ios/FrustEmbedding"
+        );
     }
 }
