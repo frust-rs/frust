@@ -1,6 +1,7 @@
 /// SplitMix64 — a byte-for-byte port of the frust side's PRNG
-/// (`examples/bubblebench/src/physics.rs`), so a given seed produces the SAME
-/// value sequence on both sides. This is the fairness gate's foundation:
+/// (`benchmarks/frust_bench/src/scenarios/s1_animation.rs`), so a given seed
+/// produces the SAME value sequence on both sides. This is the fairness gate's
+/// foundation:
 /// identical seeds → identical datasets (bubble layouts, image bytes, JSON
 /// payloads) across the two apps.
 ///

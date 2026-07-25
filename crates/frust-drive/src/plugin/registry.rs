@@ -1,19 +1,25 @@
 //! The static plugin registry (v1) — three entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
-//! an optional `biometric-gate` feature bundling the Android/iOS additions the
-//! plugin's README documents), and `clean-signals-frust` (dependency, gated on
-//! the sibling `clean-signals-rs` checkout).
+//! an optional `biometric-gate` feature wiring in the plugin's own Android
+//! library module and the iOS plist key its README documents), and
+//! `clean-signals-frust` (dependency, gated on the sibling `clean-signals-rs`
+//! checkout).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
-/// The `biometric-gate` feature's four contributions — the exact
-/// Android/iOS additions `plugins/secure-storage/README.md` §2 documents. The
-/// Kotlin helper is embedded verbatim from the plugin's canonical
-/// `platform/FrustBiometric.kt` (the copy S05 landed) so the two never drift.
+/// The `biometric-gate` feature's two contributions — the exact Android/iOS
+/// additions `plugins/secure-storage/README.md` §2 documents.
+///
+/// Android is a **single** contribution: the plugin's own
+/// `com.android.library` module. `FrustBiometric.kt` lives inside it (no file
+/// is copied into the app), its `AndroidManifest.xml` carries the
+/// `USE_BIOMETRIC` permission for the manifest merger to fold in, and its
+/// `consumerProguardFiles` carries the R8 keep rule — so the app's manifest
+/// and `proguard-rules.pro` are never touched, and nothing can drift from the
+/// plugin it came from. iOS still needs a real [`Contribution::PlistEntry`]:
+/// Apple requires the usage-description string in the *app's* own
+/// `Info.plist`.
 const SECURE_STORAGE_BIOMETRIC: &[Contribution] = &[
-    Contribution::ManifestPermission {
-        permission: "android.permission.USE_BIOMETRIC",
-    },
     Contribution::PlistEntry {
         key: "NSFaceIDUsageDescription",
         value: "Unlock your stored credentials.",
@@ -21,16 +27,9 @@ const SECURE_STORAGE_BIOMETRIC: &[Contribution] = &[
         comment: "Face ID / Touch ID usage description, added only when the \
                   frust-secure-storage biometric gate is used.",
     },
-    Contribution::KotlinFile {
-        relative_path: "android/app/src/main/kotlin/dev/frust/FrustBiometric.kt",
-        contents: include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/secure-storage/platform/FrustBiometric.kt"
-        )),
-    },
-    Contribution::ProguardRule {
-        marker: "# frust-secure-storage biometric helper (looked up via JNI/classloader)",
-        rule: "-keep class dev.frust.FrustBiometric { *; }",
+    Contribution::GradleModule {
+        gradle_name: ":frust-secure-storage",
+        rel_path: "plugins/secure-storage/platform/android",
     },
 ];
 
@@ -38,8 +37,10 @@ const SECURE_STORAGE_BIOMETRIC: &[Contribution] = &[
 const SECURE_STORAGE_FEATURES: &[FeatureSpec] = &[FeatureSpec {
     id: "biometric-gate",
     summary: "Per-store Face ID / Touch ID / BiometricPrompt gate: adds the \
-              USE_BIOMETRIC manifest permission, the NSFaceIDUsageDescription \
-              plist key, the FrustBiometric.kt helper, and an R8 keep rule.",
+              NSFaceIDUsageDescription plist key and includes the plugin's \
+              `:frust-secure-storage` Android library module (which carries \
+              the FrustBiometric helper, the USE_BIOMETRIC permission, and \
+              the R8 keep rule).",
     contributions: SECURE_STORAGE_BIOMETRIC,
 }];
 
@@ -108,28 +109,52 @@ mod tests {
     }
 
     #[test]
-    fn secure_storage_biometric_bundles_the_four_readme_contributions() {
+    fn secure_storage_biometric_bundles_the_two_readme_contributions() {
         let spec = find_plugin("secure-storage").unwrap();
         let feature = spec
             .optional_features
             .iter()
             .find(|f| f.id == "biometric-gate")
             .expect("biometric-gate feature");
-        // manifest permission + plist key + kotlin file + proguard rule.
-        assert_eq!(feature.contributions.len(), 4);
-        // The embedded Kotlin helper is the real canonical file, not a stub.
-        let has_helper = feature.contributions.iter().any(|c| {
+        // plist key + the plugin's own Gradle module. The Android permission,
+        // Kotlin helper and R8 keep rule all ride inside the module now.
+        assert_eq!(feature.contributions.len(), 2);
+        let has_module = feature.contributions.iter().any(|c| {
             matches!(
                 c,
-                Contribution::KotlinFile { contents, .. }
-                    if contents.contains("object FrustBiometric")
-                        && contents.contains("package dev.frust")
+                Contribution::GradleModule { gradle_name, rel_path }
+                    if *gradle_name == ":frust-secure-storage"
+                        && *rel_path == "plugins/secure-storage/platform/android"
             )
         });
         assert!(
-            has_helper,
-            "biometric-gate must embed the real FrustBiometric.kt"
+            has_module,
+            "biometric-gate must include the plugin's Android library module"
         );
+    }
+
+    /// The `rel_path` above is a repo-root-relative directory that must
+    /// actually exist in this checkout — a typo would otherwise surface only
+    /// as a Gradle failure in a generated app, far from here.
+    #[test]
+    fn secure_storage_gradle_module_path_exists_in_this_checkout() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for plugin in known_plugins() {
+            for contribution in plugin.base.iter().chain(
+                plugin
+                    .optional_features
+                    .iter()
+                    .flat_map(|f| f.contributions.iter()),
+            ) {
+                if let Contribution::GradleModule { rel_path, .. } = contribution {
+                    let dir = repo_root.join(rel_path);
+                    assert!(
+                        dir.join("build.gradle.kts").is_file(),
+                        "`{rel_path}` must be a Gradle module directory in this checkout"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

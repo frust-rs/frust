@@ -6,7 +6,10 @@ android/key.properties
 *.keystore
 
 # CLI-generated build output (kept in sync with `frust clean`'s REMOVED_DIRS).
+# `android/build/` is the `:frust-embedding` module's redirected output — see
+# android/settings.gradle.kts' `gradle.lifecycle.beforeProject` block.
 android/app/build/
+android/build/
 android/.gradle/
 build/
 

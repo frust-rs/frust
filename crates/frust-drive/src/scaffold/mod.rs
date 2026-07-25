@@ -358,6 +358,8 @@ mod tests {
         let gitignore = fs::read_to_string(dest.join(".gitignore")).unwrap();
         // Verify build-output patterns are present (kept in sync with clean.rs REMOVED_DIRS).
         assert!(gitignore.contains("android/app/build/"), "{gitignore}");
+        // The `:frust-embedding` module's redirected Gradle output.
+        assert!(gitignore.contains("android/build/"), "{gitignore}");
         assert!(gitignore.contains("android/.gradle/"), "{gitignore}");
         assert!(gitignore.contains("build/"), "{gitignore}");
         assert!(
@@ -458,76 +460,81 @@ mod tests {
             main_activity.contains(&format!("package {}", ctx.android_identifier())),
             "{main_activity}"
         );
-        // Deep links (task 07): cold-start (`onCreate`) and running
-        // (`onNewIntent`) delivery must both be present, unconditionally —
-        // only the manifest's intent-filter/launchMode are gated on
-        // `[deeplink]` config.
+        // Embedding extraction (task 04): the generated `MainActivity` is a
+        // near-empty subclass of the framework-owned `dev.frust.FrustActivity`
+        // — every lifecycle/deep-link/back/IME behavior it used to carry inline
+        // now lives in `platform/android/frust-embedding` (covered by that
+        // module's own compile gate and the on-device run, not by this test).
         assert!(
-            main_activity.contains("surfaceView.onDeepLink(intent?.data?.toString())"),
+            main_activity.contains("import dev.frust.FrustActivity"),
             "{main_activity}"
         );
         assert!(
-            main_activity.contains("override fun onNewIntent"),
+            main_activity.contains("class MainActivity : FrustActivity()"),
             "{main_activity}"
+        );
+        assert!(
+            main_activity.lines().count() <= 6,
+            "MainActivity.kt must stay under the 6-line budget:\n{main_activity}"
         );
 
-        // `FrustSurfaceView` stays at the fixed `dev/frust/` package
-        // regardless of `android_identifier`.
-        let surface_view = dest.join("android/app/src/main/kotlin/dev/frust/FrustSurfaceView.kt");
-        assert!(surface_view.exists());
-        let surface_view_src = fs::read_to_string(&surface_view).unwrap();
-        assert!(surface_view_src.contains("package dev.frust"));
+        // No framework Kotlin/Java is rendered into the app any more.
         assert!(
-            surface_view_src.contains(&format!("System.loadLibrary(\"{}\")", ctx.project_name))
-        );
-        // Touch delivery (spec §9): the `nativeOnTouch` export and its
-        // `onTouchEvent` bridge must be present in the generated surface view.
-        assert!(
-            surface_view_src.contains("external fun nativeOnTouch"),
-            "{surface_view_src}"
+            !dest.join("android/app/src/main/kotlin/dev/frust").exists(),
+            "the app template must ship no `dev.frust` Kotlin"
         );
         assert!(
-            surface_view_src.contains("override fun onTouchEvent"),
-            "{surface_view_src}"
+            !dest
+                .join("android/app/src/main/java/dev/accesskit")
+                .exists(),
+            "the app template must ship no vendored accesskit delegate"
         );
-        // IME transport (spec §14 Phase 4): the three IME exports, the
-        // `BaseInputConnection` mirror, and the editor-view hooks must be
-        // present, and no AndroidX dependency introduced.
+
+        // The embedding module is wired in by path: an `include`, a
+        // `projectDir` pointing at the frust checkout, and the build-output
+        // redirect that keeps that checkout pristine.
+        let settings = fs::read_to_string(dest.join("android/settings.gradle.kts")).unwrap();
         for needle in [
-            "external fun nativeImeApply",
-            "external fun nativeImeState",
-            "external fun nativeImeAction",
-            "override fun onCheckIsTextEditor",
-            "override fun onCreateInputConnection",
-            "BaseInputConnection(this@FrustSurfaceView",
-            "imm.updateSelection",
-            // Deep links (task 07): the export, the queue-until-ready field,
-            // and the public delivery method must all be present.
-            "external fun nativeOnDeepLink",
-            "pendingDeepLink",
-            "fun onDeepLink(url: String?)",
+            "include(\":frust-embedding\")",
+            "project(\":frust-embedding\").projectDir =",
+            "file(providers.gradleProperty(\"frust.embedding.dir\").get())",
+            "gradle.lifecycle.beforeProject {",
+            "layout.buildDirectory.set(rootDir.resolve(\"build/frust-embedding\"))",
         ] {
             assert!(
-                surface_view_src.contains(needle),
-                "expected `{needle}` in generated FrustSurfaceView.kt:\n{surface_view_src}"
+                settings.contains(needle),
+                "expected `{needle}`:\n{settings}"
             );
         }
-        // IME transport itself still uses no AndroidX types (state-sync
-        // stays on `BaseInputConnection`/`InputMethodManager` above);
-        // `androidx.core` is now a real, intentional dependency of the
-        // *inset*/appearance-contrast path (device-parity task 08 —
-        // RESEARCH.md "Insets / SafeArea / SystemChrome"), not IME.
-        for needle in [
-            "external fun nativeOnInsetsChanged",
-            "external fun nativeOnBackPress",
-            "androidx.core.view.ViewCompat",
-            "fun dispatchBackPress(): Boolean",
-        ] {
-            assert!(
-                surface_view_src.contains(needle),
-                "expected `{needle}` in generated FrustSurfaceView.kt:\n{surface_view_src}"
-            );
-        }
+
+        // `frust.embedding.dir` is the single machine-specific indirection
+        // point, resolved (not a literal placeholder) at scaffold time.
+        let gradle_properties = fs::read_to_string(dest.join("android/gradle.properties")).unwrap();
+        assert!(
+            gradle_properties.contains(&format!(
+                "frust.embedding.dir={}",
+                ctx.frust_embedding_android_dir()
+            )),
+            "{gradle_properties}"
+        );
+        assert!(!gradle_properties.contains("{{"), "{gradle_properties}");
+
+        assert!(
+            build_gradle.contains("implementation(project(\":frust-embedding\"))"),
+            "{build_gradle}"
+        );
+
+        // `FrustActivity` resolves the app's native library name from this
+        // `<meta-data>`; its absence is a launch-time `check()` failure.
+        let manifest =
+            fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            manifest.contains(&format!(
+                "<meta-data android:name=\"dev.frust.nativeLibrary\" android:value=\"{}\" />",
+                ctx.project_name
+            )),
+            "{manifest}"
+        );
 
         let _ = fs::remove_dir_all(&dest);
     }
@@ -582,140 +589,262 @@ mod tests {
         );
         assert!(!info_plist.contains("{{"), "{info_plist}");
 
-        // The static Swift sources and bridging header were copied verbatim.
-        assert!(dest.join("ios/Runner/AppDelegate.swift").exists());
-        assert!(dest.join("ios/Runner/SceneDelegate.swift").exists());
-        assert!(dest.join("ios/Runner/FrustView.swift").exists());
-        assert!(dest.join("ios/Runner/FrustViewController.swift").exists());
-        assert!(dest.join("ios/Runner/Runner-Bridging-Header.h").exists());
+        // Embedding extraction (task 05): `ios/Runner/` ships exactly four
+        // things — the two thin delegates, the Info.plist and the asset
+        // catalog. Every framework Swift source (and the bridging header)
+        // now lives in the `platform/ios/FrustEmbedding` Swift package.
+        let mut runner_entries: Vec<String> = fs::read_dir(dest.join("ios/Runner"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        runner_entries.sort();
+        assert_eq!(
+            runner_entries,
+            [
+                "AppDelegate.swift",
+                "Assets.xcassets",
+                "Info.plist",
+                "SceneDelegate.swift",
+            ],
+            "the app template must ship no framework Swift under ios/Runner"
+        );
 
-        // Touch delivery (spec §9): the `frust_dispatch_touch` export must be
-        // declared in the bridging header and bridged from the view's touch
-        // overrides in `FrustView.swift`.
-        let bridging =
-            fs::read_to_string(dest.join("ios/Runner/Runner-Bridging-Header.h")).unwrap();
-        assert!(bridging.contains("frust_dispatch_touch"), "{bridging}");
-        let frust_view = fs::read_to_string(dest.join("ios/Runner/FrustView.swift")).unwrap();
-        assert!(frust_view.contains("touchesBegan"), "{frust_view}");
-        assert!(frust_view.contains("var onTouch"), "{frust_view}");
+        // The two delegates are near-empty subclasses of the package's own
+        // base classes. Their former bodies — the deep-link plumbing in
+        // particular (`connectionOptions.urlContexts`, `openURLContexts`,
+        // `handleDeepLink`) — are now `FrustSceneDelegate`/
+        // `FrustViewController` code, covered by the package's compile gate
+        // and the on-device deep-link run, not by this test.
+        let app_delegate = fs::read_to_string(dest.join("ios/Runner/AppDelegate.swift")).unwrap();
+        assert!(
+            app_delegate.contains("import FrustEmbedding"),
+            "{app_delegate}"
+        );
+        assert!(
+            app_delegate.contains("class AppDelegate: FrustAppDelegate"),
+            "{app_delegate}"
+        );
+        assert!(
+            app_delegate.lines().count() <= 6,
+            "AppDelegate.swift must stay under the 6-line budget:\n{app_delegate}"
+        );
 
-        // Deep links (task 07): the C export, the queue-until-ready field,
-        // the delivery method, and both SceneDelegate call sites must all
-        // be present, unconditionally — only Info.plist's CFBundleURLTypes
-        // is gated on `[deeplink]` config.
-        assert!(bridging.contains("frust_on_deep_link"), "{bridging}");
-        let controller =
-            fs::read_to_string(dest.join("ios/Runner/FrustViewController.swift")).unwrap();
-        assert!(controller.contains("pendingDeepLink"), "{controller}");
-        assert!(controller.contains("func handleDeepLink"), "{controller}");
         let scene_delegate =
             fs::read_to_string(dest.join("ios/Runner/SceneDelegate.swift")).unwrap();
         assert!(
-            scene_delegate.contains("connectionOptions.urlContexts"),
+            scene_delegate.contains("import FrustEmbedding"),
             "{scene_delegate}"
         );
         assert!(
-            scene_delegate.contains("func scene(_ scene: UIScene, openURLContexts"),
+            scene_delegate.contains("class SceneDelegate: FrustSceneDelegate"),
             "{scene_delegate}"
+        );
+        assert!(
+            scene_delegate.lines().count() <= 4,
+            "SceneDelegate.swift must stay under the 4-line budget:\n{scene_delegate}"
         );
 
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Platform-views task 09: the generated iOS project registers the two
-    /// new platform-view host Swift sources (`FrustViewHost.swift`,
-    /// `FrustPlatformViewFactory.swift`) in every pbxproj section exactly
-    /// once, and the pbxproj is structurally well-formed (balanced sections,
-    /// no duplicate object ids). Host-runnable: this checks the *rendered*
-    /// text without needing `xcodebuild` (which `create_ios.rs` gates on
-    /// macOS). The Swift compile gate itself is owed to a macOS run (task 11).
+    /// A 24-character uppercase-hex pbxproj object id — the style every id
+    /// in the iOS template uses.
+    fn is_pbx_object_id(token: &str) -> bool {
+        token.len() == 24
+            && token
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('A'..='F').contains(&c))
+    }
+
+    /// Every object-id token on one pbxproj line, in order of appearance.
+    fn pbx_ids_on_line(line: &str) -> Vec<&str> {
+        line.split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|token| is_pbx_object_id(token))
+            .collect()
+    }
+
+    /// Splits a rendered `project.pbxproj` into `(defined ids, referenced
+    /// ids)`. A *definition* is a top-level entry of the `objects = { … }`
+    /// map: exactly two leading tabs, an object id, then ` = {`. Every other
+    /// id mention is a *reference* — including the deeper-indented
+    /// `TargetAttributes` entry and the trailing `rootObject` line, both of
+    /// which point at objects defined elsewhere.
+    fn pbx_ids(pbxproj: &str) -> (Vec<String>, Vec<String>) {
+        let mut defined = Vec::new();
+        let mut referenced = Vec::new();
+        for line in pbxproj.lines() {
+            let ids = pbx_ids_on_line(line);
+            let top_level = line
+                .strip_prefix("\t\t")
+                .filter(|rest| !rest.starts_with('\t'));
+            let is_definition = top_level.is_some_and(|rest| {
+                ids.first().is_some_and(|id| rest.starts_with(id)) && rest.contains(" = {")
+            });
+            let mut ids = ids.into_iter();
+            if is_definition {
+                defined.push(ids.next().expect("a definition line has an id").to_string());
+            }
+            referenced.extend(ids.map(str::to_string));
+        }
+        (defined, referenced)
+    }
+
+    /// The body of one `/* Begin <name> section */ … /* End <name> section */`
+    /// block, so a section-scoped assertion can't accidentally match text
+    /// from a different section.
+    fn pbx_section<'a>(pbxproj: &'a str, name: &str) -> &'a str {
+        let begin = format!("/* Begin {name} section */");
+        let end = format!("/* End {name} section */");
+        let start = pbxproj
+            .find(&begin)
+            .unwrap_or_else(|| panic!("missing `{begin}`:\n{pbxproj}"));
+        let stop = pbxproj
+            .find(&end)
+            .unwrap_or_else(|| panic!("missing `{end}`:\n{pbxproj}"));
+        &pbxproj[start..stop]
+    }
+
+    /// The id introduced by the single definition line containing `needle`.
+    fn pbx_definition_id(pbxproj: &str, needle: &str) -> String {
+        let matches: Vec<&str> = pbxproj
+            .lines()
+            .filter(|line| line.contains(needle))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one definition line containing `{needle}`:\n{pbxproj}"
+        );
+        pbx_ids_on_line(matches[0])
+            .first()
+            .unwrap_or_else(|| panic!("no object id on `{}`", matches[0]))
+            .to_string()
+    }
+
+    /// Embedding extraction (task 05), retargeted from the platform-view
+    /// host-file registration this test originally guarded: the generated
+    /// iOS project must wire the `FrustEmbedding` Swift package consistently
+    /// across **all five** sections that have to mention it
+    /// (`PBXProject.packageReferences`, the `XCLocalSwiftPackageReference`,
+    /// `PBXNativeTarget.packageProductDependencies`, the
+    /// `XCSwiftPackageProductDependency`, and a `PBXBuildFile { productRef }`
+    /// in the Frameworks phase), must mention none of the six deleted
+    /// framework files, and must carry no dangling object id — the classic
+    /// corruption that makes Xcode refuse to open a project.
+    ///
+    /// Host-runnable: this checks the *rendered* text without needing
+    /// `xcodebuild` (which `create_ios.rs` gates on macOS), and on a non-macOS
+    /// host it is the **only** automated guard the pbxproj has.
     #[test]
-    fn generate_ios_pbxproj_registers_platform_view_host_files_well_formed() {
-        let dest = unique_temp_dir("ios-pbxproj-platform-views");
+    fn generate_ios_pbxproj_wires_embedding_package_well_formed() {
+        let dest = unique_temp_dir("ios-pbxproj-embedding");
         let ctx = test_context();
         generate(&dest, &ctx, None, false, None).unwrap();
-
-        // Both new Swift sources landed on disk, copied verbatim.
-        assert!(dest.join("ios/Runner/FrustViewHost.swift").exists());
-        assert!(
-            dest.join("ios/Runner/FrustPlatformViewFactory.swift")
-                .exists()
-        );
-        // The host code + factory protocol carry their load-bearing shapes.
-        let host = fs::read_to_string(dest.join("ios/Runner/FrustViewHost.swift")).unwrap();
-        assert!(host.contains("frust_platform_view_commands_json"), "{host}");
-        assert!(host.contains("NSClassFromString"), "{host}");
-        assert!(
-            host.contains("CATransaction.setDisableActions(true)"),
-            "{host}"
-        );
-        let factory =
-            fs::read_to_string(dest.join("ios/Runner/FrustPlatformViewFactory.swift")).unwrap();
-        assert!(
-            factory.contains("@objc public protocol FrustPlatformViewFactory"),
-            "{factory}"
-        );
-        assert!(
-            factory.contains("func createView(paramsJson: String) -> UIView"),
-            "{factory}"
-        );
-
-        // The controller wires the translucent opt-in + host poll (task 09).
-        let controller =
-            fs::read_to_string(dest.join("ios/Runner/FrustViewController.swift")).unwrap();
-        assert!(
-            controller.contains("frust_set_surface_mode(1)"),
-            "{controller}"
-        );
-        assert!(
-            controller.contains("platformViewHost?.poll(handle: handle)"),
-            "{controller}"
-        );
-        // The bridging header gained the two additive C decls.
-        let bridging =
-            fs::read_to_string(dest.join("ios/Runner/Runner-Bridging-Header.h")).unwrap();
-        assert!(
-            bridging.contains("void  frust_set_surface_mode(uint8_t translucent);"),
-            "{bridging}"
-        );
-        assert!(
-            bridging.contains(
-                "char *frust_platform_view_commands_json(void *handle, uint64_t ack_generation);"
-            ),
-            "{bridging}"
-        );
 
         let pbxproj =
             fs::read_to_string(dest.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
 
-        // Each new file is registered exactly once per section: build file,
-        // file reference, group child, and sources build phase.
-        for file in ["FrustViewHost.swift", "FrustPlatformViewFactory.swift"] {
-            let build_file_def = format!("/* {file} in Sources */ = {{isa = PBXBuildFile;");
-            let file_ref_def = format!("/* {file} */ = {{isa = PBXFileReference;");
-            let group_child = format!("/* {file} */,");
-            let sources_phase_ref = format!("/* {file} in Sources */,");
-            assert_eq!(
-                pbxproj.matches(&build_file_def).count(),
-                1,
-                "`{file}` PBXBuildFile definition should appear once:\n{pbxproj}"
+        // (1) The local package reference itself, carrying the resolved (not
+        // placeholder) embedding path under the `relativePath` key Xcode
+        // reads even for an absolute value.
+        let package_ref_id = pbx_definition_id(
+            &pbxproj,
+            "/* XCLocalSwiftPackageReference \"FrustEmbedding\" */ = {",
+        );
+        let package_ref_section = pbx_section(&pbxproj, "XCLocalSwiftPackageReference");
+        assert!(
+            package_ref_section.contains("isa = XCLocalSwiftPackageReference;"),
+            "{pbxproj}"
+        );
+        assert!(
+            package_ref_section.contains(&format!(
+                "relativePath = \"{}\";",
+                ctx.frust_embedding_ios_dir()
+            )),
+            "{pbxproj}"
+        );
+
+        // (2) …referenced from `PBXProject.packageReferences`.
+        assert!(
+            pbx_section(&pbxproj, "PBXProject").contains(&package_ref_id),
+            "`packageReferences` must list the local package reference:\n{pbxproj}"
+        );
+
+        // (3) The product dependency on the package's `FrustEmbedding`
+        // product…
+        let product_dep_id = pbx_definition_id(&pbxproj, "/* FrustEmbedding */ = {");
+        assert!(
+            pbx_section(&pbxproj, "XCSwiftPackageProductDependency")
+                .contains("productName = FrustEmbedding;"),
+            "{pbxproj}"
+        );
+
+        // (4) …referenced from `PBXNativeTarget.packageProductDependencies`…
+        assert!(
+            pbx_section(&pbxproj, "PBXNativeTarget").contains(&product_dep_id),
+            "`packageProductDependencies` must list the product dependency:\n{pbxproj}"
+        );
+
+        // (5) …and linked by a `PBXBuildFile { productRef = … }` in the
+        // Frameworks build phase (all five pieces are required — s1's spike).
+        let build_file_id = pbx_definition_id(
+            &pbxproj,
+            "/* FrustEmbedding in Frameworks */ = {isa = PBXBuildFile;",
+        );
+        assert!(
+            pbxproj.contains(&format!("productRef = {product_dep_id} ")),
+            "the Frameworks PBXBuildFile must point at the product dependency:\n{pbxproj}"
+        );
+        assert!(
+            pbx_section(&pbxproj, "PBXFrameworksBuildPhase").contains(&build_file_id),
+            "the Frameworks phase must list the product build file:\n{pbxproj}"
+        );
+
+        // None of the six deleted framework files may survive in *any*
+        // section, and the bridging-header build setting is gone outright.
+        for deleted in [
+            "FrustView.swift",
+            "FrustViewController.swift",
+            "FrustViewHost.swift",
+            "FrustPlatformViewFactory.swift",
+            "FrustTextInput.swift",
+            "Runner-Bridging-Header.h",
+        ] {
+            assert!(
+                !pbxproj.contains(deleted),
+                "`{deleted}` is deleted but still referenced in the pbxproj:\n{pbxproj}"
             );
-            assert_eq!(
-                pbxproj.matches(&file_ref_def).count(),
-                1,
-                "`{file}` PBXFileReference definition should appear once:\n{pbxproj}"
-            );
-            assert_eq!(
-                pbxproj.matches(&group_child).count(),
-                1,
-                "`{file}` group child should appear once:\n{pbxproj}"
-            );
-            assert_eq!(
-                pbxproj.matches(&sources_phase_ref).count(),
-                1,
-                "`{file}` sources-phase reference should appear once:\n{pbxproj}"
+            assert!(
+                !dest.join("ios/Runner").join(deleted).exists(),
+                "`{deleted}` must not be generated any more"
             );
         }
+        assert!(!pbxproj.contains("SWIFT_OBJC_BRIDGING_HEADER"), "{pbxproj}");
+
+        // Over-deletion guard: the native build path is untouched.
+        assert!(pbxproj.contains("Build Rust staticlib"), "{pbxproj}");
+        assert_eq!(
+            pbxproj
+                .matches("LIBRARY_SEARCH_PATHS = \"$(inherited) $(BUILT_PRODUCTS_DIR)\";")
+                .count(),
+            3,
+            "{pbxproj}"
+        );
+        assert_eq!(
+            pbxproj
+                .matches(&format!("\"-l{}\",", ctx.project_name))
+                .count(),
+            3,
+            "{pbxproj}"
+        );
+        assert_eq!(
+            pbxproj
+                .matches("IPHONEOS_DEPLOYMENT_TARGET = 15.0;")
+                .count(),
+            3,
+            "{pbxproj}"
+        );
+        assert!(pbxproj.contains("objectVersion = 54;"), "{pbxproj}");
 
         // Balanced: every `/* Begin X section */` has a matching `/* End */`.
         assert_eq!(
@@ -724,23 +853,32 @@ mod tests {
             "unbalanced PBX sections:\n{pbxproj}"
         );
 
-        // No duplicate object ids: every `<id> ... = {isa = ...}` definition
-        // line introduces a unique id (a copy/paste dup makes Xcode reject the
-        // project). Reference lines inside `files = (...)`/`children = (...)`
-        // don't contain `= {isa = ` so they're excluded.
-        let mut ids: Vec<&str> = pbxproj
-            .lines()
-            .filter(|line| line.contains("= {isa = "))
-            .filter_map(|line| line.split_whitespace().next())
-            .collect();
-        let total = ids.len();
-        ids.sort_unstable();
-        ids.dedup();
+        // Object-id consistency, the corruption this test exists to catch:
+        // no duplicate definition, no reference to an undefined id (a
+        // dangling id — the project Xcode refuses to open), and no defined
+        // object nothing points at (an orphan left by a partial deletion).
+        let (defined, referenced) = pbx_ids(&pbxproj);
+        assert!(defined.len() > 20, "suspiciously few objects:\n{pbxproj}");
+        let mut unique = defined.clone();
+        unique.sort_unstable();
+        unique.dedup();
         assert_eq!(
-            ids.len(),
-            total,
+            unique.len(),
+            defined.len(),
             "duplicate PBX object id(s) in generated pbxproj:\n{pbxproj}"
         );
+        for id in &referenced {
+            assert!(
+                defined.contains(id),
+                "dangling PBX object id `{id}` (referenced but never defined):\n{pbxproj}"
+            );
+        }
+        for id in &defined {
+            assert!(
+                referenced.contains(id),
+                "orphaned PBX object `{id}` (defined but never referenced):\n{pbxproj}"
+            );
+        }
 
         // No template placeholders survived rendering.
         assert!(!pbxproj.contains("{{"), "{pbxproj}");
@@ -751,6 +889,9 @@ mod tests {
     /// Task 07 acceptance criterion 2: with no `[deeplink]` config, the
     /// rendered Android manifest must be byte-identical to the pre-task
     /// rendering (no `android:launchMode`, no second `<intent-filter>`).
+    /// The baseline gained the `dev.frust.nativeLibrary` `<meta-data>` element
+    /// with the embedding extraction (task 04) — `FrustActivity` reads it to
+    /// resolve the app's Rust library name.
     #[test]
     fn generate_android_manifest_without_deeplink_is_byte_identical_to_pre_task_baseline() {
         let dest = unique_temp_dir("manifest-no-deeplink");
@@ -772,6 +913,9 @@ mod tests {
              \x20\x20\x20\x20\x20\x20\x20\x20android:roundIcon=\"@mipmap/ic_launcher_round\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar\">\n\
              \n\
+             \x20\x20\x20\x20\x20\x20\x20\x20<!-- Read by dev.frust.FrustActivity to load this app's Rust library. -->\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20<meta-data android:name=\"dev.frust.nativeLibrary\" android:value=\"{project}\" />\n\
+             \n\
              \x20\x20\x20\x20\x20\x20\x20\x20<activity\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:name=\".MainActivity\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:exported=\"true\"\n\
@@ -787,6 +931,7 @@ mod tests {
              \n\
              </manifest>",
             title = ctx.title_case_name,
+            project = ctx.project_name,
         );
         assert_eq!(manifest, expected);
 

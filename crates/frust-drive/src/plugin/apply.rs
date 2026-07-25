@@ -9,12 +9,24 @@ use toml_edit::{DocumentMut, InlineTable, Item, Value};
 
 use super::registry::find_plugin;
 use super::{AddItem, AddOutcome, AddReport, Contribution, PluginAddError, PluginSpec};
+use crate::scaffold::context::frust_path_from_project_subdir;
 
 /// Project-relative paths of the files a contribution edits.
 const CARGO_TOML_REL: &str = "Cargo.toml";
 const MANIFEST_REL: &str = "android/app/src/main/AndroidManifest.xml";
 const PLIST_REL: &str = "ios/Runner/Info.plist";
-const PROGUARD_REL: &str = "android/app/proguard-rules.pro";
+const SETTINGS_GRADLE_REL: &str = "android/settings.gradle.kts";
+const APP_BUILD_GRADLE_REL: &str = "android/app/build.gradle.kts";
+
+/// The marker comments the Android app template ships for plugin-contributed
+/// Gradle wiring (`templates/app/android.tmpl/settings.gradle.kts.tmpl` and
+/// `app/build.gradle.kts.tmpl`). An insert goes on the line *after* the
+/// marker; a project missing either marker is
+/// [`PluginAddError::MalformedProjectFile`] and is never rewritten — guessing
+/// at `include(":app")` or a bare `dependencies {` would be a second,
+/// unpinned convention.
+const SETTINGS_ANCHOR: &str = "// frust:plugin-includes";
+const APP_DEPS_ANCHOR: &str = "// frust:plugin-dependencies";
 
 /// Apply plugin `id` (with the requested optional `features`) to the generated
 /// project at `project_root`, returning a per-edit [`AddReport`]. Idempotent:
@@ -118,13 +130,10 @@ fn apply_contribution(
             value,
             comment,
         } => apply_plist_entry(project_root, key, value, comment),
-        Contribution::KotlinFile {
-            relative_path,
-            contents,
-        } => apply_kotlin_file(project_root, relative_path, contents),
-        Contribution::ProguardRule { marker, rule } => {
-            apply_proguard_rule(project_root, marker, rule)
-        }
+        Contribution::GradleModule {
+            gradle_name,
+            rel_path,
+        } => apply_gradle_module(project_root, frust_path, gradle_name, rel_path),
     }
 }
 
@@ -143,6 +152,33 @@ fn frust_dep_path(doc: &DocumentMut) -> Option<String> {
 /// facade crate dir, two levels below the repo root).
 fn plugin_dep_path(frust_path: &str, crate_dir: &str) -> String {
     format!("{frust_path}/../../plugins/{crate_dir}")
+}
+
+/// Resolve a repo-root-relative directory (a [`Contribution::GradleModule`]'s
+/// `rel_path`) the same way [`plugin_dep_path`] resolves a crate dir, and the
+/// same way the scaffold derives `frust.embedding.dir`:
+/// `<frust>/../../<rel_path>`. One path convention, not two.
+///
+/// Unlike [`plugin_dep_path`] — whose output lands in the project root's
+/// `Cargo.toml`, the base a relative `frust_path` is written against — this
+/// value lands in `android/settings.gradle.kts` (via
+/// [`settings_include_block`]) and is resolved by `file(...)` from
+/// `<project>/android/`. A relative `frust_path` therefore needs one extra
+/// `../` to climb out of that subdirectory, applied by the single shared
+/// [`frust_path_from_project_subdir`] helper the scaffold's two embedding
+/// accessors use; an absolute path is emitted unchanged.
+///
+/// Like those accessors, this **widens** the reach of the machine-specific
+/// developer-checkout path `frust_path` already carries rather than merely
+/// inheriting it: a missing checkout now fails Gradle *sync* (the project
+/// won't configure), not just the Rust link step. A deliberate trade-off,
+/// mitigated by the published-coordinate future in this feature's
+/// `design/PUBLICATION_SEAM.md` §5.
+fn repo_relative_path(frust_path: &str, rel_path: &str) -> String {
+    format!(
+        "{}/../../{rel_path}",
+        frust_path_from_project_subdir(frust_path)
+    )
 }
 
 /// Resolve a `requires_sibling` path to an absolute location for the on-disk
@@ -215,46 +251,88 @@ fn apply_plist_entry(
     Ok(AddOutcome::Applied)
 }
 
-fn apply_kotlin_file(
+/// Wire a plugin's `com.android.library` module into the generated project:
+/// the `include(...)`/`projectDir`/build-dir-redirect trio in
+/// `android/settings.gradle.kts` plus the `implementation(project(...))` line
+/// in `android/app/build.gradle.kts`.
+///
+/// Both files are read and their replacements computed **before** either is
+/// written, so a malformed second file can't leave the first half-edited.
+/// Each half is independently skip-if-present, which is what makes a
+/// half-applied state (someone deleted one of the two lines) complete rather
+/// than duplicate: the outcome is [`AddOutcome::Applied`] if either half
+/// changed, [`AddOutcome::AlreadyPresent`] only when both were already wired.
+///
+/// The module directory is *not* checked for existence — the mutation is a
+/// text insert, and whether the path resolves is Gradle's problem at build
+/// time, not `add_plugin`'s (a plugin can legitimately be wired before the
+/// frust checkout moves into place).
+fn apply_gradle_module(
     project_root: &Path,
-    relative_path: &str,
-    contents: &str,
+    frust_path: &str,
+    gradle_name: &str,
+    rel_path: &str,
 ) -> Result<AddOutcome, PluginAddError> {
-    let path = project_root.join(relative_path);
-    if path.exists() {
+    let settings_path = project_root.join(SETTINGS_GRADLE_REL);
+    let settings_src = read_required(&settings_path, SETTINGS_GRADLE_REL)?;
+    let build_path = project_root.join(APP_BUILD_GRADLE_REL);
+    let build_src = read_required(&build_path, APP_BUILD_GRADLE_REL)?;
+
+    let settings_out = if settings_src.contains(&format!("include(\"{gradle_name}\")")) {
+        None
+    } else {
+        Some(insert_after_anchor_line(
+            &settings_src,
+            SETTINGS_ANCHOR,
+            &settings_include_block(gradle_name, frust_path, rel_path),
+            SETTINGS_GRADLE_REL,
+        )?)
+    };
+
+    let build_out = if build_src.contains(&format!("project(\"{gradle_name}\")")) {
+        None
+    } else {
+        Some(insert_after_anchor_line(
+            &build_src,
+            APP_DEPS_ANCHOR,
+            &format!("    implementation(project(\"{gradle_name}\"))\n"),
+            APP_BUILD_GRADLE_REL,
+        )?)
+    };
+
+    if settings_out.is_none() && build_out.is_none() {
         return Ok(AddOutcome::AlreadyPresent);
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| PluginAddError::Io {
-            path: relative_path.to_string(),
-            message: e.to_string(),
-        })?;
+    if let Some(out) = settings_out {
+        write_file(&settings_path, SETTINGS_GRADLE_REL, &out)?;
     }
-    write_file(&path, relative_path, contents)?;
+    if let Some(out) = build_out {
+        write_file(&build_path, APP_BUILD_GRADLE_REL, &out)?;
+    }
     Ok(AddOutcome::Applied)
 }
 
-fn apply_proguard_rule(
-    project_root: &Path,
-    marker: &str,
-    rule: &str,
-) -> Result<AddOutcome, PluginAddError> {
-    let path = project_root.join(PROGUARD_REL);
-    let src = read_required(&path, PROGUARD_REL)?;
-    if src.contains(marker) {
-        return Ok(AddOutcome::AlreadyPresent);
-    }
-    let mut out = src;
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push('\n');
-    out.push_str(marker);
-    out.push('\n');
-    out.push_str(rule);
-    out.push('\n');
-    write_file(&path, PROGUARD_REL, &out)?;
-    Ok(AddOutcome::Applied)
+/// The `settings.gradle.kts` block one [`Contribution::GradleModule`] adds —
+/// deliberately the same shape the scaffold emits for `:frust-embedding`,
+/// build-directory redirect included: a plugin module shares the embedding's
+/// "two apps, one shared frust checkout" collision problem exactly.
+fn settings_include_block(gradle_name: &str, frust_path: &str, rel_path: &str) -> String {
+    let build_dir = gradle_name.trim_start_matches(':');
+    let module_dir = repo_relative_path(frust_path, rel_path);
+    format!(
+        "\n\
+         // Added by `frust` Add Plugin: a plugin's Android library module,\n\
+         // included by path out of the frust checkout (the same derivation\n\
+         // `frust.embedding.dir` and the plugin's Cargo path dep use).\n\
+         include(\"{gradle_name}\")\n\
+         project(\"{gradle_name}\").projectDir = file(\"{module_dir}\")\n\
+         \n\
+         gradle.lifecycle.beforeProject {{\n\
+         \x20   if (path == \"{gradle_name}\") {{\n\
+         \x20       layout.buildDirectory.set(rootDir.resolve(\"build/{build_dir}\"))\n\
+         \x20   }}\n\
+         }}\n"
+    )
 }
 
 /// Insert `insertion` immediately before the last occurrence of `anchor`,
@@ -273,6 +351,37 @@ fn insert_before_anchor(
     out.push_str(&src[..idx]);
     out.push_str(insertion);
     out.push_str(&src[idx..]);
+    Ok(out)
+}
+
+/// Insert `insertion` immediately after the line containing the first
+/// occurrence of `anchor`, preserving all surrounding bytes — the
+/// marker-comment counterpart to [`insert_before_anchor`], for anchors whose
+/// own text says "lines go below". Errors
+/// [`PluginAddError::MalformedProjectFile`] if the anchor is absent (the file
+/// is never rewritten in that case).
+fn insert_after_anchor_line(
+    src: &str,
+    anchor: &str,
+    insertion: &str,
+    rel: &str,
+) -> Result<String, PluginAddError> {
+    let idx = src
+        .find(anchor)
+        .ok_or_else(|| PluginAddError::MalformedProjectFile(rel.to_string()))?;
+    // Past the anchor's own line: the byte after its newline, or end-of-file
+    // for a trailing anchor with no final newline.
+    let split = match src[idx..].find('\n') {
+        Some(nl) => idx + nl + 1,
+        None => src.len(),
+    };
+    let mut out = String::with_capacity(src.len() + insertion.len() + 1);
+    out.push_str(&src[..split]);
+    if split == src.len() && !src.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(insertion);
+    out.push_str(&src[split..]);
     Ok(out)
 }
 
@@ -351,21 +460,29 @@ mod tests {
         out
     }
 
+    /// The project-relative files a `GradleModule` contribution edits, for
+    /// tests that assert one was (or was not) touched.
+    const PROGUARD_REL: &str = "android/app/proguard-rules.pro";
+
     #[test]
     fn add_secure_storage_with_biometric_applies_every_edit() {
         let root = scaffold_project("ss-biometric");
 
+        let manifest_before = fs::read(root.join(MANIFEST_REL)).unwrap();
+        let proguard_before = fs::read(root.join(PROGUARD_REL)).unwrap();
+
         let report = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
         assert_eq!(report.plugin_id, "secure-storage");
-        // dep + manifest + plist + kotlin + proguard = 5 items, all applied.
-        assert_eq!(report.items.len(), 5);
+        // dep + plist + gradle module = 3 items, all applied. The Android
+        // permission, Kotlin helper and keep rule ride inside the module.
+        assert_eq!(report.items.len(), 3);
         assert!(
             report
                 .items
                 .iter()
                 .all(|i| i.outcome == AddOutcome::Applied)
         );
-        assert_eq!(report.counts(), (5, 0));
+        assert_eq!(report.counts(), (3, 0));
 
         // Cargo.toml: the dep landed with a path derived from the frust dep.
         let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
@@ -375,15 +492,11 @@ mod tests {
             "{cargo}"
         );
 
-        // AndroidManifest.xml: the permission is inside the (still well-formed)
-        // manifest.
-        let manifest = fs::read_to_string(root.join(MANIFEST_REL)).unwrap();
-        assert!(
-            manifest
-                .contains("<uses-permission android:name=\"android.permission.USE_BIOMETRIC\" />"),
-            "{manifest}"
-        );
-        assert!(manifest.trim_end().ends_with("</manifest>"), "{manifest}");
+        // The app's own manifest and proguard-rules.pro are NOT edited: the
+        // permission rides the plugin module's manifest (merger) and the keep
+        // rule its `consumerProguardFiles`.
+        assert_eq!(fs::read(root.join(MANIFEST_REL)).unwrap(), manifest_before);
+        assert_eq!(fs::read(root.join(PROGUARD_REL)).unwrap(), proguard_before);
 
         // Info.plist: the key + comment landed before the closing dict.
         let plist = fs::read_to_string(root.join(PLIST_REL)).unwrap();
@@ -404,27 +517,267 @@ mod tests {
             "plist comment must not contain `--`"
         );
 
-        // Kotlin helper: written at the fixed dev/frust package path, verbatim.
-        let kt = root.join("android/app/src/main/kotlin/dev/frust/FrustBiometric.kt");
-        let kt_src = fs::read_to_string(&kt).unwrap();
-        assert!(kt_src.contains("object FrustBiometric"), "{kt_src}");
-        assert!(kt_src.contains("package dev.frust"), "{kt_src}");
+        // No Kotlin file is copied into the app any more.
+        assert!(
+            !root
+                .join("android/app/src/main/kotlin/dev/frust/FrustBiometric.kt")
+                .exists()
+        );
 
-        // proguard-rules.pro: the marker + keep rule appended, existing rules
-        // preserved.
-        let proguard = fs::read_to_string(root.join(PROGUARD_REL)).unwrap();
+        // settings.gradle.kts: include + projectDir + build-dir redirect, with
+        // the module path derived from the same frust path dep, and the
+        // pre-existing `:frust-embedding` wiring untouched.
+        let settings = fs::read_to_string(root.join(SETTINGS_GRADLE_REL)).unwrap();
         assert!(
-            proguard.contains("-keep class dev.frust.FrustBiometric { *; }"),
-            "{proguard}"
+            settings.contains("include(\":frust-secure-storage\")"),
+            "{settings}"
         );
         assert!(
-            proguard.contains("looked up via JNI/classloader"),
-            "{proguard}"
+            settings.contains(
+                "project(\":frust-secure-storage\").projectDir = \
+                 file(\"/nonexistent/frust/checkout/../../plugins/secure-storage/platform/android\")"
+            ),
+            "{settings}"
         );
-        // A pre-existing scaffold rule survived the append.
         assert!(
-            proguard.contains("-keep class dev.accesskit.android.** { *; }"),
-            "{proguard}"
+            settings.contains("rootDir.resolve(\"build/frust-secure-storage\")"),
+            "{settings}"
+        );
+        assert!(
+            settings.contains("include(\":frust-embedding\")"),
+            "{settings}"
+        );
+        assert!(settings.contains("include(\":app\")"), "{settings}");
+
+        // app/build.gradle.kts: the module dependency landed inside the
+        // dependencies block, beside the embedding's.
+        let build = fs::read_to_string(root.join(APP_BUILD_GRADLE_REL)).unwrap();
+        assert!(
+            build.contains("implementation(project(\":frust-secure-storage\"))"),
+            "{build}"
+        );
+        assert!(
+            build.contains("implementation(project(\":frust-embedding\"))"),
+            "{build}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `test_context`'s `frust_path` is deliberately nonexistent, so the
+    /// module directory the include points at does not resolve on disk — and
+    /// applying must still succeed. The mutation is a text insert; whether the
+    /// path resolves is Gradle's problem at build time. Pinned so a future
+    /// change can't quietly add an existence check.
+    #[test]
+    fn gradle_module_applies_even_though_its_resolved_path_is_absent() {
+        let root = scaffold_project("gradle-module-absent-path");
+        let module_dir = PathBuf::from(repo_relative_path(
+            "/nonexistent/frust/checkout",
+            "plugins/secure-storage/platform/android",
+        ));
+        assert!(
+            !module_dir.exists(),
+            "precondition: the module dir is absent"
+        );
+
+        let report = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.description.contains(":frust-secure-storage"))
+            .expect("a Gradle module line item");
+        assert_eq!(item.outcome, AddOutcome::Applied);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Lexical `..`/`.` collapse — the module directory need not exist (see
+    /// the test above), so `fs::canonicalize` is unavailable.
+    fn normalize_lexically(path: &Path) -> PathBuf {
+        use std::path::Component;
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    /// `test_context`'s `frust_path` is absolute, which is immune to the
+    /// base-directory question — only a **relative** `--frust-path` (a
+    /// supported input) exposes it. The `projectDir` this writes is resolved
+    /// by `file(...)` from `<project>/android/`, one level below the project
+    /// root the Cargo `frust` path dep is expressed against, so it must carry
+    /// one extra `../`.
+    #[test]
+    fn gradle_module_projectdir_resolves_from_the_android_subdirectory() {
+        let root = scaffold_project("gradle-module-relative-frust-path");
+        const REL_FRUST: &str = "../checkouts/frust/crates/frust";
+        const MODULE_REL: &str = "plugins/secure-storage/platform/android";
+
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let cargo = fs::read_to_string(&cargo_path).unwrap();
+        let rewritten = cargo.replace(
+            "path = \"/nonexistent/frust/checkout\"",
+            &format!("path = \"{REL_FRUST}\""),
+        );
+        assert_ne!(rewritten, cargo, "expected to rewrite the frust path dep");
+        fs::write(&cargo_path, rewritten).unwrap();
+
+        let report = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.description.contains(":frust-secure-storage"))
+            .expect("a Gradle module line item");
+        // No on-disk existence check: the relative module dir is absent too.
+        assert_eq!(item.outcome, AddOutcome::Applied);
+
+        let settings = fs::read_to_string(root.join(SETTINGS_GRADLE_REL)).unwrap();
+        let emitted = format!("../{REL_FRUST}/../../{MODULE_REL}");
+        assert!(
+            settings.contains(&format!(
+                "project(\":frust-secure-storage\").projectDir = file(\"{emitted}\")"
+            )),
+            "{settings}"
+        );
+
+        // The intent behind that literal: resolved from `<project>/android/`
+        // (Gradle's base for `settings.gradle.kts`), it must land exactly
+        // where the project-root-relative convention reaches from `<project>/`
+        // — the same walk `resolve_sibling` performs.
+        let truth = normalize_lexically(&root.join(REL_FRUST).join("../..").join(MODULE_REL));
+        let actual = normalize_lexically(&root.join("android").join(&emitted));
+        assert_eq!(actual, truth);
+        assert!(
+            !actual.exists(),
+            "the module dir is absent, yet apply succeeded"
+        );
+
+        // The Cargo dep path is unchanged by this correction: `Cargo.toml`
+        // sits at the project root, so it needs no re-basing.
+        let cargo = fs::read_to_string(&cargo_path).unwrap();
+        assert!(
+            cargo.contains(&format!("{REL_FRUST}/../../plugins/secure-storage")),
+            "{cargo}"
+        );
+
+        // Still idempotent with a relative path.
+        let before = snapshot_tree(&root);
+        let second = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent)
+        );
+        assert_eq!(before, snapshot_tree(&root));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A half-applied module (settings wired, app dependency removed) must
+    /// complete the missing half and report `Applied`, not skip on the first
+    /// guard it finds satisfied.
+    #[test]
+    fn half_applied_gradle_module_completes_and_reports_applied() {
+        let root = scaffold_project("gradle-module-half-applied");
+        add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
+
+        // Undo only the app-module dependency half.
+        let build_path = root.join(APP_BUILD_GRADLE_REL);
+        let build = fs::read_to_string(&build_path).unwrap();
+        let stripped = build.replace(
+            "    implementation(project(\":frust-secure-storage\"))\n",
+            "",
+        );
+        assert_ne!(stripped, build, "expected to strip the dependency line");
+        fs::write(&build_path, &stripped).unwrap();
+        let settings_before = fs::read(root.join(SETTINGS_GRADLE_REL)).unwrap();
+
+        let report = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.description.contains(":frust-secure-storage"))
+            .expect("a Gradle module line item");
+        assert_eq!(
+            item.outcome,
+            AddOutcome::Applied,
+            "a half-applied module must complete and report Applied"
+        );
+
+        // The missing half was restored, and the already-wired half was not
+        // duplicated or rewritten.
+        let build = fs::read_to_string(&build_path).unwrap();
+        assert_eq!(
+            build
+                .matches("implementation(project(\":frust-secure-storage\"))")
+                .count(),
+            1,
+            "{build}"
+        );
+        assert_eq!(
+            fs::read(root.join(SETTINGS_GRADLE_REL)).unwrap(),
+            settings_before,
+            "the already-wired settings.gradle.kts must be byte-identical"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn settings_gradle_without_its_anchor_is_never_rewritten() {
+        let root = scaffold_project("gradle-module-no-settings-anchor");
+        let settings_path = root.join(SETTINGS_GRADLE_REL);
+        let mangled = fs::read_to_string(&settings_path)
+            .unwrap()
+            .replace(SETTINGS_ANCHOR, "// (marker removed)");
+        fs::write(&settings_path, &mangled).unwrap();
+        let build_before = fs::read(root.join(APP_BUILD_GRADLE_REL)).unwrap();
+
+        let err = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap_err();
+        assert!(
+            matches!(&err, PluginAddError::MalformedProjectFile(f) if f == SETTINGS_GRADLE_REL),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), mangled);
+        // The sibling file is untouched too — both are computed before either
+        // is written.
+        assert_eq!(
+            fs::read(root.join(APP_BUILD_GRADLE_REL)).unwrap(),
+            build_before
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn app_build_gradle_without_its_anchor_is_never_rewritten() {
+        let root = scaffold_project("gradle-module-no-build-anchor");
+        let build_path = root.join(APP_BUILD_GRADLE_REL);
+        let mangled = fs::read_to_string(&build_path)
+            .unwrap()
+            .replace(APP_DEPS_ANCHOR, "// (marker removed)");
+        fs::write(&build_path, &mangled).unwrap();
+        let settings_before = fs::read(root.join(SETTINGS_GRADLE_REL)).unwrap();
+
+        let err = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap_err();
+        assert!(
+            matches!(&err, PluginAddError::MalformedProjectFile(f) if f == APP_BUILD_GRADLE_REL),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(&build_path).unwrap(), mangled);
+        // settings.gradle.kts was not half-written before the failure.
+        assert_eq!(
+            fs::read(root.join(SETTINGS_GRADLE_REL)).unwrap(),
+            settings_before
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -439,13 +792,23 @@ mod tests {
         let after_first = snapshot_tree(&root);
 
         let second = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
-        assert_eq!(second.items.len(), 5);
+        assert_eq!(second.items.len(), 3);
         assert!(
             second
                 .items
                 .iter()
                 .all(|i| i.outcome == AddOutcome::AlreadyPresent),
             "second apply must report every item AlreadyPresent"
+        );
+        // The Gradle module — two files behind one line item — is covered by
+        // that blanket assertion; named here so a future contribution set
+        // cannot silently drop it from the idempotency gate.
+        assert!(
+            second
+                .items
+                .iter()
+                .any(|i| i.description.contains(":frust-secure-storage")),
+            "the Gradle module must be one of the idempotency-checked items"
         );
         let after_second = snapshot_tree(&root);
 
@@ -464,6 +827,8 @@ mod tests {
         let manifest_before = fs::read(root.join(MANIFEST_REL)).unwrap();
         let plist_before = fs::read(root.join(PLIST_REL)).unwrap();
         let proguard_before = fs::read(root.join(PROGUARD_REL)).unwrap();
+        let settings_before = fs::read(root.join(SETTINGS_GRADLE_REL)).unwrap();
+        let build_before = fs::read(root.join(APP_BUILD_GRADLE_REL)).unwrap();
 
         let report = add_plugin(&root, "secure-storage", &[]).unwrap();
         // Only the Cargo.toml dependency is applied.
@@ -471,15 +836,18 @@ mod tests {
         assert_eq!(report.items[0].outcome, AddOutcome::Applied);
         assert!(report.items[0].description.contains("frust-secure-storage"));
 
-        // No platform file was touched.
+        // No platform file was touched — including the two Gradle files the
+        // `biometric-gate` module contribution would have edited.
         assert_eq!(fs::read(root.join(MANIFEST_REL)).unwrap(), manifest_before);
         assert_eq!(fs::read(root.join(PLIST_REL)).unwrap(), plist_before);
         assert_eq!(fs::read(root.join(PROGUARD_REL)).unwrap(), proguard_before);
-        // And no Kotlin helper appeared.
-        assert!(
-            !root
-                .join("android/app/src/main/kotlin/dev/frust/FrustBiometric.kt")
-                .exists()
+        assert_eq!(
+            fs::read(root.join(SETTINGS_GRADLE_REL)).unwrap(),
+            settings_before
+        );
+        assert_eq!(
+            fs::read(root.join(APP_BUILD_GRADLE_REL)).unwrap(),
+            build_before
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -592,5 +960,137 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The frust repo root, located robustly off `CARGO_MANIFEST_DIR`
+    /// (`crates/frust-drive`) rather than the process CWD — this test must
+    /// pass regardless of where `cargo test` is invoked from.
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// Discover every in-repo Android consumer under `examples/` and
+    /// `benchmarks/` — a direct subdirectory counts if it looks like a
+    /// frust-scaffolded Android project (carries both `Cargo.toml` and an
+    /// `android/` Gradle project). Discovered dynamically rather than
+    /// hard-coded: a project added later is automatically covered, and one
+    /// removed (as `bubblebench` was) is simply absent from the listing
+    /// rather than a failure — `fs::read_dir` on a since-deleted `examples/*`
+    /// entry can't produce it, and a missing `examples/`/`benchmarks/`
+    /// directory itself is tolerated the same way.
+    fn discover_android_consumers(repo_root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for parent in ["examples", "benchmarks"] {
+            let Ok(entries) = fs::read_dir(repo_root.join(parent)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path.join(CARGO_TOML_REL).is_file()
+                    && path.join(SETTINGS_GRADLE_REL).is_file()
+                    && path.join(APP_BUILD_GRADLE_REL).is_file()
+                {
+                    out.push(path);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Copy only the files `add_plugin` reads/writes for the
+    /// `secure-storage` + `biometric-gate` contribution set (`Cargo.toml`,
+    /// the Android manifest, the iOS plist, and the two Gradle files) from a
+    /// real consumer project into a fresh tempdir, preserving their
+    /// project-relative layout.
+    ///
+    /// Deliberately **not** a whole-directory copy: an in-repo Android
+    /// consumer carries multi-gigabyte Gradle/cargo-ndk build output
+    /// (`android/app/build`, `android/app/src/main/jniLibs`) that
+    /// `add_plugin` never touches and a test must never copy, and the real
+    /// project must never be mutated in place.
+    fn copy_consumer_files(src_root: &Path, dest_root: &Path) -> std::io::Result<()> {
+        for rel in [
+            CARGO_TOML_REL,
+            MANIFEST_REL,
+            PLIST_REL,
+            SETTINGS_GRADLE_REL,
+            APP_BUILD_GRADLE_REL,
+        ] {
+            let src = src_root.join(rel);
+            let dest = dest_root.join(rel);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&src, &dest)?;
+        }
+        Ok(())
+    }
+
+    /// The regression guard for the drift `F3` fixed: `add_plugin`'s tests
+    /// above only ever exercise a **freshly scaffolded** project, which by
+    /// construction always carries the `// frust:plugin-includes`/
+    /// `// frust:plugin-dependencies` anchors `Contribution::GradleModule`
+    /// hard-requires — so they are structurally incapable of catching an
+    /// existing in-repo consumer drifting away from them (exactly how
+    /// `glyph-catalog` and `layer-bench` shipped without either anchor).
+    ///
+    /// This drives the real `add_plugin` path — not a grep — against a
+    /// tempdir copy of every in-repo Android consumer, so a future project
+    /// that ships without the anchors fails **this** test with a message
+    /// naming the project and the missing anchor, instead of silently
+    /// failing Add Plugin at demo time.
+    #[test]
+    fn every_in_repo_android_consumer_accepts_add_plugin() {
+        let repo_root = repo_root();
+        let consumers = discover_android_consumers(&repo_root);
+        assert!(
+            !consumers.is_empty(),
+            "expected to discover at least one in-repo Android consumer under \
+             examples/ or benchmarks/ (repo root resolved to {})",
+            repo_root.display()
+        );
+
+        for (i, consumer) in consumers.iter().enumerate() {
+            let display = consumer
+                .strip_prefix(&repo_root)
+                .unwrap_or(consumer)
+                .display()
+                .to_string();
+
+            let dest = unique_temp_dir(&format!("consumer-{i}"));
+            fs::create_dir_all(&dest).unwrap();
+            copy_consumer_files(consumer, &dest).unwrap_or_else(|e| {
+                panic!("failed to copy {display}'s plugin-relevant files into a tempdir: {e}")
+            });
+
+            match add_plugin(&dest, "secure-storage", &["biometric-gate"]) {
+                Ok(report) => {
+                    assert!(
+                        report
+                            .items
+                            .iter()
+                            .all(|i| i.outcome == AddOutcome::Applied),
+                        "{display}: expected every contribution to apply cleanly \
+                         against an unmodified copy, got {report:?}"
+                    );
+                }
+                Err(PluginAddError::MalformedProjectFile(file)) => {
+                    panic!(
+                        "{display} is missing a plugin anchor in `{file}` — \
+                         `add_plugin` requires `{SETTINGS_ANCHOR}` in \
+                         `{SETTINGS_GRADLE_REL}` and `{APP_DEPS_ANCHOR}` in \
+                         `{APP_BUILD_GRADLE_REL}` (see \
+                         `templates/app/android.tmpl` for the canonical \
+                         placement, or `examples/huddle`'s android/ for a \
+                         working in-repo example)"
+                    );
+                }
+                Err(e) => panic!("{display}: add_plugin failed unexpectedly: {e}"),
+            }
+
+            let _ = fs::remove_dir_all(&dest);
+        }
     }
 }

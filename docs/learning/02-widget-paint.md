@@ -2,8 +2,9 @@
 
 **Concept:** A widget is the thing that *emits* chapter 1's commands. The
 whole contract is four methods on one trait, and this repo already contains
-graded examples from trivial (`Icon`) to full custom canvas (bubblebench's
-chart). This lab makes you a producer, not a reader.
+graded examples from trivial (`Icon`) to full custom canvas (the S1
+bubble-chart scenario's chart widget). This lab makes you a producer, not a
+reader.
 
 ## Where it lives
 
@@ -13,7 +14,7 @@ chart). This lab makes you a producer, not a reader.
 | `RecordingScene` — GPU-free paint-assertion fake | `crates/frust-core/src/widget.rs` | ≈1162–1174 |
 | Smallest real paint impl: `Icon` (scaled `BezPath` fill) | `crates/frust-widgets/src/icon.rs` | ≈298–311 |
 | Animation-driven repaint: `LoadingIndicator` | `crates/frust-widgets/src/material/loading_indicator.rs` | ≈160, 194, 205 |
-| Full custom canvas: bubblebench's chart | `examples/bubblebench/src/chart.rs` | whole file |
+| Full custom canvas: the S1 bubble chart | `benchmarks/frust_bench/src/scenarios/s1_animation/chart.rs` | whole file |
 | Custom widgets in an *app* (escape hatch) | `examples/huddle/src/ui/{fill_box,swipeable,sheet,toast}.rs` | see `examples/huddle/Cargo.toml` ≈47–61 |
 
 The signatures you implement:
@@ -43,13 +44,14 @@ entire scheme:
 
 ## Experiments
 
-### 2.1 — Break bubblebench, on purpose
+### 2.1 — Break the S1 bubble chart, on purpose
 
-`examples/bubblebench/src/chart.rs` is a physics canvas painting 60
-radial-gradient circles + strokes + two text runs each, every frame. Warm up:
+`benchmarks/frust_bench/src/scenarios/s1_animation/chart.rs` is a physics
+canvas painting a play-area-derived field of radial-gradient circles +
+strokes + two text runs each, every frame. Warm up:
 
 ```bash
-cd examples/bubblebench && cargo run
+cd benchmarks/frust_bench && cargo run
 ```
 
 Then edit `chart.rs` and re-run after each change:
@@ -80,10 +82,10 @@ escape-hatch comment in `examples/huddle/Cargo.toml` (≈47–61), then pick the
 smallest model: `examples/huddle/src/ui/fill_box.rs` (a rounded-rect
 `View`/`Widget` pair in ~150 lines).
 
-Build a `Sparkline` widget in bubblebench or huddle:
+Build a `Sparkline` widget in `frust_bench` or huddle:
 
 - `layout`: return `bc.constrain(Size::new(120.0, 32.0))`.
-- `paint`: keep a `VecDeque<f64>` of the last N FPS samples (bubblebench
+- `paint`: keep a `VecDeque<f64>` of the last N FPS samples (the S1 scenario
   already computes FPS — feed it through a prop), then `stroke_path` a
   `kurbo::BezPath` polyline through them.
 - Bonus: animate new samples in with an `AnimationController` +

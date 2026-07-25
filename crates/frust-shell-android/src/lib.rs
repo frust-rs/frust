@@ -2,7 +2,7 @@
 //!
 //! This crate is the Android counterpart to `frust-shell-desktop`. Where the
 //! desktop shell owns a `winit` event loop, the Android shell is *driven* by the
-//! Kotlin `FrustSurfaceView` (see `templates/app/android.tmpl/.../
+//! Kotlin `FrustSurfaceView` (see `platform/android/frust-embedding/src/main/kotlin/dev/frust/
 //! FrustSurfaceView.kt`): the JVM calls a fixed set of
 //! `Java_dev_frust_FrustSurfaceView_native*` symbols, and each generated
 //! app supplies its own `State`/`app_logic` through the [`android_app!`] macro,

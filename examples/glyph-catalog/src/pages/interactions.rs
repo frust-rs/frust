@@ -35,8 +35,8 @@
 //!   `std::time::Instant::now()` directly inside its page fn (permitted: the
 //!   "no wall clock" rule in `docs/CODE_STANDARDS.md`'s Theming & Animation
 //!   Conventions binds `frust-core`/`frust-widgets`, not application code —
-//!   `examples/huddle`/`examples/bubblebench` both already read `Instant`
-//!   at this tier) and mounts a tiny [`FrameTicker`] — a hand-rolled
+//!   `examples/huddle` already reads `Instant` at this tier) and mounts a
+//!   tiny [`FrameTicker`] — a hand-rolled
 //!   `View`/`Widget` pair (this crate's `Cargo.toml` already carries
 //!   `frust-core`/`kurbo` as real dependencies for `appbar.rs`'s
 //!   `AnchorReporter`, the same documented escape hatch) whose only job is an

@@ -17,7 +17,9 @@ not re-export it.
 > below by hand — or let the frust TUI's **Add Plugin** dialog apply them for
 > you (it automates every step in this document). Nothing here is scaffolded,
 > so an app that never uses the biometric gate never carries an unused
-> `NSFaceIDUsageDescription` or `USE_BIOMETRIC` permission.
+> `NSFaceIDUsageDescription` or `USE_BIOMETRIC` permission. On Android the
+> plugin's platform code ships as its own Gradle library module rather than as
+> files copied into your app, so there is nothing to keep in sync by hand.
 
 ---
 
@@ -80,40 +82,54 @@ prompt**. That requires the platform additions below.
 
 ### 2a. Android biometric setup
 
-Three additions (all applied automatically by the TUI Add Plugin dialog):
+**One addition: include this plugin's Android library module.** The framework
+`AuthenticationCallback` is an abstract class JNI cannot subclass, so the
+installed app must carry a small Kotlin helper — but you never copy a file. The
+helper ships inside `plugins/secure-storage/platform/android`, a
+`com.android.library` module (`namespace = "dev.frust.securestorage"`) that also
+declares the `USE_BIOMETRIC` permission in its own manifest (the merger folds it
+into your app) and the R8 keep rule in its own `consumer-rules.pro` (your
+`proguard-rules.pro` stays untouched). Nothing to copy means nothing to drift.
 
-1. **Copy the helper class** — the framework `AuthenticationCallback` is an
-   abstract class JNI cannot subclass, so the app must carry a small Kotlin
-   helper. Copy this plugin's canonical file **verbatim**:
+The TUI Add Plugin dialog (`frust tui` → Add Plugin → secure-storage →
+`biometric-gate`) makes both edits below for you, idempotently. By hand:
 
+1. `android/settings.gradle.kts` — include the module by path, and redirect its
+   build directory so two apps can share one frust checkout:
+
+   ```kotlin
+   include(":frust-secure-storage")
+   project(":frust-secure-storage").projectDir =
+       file("<frust checkout>/plugins/secure-storage/platform/android")
+
+   gradle.lifecycle.beforeProject {
+       if (path == ":frust-secure-storage") {
+           layout.buildDirectory.set(rootDir.resolve("build/frust-secure-storage"))
+       }
+   }
    ```
-   plugins/secure-storage/platform/FrustBiometric.kt
-     →  app/src/main/kotlin/dev/frust/FrustBiometric.kt
+
+   The path is derived the same way `gradle.properties`' `frust.embedding.dir`
+   is — one machine-specific line, replaced by a Maven coordinate once the
+   modules publish.
+
+2. `android/app/build.gradle.kts` — depend on it:
+
+   ```kotlin
+   dependencies {
+       implementation(project(":frust-secure-storage"))
+   }
    ```
 
-   The package/class `dev.frust.FrustBiometric` is a hard contract — the Rust
-   backend looks it up through the application classloader. Absent → a typed
-   `NotAvailable(HelperMissing)`, never a crash.
-
-2. **Manifest permission** — add to `AndroidManifest.xml` (inside
-   `<manifest>`, a normal install-time permission, no runtime request):
-
-   ```xml
-   <uses-permission android:name="android.permission.USE_BIOMETRIC" />
-   ```
-
-3. **ProGuard/R8 keep rule** — so a release build does not strip the helper
-   (which would surface as `NotAvailable(HelperMissing)`). Add to
-   `proguard-rules.pro`:
-
-   ```proguard
-   # frust-secure-storage biometric helper (looked up via JNI/classloader)
-   -keep class dev.frust.FrustBiometric { *; }
-   ```
+The class name `dev.frust.securestorage.FrustBiometric` is a hard contract — the
+Rust backend looks it up through the application classloader. If the module
+isn't wired in, a gated open returns a typed `NotAvailable(HelperMissing)`,
+never a crash.
 
 The framework `BiometricPrompt` path requires **API 28+**; on API 24–27 a
 gated open returns `NotAvailable(UnsupportedApiLevel)` (frust's minSdk is 24).
-No Gradle dependency and no `FragmentActivity` are needed — the plugin uses
+No third-party Gradle dependency and no `FragmentActivity` are needed — the
+module above pulls in nothing (not even `:frust-embedding`), and the plugin uses
 the application `Context` frust already provides.
 
 ### 2b. iOS biometric setup
@@ -155,10 +171,12 @@ prompt) — safe to call anywhere to decide whether to offer a gated flow.
 ## 4. Caveats
 
 - **`frust create --overwrite` destroys these additions.** `--overwrite`
-  re-renders the generated project wholesale, silently dropping the helper
-  file, manifest line, plist key, and keep rule. All additions are
+  re-renders the generated project wholesale, silently dropping the Gradle
+  include, the module dependency and the plist key. All additions are
   **idempotent** — just re-run the Add Plugin dialog (or re-apply this
-  document) to restore them.
+  document) to restore them. (The helper class, permission and keep rule live
+  in the plugin's own module, so those survive — but a project that no longer
+  includes the module can't reach them.)
 - **Android backup/restore data loss.** Auto-backup restores the ciphertext
   XML but never the Keystore key, so restored entries are undecryptable.
   Exclude the store's `frust.ss.<name>` SharedPreferences file from backup
@@ -189,8 +207,8 @@ prompt) — safe to call anywhere to decide whether to offer a gated flow.
 
 ## 5. The TUI Add Plugin dialog automates all of this
 
-Everything in §1 and §2 — the Cargo.toml dep, the Kotlin helper copy, the
-manifest permission, the plist key, and the ProGuard keep rule — is applied for
+Everything in §1 and §2 — the Cargo.toml dep, the `:frust-secure-storage`
+Gradle include plus its app-module dependency, and the plist key — is applied for
 you, idempotently, by the frust TUI's **Add Plugin** dialog (select
 `secure-storage`, tick the *biometric gate* option). This README is the manual
 contract that dialog encodes.

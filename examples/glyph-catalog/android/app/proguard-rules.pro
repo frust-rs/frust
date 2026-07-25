@@ -6,26 +6,15 @@
 # via `proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"),
 # "proguard-rules.pro")`.
 
-# `dev.frust.FrustSurfaceView` declares the fixed `external` (JNI)
-# methods the Rust side's `#[unsafe(no_mangle)]` exports bind by mangled
-# symbol name (see docs/CODE_STANDARDS.md's Naming Conventions — JNI export
-# names are LAW), and is itself constructed from Kotlin (MainActivity's
-# layout, not reflection). AGP's default `-keepclasseswithmembernames`
-# native-method rule (in proguard-android-optimize.txt) already protects a
-# class with `native`/`external` methods from *member* renaming, but does not
-# stop R8 from renaming/removing the *class* itself when nothing else
-# references it by name — belt and braces, keep the whole class.
--keep class dev.frust.** { *; }
-
-# `dev.accesskit.android.Delegate` (vendored from accesskit_android 0.7.5,
-# see its own file header) is located at runtime via a string class lookup
-# (`JNIEnv::find_class("dev/accesskit/android/Delegate")`) and its native
-# methods are bound dynamically via `RegisterNatives`, not the
-# `Java_<pkg>_<Class>_native<Name>` symbol-mangling scheme AGP's default
-# native-method keep rule expects. That default rule
-# (`-keepclasseswithmembernames class * { native <methods>; }`) still allows
-# R8 to strip/rename the whole class when nothing references it by name
-# (`keepclasseswithmembernames` only protects members, not the class from
-# removal) — since this class is found by string, not compiled reference, R8
-# cannot see that it's live and would otherwise drop it. Keep it whole.
--keep class dev.accesskit.android.** { *; }
+# Framework keep rules for `dev.frust.**` (JNI-referenced) and
+# `dev.accesskit.android.**` (classloader-referenced) are no longer listed
+# here — they now arrive via the `frust-embedding` library module's own
+# `consumer-rules.pro`, merged automatically by AGP's `consumerProguardFiles`.
+# Do not re-add them here; add app-specific rules below instead.
+#
+# `dev.frust.DemoStreamFactory` (this catalog's own Mode B demo factory,
+# `dev/frust/DemoStreamFactory.kt`, resolved by name from `FrustViewHost` —
+# see docs/CODE_STANDARDS.md's Naming Conventions) is a `dev.frust.**` class
+# too, even though it's app-authored rather than `:frust-embedding`-owned, so
+# the module's `-keep class dev.frust.** { *; }` consumer rule (broad by
+# design — see task 07) already protects it. No extra rule needed here.

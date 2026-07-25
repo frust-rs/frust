@@ -9,26 +9,16 @@
 /* Begin PBXBuildFile section */
 		ABCDABCDABCDABCDABCD0020 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0010 /* AppDelegate.swift */; };
 		ABCDABCDABCDABCDABCD0021 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */; };
-		ABCDABCDABCDABCDABCD0022 /* FrustView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0012 /* FrustView.swift */; };
-		ABCDABCDABCDABCDABCD0023 /* FrustViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0013 /* FrustViewController.swift */; };
-		ABCDABCDABCDABCDABCD0024 /* FrustTextInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0016 /* FrustTextInput.swift */; };
-		ABCDABCDABCDABCDABCD0028 /* FrustViewHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0018 /* FrustViewHost.swift */; };
-		ABCDABCDABCDABCDABCD0029 /* FrustPlatformViewFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0019 /* FrustPlatformViewFactory.swift */; };
 		ABCDABCDABCDABCDABCD0032 /* DemoStreamFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */; };
 		ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */; };
+		ABCDABCDABCDABCDABCD0036 /* FrustEmbedding in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0035 /* FrustEmbedding */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		ABCDABCDABCDABCDABCD0003 /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ABCDABCDABCDABCDABCD0010 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
-		ABCDABCDABCDABCDABCD0012 /* FrustView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustView.swift; sourceTree = "<group>"; };
-		ABCDABCDABCDABCDABCD0013 /* FrustViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustViewController.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		ABCDABCDABCDABCDABCD0015 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
-		ABCDABCDABCDABCDABCD0016 /* FrustTextInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustTextInput.swift; sourceTree = "<group>"; };
-		ABCDABCDABCDABCDABCD0018 /* FrustViewHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustViewHost.swift; sourceTree = "<group>"; };
-		ABCDABCDABCDABCDABCD0019 /* FrustPlatformViewFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrustPlatformViewFactory.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoStreamFactory.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -38,6 +28,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ABCDABCDABCDABCDABCD0036 /* FrustEmbedding in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -76,13 +67,7 @@
 			children = (
 				ABCDABCDABCDABCDABCD0010 /* AppDelegate.swift */,
 				ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */,
-				ABCDABCDABCDABCDABCD0012 /* FrustView.swift */,
-				ABCDABCDABCDABCDABCD0013 /* FrustViewController.swift */,
-				ABCDABCDABCDABCDABCD0018 /* FrustViewHost.swift */,
-				ABCDABCDABCDABCDABCD0019 /* FrustPlatformViewFactory.swift */,
 				ABCDABCDABCDABCDABCD0031 /* DemoStreamFactory.swift */,
-				ABCDABCDABCDABCDABCD0016 /* FrustTextInput.swift */,
-				ABCDABCDABCDABCDABCD0015 /* Runner-Bridging-Header.h */,
 				ABCDABCDABCDABCDABCD0014 /* Info.plist */,
 				ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */,
 			);
@@ -106,6 +91,9 @@
 			dependencies = (
 			);
 			name = Runner;
+			packageProductDependencies = (
+				ABCDABCDABCDABCDABCD0035 /* FrustEmbedding */,
+			);
 			productName = Runner;
 			productReference = ABCDABCDABCDABCDABCD0003 /* Runner.app */;
 			productType = "com.apple.product-type.application";
@@ -133,6 +121,9 @@
 				Base,
 			);
 			mainGroup = ABCDABCDABCDABCDABCD0007;
+			packageReferences = (
+				ABCDABCDABCDABCDABCD0034 /* XCLocalSwiftPackageReference "FrustEmbedding" */,
+			);
 			productRefGroup = ABCDABCDABCDABCDABCD0008 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -167,12 +158,7 @@
 			files = (
 				ABCDABCDABCDABCDABCD0020 /* AppDelegate.swift in Sources */,
 				ABCDABCDABCDABCDABCD0021 /* SceneDelegate.swift in Sources */,
-				ABCDABCDABCDABCDABCD0022 /* FrustView.swift in Sources */,
-				ABCDABCDABCDABCDABCD0023 /* FrustViewController.swift in Sources */,
-				ABCDABCDABCDABCDABCD0028 /* FrustViewHost.swift in Sources */,
-				ABCDABCDABCDABCDABCD0029 /* FrustPlatformViewFactory.swift in Sources */,
 				ABCDABCDABCDABCDABCD0032 /* DemoStreamFactory.swift in Sources */,
-				ABCDABCDABCDABCDABCD0024 /* FrustTextInput.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -279,7 +265,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.glyphcatalog";
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -318,7 +303,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.glyphcatalog";
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -358,7 +342,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.glyphcatalog";
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -388,6 +371,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		ABCDABCDABCDABCDABCD0034 /* XCLocalSwiftPackageReference "FrustEmbedding" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../../platform/ios/FrustEmbedding";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		ABCDABCDABCDABCDABCD0035 /* FrustEmbedding */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FrustEmbedding;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = ABCDABCDABCDABCDABCD0001 /* Project object */;
 }

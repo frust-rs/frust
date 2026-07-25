@@ -11,7 +11,7 @@
 # several warm runs.
 #
 # Usage: scripts/devloop-measure.sh [--app <dir>] [--runs <n>]
-#   --app <dir>   App directory to measure (default: examples/bubblebench,
+#   --app <dir>   App directory to measure (default: examples/huddle,
 #                 relative to the repo root this script lives in) — a
 #                 standalone (non-root-workspace) `frust`-scaffolded-shaped
 #                 app, so measuring it never touches the root workspace's
@@ -31,7 +31,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
-APP_REL="examples/bubblebench"
+APP_REL="examples/huddle"
 RUNS=3
 
 while [ $# -gt 0 ]; do
@@ -71,7 +71,7 @@ case "$APP_REL" in
 esac
 
 if [ ! -f "${APP_DIR}/Cargo.toml" ]; then
-  echo "error: no Cargo.toml at ${APP_DIR} — expected an app dir (e.g. examples/bubblebench)" >&2
+  echo "error: no Cargo.toml at ${APP_DIR} — expected an app dir (e.g. examples/huddle)" >&2
   exit 2
 fi
 

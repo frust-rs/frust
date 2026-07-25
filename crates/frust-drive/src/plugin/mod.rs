@@ -5,10 +5,17 @@
 //! or platform contributions are scaffolded (the template-hygiene decision).
 //! Instead, a plugin's contributions are applied to an existing generated
 //! project on demand: [`add_plugin`] performs the exact edits a plugin's
-//! README documents (a Cargo.toml dependency, an Android manifest permission,
-//! an Info.plist key, a Kotlin helper file, an R8 keep rule), each **idempotent**
+//! README documents (a Cargo.toml dependency, an Info.plist key, a Gradle
+//! library-module include, an Android manifest permission), each **idempotent**
 //! — running it twice yields a byte-identical tree, every line item reported
 //! [`AddOutcome::AlreadyPresent`] the second time.
+//!
+//! A plugin's Android Kotlin is **not** copied into the app: it ships as the
+//! plugin's own `com.android.library` module under `platform/android/`, wired
+//! in by [`Contribution::GradleModule`], with its permission carried by the
+//! manifest merger and its R8 keep rules by `consumerProguardFiles`. That is
+//! why there is no `KotlinFile`/`ProguardRule` contribution — a copied file
+//! and a hand-appended keep rule both drift from the plugin they came from.
 //!
 //! v1 is a **static in-crate registry** ([`known_plugins`]): the
 //! `frust-plugin.toml` cargo-metadata discovery ARCHITECTURE.md sketches stays
@@ -72,8 +79,16 @@ pub enum Contribution {
     /// project's existing `frust` path dep (crates unpublished — version deps
     /// come post-publish). `name` is the crate/dependency name.
     CargoDep { name: &'static str },
-    /// A `<uses-permission android:name="..."/>` line inserted into
-    /// `AndroidManifest.xml` before `</manifest>`.
+    /// A `<uses-permission android:name="..."/>` line inserted into the app's
+    /// own `AndroidManifest.xml` before `</manifest>`.
+    ///
+    /// **Prefer [`Contribution::GradleModule`]**: a permission declared in a
+    /// plugin module's own `src/main/AndroidManifest.xml` is folded into the
+    /// app by the manifest merger, so the app's manifest is never edited and
+    /// the permission cannot outlive the plugin. Reach for this variant only
+    /// when the permission genuinely belongs to the *app* rather than to the
+    /// plugin's module — e.g. one whose presence depends on app-level policy
+    /// the merger cannot supply. No plugin uses it today.
     ManifestPermission { permission: &'static str },
     /// A `<key>/<string>` pair (with an explanatory XML comment) inserted into
     /// `Info.plist` before the root `</dict>`.
@@ -82,18 +97,21 @@ pub enum Contribution {
         value: &'static str,
         comment: &'static str,
     },
-    /// A Kotlin helper written into `android/app/src/main/kotlin/...`,
-    /// write-if-absent; `contents` is embedded from the plugin's canonical
-    /// `platform/` copy at compile time.
-    KotlinFile {
-        relative_path: &'static str,
-        contents: &'static str,
-    },
-    /// A marker-commented keep rule appended to `proguard-rules.pro`,
-    /// skip-if-marker-present.
-    ProguardRule {
-        marker: &'static str,
-        rule: &'static str,
+    /// A Gradle library module included into the generated project: appends
+    /// the `include(...)` + `projectDir` (+ build-directory redirect) lines to
+    /// `android/settings.gradle.kts` and the `implementation(project(...))`
+    /// line to `android/app/build.gradle.kts`, both idempotently.
+    ///
+    /// One contribution, two files, **one** [`AddItem`] — the report is a
+    /// per-contribution ledger, not a per-file one. A half-applied state (one
+    /// file wired, the other not) completes the other file and reports
+    /// [`AddOutcome::Applied`].
+    GradleModule {
+        /// The Gradle project path, e.g. `":frust-secure-storage"`.
+        gradle_name: &'static str,
+        /// The module directory, relative to the frust repo root, e.g.
+        /// `"plugins/secure-storage/platform/android"`.
+        rel_path: &'static str,
     },
 }
 
@@ -107,10 +125,9 @@ impl Contribution {
                 format!("AndroidManifest.xml permission `{permission}`")
             }
             Contribution::PlistEntry { key, .. } => format!("Info.plist key `{key}`"),
-            Contribution::KotlinFile { relative_path, .. } => {
-                format!("Kotlin helper `{relative_path}`")
+            Contribution::GradleModule { gradle_name, .. } => {
+                format!("Gradle module `{gradle_name}`")
             }
-            Contribution::ProguardRule { rule, .. } => format!("proguard-rules.pro rule `{rule}`"),
         }
     }
 }

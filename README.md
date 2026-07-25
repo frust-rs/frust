@@ -95,8 +95,9 @@ curriculum for understanding how Frust turns a `View` into pixels — from
 the display list through the widget paint seam, the frame loop, the
 Vello/wgpu encode-present path, text shaping, the mobile frame gate, and
 the measurement tooling. Every chapter anchors to real files in this repo
-and ends with runnable experiments (build a scene by hand, break
-bubblebench on purpose, trace a frame with `FRUST_TRACE=1`), plus a
+and ends with runnable experiments (build a scene by hand, break the S1
+bubble-chart benchmark scenario on purpose, trace a frame with
+`FRUST_TRACE=1`), plus a
 verified watchlist of talks and university lectures for the theory —
 after you've seen the mechanism working.
 

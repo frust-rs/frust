@@ -17,18 +17,15 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # build phase resolves `target/<triple>/<profile>/libhuddle.a` relative to
 # the project directory, which a root-workspace member's shared `target/`
 # would break (the same rationale the now-deleted `catalog` example carried).
-# examples/bubblebench (the Flutter-Impeller-issue-#180958 bubble-physics
-# benchmark port) is standalone for huddle's reason (2) alone: it is a full
-# `frust create` scaffold whose generated Android/iOS projects need a
-# project-local `target/` dir, and its generated Cargo.toml carries its own
-# `[profile.*]` blocks, which only take effect in a workspace root.
-# examples/shadertoy (the shader showcase) is standalone for the same reason
-# as bubblebench: a full `frust create` scaffold with its own project-local
-# `target/` dir and hand-synced `[profile.*]` blocks.
+# examples/shadertoy (the shader showcase) is standalone for huddle's reason
+# (2) alone: it is a full `frust create` scaffold whose generated Android/iOS
+# projects need a project-local `target/` dir, and its generated Cargo.toml
+# carries its own `[profile.*]` blocks, which only take effect in a
+# workspace root.
 # examples/glyph-catalog (the Glyph design-system catalog) is standalone for
-# the same reason as bubblebench/shadertoy: a full `frust create` scaffold
-# with its own project-local `target/` dir and hand-synced `[profile.*]`
-# blocks (its generated Android/iOS projects need a project-local `target/`).
+# the same reason as shadertoy: a full `frust create` scaffold with its own
+# project-local `target/` dir and hand-synced `[profile.*]` blocks (its
+# generated Android/iOS projects need a project-local `target/`).
 # examples/layer-bench (the retained-layers Phase-0 composite-cost spike bench,
 # a THROWAWAY LAB) is standalone for the same reason as the examples above: a
 # full `frust create` scaffold with its own project-local `target/` dir and
@@ -40,7 +37,7 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
 # Version-Pin Policy). Excluding a not-yet-migrated dir is harmless.
-exclude = ["examples/huddle", "examples/bubblebench", "examples/shadertoy", "examples/glyph-catalog", "examples/layer-bench", "plugins/clean-signals-frust"]
+exclude = ["examples/huddle", "examples/shadertoy", "examples/glyph-catalog", "examples/layer-bench", "plugins/clean-signals-frust"]
 
 [workspace.package]
 version = "0.1.0"
