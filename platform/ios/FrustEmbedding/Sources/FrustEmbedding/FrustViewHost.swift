@@ -179,14 +179,27 @@ final class FrustViewHost {
     /// ObjC runtime class name of an `@objc(...)`-annotated `NSObject`
     /// factory (see `FrustPlatformViewFactory`'s doc). A failure returns
     /// `nil` — the caller marks the slot dead, never crashes.
+    ///
+    /// **Check order is part of the contract, not an implementation
+    /// detail:** `NSClassFromString` resolves the class object, then
+    /// `class_conformsToProtocol` verifies `FrustPlatformViewFactory`
+    /// conformance on the *class object* — BOTH BEFORE `init()` ever runs.
+    /// iOS has no package-prefix convention (bare `@objc` names are the
+    /// contract — `docs/CODE_STANDARDS.md`'s Naming Conventions), so
+    /// conformance-before-init is the whole fix: instantiating an
+    /// arbitrary attacker-influenced class name before checking what it is
+    /// lets a no-arg `init()`'s side effects run unconditionally.
     private func resolveFactory(_ viewType: String) -> FrustPlatformViewFactory? {
         if let cached = factoryCache[viewType] {
             return cached
         }
         guard
             let cls = NSClassFromString(viewType) as? NSObject.Type,
-            let factory = cls.init() as? FrustPlatformViewFactory
+            class_conformsToProtocol(cls, FrustPlatformViewFactory.self)
         else {
+            return nil
+        }
+        guard let factory = cls.init() as? FrustPlatformViewFactory else {
             return nil
         }
         factoryCache[viewType] = factory

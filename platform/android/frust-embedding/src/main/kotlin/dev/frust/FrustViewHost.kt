@@ -209,16 +209,39 @@ class FrustViewHost(
      * no-arg constructor. Successes and failures are both cached, so a bad
      * `viewType` costs one reflection attempt, not one per frame. A failure
      * never throws — it logs and returns null (the caller marks the slot dead).
+     *
+     * **Check order is part of the contract, not an implementation detail:**
+     * (1) the `dev.frust.` package prefix, (2) [FrustPlatformViewFactory]
+     * assignability via [Class.isAssignableFrom] on the *class object* — BOTH
+     * checked BEFORE (3) the no-arg constructor ever runs. Reflectively
+     * instantiating an arbitrary attacker-influenced class name before
+     * checking what it is lets a public no-arg constructor's side effects run
+     * unconditionally; verifying the type first closes that hole.
      */
     private fun resolveFactory(viewType: String): FrustPlatformViewFactory? {
         factories[viewType]?.let { return it }
         if (viewType in failedViewTypes) return null
+        if (!viewType.startsWith(FACTORY_PACKAGE_PREFIX)) {
+            Log.w(
+                TAG,
+                "platform-view factory '$viewType' rejected: " +
+                    "viewType must start with '$FACTORY_PACKAGE_PREFIX'",
+            )
+            failedViewTypes.add(viewType)
+            return null
+        }
         return try {
-            val instance = activity.classLoader
-                .loadClass(viewType)
-                .getDeclaredConstructor()
-                .newInstance()
-            val factory = instance as FrustPlatformViewFactory
+            val cls = activity.classLoader.loadClass(viewType)
+            if (!FrustPlatformViewFactory::class.java.isAssignableFrom(cls)) {
+                Log.w(
+                    TAG,
+                    "platform-view factory '$viewType' rejected: " +
+                        "does not implement FrustPlatformViewFactory",
+                )
+                failedViewTypes.add(viewType)
+                return null
+            }
+            val factory = cls.getDeclaredConstructor().newInstance() as FrustPlatformViewFactory
             factories[viewType] = factory
             factory
         } catch (e: Throwable) {
@@ -230,6 +253,9 @@ class FrustViewHost(
 
     companion object {
         private const val TAG = "frust"
+
+        /** The [dev.frust] package prefix every `viewType` must carry (CODE_STANDARDS LAW). */
+        private const val FACTORY_PACKAGE_PREFIX = "dev.frust."
     }
 }
 
