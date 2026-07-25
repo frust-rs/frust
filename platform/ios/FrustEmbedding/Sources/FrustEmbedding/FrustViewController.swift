@@ -103,11 +103,24 @@ open class FrustViewController: UIViewController {
         super.init(coder: coder)
     }
 
-    override func loadView() {
+    /// The UIKit lifecycle overrides below (through `traitCollectionDidChange`)
+    /// are `open override`, not bare `override`. **This is load-bearing, not
+    /// stylistic:** an override must be at least as accessible as the member it
+    /// overrides, and UIKit declares all of these `open`. Left at Swift's default
+    /// `internal` — which is what they were while this file was app-owned — the
+    /// package does not compile, with one `error: overriding instance method must
+    /// be as accessible as the declaration it overrides` per member.
+    ///
+    /// `open` rather than `public` so an app's `FrustViewController` subclass can
+    /// still hook these, exactly as it could before the embedding was extracted
+    /// into a package; `public` would compile but silently remove that ability.
+    /// Do not narrow them back — the failure only shows when the package is built
+    /// on its own, not when an app target happens to build.
+    open override func loadView() {
         view = FrustView()
     }
 
-    override func viewDidLoad() {
+    open override func viewDidLoad() {
         super.viewDidLoad()
         // Perf instrumentation (spec §14 phase 7.A task 09): marks
         // viewDidLoad's entry on the same console stream the Rust side's
@@ -188,7 +201,7 @@ open class FrustViewController: UIViewController {
         )
     }
 
-    override func viewDidLayoutSubviews() {
+    open override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateSurface()
     }
@@ -196,7 +209,7 @@ open class FrustViewController: UIViewController {
     /// SafeArea change (rotation, notch/Dynamic Island layout change, a
     /// sibling view controller's chrome) — task 08. Pushed unconditionally;
     /// `IosAppHandle::set_insets` (Rust side) no-op-guards an unchanged value.
-    override func viewSafeAreaInsetsDidChange() {
+    open override func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
         pushInsets()
     }
@@ -245,7 +258,7 @@ open class FrustViewController: UIViewController {
         )
     }
 
-    override func viewWillTransition(
+    open override func viewWillTransition(
         to size: CGSize,
         with coordinator: UIViewControllerTransitionCoordinator
     ) {
@@ -436,9 +449,9 @@ open class FrustViewController: UIViewController {
         setNeedsUpdateOfHomeIndicatorAutoHidden()
     }
 
-    override var prefersStatusBarHidden: Bool { statusBarHidden }
+    open override var prefersStatusBarHidden: Bool { statusBarHidden }
 
-    override var prefersHomeIndicatorAutoHidden: Bool { homeIndicatorAutoHidden }
+    open override var prefersHomeIndicatorAutoHidden: Bool { homeIndicatorAutoHidden }
 
     @objc private func renderFrame(_ link: CADisplayLink) {
         guard let handle else { return }
@@ -484,7 +497,7 @@ open class FrustViewController: UIViewController {
 
     /// The platform's light/dark appearance preference changed (task 08) —
     /// re-seed the theme's brightness.
-    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    open override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
         guard let handle else { return }
         frust_set_appearance(handle, traitCollection.userInterfaceStyle == .dark ? 1 : 0)
