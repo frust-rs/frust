@@ -49,16 +49,30 @@ jni = { workspace = true }
 objc2 = { workspace = true }
 # `alloc`/`std`: baseline. `NSString`/`NSError`/`NSObject`: error messages and
 # the capture-delegate base class (task 07, `define_class!`). `NSArray`:
-# device-discovery-session result lists. `NSNotification`: session
-# runtime-error/interruption notifications (Phase 2).
+# device-discovery-session result lists. `NSData`: TASK-02 GAP (added by task
+# 07) — `AVCapturePhoto.fileDataRepresentation()` returns an `NSData` the
+# still-capture delegate flattens to bytes, and `objc2-av-foundation` enables
+# only `objc2-foundation/alloc` itself, so naming the type needs this feature
+# here. `NSNotification`: session runtime-error/interruption notifications
+# (Phase 2).
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
     "NSString",
     "NSError",
     "NSArray",
+    "NSData",
     "NSNotification",
 ] }
+# TASK-02 GAP (added by task 07): the `AVCaptureDevice
+# requestAccessForMediaType:completionHandler:` permission bridge needs to
+# *construct* a block (`block2::RcBlock`), not just name the `DynBlock`
+# parameter type `objc2-av-foundation` re-exports nothing of — so `block2` has
+# to be a direct dependency, not only an `objc2-av-foundation` feature. Version
+# range matches what `objc2-av-foundation 0.3.2` itself requires
+# (`>=0.6.1, <0.8.0`); `0.6.2` was already in `Cargo.lock` transitively, so
+# this edge resolves to the same version and moves no pin.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
 # `objc2-av-foundation 0.3.2` requires `objc2 >=0.6.2, <0.8.0` (permits
 # 0.7.x — RESEARCH-REFRESH.md §5 correction; do not write "requires objc2
 # ^0.6"). Coverage, one feature per RESEARCH-REFRESH.md §5's confirmed

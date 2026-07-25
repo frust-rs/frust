@@ -1446,6 +1446,7 @@ dependencies = [
 name = "frust-camera"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "dispatch2",
  "frust-plugin",
  "jni 0.22.4",
