@@ -173,6 +173,7 @@ android {
 // declares neither directly.
 dependencies {
     implementation(project(":frust-embedding"))
+    // frust:plugin-dependencies — plugin-contributed dependencies go below.
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each

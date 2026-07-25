@@ -32,3 +32,5 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("build/frust-embedding"))
     }
 }
+
+// frust:plugin-includes — plugin-contributed `include(...)` lines go below.
