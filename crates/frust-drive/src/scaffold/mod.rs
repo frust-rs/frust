@@ -358,6 +358,8 @@ mod tests {
         let gitignore = fs::read_to_string(dest.join(".gitignore")).unwrap();
         // Verify build-output patterns are present (kept in sync with clean.rs REMOVED_DIRS).
         assert!(gitignore.contains("android/app/build/"), "{gitignore}");
+        // The `:frust-embedding` module's redirected Gradle output.
+        assert!(gitignore.contains("android/build/"), "{gitignore}");
         assert!(gitignore.contains("android/.gradle/"), "{gitignore}");
         assert!(gitignore.contains("build/"), "{gitignore}");
         assert!(
@@ -458,76 +460,81 @@ mod tests {
             main_activity.contains(&format!("package {}", ctx.android_identifier())),
             "{main_activity}"
         );
-        // Deep links (task 07): cold-start (`onCreate`) and running
-        // (`onNewIntent`) delivery must both be present, unconditionally —
-        // only the manifest's intent-filter/launchMode are gated on
-        // `[deeplink]` config.
+        // Embedding extraction (task 04): the generated `MainActivity` is a
+        // near-empty subclass of the framework-owned `dev.frust.FrustActivity`
+        // — every lifecycle/deep-link/back/IME behavior it used to carry inline
+        // now lives in `platform/android/frust-embedding` (covered by that
+        // module's own compile gate and the on-device run, not by this test).
         assert!(
-            main_activity.contains("surfaceView.onDeepLink(intent?.data?.toString())"),
+            main_activity.contains("import dev.frust.FrustActivity"),
             "{main_activity}"
         );
         assert!(
-            main_activity.contains("override fun onNewIntent"),
+            main_activity.contains("class MainActivity : FrustActivity()"),
             "{main_activity}"
+        );
+        assert!(
+            main_activity.lines().count() <= 6,
+            "MainActivity.kt must stay under the 6-line budget:\n{main_activity}"
         );
 
-        // `FrustSurfaceView` stays at the fixed `dev/frust/` package
-        // regardless of `android_identifier`.
-        let surface_view = dest.join("android/app/src/main/kotlin/dev/frust/FrustSurfaceView.kt");
-        assert!(surface_view.exists());
-        let surface_view_src = fs::read_to_string(&surface_view).unwrap();
-        assert!(surface_view_src.contains("package dev.frust"));
+        // No framework Kotlin/Java is rendered into the app any more.
         assert!(
-            surface_view_src.contains(&format!("System.loadLibrary(\"{}\")", ctx.project_name))
-        );
-        // Touch delivery (spec §9): the `nativeOnTouch` export and its
-        // `onTouchEvent` bridge must be present in the generated surface view.
-        assert!(
-            surface_view_src.contains("external fun nativeOnTouch"),
-            "{surface_view_src}"
+            !dest.join("android/app/src/main/kotlin/dev/frust").exists(),
+            "the app template must ship no `dev.frust` Kotlin"
         );
         assert!(
-            surface_view_src.contains("override fun onTouchEvent"),
-            "{surface_view_src}"
+            !dest
+                .join("android/app/src/main/java/dev/accesskit")
+                .exists(),
+            "the app template must ship no vendored accesskit delegate"
         );
-        // IME transport (spec §14 Phase 4): the three IME exports, the
-        // `BaseInputConnection` mirror, and the editor-view hooks must be
-        // present, and no AndroidX dependency introduced.
+
+        // The embedding module is wired in by path: an `include`, a
+        // `projectDir` pointing at the frust checkout, and the build-output
+        // redirect that keeps that checkout pristine.
+        let settings = fs::read_to_string(dest.join("android/settings.gradle.kts")).unwrap();
         for needle in [
-            "external fun nativeImeApply",
-            "external fun nativeImeState",
-            "external fun nativeImeAction",
-            "override fun onCheckIsTextEditor",
-            "override fun onCreateInputConnection",
-            "BaseInputConnection(this@FrustSurfaceView",
-            "imm.updateSelection",
-            // Deep links (task 07): the export, the queue-until-ready field,
-            // and the public delivery method must all be present.
-            "external fun nativeOnDeepLink",
-            "pendingDeepLink",
-            "fun onDeepLink(url: String?)",
+            "include(\":frust-embedding\")",
+            "project(\":frust-embedding\").projectDir =",
+            "file(providers.gradleProperty(\"frust.embedding.dir\").get())",
+            "gradle.lifecycle.beforeProject {",
+            "layout.buildDirectory.set(rootDir.resolve(\"build/frust-embedding\"))",
         ] {
             assert!(
-                surface_view_src.contains(needle),
-                "expected `{needle}` in generated FrustSurfaceView.kt:\n{surface_view_src}"
+                settings.contains(needle),
+                "expected `{needle}`:\n{settings}"
             );
         }
-        // IME transport itself still uses no AndroidX types (state-sync
-        // stays on `BaseInputConnection`/`InputMethodManager` above);
-        // `androidx.core` is now a real, intentional dependency of the
-        // *inset*/appearance-contrast path (device-parity task 08 —
-        // RESEARCH.md "Insets / SafeArea / SystemChrome"), not IME.
-        for needle in [
-            "external fun nativeOnInsetsChanged",
-            "external fun nativeOnBackPress",
-            "androidx.core.view.ViewCompat",
-            "fun dispatchBackPress(): Boolean",
-        ] {
-            assert!(
-                surface_view_src.contains(needle),
-                "expected `{needle}` in generated FrustSurfaceView.kt:\n{surface_view_src}"
-            );
-        }
+
+        // `frust.embedding.dir` is the single machine-specific indirection
+        // point, resolved (not a literal placeholder) at scaffold time.
+        let gradle_properties = fs::read_to_string(dest.join("android/gradle.properties")).unwrap();
+        assert!(
+            gradle_properties.contains(&format!(
+                "frust.embedding.dir={}",
+                ctx.frust_embedding_android_dir()
+            )),
+            "{gradle_properties}"
+        );
+        assert!(!gradle_properties.contains("{{"), "{gradle_properties}");
+
+        assert!(
+            build_gradle.contains("implementation(project(\":frust-embedding\"))"),
+            "{build_gradle}"
+        );
+
+        // `FrustActivity` resolves the app's native library name from this
+        // `<meta-data>`; its absence is a launch-time `check()` failure.
+        let manifest =
+            fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            manifest.contains(&format!(
+                "<meta-data android:name=\"dev.frust.nativeLibrary\" android:value=\"{}\" />",
+                ctx.project_name
+            )),
+            "{manifest}"
+        );
 
         let _ = fs::remove_dir_all(&dest);
     }
@@ -751,6 +758,9 @@ mod tests {
     /// Task 07 acceptance criterion 2: with no `[deeplink]` config, the
     /// rendered Android manifest must be byte-identical to the pre-task
     /// rendering (no `android:launchMode`, no second `<intent-filter>`).
+    /// The baseline gained the `dev.frust.nativeLibrary` `<meta-data>` element
+    /// with the embedding extraction (task 04) — `FrustActivity` reads it to
+    /// resolve the app's Rust library name.
     #[test]
     fn generate_android_manifest_without_deeplink_is_byte_identical_to_pre_task_baseline() {
         let dest = unique_temp_dir("manifest-no-deeplink");
@@ -772,6 +782,9 @@ mod tests {
              \x20\x20\x20\x20\x20\x20\x20\x20android:roundIcon=\"@mipmap/ic_launcher_round\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.NoTitleBar\">\n\
              \n\
+             \x20\x20\x20\x20\x20\x20\x20\x20<!-- Read by dev.frust.FrustActivity to load this app's Rust library. -->\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20<meta-data android:name=\"dev.frust.nativeLibrary\" android:value=\"{project}\" />\n\
+             \n\
              \x20\x20\x20\x20\x20\x20\x20\x20<activity\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:name=\".MainActivity\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20android:exported=\"true\"\n\
@@ -787,6 +800,7 @@ mod tests {
              \n\
              </manifest>",
             title = ctx.title_case_name,
+            project = ctx.project_name,
         );
         assert_eq!(manifest, expected);
 
