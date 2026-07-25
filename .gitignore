@@ -5,3 +5,10 @@
 .DS_Store
 
 /workflow/personal_notes.txt
+
+# Belt-and-braces: a consuming app redirects the embedding module's build
+# directory into its own tree (`gradle.lifecycle.beforeProject`), so these
+# should never appear — but a missing redirect must not commit build output
+# into the framework checkout.
+/platform/android/frust-embedding/build/
+/platform/android/frust-embedding/.gradle/
