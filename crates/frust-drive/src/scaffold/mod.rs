@@ -589,140 +589,262 @@ mod tests {
         );
         assert!(!info_plist.contains("{{"), "{info_plist}");
 
-        // The static Swift sources and bridging header were copied verbatim.
-        assert!(dest.join("ios/Runner/AppDelegate.swift").exists());
-        assert!(dest.join("ios/Runner/SceneDelegate.swift").exists());
-        assert!(dest.join("ios/Runner/FrustView.swift").exists());
-        assert!(dest.join("ios/Runner/FrustViewController.swift").exists());
-        assert!(dest.join("ios/Runner/Runner-Bridging-Header.h").exists());
+        // Embedding extraction (task 05): `ios/Runner/` ships exactly four
+        // things — the two thin delegates, the Info.plist and the asset
+        // catalog. Every framework Swift source (and the bridging header)
+        // now lives in the `platform/ios/FrustEmbedding` Swift package.
+        let mut runner_entries: Vec<String> = fs::read_dir(dest.join("ios/Runner"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        runner_entries.sort();
+        assert_eq!(
+            runner_entries,
+            [
+                "AppDelegate.swift",
+                "Assets.xcassets",
+                "Info.plist",
+                "SceneDelegate.swift",
+            ],
+            "the app template must ship no framework Swift under ios/Runner"
+        );
 
-        // Touch delivery (spec §9): the `frust_dispatch_touch` export must be
-        // declared in the bridging header and bridged from the view's touch
-        // overrides in `FrustView.swift`.
-        let bridging =
-            fs::read_to_string(dest.join("ios/Runner/Runner-Bridging-Header.h")).unwrap();
-        assert!(bridging.contains("frust_dispatch_touch"), "{bridging}");
-        let frust_view = fs::read_to_string(dest.join("ios/Runner/FrustView.swift")).unwrap();
-        assert!(frust_view.contains("touchesBegan"), "{frust_view}");
-        assert!(frust_view.contains("var onTouch"), "{frust_view}");
+        // The two delegates are near-empty subclasses of the package's own
+        // base classes. Their former bodies — the deep-link plumbing in
+        // particular (`connectionOptions.urlContexts`, `openURLContexts`,
+        // `handleDeepLink`) — are now `FrustSceneDelegate`/
+        // `FrustViewController` code, covered by the package's compile gate
+        // and the on-device deep-link run, not by this test.
+        let app_delegate = fs::read_to_string(dest.join("ios/Runner/AppDelegate.swift")).unwrap();
+        assert!(
+            app_delegate.contains("import FrustEmbedding"),
+            "{app_delegate}"
+        );
+        assert!(
+            app_delegate.contains("class AppDelegate: FrustAppDelegate"),
+            "{app_delegate}"
+        );
+        assert!(
+            app_delegate.lines().count() <= 6,
+            "AppDelegate.swift must stay under the 6-line budget:\n{app_delegate}"
+        );
 
-        // Deep links (task 07): the C export, the queue-until-ready field,
-        // the delivery method, and both SceneDelegate call sites must all
-        // be present, unconditionally — only Info.plist's CFBundleURLTypes
-        // is gated on `[deeplink]` config.
-        assert!(bridging.contains("frust_on_deep_link"), "{bridging}");
-        let controller =
-            fs::read_to_string(dest.join("ios/Runner/FrustViewController.swift")).unwrap();
-        assert!(controller.contains("pendingDeepLink"), "{controller}");
-        assert!(controller.contains("func handleDeepLink"), "{controller}");
         let scene_delegate =
             fs::read_to_string(dest.join("ios/Runner/SceneDelegate.swift")).unwrap();
         assert!(
-            scene_delegate.contains("connectionOptions.urlContexts"),
+            scene_delegate.contains("import FrustEmbedding"),
             "{scene_delegate}"
         );
         assert!(
-            scene_delegate.contains("func scene(_ scene: UIScene, openURLContexts"),
+            scene_delegate.contains("class SceneDelegate: FrustSceneDelegate"),
             "{scene_delegate}"
+        );
+        assert!(
+            scene_delegate.lines().count() <= 4,
+            "SceneDelegate.swift must stay under the 4-line budget:\n{scene_delegate}"
         );
 
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Platform-views task 09: the generated iOS project registers the two
-    /// new platform-view host Swift sources (`FrustViewHost.swift`,
-    /// `FrustPlatformViewFactory.swift`) in every pbxproj section exactly
-    /// once, and the pbxproj is structurally well-formed (balanced sections,
-    /// no duplicate object ids). Host-runnable: this checks the *rendered*
-    /// text without needing `xcodebuild` (which `create_ios.rs` gates on
-    /// macOS). The Swift compile gate itself is owed to a macOS run (task 11).
+    /// A 24-character uppercase-hex pbxproj object id — the style every id
+    /// in the iOS template uses.
+    fn is_pbx_object_id(token: &str) -> bool {
+        token.len() == 24
+            && token
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('A'..='F').contains(&c))
+    }
+
+    /// Every object-id token on one pbxproj line, in order of appearance.
+    fn pbx_ids_on_line(line: &str) -> Vec<&str> {
+        line.split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|token| is_pbx_object_id(token))
+            .collect()
+    }
+
+    /// Splits a rendered `project.pbxproj` into `(defined ids, referenced
+    /// ids)`. A *definition* is a top-level entry of the `objects = { … }`
+    /// map: exactly two leading tabs, an object id, then ` = {`. Every other
+    /// id mention is a *reference* — including the deeper-indented
+    /// `TargetAttributes` entry and the trailing `rootObject` line, both of
+    /// which point at objects defined elsewhere.
+    fn pbx_ids(pbxproj: &str) -> (Vec<String>, Vec<String>) {
+        let mut defined = Vec::new();
+        let mut referenced = Vec::new();
+        for line in pbxproj.lines() {
+            let ids = pbx_ids_on_line(line);
+            let top_level = line
+                .strip_prefix("\t\t")
+                .filter(|rest| !rest.starts_with('\t'));
+            let is_definition = top_level.is_some_and(|rest| {
+                ids.first().is_some_and(|id| rest.starts_with(id)) && rest.contains(" = {")
+            });
+            let mut ids = ids.into_iter();
+            if is_definition {
+                defined.push(ids.next().expect("a definition line has an id").to_string());
+            }
+            referenced.extend(ids.map(str::to_string));
+        }
+        (defined, referenced)
+    }
+
+    /// The body of one `/* Begin <name> section */ … /* End <name> section */`
+    /// block, so a section-scoped assertion can't accidentally match text
+    /// from a different section.
+    fn pbx_section<'a>(pbxproj: &'a str, name: &str) -> &'a str {
+        let begin = format!("/* Begin {name} section */");
+        let end = format!("/* End {name} section */");
+        let start = pbxproj
+            .find(&begin)
+            .unwrap_or_else(|| panic!("missing `{begin}`:\n{pbxproj}"));
+        let stop = pbxproj
+            .find(&end)
+            .unwrap_or_else(|| panic!("missing `{end}`:\n{pbxproj}"));
+        &pbxproj[start..stop]
+    }
+
+    /// The id introduced by the single definition line containing `needle`.
+    fn pbx_definition_id(pbxproj: &str, needle: &str) -> String {
+        let matches: Vec<&str> = pbxproj
+            .lines()
+            .filter(|line| line.contains(needle))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one definition line containing `{needle}`:\n{pbxproj}"
+        );
+        pbx_ids_on_line(matches[0])
+            .first()
+            .unwrap_or_else(|| panic!("no object id on `{}`", matches[0]))
+            .to_string()
+    }
+
+    /// Embedding extraction (task 05), retargeted from the platform-view
+    /// host-file registration this test originally guarded: the generated
+    /// iOS project must wire the `FrustEmbedding` Swift package consistently
+    /// across **all five** sections that have to mention it
+    /// (`PBXProject.packageReferences`, the `XCLocalSwiftPackageReference`,
+    /// `PBXNativeTarget.packageProductDependencies`, the
+    /// `XCSwiftPackageProductDependency`, and a `PBXBuildFile { productRef }`
+    /// in the Frameworks phase), must mention none of the six deleted
+    /// framework files, and must carry no dangling object id — the classic
+    /// corruption that makes Xcode refuse to open a project.
+    ///
+    /// Host-runnable: this checks the *rendered* text without needing
+    /// `xcodebuild` (which `create_ios.rs` gates on macOS), and on a non-macOS
+    /// host it is the **only** automated guard the pbxproj has.
     #[test]
-    fn generate_ios_pbxproj_registers_platform_view_host_files_well_formed() {
-        let dest = unique_temp_dir("ios-pbxproj-platform-views");
+    fn generate_ios_pbxproj_wires_embedding_package_well_formed() {
+        let dest = unique_temp_dir("ios-pbxproj-embedding");
         let ctx = test_context();
         generate(&dest, &ctx, None, false, None).unwrap();
-
-        // Both new Swift sources landed on disk, copied verbatim.
-        assert!(dest.join("ios/Runner/FrustViewHost.swift").exists());
-        assert!(
-            dest.join("ios/Runner/FrustPlatformViewFactory.swift")
-                .exists()
-        );
-        // The host code + factory protocol carry their load-bearing shapes.
-        let host = fs::read_to_string(dest.join("ios/Runner/FrustViewHost.swift")).unwrap();
-        assert!(host.contains("frust_platform_view_commands_json"), "{host}");
-        assert!(host.contains("NSClassFromString"), "{host}");
-        assert!(
-            host.contains("CATransaction.setDisableActions(true)"),
-            "{host}"
-        );
-        let factory =
-            fs::read_to_string(dest.join("ios/Runner/FrustPlatformViewFactory.swift")).unwrap();
-        assert!(
-            factory.contains("@objc public protocol FrustPlatformViewFactory"),
-            "{factory}"
-        );
-        assert!(
-            factory.contains("func createView(paramsJson: String) -> UIView"),
-            "{factory}"
-        );
-
-        // The controller wires the translucent opt-in + host poll (task 09).
-        let controller =
-            fs::read_to_string(dest.join("ios/Runner/FrustViewController.swift")).unwrap();
-        assert!(
-            controller.contains("frust_set_surface_mode(1)"),
-            "{controller}"
-        );
-        assert!(
-            controller.contains("platformViewHost?.poll(handle: handle)"),
-            "{controller}"
-        );
-        // The bridging header gained the two additive C decls.
-        let bridging =
-            fs::read_to_string(dest.join("ios/Runner/Runner-Bridging-Header.h")).unwrap();
-        assert!(
-            bridging.contains("void  frust_set_surface_mode(uint8_t translucent);"),
-            "{bridging}"
-        );
-        assert!(
-            bridging.contains(
-                "char *frust_platform_view_commands_json(void *handle, uint64_t ack_generation);"
-            ),
-            "{bridging}"
-        );
 
         let pbxproj =
             fs::read_to_string(dest.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
 
-        // Each new file is registered exactly once per section: build file,
-        // file reference, group child, and sources build phase.
-        for file in ["FrustViewHost.swift", "FrustPlatformViewFactory.swift"] {
-            let build_file_def = format!("/* {file} in Sources */ = {{isa = PBXBuildFile;");
-            let file_ref_def = format!("/* {file} */ = {{isa = PBXFileReference;");
-            let group_child = format!("/* {file} */,");
-            let sources_phase_ref = format!("/* {file} in Sources */,");
-            assert_eq!(
-                pbxproj.matches(&build_file_def).count(),
-                1,
-                "`{file}` PBXBuildFile definition should appear once:\n{pbxproj}"
+        // (1) The local package reference itself, carrying the resolved (not
+        // placeholder) embedding path under the `relativePath` key Xcode
+        // reads even for an absolute value.
+        let package_ref_id = pbx_definition_id(
+            &pbxproj,
+            "/* XCLocalSwiftPackageReference \"FrustEmbedding\" */ = {",
+        );
+        let package_ref_section = pbx_section(&pbxproj, "XCLocalSwiftPackageReference");
+        assert!(
+            package_ref_section.contains("isa = XCLocalSwiftPackageReference;"),
+            "{pbxproj}"
+        );
+        assert!(
+            package_ref_section.contains(&format!(
+                "relativePath = \"{}\";",
+                ctx.frust_embedding_ios_dir()
+            )),
+            "{pbxproj}"
+        );
+
+        // (2) …referenced from `PBXProject.packageReferences`.
+        assert!(
+            pbx_section(&pbxproj, "PBXProject").contains(&package_ref_id),
+            "`packageReferences` must list the local package reference:\n{pbxproj}"
+        );
+
+        // (3) The product dependency on the package's `FrustEmbedding`
+        // product…
+        let product_dep_id = pbx_definition_id(&pbxproj, "/* FrustEmbedding */ = {");
+        assert!(
+            pbx_section(&pbxproj, "XCSwiftPackageProductDependency")
+                .contains("productName = FrustEmbedding;"),
+            "{pbxproj}"
+        );
+
+        // (4) …referenced from `PBXNativeTarget.packageProductDependencies`…
+        assert!(
+            pbx_section(&pbxproj, "PBXNativeTarget").contains(&product_dep_id),
+            "`packageProductDependencies` must list the product dependency:\n{pbxproj}"
+        );
+
+        // (5) …and linked by a `PBXBuildFile { productRef = … }` in the
+        // Frameworks build phase (all five pieces are required — s1's spike).
+        let build_file_id = pbx_definition_id(
+            &pbxproj,
+            "/* FrustEmbedding in Frameworks */ = {isa = PBXBuildFile;",
+        );
+        assert!(
+            pbxproj.contains(&format!("productRef = {product_dep_id} ")),
+            "the Frameworks PBXBuildFile must point at the product dependency:\n{pbxproj}"
+        );
+        assert!(
+            pbx_section(&pbxproj, "PBXFrameworksBuildPhase").contains(&build_file_id),
+            "the Frameworks phase must list the product build file:\n{pbxproj}"
+        );
+
+        // None of the six deleted framework files may survive in *any*
+        // section, and the bridging-header build setting is gone outright.
+        for deleted in [
+            "FrustView.swift",
+            "FrustViewController.swift",
+            "FrustViewHost.swift",
+            "FrustPlatformViewFactory.swift",
+            "FrustTextInput.swift",
+            "Runner-Bridging-Header.h",
+        ] {
+            assert!(
+                !pbxproj.contains(deleted),
+                "`{deleted}` is deleted but still referenced in the pbxproj:\n{pbxproj}"
             );
-            assert_eq!(
-                pbxproj.matches(&file_ref_def).count(),
-                1,
-                "`{file}` PBXFileReference definition should appear once:\n{pbxproj}"
-            );
-            assert_eq!(
-                pbxproj.matches(&group_child).count(),
-                1,
-                "`{file}` group child should appear once:\n{pbxproj}"
-            );
-            assert_eq!(
-                pbxproj.matches(&sources_phase_ref).count(),
-                1,
-                "`{file}` sources-phase reference should appear once:\n{pbxproj}"
+            assert!(
+                !dest.join("ios/Runner").join(deleted).exists(),
+                "`{deleted}` must not be generated any more"
             );
         }
+        assert!(!pbxproj.contains("SWIFT_OBJC_BRIDGING_HEADER"), "{pbxproj}");
+
+        // Over-deletion guard: the native build path is untouched.
+        assert!(pbxproj.contains("Build Rust staticlib"), "{pbxproj}");
+        assert_eq!(
+            pbxproj
+                .matches("LIBRARY_SEARCH_PATHS = \"$(inherited) $(BUILT_PRODUCTS_DIR)\";")
+                .count(),
+            3,
+            "{pbxproj}"
+        );
+        assert_eq!(
+            pbxproj
+                .matches(&format!("\"-l{}\",", ctx.project_name))
+                .count(),
+            3,
+            "{pbxproj}"
+        );
+        assert_eq!(
+            pbxproj
+                .matches("IPHONEOS_DEPLOYMENT_TARGET = 15.0;")
+                .count(),
+            3,
+            "{pbxproj}"
+        );
+        assert!(pbxproj.contains("objectVersion = 54;"), "{pbxproj}");
 
         // Balanced: every `/* Begin X section */` has a matching `/* End */`.
         assert_eq!(
@@ -731,23 +853,32 @@ mod tests {
             "unbalanced PBX sections:\n{pbxproj}"
         );
 
-        // No duplicate object ids: every `<id> ... = {isa = ...}` definition
-        // line introduces a unique id (a copy/paste dup makes Xcode reject the
-        // project). Reference lines inside `files = (...)`/`children = (...)`
-        // don't contain `= {isa = ` so they're excluded.
-        let mut ids: Vec<&str> = pbxproj
-            .lines()
-            .filter(|line| line.contains("= {isa = "))
-            .filter_map(|line| line.split_whitespace().next())
-            .collect();
-        let total = ids.len();
-        ids.sort_unstable();
-        ids.dedup();
+        // Object-id consistency, the corruption this test exists to catch:
+        // no duplicate definition, no reference to an undefined id (a
+        // dangling id — the project Xcode refuses to open), and no defined
+        // object nothing points at (an orphan left by a partial deletion).
+        let (defined, referenced) = pbx_ids(&pbxproj);
+        assert!(defined.len() > 20, "suspiciously few objects:\n{pbxproj}");
+        let mut unique = defined.clone();
+        unique.sort_unstable();
+        unique.dedup();
         assert_eq!(
-            ids.len(),
-            total,
+            unique.len(),
+            defined.len(),
             "duplicate PBX object id(s) in generated pbxproj:\n{pbxproj}"
         );
+        for id in &referenced {
+            assert!(
+                defined.contains(id),
+                "dangling PBX object id `{id}` (referenced but never defined):\n{pbxproj}"
+            );
+        }
+        for id in &defined {
+            assert!(
+                referenced.contains(id),
+                "orphaned PBX object `{id}` (defined but never referenced):\n{pbxproj}"
+            );
+        }
 
         // No template placeholders survived rendering.
         assert!(!pbxproj.contains("{{"), "{pbxproj}");
