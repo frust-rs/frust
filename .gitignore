@@ -12,3 +12,10 @@
 # into the framework checkout.
 /platform/android/frust-embedding/build/
 /platform/android/frust-embedding/.gradle/
+
+# The iOS mirror of the above. Building the embedding package in place — which
+# `MACOS_HANDOFF.md`'s package gate does — drops a ~138MB SwiftPM `.build/`
+# (index-build output) into the framework checkout. A consuming app passes its
+# own `-derivedDataPath`, so this only appears when the package itself is built
+# directly, but it must never be committed.
+/platform/ios/FrustEmbedding/.build/
