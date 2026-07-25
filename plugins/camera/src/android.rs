@@ -1,10 +1,12 @@
 //! The Android backend — CameraX, driven from a `dev.frust.camera.FrustCameraHost`
 //! Kotlin helper (`plugins/camera/platform/android/`) over this crate's own
-//! JNI surface. **Task 06** wires the real Rust→Kotlin calls and the
-//! `nativeOn*` export bodies below; this module (task 02) fixes the API
-//! shape and the JNI symbol surface — every operation beyond
-//! [`AndroidSession::preview_view_type`] reports
-//! [`CameraError::Platform`]`("not yet implemented")`.
+//! JNI surface. **Task 06** (this module's current state) drives the real
+//! Rust→Kotlin calls and fills the `nativeOn*` export bodies against the
+//! frozen contract task 02 fixed; only the image stream
+//! ([`AndroidSession::start_image_stream`]/[`AndroidSession::stop_image_stream`]
+//! and the host's `startImageStream`/`stopImageStream`/`nativeOnImageFrame`)
+//! is still reported as [`CameraError::Platform`]`("not yet implemented")` —
+//! task 09 lands it on both backends at once.
 //!
 //! # The frozen contract
 //!
@@ -39,19 +41,74 @@
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`]`(env, class, session: jint, ok: jboolean, path: JString)`
 //! - (task 09 adds `nativeOnImageFrame`)
 //!
-//! Every export below is stubbed log-only (task 02) so the symbol surface is
-//! fixed; task 06 fills the real handling. Each upgrades its
-//! [`jni::EnvUnowned`] via [`jni::EnvUnowned::with_env`], which wraps the
-//! body in `catch_unwind` — the crate's own no-unwind-across-FFI guarantee
-//! (`docs/CODE_STANDARDS.md`'s Language Idioms), matching the pattern
-//! `frust-shell-android`'s own JNI exports use.
+//! Each export upgrades its [`jni::EnvUnowned`] via
+//! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind` — the
+//! crate's own no-unwind-across-FFI guarantee (`docs/CODE_STANDARDS.md`'s
+//! Language Idioms), matching the pattern `frust-shell-android`'s own JNI
+//! exports use. This module contains **no `unsafe` block**: the only `unsafe`
+//! token is each export's `#[unsafe(no_mangle)]` attribute, so the
+//! sanctioned-zone `# Safety` rule has nothing to document beyond the symbol
+//! names above.
+//!
+//! # Which calls block, and on what
+//!
+//! Three of the contract's calls are answered asynchronously by a `nativeOn*`
+//! callback. This backend resolves that split **once**, here, so an app never
+//! has to:
+//!
+//! | Call | Blocking? |
+//! |---|---|
+//! | [`request_permission`] | **Blocks** on [`PERMISSION_TIMEOUT`] when the host reports `3` (dialog shown), waking on `nativeOnPermissionResult`; a timeout reports [`PermissionStatus::Denied`]. `0`/`1`/`2` return immediately. |
+//! | [`AndroidSession::open`] | **Never blocks.** `openCamera` returns the session id and this returns immediately with a live [`AndroidSession`]; CameraX configuration continues on the host's main thread and lands via `nativeOnCameraState`. A caller reads [`AndroidSession::preview_aspect_ratio`] (`0.0` until the first `TransformationInfo`) to learn when geometry is ready — this is the same contract [`crate::Camera::open`]'s doc already states, and the one task 11's catalog page consumes. |
+//! | [`AndroidSession::take_picture`] | **Blocks** on [`PICTURE_TIMEOUT`] until `nativeOnPictureTaken` answers the capture it started (`spawn_blocking`-paired by convention — the crate doc's *Blocking API*). |
+//!
+//! Every blocking wait happens **outside** the scoped JNI attachment
+//! ([`frust_plugin::android::with_jni_env`] returns before the wait starts),
+//! so a blocked caller never pins a JVM attachment and the callback thread is
+//! free to deliver its answer.
+//!
+//! # Session state
+//!
+//! [`SESSIONS`] is the process-wide `session id -> `[`SessionState`] map the
+//! exports write and the blocking waits read, woken by [`SESSIONS_UPDATED`].
+//! Entries are created by [`AndroidSession::open`] and dropped by
+//! [`AndroidSession::close`] or a `Closed` state callback — an
+//! [`AndroidSession`] itself holds only the integer id, so it stays trivially
+//! `Send + Sync` and holds no JNI reference across calls (the
+//! `frust-secure-storage` per-call-attachment shape).
+//!
+//! # Fail-soft, never a panic
+//!
+//! Every entry point routes through [`with_host`], which checks
+//! `frust-plugin`'s ready flag first: before the host shell installs the
+//! `(JavaVM, Context)` handles (an old scaffold predating
+//! `nativeInitPlatform`) every call reports
+//! [`CameraError::PlatformNotInitialized`]. Any JNI failure — a missing
+//! `FrustCameraHost` class (the plugin's Gradle module isn't wired in), a
+//! thrown exception, a null return — maps to [`CameraError::Platform`] with
+//! the failing operation named, never a panic across the FFI boundary.
+//!
+//! # What the contract does *not* carry
+//!
+//! `openCamera` takes a lens facing and nothing else, so
+//! [`crate::Resolution`] is **not** forwarded to CameraX on Android v1: the
+//! host uses CameraX's own un-configured resolution strategy and an app reads
+//! the delivered geometry back via [`AndroidSession::preview_aspect_ratio`],
+//! exactly as [`crate::Resolution::Explicit`]'s "best-effort, always read it
+//! back" doc allows. Widening the contract with a resolution parameter means
+//! updating tasks 02/05/06 together, not improvising here.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
-use jni::EnvUnowned;
 use jni::errors::LogErrorAndDefault;
-use jni::objects::{JClass, JString};
+use jni::objects::{JClass, JObject, JString, JValue};
+use jni::refs::Global;
 use jni::sys::{jboolean, jint};
+use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
 use crate::{
     CameraError, ImageFormat, ImageFrameCallback, Lens, PermissionStatus, Resolution,
@@ -65,34 +122,455 @@ use crate::{
 /// `CameraPreviewFactory.kt` (task 05).
 const PREVIEW_VIEW_TYPE: &str = "dev.frust.camera.CameraPreviewFactory";
 
+/// The Kotlin host's fully-qualified class name in **binary/dotted** form, as
+/// `ClassLoader.loadClass` expects (**not** the slash form `FindClass` wants)
+/// — the module doc's frozen contract, and the package baked into every JNI
+/// export symbol below. Looked up through the application classloader (see
+/// [`load_host_class`]).
+const HOST_CLASS_BINARY: &str = "dev.frust.camera.FrustCameraHost";
+
+/// `CameraSelector.LENS_FACING_FRONT` — a published `androidx.camera.core`
+/// constant (see [`Lens`]'s doc), passed straight to `openCamera`.
+const LENS_FACING_FRONT: i32 = 0;
+/// `CameraSelector.LENS_FACING_BACK` — a published `androidx.camera.core`
+/// constant (see [`Lens`]'s doc).
+const LENS_FACING_BACK: i32 = 1;
+
+/// `FrustCameraHost.requestPermission()`'s "already granted" return code.
+const PERMISSION_CODE_GRANTED: i32 = 0;
+/// `requestPermission()`'s "denied" return code.
+const PERMISSION_CODE_DENIED: i32 = 1;
+/// `requestPermission()`'s "no Activity cached yet" return code.
+const PERMISSION_CODE_NEEDS_UI: i32 = 2;
+/// `requestPermission()`'s "system dialog shown" return code — the answer
+/// arrives via [`Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionResult`].
+const PERMISSION_CODE_PENDING: i32 = 3;
+
+/// `nativeOnCameraState`'s `state` codes (module doc's contract table).
+const STATE_CODE_CONFIGURING: i32 = 0;
+/// See [`STATE_CODE_CONFIGURING`].
+const STATE_CODE_RUNNING: i32 = 1;
+/// See [`STATE_CODE_CONFIGURING`].
+const STATE_CODE_CLOSED: i32 = 2;
+/// See [`STATE_CODE_CONFIGURING`].
+const STATE_CODE_ERROR: i32 = 3;
+
+/// `FrustCameraHost.takePicture`'s "capture started" return code; anything
+/// else is a rejected request.
+const TAKE_PICTURE_STARTED: i32 = 0;
+
+/// How long [`request_permission`] waits for `nativeOnPermissionResult` after
+/// the host reports [`PERMISSION_CODE_PENDING`], before reporting
+/// [`PermissionStatus::Denied`].
+///
+/// **Not a platform value** — the system permission dialog has no published
+/// deadline (a user may leave it on screen indefinitely). Two minutes is long
+/// enough that a real answer is never cut short, short enough that a caller
+/// paired with `frust_reactive::spawn_blocking` cannot pin a blocking-pool
+/// thread forever if the host never relays a result (e.g. the Activity was
+/// destroyed mid-dialog). Timing out reports `Denied` rather than an error:
+/// "we did not obtain permission" is exactly what the caller must act on, and
+/// re-requesting is always valid.
+const PERMISSION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long [`AndroidSession::take_picture`] waits for `nativeOnPictureTaken`
+/// before reporting [`CameraError::Platform`].
+///
+/// **Not a platform value** — `ImageCapture.takePicture`'s own completion has
+/// no published bound. Fifteen seconds comfortably covers a slow
+/// low-light/HDR capture plus the file write while still failing a caller
+/// whose completion callback never arrives.
+const PICTURE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The cached `dev.frust.camera.FrustCameraHost` class reference.
+///
+/// **One** global reference for the whole process (plus the method ids ART
+/// caches behind `call_static_method`), never a per-call one: ART's global-ref
+/// table is a hard-capped budget (`JNI ERROR: global reference table
+/// overflow`), and a per-call `Global` would burn it on the image-stream path.
+/// A local `JClass` cannot be cached instead — locals die with their JNI
+/// frame.
+static HOST_CLASS: OnceLock<Global<JClass<'static>>> = OnceLock::new();
+
+/// The process-wide permission-request slot: `nativeOnPermissionResult`
+/// carries no request id, so the answer is matched to the caller by
+/// [`PermissionSlot::generation`] (bumped by every request), which keeps a
+/// late answer to an abandoned request from resolving the next one.
+struct PermissionSlot {
+    /// Bumped by each [`request_permission`] call that arms a wait.
+    generation: u64,
+    /// The answer `nativeOnPermissionResult` delivered for [`Self::generation`].
+    result: Option<bool>,
+}
+
+impl PermissionSlot {
+    /// The pre-request state: nothing armed, no answer.
+    const fn new() -> Self {
+        Self {
+            generation: 0,
+            result: None,
+        }
+    }
+}
+
+/// See [`PermissionSlot`].
+static PERMISSION: Mutex<PermissionSlot> = Mutex::new(PermissionSlot::new());
+/// Woken by `nativeOnPermissionResult`; waited on by [`request_permission`].
+static PERMISSION_UPDATED: Condvar = Condvar::new();
+
+/// A session's lifecycle phase, as `nativeOnCameraState` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SessionPhase {
+    /// CameraX is still binding the use cases — the session's initial state.
+    #[default]
+    Configuring,
+    /// The camera is live.
+    Running,
+    /// The host reported a failure; every blocking wait on this session
+    /// aborts with [`CameraError::Platform`].
+    Error,
+}
+
+/// One live session's callback-delivered state (see [`SESSIONS`]).
+#[derive(Debug, Default)]
+struct SessionState {
+    /// The latest phase `nativeOnCameraState` reported. A `Closed` state is
+    /// not a phase: it removes the entry outright (see the module doc).
+    phase: SessionPhase,
+    /// Bumped by each [`AndroidSession::take_picture`] call, so a completion
+    /// is matched to the caller that started it rather than to a previous,
+    /// timed-out one.
+    capture_generation: u64,
+    /// `(generation, ok)` as `nativeOnPictureTaken` delivered it.
+    capture_result: Option<(u64, bool)>,
+}
+
+/// Every open session's callback state, keyed by the host's session id.
+///
+/// `HashMap::new` is not `const`, so this is a [`LazyLock`] rather than a bare
+/// `static Mutex<HashMap<..>>`. Entries are inserted by
+/// [`AndroidSession::open`] and removed by [`AndroidSession::close`] or a
+/// `Closed` state callback; the `nativeOn*` exports only ever update an
+/// **existing** entry, so a callback for an unknown/already-closed session is
+/// logged and dropped instead of resurrecting a map entry.
+static SESSIONS: LazyLock<Mutex<HashMap<i32, SessionState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Woken by `nativeOnCameraState`/`nativeOnPictureTaken` and by
+/// [`AndroidSession::close`]; waited on by [`await_capture`].
+static SESSIONS_UPDATED: Condvar = Condvar::new();
+
+/// Lock a module-global mutex, recovering from poisoning instead of
+/// panicking: a panic caught by an export's `catch_unwind` must not turn every
+/// later camera call into a panic near the FFI boundary
+/// (`docs/CODE_STANDARDS.md`'s no-unwind rule). The guarded data is plain
+/// bookkeeping, so a poisoned view is still coherent enough to use.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+// --- JNI plumbing -----------------------------------------------------------
+
+/// Run `f` with a live [`Env`] and the cached `FrustCameraHost` class inside a
+/// scoped JNI attachment, flattening the two error layers: a missing platform
+/// handle → [`CameraError::PlatformNotInitialized`] (the ready flag is checked
+/// *first*, before any JNI work), a JVM attach failure →
+/// [`CameraError::Platform`]. `f` itself already returns a [`CameraError`].
+fn with_host<T>(
+    f: impl FnOnce(&mut Env<'_>, &Global<JClass<'static>>) -> Result<T, CameraError>,
+) -> Result<T, CameraError> {
+    let attached = frust_plugin::android::with_jni_env(|env, context| {
+        let class = host_class(env, context)?;
+        f(env, class)
+    });
+    match attached {
+        Ok(inner) => inner,
+        Err(frust_plugin::PlatformHandleError::NotInitialized) => {
+            Err(CameraError::PlatformNotInitialized)
+        }
+        Err(other) => Err(CameraError::Platform(format!(
+            "android camera backend: platform handle error: {other}"
+        ))),
+    }
+}
+
+/// The cached [`HOST_CLASS`], loading it on first use. A racing loser's
+/// reference is dropped immediately (`Global`'s own `Drop` releases it), so at
+/// most one global ref survives.
+fn host_class(
+    env: &mut Env<'_>,
+    context: &JObject,
+) -> Result<&'static Global<JClass<'static>>, CameraError> {
+    if let Some(class) = HOST_CLASS.get() {
+        return Ok(class);
+    }
+    let class = load_host_class(env, context)?;
+    Ok(HOST_CLASS.get_or_init(|| class))
+}
+
+/// `context.getClassLoader().loadClass("dev.frust.camera.FrustCameraHost")`,
+/// promoted to a process-lifetime global reference.
+///
+/// The application `Context`'s classloader is the only loader that can see
+/// app-defined classes — a bare `FindClass` on a JNI worker thread sees the
+/// bootstrap loader only, which is exactly why this explicit path exists (the
+/// `FrustBiometric` mechanism, `plugins/secure-storage/src/android.rs`). A
+/// `ClassNotFoundException` here means the plugin's Android Gradle module
+/// isn't wired into the app.
+fn load_host_class(
+    env: &mut Env<'_>,
+    context: &JObject,
+) -> Result<Global<JClass<'static>>, CameraError> {
+    run_jni(
+        env,
+        "loading dev.frust.camera.FrustCameraHost (is the plugin's Android Gradle module wired \
+         into the app?)",
+        |env| {
+            let loader = env
+                .call_method(
+                    context,
+                    jni_str!("getClassLoader"),
+                    jni_sig!("()Ljava/lang/ClassLoader;"),
+                    &[],
+                )?
+                .l()?;
+            let name = env.new_string(HOST_CLASS_BINARY)?;
+            let class = env
+                .call_method(
+                    &loader,
+                    jni_str!("loadClass"),
+                    jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
+                    &[JValue::Object(&name)],
+                )?
+                .l()?;
+            let class = env.cast_local::<JClass>(class)?;
+            env.new_global_ref(class)
+        },
+    )
+}
+
+/// Run a sequence of JNI calls, converting any pending Java exception into a
+/// typed [`CameraError::Platform`] naming `op`.
+///
+/// `jni` 0.22 returns `Err(Error::JavaException)` and leaves the exception
+/// **pending** — undefined behaviour for the next JNI call — so we always
+/// check/clear it here before returning, whatever `f` reported (the
+/// `frust-secure-storage` `run_jni` shape). The camera contract has no
+/// exception taxonomy to distinguish (unlike Keystore's
+/// `KeyPermanentlyInvalidatedException`), so every throw maps to one variant
+/// with the class and message preserved in the string.
+fn run_jni<'local, T>(
+    env: &mut Env<'local>,
+    op: &str,
+    f: impl FnOnce(&mut Env<'local>) -> Result<T, jni::errors::Error>,
+) -> Result<T, CameraError> {
+    let result = f(env);
+    if env.exception_check() {
+        return Err(take_pending_exception(env, op));
+    }
+    result.map_err(|e| CameraError::Platform(format!("android camera backend: {op}: {e}")))
+}
+
+/// Extract, **clear**, and describe the pending Java exception. Clears first
+/// (mirroring `jni`'s own `exception_catch`) so the subsequent class/message
+/// queries run without a pending exception; a defensive final clear covers the
+/// unlikely case one of those queries itself throws.
+fn take_pending_exception(env: &mut Env<'_>, op: &str) -> CameraError {
+    let Some(throwable) = env.exception_occurred() else {
+        env.exception_clear();
+        return CameraError::Platform(format!(
+            "android camera backend: {op}: JNI reported an exception with no throwable"
+        ));
+    };
+    env.exception_clear();
+
+    let class_name = match env.get_object_class(&throwable) {
+        Ok(class) => match class.get_name(env) {
+            Ok(name) => name.to_string(),
+            Err(_) => "<unknown exception class>".to_string(),
+        },
+        Err(_) => "<unknown exception class>".to_string(),
+    };
+    let message = match throwable.get_message(env) {
+        Ok(msg) => msg.to_string(),
+        Err(_) => "<no message>".to_string(),
+    };
+
+    // Defensive: don't leave a second exception pending for the next JNI call.
+    if env.exception_check() {
+        env.exception_clear();
+    }
+
+    CameraError::Platform(format!(
+        "android camera backend: {op}: {class_name}: {message}"
+    ))
+}
+
+// --- Permission -------------------------------------------------------------
+
 /// [`crate::Camera::request_permission`]'s Android arm.
 ///
-/// Task 06 fills the real `FrustCameraHost.requestPermission()` call (the
-/// contract table above); until then every call reports
-/// [`CameraError::Platform`].
+/// Calls `FrustCameraHost.requestPermission()` (module doc's contract table).
+/// A [`PERMISSION_CODE_PENDING`] answer means the system dialog is on screen,
+/// so this **blocks** for up to [`PERMISSION_TIMEOUT`] on
+/// `nativeOnPermissionResult` — pair with `frust_reactive::spawn_blocking`,
+/// never call it on the UI thread (the crate doc's *Blocking API*).
+///
+/// # Errors
+/// [`CameraError::PlatformNotInitialized`] before the host shell installs the
+/// `(JavaVM, Context)` handles; [`CameraError::Platform`] on any JNI failure
+/// or an unrecognised return code.
 pub(crate) fn request_permission() -> Result<PermissionStatus, CameraError> {
-    Err(not_yet_implemented("request_permission"))
+    // Arm the wait *before* the JNI call so a result relayed while
+    // `requestPermission` is still returning cannot be missed.
+    let generation = {
+        let mut slot = lock(&PERMISSION);
+        slot.generation = slot.generation.wrapping_add(1);
+        slot.result = None;
+        slot.generation
+    };
+
+    let code = with_host(|env, class| {
+        run_jni(env, "FrustCameraHost.requestPermission", |env| {
+            env.call_static_method(class, jni_str!("requestPermission"), jni_sig!("()I"), &[])?
+                .i()
+        })
+    })?;
+
+    match code {
+        PERMISSION_CODE_GRANTED => Ok(PermissionStatus::Granted),
+        PERMISSION_CODE_DENIED => Ok(PermissionStatus::Denied),
+        PERMISSION_CODE_NEEDS_UI => Ok(PermissionStatus::NeedsUi),
+        // The dialog is showing — block outside the JNI attachment (which
+        // `with_host` already dropped) until the relay answers.
+        PERMISSION_CODE_PENDING => Ok(await_permission(generation)),
+        other => Err(CameraError::Platform(format!(
+            "android camera backend: FrustCameraHost.requestPermission returned an unknown code \
+             {other}"
+        ))),
+    }
 }
+
+/// Block until `nativeOnPermissionResult` answers request `generation`, or
+/// [`PERMISSION_TIMEOUT`] elapses (→ [`PermissionStatus::Denied`], see that
+/// constant's doc).
+///
+/// A concurrent [`request_permission`] that bumps the generation ends this
+/// wait too: the other caller now owns the dialog's answer, so this one
+/// reports [`PermissionStatus::Pending`] — the "ask again / read it from the
+/// other call" status, not a fabricated grant or denial.
+fn await_permission(generation: u64) -> PermissionStatus {
+    let slot = lock(&PERMISSION);
+    let (slot, _timeout) = PERMISSION_UPDATED
+        .wait_timeout_while(slot, PERMISSION_TIMEOUT, |slot| {
+            slot.generation == generation && slot.result.is_none()
+        })
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if slot.generation != generation {
+        log::debug!(
+            "frust-camera: permission request superseded by a newer one — reporting Pending"
+        );
+        return PermissionStatus::Pending;
+    }
+
+    match slot.result {
+        Some(true) => PermissionStatus::Granted,
+        Some(false) => PermissionStatus::Denied,
+        None => {
+            log::warn!(
+                "frust-camera: permission dialog did not report a result within {}s — reporting \
+                 Denied",
+                PERMISSION_TIMEOUT.as_secs()
+            );
+            PermissionStatus::Denied
+        }
+    }
+}
+
+// --- Session ----------------------------------------------------------------
 
 /// The Android [`SessionBackend`] — one CameraX session owned by
 /// `FrustCameraHost.kt`, referenced here by its integer session id.
+///
+/// Holds no JNI reference (each operation re-attaches through [`with_host`]),
+/// so it is trivially `Send + Sync`; the callback-delivered state lives in
+/// [`SESSIONS`] under [`Self::session_id`].
 pub(crate) struct AndroidSession {
-    /// The id `FrustCameraHost.openCamera` will return (task 06). This
-    /// phase never calls it, so every session holds the sentinel `-1`.
+    /// The id `FrustCameraHost.openCamera` returned.
     session_id: i32,
+    /// Set by the first [`Self::close`] so a second close (and the [`Drop`]
+    /// safety net) is a no-op and later operations report
+    /// [`CameraError::SessionClosed`].
+    closed: AtomicBool,
 }
 
 impl AndroidSession {
-    /// [`crate::Camera::open`]'s Android arm.
+    /// [`crate::Camera::open`]'s Android arm — `FrustCameraHost.openCamera`.
     ///
-    /// Session opening on the real backend is asynchronous (state arrives
-    /// via [`Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState`]),
-    /// so this succeeds even during this crate's stub phase — the returned
-    /// session is inert until task 06 lands the real
-    /// `FrustCameraHost.openCamera` call; every capture/stream operation
-    /// reports [`CameraError::Platform`] until then.
-    pub(crate) fn open(_lens: Lens, _resolution: Resolution) -> Result<Self, CameraError> {
-        Ok(Self { session_id: -1 })
+    /// **Returns as soon as the host hands back a session id**, without
+    /// waiting for `nativeOnCameraState` to report past `Configuring` (the
+    /// module doc's blocking table, and the contract
+    /// [`crate::Camera::open`]'s doc already states): CameraX binds on the
+    /// host's main thread, so blocking here would stall a caller for a whole
+    /// bind cycle to learn something [`Self::preview_aspect_ratio`] reports
+    /// anyway. A caller sizes its preview slot off that ratio once it turns
+    /// non-zero.
+    ///
+    /// `resolution` is accepted and **not forwarded** — the frozen
+    /// `openCamera(int lensFacing)` contract carries no resolution parameter
+    /// (module doc's *What the contract does not carry*).
+    ///
+    /// # Errors
+    /// [`CameraError::PlatformNotInitialized`] before the host shell installs
+    /// the platform handles; [`CameraError::Platform`] if `openCamera`
+    /// reports a negative error code or the JNI call fails.
+    pub(crate) fn open(lens: Lens, resolution: Resolution) -> Result<Self, CameraError> {
+        let _ = resolution;
+        let lens_facing = match lens {
+            Lens::Back => LENS_FACING_BACK,
+            Lens::Front => LENS_FACING_FRONT,
+        };
+
+        let session_id = with_host(|env, class| {
+            run_jni(env, "FrustCameraHost.openCamera", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("openCamera"),
+                    jni_sig!("(I)I"),
+                    &[JValue::Int(lens_facing)],
+                )?
+                .i()
+            })
+        })?;
+
+        if session_id < 0 {
+            // The contract fixes only the sign (≥0 id / <0 error); it defines
+            // no finer code taxonomy, so the code travels in the message
+            // rather than being mapped to an invented variant. A post-open
+            // failure arrives instead as `nativeOnCameraState`'s `Error`.
+            return Err(CameraError::Platform(format!(
+                "android camera backend: FrustCameraHost.openCamera failed (code {session_id})"
+            )));
+        }
+
+        lock(&SESSIONS).insert(session_id, SessionState::default());
+
+        Ok(Self {
+            session_id,
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    /// `Ok(())` while this session is usable, [`CameraError::SessionClosed`]
+    /// once [`Self::close`] ran (or a `Closed` state callback dropped the
+    /// entry).
+    fn ensure_open(&self) -> Result<(), CameraError> {
+        if self.closed.load(Ordering::Acquire) || !lock(&SESSIONS).contains_key(&self.session_id) {
+            return Err(CameraError::SessionClosed);
+        }
+        Ok(())
     }
 }
 
@@ -107,13 +585,82 @@ impl SessionBackend for AndroidSession {
 
     fn preview_aspect_ratio(&self) -> f32 {
         // `0.0` until the platform reports its first `TransformationInfo` —
-        // the contract table's own documented initial value, not a stub
-        // placeholder.
-        0.0
+        // the contract table's own documented initial value. A closed session
+        // or a JNI failure reports the same `0.0` rather than an error: this
+        // accessor is infallible by API shape, so a caller sizing a preview
+        // slot simply keeps waiting.
+        if self.ensure_open().is_err() {
+            return 0.0;
+        }
+        let ratio = with_host(|env, class| {
+            run_jni(env, "FrustCameraHost.previewAspectRatio", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("previewAspectRatio"),
+                    jni_sig!("(I)F"),
+                    &[JValue::Int(self.session_id)],
+                )?
+                .f()
+            })
+        });
+        match ratio {
+            Ok(ratio) => ratio,
+            Err(err) => {
+                log::warn!("frust-camera: preview_aspect_ratio failed: {err}");
+                0.0
+            }
+        }
     }
 
-    fn take_picture(&self, _path: &Path) -> Result<(), CameraError> {
-        Err(not_yet_implemented("take_picture"))
+    fn take_picture(&self, path: &Path) -> Result<(), CameraError> {
+        self.ensure_open()?;
+
+        let path_str = path.to_str().ok_or_else(|| {
+            CameraError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "camera capture path is not valid UTF-8 (it must cross JNI as a Java \
+                     String): {}",
+                    path.display()
+                ),
+            ))
+        })?;
+
+        // Arm the completion slot *before* the JNI call so a capture that
+        // completes while `takePicture` is still returning cannot be missed.
+        let generation = {
+            let mut sessions = lock(&SESSIONS);
+            let Some(state) = sessions.get_mut(&self.session_id) else {
+                return Err(CameraError::SessionClosed);
+            };
+            state.capture_generation = state.capture_generation.wrapping_add(1);
+            state.capture_result = None;
+            state.capture_generation
+        };
+
+        let code = with_host(|env, class| {
+            run_jni(env, "FrustCameraHost.takePicture", |env| {
+                let path_jstr = env.new_string(path_str)?;
+                env.call_static_method(
+                    class,
+                    jni_str!("takePicture"),
+                    jni_sig!("(ILjava/lang/String;)I"),
+                    &[JValue::Int(self.session_id), JValue::Object(&path_jstr)],
+                )?
+                .i()
+            })
+        })?;
+
+        if code != TAKE_PICTURE_STARTED {
+            return Err(CameraError::Platform(format!(
+                "android camera backend: FrustCameraHost.takePicture refused the request (code \
+                 {code})"
+            )));
+        }
+
+        // Block outside the JNI attachment (`with_host` already dropped it)
+        // so the callback thread can attach and deliver the completion.
+        await_capture(self.session_id, generation)
     }
 
     fn start_image_stream(
@@ -121,6 +668,7 @@ impl SessionBackend for AndroidSession {
         _format: ImageFormat,
         _on_frame: Box<ImageFrameCallback>,
     ) -> Result<(), CameraError> {
+        self.ensure_open()?;
         Err(not_yet_implemented("start_image_stream"))
     }
 
@@ -129,18 +677,105 @@ impl SessionBackend for AndroidSession {
     }
 
     fn close(&self) {
-        log::debug!(
-            "frust-camera: close(session_id={}) — stub, task 06 fills",
-            self.session_id
-        );
+        // First close wins; a second (including the `Drop` safety net) is a
+        // no-op, per `CameraSession::close`'s documented contract.
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let closed = with_host(|env, class| {
+            run_jni(env, "FrustCameraHost.closeCamera", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("closeCamera"),
+                    jni_sig!("(I)V"),
+                    &[JValue::Int(self.session_id)],
+                )?
+                .v()
+            })
+        });
+        if let Err(err) = closed {
+            // Close is infallible by API shape; report and still drop our own
+            // bookkeeping so blocked callers wake with `SessionClosed`.
+            log::warn!(
+                "frust-camera: close(session_id={}) failed: {err}",
+                self.session_id
+            );
+        }
+
+        lock(&SESSIONS).remove(&self.session_id);
+        SESSIONS_UPDATED.notify_all();
     }
 }
 
-/// Every stub operation's error, named per call site so a log/error message
-/// says exactly what hasn't landed yet (module doc's *Phased delivery*).
+impl Drop for AndroidSession {
+    /// Release the camera if the app dropped its [`crate::CameraSession`]
+    /// without calling [`crate::CameraSession::close`] — a hardware resource
+    /// no other owner would ever free. Explicit `close` remains the documented
+    /// path; this is only the safety net (and a no-op after it).
+    fn drop(&mut self) {
+        SessionBackend::close(self);
+    }
+}
+
+/// Block until `nativeOnPictureTaken` answers capture `generation` on
+/// `session_id`, the session ends, or [`PICTURE_TIMEOUT`] elapses.
+fn await_capture(session_id: i32, generation: u64) -> Result<(), CameraError> {
+    let sessions = lock(&SESSIONS);
+    let (sessions, _timeout) = SESSIONS_UPDATED
+        .wait_timeout_while(sessions, PICTURE_TIMEOUT, |sessions| {
+            !capture_settled(sessions, session_id, generation)
+        })
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let Some(state) = sessions.get(&session_id) else {
+        // The entry is gone: `close` ran, or the host reported `Closed`.
+        return Err(CameraError::SessionClosed);
+    };
+    match state.capture_result {
+        Some((delivered, true)) if delivered == generation => Ok(()),
+        Some((delivered, false)) if delivered == generation => Err(CameraError::Platform(
+            "android camera backend: take_picture failed (the host reported an unsuccessful \
+             capture)"
+                .to_string(),
+        )),
+        // No answer for *our* generation: either the session errored or we
+        // hit the deadline.
+        _ if state.phase == SessionPhase::Error => Err(CameraError::Platform(
+            "android camera backend: take_picture aborted — the session reported an error state"
+                .to_string(),
+        )),
+        _ => Err(CameraError::Platform(format!(
+            "android camera backend: take_picture did not complete within {}s",
+            PICTURE_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
+/// Whether [`await_capture`]'s wait is over: the session ended, it reported an
+/// error, or the completion for `generation` landed.
+fn capture_settled(
+    sessions: &HashMap<i32, SessionState>,
+    session_id: i32,
+    generation: u64,
+) -> bool {
+    match sessions.get(&session_id) {
+        None => true,
+        Some(state) => {
+            state.phase == SessionPhase::Error
+                || matches!(state.capture_result, Some((delivered, _)) if delivered == generation)
+        }
+    }
+}
+
+/// The operations this phase still reports unimplemented, named per call site
+/// so a log/error message says exactly what hasn't landed yet (the crate
+/// doc's *Phased delivery*). Only the image stream remains — task 09 wires
+/// `startImageStream`/`stopImageStream`/`nativeOnImageFrame` on both backends
+/// at once.
 fn not_yet_implemented(op: &str) -> CameraError {
     CameraError::Platform(format!(
-        "android camera backend: {op} not yet implemented (task 06)"
+        "android camera backend: {op} not yet implemented (task 09)"
     ))
 }
 
@@ -148,9 +783,8 @@ fn not_yet_implemented(op: &str) -> CameraError {
 
 /// `Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionResult` — fires
 /// once the system permission dialog resolves
-/// ([`PermissionStatus::Pending`]'s eventual answer). Log-only stub; task 06
-/// wires this into whatever pending-request state tracks the caller's
-/// original [`crate::Camera::request_permission`] call.
+/// ([`PermissionStatus::Pending`]'s eventual answer), waking the
+/// [`request_permission`] call blocked in [`await_permission`].
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionResult<'local>(
     mut env: EnvUnowned<'local>,
@@ -158,9 +792,9 @@ pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionR
     granted: jboolean,
 ) {
     env.with_env(|_env| {
-        log::debug!(
-            "frust-camera: nativeOnPermissionResult(granted={granted}) — stub, task 06 fills"
-        );
+        log::debug!("frust-camera: nativeOnPermissionResult(granted={granted})");
+        lock(&PERMISSION).result = Some(granted);
+        PERMISSION_UPDATED.notify_all();
         Ok::<(), jni::errors::Error>(())
     })
     .resolve::<LogErrorAndDefault>();
@@ -168,8 +802,13 @@ pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionR
 
 /// `Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState` — `state` is
 /// `0` Configuring / `1` Running / `2` Closed / `3` Error (contract table
-/// above). Log-only stub; task 06 wires this into the owning
-/// [`AndroidSession`]'s tracked state.
+/// above).
+///
+/// A `Closed` state **removes** the session's [`SESSIONS`] entry (it is the
+/// host's own teardown notification, and the common case is that it arrives
+/// after [`AndroidSession::close`] already removed it); every other state
+/// updates an existing entry only, so a callback for an unknown session is
+/// logged and dropped rather than resurrecting a map entry.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState<'local>(
     mut env: EnvUnowned<'local>,
@@ -178,19 +817,44 @@ pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState
     state: jint,
 ) {
     env.with_env(|_env| {
-        log::debug!(
-            "frust-camera: nativeOnCameraState(session={session}, state={state}) — stub, task 06 \
-             fills"
-        );
+        log::debug!("frust-camera: nativeOnCameraState(session={session}, state={state})");
+        {
+            let mut sessions = lock(&SESSIONS);
+            match state {
+                STATE_CODE_CLOSED => {
+                    sessions.remove(&session);
+                }
+                STATE_CODE_CONFIGURING | STATE_CODE_RUNNING | STATE_CODE_ERROR => {
+                    let phase = match state {
+                        STATE_CODE_RUNNING => SessionPhase::Running,
+                        STATE_CODE_ERROR => SessionPhase::Error,
+                        _ => SessionPhase::Configuring,
+                    };
+                    match sessions.get_mut(&session) {
+                        Some(entry) => entry.phase = phase,
+                        None => log::debug!(
+                            "frust-camera: nativeOnCameraState for unknown session {session} — \
+                             dropped"
+                        ),
+                    }
+                }
+                unknown => log::warn!(
+                    "frust-camera: nativeOnCameraState(session={session}) reported unknown state \
+                     {unknown} — ignored"
+                ),
+            }
+        }
+        SESSIONS_UPDATED.notify_all();
         Ok::<(), jni::errors::Error>(())
     })
     .resolve::<LogErrorAndDefault>();
 }
 
 /// `Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken` — completion
-/// callback for [`AndroidSession::take_picture`] (contract table above).
-/// Log-only stub; task 06 wires this into the caller's original
-/// [`crate::CameraSession::take_picture`] result.
+/// callback for [`AndroidSession::take_picture`] (contract table above),
+/// waking the caller blocked in [`await_capture`]. The completion is tagged
+/// with the session's current capture generation, so a late answer to a
+/// timed-out capture can never resolve the next one.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken<'local>(
     mut env: EnvUnowned<'local>,
@@ -200,10 +864,20 @@ pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTake
     path: JString<'local>,
 ) {
     env.with_env(|_env| {
-        log::debug!(
-            "frust-camera: nativeOnPictureTaken(session={session}, ok={ok}, path={path}) — stub, \
-             task 06 fills"
-        );
+        log::debug!("frust-camera: nativeOnPictureTaken(session={session}, ok={ok}, path={path})");
+        {
+            let mut sessions = lock(&SESSIONS);
+            match sessions.get_mut(&session) {
+                Some(state) => {
+                    let generation = state.capture_generation;
+                    state.capture_result = Some((generation, ok));
+                }
+                None => log::debug!(
+                    "frust-camera: nativeOnPictureTaken for unknown session {session} — dropped"
+                ),
+            }
+        }
+        SESSIONS_UPDATED.notify_all();
         Ok::<(), jni::errors::Error>(())
     })
     .resolve::<LogErrorAndDefault>();
