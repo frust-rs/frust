@@ -9,6 +9,7 @@ use toml_edit::{DocumentMut, InlineTable, Item, Value};
 
 use super::registry::find_plugin;
 use super::{AddItem, AddOutcome, AddReport, Contribution, PluginAddError, PluginSpec};
+use crate::scaffold::context::frust_path_from_project_subdir;
 
 /// Project-relative paths of the files a contribution edits.
 const CARGO_TOML_REL: &str = "Cargo.toml";
@@ -156,11 +157,28 @@ fn plugin_dep_path(frust_path: &str, crate_dir: &str) -> String {
 /// Resolve a repo-root-relative directory (a [`Contribution::GradleModule`]'s
 /// `rel_path`) the same way [`plugin_dep_path`] resolves a crate dir, and the
 /// same way the scaffold derives `frust.embedding.dir`:
-/// `<frust>/../../<rel_path>`. One path convention, not two — it carries
-/// exactly the machine-specific developer-checkout path `frust_path` already
-/// carries, and becomes a published coordinate post-crates.io.
+/// `<frust>/../../<rel_path>`. One path convention, not two.
+///
+/// Unlike [`plugin_dep_path`] — whose output lands in the project root's
+/// `Cargo.toml`, the base a relative `frust_path` is written against — this
+/// value lands in `android/settings.gradle.kts` (via
+/// [`settings_include_block`]) and is resolved by `file(...)` from
+/// `<project>/android/`. A relative `frust_path` therefore needs one extra
+/// `../` to climb out of that subdirectory, applied by the single shared
+/// [`frust_path_from_project_subdir`] helper the scaffold's two embedding
+/// accessors use; an absolute path is emitted unchanged.
+///
+/// Like those accessors, this **widens** the reach of the machine-specific
+/// developer-checkout path `frust_path` already carries rather than merely
+/// inheriting it: a missing checkout now fails Gradle *sync* (the project
+/// won't configure), not just the Rust link step. A deliberate trade-off,
+/// mitigated by the published-coordinate future in this feature's
+/// `design/PUBLICATION_SEAM.md` §5.
 fn repo_relative_path(frust_path: &str, rel_path: &str) -> String {
-    format!("{frust_path}/../../{rel_path}")
+    format!(
+        "{}/../../{rel_path}",
+        frust_path_from_project_subdir(frust_path)
+    )
 }
 
 /// Resolve a `requires_sibling` path to an absolute location for the on-disk
@@ -570,6 +588,96 @@ mod tests {
             .find(|i| i.description.contains(":frust-secure-storage"))
             .expect("a Gradle module line item");
         assert_eq!(item.outcome, AddOutcome::Applied);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Lexical `..`/`.` collapse — the module directory need not exist (see
+    /// the test above), so `fs::canonicalize` is unavailable.
+    fn normalize_lexically(path: &Path) -> PathBuf {
+        use std::path::Component;
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    /// `test_context`'s `frust_path` is absolute, which is immune to the
+    /// base-directory question — only a **relative** `--frust-path` (a
+    /// supported input) exposes it. The `projectDir` this writes is resolved
+    /// by `file(...)` from `<project>/android/`, one level below the project
+    /// root the Cargo `frust` path dep is expressed against, so it must carry
+    /// one extra `../`.
+    #[test]
+    fn gradle_module_projectdir_resolves_from_the_android_subdirectory() {
+        let root = scaffold_project("gradle-module-relative-frust-path");
+        const REL_FRUST: &str = "../checkouts/frust/crates/frust";
+        const MODULE_REL: &str = "plugins/secure-storage/platform/android";
+
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let cargo = fs::read_to_string(&cargo_path).unwrap();
+        let rewritten = cargo.replace(
+            "path = \"/nonexistent/frust/checkout\"",
+            &format!("path = \"{REL_FRUST}\""),
+        );
+        assert_ne!(rewritten, cargo, "expected to rewrite the frust path dep");
+        fs::write(&cargo_path, rewritten).unwrap();
+
+        let report = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.description.contains(":frust-secure-storage"))
+            .expect("a Gradle module line item");
+        // No on-disk existence check: the relative module dir is absent too.
+        assert_eq!(item.outcome, AddOutcome::Applied);
+
+        let settings = fs::read_to_string(root.join(SETTINGS_GRADLE_REL)).unwrap();
+        let emitted = format!("../{REL_FRUST}/../../{MODULE_REL}");
+        assert!(
+            settings.contains(&format!(
+                "project(\":frust-secure-storage\").projectDir = file(\"{emitted}\")"
+            )),
+            "{settings}"
+        );
+
+        // The intent behind that literal: resolved from `<project>/android/`
+        // (Gradle's base for `settings.gradle.kts`), it must land exactly
+        // where the project-root-relative convention reaches from `<project>/`
+        // — the same walk `resolve_sibling` performs.
+        let truth = normalize_lexically(&root.join(REL_FRUST).join("../..").join(MODULE_REL));
+        let actual = normalize_lexically(&root.join("android").join(&emitted));
+        assert_eq!(actual, truth);
+        assert!(
+            !actual.exists(),
+            "the module dir is absent, yet apply succeeded"
+        );
+
+        // The Cargo dep path is unchanged by this correction: `Cargo.toml`
+        // sits at the project root, so it needs no re-basing.
+        let cargo = fs::read_to_string(&cargo_path).unwrap();
+        assert!(
+            cargo.contains(&format!("{REL_FRUST}/../../plugins/secure-storage")),
+            "{cargo}"
+        );
+
+        // Still idempotent with a relative path.
+        let before = snapshot_tree(&root);
+        let second = add_plugin(&root, "secure-storage", &["biometric-gate"]).unwrap();
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent)
+        );
+        assert_eq!(before, snapshot_tree(&root));
 
         let _ = fs::remove_dir_all(&root);
     }

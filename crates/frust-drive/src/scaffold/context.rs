@@ -1,8 +1,41 @@
 //! Template context construction and project-name validation (spec §12.3).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use thiserror::Error;
+
+/// Re-base a **project-root-relative** `frust_path` for a consumer that
+/// resolves it from a project *subdirectory* one level down (`android/`,
+/// `ios/`) instead of from the project root.
+///
+/// `frust_path` is written into `Cargo.toml`'s `frust = { path = ... }`, and
+/// `Cargo.toml` sits at the project root — so that is the base every relative
+/// `frust_path` is expressed against (`plugin::apply::resolve_sibling` joins it
+/// onto `project_root` for exactly that reason). But Gradle resolves
+/// `frust.embedding.dir` / a plugin module's `projectDir` against
+/// `<project>/android/`, and Xcode resolves an
+/// `XCLocalSwiftPackageReference`'s `relativePath` against `<project>/ios/`
+/// (the directory *containing* `Runner.xcodeproj`, not the bundle —
+/// `research/SPIKE_IOS.md` §7). Both are one level down, so a relative path
+/// needs one extra `../` to climb back out; an **absolute** path is base-
+/// independent and is returned byte-identical.
+///
+/// The adjustment is deliberately **lexical**: the target need not exist at
+/// scaffold time (`frust create` runs before any checkout is guaranteed in
+/// place), so canonicalizing is not an option.
+///
+/// The single helper behind all three emitters
+/// ([`TemplateContext::frust_embedding_android_dir`],
+/// [`TemplateContext::frust_embedding_ios_dir`] and
+/// `plugin::apply::repo_relative_path`) — one path convention, not two.
+pub fn frust_path_from_project_subdir(frust_path: &str) -> String {
+    if Path::new(frust_path).is_absolute() {
+        frust_path.to_string()
+    } else {
+        format!("../{frust_path}")
+    }
+}
 
 /// Values substituted into `.tmpl` file contents, and (a subset of) values
 /// usable as literal path-segment placeholders.
@@ -112,23 +145,52 @@ impl TemplateContext {
     /// plugin crate directory: `frust` resolves to the facade crate dir
     /// (`crates/frust`), two levels below the repo root, so
     /// `{frust_path}/../../platform/android/frust-embedding` reaches the
-    /// module directory. This carries the same machine-specific
-    /// developer-checkout path `frust_path` itself already carries — no new
-    /// class of problem — and is a placeholder for a published Maven
-    /// coordinate once the embedding module ships to a registry
-    /// post-crates.io.
+    /// module directory.
+    ///
+    /// The emitted value lands in `android/gradle.properties`'
+    /// `frust.embedding.dir` and is resolved by `file(...)` in
+    /// `android/settings.gradle.kts` — i.e. from `<project>/android/`, **not**
+    /// from the project root a relative `frust_path` is expressed against. So
+    /// the path is re-based by [`frust_path_from_project_subdir`] first; an
+    /// absolute `frust_path` (the `frust create` default) is unaffected.
+    ///
+    /// This **widens** the blast radius of the machine-specific
+    /// developer-checkout path `frust_path` already carries rather than merely
+    /// inheriting it: before the embedding extraction only `cargo build`
+    /// needed the frust checkout and a scaffolded app's Gradle build was
+    /// self-contained, whereas now a missing or moved checkout fails Gradle
+    /// *sync* — the project cannot be opened or configured at all, not just
+    /// linked. That is a deliberate trade-off, taken because the value is a
+    /// placeholder for a published Maven coordinate once the embedding module
+    /// ships to a registry post-crates.io (the mitigation in this feature's
+    /// `design/PUBLICATION_SEAM.md` §5) and because `gradle.properties` keeps
+    /// it to one line to edit when a project moves machines.
     pub fn frust_embedding_android_dir(&self) -> String {
-        format!("{}/../../platform/android/frust-embedding", self.frust_path)
+        format!(
+            "{}/../../platform/android/frust-embedding",
+            frust_path_from_project_subdir(&self.frust_path)
+        )
     }
 
     /// The iOS embedding Swift package's location, derived from `frust_path`
-    /// the same way as [`Self::frust_embedding_android_dir`] above. Carries
-    /// the same machine-specific developer-checkout path `frust_path` itself
-    /// already carries — no new class of problem — and is a placeholder for
-    /// a published Swift package reference once the embedding package ships
-    /// to a registry post-crates.io.
+    /// the same way as [`Self::frust_embedding_android_dir`] above, and
+    /// re-based by the same [`frust_path_from_project_subdir`]: the value
+    /// becomes an `XCLocalSwiftPackageReference`'s `relativePath` in
+    /// `ios/Runner.xcodeproj`, which Xcode resolves against `<project>/ios/`
+    /// — the directory containing the `.xcodeproj`, not the bundle itself
+    /// (`research/SPIKE_IOS.md` §7).
+    ///
+    /// It widens the developer-checkout blast radius exactly as the Android
+    /// accessor above describes — a missing checkout fails Xcode's *package
+    /// resolution*, so the project won't open, not just link — under the same
+    /// deliberate trade-off, and is a placeholder for a published Swift
+    /// package reference once the embedding package ships to a registry
+    /// post-crates.io.
     pub fn frust_embedding_ios_dir(&self) -> String {
-        format!("{}/../../platform/ios/FrustEmbedding", self.frust_path)
+        format!(
+            "{}/../../platform/ios/FrustEmbedding",
+            frust_path_from_project_subdir(&self.frust_path)
+        )
     }
 }
 
@@ -442,17 +504,114 @@ mod tests {
         ctx.frust_path = "/absolute/frust".into();
         assert!(ctx.frust_embedding_android_dir().starts_with('/'));
         assert!(ctx.frust_embedding_ios_dir().starts_with('/'));
+        // An absolute path is base-independent: emitted byte-identical.
+        assert_eq!(
+            ctx.frust_embedding_android_dir(),
+            "/absolute/frust/../../platform/android/frust-embedding"
+        );
+        assert_eq!(
+            ctx.frust_embedding_ios_dir(),
+            "/absolute/frust/../../platform/ios/FrustEmbedding"
+        );
 
+        // A relative path carries one extra `../`: both values are resolved
+        // from a project *subdirectory* (`android/`, `ios/`), while
+        // `frust_path` itself is expressed against the project root.
         ctx.frust_path = "../relative/frust".into();
         assert!(!ctx.frust_embedding_android_dir().starts_with('/'));
         assert!(!ctx.frust_embedding_ios_dir().starts_with('/'));
         assert_eq!(
             ctx.frust_embedding_android_dir(),
-            "../relative/frust/../../platform/android/frust-embedding"
+            "../../relative/frust/../../platform/android/frust-embedding"
         );
         assert_eq!(
             ctx.frust_embedding_ios_dir(),
-            "../relative/frust/../../platform/ios/FrustEmbedding"
+            "../../relative/frust/../../platform/ios/FrustEmbedding"
+        );
+    }
+
+    /// Lexical `..`/`.` collapse — the scaffold targets need not exist, so
+    /// `fs::canonicalize` is unavailable (mirrors the accessors' own
+    /// deliberately lexical derivation).
+    fn normalize_lexically(path: &std::path::Path) -> std::path::PathBuf {
+        use std::path::{Component, PathBuf};
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    /// The *intent* behind [`embedding_dirs_preserve_absolute_or_relative_form`]'s
+    /// literal strings: each emitted path, resolved from the subdirectory that
+    /// actually consumes it, must land where the project-root-relative
+    /// `frust_path` convention reaches from the project root. A string-only
+    /// assertion is what let the one-level-short form ship in the first place.
+    #[test]
+    fn embedding_dirs_resolve_from_their_consumers_base_directory() {
+        use std::path::Path;
+
+        let project_root = Path::new("/projects/my_app");
+        for frust_path in [
+            "../checkouts/frust/crates/frust",
+            "vendor/frust/crates/frust",
+            "/absolute/checkout/crates/frust",
+        ] {
+            let mut ctx = test_context();
+            ctx.frust_path = frust_path.into();
+
+            // What `frust_path`'s own (project-root-relative) convention
+            // reaches — the same walk `plugin::apply::resolve_sibling` does.
+            let android_truth = normalize_lexically(
+                &project_root
+                    .join(frust_path)
+                    .join("../../platform/android/frust-embedding"),
+            );
+            let ios_truth = normalize_lexically(
+                &project_root
+                    .join(frust_path)
+                    .join("../../platform/ios/FrustEmbedding"),
+            );
+
+            // What the emitted values reach from the directories that
+            // actually resolve them: `<proj>/android/` (Gradle) and
+            // `<proj>/ios/` (Xcode, the dir containing `Runner.xcodeproj`).
+            let android_actual = normalize_lexically(
+                &project_root
+                    .join("android")
+                    .join(ctx.frust_embedding_android_dir()),
+            );
+            let ios_actual =
+                normalize_lexically(&project_root.join("ios").join(ctx.frust_embedding_ios_dir()));
+
+            assert_eq!(
+                android_actual, android_truth,
+                "android embedding dir for frust_path `{frust_path}`"
+            );
+            assert_eq!(
+                ios_actual, ios_truth,
+                "ios embedding dir for frust_path `{frust_path}`"
+            );
+        }
+    }
+
+    #[test]
+    fn frust_path_from_project_subdir_climbs_only_for_relative_paths() {
+        assert_eq!(
+            frust_path_from_project_subdir("/abs/frust"),
+            "/abs/frust",
+            "an absolute path is base-independent"
+        );
+        assert_eq!(frust_path_from_project_subdir("../frust"), "../../frust");
+        assert_eq!(
+            frust_path_from_project_subdir("vendor/frust"),
+            "../vendor/frust"
         );
     }
 }
