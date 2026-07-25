@@ -38,6 +38,38 @@ use crate::lifecycle::{
 };
 use crate::shader_effects::{ShaderEffects, clamp_size};
 
+/// Caller-requested alpha-compositing behavior for a surface configuration
+/// (platform-views task 04) — the `frust-render` public seam a shell picks
+/// between an opaque (today's default) and a translucent-preferred surface;
+/// the resolved `wgpu::CompositeAlphaMode` itself never crosses this boundary
+/// (mirrors [`DetachedSurface`]'s opacity — see `docs/CODE_STANDARDS.md`'s
+/// wgpu-leak anti-pattern), so this type stays `kurbo`/`peniko`-free too.
+///
+/// Resolution (`crate::context::resolve_alpha_mode`) happens inside
+/// [`RenderContext::create_render_surface`](crate::context::RenderContext::create_render_surface),
+/// validated against the live surface's `SurfaceCapabilities::alpha_modes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceAlphaRequest {
+    /// Today's behavior for every existing caller: `wgpu::CompositeAlphaMode::Auto`,
+    /// bit-for-bit unchanged.
+    Opaque,
+    /// Prefer a translucent alpha-compositing mode (Mode B platform views —
+    /// see `workflow/plans/features/frust-platform-views/PLAN.md`), trying
+    /// `Inherit` (Android's only reported mode) then `PostMultiplied` (iOS's
+    /// translucent mode) then `PreMultiplied`, in that order, against the
+    /// surface's reported `alpha_modes`. Falls back to `Opaque`'s `Auto` (and
+    /// a `log::warn!`) when none of those three is available — translucency
+    /// is then unavailable on that surface.
+    ///
+    /// **This is a request, not an outcome.** Never key a paint contract off
+    /// it: read
+    /// [`SurfaceRenderer::surface_resolved_translucent`](SurfaceRenderer::surface_resolved_translucent)
+    /// after the surface is installed instead (review finding M1 — a fallback
+    /// must degrade to the opaque Mode A contract, or the hole punch presents
+    /// black rectangles on an opaque swapchain).
+    TranslucentPreferred,
+}
+
 /// The live GPU resources of a [`SurfacePhase::SurfaceReady`] surface.
 ///
 /// The tier backend is created per surface (it is device-bound) and, with the
@@ -204,6 +236,39 @@ impl SurfaceRenderer {
         Some(crate::pipeline_cache::frame(key, &data))
     }
 
+    /// Whether the **live** surface actually resolved to a translucent
+    /// (alpha-compositing) mode — the truth a shell's Mode B paint contract
+    /// must key off, replacing the `SurfaceAlphaRequest` it *asked* for
+    /// (review finding M1).
+    ///
+    /// [`SurfaceAlphaRequest::TranslucentPreferred`] is a *preference*: the
+    /// configure step resolves it against the platform's advertised alpha modes
+    /// and silently degrades to an opaque swapchain (with a `log::warn!`) when
+    /// none is available. A shell that clears its base color to `TRANSPARENT`
+    /// and lets `platform_view` slots punch their rects on the strength of the
+    /// request alone then presents black rectangles on that opaque swapchain.
+    /// Reading this after every successful `on_surface_created*`/
+    /// [`on_surface_installed`](Self::on_surface_installed) — and re-reading it
+    /// after every recreate — is what makes a fallback degrade to the Mode A
+    /// contract (opaque base, no punch) instead.
+    ///
+    /// `false` outside [`SurfacePhase::SurfaceReady`]: with no live surface
+    /// there is nothing translucent to composite against, and `false` is the
+    /// safe (Mode A) default — never punch a hole you can't prove is a window.
+    ///
+    /// Deliberately **not** named `is_surface_translucent`: `RenderRoot` (which
+    /// sits on the other side of this same call chain) already owns a method by
+    /// that name for the *pushed* flag, and a shell threads this value straight
+    /// into it. The signature is `wgpu`-free, like every other value crossing
+    /// this crate's boundary (`docs/CODE_STANDARDS.md`'s wgpu-leak
+    /// anti-pattern).
+    pub fn surface_resolved_translucent(&self) -> bool {
+        match &self.state {
+            SurfaceState::Ready(ready) => ready.surface.resolved_translucent,
+            SurfaceState::NoSurface | SurfaceState::Lost => false,
+        }
+    }
+
     /// The current lifecycle phase (spec §8.1).
     pub fn phase(&self) -> SurfacePhase {
         match self.state {
@@ -230,6 +295,7 @@ impl SurfaceRenderer {
         window: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
         let surface = ctx
             .create_surface(
@@ -237,6 +303,7 @@ impl SurfaceRenderer {
                 width.max(1),
                 height.max(1),
                 wgpu::PresentMode::AutoVsync,
+                alpha,
             )
             .await
             .map_err(|e| anyhow!("frust-render: failed to create render surface: {e}"))?;
@@ -266,6 +333,7 @@ impl SurfaceRenderer {
         surface: DetachedSurface,
         width: u32,
         height: u32,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
         let surface = ctx
             .create_render_surface(
@@ -273,6 +341,7 @@ impl SurfaceRenderer {
                 width.max(1),
                 height.max(1),
                 wgpu::PresentMode::AutoVsync,
+                alpha,
             )
             .await
             .map_err(|e| anyhow!("frust-render: failed to configure detached surface: {e}"))?;
@@ -300,6 +369,7 @@ impl SurfaceRenderer {
         window_ptr: *mut c_void,
         width: u32,
         height: u32,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
         // SAFETY: forwarded to the caller's `on_surface_created_from_android_window`
         // contract — `window_ptr` is a valid, acquired ANativeWindow* outliving
@@ -311,6 +381,7 @@ impl SurfaceRenderer {
                 width.max(1),
                 height.max(1),
                 wgpu::PresentMode::AutoVsync,
+                alpha,
             )
             .await
             .map_err(|e| anyhow!("frust-render: failed to configure Android surface: {e}"))?;
@@ -342,13 +413,20 @@ impl SurfaceRenderer {
         layer_ptr: *mut c_void,
         width: u32,
         height: u32,
+        alpha: SurfaceAlphaRequest,
     ) -> Result<()> {
         // SAFETY: forwarded to the caller's `on_surface_created_from_metal_layer`
         // contract — `layer_ptr` is a valid, live CAMetalLayer* outliving the
         // surface.
         let raw = unsafe { crate::lifecycle::create_metal_surface(&ctx.instance, layer_ptr) }?;
         let surface = ctx
-            .create_render_surface(raw, width.max(1), height.max(1), wgpu::PresentMode::Fifo)
+            .create_render_surface(
+                raw,
+                width.max(1),
+                height.max(1),
+                wgpu::PresentMode::Fifo,
+                alpha,
+            )
             .await
             .map_err(|e| anyhow!("frust-render: failed to configure Metal surface: {e}"))?;
         self.install_surface(ctx, surface)
@@ -606,6 +684,39 @@ impl SurfaceRenderer {
                         );
                         // Carry `base_color` to `submit`, where the render runs.
                         *pending_base_color = Some(base_color);
+                    }
+                    // Direct-premultiplied (translucent, premultiplied-expecting —
+                    // defect D3): unlike the plain direct arm, the intermediate
+                    // already exists at encode time, so vello renders into it now
+                    // (like the blit arm); `submit`'s premultiply compute pass then
+                    // writes `(rgb*a, a)` into the acquired swapchain texture.
+                    RenderPath::DirectPremultiplied {
+                        intermediate_view, ..
+                    } => {
+                        vello_scene.reset();
+                        convert::encode_scene_with_shaders(
+                            scene,
+                            vello_scene,
+                            &shader_images,
+                            adapter_max,
+                        );
+                        let params = vello::RenderParams {
+                            base_color,
+                            width: ready.surface.config.width,
+                            height: ready.surface.config.height,
+                            antialiasing_method: vello::AaConfig::Area,
+                        };
+                        renderer
+                            .render_to_texture(
+                                &device_handle.device,
+                                &device_handle.queue,
+                                vello_scene,
+                                intermediate_view,
+                                &params,
+                            )
+                            .map_err(|e| {
+                                anyhow!("frust-render: vello render_to_texture failed: {e}")
+                            })?;
                     }
                     // Blit fallback: render into the intermediate `Rgba8Unorm` target
                     // now; the acquire/blit/present tail (see `submit`) copies it to
@@ -894,6 +1005,32 @@ impl SurfaceRenderer {
                     ));
                 }
             },
+            // Direct-premultiplied (defect D3): vello already rendered the
+            // straight-alpha frame into the intermediate in `encode`; premultiply
+            // it into the acquired swapchain texture so a premultiplied-expecting
+            // compositor (Android `Inherit`) blends it correctly. No blit, no
+            // intermediate→swapchain copy beyond this single compute dispatch.
+            RenderPath::DirectPremultiplied {
+                intermediate_view,
+                premultiply,
+                ..
+            } => {
+                let mut encoder =
+                    device_handle
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("frust-render premultiply"),
+                        });
+                premultiply.record(
+                    &device_handle.device,
+                    &mut encoder,
+                    intermediate_view,
+                    &swapchain_view,
+                    surface.config.width,
+                    surface.config.height,
+                );
+                device_handle.queue.submit([encoder.finish()]);
+            }
             // Blit fallback: copy the intermediate target (filled in `encode`)
             // into the swapchain texture and submit.
             RenderPath::Blit {
@@ -1072,6 +1209,16 @@ mod tests {
     fn starts_with_no_surface() {
         let renderer = SurfaceRenderer::new();
         assert_eq!(renderer.phase(), SurfacePhase::NoSurface);
+    }
+
+    #[test]
+    fn resolved_translucent_is_false_without_a_live_surface() {
+        // The Mode A default (review finding M1): with no surface installed
+        // there is nothing proven translucent, so a shell reading this before
+        // its first install keeps the opaque paint contract rather than
+        // punching holes it can't back.
+        let renderer = SurfaceRenderer::new();
+        assert!(!renderer.surface_resolved_translucent());
     }
 
     #[test]

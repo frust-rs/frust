@@ -1,8 +1,8 @@
 # Frust - Development Guide
 
 The canonical test-tier, golden-image, headless GPU, and Android emulator
-runbook is `docs/TESTING.md`. This guide retains the concise build/test commands
-and platform prerequisites used during ordinary development.
+runbook is `docs/TESTING.md`. This guide retains the concise build/test
+commands and platform prerequisites used during ordinary development.
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ compilation/translation is slow enough on mobile CPUs to trip the iOS
 launch watchdog, so only this stack is optimized. The three manifests are
 hand-synced (`cargo test -p frust-cli --test profile_sync` is the
 tripwire); a `[profile.dev.package."*"]` wildcard (`opt-level = 1`) widens
-every other non-workspace-member dependency's debug optimization the same way.
+every other dependency's debug optimization the same way.
 
 **Release-profile hardening.** `[profile.release]` (root, template, huddle)
 sets `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic =
@@ -126,8 +126,8 @@ adapter, `cpu` can always be forced. Desktop-preview-only today.
 
 **High refresh-rate hints.** A generated app's iOS `CADisplayLink` requests
 a 30–120Hz `preferredFrameRateRange`; Android calls `Surface.setFrameRate()`
-(API 30+) with the display's max rate — both hints, not guarantees, and
-unverifiable on the iOS Simulator or most Android emulators (60Hz-only).
+(API 30+) with the display's max rate — both hints, unverifiable on the iOS
+Simulator or most Android emulators (60Hz-only).
 
 **TUI workbench.** `frust tui` opens the ratatui workbench: `n` scaffolds a
 project; the devices panel launches concurrent sessions (`r`/`Enter`);
@@ -137,9 +137,9 @@ the bootstrap wizard, `Ctrl+P`/`:` a fuzzy command palette, `?` help,
 `Alt+m` toggles mouse capture. A per-session perf sparkline (`t`) parses
 `frust-perf` lines once `FRUST_TRACE` is set; settings persist to
 `$XDG_CONFIG_HOME/frust/tui.toml`. `q`/`Ctrl+Q` quits. `cargo test -p
-frust-tui` covers engine/render logic; live-terminal gestures, OSC-52
-copy, panic-restore, and a fresh-machine bootstrap walk are a **manual
-gate** for a person at a real desk, not CI.
+frust-tui` covers engine/render logic; live-terminal gestures, OSC-52 copy,
+panic-restore, and a fresh-machine bootstrap walk are a **manual gate** for
+a person at a real desk, not CI.
 
 ## Dev Loop
 
@@ -262,8 +262,10 @@ cargo check --target aarch64-linux-android -p frust-plugin
 cargo check --target aarch64-linux-android -p frust-shared-preferences
 cargo check --target aarch64-linux-android -p frust-secure-storage
 
-# iOS compile gate (no device needed; macOS only): the whole facade graph
-# must compile for the iOS Simulator target (frust-secure-storage also gates the real device target).
+# iOS compile gate (no device/Xcode needed — a type-check, runs on Linux
+# too; only building/running an iOS app needs macOS, see Prerequisites):
+# the whole facade graph must compile for the iOS Simulator target
+# (frust-secure-storage also gates the real device target).
 cargo check --target aarch64-apple-ios-sim -p frust
 cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences
 cargo check --target aarch64-apple-ios-sim -p frust-secure-storage
@@ -435,14 +437,12 @@ touching that pin:
 | `toml_edit 0.25` minor | `frust-tui`'s config persistence and `frust-drive::plugin`'s format-preserving Cargo.toml/manifest edits | `cargo test -p frust-tui` && `cargo test -p frust-drive` |
 
 - `examples/huddle` and `plugins/clean-signals-frust` are each a
-  **standalone package** (own `[workspace]` root/`Cargo.lock`, excluded
-  from the root `[workspace]`), path-depending on the `clean-signals` core
-  crate at the same **sibling checkout** (`../../../clean-signals-rs`,
-  branch `master` — not git+rev-pinned, so every consumer must resolve it
-  the same way; mixing `path`/`git`+`rev` builds two distinct identities
-  that fail to unify). Neither manifest can use `{ workspace = true }` —
-  every dependency is a literal spec kept in sync by hand; gate each from
-  its own directory (`cargo test` + `cargo clippy --all-targets -- -D warnings`).
+  **standalone package** (own `[workspace]` root/`Cargo.lock`, excluded from
+  the root `[workspace]`), path-depending on the `clean-signals` core crate
+  at the same **sibling checkout** (`../../../clean-signals-rs`, branch
+  `master` — not git+rev-pinned, so every consumer must resolve it the same
+  way). Neither manifest can use `{ workspace = true }`; gate each from its
+  own directory (`cargo test` + `cargo clippy --all-targets -- -D warnings`).
 - **Never run a blind `cargo update`.** After any pinned-dependency manifest
   change, run `cargo generate-lockfile` then confirm `cargo build
   --workspace --locked` still succeeds before committing.
@@ -492,9 +492,8 @@ the same key/value pairs in the build shell's environment first; fix pending.
 vello 0.9's bitmap-glyph decode path (`sbix`/COLR strikes) errors and skips
 any glyph whose PNG isn't `(RGBA, 8-bit)` — pinned, unfixed upstream
 ([linebender/vello#1031](https://github.com/linebender/vello/issues/1031)).
-**Safe** for huddle's desktop emoji set (every reaction-emoji's Apple Color
-Emoji `sbix` strike is uniformly RGBA8); the **unverified, at-risk** path
-is Android's CBDT strikes — legacy Noto Color Emoji CBDT strikes are known
-to use palette-indexed PNGs at smaller sizes, triggering this defect,
-unconfirmed on any device/emulator. The desktop logger suppresses this
-noise below `debug` (*Instrumentation*'s `FRUST_LOG` row).
+**Safe** for huddle's desktop emoji set (Apple Color Emoji's `sbix` strikes
+are uniformly RGBA8); **unverified, at-risk**: Android's CBDT strikes may use
+palette-indexed PNGs at smaller sizes, unconfirmed on any device. The desktop
+logger suppresses this noise below `debug` (*Instrumentation*'s `FRUST_LOG`
+row).

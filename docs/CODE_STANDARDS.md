@@ -55,8 +55,7 @@
 - **UTF-16 at the FFI seam, bytes inside.** `EditingState`'s
   `selection_*`/`composing_*` indices are UTF-16 code-unit indexed
   everywhere they cross a shell boundary; convert to/from byte offsets only
-  inside `frust-text`'s `TextEditor` — a shell/glue module passes indices
-  through opaquely, never converting them.
+  inside `frust-text`'s `TextEditor`.
 - **Hand-roll JSON at the mobile FFI boundary — no `serde` in shell crates.**
   `frust-shell-android`/`frust-shell-ios` serialize `ImeState` with a small
   hand-written escaper/builder for a handful of fixed fields.
@@ -64,8 +63,7 @@
   writing a type. When a lower layer threads a resource owned by a higher
   layer, pass it as `&mut dyn Any` and recover it at the one call site that
   knows the concrete type via a documented, panic-on-mismatch
-  `downcast_mut::<T>()` (the panic should say wiring bug, not runtime-data
-  condition).
+  `downcast_mut::<T>()`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope
   lifetimes by default.** When a function returns an `impl Trait` that
   borrows nothing from its parameters (e.g. `app_logic(&mut State) -> impl
@@ -93,8 +91,7 @@
   const EDGE_SWIPE_ZONE_DP: f64 = 20.0;
   ```
   This keeps the tunable visible in one place and tells a future reader
-  whether "fixing" it means matching a spec or adjusting a guess — grep
-  for `Community-approximate` to find every instance.
+  whether "fixing" it means matching a spec or adjusting a guess.
 
 ## Error Handling
 
@@ -126,10 +123,15 @@
 | Test-only fakes | `Fake<Trait>` | `FakeProcessRunner`, `FakeEnv` |
 | Widget pairs | `<Name>View` (declarative) / `<Name>Widget` (retained) | `TextView` / `TextWidget` |
 | JNI exports | `Java_<fixed_package>_<FixedClass>_native<Name>` | `Java_dev_frust_FrustSurfaceView_nativeOnFrame` |
+| Platform-view factory `viewType` | Android: fully-qualified `dev.frust.<Name>Factory` class; iOS: bare `@objc(<Name>)` runtime name | `dev.frust.MapFactory` / `@objc(MapFactory)` |
 
 JNI export names are LAW: the package/class (`dev.frust.FrustSurfaceView`)
 is fixed across every generated app, so the mangled symbol stays stable
-regardless of the app's own package.
+regardless of the app's own package. A `platform_view` factory's `viewType`
+naming is LAW too: Android's generated `FrustViewHost` resolves it as a
+`dev.frust.<Name>Factory` class via the app classloader; iOS resolves the
+bare `@objc(<Name>)` name via `NSClassFromString` — the host template
+hard-codes both lookup shapes, so neither convention is optional.
 
 ## Plugin Conventions
 
@@ -159,6 +161,27 @@ Structure) follow these conventions:
   Adding an OS-side contribution (dependency, manifest permission, Kotlin
   file, plist key) checks first and no-ops if already present — the
   contract `frust-drive::plugin::add_plugin` implements (see `docs/ARCHITECTURE.md`'s Plugin flow).
+
+## Platform-View Conventions
+
+- **Mode B is a build-time host configuration, never an app Rust opt-in.**
+  The generated host's translucency constant (`FRUST_TRANSLUCENT_SURFACE`
+  on Android, `translucentSurface` on iOS) must drive the window pixel
+  format, the host's native-sibling z-order, and the
+  `declare_host_translucent_surface` call *together*, in the same branch —
+  splitting them is the exact defect review M3 fixed. App Rust has no
+  matching call; only the two shells' own FFI-glue may declare it (see
+  `docs/ARCHITECTURE.md`'s Platform-view flow).
+- **Mode B paint contract: an unpainted region is a window, not a
+  compositor bug.** `platform_view` punches its own slot rect
+  automatically; any other chrome region left unpainted by a Mode B host
+  shows raw OS content behind the frust surface — pair translucency with
+  an explicit opaque app-root background (the catalog's `AppBackground`
+  precedent).
+- **A `platform_view` slot never receives `Widget::event` (v1).** Native-view
+  input is OS-routed through the host's own view hierarchy, not `EventCtx`
+  — there is no hit-test/dispatch seam for a hosted view; don't add pointer
+  handling to `PlatformViewWidget`.
 
 ## TUI Conventions
 
@@ -235,28 +258,26 @@ interactive widget in `frust-widgets`:
   }
   ```
 
-- **Controlled components never self-mutate.** `Checkbox`/`Slider` report the
-  *requested* value through `on_toggle`/`on_change` and leave `checked`/
-  `value` untouched until the next `rebuild` feeds the app-confirmed value
-  back down — never flip `self.checked` (or similar) inline in a handler.
-  `TextInput` is controlled too, reconciled rather than mutated:
-  `rebuild` applies the view's `value` to the widget's `TextEditor`
-  set-if-different (preserving the live selection when unchanged), so an
-  app that rejects/transforms input in `on_change` sees its own value win
-  next frame.
+- **Controlled components never self-mutate.** `Checkbox`/`Slider` report
+  the *requested* value through `on_toggle`/`on_change` and leave
+  `checked`/`value` untouched until the next `rebuild` feeds the
+  app-confirmed value back down — never flip `self.checked` (or similar)
+  inline in a handler. `TextInput` is controlled too: `rebuild` applies the
+  view's `value` to the widget's `TextEditor` set-if-different, so an app
+  that rejects/transforms input in `on_change` sees its own value win next
+  frame.
 
 - **Focus routes by recorded path, like capture; `Key`/`Ime` events never
   hit-test.** `EventCtx::request_focus`/`release_focus` record/clear the
   focused child exactly like `capture_pointer`, and a container simply
   forwards `Key`/`Ime` events to its focused child; a `Down` that doesn't
-  (re)claim focus on the child it hits blurs the chain (blur-on-outside-tap).
-  **A structural container rebuild clears capture and focus only where
-  identity is actually lost** — stable-prefix/key-matched, not a blanket
-  clear: positional reconciliation clears a path only at/after the first
-  index whose concrete type changed; keyed reconciliation clears it only
-  for a removed/type-swapped child (a key-matched reorder relocates the
-  widget, and its path, intact). `RenderRoot`'s cached
-  `focus_active`/`ime_state` self-correct on the next event pass.
+  (re)claim focus on the child it hits blurs the chain. **A structural
+  container rebuild clears capture and focus only where identity is actually
+  lost** — stable-prefix/key-matched, not a blanket clear: positional
+  reconciliation clears a path only at/after the first index whose type
+  changed; keyed reconciliation clears it only for a removed/type-swapped
+  child. `RenderRoot`'s cached `focus_active`/`ime_state` self-correct on
+  the next event pass.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key,
   view)` marks a `Flex` child list for identity-based reconciliation; once
@@ -295,10 +316,9 @@ interactive widget in `frust-widgets`:
   capture, clear their focus, and publish a cleared IME surface — in that
   order, with no bypass.** This binds any container that stops forwarding
   events to an already-interactive child (the navigator's mid-transition
-  input block is the reference impl, via `cancel_pod`/`set_active`/
-  `set_focused` — see `docs/ARCHITECTURE.md`'s Navigation flow), not just
-  `Navigator`. Skipping this leaves a child armed (a later `Up` it never
-  receives fires against a widget the container has stopped routing to) or
+  input block is the reference impl — see `docs/ARCHITECTURE.md`'s
+  Navigation flow). Skipping this leaves a child armed (a later `Up` it
+  never receives fires against a widget the container stopped routing to) or
   a stale focus/IME surface behind after the block lifts.
 
 ## Semantics Conventions
@@ -367,115 +387,94 @@ Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantic
   unlike the throwaway `()` at the root, but the contract is identical).
 - **Heavy work routes by shape: `spawn` (async IO) / `spawn_local` (UI-thread `!Send`) /
   `spawn_blocking` (one-off CPU) / rayon (an app-level choice, not bundled).** Calling
-  `spawn_local` off the UI thread panics (a wiring bug, not a runtime-data condition); a
-  backgrounded iOS app pauses `CADisplayLink`, so a `spawn_local` timer stalls until
-  `frust_resume`'s next pump. `use_task` composes `AsyncValue<T>` over this routing: a
-  UI-thread coordinator (under the calling component's `Owner`) hands work to
-  `spawn`/`spawn_blocking` and is the sole signal writer, ruling out a cross-thread write
-  race; owner cleanup aborts it and its `JoinHandle` — an already-running `spawn_blocking`
-  closure can't be interrupted, only its result delivery dropped.
+  `spawn_local` off the UI thread panics; a backgrounded iOS app pauses `CADisplayLink`, so a
+  `spawn_local` timer stalls until `frust_resume`'s next pump. `use_task` composes `AsyncValue<T>`
+  over this routing: a UI-thread coordinator hands work to `spawn`/`spawn_blocking` and is the
+  sole signal writer; owner cleanup aborts it and its `JoinHandle`.
 - **`Component::State` holds `RwSignal`s directly; app code depends on the
   `frust` facade only, never `reactive_graph`/`any_spawner`/`frust-reactive`
   directly.** A reactive field is typed `RwSignal<T>`, read/written through
   the facade's `Get`/`Set`/`Update` traits. **An `examples/*`/app crate's
-  `Cargo.toml` depends on `frust` plus plugin crates only** — the facade
-  never re-exports plugins (Plugin Conventions below); a documented
-  `frust-core`/`kurbo`(/`peniko`) escape hatch (`examples/huddle`,
-  `examples/glyph-catalog`) is sanctioned, for gaps no facade widget covers.
-- **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
-  untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
-  *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
-  per-frame rebuild (desktop's `scope.track(|| root.rebuild(..))`, mirrored on mobile by a
-  persistent per-`AppHandle` `TrackedScope`). A render-relevant read taken via
-  `*_untracked`/`get_untracked` anywhere in that path never subscribes, so a later write flips
-  no dirty flag and the shell may never repaint — reserve `*_untracked` for genuine
-  non-rendering reads, never a value a `build` return depends on.
+  `Cargo.toml` depends on `frust` plus plugin crates only** — a documented
+  `frust-core`/`kurbo`(/`peniko`) escape hatch is sanctioned, for gaps no
+  facade widget covers.
+- **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an untracked
+  read is a silent wake hazard, not a stale value.** `.get()` subscribes only from *inside* a live
+  `TrackedScope::track` closure; both shells guarantee this for their per-frame rebuild. A
+  render-relevant read taken via `*_untracked`/`get_untracked` anywhere in that path never
+  subscribes, so a later write flips no dirty flag and the shell may never repaint — reserve
+  `*_untracked` for genuine non-rendering reads, never a value a `build` return depends on.
 
 ## Theming & Animation Conventions
 
 - **Paint-time resolution is always safe; layout-time-baked resolution is
   only safe under the `set_theme` → `ChangeFlags` contract.** Most themed
-  widgets resolve tokens from `PaintCtx` on every paint pass and so
-  self-refresh on a live theme swap for free. `Text` and `TextInput` instead
-  bake their resolved glyph color into the shaped layout at LAYOUT time (see
-  `docs/ARCHITECTURE.md`'s Theme delivery); a widget adding layout-time-baked
-  resolution depends on relayout actually happening, so any dirty-tracking
-  work must treat a theme change as forcing `ChangeFlags::LAYOUT`, not just
-  `PAINT`.
+  widgets resolve tokens from `PaintCtx` every paint pass and self-refresh
+  on a live theme swap for free. `Text`/`TextInput` instead bake resolved
+  glyph color into the shaped layout at LAYOUT time; a widget adding
+  layout-time-baked resolution depends on relayout actually happening, so
+  treat a theme change as forcing `ChangeFlags::LAYOUT`, not just `PAINT`.
 - **Resolve theme tokens with an unthemed-fallback constant per resolved
   value.** A themed widget looks up
-  `Theme::from_paint_ctx(ctx)`/`from_layout_ctx(ctx)`, falling back to a local
-  constant (e.g. `Button`'s `FILL`/`RADIUS`) when no theme is threaded
-  (bare-core tests, pre-theme apps). Precedence is **explicit builder value >
-  theme > fallback**: an app-set value (`.color(...)`, `.style(...)`) always
-  wins over both (see `Text`'s `color_explicit` flag).
+  `Theme::from_paint_ctx(ctx)`/`from_layout_ctx(ctx)`, falling back to a
+  local constant (e.g. `Button`'s `FILL`/`RADIUS`) when no theme is
+  threaded. Precedence is **explicit builder value > theme > fallback**
+  (see `Text`'s `color_explicit` flag).
 - **Token-not-hardcode: a widget authors against a `Theme` field first; a
   bare local constant is the documented fallback, not the default.** A
-  hardcoded metric/color in paint or layout code is a defect once a matching
+  hardcoded metric/color is a defect once a matching
   `ColorScheme`/`ShapeScale`/`Elevation`/`GlassScale`/`MotionScheme` field
-  exists — resolve it through `Theme::from_paint_ctx`/`from_layout_ctx` per
-  the fallback bullet above. Only a genuine token-scale gap earns a
-  hand-tuned constant, and that constant stays named, doc-commented, and
-  states *why* no token applies rather than being a silent magic number.
+  exists. Only a genuine token-scale gap earns a hand-tuned constant, and
+  it stays named, doc-commented, and states *why* no token applies.
 - **A contested or unsourced design fact is resolved against a primary
-  source and cited with a retrieval date, not left as a guess.** When a
-  research doc's claim lacks (or conflicts with) a citable primary source,
-  fetch it and record `<source>, retrieved <date>` in the module doc,
-  alongside the **Community-approximate** marker (above) for values that
-  stay genuinely unsourced.
+  source and cited with a retrieval date, not left as a guess** — record
+  `<source>, retrieved <date>` in the module doc, alongside the
+  **Community-approximate** marker (above) for values that stay genuinely
+  unsourced.
 - **Event-pass code never reads a theme — `EventCtx` carries none.** Only
-  `LayoutCtx`/`PaintCtx` thread a theme; a metric an event handler also needs
-  (hit-test padding, caret geometry) stays a plain constant read from both
-  passes — the precedent is `TextInput`'s `PAD_X`/`PAD_Y`/`CARET_W`,
-  deliberately never resolved from theme.
-- **No `Instant::now()` in `frust-core`/`frust-widgets`.** Time enters
-  the framework only from a shell, as the `FrameTime` passed into
-  `RenderRoot::paint` and threaded via `PaintCtx::frame_time` — desktop reads
-  its own `Instant` epoch; Android/iOS pass through the platform's own frame
-  clock. Widget code only *differences* two `FrameTime`s (`saturating_sub`),
-  never reads a wall clock directly.
-- **An animation controller advances during paint, not on a timer.** A widget
-  holds an `anim::AnimationController`, calls `advance(ctx.frame_time())` once
-  per paint, reads `value()`, and — while `advance` returns `true` — calls
-  `PaintCtx::request_frame()` so the shell schedules the next frame; there is
-  no ambient ticker. **A layout-affecting animation calls `request_layout()`
-  instead** (it implies `request_frame`) — reserve bare `request_frame` for an
-  animation that only repaints (color fade, caret blink), or the mobile
-  intra-frame layout skip silently leaves it unresized (see
-  `docs/ARCHITECTURE.md`'s Frame pipeline).
-- **State-layer opacity has one source: `material::state_layer`'s constants.**
-  `HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/`DRAGGED_OPACITY` (M3
-  `StateTokens`) live in that one module; a catalog widget imports them
+  `LayoutCtx`/`PaintCtx` thread a theme; a metric an event handler also
+  needs stays a plain constant read from both passes (`TextInput`'s
+  `PAD_X`/`PAD_Y`/`CARET_W` precedent).
+- **No `Instant::now()` in `frust-core`/`frust-widgets`.** Time enters the
+  framework only from a shell, as the `FrameTime` passed into
+  `RenderRoot::paint`/`PaintCtx::frame_time` — desktop reads its own
+  `Instant` epoch; Android/iOS pass through the platform's frame clock.
+  Widget code only *differences* two `FrameTime`s, never reads a wall
+  clock directly.
+- **An animation controller advances during paint, not on a timer.** A
+  widget holds an `anim::AnimationController`, calls
+  `advance(ctx.frame_time())` once per paint and, while it returns `true`,
+  calls `PaintCtx::request_frame()`. **A layout-affecting animation calls
+  `request_layout()` instead** (implies `request_frame`) — reserve bare
+  `request_frame` for a paint-only animation, or the mobile intra-frame
+  layout skip leaves it unresized (`docs/ARCHITECTURE.md`'s Frame pipeline).
+- **State-layer opacity has one source: `material::state_layer`'s
+  constants** (`HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/
+  `DRAGGED_OPACITY`, M3 `StateTokens`) — a catalog widget imports them
   rather than hardcoding overlay opacity, taking the **maximum** of
-  concurrently-active states, never their sum. Only `pressed` is currently
-  wired by any shipping widget.
-- **Glyph's token set adds three resolution precedents.** A per-status color
-  with no `ColorScheme` field (Success/Warning/Info) resolves
-  `Theme::extension::<StatusPalette>()` first, before a role that already has
-  one (Error) resolves it directly. `GlyphInk` is never brightness-swapped
-  like a scheme role — it reads identically on Light/Dark `glyph_baseline()`.
-  Accent role split: `primary`/`on_primary` is accent text/icon ink,
-  `primary_container`/`on_primary_container` is the bright fill — conflating
-  the two (Glyph light mode forces them apart) is the catalog's most common
-  accent bug.
+  concurrently-active states, never their sum.
+- **Glyph's token set adds three resolution precedents.** A per-status
+  color with no `ColorScheme` field (Success/Warning/Info) resolves
+  `Theme::extension::<StatusPalette>()` first, before a role that already
+  has one (Error) resolves it directly. `GlyphInk` is never
+  brightness-swapped like a scheme role. Accent role split:
+  `primary`/`on_primary` is accent text/icon ink,
+  `primary_container`/`on_primary_container` is the bright fill —
+  conflating the two is the catalog's most common accent bug.
 - **A transition pattern's default timing resolves from `Theme.motion`,
   never a hand-rolled duration, and collapses under `reduce_motion`.**
   `PatternSwitcher`/`AnimatedOpacity`/`AnimatedScale` resolve
-  `MotionScheme`'s duration/easing/spring tokens for their default
-  `Timing` (an explicit `.timing(...)` call always wins); every
-  pattern/wrapper substitutes a short linear crossfade under
-  `reduce_motion` instead of a bespoke reduced variant.
+  `MotionScheme`'s duration/easing/spring tokens by default (an explicit
+  `.timing(...)` call always wins); every pattern substitutes a short
+  linear crossfade under `reduce_motion` instead of a bespoke variant.
 - **A perpetual decorative loop calls `PaintCtx::request_frame_paced`
   (`TickClass::CosmeticLoop`), never bare `request_frame`.** `request_frame`
-  stays `TickClass::Transition` (unpaced) — correct for a spring, a finite
-  transition, or anything with a user-visible endpoint (`request_layout`
-  always implies `Transition`). A shimmer/spinner/pulse with no endpoint
-  requests the paced class instead, letting the mobile frame gate throttle
-  it to `MotionScheme::cosmetic_loop_rate` (`docs/ARCHITECTURE.md`'s Frame
-  gate), and must still honor `reduce_motion` like any other loop (freeze
-  in place, stop requesting frames). **Input-driven frames are never
-  paced** — a paced request only ever comes from a perpetual paint-time
-  loop, never from `EventCtx`.
+  stays `TickClass::Transition` (unpaced) — correct for a spring or any
+  transition with a user-visible endpoint. A shimmer/spinner/pulse with no
+  endpoint requests the paced class instead, letting the mobile frame gate
+  throttle it to `MotionScheme::cosmetic_loop_rate`, and must still honor
+  `reduce_motion` (freeze in place, stop requesting frames).
+  **Input-driven frames are never paced.**
 
 ## Testing Patterns
 

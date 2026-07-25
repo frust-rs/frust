@@ -50,8 +50,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use frust_core::FrameTime;
 use frust_render::{
-    AcquireOutcome, DetachedSurface, EncodeOutcome, FrameOutcome, RenderContext, SurfaceFactory,
-    SurfacePhase, SurfaceRenderer,
+    AcquireOutcome, DetachedSurface, EncodeOutcome, FrameOutcome, RenderContext,
+    SurfaceAlphaRequest, SurfaceFactory, SurfacePhase, SurfaceRenderer,
 };
 use frust_scene::Scene;
 use frust_shell_common::perf::{
@@ -326,6 +326,7 @@ impl InlineExecutor {
             window.clone(),
             size.width.max(1),
             size.height.max(1),
+            SurfaceAlphaRequest::Opaque,
         ))
         .context("frust: failed to create render surface")?;
         persist_and_record(
@@ -370,6 +371,7 @@ impl InlineExecutor {
                     window.clone(),
                     size.width.max(1),
                     size.height.max(1),
+                    SurfaceAlphaRequest::Opaque,
                 )) {
                     Ok(()) => window.request_redraw(),
                     Err(err) => eprintln!("frust: failed to recreate surface: {err}"),
@@ -755,8 +757,14 @@ fn install_detached(
     renderer_spans_recorded: &mut bool,
 ) -> Result<()> {
     let hit = load_pipeline_cache(renderer);
-    pollster::block_on(renderer.on_surface_installed(render_cx, detached, width, height))
-        .context("frust: failed to install render surface")?;
+    pollster::block_on(renderer.on_surface_installed(
+        render_cx,
+        detached,
+        width,
+        height,
+        SurfaceAlphaRequest::Opaque,
+    ))
+    .context("frust: failed to install render surface")?;
     persist_and_record(renderer, startup, renderer_spans_recorded, hit);
     Ok(())
 }

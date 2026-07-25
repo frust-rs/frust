@@ -76,7 +76,7 @@ pub mod __jni {
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (spec §10.1, Makepad `app_main!` precedent).
 ///
-/// Stamps out the seventeen `Java_dev_frust_FrustSurfaceView_native*` symbols
+/// Stamps out the nineteen `Java_dev_frust_FrustSurfaceView_native*` symbols
 /// the Kotlin `FrustSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
@@ -95,8 +95,14 @@ pub mod __jni {
 /// (returning whether it consumed it). `nativeOnSurfaceChanged` also gained a
 /// trailing `density` argument in the same task. `nativeSystemUiState` (task
 /// 09) returns the app-facing `frust::set_system_ui_mode` override slot's
-/// packed `(generation, mode)` state for a per-frame Kotlin poll, additive
-/// over the sixteen exports above it. `nativeInit` also
+/// packed `(generation, mode)` state for a per-frame Kotlin poll. Two more,
+/// additive over those seventeen (platform-views task 05): `nativeSetSurfaceMode`
+/// latches a translucent GPU surface pre-init (a one-way opt-in — see
+/// `frust_shell_common::surface_mode`'s module docs), and
+/// `nativePlatformViewCommands` returns the native-sibling-compositor command
+/// backlog (task 03's differ) as JSON for Kotlin's own per-frame poll, mirroring
+/// `nativeSystemUiState`'s generation-gated shape but JSON-encoded (task 03's
+/// `ViewCommand` vocabulary) rather than packed into a `jlong`. `nativeInit` also
 /// initializes the process-wide [`frust_reactive::ReactiveRuntime`] (see
 /// [`jni_glue::native_init`]) before the state factory runs, so a `State`'s own
 /// construction may already create signals/controllers.
@@ -399,6 +405,39 @@ macro_rules! android_app {
             handle: $crate::__jni::jlong,
         ) -> $crate::__jni::jlong {
             $crate::jni_glue::native_system_ui_state(handle)
+        }
+
+        /// JNI `nativeSetSurfaceMode`: latch a translucent (alpha-channel) GPU
+        /// surface before it is created (platform-views task 05). Takes no
+        /// handle — a process-wide, pre-init-only opt-in the generated glue
+        /// calls BEFORE `nativeInit` (template task 08); a call after a
+        /// surface already exists in this process is logged and has no
+        /// effect on it.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeSetSurfaceMode<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            translucent: $crate::__jni::jboolean,
+        ) {
+            $crate::jni_glue::native_set_surface_mode(translucent)
+        }
+
+        /// JNI `nativePlatformViewCommands`: return the native-sibling-
+        /// compositor command backlog (task 03's differ) as JSON for
+        /// Kotlin's per-frame poll (platform-views task 05).
+        /// `ack_generation` round-trips the generation Kotlin's own last
+        /// poll returned (`0` on the first call); returns `null` on the
+        /// no-change fast path or a missing handle.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativePlatformViewCommands<
+            'local,
+        >(
+            env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            ack_generation: $crate::__jni::jlong,
+        ) -> $crate::__jni::jstring {
+            $crate::jni_glue::native_platform_view_commands(env, handle, ack_generation)
         }
     };
 }

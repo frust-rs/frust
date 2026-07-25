@@ -160,6 +160,16 @@ impl<'a> SceneBuilder<'a> {
         self.scene.push(Command::PopLayer);
     }
 
+    /// Records a rectangle cleared to full transparency (alpha 0) under the
+    /// current transform (see [`Command::ClearRect`]) — the platform-view
+    /// hole-punch. Unlike [`SceneBuilder::fill_rect`] with a transparent brush
+    /// (which composites transparent *over* the backdrop, a no-op), this erases
+    /// whatever was already drawn beneath the rect.
+    pub fn clear_rect(&mut self, rect: Rect) {
+        let transform = self.current_transform();
+        self.scene.push(Command::ClearRect { rect, transform });
+    }
+
     /// Records a filled arbitrary vector path (e.g. an arc) under the current
     /// transform, using the nonzero winding rule.
     pub fn fill_path(&mut self, path: BezPath, brush: Brush) {
@@ -579,6 +589,29 @@ mod tests {
             other => panic!("expected PushLayer, got {other:?}"),
         }
         assert!(matches!(commands[1], Command::PopLayer));
+    }
+
+    #[test]
+    fn clear_rect_records_command_with_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((7.0, 4.0));
+        builder.push_transform(translate);
+        let rect = Rect::new(0.0, 0.0, 80.0, 60.0);
+        builder.clear_rect(rect);
+
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            Command::ClearRect {
+                rect: got_rect,
+                transform,
+            } => {
+                assert_eq!(*got_rect, rect);
+                assert_eq!(*transform, translate);
+            }
+            other => panic!("expected ClearRect, got {other:?}"),
+        }
     }
 
     #[test]

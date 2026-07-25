@@ -13,9 +13,36 @@ import QuartzCore
 //     backgrounded app can get the process killed.
 //   - `frust_destroy` reclaims the native handle before the view is gone.
 final class FrustViewController: UIViewController {
+    /// Opt into a translucent (non-opaque) render surface so native sibling
+    /// views hosted BELOW the Frust surface (Mode B — see `FrustViewHost`)
+    /// show through it (platform-views task 09). Flip to `true` in your
+    /// generated app to enable translucency; left `false` by default so a
+    /// fresh scaffold's surface is fully opaque and unchanged. Read once,
+    /// before `frust_init` (via `frust_set_surface_mode`), and never mutated
+    /// — the surface's alpha mode is fixed for the process lifetime.
+    ///
+    /// **This constant is the whole Mode B switch: it must drive
+    /// `CAMetalLayer.isOpaque`, the `FrustViewHost` subview ordering, AND the
+    /// `frust_set_surface_mode` declaration below, together.** Flipping only
+    /// some of them is a defect — the Rust side trusts
+    /// `frust_set_surface_mode(1)` as proof the layer is *already*
+    /// translucent (review M3); calling it without `isOpaque = false` already
+    /// set reintroduces the exact black-rectangle bug that finding fixed.
+    /// This is also why there is no app-Rust equivalent call — only this
+    /// file may declare translucency.
+    ///
+    /// `true` here (platform-views task 10): this catalog is the framework's
+    /// Mode B testbed — see `glyphcatalog::pages::platform_views`'s module
+    /// docs (Rust side).
+    private let translucentSurface = true
+
     private var forgeView: FrustView { view as! FrustView }
     private var displayLink: CADisplayLink?
     private var handle: UnsafeMutableRawPointer?
+    /// Hosts native UIKit sibling views driven by the platform-view command
+    /// channel (platform-views task 09). Constructed once `frust_init` has a
+    /// handle; polled each `CADisplayLink` tick after `frust_render_frame`.
+    private var platformViewHost: FrustViewHost?
     private var lastDrawableSize: CGSize = .zero
     // `frust_init` failure is session-permanent by design: the shell has
     // no transient failure mode (the one observed cause, a simulator GPU
@@ -83,6 +110,18 @@ final class FrustViewController: UIViewController {
         let scale = UIScreen.main.scale
         view.contentScaleFactor = scale
         forgeView.metalLayer.contentsScale = scale
+
+        // Translucent surface opt-in (platform-views task 09, spike recipe):
+        // latch the process-global surface mode BEFORE the first `frust_init`
+        // (`updateSurface` runs later, from `viewDidLayoutSubviews`) and make
+        // both the view and its CAMetalLayer non-opaque so native sibling
+        // views hosted behind the surface (Mode B) composite through. No-op
+        // in the default opaque scaffold (`translucentSurface == false`).
+        if translucentSurface {
+            frust_set_surface_mode(1)
+            forgeView.isOpaque = false
+            forgeView.metalLayer.isOpaque = false
+        }
 
         // Bridge the view's raw touch callbacks into the native tree (spec §9).
         // `location` is already logical points, so it is passed through without
@@ -256,6 +295,11 @@ final class FrustViewController: UIViewController {
             // `handle` existed, so `pushInsets()`'s guard silently dropped
             // it; push once explicitly now that a handle is live.
             pushInsets()
+            // Stand up the platform-view host now that a handle exists
+            // (platform-views task 09): it hosts native sibling views and is
+            // polled from `renderFrame` after each `frust_render_frame`.
+            platformViewHost = FrustViewHost(
+                containerView: forgeView, translucent: translucentSurface)
             startDisplayLink()
             // Flush a deep link that arrived before this handle existed
             // (see `pendingDeepLink`'s doc comment) — a cold-start link
@@ -407,7 +451,13 @@ final class FrustViewController: UIViewController {
             displayLink?.invalidate()
             displayLink = nil
             NSLog("Frust: render thread reported a fatal error — rendering disabled for this session")
+            return
         }
+        // Platform views (task 09): apply this frame's compositor command
+        // batch (create/reposition/dispose native sibling views) right after
+        // the Frust surface has painted, so native views and Frust content
+        // land in the same visual frame. Cheap when idle (null poll).
+        platformViewHost?.poll(handle: handle)
     }
 
     @objc private func appWillResignActive() {
