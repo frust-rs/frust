@@ -50,6 +50,7 @@ use kurbo::{Affine, Point, Size};
 use ndk::native_window::NativeWindow;
 
 use crate::ffi_support::TouchPhase;
+use crate::sync_tail::{ScrollSyncTail, TailSignals};
 
 /// Everything a running Android app needs across frames — the state behind the
 /// opaque `jlong` handle the JVM passes back into every native call.
@@ -250,6 +251,25 @@ pub struct AndroidAppHandle {
     /// better than the ungated path on both Phase-0 test devices with zero
     /// overshoot on either (SPIKE-SYNC §2.5/§2.6.1) — so there is no dial.
     platform_view_due: FramePairing,
+    /// The shape-aware tail stacked on top of that gate (camera task 12): a
+    /// regime-gated, frame-timeline-derived hold that closes the compositor-queue
+    /// residual the gate cannot see, and applies **only** while the surface is
+    /// acquire-bound (where that residual is constant-shaped). Ticked once per
+    /// Choreographer frame at the top of [`Self::frame`] — before every early
+    /// return, since the hold ages in display frames — consulted in
+    /// [`Self::platform_view_commands`], and cleared beside `platform_view_due`
+    /// on the same lifecycle edges. Off (depth 0, bit-for-bit gate-only) below
+    /// API 33, with no platform view hosted, or on a submit-bound device: see
+    /// [`crate::sync_tail`].
+    sync_tail: ScrollSyncTail,
+    /// The latest Choreographer frame-timeline delta Kotlin pushed in
+    /// (`nativeSetFrameTimeline`, API 33+): `expectedPresentationTimeNanos −
+    /// frameTimeNanos`, the platform's own answer to when a window frame
+    /// committed now reaches the screen, and the tail's depth input. `0` means
+    /// "no sample" — the only signal in this shell the JVM side must read for
+    /// us, because `Choreographer.postVsyncCallback` has no NDK equivalent in
+    /// this crate's dependency set.
+    frame_timeline_delta_nanos: u64,
     /// Whether this handle's GPU surface **actually came up** translucent
     /// (alpha-channel, Mode B) — the RESOLVED capability, not the
     /// [`SurfaceModeWatcher`] request latch (review finding M1).
@@ -306,12 +326,12 @@ pub(crate) enum FrameExecutor {
     Split(SplitExecutor),
 }
 
-/// What the render side publishes about the frames it has actually PRESENTED,
-/// read by the UI thread — one instance shared by both sides through an `Arc`,
-/// the same no-channel/no-protocol pattern as the `fatal` flag.
+/// What the render side publishes about the frames it renders, read by the UI
+/// thread — one instance shared by both sides through an `Arc`, the same
+/// no-channel/no-protocol pattern as the `fatal` flag.
 ///
-/// Two values, because they answer two different questions and one cannot
-/// substitute for the other:
+/// Three values, because they answer three different questions and none can
+/// substitute for another:
 ///
 /// - `count` — **how many** frames reached the screen (task 10), pushed into
 ///   `AppTree::set_presented_frames` so an FPS-measuring widget reports the
@@ -322,13 +342,22 @@ pub(crate) enum FrameExecutor {
 ///   scenes the UI thread submitted are routinely overtaken and never rendered,
 ///   and the two clocks drift apart by exactly the dropped frames (SPIKE-SYNC
 ///   §2.5).
+/// - `acquire_ewma_us` — **how deep the swapchain queue is**, as the wait the
+///   render tail spends inside `acquire` (a quarter-weight EWMA in µs). This is
+///   the regime discriminator the shape-aware scroll-sync tail switches on
+///   (camera task 12, [`crate::sync_tail`]): acquire-bound means every frame is
+///   equally late behind the same queue — a constant-shaped residual a hold can
+///   close — while submit-bound means there is no queue to correct for. An
+///   `Arc` field beside the two above, deliberately not the spike's
+///   process-global.
 #[derive(Debug, Default)]
-pub(crate) struct PresentTracker {
+pub(crate) struct RenderSignals {
     count: AtomicU64,
     frame_id: AtomicU64,
+    acquire_ewma_us: AtomicU64,
 }
 
-impl PresentTracker {
+impl RenderSignals {
     /// Record one presented frame. `fetch_max` on the id rather than `store`:
     /// ids only ever move forward, and a late write must never walk the release
     /// gate backwards.
@@ -337,12 +366,33 @@ impl PresentTracker {
         self.frame_id.fetch_max(frame_id, Ordering::Relaxed);
     }
 
+    /// Fold one frame's acquire wait into the published EWMA. Called only for
+    /// frames that actually acquired — a skipped frame's ~0 would drag the
+    /// average toward zero exactly when the queue is idle-but-deep, which is the
+    /// regime the tail exists to detect.
+    fn record_acquire_wait(&self, micros: u64) {
+        let previous = self.acquire_ewma_us.load(Ordering::Relaxed);
+        // Quarter-weight, seeded by the first sample rather than ramping up
+        // from zero (the regime must be readable within a few frames of a
+        // scroll starting, not a few dozen).
+        let next = if previous == 0 {
+            micros
+        } else {
+            (3 * previous + micros) / 4
+        };
+        self.acquire_ewma_us.store(next, Ordering::Relaxed);
+    }
+
     fn count(&self) -> u64 {
         self.count.load(Ordering::Relaxed)
     }
 
     fn frame_id(&self) -> u64 {
         self.frame_id.load(Ordering::Relaxed)
+    }
+
+    fn acquire_ewma_us(&self) -> u64 {
+        self.acquire_ewma_us.load(Ordering::Relaxed)
     }
 }
 
@@ -363,11 +413,12 @@ pub(crate) struct InlineExecutor {
     /// gate then reads one uniform signal across both arms with no special
     /// case.
     frame_id: u64,
-    /// What this executor has presented (task 10 + the release gate). Inline
-    /// renders on the UI thread, so this is written and read on the same
-    /// thread — the `Arc` shape matches the split's cross-thread tracker so
-    /// [`FrameExecutor`] reads both variants uniformly.
-    presented: Arc<PresentTracker>,
+    /// What this executor publishes about its rendered frames (task 10's
+    /// count + the release gate's frame id + the tail's acquire EWMA — see
+    /// [`RenderSignals`]). Inline renders on the UI thread, so this is written
+    /// and read on the same thread — the `Arc` shape matches the split's
+    /// cross-thread slot so [`FrameExecutor`] reads both variants uniformly.
+    signals: Arc<RenderSignals>,
 }
 
 impl InlineExecutor {
@@ -386,7 +437,7 @@ impl InlineExecutor {
             frame_stats: FrameStats::new(),
             startup_spans: Some(startup_spans),
             frame_id: 0,
-            presented: Arc::new(PresentTracker::default()),
+            signals: Arc::new(RenderSignals::default()),
         }
     }
 
@@ -410,7 +461,7 @@ impl InlineExecutor {
             &mut self.frame_stats,
             &mut self.startup_spans,
             perf_on,
-            &self.presented,
+            &self.signals,
             self.frame_id,
         )
     }
@@ -486,14 +537,15 @@ pub(crate) struct SplitExecutor {
     /// [`Self::scene_return`] on the next [`Self::take_reusable_scene`] call
     /// so that buffer is reused too, rather than dropped.
     spare_scene: Option<Scene>,
-    /// What the render side has presented (task 10 + the release gate): one
-    /// clone here (read by the UI thread before paint via
-    /// `FrameExecutor::presented_frames`/`presented_frame_id`), one on the
-    /// render thread ([`crate::jni_glue::render_loop`], which records into it on
-    /// each `FrameOutcome::Rendered`). A plain `Arc` — no channel/protocol,
-    /// mirroring the `fatal`-flag pattern. See [`PresentTracker`] for why the
-    /// count alone is not enough.
-    presented: Arc<PresentTracker>,
+    /// What the render side publishes about its rendered frames (task 10's
+    /// count, the release gate's frame id, the scroll-sync tail's acquire
+    /// EWMA): one clone here (read by the UI thread before paint via
+    /// `FrameExecutor::presented_frames`/`presented_frame_id`/
+    /// `acquire_wait_us`), one on the render thread
+    /// ([`crate::jni_glue::render_loop`], which records into it from the render
+    /// tail). A plain `Arc` — no channel/protocol, mirroring the `fatal`-flag
+    /// pattern. See [`RenderSignals`] for why the count alone is not enough.
+    signals: Arc<RenderSignals>,
 }
 
 impl SplitExecutor {
@@ -502,7 +554,7 @@ impl SplitExecutor {
         join: JoinHandle<()>,
         fatal: Arc<AtomicBool>,
         scene_return: SceneReturnReceiver<Scene>,
-        presented: Arc<PresentTracker>,
+        signals: Arc<RenderSignals>,
     ) -> Self {
         Self {
             sender: Some(sender),
@@ -512,7 +564,7 @@ impl SplitExecutor {
             fatal,
             scene_return,
             spare_scene: None,
-            presented,
+            signals,
         }
     }
 
@@ -638,18 +690,30 @@ impl FrameExecutor {
     /// the counter with their render side via an `Arc<AtomicU64>`.
     fn presented_frames(&self) -> u64 {
         match self {
-            FrameExecutor::Inline(inline) => inline.presented.count(),
-            FrameExecutor::Split(split) => split.presented.count(),
+            FrameExecutor::Inline(inline) => inline.signals.count(),
+            FrameExecutor::Split(split) => split.signals.count(),
         }
     }
 
     /// The id of the last frame the render side actually PRESENTED — the
     /// platform-view release gate's "is the frame that produced this geometry
-    /// on screen yet?" input (see [`PresentTracker`]).
+    /// on screen yet?" input (see [`RenderSignals`]).
     fn presented_frame_id(&self) -> u64 {
         match self {
-            FrameExecutor::Inline(inline) => inline.presented.frame_id(),
-            FrameExecutor::Split(split) => split.presented.frame_id(),
+            FrameExecutor::Inline(inline) => inline.signals.frame_id(),
+            FrameExecutor::Split(split) => split.signals.frame_id(),
+        }
+    }
+
+    /// The render tail's swapchain-acquire wait EWMA in µs — the scroll-sync
+    /// tail's regime discriminator (see [`RenderSignals`] and
+    /// [`crate::sync_tail`]). Read once per frame on the UI thread; both
+    /// executor arms publish it the same way, so the tail sees one uniform
+    /// signal whether or not the render split is engaged.
+    fn acquire_wait_us(&self) -> u64 {
+        match self {
+            FrameExecutor::Inline(inline) => inline.signals.acquire_ewma_us(),
+            FrameExecutor::Split(split) => split.signals.acquire_ewma_us(),
         }
     }
 
@@ -735,11 +799,11 @@ pub(crate) fn render_scene(
     frame_stats: &mut FrameStats,
     startup_spans: &mut Option<StartupSpans>,
     perf_on: bool,
-    presented: &PresentTracker,
+    signals: &RenderSignals,
     // The id of the frame this scene came from (`FrameMeta::frame_id` in the
     // split, the inline executor's own counter otherwise) — published on an
     // actual present so a platform-view geometry batch can be paired back to
-    // the frame that produced it (the release gate; see `PresentTracker`).
+    // the frame that produced it (the release gate; see `RenderSignals`).
     frame_id: u64,
 ) -> Duration {
     // Encode span (GPU/CPU encode, no swapchain touch).
@@ -760,13 +824,31 @@ pub(crate) fn render_scene(
     }
 
     // Acquire span (blocking vsync/present wait).
-    let acquire_start = perf_on.then(Instant::now);
+    //
+    // The one clock read on this path that is NOT gated behind `perf_on` (the
+    // module's perf convention — see `docs/CODE_STANDARDS.md`'s Instrumentation
+    // conventions): the acquire wait is not instrumentation here, it is the
+    // shape-aware scroll-sync tail's live regime input (`RenderSignals::
+    // acquire_ewma_us`, camera task 12), which must be readable in a plain
+    // profile/release build with tracing off. One `Instant` pair per rendered
+    // frame on the render thread; the perf span itself still resolves to
+    // `Duration::ZERO` when tracing is off, so nothing else changes.
+    let encoded = matches!(encode_outcome, Ok(EncodeOutcome::Encoded));
+    let acquire_start = Instant::now();
     let acquire_result = match encode_outcome {
         Ok(EncodeOutcome::Encoded) => renderer.acquire(render_cx),
         Ok(EncodeOutcome::Skipped) => Ok(AcquireOutcome::Skipped),
         Err(err) => Err(err),
     };
-    let acquire_time = acquire_start.map_or(Duration::ZERO, |t| t.elapsed());
+    let acquire_elapsed = acquire_start.elapsed();
+    if encoded {
+        signals.record_acquire_wait(acquire_elapsed.as_micros() as u64);
+    }
+    let acquire_time = if perf_on {
+        acquire_elapsed
+    } else {
+        Duration::ZERO
+    };
 
     // Submit span (blit + queue-submit + present).
     let submit_start = perf_on.then(Instant::now);
@@ -793,7 +875,7 @@ pub(crate) fn render_scene(
             // before paint (task 10) and publish WHICH frame is now on screen
             // for the platform-view release gate. `Skipped` presents nothing,
             // so it does neither.
-            presented.record_present(frame_id);
+            signals.record_present(frame_id);
             // First successful present: close out the cold-start recorder once.
             if let Some(mut spans) = startup_spans.take() {
                 spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
@@ -1064,6 +1146,8 @@ impl AndroidAppHandle {
             deadline_overruns: 0,
             platform_view_state: PlatformViewState::new(),
             platform_view_due: FramePairing::new(),
+            sync_tail: ScrollSyncTail::new(),
+            frame_timeline_delta_nanos: 0,
             translucent_resolved,
         }
     }
@@ -1323,6 +1407,9 @@ impl AndroidAppHandle {
         // went away — so the pairing goes with it (camera task 01).
         self.platform_view_state.reset_for_surface_recreate();
         self.platform_view_due.clear();
+        // ...and with it the tail's hold: neither stage may outlive the
+        // frames it refers to (camera task 12, mirroring the pairing above).
+        self.sync_tail.clear();
         // The new surface re-resolves its alpha mode from scratch (review M1);
         // the render thread stores the outcome when it installs. Re-push
         // whatever is known now — the next `frame` re-reads it, so a
@@ -1355,6 +1442,9 @@ impl AndroidAppHandle {
         // release-gate pairing refers to the old surface's frames.
         self.platform_view_state.reset_for_surface_recreate();
         self.platform_view_due.clear();
+        // ...and with it the tail's hold: neither stage may outlive the
+        // frames it refers to (camera task 12, mirroring the pairing above).
+        self.sync_tail.clear();
         // Inline recreate: the renderer on this thread already holds the new
         // surface, so this reads its freshly RESOLVED translucency (review M1)
         // — a recreate that fell back to opaque degrades to Mode A here rather
@@ -1450,6 +1540,9 @@ impl AndroidAppHandle {
         // that never lands. The gate is a smoothing device, not a correctness
         // barrier — drop it so the hide goes out on the next poll.
         self.platform_view_due.clear();
+        // ...and with it the tail's hold: neither stage may outlive the
+        // frames it refers to (camera task 12, mirroring the pairing above).
+        self.sync_tail.clear();
     }
 
     /// Peek the differ's releasable command backlog (task 05, gated by camera
@@ -1465,12 +1558,37 @@ impl AndroidAppHandle {
     /// the moment their frame lands (or the moment the staleness escape hatch
     /// declares that frame dropped). Kotlin needs no change: it applies exactly
     /// what it is handed and acks the generation it is told.
-    pub(crate) fn platform_view_commands(&self) -> (u64, &[ViewCommand]) {
-        let releasable = self.platform_view_due.releasable_generation(
+    pub(crate) fn platform_view_commands(&mut self) -> (u64, &[ViewCommand]) {
+        let gated = self.platform_view_due.releasable_generation(
             self.executor.presented_frame_id(),
             self.executor.submitted_frame_id(),
         );
+        // Resolve the gate's "nothing is held" answer (`u64::MAX`) against the
+        // differ's live tip BEFORE the tail sees it: the tail ages a *real*
+        // generation, and a saturated sentinel would be recorded once and then
+        // never change again — a hold that silently expires for the rest of the
+        // process (found on cupid: the tail read a steady depth 3 while the
+        // measured band stayed at the gate-only residual).
+        let tip = self.platform_view_state.commands().0;
+        // Then the shape-aware tail (camera task 12), which can only ever delay
+        // what the gate already released — and only while the surface is in the
+        // acquire-bound regime where the leftover residual is constant-shaped.
+        // Everywhere else (submit-bound device, below API 33, nothing hosted)
+        // this returns the gate's own answer unchanged, i.e. bit-for-bit the
+        // shipped gate.
+        let releasable = self.sync_tail.releasable(gated.min(tip));
         self.platform_view_state.commands_up_to(releasable)
+    }
+
+    /// `nativeSetFrameTimeline`: record this tick's Choreographer frame-timeline
+    /// delta (`expectedPresentationTimeNanos − frameTimeNanos`, API 33+) for the
+    /// scroll-sync tail's depth derivation (camera task 12). Kotlin pushes it
+    /// once per frame while a platform view is actually hosted, and pushes `0`
+    /// otherwise — see [`crate::sync_tail`] for why every no-sample path is
+    /// gate-only. Untrusted JNI input: a negative value clamps to `0` and an
+    /// implausible one is rejected downstream by the tail itself.
+    pub(crate) fn set_frame_timeline(&mut self, expected_present_delta_nanos: i64) {
+        self.frame_timeline_delta_nanos = expected_present_delta_nanos.max(0) as u64;
     }
 
     /// Tell the differ the native side has finished applying everything
@@ -1636,6 +1754,35 @@ impl AndroidAppHandle {
         // Per-tick input gathering (contract order, task 17 / task 07):
         // pump FIRST, then gather every FrameInputs signal, THEN decide.
         // ---------------------------------------------------------------
+
+        // Advance the scroll-sync tail (camera task 12) ahead of EVERY early
+        // return in this function — the frame gate's skip, the surface-ready
+        // bail — because a held geometry batch ages in **display** frames, and
+        // the Choreographer keeps delivering those while frust produces
+        // nothing. That is what makes the settle case structural: a batch left
+        // over from the last frame of a fling lands on schedule even though the
+        // scroll produced no further frust frame (SPIKE-SYNC §2.4).
+        let acquire_wait_us = self.executor.acquire_wait_us();
+        let tail_depth = self.sync_tail.tick(TailSignals {
+            frame_time_nanos: frame_time_nanos as i64,
+            expected_present_delta_nanos: self.frame_timeline_delta_nanos,
+            acquire_wait_us,
+        });
+        // One line per depth *change* (a handful per fling, never per frame),
+        // behind the same `perf::enabled()` switch as every other instrumented
+        // line here — the only on-device read-out of what the regime decided,
+        // and the line a band measurement is correlated against.
+        if let Some(depth) = tail_depth
+            && perf::enabled()
+        {
+            log::info!(
+                "frust-perf platform-view tail depth={depth} acquire_bound={} \
+                 expected_present_us={} acquire_us={acquire_wait_us} period_us={}",
+                self.sync_tail.regime_active(),
+                self.frame_timeline_delta_nanos / 1000,
+                (self.sync_tail.period_ms() * 1000.0) as u64,
+            );
+        }
 
         // Pump the reactive runtime's local task queue BEFORE anything else: a
         // controller-driven `spawn_local` task must keep draining every

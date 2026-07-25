@@ -316,6 +316,15 @@ class FrustSurfaceView(
     // can compact acknowledged commands. Rects in the JSON are physical px.
     private external fun nativePlatformViewCommands(handle: Long, ackGeneration: Long): String?
 
+    // Platform-view scroll sync (camera task 12): push this tick's Choreographer
+    // frame-timeline delta (`expectedPresentationTimeNanos - frameTimeNanos`) to
+    // the native scroll-sync tail, which derives from it how many display frames
+    // a geometry batch must be held so a hosted native view lands WITH the frust
+    // content it is pinned to. `0` means "no sample" and leaves the native side
+    // gate-only (its shipped behaviour). This is the one signal Rust cannot read
+    // for itself — `Choreographer.postVsyncCallback` is JVM-only, API 33+.
+    private external fun nativeSetFrameTimeline(handle: Long, expectedPresentDeltaNanos: Long)
+
     /** `0` means "no native side yet" — every native call is guarded on this. */
     private var handle: Long = 0
 
@@ -401,6 +410,38 @@ class FrustSurfaceView(
      * Rust side's null-on-no-change fast path (one cheap JNI call, no parse).
      */
     var platformViewHost: FrustViewHost? = null
+
+    /**
+     * The latest `expectedPresentationTimeNanos - frameTimeNanos` read off the
+     * Choreographer frame timeline (API 33+) — how far ahead of *now* a window
+     * frame committed on this tick is expected to reach the screen, which is
+     * exactly the landing time a hosted native view's geometry has to match.
+     * Pushed into Rust by [sampleFrameTimeline]; `0` until the first sample (and
+     * again whenever sampling stops).
+     *
+     * Written by [frameTimelineCallback] and read by [sampleFrameTimeline], both
+     * on the main thread (a `Choreographer` callback is dispatched on the thread
+     * that posted it — the same thread [doFrame] runs on), so no synchronization
+     * is needed.
+     */
+    private var expectedPresentDeltaNanos = 0L
+
+    /**
+     * One-shot frame-timeline sampler, re-posted by [sampleFrameTimeline] on
+     * every frame that hosts a native sibling. `null` below API 33 — where the
+     * `Choreographer.VsyncCallback` API does not exist and the scroll-sync tail
+     * stays gate-only, which is already strictly better than the ungated
+     * behaviour on every measured device.
+     */
+    private val frameTimelineCallback: Choreographer.VsyncCallback? =
+        if (Build.VERSION.SDK_INT >= 33) {
+            Choreographer.VsyncCallback { data ->
+                expectedPresentDeltaNanos =
+                    data.preferredFrameTimeline.expectedPresentationTimeNanos - data.frameTimeNanos
+            }
+        } else {
+            null
+        }
 
     private val imm: InputMethodManager
         get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
@@ -765,6 +806,11 @@ class FrustSurfaceView(
         // Once the surface is lost the handle stays valid and the native frame
         // is a cheap no-op, so re-posting is always correct while `running`.
         if (handle != 0L) {
+            // Platform-view scroll sync (camera task 12): hand the native side
+            // this tick's frame-timeline sample BEFORE `nativeOnFrame`, which is
+            // where the scroll-sync tail advances. Inert (one `Long` field
+            // compare) unless a native sibling is actually on screen.
+            sampleFrameTimeline()
             // A `false` return is a FATAL, unrecoverable render-thread failure
             // (first-surface install could not succeed) — stop the loop rather
             // than drive doomed frames against a permanent black screen. This is
@@ -798,6 +844,39 @@ class FrustSurfaceView(
             }
         }
         Choreographer.getInstance().postFrameCallback(this)
+    }
+
+    /**
+     * Push this tick's frame-timeline sample to the native scroll-sync tail and
+     * arm the next one (platform views, camera task 12).
+     *
+     * Sampling is **scoped to frames that actually host a native sibling**: the
+     * tail exists only to align a hosted view's geometry with the Frust content
+     * behind it, so an app with no platform view — the overwhelming majority —
+     * posts no vsync callback and makes no extra JNI call beyond the single
+     * `0`-valued push that stands the tail down when the last slot goes away.
+     *
+     * Below API 33 ([frameTimelineCallback] `== null`) there is no timeline to
+     * read and the native side stays gate-only, which the Phase-0 measurements
+     * put strictly ahead of the ungated behaviour on every device tested.
+     */
+    private fun sampleFrameTimeline() {
+        val sampling = frameTimelineCallback != null && platformViewHost?.hasHostedViews == true
+        if (!sampling) {
+            // Stand the tail down exactly once when sampling stops (the last
+            // hosted view was disposed, or this app never had one): a stale
+            // delta must not keep deriving a hold for geometry nobody is
+            // showing.
+            if (expectedPresentDeltaNanos != 0L) {
+                expectedPresentDeltaNanos = 0L
+                nativeSetFrameTimeline(handle, 0L)
+            }
+            return
+        }
+        nativeSetFrameTimeline(handle, expectedPresentDeltaNanos)
+        if (Build.VERSION.SDK_INT >= 33) {
+            Choreographer.getInstance().postVsyncCallback(frameTimelineCallback!!)
+        }
     }
 
     /**

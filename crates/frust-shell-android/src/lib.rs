@@ -39,6 +39,16 @@
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod ffi_support;
 
+// The shape-aware scroll-sync tail (camera task 12): pure logic — two scalars
+// per display frame in, a hold depth out — deliberately kept out of the
+// Android-only modules below so its regime state machine and hold aging are
+// unit-testable on the host (the same "platform-agnostic brain" split the
+// frame-id gate's `FramePairing` uses in `frust-shell-common`). Only the
+// (Android-only) frame loop drives it, hence the same dead-code shape as
+// [`ffi_support`].
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod sync_tail;
+
 #[cfg(target_os = "android")]
 mod app;
 #[cfg(target_os = "android")]
@@ -76,7 +86,7 @@ pub mod __jni {
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (spec §10.1, Makepad `app_main!` precedent).
 ///
-/// Stamps out the nineteen `Java_dev_frust_FrustSurfaceView_native*` symbols
+/// Stamps out the twenty `Java_dev_frust_FrustSurfaceView_native*` symbols
 /// the Kotlin `FrustSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
@@ -102,7 +112,12 @@ pub mod __jni {
 /// `nativePlatformViewCommands` returns the native-sibling-compositor command
 /// backlog (task 03's differ) as JSON for Kotlin's own per-frame poll, mirroring
 /// `nativeSystemUiState`'s generation-gated shape but JSON-encoded (task 03's
-/// `ViewCommand` vocabulary) rather than packed into a `jlong`. `nativeInit` also
+/// `ViewCommand` vocabulary) rather than packed into a `jlong`. One more
+/// (camera task 12): `nativeSetFrameTimeline` pushes the Choreographer frame
+/// timeline's `expectedPresentationTimeNanos − frameTimeNanos` (API 33+, the
+/// one signal only the JVM side can read) into the scroll-sync tail — additive
+/// and optional, `0`/never-called leaves the platform-view release path
+/// gate-only. `nativeInit` also
 /// initializes the process-wide [`frust_reactive::ReactiveRuntime`] (see
 /// [`jni_glue::native_init`]) before the state factory runs, so a `State`'s own
 /// construction may already create signals/controllers.
@@ -438,6 +453,24 @@ macro_rules! android_app {
             ack_generation: $crate::__jni::jlong,
         ) -> $crate::__jni::jstring {
             $crate::jni_glue::native_platform_view_commands(env, handle, ack_generation)
+        }
+
+        /// JNI `nativeSetFrameTimeline`: push this tick's Choreographer
+        /// frame-timeline delta (`expectedPresentationTimeNanos −
+        /// frameTimeNanos`, API 33+) into the scroll-sync tail (camera task
+        /// 12). `0` means "no sample" — below API 33, or no platform view is
+        /// hosted, in which case Kotlin never samples the timeline at all —
+        /// and leaves the platform-view release path gate-only. The value is
+        /// only ever a hold *depth* input; nothing about correctness depends
+        /// on it.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeSetFrameTimeline<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            expected_present_delta_nanos: $crate::__jni::jlong,
+        ) {
+            $crate::jni_glue::native_set_frame_timeline(handle, expected_present_delta_nanos)
         }
     };
 }

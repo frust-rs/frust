@@ -64,6 +64,16 @@ class FrustViewHost(
     /** Live slots by Frust slot id. */
     private val slots = HashMap<Long, Slot>()
 
+    /**
+     * Whether any native sibling is currently hosted. Read once per frame by
+     * `FrustSurfaceView.sampleFrameTimeline` (camera task 12) to scope the
+     * scroll-sync tail's Choreographer frame-timeline sampling to the frames
+     * where a hosted view's geometry can actually be out of step — an app with
+     * no platform view posts no vsync callback at all.
+     */
+    val hasHostedViews: Boolean
+        get() = slots.isNotEmpty()
+
     /** Successfully-resolved factories, cached per `viewType`. */
     private val factories = HashMap<String, FrustPlatformViewFactory>()
 
