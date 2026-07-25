@@ -7,12 +7,14 @@
 //! # Mode B testbed
 //!
 //! This catalog is the framework's Mode B (translucent-surface) testbed: its
-//! Android/iOS glue (hand-synced from tasks 08/09's rendered templates —
-//! see `android/app/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
-//! `FRUST_TRANSLUCENT_SURFACE` const and `ios/Runner/FrustViewController.swift`'s
-//! `translucentSurface` const, both flipped ON by this task) turns the WHOLE
-//! app's frust surface non-opaque, process-wide — not scoped to this one
-//! page. [`platform_view`]'s own module docs state the resulting paint
+//! Android/iOS glue overrides the embedding module's `translucentSurface`
+//! seam (`docs/ARCHITECTURE.md`'s Embedding distribution) — see
+//! `android/app/src/main/kotlin/it/f0x/glyphcatalog/MainActivity.kt`'s
+//! `FrustActivity.translucentSurface` override and
+//! `ios/Runner/SceneDelegate.swift`'s `MainViewController.translucentSurface`
+//! override, both flipped ON by this task — which turns the WHOLE app's
+//! frust surface non-opaque, process-wide — not scoped to this one page.
+//! [`platform_view`]'s own module docs state the resulting paint
 //! contract plainly: "any region this slot's parent doesn't paint over is a
 //! window straight through to the native view (or the OS background) behind
 //! it". The root shell (`crate::lib`'s `home_page`) now paints an explicit
