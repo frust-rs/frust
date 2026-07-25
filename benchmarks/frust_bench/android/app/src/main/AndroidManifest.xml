@@ -8,6 +8,9 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@android:style/Theme.NoTitleBar">
 
+        <!-- Read by dev.frust.FrustActivity to load this app's Rust library. -->
+        <meta-data android:name="dev.frust.nativeLibrary" android:value="frustbench" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
