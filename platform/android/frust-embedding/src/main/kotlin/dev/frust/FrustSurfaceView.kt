@@ -91,33 +91,46 @@ class FrustSurfaceView(
 
     companion object {
         /**
-         * Latched by the first [loadNativeLibrary] call — the library name is
-         * the app's, not the framework's, so this module cannot load it from a
-         * static initializer the way a per-app generated copy of this file used
-         * to.
+         * Latched by the first successful [loadNativeLibrary] call — the library
+         * name is the app's, not the framework's, so this module cannot load it
+         * from a static initializer the way a per-app generated copy of this file
+         * used to.
+         *
+         * Plain Boolean (not AtomicBoolean) since the only access path
+         * ([loadNativeLibrary]) is @Synchronized; the monitor lock provides the
+         * necessary exclusion, and AtomicBoolean's CAS would be redundant.
          */
-        private val libraryLoaded = AtomicBoolean(false)
+        private var libraryLoaded = false
 
         /**
          * Load the app's Rust native library (the `.so` carrying the
          * `Java_dev_frust_FrustSurfaceView_native*` exports) by `name` — the
          * `System.loadLibrary` base name, i.e. `libfoo.so` is `"foo"`.
          *
-         * Idempotent; safe to call from any thread — the first call wins, and
-         * a later call with a different name is a no-op. Must run before any
-         * native method on this view is reached; [FrustActivity.onCreate] calls
-         * it before constructing the view. `@Synchronized` so a concurrent
-         * second caller cannot return while the first is still inside
-         * `System.loadLibrary`.
+         * Idempotent; safe to call from any thread. Loads the library on the
+         * first successful call and leaves the flag latched, so a second call
+         * after success is a silent no-op and does not re-invoke
+         * `System.loadLibrary`. A load failure propagates (an
+         * `UnsatisfiedLinkError`) and leaves the flag clear, so a later retry
+         * (e.g. after fixing a missing `.so` or ABI mismatch) re-attempts the
+         * load rather than silently succeeding.
          *
-         * A load failure propagates (an `UnsatisfiedLinkError`) rather than
-         * being swallowed: without the library, nothing this view does can work.
+         * **Single-library shape**: a caller that invokes this with different
+         * `name` values will load the first, ignore the rest. This is the only
+         * supported configuration today; multi-library hosting is not
+         * implemented.
+         *
+         * Must run before any native method on this view is reached;
+         * [FrustActivity.onCreate] calls it before constructing the view.
+         * `@Synchronized` so a concurrent second caller cannot return while the
+         * first is still inside `System.loadLibrary`.
          */
         @JvmStatic
         @Synchronized
         fun loadNativeLibrary(name: String) {
-            if (libraryLoaded.compareAndSet(false, true)) {
+            if (!libraryLoaded) {
                 System.loadLibrary(name)
+                libraryLoaded = true
             }
         }
 
