@@ -56,7 +56,8 @@
 //! of the crate-wide main-thread rule whose Android half
 //! (`Looper.myLooper() == Looper.getMainLooper()`) lives in the `android`
 //! backend module. A UI-thread caller gets an immediate, diagnosable
-//! [`CameraError::Platform`] instead of a ten-second frozen frame.
+//! [`CameraError::UiThread`] instead of a ten-second frozen frame — the
+//! same typed error the Android half reports.
 //!
 //! # `unsafe`
 //!
@@ -1490,10 +1491,14 @@ fn reject_on_main_thread(operation: &str) -> Result<(), CameraError> {
     if MainThreadMarker::new().is_none() {
         return Ok(());
     }
-    Err(CameraError::Platform(format!(
-        "apple camera backend: {operation} blocks and must not be called on \
-         the main thread — pair it with frust_reactive::spawn_blocking"
-    )))
+    // Same typed error as the Android half's `ensure_off_ui_thread`: the two
+    // backends must report one main-thread refusal, not two shapes of it.
+    // (f2 wrote `Platform` because `CameraError` lived in f1's file that round;
+    // re-pointed by the conductor once f1's `UiThread` variant landed. The
+    // operation name stays in the log line below rather than the error, which
+    // carries the crate-wide message.)
+    let _ = operation;
+    Err(CameraError::UiThread)
 }
 
 /// `AVMediaTypeVideo`, or a typed error if the framework constant is missing
