@@ -4,7 +4,7 @@ resolver = "2"
 # doesn't cover `plugins/`) — a platform plugin (frust-plugin + FFI crates
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera"]
 # examples/huddle (renamed from its prior directory name, task 09) is the
 # sole example (phase 8 examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
@@ -215,6 +215,27 @@ objc2-local-authentication = "0.3"
 keyring-core = "1.0"
 zbus-secret-service-keyring-store = "1.0"
 windows-native-keyring-store = "1.1"
+# frust-camera's Apple AVFoundation bindings (task 02, Plan Phase 1 preamble
+# — see plugins/camera/Cargo.toml's comment): the same plain-version-string
+# shape as `objc2`/`objc2-foundation` above (Cargo's workspace-dependency
+# inheritance forbids a member from overriding `default-features` unless the
+# workspace-level entry already sets it), so `plugins/camera/Cargo.toml`
+# repeats each version literal with its own `default-features = false` +
+# minimal feature list rather than inheriting. `objc2-av-foundation 0.3.2`
+# requires `objc2 >=0.6.2, <0.8.0` (RESEARCH-REFRESH.md §5 — narrower than
+# 0.3.0's `^0.6.0`, but do not write "requires objc2 ^0.6" anywhere; 0.7.x is
+# permitted). `objc2-quartz-core` is pinned here for `CALayer` only —
+# `AVCaptureVideoPreviewLayer` itself lives in `objc2-av-foundation`, not
+# `objc2-quartz-core` (a RESEARCH-REFRESH correction to the original plan).
+# `dispatch2` backs the serial dispatch queue the video-data-output sample
+# delegate runs on (Plan Phase 3). Pinned to minor per the Version-Pin
+# Policy; the tripwire is
+# `cargo check --target aarch64-apple-ios-sim -p frust-camera`.
+objc2-av-foundation = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-quartz-core = "0.3"
+dispatch2 = "0.3"
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md / phase-5.5 research doc)
 reactive_graph = "0.2"

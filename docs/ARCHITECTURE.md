@@ -28,10 +28,10 @@ consumed by app code via the `frust` facade crate, and example apps under
 | `frust-drive` | Drive library: the `ProcessRunner` seam (`run`/`run_streaming`/cancellable `spawn_streaming` + `StreamHandle`), device discovery, environment doctor checks — both the CLI's flat `Validator` pass/fail set and its `doctor::report` module's structured, component-level `DoctorReport` (`build_report`, one `Component`/`ComponentStatus` per toolchain piece grouped by area, each with zero or more structured fix commands) rolled up with a non-blocking-platform-gap model (core Rust toolchain/cargo gates the rollup; Android/iOS/Desktop gaps cap it at `Partial`, never `Missing`) — the `BuildInfo` mode/flavor/defines funnel (sans the clap-derived `BuildArgs`, which stays CLI-side), the Android (Gradle/cargo-ndk) and iOS (xcodebuild/devicectl) run/build pipelines, and the project scaffold/template renderer. `spawn_streaming`'s lines ride a bounded, drop-oldest ring buffer (a `LineReceiver` counting `dropped_lines()`) with the child's stderr merged into the same stream, so a slow consumer can't stall the producer and no output is silently inherited to a caller's own tty. Every build/run core is print-free — output flows only through an `on_line` sink argument passed down from the front-end, never a bare `println!` (see `docs/CODE_STANDARDS.md`'s Anti-patterns); the CLI front-end owns printing, the TUI routes the same sink into a session's log tab. Its `plugin` module holds the static `known_plugins()` registry and idempotent `add_plugin()` — the post-scaffold mechanism (format-preserving Cargo.toml/manifest/plist edits, plus idempotent Gradle-module wiring for a plugin's own OS-side library module) a plugin's OS-side contributions are applied through (see Data Flow's Plugin flow). Consumed by `frust-cli` and `frust-tui`; no framework-crate or clap dependency. |
 | `frust-tui` | Mouse-first ratatui TEA workbench: `engine` (pure `AppState`/`Message`/`update`, returning an `Effect` for the impure actions `update` itself can't perform — stop/launch a session, clipboard copy — that the runner enacts; an mpsc-channeled `Engine`), `ui` (layout/views/theme/a per-frame mouse-region registry with hover, an ANSI-aware session log view — renders `&AppState` only, never mutates the engine), `supervise` (the session-supervision layer: a session is keyed by project root × device target × build mode, moving through a `Configuring→Building→Installing→Running→Exited`/`Killed` lifecycle inferred tolerantly from streamed output; a std drain thread per session bridges `frust-drive`'s blocking `spawn_streaming` handle into a bounded tokio mpsc the engine selects on, coalescing each ready burst of lines into one `Lines` batch send and applying a drop-newest + counted-overflow policy on a full channel — one layer above `frust-drive`'s drop-oldest ring, see the `ProcessRunner` row below), and a tokio-driven `runner` (terminal lifecycle, crossterm event loop, dirty-frame skip, effect enactment). Layered on this triad as further `ActiveModal`/overlay state, not a new tier: a bootstrap wizard projecting `frust-drive`'s doctor report into a guided-fix flow (auto-runnable fixes run as an ad-hoc supervised session, re-preflighting on exit); a fuzzy command palette + toast stack (the palette's command registry doubles as the single source a generated help overlay renders from); right-click context menus and drag regions (sidebar resize, log scrollbar) riding the same mouse-region registry; a per-session perf sparkline panel parsing `frust-perf` trace lines out of that session's log stream; and an Add Plugin dialog (a key / sidebar / palette command) walking Select→Options→Applying→Report over `frust-drive::plugin::add_plugin`. Depends on `frust-drive` only; no other framework crate. |
 | `frust-cli` | Standalone `frust` binary: a thin clap front-end. `commands::dispatch` constructs one `RealProcessRunner` and injects it into every handler, which calls `frust-drive` for scaffolding, doctor/device checks, and the run/build/clean drive pipelines, and `frust-tui` for the `tui` subcommand. Depends on `frust-drive` + `frust-tui`; no direct dependency on the framework crates above. |
-| `frust-plugin` | Leaf plugin substrate (like `frust-reactive`): owns the Android `(JavaVM, application Context)` platform-handle install a plugin needs to reach the OS through FFI — the shell's `nativeInitPlatform` calls `android::initialize` once, which writes the handles into `ndk-context`'s process-wide slot and sets an atomic ready flag; a plugin reads them back via `android::with_jni_env` (a scoped JNI attach), gated on that flag first — see Data Flow's Plugin flow. No `frust-*` dependencies; inert (the flag never sets, so calls always report `NotInitialized`) on non-Android targets so it stays an unconditional plugin dependency. On Apple there is nothing to publish — the ObjC runtime is globally reachable via `objc2`. |
-| `frust-paths` | Leaf substrate crate (like `frust-plugin`/`frust-reactive`): desktop data/cache directory resolution per XDG (Unix)/`APPDATA`+`LOCALAPPDATA` (Windows) conventions, per-binary `app_stem()` namespacing, and an `atomic_write` temp-file-then-rename helper. No `frust-*` dependencies. Consumed by `frust-shared-preferences`' `file` backend (see below) and by both the desktop and Android shells' pipeline-cache persistence (see Data Flow's GPU pipeline cache). |
+| `frust-plugin` / `frust-paths` | Two small leaf substrate crates beside `frust-reactive` (no `frust-*` deps). `frust-plugin` owns the Android `(JavaVM, application Context)` platform-handle install a plugin needs to reach the OS through FFI — the shell's `nativeInitPlatform` calls `android::initialize` once, writing the handles into `ndk-context`'s process-wide slot and arming an atomic ready flag a plugin reads back via `android::with_jni_env` (a scoped JNI attach) — see Data Flow's Plugin flow; inert (`NotInitialized`) on non-Android targets so it stays an unconditional plugin dependency (Apple needs no init step — the ObjC runtime is globally reachable via `objc2`). `frust-paths` resolves desktop data/cache directories per XDG (Unix)/`APPDATA`+`LOCALAPPDATA` (Windows), namespaces per-binary via `app_stem()`, and offers an `atomic_write` temp-file-then-rename helper; consumed by `frust-shared-preferences`' `file` backend and by both the desktop and Android shells' pipeline-cache persistence (see Data Flow's GPU pipeline cache). |
 | `frust-shared-preferences` (`plugins/shared-preferences`) | The first **platform plugin**: a synchronous, thread-safe key-value store (`bool`/`i64`/`f64`/`String`/`Vec<String>`) behind one `SharedPreferences` API, routed by `#[cfg(target_os)]` to three backends — `apple` (`NSUserDefaults` via `objc2`, also serving macOS desktop preview), `android` (`Context.getSharedPreferences` via `frust-plugin`), `file` (a JSON file on Linux/Windows, its directory resolution and atomic write delegated to `frust-paths`). Depends on `frust-plugin` + `frust-paths` plus FFI crates only, never on any other `frust-*` framework crate. |
 | `frust-secure-storage` (`plugins/secure-storage`) | The secure sibling of `frust-shared-preferences`: a synchronous, typed `SecureStorage` named-store API (`frust.ss.<store>` namespace, String values) with an optional per-store biometric gate, routed by `#[cfg(target_os)]` to `apple` (Keychain via `objc2-security`, gate via `SecAccessControl`+`LAContext`), `android` (`AndroidKeyStore` AES-256-GCM via `frust-plugin`, gate via framework `BiometricPrompt` plus the plugin's own Gradle library module contributing `dev.frust.securestorage.FrustBiometric`), and `desktop` linux/windows (`keyring-core` over secret-service/Credential Manager, gate permanently unsupported); `file` is test-only. A gated call blocks on the system prompt, so callers pair it with `frust-reactive::spawn_blocking` — never on the UI thread (see `docs/CODE_STANDARDS.md`). Depends on `frust-plugin` plus FFI crates only. |
+| `frust-camera` (`plugins/camera`) | The camera platform plugin: a synchronous-permission, async-session `Camera`/`CameraSession` API routed by `#[cfg(target_os)]` to `android` (CameraX via a `dev.frust.camera.FrustCameraHost` Kotlin session owner, driven over the plugin's own JNI exports) and `apple` (AVFoundation directly from Rust via `objc2-av-foundation`, no Swift glue) backends, plus an inert `unsupported` fallback. Its preview renders as a **Mode B platform view** (`session.preview_view_type()`, target-gated: Android's FQCN vs iOS's bare runtime name) — zero frust frames while running (see Data Flow's Platform-view flow). A session's lifetime is independent of its preview view (the Android host owns a `LifecycleRegistry`-backed session outliving any slot; a revived slot re-attaches a fresh preview surface rather than reopening the camera). Its two platform module trees mirror the shared-preferences/secure-storage shape one tier up: `plugins/camera/platform/android` is a Gradle library module (namespace `dev.frust.camera`, `implementation(project(":frust-embedding"))` for `FrustPlatformViewFactory`) and `plugins/camera/platform/ios` is the **first plugin Swift package** (`FrustCamera`, depending on the sibling `FrustEmbedding` package), added to a generated app as a second local package reference. Depends on `frust-plugin` plus FFI crates only — the same leaf platform-plugin charter as `frust-shared-preferences`/`frust-secure-storage`. |
 | `clean-signals-frust` (`plugins/clean-signals-frust`) | The first **facade-tier plugin**: a glue crate binding the (separately published) `clean-signals` clean-architecture core to Frust — nothing more than a crate depending on `frust`, sitting above the whole framework graph. A standalone workspace excluded from the root Cargo workspace (like `examples/huddle`), since its `clean-signals` dependency is a sibling-checkout path dep until `clean-signals` publishes to crates.io (see `docs/DEVELOPMENT.md`). |
 | `platform/android/frust-embedding` *(Kotlin, not a Cargo crate)* | Android `com.android.library`, namespace `dev.frust` (exclusive — `docs/CODE_STANDARDS.md`'s Plugin Conventions): `FrustActivity`, `FrustSurfaceView`, `FrustViewHost`, `FrustPlatformViewFactory`, the vendored `dev.accesskit.android.Delegate`, `consumer-rules.pro` — see Data Flow's Embedding distribution. |
 | `platform/ios/FrustEmbedding` *(Swift, not a Cargo crate)* | Swift package (iOS 15+, unverified — no macOS compile in this repo's history): a `CFrustFFI` C target (the former bridging-header declarations) plus the `FrustEmbedding` target — `FrustAppDelegate`, `FrustSceneDelegate`, `FrustViewController`, `FrustView`, `FrustTextInput`, `FrustViewHost`, `FrustPlatformViewFactory` — see Data Flow's Embedding distribution. |
@@ -55,19 +55,18 @@ frust  = core + widgets + reactive + shell-android (always) + shell-ios (always)
 frust-drive  (leaf: no frust-* deps, no framework-crate deps — process/devices/doctor/build/scaffold + android/ios pipelines)
 frust-cli (bin) → frust-tui → frust-drive  (clap front-end → ratatui/crossterm TEA workbench → drive library; no other framework crate)
 
-frust-plugin  (leaf: no frust-* deps; Android-only jni/ndk-context, target-gated; inert stub elsewhere)
-frust-paths   (leaf: no frust-* deps; desktop data/cache-dir resolution + atomic_write + app_stem)
+frust-plugin / frust-paths  (leaves: no frust-* deps; frust-plugin = Android-only jni/ndk-context, target-gated, inert stub elsewhere; frust-paths = desktop data/cache-dir resolution + atomic_write + app_stem)
 plugins/*     (beside the facade, never inside it — the facade never depends on or re-exports a plugin)
     ├── frust-shared-preferences  = frust-plugin + frust-paths + FFI crates only   (platform plugin)
     ├── frust-secure-storage      = frust-plugin + FFI crates only   (platform plugin)
+    ├── frust-camera              = frust-plugin + FFI crates only   (platform plugin)
     └── clean-signals-frust      = frust alone                      (facade plugin)
 ```
 
 **Plugins are a tier beside the facade, not inside it.** `frust-plugin` and
 `frust-paths` are leaves by charter — no outgoing `frust-*` edges — though
-`frust-shell-android` depends on `frust-plugin` (Android-gated, installs
-platform handles) and both shells depend on `frust-paths` (pipeline-cache
-persistence); a plugin only reads `frust-plugin`'s handles back. A
+`frust-shell-android` depends on `frust-plugin` and both shells depend on
+`frust-paths`; a plugin only reads `frust-plugin`'s handles back. A
 **platform plugin** depends on `frust-plugin` + `frust-paths` plus FFI
 crates, never any other `frust-*` framework crate; a **facade plugin**
 depends on `frust` alone, above the whole graph. Either way the facade
@@ -117,107 +116,79 @@ that generates/inspects Frust projects, not a framework consumer.
    type-erased so `frust-core` has no dependency on `frust-text`; text
    widgets recover it via `LayoutCtx::text_context::<TextContext>()`.
 4. `RenderRoot::paint(scene, frame_time)` calls each widget's `paint`, which
-   emits draw commands into `&mut dyn PaintScene`;
-   `frust-scene::SceneBuilder` implements `PaintScene` (fills, rounded rects,
-   strokes, clip/transform push/pop, glyph runs) as real `Command`s in the
-   `Scene`. The `frame_time` (a shell-supplied `FrameTime`, never
-   `Instant::now()` inside `frust-core`/widgets — see
-   `docs/CODE_STANDARDS.md`) and the render root's stored theme (Theme
-   delivery below) thread down through `PaintCtx` unchanged to every
-   descendant, letting a widget advance an `anim::AnimationController` (or
-   fling spring) and call `PaintCtx::request_frame` (paint-only) or
-   `request_layout` (also resizes/repositions, forcing next frame's
-   `ChangeFlags::LAYOUT` even under the mobile layout-skip gate); these
-   bubble up as `PaintOutcome::needs_frame`/`needs_layout`, honored by the
-   desktop shell as an extra `window.request_redraw()` and fed into the
-   mobile frame-gate decision (Frame gate below) — an in-flight animation is
-   never skipped. A focused editable similarly calls
-   `PaintCtx::publish_ime_state` during paint, refreshing
-   `RenderRoot::ime_state`/`AppTree::ime_state` for an app-driven change that
-   never crossed an event (e.g. a controlled clear-on-submit);
-   `RenderRoot::paint` only accepts a bubbled `ime_state` while
-   `focus_active` — a guard against resurrecting a surface a blur already
-   cleared.
-5. The finished `Scene` is encoded (`frust_render::encode_scene`) into a
-   `vello::Scene` and presented by `SurfaceRenderer`, the spec §8.1 surface
-   lifecycle state machine
-   (`SurfacePhase::NoSurface/SurfaceReady/SurfaceLost`,
-   `FrameOutcome::Rendered/Skipped/Redraw/SurfaceLost`) shared by every
-   shell: a surface can be destroyed/recreated at any time (window close,
-   Android rotation/backgrounding), and rendering is a no-op outside
+   emits draw commands into `&mut dyn PaintScene`; `frust-scene::SceneBuilder`
+   implements `PaintScene` as real `Command`s in the `Scene`. The
+   `frame_time` (a shell-supplied `FrameTime`, never `Instant::now()` inside
+   `frust-core`/widgets — see `docs/CODE_STANDARDS.md`) and the render
+   root's stored theme (Theme delivery below) thread down through
+   `PaintCtx` to every descendant, letting a widget advance an animation and
+   call `PaintCtx::request_frame` (paint-only) or `request_layout` (also
+   forces next frame's `ChangeFlags::LAYOUT`); these bubble up as
+   `PaintOutcome::needs_frame`/`needs_layout`, fed into the mobile
+   frame-gate decision (Frame gate below) — an in-flight animation is never
+   skipped. A focused editable similarly calls `PaintCtx::publish_ime_state`
+   during paint for an app-driven change that never crossed an event.
+5. The finished `Scene` is encoded (`frust_render::encode_scene`) and
+   presented by `SurfaceRenderer`, the spec §8.1 surface lifecycle state
+   machine (`SurfacePhase`/`FrameOutcome`) shared by every shell: a surface
+   can be destroyed/recreated at any time, and rendering is a no-op outside
    `SurfaceReady`. By default this tail is split onto a dedicated render
-   thread via `frust-shell-common::render_split` (module row above);
-   `FRUST_NO_RENDER_THREAD` (`docs/DEVELOPMENT.md`) reverts to the pre-split
-   single-thread path — winit's main-thread-only window handle is why the UI
-   thread creates the surface and the render thread installs it (Key Types'
-   `SurfaceFactory` row), round-tripping the same way on `SurfaceLost`; a
+   thread via `frust-shell-common::render_split`; `FRUST_NO_RENDER_THREAD`
+   (`docs/DEVELOPMENT.md`) reverts to the pre-split single-thread path — a
    first-install failure is fatal.
 
 **Semantics pass:** `RenderRoot::semantics` (spec §9) walks the tree
-post-layout via `ChildPod::semantics_child` into a flat `SemanticsUpdate`
-(node map, root/focus ids, each node keyed by a stable per-pod id);
-`semantics_generation` lets a shell skip re-pushing an unchanged tree (iOS
-also serves a cached snapshot to a newly-activated screen reader).
+post-layout into a flat `SemanticsUpdate` (node map, root/focus ids, stable
+per-pod ids), skipped when unchanged via a generation counter.
 `RenderRoot::perform_accessibility_action` routes a platform action back
 through the **normal event path** by synthesizing pointer events at the
 target node's bounds, so any fire-on-up-inside widget is operable with no
-widget-side changes. All three shells push `SemanticsUpdate`s into a platform
-accesskit adapter (`accesskit_winit`/`accesskit_android`/ `accesskit_ios` —
-see `docs/DEVELOPMENT.md`'s compile-gate note); a modal flag plus a
-keyboard-operability convention (claim focus on first pointer interaction,
-dismiss on a focus-routed `Key(Escape)`, desktop only) cover the catalog's
-five modal/menu widgets.
+widget-side changes. All three shells push `SemanticsUpdate`s into a
+platform accesskit adapter (`docs/DEVELOPMENT.md`'s compile-gate note);
+modal/menu widgets additionally claim focus on first interaction and
+dismiss on a focus-routed Escape (desktop only).
 
 **Signal-driven wake:** a write to a tracked signal fires the process-wide
-`FrameWaker` (`frust-reactive`; coalesced — N writes between tracked rebuilds
-produce one wake); every `spawn_local` task wake fires the same `FrameWaker`
-through the executor's composite waker. On desktop the waker sends a
-`ShellUserEvent::SignalsDirty` through the winit `EventLoopProxy`, pumping
-the reactive runtime's UI-thread local task queue
-(`ReactiveRuntime::pump_local`) and requesting a redraw; the next
-`RedrawRequested` re-tracks from scratch. Mobile shells need no nudge step —
-`Choreographer`/`CADisplayLink` already drive a continuous loop — but both
-pump local tasks once per frame, before the surface-readiness gate and at
-touch/IME entry points. **The set side is a persistent `TrackedScope` each
-mobile `AppHandle` wraps its per-frame rebuild in**: only a rebuild run
-*inside* one subscribes signal reads, so only then does a later write flip
-the process-wide `signals_dirty` flag the mobile shells drain once per frame
-as a frame-gate input (Frame gate below).
+`FrameWaker` (`frust-reactive`; coalesced — N writes between tracked
+rebuilds produce one wake), reached the same way by a `spawn_local` task
+wake. On desktop this sends a `SignalsDirty` event through the winit event
+loop, pumping local tasks and requesting a redraw; the next rebuild
+re-tracks from scratch. Mobile shells need no nudge — `Choreographer`/
+`CADisplayLink` already drive a continuous loop — but both pump local tasks
+once per frame. **The set side is a persistent `TrackedScope` each mobile
+`AppHandle` wraps its per-frame rebuild in**, so only a rebuild run *inside*
+one subscribes signal reads; a later write flips the process-wide
+`signals_dirty` flag the mobile shells drain once per frame as a frame-gate
+input (Frame gate below).
 
 **Component state boundary:** a `Component` (`frust-core::component`) is a
 `StatefulWidget` analog — retained local state living in the widget tree
 behind a `ComponentView<C>` that implements `View<Outer>` for any outer
 state, so the hosted subtree diffs against the component's own `C::State`
-instead of the ambient app state. `ComponentWidget` builds an inner
-`EventCtx` over that local state, routes events through the same
-capture/focus/IME contract a single-child container uses, then mirrors the
-inner outcome onto the *outer* `EventCtx` — a boundary a container observes
-effects through, never mutates across (a synthesized `Cancel` crossing it
-still never touches state — `docs/CODE_STANDARDS.md`). Each component owns a
-child reactive `Owner` (nested under its parent's, or the shell's root
-`Owner` at the top), scoping `provide_context`/`use_context`/`on_cleanup`;
-rebuild re-runs `C::build`, while teardown tears down the child element,
-disposes the owner (running `on_cleanup`s), and drops the state.
+instead of the ambient app state. `ComponentWidget` routes events through
+the same capture/focus/IME contract a single-child container uses, then
+mirrors the inner outcome onto the *outer* `EventCtx` — a boundary a
+container observes effects through, never mutates across. Each component
+owns a child reactive `Owner` (nested under its parent's, or the shell's
+root `Owner` at the top), scoping `provide_context`/`use_context`/
+`on_cleanup`; teardown tears down the child element, disposes the owner,
+and drops the state.
 
-**Theme delivery:** a shell owns the active `frust_theme::Theme` and delivers
-it two ways, mirroring the text-context pattern above: to widgets, boxed
-type-erased (`RenderRoot::set_theme(Box<dyn Any>)`), lent as `Option<&dyn
-Any>` into every `LayoutCtx`/`PaintCtx` and recovered via
-`theme_as::<Theme>()`/`Theme::from_paint_ctx`/`from_layout_ctx` (`frust-core`
-never depends on `frust-theme`); to app code, a cloned `Theme` under the
-reactive root `Owner`, read via `use_context::<Theme>()`. A shell re-pushes
-both paths together on a brightness change; an app can also force the active
-`Theme` via `frust::set_app_theme`/`clear_app_theme`
-(`frust-shell-common::theme_override`, a process-global override slot,
+**Theme delivery:** a shell owns the active `frust_theme::Theme` and
+delivers it two ways: to widgets, boxed type-erased
+(`RenderRoot::set_theme`), recovered via `theme_as::<Theme>()`/
+`Theme::from_paint_ctx`/`from_layout_ctx` (`frust-core` never depends on
+`frust-theme`); to app code, a cloned `Theme` under the reactive root
+`Owner`, read via `use_context::<Theme>()`. A shell re-pushes both paths on
+a brightness change; an app can also force the active `Theme` via
+`frust::set_app_theme`/`clear_app_theme` (a process-global override slot,
 winning over the platform preference until cleared). All three shells seed
-`Theme::glyph_baseline()` by default and gate a one-time `glyph::font_data()`
-registration when `design_language` is `Glyph` (Font registration flow
-below). Resolution timing is asymmetric: most themed widgets re-read the
-theme from `PaintCtx` every paint and self-refresh on a live swap, but
-`Text`/`TextInput` bake resolved glyph color into the shaped layout at LAYOUT
-time — safe under the mobile layout-skip gate only because `set_theme` forces
-`ChangeFlags::LAYOUT | PAINT` even on an otherwise-skipped frame
-(`docs/CODE_STANDARDS.md`'s Theming conventions).
+`Theme::glyph_baseline()` by default (Font registration flow below).
+Resolution timing is asymmetric: most themed widgets re-read the theme from
+`PaintCtx` every paint, but `Text`/`TextInput` bake resolved glyph color
+into the shaped layout at LAYOUT time — safe under the mobile layout-skip
+gate only because `set_theme` forces `ChangeFlags::LAYOUT | PAINT` even on
+an otherwise-skipped frame (`docs/CODE_STANDARDS.md`'s Theming conventions).
 
 **Font registration flow:** `frust::register_app_fonts(bytes)` (facade)
 pushes into `frust-shell-common::font_registry`'s process-global pending
@@ -231,70 +202,65 @@ mobile also flags the frame gate's `theme_or_appearance_changed` input.
 shell's `SystemUiWatcher::poll` once per frame.
 
 **Inset delivery:** a shell converts platform-reported system-bar/cutout/IME
-occlusion into logical `WindowInsets` via the FFI-boundary `logical_insets`
-helper, mirroring Theme delivery: to widgets, threaded concrete via
-`RenderRoot::set_insets`/`window_insets()`; to app code, `provide_context`d
-under the reactive root `Owner`. `WindowInsets::padding()` derives the safe
-edge as `max(0, view_padding − view_insets)` per edge (Flutter's
-`ViewPadding`/`ViewInsets` provenance), so an IME overlap zeroes the affected
-edge instead of double-padding. `set_insets` is `PartialEq`-guarded and marks
-`ChangeFlags::LAYOUT | PAINT` only on an actual change, the same
-forced-relayout contract as Theme delivery. `SafeArea` (Key Types) is the
-sole widget consumer of `padding()`.
+occlusion into logical `WindowInsets`, mirroring Theme delivery: to
+widgets, threaded concrete via `RenderRoot::set_insets`/`window_insets()`;
+to app code, `provide_context`d under the reactive root `Owner`.
+`WindowInsets::padding()` derives the safe edge as `max(0, view_padding −
+view_insets)` per edge, so an IME overlap zeroes the affected edge instead
+of double-padding; `set_insets` marks `ChangeFlags::LAYOUT | PAINT` only on
+an actual change, the same forced-relayout contract as Theme delivery.
+`SafeArea` (Key Types) is the sole widget consumer of `padding()`.
 
 **Glass material tokens:** `frust-theme::glass` (spec 6f) is pure data — no
-scene/reactive dependency, no blur rendered here. `GlassScale` bundles three
-tiers (`chrome`/`bar`/`control`), each a `GlassMaterial` recipe of a
-`blur_radius_intent` (future-backend contract; `0.0` = opaque, since pinned
-vello 0.9 has no backdrop-blur primitive), fill-wash stacks, a specular
-hairline alpha, and a drop shadow. `Theme.glass` carries one `GlassScale` per
-baseline, so a widget branches on `GlassMaterial::is_opaque()` rather than
-`DesignLanguage` directly; the `cupertino` chrome widgets are the first
-consumers, degrading to an opaque Material fill off the glass branch — a
-deliberate approximation pending a render-backend upgrade.
+scene/reactive dependency, no blur rendered here. `GlassScale` bundles
+three tiers (`chrome`/`bar`/`control`), each a `GlassMaterial` recipe of a
+`blur_radius_intent` (future-backend contract; `0.0` = opaque under pinned
+vello 0.9), fill-wash stacks, a specular hairline alpha, and a drop shadow.
+`Theme.glass` carries one `GlassScale` per baseline, so a widget branches
+on `GlassMaterial::is_opaque()` rather than `DesignLanguage` directly; the
+`cupertino` chrome widgets are the first consumers, degrading to an opaque
+Material fill off the glass branch pending a render-backend upgrade.
 
 **Event pipeline:** an `InputEvent` (a `PointerEvent` down/move/up/cancel, or
 a scroll delta — already translated into **logical**, density-independent
-coordinates by the shell) enters the tree through `RenderRoot::event`, which
-builds a root `EventCtx` over the type-erased app state and dispatches to the
-root widget. Containers own their children directly as `ChildPod`s — a `Vec`
-or named fields, not arena nodes — routing an event down by translating it
-into each child's local space (`ChildPod::event_child`); a deliberate
-divergence from the arena-backed `WidgetTree`, which stays single-root.
-Pointer **capture** and **focus** are each a recorded path (not a global
-registry) that `EventCtx::capture_pointer`/`request_focus` set on
-`Down`/claim and that subsequent moves or `Key`/`Ime` events route straight
-back through with no hit test; a structural container rebuild force-releases
-a path only for a child whose identity was actually lost — a stable-prefix or
-key-matched survivor (Key Types' `ChildKey` row) keeps its path across the
-rebuild (`docs/CODE_STANDARDS.md`'s Interaction Semantics). The focused
-widget's `ImeState` is published via `EventCtx`/`PaintCtx::publish_ime_state`
-and surfaced as `RenderRoot::ime_state()`/`AppTree::ime_state()`; a platform
-IME bridge pushes a reconciled `EditingState` back via `AppTree::ime_apply`.
-Interactive widgets hold their view-declared callback as an **erased
-closure** (`Rc<dyn Fn(&mut State)>` boxed into `Box<dyn FnMut(&mut
-EventCtx)>`), so `frust-core`/`frust-widgets` carry no knowledge of the
-concrete app-state type. The pass never rebuilds or repaints — it returns
-`EventOutcome { handled, needs_redraw }`, and the shell runs
-rebuild→layout→paint afterward only if warranted: desktop is **dirty-driven**
-(idle CPU near zero under `winit`'s `ControlFlow::Wait`) while Android/iOS
-run a **continuous** per-frame loop regardless.
+coordinates by the shell) enters the tree through `RenderRoot::event`,
+which builds a root `EventCtx` and dispatches to the root widget.
+Containers own their children directly as `ChildPod`s — a `Vec` or named
+fields, not arena nodes — routing an event down by translating it into each
+child's local space; a deliberate divergence from the arena-backed
+`WidgetTree`, which stays single-root. Pointer **capture** and **focus**
+are each a recorded path (not a global registry) set on `Down`/claim, that
+subsequent moves or `Key`/`Ime` events route straight back through with no
+hit test; a structural container rebuild force-releases a path only for a
+child whose identity was actually lost (`docs/CODE_STANDARDS.md`'s
+Interaction Semantics). The focused widget's `ImeState` is published via
+`PaintCtx::publish_ime_state` and surfaced as `RenderRoot::ime_state()`; a
+platform IME bridge pushes a reconciled `EditingState` back via
+`AppTree::ime_apply`. Interactive widgets hold their view-declared callback
+as an **erased closure**, so `frust-core`/`frust-widgets` carry no
+knowledge of the concrete app-state type. The pass never rebuilds or
+repaints — it returns `EventOutcome { handled, needs_redraw }`, and the
+shell runs rebuild→layout→paint afterward only if warranted: desktop is
+**dirty-driven** (idle CPU near zero) while Android/iOS run a
+**continuous** per-frame loop regardless.
 
 **Frame gate:** the mobile shells' Choreographer/`CADisplayLink` callbacks
 keep firing every tick; `frust-shell-common::frame_gate`'s `FrameGate`
-decides whether one actually reproduces a frame, from an OR-list of dirtiness
-signals (pending input, pending `ChangeFlags`, an in-flight
+decides whether one actually reproduces a frame, from an OR-list of
+dirtiness signals (pending input, pending `ChangeFlags`, an in-flight
 `PaintOutcome::needs_frame`, a theme/appearance change, `signals_dirty`
 above, pointer capture/focus, an accessibility action, post-resume warmup)
 bundled into `FrameInputs`; any true signal forces `Run`, else `Skip` (no
 rebuild/layout/paint/present work; `docs/DEVELOPMENT.md`'s skip-count
 caveat). `FRUST_NO_FRAME_GATE=1` forces every tick to `Run`. On a `Run`,
-Android also skips layout unless change flags report `needs_layout()`, first
-frame, or resize; iOS still relayouts every `Run` (the finer skip isn't wired
-there yet). A `Run` triggered only by a paced (`TickClass::CosmeticLoop`)
-request is throttled to `MotionScheme::cosmetic_loop_rate` by
-`FrameGate::decide_paced`; all other dirtiness still forces an immediate
-`Run`, and `FRUST_NO_ANIM_PACING` disables only this throttle.
+Android also skips layout unless change flags report `needs_layout()`,
+first frame, or resize; iOS still relayouts every `Run` (the finer skip
+isn't wired there yet), though both shells now drain the flags they
+consult so a stale peek can no longer force `Run` forever (Android/iOS
+frame pipelines below). A `Run` triggered only by a paced
+(`TickClass::CosmeticLoop`) request is throttled to
+`MotionScheme::cosmetic_loop_rate`; all other dirtiness forces an
+immediate `Run`, and `FRUST_NO_ANIM_PACING` disables only this throttle.
 
 **GPU pipeline cache:** `frust-render::pipeline_cache` frames an opaque,
 adapter-fingerprinted `wgpu::PipelineCache` blob (Vulkan-only, no-op
@@ -312,19 +278,30 @@ into `RenderRoot::event` between frames, and surface-changed/destroyed
 callbacks drive the same `SurfaceRenderer` state machine as desktop's
 resize/suspend events, `surfaceDestroyed` blocking the UI thread on the `Ack`
 barrier until surface resources drop. A first-install failure sets a fatal
-flag `nativeOnFrame` returns, telling Kotlin to stop driving frames. Full
-export surface: `android_app!` row in Key Types.
+flag `nativeOnFrame` returns, telling Kotlin to stop driving frames. The
+render thread also publishes a swapchain-acquire-wait EWMA the
+`sync_tail` module (Platform-view flow below) uses alongside a
+Kotlin-sampled `Choreographer` timeline (`nativeSetFrameTimeline`, API 33+).
+Full export surface: `android_app!` row in Key Types.
 
 **iOS frame pipeline:** the embedding module's `FrustViewController` drives
 `frust-shell-ios` instead of an event loop: a UIKit `CADisplayLink` tick
 calls the render-frame export once per frame (nanosecond timestamp as
 `FrameTime`), consulting the same frame gate as Android before
 rebuild→layout→paint→render — unlike Android, a `Run` still relayouts
-unconditionally (the intra-frame skip isn't wired here). A resize export
-resizes the existing `SurfaceRenderer` surface in place (the `CAMetalLayer`
-Swift owns survives the app lifetime); a lost surface recreates itself from
-the retained layer pointer. The render tail also runs on its own thread by
-default: `pause` blocks on the `Ack` barrier, `destroy` joins the thread
+unconditionally (the intra-frame skip isn't wired here), though the Run path
+now drains `RenderRoot`'s change flags right after rebuild (value discarded)
+so that gate input can no longer latch stuck true — the fix that lets iOS's
+gate reach Android's zero-frames-at-rest property. A resize export resizes
+the existing `SurfaceRenderer` surface in place (the `CAMetalLayer` Swift
+owns survives the app lifetime); a lost surface recreates itself from the
+retained layer pointer, and — since iOS surface loss has no platform entry
+point the way Android's `surfaceChanged` does — the render thread signals
+its own recreate attempt to the UI thread via a consumed-once
+`surface_reinstalled` flag (same `Arc<AtomicBool>` shape as `fatal`), which
+forces one replay frame so a self-healed surface and its live platform-view
+slots are never left stranded. The render tail also runs on its own thread
+by default: `pause` blocks on the `Ack` barrier, `destroy` joins the thread
 after teardown, and its GPU tail runs inside an autorelease-pool drain (no
 UIKit runloop provides one) so a suspended app's Metal submission can't get
 the process killed. Export surface mirrors Android's shape
@@ -340,42 +317,51 @@ calls `frust_plugin::android::initialize`, writing `(JavaVM, Context)` into
 scoped `with_jni_env` checks first. Apple needs no init step — the ObjC
 runtime is globally reachable via `objc2`.
 
-**Plugin contributions (OS-side):** a Gradle library module (Android:
+**Plugin contributions (OS-side):** a Gradle library module (Android;
 permissions/keep rules ride its own manifest/`consumerProguardFiles`, never
-the app's), an Info.plist key (iOS), or a Cargo.toml dependency is applied
+the app's), a local Swift package reference (iOS: `Contribution::SwiftPackageRef`,
+a six-site, all-or-nothing, object-id-minting `project.pbxproj` edit), an
+Info.plist key (iOS), an app-crate-macro line such as
+`#[cfg(target_vendor = "apple")] frust_camera::ios_exports!();`
+(`Contribution::AppCrateMacro` — a retention shim keeping an otherwise-
+uncalled dependency-crate FFI export alive through
+`lto = "fat"`/`strip = "symbols"`), or a Cargo.toml dependency, applied
 post-scaffold via `frust-drive::plugin`'s static `known_plugins()` registry,
-merged idempotently by `add_plugin()` (anchored inserts, write-if-absent) —
-via the frust TUI's Add Plugin dialog or by hand per the README.
+merged idempotently by `add_plugin()` — via the frust TUI's Add Plugin
+dialog or by hand per the README.
 
 **Embedding distribution:** the platform modules above carry Kotlin/Swift
 only, no native code — the Rust `.so`/`.a` keeps flowing through cargo-ndk /
-the Xcode staticlib phase unchanged. `dev.frust`'s twenty JNI exports derive
-from the *declaring class's* FQN, so the package is fixed; iOS's `frust_*` C
-symbols resolve at final link regardless of the calling module — no analogous
-constraint. Two override seams customize a host: `nativeLibraryName` (the
-`dev.frust.nativeLibrary` manifest `<meta-data>`) and `translucentSurface`,
-which must drive pixel format, z-order, and
-`declare_host_translucent_surface` together in one branch (Module Structure
-rows above; `examples/glyph-catalog` exercises it). Both modules resolve **by
-path** today (`frust.embedding.dir`; a local Swift package reference) — see
-`design/PUBLICATION_SEAM.md` for the coordinate swap.
+the Xcode staticlib phase unchanged. `dev.frust`'s twenty-one JNI exports
+(`android_app!`'s twenty plus `frust-plugin`'s own `nativeInitPlatform`)
+derive from the *declaring class's* FQN, so the package is fixed; iOS's
+`frust_*` C symbols resolve at final link regardless of the calling module.
+**Three** override seams customize a host: `nativeLibraryName` (the
+`dev.frust.nativeLibrary` manifest `<meta-data>`), `translucentSurface`
+(pixel format, z-order and `declare_host_translucent_surface` together in
+one branch — Module Structure rows above), and iOS's
+`synchronizesPresentWithPlatformViews` (default off; drives
+`CAMetalLayer.presentsWithTransaction` and the render-side present-sync
+latch together, with present-then-poll inside one `CATransaction`
+load-bearing — Platform-view flow below). Both embedding modules resolve
+**by path** today (`frust.embedding.dir`; a local Swift package reference) —
+see `design/PUBLICATION_SEAM.md` for the coordinate swap.
 
 **Navigation flow:** `nav::navigator()`'s retained page stack is driven by
 `NavigatorController`, a cloneable handle that only *records* requested ops
-(`push`/`pop`/`replace`) — never self-mutates mid-event, the controlled-
-component convention (`docs/CODE_STANDARDS.md`). Queued ops drain and apply
-in `NavigatorView::rebuild`; a page switch cancels in-flight capture/focus/
-IME on the outgoing top page so a platform keyboard hides deterministically.
-Only the topmost settled opaque page (plus any transparent pages above it) is
-laid out/painted — covered pages stay retained but culled until revealed. A
-push/pop carrying a `TransitionSpec` runs a `TransitionDriver` during paint,
-blocking pointer routing to both pages (captures cancelled first) except an
-interactive edge-swipe pop; `push_transparent_for_result` composes a
-transparent push with a result callback, the modal shape
-`Dialog`/`BottomSheet` build on. During any transition, both pages'
-`hero(tag, child)` wrappers report bounds through the navigator's
-`HeroFrames` registry; where the same tag appears on both, the topmost page's
-hero morphs while the counterpart is suppressed.
+(`push`/`pop`/`replace`) — never self-mutates mid-event, the
+controlled-component convention (`docs/CODE_STANDARDS.md`). Queued ops
+drain and apply in `NavigatorView::rebuild`; a page switch cancels
+in-flight capture/focus/IME on the outgoing top page. Only the topmost
+settled opaque page (plus any transparent pages above it) is laid
+out/painted — covered pages stay retained but culled until revealed. A
+push/pop carrying a `TransitionSpec` runs a `TransitionDriver` during
+paint, blocking pointer routing to both pages except an interactive
+edge-swipe pop; `push_transparent_for_result` composes a transparent push
+with a result callback, the modal shape `Dialog`/`BottomSheet` build on.
+During a transition, both pages' `hero(tag, child)` wrappers report bounds
+through the navigator's `HeroFrames` registry and morph where a tag
+matches.
 
 **Deep-link flow:** a platform delivers a link (cold-start intent data, or a
 running app's warm re-delivery) through the fixed FFI export each mobile
@@ -409,7 +395,21 @@ Android's `nativePlatformViewCommands`, iOS's
 since the last ack — polled by the embedding module's `FrustViewHost` (Module
 Structure above), which resolves each command's `viewType` to a factory
 (`docs/CODE_STANDARDS.md`'s naming contract) and applies the batch to its
-native view hierarchy.
+native view hierarchy. Each shell also gates *when* a backlog is releasable,
+so a scroll-hosted slot's geometry lands with the frust content it is
+pinned to. Android **always** runs a frame-id release gate
+(`platform_view::FramePairing`/`commands_up_to` — served only once the
+producing frame has actually presented), layered with a regime-gated
+shape-aware hold (`sync_tail`, Android frame pipeline above) active only
+while acquire-bound; iOS shares the same `FramePairing` machinery but arms
+it only under the host's `synchronizesPresentWithPlatformViews` seam
+(Embedding distribution above), since ungated iOS needs the opposite
+correction. **The two platforms correct in opposite directions by
+design**: Android delays the *view* to meet an already-presented surface;
+iOS delays the *surface* (`frust-render`'s `submit_deferred`/`DeferredPresent`,
+presented by the UI thread inside the platform-view `CATransaction`) to
+meet the view's already-committed geometry — per-shell mechanisms behind
+one shared differ, deliberately with no shared knob.
 
 Two modes gate a slot's paint, and Mode B is a **build-time host choice**,
 not something frust decides — see Data Flow's Embedding distribution for the
@@ -485,11 +485,11 @@ or hands off to `frust-tui`'s entry point (`tui`).
 | `Scene` / `SceneBuilder` / `Command` | Layer 3 vector display list — the widget/GPU seam. `Command::Path` carries a `BezPath` plus a fill-or-stroke `PathStyle`; `Command::ShaderQuad` carries a `ShaderProgram` (opaque WGSL handle) plus `dest`/`transform`/`time`, recorded by `SceneBuilder::draw_shader` (see the `frust-render` row above for how it's rendered). |
 | `GlyphRun` | Shaped-glyph carrier from `frust-text` into the scene. |
 | `TextContext` / `TextStyle` / `TextLayout` | Parley-backed text shaping surface. |
-| `RenderContext` / `SurfaceRenderer` / `SurfaceFactory` / `DetachedSurface` | `RenderContext` owns the wgpu `Instance` and lazily creates/holds the logical `wgpu::Device` itself (adapter-derived limits, not a thin `vello::util` wrapper) so it can request the real adapter limits vello's own device pool cannot; `ensure_device_headless` creates the device with no surface, the Android pre-init entry (see Data Flow's Android frame pipeline). `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation, plus the persisted-pipeline-cache seam (`set_initial_pipeline_cache_data`/`pipeline_cache_data` — see Data Flow's GPU pipeline cache). Its `encode()`/`present()` split GPU encode from swapchain-acquire+present as separate public calls (`render()` retained as a combined wrapper), returning an `EncodeOutcome` (`Encoded`/`Skipped`) — the seam the render-thread split times/moves independently onto a dedicated render thread (see Data Flow's frame pipelines); the Gpu arm of `encode()` also runs the crate-private `shader_effects` pre-pass (Module Structure's `frust-render` row) before the Direct/Blit branch. `SurfaceFactory` (cloned off `RenderContext`) creates a `Send`-able, opaque `DetachedSurface` on a windowing-constrained thread; `SurfaceRenderer::on_surface_installed` brings it online on another thread — the desktop split's UI-thread-creates/render-thread-installs seam. |
+| `RenderContext` / `SurfaceRenderer` / `SurfaceFactory` / `DetachedSurface` | `RenderContext` owns the wgpu `Instance` and lazily creates/holds the logical `wgpu::Device` itself (adapter-derived limits, not a thin `vello::util` wrapper) so it can request the real adapter limits vello's own device pool cannot; `ensure_device_headless` creates the device with no surface, the Android pre-init entry (see Data Flow's Android frame pipeline). `SurfaceRenderer` is the §8.1 surface lifecycle state machine (`SurfacePhase`/`FrameOutcome`) that owns surface creation and per-frame presentation, plus the persisted-pipeline-cache seam (`set_initial_pipeline_cache_data`/`pipeline_cache_data` — see Data Flow's GPU pipeline cache). Its `encode()`/`present()` split GPU encode from swapchain-acquire+present as separate public calls (`render()` retained as a combined wrapper), returning an `EncodeOutcome` (`Encoded`/`Skipped`) — the seam the render-thread split times/moves independently onto a dedicated render thread (see Data Flow's frame pipelines); the Gpu arm of `encode()` also runs the crate-private `shader_effects` pre-pass (Module Structure's `frust-render` row) before the Direct/Blit branch. A `submit_deferred` sibling of `submit` returns an opaque, `Send` `DeferredPresent` instead of presenting inline — the second sanctioned opaque wgpu wrapper beside `DetachedSurface`, letting the iOS shell issue the actual present from the UI thread inside a platform-view `CATransaction` (Platform-view flow above). `SurfaceFactory` (cloned off `RenderContext`) creates a `Send`-able, opaque `DetachedSurface` on a windowing-constrained thread; `SurfaceRenderer::on_surface_installed` brings it online on another thread — the desktop split's UI-thread-creates/render-thread-installs seam. |
 | `FrameGate` / `FrameInputs` / `FrameDecision` | `frust-shell-common::frame_gate`'s whole-frame skip gate a mobile shell consults every tick: `FrameInputs` bundles the dirtiness signals, `FrameGate::decide` returns `Run`/`Skip`, gated by a `FRUST_NO_FRAME_GATE` kill switch — see Data Flow's Frame gate. |
 | `FrameStats` / `StartupSpans` / `UiSpans` / `RenderSpans` | `frust-shell-common::perf`'s instrumentation: `FrameStats` records a ring buffer + running counters of per-pass frame timings and emits a rate-limited summary; `StartupSpans` records named cold-start milestones and emits once on first frame presented. Both gated behind `perf::enabled()`/`FRUST_TRACE` — see `docs/DEVELOPMENT.md`. In the render-thread split, the UI thread records its `rebuild`/`layout`/`paint` timing as `UiSpans` and hands it across with the scene; the render thread — the split's sole perf emitter — records its own `encode`/`acquire`/`submit` timing as `RenderSpans` and folds the two into one recorded frame via `FramePasses::from_split`, so the wire format is unchanged whether a frame ran split or inline. A second, independent gate (`FRUST_TRACE_RAW`, also requiring `FRUST_TRACE`) puts `FrameStats` into a raw-export mode emitting one parseable line per frame instead of periodic summaries, splitting `encode`/`acquire`/`submit` timing into separate fields (v3 format — see `docs/DEVELOPMENT.md`); `mark_scenario_start`/`mark_scenario_end` stamp named scenario boundaries into the same stream for a benchmark harness to slice by. `SPAN_FIRST_ENCODE_DONE` marks first-encode on all three shells; `SPAN_PIPELINE_CACHE_RESTORED` marks a warm pipeline-cache hit but is wired on the desktop shell only (not yet on the mobile FFI init seams); each mobile shell also stamps `font_preinit_started`/`font_preinit_joined` around its background `TextContext` prewarm join, overlapped with GPU pre-init. |
-| `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed, nineteen-export Android JNI surface (init/frame/touch/resume/pause/destroy/surface-changed/surface-destroyed, the `nativeImeApply`/`nativeImeState`/`nativeImeAction` IME state-sync trio, `nativeSetAppearance`, `nativeOnDeepLink`, `nativeInitAccessibility`, `nativeOnInsetsChanged`, `nativeOnBackPress`, `nativeSystemUiState`, `nativeSetSurfaceMode`, and `nativePlatformViewCommands` — the latter two the platform-view surface-mode latch and command-backlog peek getter, see Data Flow's Platform-view flow); the sole Android app entry point. `nativeInit` additionally carries a `cacheDir` string (pipeline-cache seam, see Data Flow); a process-wide `JNI_OnLoad` (native-library load, not macro-generated) starts the GPU pre-init thread `nativeInit` joins — see Data Flow's Android frame pipeline. A 2-arg (`State: Default`) and a 3-arg state-factory arm both funnel through `new_boxed_app_with`. |
-| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`frust-shell-ios`) is the opaque native handle behind the seventeen `frust_*` C exports (init/resize/render-frame/dispatch-touch/pause/resume/destroy, the `frust_ime_apply`/`frust_ime_state_json`/`frust_string_free` IME state-sync trio, `frust_set_appearance`, `frust_on_deep_link`, `frust_init_accessibility`, `frust_set_insets`, `frust_system_ui_state`, `frust_set_surface_mode`, and `frust_platform_view_commands_json` — the latter two mirroring Android's surface-mode latch and command-backlog peek getter), mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `frust_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports, mirroring `android_app!`'s 2-/3-arg arms; the sole iOS app entry point. |
+| `android_app!` | Facade macro binding a generated app's `State`/`app_logic` to the fixed, twenty-export Android JNI surface (init/frame/touch/resume/pause/destroy/surface-changed/surface-destroyed, the `nativeImeApply`/`nativeImeState`/`nativeImeAction` IME state-sync trio, `nativeSetAppearance`, `nativeOnDeepLink`, `nativeInitAccessibility`, `nativeOnInsetsChanged`, `nativeOnBackPress`, `nativeSystemUiState`, `nativeSetSurfaceMode`, `nativePlatformViewCommands` — the platform-view surface-mode latch and command-backlog peek getter, see Data Flow's Platform-view flow — and `nativeSetFrameTimeline` (camera's scroll-sync tail input, Android frame pipeline above)); the sole Android app entry point. `nativeInit` additionally carries a `cacheDir` string (pipeline-cache seam, see Data Flow); a process-wide `JNI_OnLoad` (native-library load, not macro-generated) starts the GPU pre-init thread `nativeInit` joins — see Data Flow's Android frame pipeline. A 2-arg (`State: Default`) and a 3-arg state-factory arm both funnel through `new_boxed_app_with`. |
+| `IosAppHandle` / `ios_app!` | `IosAppHandle` (`frust-shell-ios`) is the opaque native handle behind the nineteen `frust_*` C exports (init/resize/render-frame/dispatch-touch/pause/resume/destroy, the `frust_ime_apply`/`frust_ime_state_json`/`frust_string_free` IME state-sync trio, `frust_set_appearance`, `frust_on_deep_link`, `frust_init_accessibility`, `frust_set_insets`, `frust_system_ui_state`, `frust_set_surface_mode`, `frust_platform_view_commands_json` — mirroring Android's surface-mode latch and command-backlog peek getter — and camera's `frust_set_present_sync`/`frust_present_frame` present-sync pair, Platform-view flow above), mirroring `AndroidAppHandle` (retains the Swift-owned `CAMetalLayer` pointer, guaranteed to outlive the handle until `frust_destroy`, so a lost surface can be recreated; a `paused` flag gates frame submission). `ios_app!` is the facade macro binding a generated app's `State`/`app_logic` to those exports, mirroring `android_app!`'s 2-/3-arg arms; the sole iOS app entry point. |
 | `app!` | The canonical facade entry macro (spec §5.5): binds a `Component + Default` root to all three platforms in one call — `android_app!`/`ios_app!` under the hood, plus a hidden desktop `__frust_main` calling `frust::run`. A generated `lib.rs` calls it once; `main.rs` calls the generated `__frust_main`; `frust::run(root)` is the same desktop path called directly, for apps with no mobile target. |
 | `new_boxed_app_with` | `frust-shell-common`'s app-construction seam: builds an `AppTree` from a state *factory* closure (`FnOnce() -> State`) rather than a pre-built value, letting the entry macros bind `Component::init`; `new_boxed_app` (`State: Default`) is the convenience wrapper over it. |
 | `BuildInfo` / `BuildArgs` | CLI build-mode funnel (debug/profile/release, flavor, defines, build name/number); drives both the `build` command (release-default) and `run`'s Android/iOS pipelines (debug-default). |

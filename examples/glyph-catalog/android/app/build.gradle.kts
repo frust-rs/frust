@@ -174,6 +174,7 @@ android {
 dependencies {
     implementation(project(":frust-embedding"))
     // frust:plugin-dependencies — plugin-contributed dependencies go below.
+    implementation(project(":frust-camera"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each

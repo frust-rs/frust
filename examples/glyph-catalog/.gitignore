@@ -18,3 +18,7 @@ android/local.properties
 
 # Rust-built JNI libraries copied in by the gradle preBuild step — build output, never commit.
 android/app/src/main/jniLibs/
+
+# Kotlin daemon's per-project cache, created by any `./gradlew compile*Kotlin`
+# (the Kotlin gate every camera/scroll-sync task has to run). Build output.
+.kotlin/

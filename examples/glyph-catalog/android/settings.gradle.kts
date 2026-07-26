@@ -34,3 +34,16 @@ gradle.lifecycle.beforeProject {
 }
 
 // frust:plugin-includes — plugin-contributed `include(...)` lines go below.
+
+// frust-camera (frust-camera task 11): hand-wired exactly as
+// `frust-drive::plugin::apply_gradle_module` would (task 10 hasn't landed
+// the registry entry yet) — the same include/projectDir/build-dir-redirect
+// trio `:frust-embedding` above uses, per that applier's own doc comment.
+include(":frust-camera")
+project(":frust-camera").projectDir = file("../../../plugins/camera/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-camera") {
+        layout.buildDirectory.set(rootDir.resolve("build/frust-camera"))
+    }
+}

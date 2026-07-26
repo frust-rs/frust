@@ -1,0 +1,4 @@
+module CFrustCamera {
+    header "frust_camera.h"
+    export *
+}

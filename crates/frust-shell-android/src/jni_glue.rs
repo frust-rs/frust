@@ -40,7 +40,7 @@
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread::JoinHandle;
 
@@ -65,7 +65,9 @@ use frust_shell_common::{
 };
 use frust_text::TextContext;
 
-use crate::app::{AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor};
+use crate::app::{
+    AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, RenderSignals, SplitExecutor,
+};
 use crate::ffi_support::{
     ImeJsonState, PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
     load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
@@ -647,7 +649,7 @@ pub(crate) fn render_loop(
     cache_dir: Option<String>,
     fatal: Arc<AtomicBool>,
     scene_return: SceneReturnSender<Scene>,
-    presented: Arc<AtomicU64>,
+    signals: Arc<RenderSignals>,
     translucent_resolved: Arc<AtomicBool>,
 ) {
     // Render-thread priority self-boost (phase-11 fix F6): raise this dedicated
@@ -786,7 +788,12 @@ pub(crate) fn render_loop(
                     &mut frame_stats,
                     &mut startup_spans,
                     perf_on,
-                    &presented,
+                    &signals,
+                    // Which frame this scene is — the UI thread stamped it into
+                    // `FrameMeta` at submission; `render_scene` publishes it back
+                    // out on an actual present, for the platform-view release
+                    // gate to pair a geometry batch against (camera task 01).
+                    frame.meta.frame_id,
                 );
             }
             // Give the drained scene back for the UI thread to reclaim (review
@@ -1107,11 +1114,12 @@ fn spawn_split_executor(
     let fatal = Arc::new(AtomicBool::new(false));
     let fatal_render = Arc::clone(&fatal);
 
-    // Presented-frame counter (task 10): one clone drives into the render thread
-    // (bumped on each `FrameOutcome::Rendered`), one stays in the `SplitExecutor`
-    // for the UI thread to read before paint. Mirrors the `fatal` flag's shape.
-    let presented = Arc::new(AtomicU64::new(0));
-    let presented_render = Arc::clone(&presented);
+    // Present bookkeeping (task 10's counter + camera task 01's presented frame
+    // id): one clone drives into the render thread (recorded on each
+    // `FrameOutcome::Rendered`), one stays in the `SplitExecutor` for the UI
+    // thread to read before paint. Mirrors the `fatal` flag's shape.
+    let signals = Arc::new(RenderSignals::default());
+    let signals_render = Arc::clone(&signals);
 
     // Move `startup_spans` (init_entry + font spans already recorded) into the
     // render thread, which owns the rest of the startup line.
@@ -1128,7 +1136,7 @@ fn spawn_split_executor(
                     cache_dir,
                     fatal_render,
                     scene_return_tx,
-                    presented_render,
+                    signals_render,
                     translucent_resolved,
                 )
             })
@@ -1149,7 +1157,7 @@ fn spawn_split_executor(
             join,
             fatal,
             scene_return_rx,
-            presented,
+            signals,
         )),
         text_ctx,
     )
@@ -1593,15 +1601,40 @@ pub fn native_platform_view_commands(
         };
         let ack_generation = ack_generation.max(0) as u64;
         app.acknowledge_platform_view_commands(ack_generation);
+        // Read the scale up front: the release peek borrows the handle mutably
+        // (the scroll-sync tail records this poll's hold — camera task 12), so
+        // it cannot be re-borrowed while `commands` is alive.
+        let scale = app.sanitized_scale();
         let (generation, commands) = app.platform_view_commands();
         if platform_view_commands_up_to_date(generation, ack_generation) {
             return std::ptr::null_mut(); // no-change fast path
         }
-        let json_commands = platform_view_commands_to_json(commands, app.sanitized_scale());
+        let json_commands = platform_view_commands_to_json(commands, scale);
         let json = build_platform_view_commands_json(generation, &json_commands);
         env.with_env(|env| Ok::<JObject, jni::errors::Error>(JString::new(env, &json)?.into()))
             .resolve::<LogErrorAndDefault>()
             .into_raw()
+    })
+}
+
+/// `nativeSetFrameTimeline`: hand this tick's Choreographer frame-timeline
+/// delta (`expectedPresentationTimeNanos − frameTimeNanos`, API 33+) to the
+/// scroll-sync tail (camera task 12) — the one signal in this shell only the
+/// JVM side can read (`Choreographer.postVsyncCallback` has no NDK equivalent
+/// in this crate's dependency set).
+///
+/// Kotlin pushes it once per `doFrame` **while a platform view is actually
+/// hosted**, and pushes `0` otherwise; `0` (and any implausible value) leaves
+/// the platform-view release path gate-only, so an app that never hosts a
+/// native sibling — or runs below API 33 — pays nothing and behaves exactly as
+/// before. Fire-and-forget: no return value, no ordering requirement beyond
+/// "before this tick's `nativeOnFrame`", and a missing handle is a no-op.
+pub fn native_set_frame_timeline(handle: jlong, expected_present_delta_nanos: jlong) {
+    guard("nativeSetFrameTimeline", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_frame_timeline(expected_present_delta_nanos);
+        }
     })
 }
 

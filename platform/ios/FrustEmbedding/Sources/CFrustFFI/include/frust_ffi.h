@@ -128,4 +128,33 @@ void  frust_set_surface_mode(uint8_t translucent);
 // renderFrame, which polls it after frust_render_frame).
 char *frust_platform_view_commands_json(void *handle, uint64_t ack_generation);
 
+// Present-sync (camera task 13 — research/SPIKE-SYNC.md §3.2/§3.5). iOS's
+// platform-view desync has the OPPOSITE sign to Android's: the native sibling
+// LAGS frust's content, so the fix holds frust's *present* back to meet the
+// geometry rather than delaying the view.
+//
+// frust_set_present_sync declares that this host will present the surface
+// itself, inside the CATransaction that commits platform-view geometry.
+// Callable BEFORE frust_init (no handle arg — a process-global latch, like
+// frust_set_surface_mode), which is what FrustViewController does from
+// viewDidLoad when its `synchronizesPresentWithPlatformViews` const is set —
+// in the SAME branch that sets CAMetalLayer.presentsWithTransaction = true.
+// The two halves must move together: the layer flag alone stops presentation
+// entirely under the render-thread split (the drawable is handed over on a
+// thread that commits no transaction), and this call alone only defers each
+// present by a tick. `enabled` is 0/1 (plain uint8_t, matching
+// frust_set_appearance's no-<stdbool.h> convention). The render-thread split
+// stays ON — this is not a kill switch.
+void  frust_set_present_sync(uint8_t enabled);
+// frust_present_frame presents the frame the render thread parked for the UI
+// thread, and records which frust frame that was. Call it once per
+// CADisplayLink tick, inside a CATransaction and BEFORE FrustViewHost.poll:
+// the poll then releases exactly the geometry batch that frame painted, so
+// pixels and native-sibling geometry land in one visual frame (see
+// FrustViewController.renderFrame — the order is load-bearing). A no-op when
+// present-sync was never declared, on the inline render path
+// (FRUST_NO_RENDER_THREAD), on a frame-gate-skipped tick, or with no live
+// handle — safe to call unconditionally.
+void  frust_present_frame(void *handle);
+
 #endif /* FRUST_FFI_H */

@@ -134,6 +134,57 @@ enum SurfaceState {
     Lost,
 }
 
+/// A frame that has been rendered and queue-submitted but **not yet
+/// presented** — the deferred half of [`SurfaceRenderer::submit_deferred`].
+///
+/// Opaque by design: it wraps a `wgpu::SurfaceTexture` behind a private field
+/// with no accessor, exactly like [`DetachedSurface`](crate::DetachedSurface),
+/// so no `wgpu` type is nameable outside this crate
+/// (`docs/CODE_STANDARDS.md`'s wgpu-leak anti-pattern). It is `Send` — a
+/// `wgpu::SurfaceTexture` owns its swapchain frame and borrows nothing — which
+/// is the whole point: a shell can hand it from the render thread to the thread
+/// that must issue the present.
+///
+/// **Why deferring the present is a contract, not a micro-optimisation.** On
+/// iOS, a `CAMetalLayer` with `presentsWithTransaction = true` requires
+/// `[drawable present]` to run on the thread committing the `CATransaction`
+/// that carries the sibling views' geometry. wgpu-hal's Metal present already
+/// implements exactly that shape when the layer has the flag set (submit a
+/// present command buffer, `waitUntilScheduled`, then `drawable.present()`) —
+/// it simply runs it on whichever thread calls [`Self::present`]. Under the
+/// render-thread split that thread commits no transaction, so the drawable is
+/// never handed to the compositor at all (measured: total loss of presentation,
+/// `research/SPIKE-SYNC.md` §3.2). Handing this value to the UI thread and
+/// presenting *there* is what lets frust's surface land in the same transaction
+/// as the platform-view geometry while the split stays on.
+///
+/// Dropping one without presenting is safe and deliberate: the drawable returns
+/// to the layer's pool un-presented and that frame is simply skipped — the
+/// depth-1 latest-wins discipline (a newer frame supersedes an un-presented
+/// older one rather than blocking on it).
+pub struct DeferredPresent {
+    texture: wgpu::SurfaceTexture,
+}
+
+impl std::fmt::Debug for DeferredPresent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeferredPresent").finish_non_exhaustive()
+    }
+}
+
+impl DeferredPresent {
+    /// Present the deferred frame **on the calling thread**.
+    ///
+    /// Consumes the handle, so a frame can never be presented twice. With
+    /// `presentsWithTransaction` set on the target `CAMetalLayer` this is the
+    /// call that must run on the transaction-committing (UI) thread; on every
+    /// other platform/configuration it is an ordinary present that happens to
+    /// have been moved off the submit site.
+    pub fn present(self) {
+        self.texture.present();
+    }
+}
+
 /// Per-surface renderer and lifecycle state machine (spec §8.1).
 ///
 /// Holds a device-independent, reusable `vello::Scene` (so it survives surface
@@ -946,10 +997,50 @@ impl SurfaceRenderer {
     /// (no prior `Acquired`, or the surface vanished between the two calls) it is
     /// a no-op returning [`FrameOutcome::Skipped`]; otherwise
     /// [`FrameOutcome::Rendered`].
+    ///
+    /// A caller that must issue the present itself, on another thread, calls
+    /// [`Self::submit_deferred`] instead.
     pub fn submit(&mut self, ctx: &RenderContext) -> Result<FrameOutcome> {
+        let (outcome, presentable) = self.submit_impl(ctx)?;
+        if let Some(surface_texture) = presentable {
+            surface_texture.present();
+        }
+        Ok(outcome)
+    }
+
+    /// [`Self::submit`] with the final present step handed back to the caller
+    /// instead of issued here: identical GPU work (render/blit + queue-submit),
+    /// but the acquired swapchain frame is returned as an opaque, `Send`
+    /// [`DeferredPresent`] the caller presents on a thread of its choosing.
+    ///
+    /// The iOS `presentsWithTransaction` contract is why this exists — see
+    /// [`DeferredPresent`]'s docs for the full mechanism. Everything else is
+    /// unchanged: same outcomes, same stash discipline, and
+    /// `Some(DeferredPresent)` accompanies exactly the
+    /// [`FrameOutcome::Rendered`] case (every other outcome carries `None`).
+    /// Dropping the returned handle instead of presenting it skips that frame's
+    /// present without error.
+    pub fn submit_deferred(
+        &mut self,
+        ctx: &RenderContext,
+    ) -> Result<(FrameOutcome, Option<DeferredPresent>)> {
+        let (outcome, presentable) = self.submit_impl(ctx)?;
+        Ok((
+            outcome,
+            presentable.map(|texture| DeferredPresent { texture }),
+        ))
+    }
+
+    /// Shared body of [`Self::submit`]/[`Self::submit_deferred`]: everything up
+    /// to (but not including) `SurfaceTexture::present`, handing the acquired
+    /// frame back so each wrapper decides where the present happens.
+    fn submit_impl(
+        &mut self,
+        ctx: &RenderContext,
+    ) -> Result<(FrameOutcome, Option<wgpu::SurfaceTexture>)> {
         // Nothing acquired this frame (no prior `Acquired`): nothing to present.
         let Some(surface_texture) = self.pending_present.take() else {
-            return Ok(FrameOutcome::Skipped);
+            return Ok((FrameOutcome::Skipped, None));
         };
         // The stashed texture is owned, but the encoded pixels (direct: the vello
         // renderer + scene; blit: the intermediate target + blitter) live on
@@ -962,7 +1053,7 @@ impl SurfaceRenderer {
             ..
         } = self;
         let SurfaceState::Ready(ready) = state else {
-            return Ok(FrameOutcome::Skipped);
+            return Ok((FrameOutcome::Skipped, None));
         };
         let ReadySurface {
             surface, backend, ..
@@ -1053,8 +1144,7 @@ impl SurfaceRenderer {
                 device_handle.queue.submit([encoder.finish()]);
             }
         }
-        surface_texture.present();
-        Ok(FrameOutcome::Rendered)
+        Ok((FrameOutcome::Rendered, Some(surface_texture)))
     }
 }
 
@@ -1235,6 +1325,31 @@ mod tests {
         // A zero-area dest yields (0, 0) — `clamp_size` later floors it to 1.
         let dest = kurbo::Rect::new(5.0, 5.0, 5.0, 5.0);
         assert_eq!(physical_size(Affine::IDENTITY, dest), (0, 0));
+    }
+
+    #[test]
+    fn deferred_present_is_send() {
+        // The whole point of `DeferredPresent` is crossing a thread boundary
+        // (render thread → the thread committing the CATransaction), so pin the
+        // auto-trait: losing it would break `frust-shell-ios`'s present-sync
+        // handoff at a distance, in a crate that can't see this type's fields.
+        fn assert_send<T: Send>() {}
+        assert_send::<DeferredPresent>();
+    }
+
+    #[test]
+    fn submit_deferred_yields_no_frame_without_a_surface() {
+        // No GPU needed: with nothing acquired (no surface at all) the deferred
+        // submit skips exactly like `submit`, and hands back no present handle —
+        // `Some(..)` accompanies only `Rendered`.
+        let ctx = RenderContext::new();
+        let mut renderer = SurfaceRenderer::new();
+
+        let (outcome, deferred) = renderer
+            .submit_deferred(&ctx)
+            .expect("submit_deferred in NoSurface must not error");
+        assert_eq!(outcome, FrameOutcome::Skipped);
+        assert!(deferred.is_none());
     }
 
     #[test]

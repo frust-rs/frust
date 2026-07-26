@@ -1,9 +1,10 @@
-//! The ten catalog sections, one module per section, mirroring the reference
-//! builds' section list (foundations, buttons+forms, feedback, navigation,
-//! content, overlays, motion) plus `interactions` (glyph-refinements task 19),
-//! `appbar` (glyph-refinements task 20), and `platform_views`
-//! (platform-views task 10) — three sections with no reference-build
-//! section-list precedent of their own.
+//! The eleven catalog sections, one module per section, mirroring the
+//! reference builds' section list (foundations, buttons+forms, feedback,
+//! navigation, content, overlays, motion) plus `interactions`
+//! (glyph-refinements task 19), `appbar` (glyph-refinements task 20),
+//! `platform_views` (platform-views task 10), and `camera` (frust-camera task
+//! 11) — four sections with no reference-build section-list precedent of
+//! their own.
 //!
 //! # Page-fn contract (fixed by `c01`; every fill task keeps it exactly)
 //!
@@ -37,6 +38,7 @@
 
 pub mod appbar;
 pub mod buttons_forms;
+pub mod camera;
 pub mod content;
 pub mod feedback;
 pub mod foundations;
@@ -50,11 +52,11 @@ use frust::AnyView;
 
 use crate::CatalogState;
 
-/// The ten section tab labels, in order. Indexed by `CatalogState::section`
-/// and dispatched by [`current`]. "Platform Views" (platform-views task 10)
-/// is the newest addition, appended at the end so every existing section's
-/// index stays stable.
-pub const SECTION_LABELS: [&str; 10] = [
+/// The eleven section tab labels, in order. Indexed by `CatalogState::section`
+/// and dispatched by [`current`]. "Camera" (frust-camera task 11) is the
+/// newest addition, appended at the end so every existing section's index
+/// stays stable.
+pub const SECTION_LABELS: [&str; 11] = [
     "Foundations",
     "Buttons + Forms",
     "Feedback",
@@ -65,9 +67,10 @@ pub const SECTION_LABELS: [&str; 10] = [
     "Interactions",
     "AppBar",
     "Platform Views",
+    "Camera",
 ];
 
-/// Dispatch to the section page for `section` (0..10), falling back to
+/// Dispatch to the section page for `section` (0..11), falling back to
 /// foundations for any out-of-range index (defensive — the tab strip only ever
 /// yields a valid index).
 pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
@@ -82,6 +85,7 @@ pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
         7 => interactions::page(state),
         8 => appbar::page(state),
         9 => platform_views::page(state),
+        10 => camera::page(state),
         _ => foundations::page(state),
     }
 }

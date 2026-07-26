@@ -1,5 +1,6 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
+assertion_line: 389
 expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, false, 0))"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
@@ -9,22 +10,22 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
   ▸ huddle               │  Dashboard                                                               
                          │  ━━━━━━━━━━                                                              
  DEVICES ↻ r             │                                                                          
-   none found            │  No session running — start a run to open a log tab here.                
-                  ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
- SESSIONS         │                                                              │▓▓                
-   none running   │  Choose a plugin to add to this project                      │▓▓                
-                  │  ▸ (o) shared-preferences                                    │▓▓                
- ACTIONS          │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
-   New project · n│    ( ) secure-storage                                        │▓▓                
-   Add plugin · a │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
-   Doctor · d     │    ( ) clean-signals-frust                                   │▓▓                
-   Build · b      │        ✗ needs a sibling checkout (dev-machine only)         │▓▓                
-   Clean · c      │                                                              │▓▓                
+   none found     ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮e.                
+                  │                                                              │▓▓                
+ SESSIONS         │  Choose a plugin to add to this project                      │▓▓                
+   none running   │  ▸ (o) shared-preferences                                    │▓▓                
+                  │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
+ ACTIONS          │    ( ) secure-storage                                        │▓▓                
+   New project · n│        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
+   Add plugin · a │    ( ) clean-signals-frust                                   │▓▓                
+   Doctor · d     │        ✗ needs a sibling checkout (dev-machine only)         │▓▓                
+   Build · b      │    ( ) camera                                                │▓▓                
+   Clean · c      │        Camera preview (a platform view), still capture, and  │▓▓                
+                  │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          
