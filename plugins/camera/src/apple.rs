@@ -1494,9 +1494,10 @@ fn reject_on_main_thread(operation: &str) -> Result<(), CameraError> {
     // Same typed error as the Android half's `ensure_off_ui_thread`: the two
     // backends must report one main-thread refusal, not two shapes of it.
     // (f2 wrote `Platform` because `CameraError` lived in f1's file that round;
-    // re-pointed by the conductor once f1's `UiThread` variant landed. The
-    // operation name stays in the log line below rather than the error, which
-    // carries the crate-wide message.)
+    // re-pointed by the conductor once f1's `UiThread` variant landed.)
+    // `UiThread` carries the crate-wide message, so the operation name is not
+    // part of the error; the parameter is kept because it documents each call
+    // site and would be the payload if this ever needs a per-operation variant.
     let _ = operation;
     Err(CameraError::UiThread)
 }
