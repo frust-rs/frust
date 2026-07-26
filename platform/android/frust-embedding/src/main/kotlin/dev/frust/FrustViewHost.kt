@@ -92,7 +92,35 @@ class FrustViewHost(
         val factory: FrustPlatformViewFactory,
         val layoutParams: FrameLayout.LayoutParams,
         val clipRect: Rect,
+        /** Mode B input forwarding (native-widgets spike 3): whether a
+         * touch-DOWN inside this slot's rect hands the gesture to [view]. */
+        val interactive: Boolean,
+        /** The z-shield list (physical px, absolute window space): regions
+         * where frust content over the slot keeps winning input. */
+        val shields: MutableList<android.graphics.RectF>,
     )
+
+    /**
+     * Mode B input forwarding (native-widgets spike 3): the view that should
+     * own a gesture starting at physical-px window point `(x, y)`, or null
+     * when the frust surface keeps it. A slot wins when it is interactive,
+     * visible, contains the point, and no z-shield rect covers it.
+     */
+    fun interactiveTargetAt(x: Float, y: Float): View? {
+        for (slot in slots.values) {
+            if (!slot.interactive) continue
+            val v = slot.view
+            if (v.visibility != View.VISIBLE) continue
+            val left = v.translationX
+            val top = v.translationY
+            val right = left + slot.layoutParams.width
+            val bottom = top + slot.layoutParams.height
+            if (x < left || x >= right || y < top || y >= bottom) continue
+            if (slot.shields.any { it.contains(x, y) }) continue
+            return v
+        }
+        return null
+    }
 
     /**
      * Apply one non-null command batch (`{"generation":N,"commands":[...]}`).
@@ -153,7 +181,8 @@ class FrustViewHost(
         }
         view.visibility = View.INVISIBLE
         root.addView(view, index, lp)
-        slots[slotId] = Slot(view, factory, lp, Rect())
+        slots[slotId] =
+            Slot(view, factory, lp, Rect(), cmd.optBoolean("interactive", false), mutableListOf())
     }
 
     private fun applyUpdate(cmd: JSONObject) {
@@ -190,6 +219,22 @@ class FrustViewHost(
         }
 
         slot.view.visibility = if (cmd.optBoolean("visible", true)) View.VISIBLE else View.INVISIBLE
+
+        // The z-shield list rides every update (same absolute physical-px
+        // space as `rect`) — replaced wholesale.
+        slot.shields.clear()
+        val shields = cmd.optJSONArray("shields")
+        if (shields != null) {
+            for (i in 0 until shields.length()) {
+                val s = shields.optJSONArray(i) ?: continue
+                if (s.length() < 4) continue
+                val sx = s.optDouble(0, 0.0).toFloat()
+                val sy = s.optDouble(1, 0.0).toFloat()
+                val sw = s.optDouble(2, 0.0).toFloat()
+                val sh = s.optDouble(3, 0.0).toFloat()
+                slot.shields.add(android.graphics.RectF(sx, sy, sx + sw, sy + sh))
+            }
+        }
     }
 
     private fun applyUpdateParams(cmd: JSONObject) {

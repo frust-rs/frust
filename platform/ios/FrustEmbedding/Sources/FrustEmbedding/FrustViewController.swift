@@ -389,6 +389,11 @@ open class FrustViewController: UIViewController {
             // polled from `renderFrame` after each `frust_render_frame`.
             platformViewHost = FrustViewHost(
                 containerView: forgeView, translucent: translucentSurface)
+            // Mode B input forwarding (native-widgets spike 3): let the
+            // surface's hitTest consult the host's interactive-slot rects.
+            forgeView.interactiveSlotHitTest = { [weak self] point in
+                self?.platformViewHost?.interactiveSlotContains(point) ?? false
+            }
             startDisplayLink()
             // Flush a deep link that arrived before this handle existed
             // (see `pendingDeepLink`'s doc comment) — a cold-start link

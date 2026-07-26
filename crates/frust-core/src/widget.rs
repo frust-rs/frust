@@ -1229,6 +1229,16 @@ pub struct PlatformViewFrame {
     /// `false` ⇒ hidden (offscreen/culled by the widget itself, distinct from
     /// simply being absent from the collection this pass).
     pub visible: bool,
+    /// Mode B input forwarding (native-widgets spike 3 vocabulary): whether
+    /// the hosted native view should receive pointer input — a touch-DOWN
+    /// inside `rect` (and outside every `shields` rect) hands the whole
+    /// gesture to the native sibling in the embedding. `false` (the default)
+    /// keeps the v1 no-input contract: the frust surface consumes everything.
+    pub interactive: bool,
+    /// The z-shield list: absolute-coordinate regions where frust content
+    /// drawn OVER this slot must keep winning input. Only consulted when
+    /// `interactive`. Same coordinate space as `rect`.
+    pub shields: Vec<Rect>,
 }
 
 /// The result of a whole [`crate::app::RenderRoot::paint`] pass.
@@ -2027,6 +2037,8 @@ mod tests {
                     rect: Rect::from_origin_size(ctx.origin(), ctx.size()),
                     clip: None,
                     visible: true,
+                    interactive: false,
+                    shields: Vec::new(),
                 });
             }
         }

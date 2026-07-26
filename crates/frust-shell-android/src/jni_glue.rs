@@ -1653,21 +1653,25 @@ fn platform_view_commands_to_json(
                 slot_id,
                 view_type,
                 params_json,
+                interactive,
             } => PlatformViewCommandJson::Create {
                 slot_id: *slot_id,
                 view_type: view_type.clone(),
                 params_json: params_json.clone(),
+                interactive: *interactive,
             },
             ViewCommand::Update {
                 slot_id,
                 rect,
                 clip,
                 visible,
+                shields,
             } => PlatformViewCommandJson::Update {
                 slot_id: *slot_id,
                 rect: scale_rect(*rect, scale),
                 clip: clip.map(|c| scale_rect(c, scale)),
                 visible: *visible,
+                shields: shields.iter().map(|s| scale_rect(*s, scale)).collect(),
             },
             ViewCommand::UpdateParams {
                 slot_id,

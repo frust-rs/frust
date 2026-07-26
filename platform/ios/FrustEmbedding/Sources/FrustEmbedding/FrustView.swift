@@ -69,6 +69,22 @@ final class FrustView: UIView {
     // the Rust side (0 = began, 1 = moved, 2 = ended, 3 = cancelled).
     var onTouch: ((UInt32, CGPoint) -> Void)?
 
+    /// Mode B input forwarding (native-widgets spike 3): set by the
+    /// controller to `FrustViewHost.interactiveSlotContains`. When a touch
+    /// lands inside an interactive hosted slot's rect (outside its
+    /// z-shields), this view's `hitTest` returns nil so UIKit falls through
+    /// to the native sibling BELOW and routes the whole gesture there —
+    /// touch-DOWN decides ownership, natively, with real UIControl
+    /// semantics. Everywhere else the surface behaves exactly as before.
+    var interactiveSlotHitTest: ((CGPoint) -> Bool)?
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if let probe = interactiveSlotHitTest, probe(point) {
+            return nil
+        }
+        return super.hitTest(point, with: event)
+    }
+
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         forward(touches, phase: 0)
     }

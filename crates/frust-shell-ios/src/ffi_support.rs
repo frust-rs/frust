@@ -331,6 +331,7 @@ pub(crate) enum PlatformViewCommand {
         slot_id: u64,
         view_type: String,
         params_json: String,
+        interactive: bool,
     },
     /// Place/resize/clip/show-or-hide an already-created slot.
     Update {
@@ -338,6 +339,7 @@ pub(crate) enum PlatformViewCommand {
         rect: PvRect,
         clip: Option<PvRect>,
         visible: bool,
+        shields: Vec<PvRect>,
     },
     /// `params_json` changed with no necessary rect/clip/visible change.
     UpdateParams { slot_id: u64, params_json: String },
@@ -394,6 +396,7 @@ fn push_command_json(out: &mut String, cmd: &PlatformViewCommand) {
             slot_id,
             view_type,
             params_json,
+            interactive,
         } => {
             out.push_str("{\"op\":\"create\",\"slot\":");
             let _ = write!(out, "{slot_id}");
@@ -401,13 +404,16 @@ fn push_command_json(out: &mut String, cmd: &PlatformViewCommand) {
             json_escape_into(view_type, out);
             out.push_str("\",\"params\":\"");
             json_escape_into(params_json, out);
-            out.push_str("\"}");
+            out.push_str("\",\"interactive\":");
+            out.push_str(if *interactive { "true" } else { "false" });
+            out.push('}');
         }
         PlatformViewCommand::Update {
             slot_id,
             rect,
             clip,
             visible,
+            shields,
         } => {
             out.push_str("{\"op\":\"update\",\"slot\":");
             let _ = write!(out, "{slot_id}");
@@ -420,7 +426,14 @@ fn push_command_json(out: &mut String, cmd: &PlatformViewCommand) {
             }
             out.push_str(",\"visible\":");
             out.push_str(if *visible { "true" } else { "false" });
-            out.push('}');
+            out.push_str(",\"shields\":[");
+            for (i, s) in shields.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                push_rect_json(out, *s);
+            }
+            out.push_str("]}");
         }
         PlatformViewCommand::UpdateParams {
             slot_id,
@@ -790,18 +803,20 @@ mod tests {
                 slot_id: 3,
                 view_type: "dev.frust.XFactory".to_string(),
                 params_json: "{}".to_string(),
+                interactive: false,
             },
             PlatformViewCommand::Update {
                 slot_id: 3,
                 rect: rect(10.0, 20.0, 100.0, 50.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             },
         ];
         let json = platform_view_commands_json(1, 0, &commands).unwrap();
         assert_eq!(
             json,
-            r#"{"generation":1,"commands":[{"op":"create","slot":3,"viewType":"dev.frust.XFactory","params":"{}"},{"op":"update","slot":3,"rect":[10,20,100,50],"clip":null,"visible":true}]}"#
+            r#"{"generation":1,"commands":[{"op":"create","slot":3,"viewType":"dev.frust.XFactory","params":"{}","interactive":false},{"op":"update","slot":3,"rect":[10,20,100,50],"clip":null,"visible":true,"shields":[]}]}"#
         );
     }
 
@@ -812,11 +827,12 @@ mod tests {
             rect: rect(0.0, 0.0, 40.0, 40.0),
             clip: Some(rect(0.0, 0.0, 20.0, 40.0)),
             visible: false,
+            shields: Vec::new(),
         }];
         let json = platform_view_commands_json(2, 1, &commands).unwrap();
         assert_eq!(
             json,
-            r#"{"generation":2,"commands":[{"op":"update","slot":5,"rect":[0,0,40,40],"clip":[0,0,20,40],"visible":false}]}"#
+            r#"{"generation":2,"commands":[{"op":"update","slot":5,"rect":[0,0,40,40],"clip":[0,0,20,40],"visible":false,"shields":[]}]}"#
         );
     }
 
@@ -849,6 +865,7 @@ mod tests {
             slot_id: 1,
             view_type: "dev.frust.\"Weird\"".to_string(),
             params_json: "line1\nline2".to_string(),
+            interactive: false,
         }];
         let json = platform_view_commands_json(1, 0, &commands).unwrap();
         assert!(json.contains(r#""viewType":"dev.frust.\"Weird\"""#));
@@ -875,6 +892,7 @@ mod tests {
                 h: 3.0,
             }),
             visible: true,
+            shields: Vec::new(),
         }];
         let json = platform_view_commands_json(1, 0, &commands).unwrap();
         assert!(json.contains(r#""rect":[0,0,0,4]"#), "{json}");

@@ -103,6 +103,8 @@ pub struct PlatformViewView {
     #[cfg(debug_assertions)]
     debug_fill: bool,
     semantics_label: Option<String>,
+    interactive: bool,
+    shields_local: Vec<Rect>,
 }
 
 /// Reserve layout space for a native platform view created by `view_type`
@@ -117,6 +119,8 @@ pub fn platform_view(view_type: impl Into<String>) -> PlatformViewView {
         #[cfg(debug_assertions)]
         debug_fill: false,
         semantics_label: None,
+        interactive: false,
+        shields_local: Vec::new(),
     }
 }
 
@@ -168,6 +172,26 @@ impl PlatformViewView {
         self.semantics_label = Some(label.into());
         self
     }
+
+    /// Mode B input forwarding (native-widgets spike 3): mark this slot's
+    /// native view as pointer-interactive. A touch-DOWN inside the slot's
+    /// rect — and outside every shield rect ([`Self::shield_local`]) — hands
+    /// the whole gesture to the native sibling instead of the frust surface.
+    /// Default off (the v1 no-input contract).
+    pub fn interactive(mut self) -> Self {
+        self.interactive = true;
+        self
+    }
+
+    /// Declare a slot-relative region where frust content drawn OVER this
+    /// slot must keep receiving input (the z-shield). SPIKE-INTERIM source:
+    /// Phase 1 replaces this builder param with paint-time collection of
+    /// overlapping interactive frust widgets; the differ/embedding contract
+    /// downstream is the shipped shape either way.
+    pub fn shield_local(mut self, rect: Rect) -> Self {
+        self.shields_local.push(rect);
+        self
+    }
 }
 
 /// The retained widget for a [`PlatformViewView`]. See the [module docs](self).
@@ -185,6 +209,8 @@ pub struct PlatformViewWidget {
     #[cfg(debug_assertions)]
     debug_fill: bool,
     semantics_label: Option<String>,
+    interactive: bool,
+    shields_local: Vec<Rect>,
 }
 
 impl<State: 'static> View<State> for PlatformViewView {
@@ -200,6 +226,8 @@ impl<State: 'static> View<State> for PlatformViewView {
             #[cfg(debug_assertions)]
             debug_fill: self.debug_fill,
             semantics_label: self.semantics_label.clone(),
+            interactive: self.interactive,
+            shields_local: self.shields_local.clone(),
         }
     }
 
@@ -244,6 +272,14 @@ impl<State: 'static> View<State> for PlatformViewView {
             element.semantics_label = self.semantics_label.clone();
         }
 
+        if prev.interactive != self.interactive || prev.shields_local != self.shields_local {
+            element.interactive = self.interactive;
+            element.shields_local = self.shields_local.clone();
+            // The next paint must republish the frame so the differ sees the
+            // new input contract.
+            flags |= ChangeFlags::PAINT;
+        }
+
         flags
     }
 }
@@ -284,6 +320,12 @@ impl Widget for PlatformViewWidget {
             rect,
             clip,
             visible,
+            interactive: self.interactive,
+            shields: self
+                .shields_local
+                .iter()
+                .map(|r| *r + ctx.origin().to_vec2())
+                .collect(),
         });
 
         // Mode B hole-punch (research VERIFY.md D1): on a translucent surface,

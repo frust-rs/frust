@@ -1012,21 +1012,25 @@ fn to_pv_command(cmd: &ViewCommand, scale: f64) -> crate::ffi_support::PlatformV
             slot_id,
             view_type,
             params_json,
+            interactive,
         } => crate::ffi_support::PlatformViewCommand::Create {
             slot_id: *slot_id,
             view_type: view_type.clone(),
             params_json: params_json.clone(),
+            interactive: *interactive,
         },
         ViewCommand::Update {
             slot_id,
             rect,
             clip,
             visible,
+            shields,
         } => crate::ffi_support::PlatformViewCommand::Update {
             slot_id: *slot_id,
             rect: to_pv_rect(*rect, scale),
             clip: clip.map(|c| to_pv_rect(c, scale)),
             visible: *visible,
+            shields: shields.iter().map(|s| to_pv_rect(*s, scale)).collect(),
         },
         ViewCommand::UpdateParams {
             slot_id,

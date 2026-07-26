@@ -1003,6 +1003,8 @@ mod tests {
                     rect: kurbo::Rect::from_origin_size(ctx.origin(), ctx.size()),
                     clip: None,
                     visible: true,
+                    interactive: false,
+                    shields: Vec::new(),
                 });
             }
         }

@@ -189,6 +189,10 @@ pub enum ViewCommand {
         view_type: String,
         /// Opaque creation params for the native factory (may be empty).
         params_json: String,
+        /// Mode B input forwarding (native-widgets spike 3): whether a
+        /// touch-DOWN inside this slot's rect hands the gesture to the
+        /// native sibling. Fixed at create in v1 (no live flip).
+        interactive: bool,
     },
     /// Place/resize/clip/show-or-hide an already-created slot. Logical px,
     /// absolute window coordinates (mirroring [`PlatformViewFrame`]) — the
@@ -202,6 +206,10 @@ pub enum ViewCommand {
         clip: Option<Rect>,
         /// `false` ⇒ hide the native view without disposing it.
         visible: bool,
+        /// The z-shield list (native-widgets spike 3): absolute-coordinate
+        /// regions where frust content over the slot keeps winning input.
+        /// Meaningful only for an interactive slot; empty otherwise.
+        shields: Vec<Rect>,
     },
     /// `params_json` changed (`params_generation` advanced) with no
     /// necessary rect/clip/visible change — a separate command so a shell
@@ -228,9 +236,11 @@ struct SlotEntry {
     view_type: String,
     params_json: String,
     params_generation: u64,
+    interactive: bool,
     last_rect: Rect,
     last_clip: Option<Rect>,
     last_visible: bool,
+    last_shields: Vec<Rect>,
     /// Consecutive `ingest` calls this slot has been absent from `frames`.
     /// Reset to `0` the instant it reappears.
     missing_streak: u32,
@@ -304,12 +314,14 @@ impl PlatformViewState {
                         slot_id: frame.slot_id,
                         view_type: frame.view_type.clone(),
                         params_json: frame.params_json.clone(),
+                        interactive: frame.interactive,
                     });
                     batch.push(ViewCommand::Update {
                         slot_id: frame.slot_id,
                         rect: frame.rect,
                         clip: frame.clip,
                         visible: frame.visible,
+                        shields: frame.shields.clone(),
                     });
                     self.live.insert(
                         frame.slot_id,
@@ -317,9 +329,11 @@ impl PlatformViewState {
                             view_type: frame.view_type.clone(),
                             params_json: frame.params_json.clone(),
                             params_generation: frame.params_generation,
+                            interactive: frame.interactive,
                             last_rect: frame.rect,
                             last_clip: frame.clip,
                             last_visible: frame.visible,
+                            last_shields: frame.shields.clone(),
                             missing_streak: 0,
                         },
                     );
@@ -329,16 +343,19 @@ impl PlatformViewState {
                     if entry.last_visible != frame.visible
                         || rect_changed(entry.last_rect, frame.rect)
                         || clip_changed(entry.last_clip, frame.clip)
+                        || entry.last_shields != frame.shields
                     {
                         batch.push(ViewCommand::Update {
                             slot_id: frame.slot_id,
                             rect: frame.rect,
                             clip: frame.clip,
                             visible: frame.visible,
+                            shields: frame.shields.clone(),
                         });
                         entry.last_rect = frame.rect;
                         entry.last_clip = frame.clip;
                         entry.last_visible = frame.visible;
+                        entry.last_shields = frame.shields.clone();
                     }
                     if entry.params_generation != frame.params_generation {
                         batch.push(ViewCommand::UpdateParams {
@@ -367,6 +384,7 @@ impl PlatformViewState {
                     rect: entry.last_rect,
                     clip: entry.last_clip,
                     visible: false,
+                    shields: entry.last_shields.clone(),
                 });
                 entry.last_visible = false;
             }
@@ -406,6 +424,7 @@ impl PlatformViewState {
                     rect: entry.last_rect,
                     clip: entry.last_clip,
                     visible: false,
+                    shields: entry.last_shields.clone(),
                 });
                 entry.last_visible = false;
             }
@@ -448,12 +467,14 @@ impl PlatformViewState {
                 slot_id,
                 view_type: entry.view_type.clone(),
                 params_json: entry.params_json.clone(),
+                interactive: entry.interactive,
             });
             batch.push(ViewCommand::Update {
                 slot_id,
                 rect: entry.last_rect,
                 clip: entry.last_clip,
                 visible: entry.last_visible,
+                shields: entry.last_shields.clone(),
             });
         }
     }
@@ -711,6 +732,8 @@ mod tests {
             rect,
             clip: None,
             visible,
+            interactive: false,
+            shields: Vec::new(),
         }
     }
 
@@ -733,12 +756,14 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(0.0, 0.0, 100.0, 50.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -775,6 +800,7 @@ mod tests {
                 rect: r(1.0, 0.0, 100.0, 50.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             }]
         );
     }
@@ -800,6 +826,7 @@ mod tests {
                 rect: r(0.0, 0.0, 10.0, 10.0),
                 clip: None,
                 visible: false,
+                shields: Vec::new(),
             }]
         );
 
@@ -846,6 +873,7 @@ mod tests {
                 rect: r(0.0, 0.0, 10.0, 10.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             }]
         );
         assert!(!cmds.iter().any(|c| matches!(c, ViewCommand::Create { .. })));
@@ -870,12 +898,14 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(0.0, 0.0, 10.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -921,23 +951,27 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(0.0, 0.0, 10.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
                 ViewCommand::Create {
                     slot_id: 2,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 2,
                     rect: r(20.0, 0.0, 30.0, 10.0),
                     clip: None,
                     visible: false,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -965,12 +999,14 @@ mod tests {
                     slot_id: 2,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 2,
                     rect: r(50.0, 50.0, 60.0, 60.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -987,6 +1023,7 @@ mod tests {
                 rect: r(5.0, 0.0, 15.0, 10.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             }]
         );
     }
@@ -1035,12 +1072,14 @@ mod tests {
                     rect: r(0.0, 0.0, 10.0, 10.0),
                     clip: None,
                     visible: false,
+                    shields: Vec::new(),
                 },
                 ViewCommand::Update {
                     slot_id: 2,
                     rect: r(20.0, 0.0, 30.0, 10.0),
                     clip: None,
                     visible: false,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -1085,6 +1124,7 @@ mod tests {
                 rect: r(0.0, 0.0, 10.0, 10.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             }]
         );
         assert!(!cmds.iter().any(|c| matches!(c, ViewCommand::Create { .. })));
@@ -1124,12 +1164,14 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Other".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(0.0, 0.0, 10.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -1215,23 +1257,27 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(x, 0.0, x + 10.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
                 ViewCommand::Create {
                     slot_id: 2,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 2,
                     rect: r(x + 20.0, 0.0, x + 30.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );

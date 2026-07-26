@@ -284,6 +284,7 @@ pub(crate) enum PlatformViewCommandJson {
         slot_id: u64,
         view_type: String,
         params_json: String,
+        interactive: bool,
     },
     /// Mirrors `frust_shell_common::ViewCommand::Update`.
     Update {
@@ -291,6 +292,7 @@ pub(crate) enum PlatformViewCommandJson {
         rect: (f32, f32, f32, f32),
         clip: Option<(f32, f32, f32, f32)>,
         visible: bool,
+        shields: Vec<(f32, f32, f32, f32)>,
     },
     /// Mirrors `frust_shell_common::ViewCommand::UpdateParams`.
     UpdateParams { slot_id: u64, params_json: String },
@@ -333,8 +335,9 @@ fn platform_view_command_json(cmd: &PlatformViewCommandJson) -> String {
             slot_id,
             view_type,
             params_json,
+            interactive,
         } => format!(
-            "{{\"op\":\"create\",\"slot\":{slot_id},\"viewType\":\"{}\",\"params\":\"{}\"}}",
+            "{{\"op\":\"create\",\"slot\":{slot_id},\"viewType\":\"{}\",\"params\":\"{}\",\"interactive\":{interactive}}}",
             json_escape(view_type),
             json_escape(params_json),
         ),
@@ -343,11 +346,19 @@ fn platform_view_command_json(cmd: &PlatformViewCommandJson) -> String {
             rect,
             clip,
             visible,
-        } => format!(
-            "{{\"op\":\"update\",\"slot\":{slot_id},\"rect\":{},\"clip\":{},\"visible\":{visible}}}",
-            platform_view_rect_json(*rect),
-            clip.map_or_else(|| "null".to_string(), platform_view_rect_json),
-        ),
+            shields,
+        } => {
+            let shields_json = shields
+                .iter()
+                .map(|s| platform_view_rect_json(*s))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"op\":\"update\",\"slot\":{slot_id},\"rect\":{},\"clip\":{},\"visible\":{visible},\"shields\":[{shields_json}]}}",
+                platform_view_rect_json(*rect),
+                clip.map_or_else(|| "null".to_string(), platform_view_rect_json),
+            )
+        }
         PlatformViewCommandJson::UpdateParams {
             slot_id,
             params_json,
@@ -775,11 +786,12 @@ mod tests {
                 slot_id: 3,
                 view_type: "dev.frust.MapFactory".to_string(),
                 params_json: "{\"style\":\"dark\"}".to_string(),
+                interactive: false,
             }],
         );
         assert_eq!(
             json,
-            "{\"generation\":1,\"commands\":[{\"op\":\"create\",\"slot\":3,\"viewType\":\"dev.frust.MapFactory\",\"params\":\"{\\\"style\\\":\\\"dark\\\"}\"}]}"
+            "{\"generation\":1,\"commands\":[{\"op\":\"create\",\"slot\":3,\"viewType\":\"dev.frust.MapFactory\",\"params\":\"{\\\"style\\\":\\\"dark\\\"}\",\"interactive\":false}]}"
         );
     }
 
@@ -792,11 +804,12 @@ mod tests {
                 rect: (0.0, 10.0, 100.0, 200.0),
                 clip: Some((0.0, 10.0, 50.0, 200.0)),
                 visible: true,
+                shields: Vec::new(),
             }],
         );
         assert_eq!(
             json,
-            "{\"generation\":2,\"commands\":[{\"op\":\"update\",\"slot\":3,\"rect\":[0,10,100,200],\"clip\":[0,10,50,200],\"visible\":true}]}"
+            "{\"generation\":2,\"commands\":[{\"op\":\"update\",\"slot\":3,\"rect\":[0,10,100,200],\"clip\":[0,10,50,200],\"visible\":true,\"shields\":[]}]}"
         );
     }
 
@@ -809,11 +822,12 @@ mod tests {
                 rect: (0.0, 0.0, 10.0, 10.0),
                 clip: None,
                 visible: false,
+                shields: Vec::new(),
             }],
         );
         assert_eq!(
             json,
-            "{\"generation\":3,\"commands\":[{\"op\":\"update\",\"slot\":1,\"rect\":[0,0,10,10],\"clip\":null,\"visible\":false}]}"
+            "{\"generation\":3,\"commands\":[{\"op\":\"update\",\"slot\":1,\"rect\":[0,0,10,10],\"clip\":null,\"visible\":false,\"shields\":[]}]}"
         );
     }
 
@@ -852,6 +866,7 @@ mod tests {
                 slot_id: 1,
                 view_type: "dev.frust.\"Weird\"Factory".to_string(),
                 params_json: r"a\b".to_string(),
+                interactive: false,
             }],
         );
         assert!(
@@ -870,18 +885,20 @@ mod tests {
                     slot_id: 3,
                     view_type: "dev.frust.XFactory".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 PlatformViewCommandJson::Update {
                     slot_id: 3,
                     rect: (0.0, 0.0, 10.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ],
         );
         assert_eq!(
             json,
-            "{\"generation\":7,\"commands\":[{\"op\":\"create\",\"slot\":3,\"viewType\":\"dev.frust.XFactory\",\"params\":\"\"},{\"op\":\"update\",\"slot\":3,\"rect\":[0,0,10,10],\"clip\":null,\"visible\":true}]}"
+            "{\"generation\":7,\"commands\":[{\"op\":\"create\",\"slot\":3,\"viewType\":\"dev.frust.XFactory\",\"params\":\"\",\"interactive\":false},{\"op\":\"update\",\"slot\":3,\"rect\":[0,0,10,10],\"clip\":null,\"visible\":true,\"shields\":[]}]}"
         );
     }
 
@@ -902,6 +919,7 @@ mod tests {
                 rect: (f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 4.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             }],
         );
         assert!(json.contains("\"rect\":[0,0,0,4]"), "{json}");
@@ -935,6 +953,7 @@ mod tests {
                 slot_id: 1,
                 view_type: "dev.frust.X".to_string(),
                 params_json: String::new(),
+                interactive: false,
             }],
         );
         // First poll: Kotlin's ack_generation starts at 0 (nothing seen yet)

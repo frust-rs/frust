@@ -26,7 +26,15 @@ import UIKit
 // hook here — a hosted view either handles a touch itself or it falls
 // through to the Frust surface behind/in front of it. Frust never
 // intercepts a touch destined for a hosted view.
-@objc public protocol FrustPlatformViewFactory {
+// The explicit `@objc(FrustPlatformViewFactory)` name is LOAD-BEARING for the
+// same reason the class annotation above is: without it, Swift registers the
+// protocol with the ObjC runtime under its MANGLED name
+// (`_TtP14FrustEmbedding24FrustPlatformViewFactory_`), so a non-Swift
+// implementor (e.g. a Rust `define_class!` factory attaching conformance by
+// name via `objc_getProtocol`) can never match the object
+// `class_conformsToProtocol` checks against. Swift-side conformances are
+// by-type and unaffected. (Found by the native-widgets Phase 0 spike.)
+@objc(FrustPlatformViewFactory) public protocol FrustPlatformViewFactory {
     /// Create the native view for a freshly-created slot. Called on the main
     /// thread; must not block. `paramsJson` is the app-supplied parameter
     /// blob (the same JSON the Rust `platform_view` widget was given) — the
