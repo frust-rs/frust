@@ -7,8 +7,21 @@
 //! `define_class!` class — zero Swift, Phase 0 spike 2, GO). See
 //! `workflow/plans/features/frust-native-widgets/PLAN.md` for the full plan;
 //! this crate lands incrementally across that plan's tasks — today it is
-//! the crate skeleton plus the retained-handle [`registry`] every later
-//! phase's create/update/dispose path is built over.
+//! the crate skeleton, the retained-handle [`registry`] every later phase's
+//! create/update/dispose path is built over, and the `runtime` those paths
+//! dispatch through.
+//!
+//! # One factory, one listener, N controls
+//!
+//! Adding a control never adds Kotlin or Swift. Every control is a Rust
+//! `NativeWidget` impl registered under a kind string in the plugin-internal
+//! `runtime`, and the platform side is fixed forever at ONE generic factory
+//! class plus ONE generic listener class (Android:
+//! `plugins/native-widgets/platform/android/`, driven by this crate's four
+//! JNI exports; iOS: a Rust `define_class!` factory, Phase 2). Which control
+//! a `platform_view` slot means travels in that slot's `params_json`, under
+//! two reserved keys the api layer injects — the same payload that carries
+//! the differ's slot id across a factory contract that does not pass it.
 //!
 //! # Charter: a platform plugin
 //!
@@ -46,7 +59,17 @@
 //! native event straight into a signal write, which is what wakes exactly
 //! one frust frame.
 
+#[cfg(target_os = "android")]
+mod android;
 mod registry;
+// The runtime's surface is consumed by the platform arms — this crate's JNI
+// exports today, the six controls in p1-04 and their listeners in p1-05, the
+// Apple arm in Phase 2 — plus its own host tests, which a plain (non-test)
+// build does not count. Until those controls land, roughly half the surface
+// is legitimately uncalled on every target; the attribute goes away with
+// them rather than growing per-item `allow`s in the meantime.
+#[allow(dead_code)]
+mod runtime;
 
 pub use registry::{Registry, SlotId};
 
@@ -73,8 +96,34 @@ pub enum NativeWidgetError {
     #[error("native-widgets platform not initialized")]
     PlatformNotInitialized,
 
+    /// A slot's `params_json` could not be read: the reserved identity keys
+    /// are missing, a required field is absent or malformed, or the params
+    /// name a different control than the live instance. Distinguishable from
+    /// [`Self::Platform`] because it is an api-layer/runtime contract
+    /// violation, never a platform failure.
+    #[error("native-widgets params error: {0}")]
+    Params(String),
+
+    /// No `NativeWidget` is registered under the control kind a slot's params
+    /// name — a control the app's build never registered (or a params payload
+    /// from a different plugin version).
+    #[error("native-widgets: no control registered as '{0}'")]
+    UnknownControl(String),
+
     /// A backend-specific failure not covered by a more specific variant
     /// (a JNI error, an unexpected ObjC runtime failure).
     #[error("native-widgets platform error: {0}")]
     Platform(String),
+}
+
+/// The un-contexted fallback conversion, so a JNI error can ride `?` through
+/// a helper that has no operation name to attach (the local-frame wrapper is
+/// the one such path). **Prefer `NativeCtx::run_jni`**, which names the
+/// failing operation and converts a pending Java exception into a message —
+/// this impl exists for the plumbing that cannot.
+#[cfg(target_os = "android")]
+impl From<jni::errors::Error> for NativeWidgetError {
+    fn from(error: jni::errors::Error) -> Self {
+        Self::Platform(format!("jni: {error}"))
+    }
 }

@@ -116,6 +116,21 @@ impl<H> Registry<H> {
         self.live.contains_key(&slot_id)
     }
 
+    /// The handle currently live under `slot_id`, if any — what a caller
+    /// holding a slot id (an `UpdateParams` command, a listener callback
+    /// carrying its own slot id) resolves against, as opposed to
+    /// [`Self::remove_matching`]'s identity lookup for a dispose that carries
+    /// none.
+    pub fn get(&self, slot_id: SlotId) -> Option<&H> {
+        self.live.get(&slot_id)
+    }
+
+    /// [`Self::get`]'s mutable counterpart, for a caller that mutates the
+    /// handle in place (the runtime's per-instance props/state — task p1-03).
+    pub fn get_mut(&mut self, slot_id: SlotId) -> Option<&mut H> {
+        self.live.get_mut(&slot_id)
+    }
+
     /// The number of live handles — the leak bar every create/dispose
     /// cycle must return to `0` (PLAN.md's Global-ref discipline risk
     /// row).
