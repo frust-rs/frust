@@ -36,8 +36,9 @@
 //!   process-global). Above [`REGIME_ENTER_FRACTION`] of a display period the
 //!   surface is acquire-bound (queued); below [`REGIME_EXIT_FRACTION`] it is
 //!   submit-bound (no queue). The gap between the two is the hysteresis band,
-//!   and a flip additionally needs [`REGIME_CONFIRM_FRAMES`] consecutive ticks
-//!   agreeing, so the depth cannot flap with the EWMA.
+//!   and a flip additionally needs several consecutive ticks agreeing
+//!   ([`REGIME_ENTER_CONFIRM_FRAMES`] / [`REGIME_EXIT_CONFIRM_FRAMES`]), so the
+//!   depth cannot flap with the EWMA.
 //! - **Depth** — [`TailSignals::expected_present_delta_nanos`], the
 //!   Choreographer frame timeline's `expectedPresentationTimeNanos −
 //!   frameTimeNanos` (API 33+, sampled Kotlin-side and pushed in). This is the
@@ -58,9 +59,48 @@
 //! [`ScrollSyncTail::clear`] releases the whole hold at once for the lifecycle
 //! edges where no further frame will be presented (backgrounding, surface loss).
 //!
+//! # Gesture onset (camera task 12b)
+//!
+//! Task 12's steady state is clean (band median 0 px at every velocity,
+//! SPIKE-SYNC §2.7), but the *first* frames of a gesture were not: the
+//! correction could not exist until the acquire EWMA had risen under the new
+//! load, been confirmed for a whole confirm window, and then been ramped in one
+//! frame per tick. Three additive delays, all measured in display frames, all
+//! paid at the start of **every** gesture. Two of them are closed here:
+//!
+//! 1. **Asymmetric confirm** ([`REGIME_ENTER_CONFIRM_FRAMES`] vs
+//!    [`REGIME_EXIT_CONFIRM_FRAMES`]). The costs of the two flips are not
+//!    symmetric, so the confirm windows are not either: entering wrongly costs a
+//!    small hold that drains harmlessly within a few frames (and is bounded by
+//!    [`MAX_HOLD_FRAMES`] regardless), while entering late costs a visible
+//!    desync at the start of every scroll. Leaving late costs nothing at rest,
+//!    so the exit window keeps the full eight-tick agreement that makes the
+//!    stand-down conservative.
+//! 2. **Pre-seeded depth** ([`ScrollSyncTail::tick`]'s seed arm). The ramp
+//!    exists so a *change* in depth under a live hold does not step the geometry
+//!    by several frames in one tick. On the tick the regime latches there is no
+//!    such hold to step (`depth == 0` — the tail was passing the gate through),
+//!    and the derived depth's input (the frame timeline's
+//!    `expectedPresentationTimeNanos` delta) is rock-stable from the very first
+//!    tick, measured ±0 across every run on cupid. So the ramp buys nothing at
+//!    onset and costs one display frame per unit of depth: the entry edge (and
+//!    any rise from a depth of zero) applies the derived depth immediately, and
+//!    the ramp is kept only for depth changes *on top of* a live hold, in both
+//!    directions.
+//!
+//! The third delay — the acquire EWMA only starts rising once the GPU is
+//! actually loaded, i.e. the clock on (1) does not start at the first moved
+//! pixel — is **not** addressed here. Closing it needs a speculative arm driven
+//! by a touch-down signal pushed from Kotlin, which is only justified by a
+//! measurement showing (1)+(2) fall short; see this task's summary and
+//! SPIKE-SYNC §2.8 for the bar that would justify it.
+//!
 //! Everything here is pure logic driven by two scalars per tick — no clock, no
 //! JNI, no platform types — so it compiles and unit-tests on the host even
-//! though the shell it serves is `#[cfg(target_os = "android")]`.
+//! though the shell it serves is `#[cfg(target_os = "android")]`. That includes
+//! the onset behaviour: [`tests::onset_reaches_full_depth_in_three_frames`]
+//! drives the acquire EWMA's own rise curve, so the frame count this task moves
+//! is pinned by a host test rather than only by a device trace.
 
 use std::collections::VecDeque;
 
@@ -76,11 +116,23 @@ const REGIME_ENTER_FRACTION: f64 = 0.5;
 /// band a fluctuating EWMA can wander inside without flipping the regime.
 const REGIME_EXIT_FRACTION: f64 = 0.25;
 
-/// Consecutive ticks a regime change must hold before it is applied (~65 ms at
-/// 120 Hz). Level hysteresis alone still flips on a single outlier EWMA sample;
-/// this makes the state machine agree with itself over time as well as over
-/// level.
-const REGIME_CONFIRM_FRAMES: u32 = 8;
+/// Consecutive ticks that must argue for *entering* the acquire-bound regime
+/// before it latches (~17 ms at 120 Hz). Level hysteresis alone still flips on a
+/// single outlier EWMA sample, so some time hysteresis is needed — but only
+/// enough to reject one: the quarter-weight acquire EWMA cannot stay above
+/// `period/2` for two consecutive ticks off a single spike (it decays to 75% of
+/// the spike's contribution on the very next tick, pinned by
+/// `a_single_acquire_spike_cannot_arm_a_submit_bound_device`). Entering late is
+/// the expensive mistake — it is paid as a visible desync at the start of every
+/// gesture — so the entry window is the short one (camera task 12b, rung 1).
+const REGIME_ENTER_CONFIRM_FRAMES: u32 = 2;
+
+/// Consecutive ticks that must argue for *leaving* the acquire-bound regime
+/// before it stands down (~65 ms at 120 Hz). Deliberately four times the entry
+/// window: leaving late costs nothing visible (the queue is draining, the hold
+/// drains with it one frame per tick), while leaving early re-opens the desync
+/// mid-gesture. This is task 12's original value, unchanged.
+const REGIME_EXIT_CONFIRM_FRAMES: u32 = 8;
 
 /// Latch margin subtracted from the frame-timeline delta before it is converted
 /// to a depth (~half a 120 Hz period). The batch must be applied by the *start*
@@ -154,6 +206,26 @@ enum Regime {
     AcquireBound,
 }
 
+/// One tick's diagnostic read-out, returned by [`ScrollSyncTail::tick`] **only
+/// on the ticks where the depth or the regime actually changed** — a handful of
+/// lines per gesture instead of one per frame, and the only on-device read-out
+/// of what the regime decided. `display_frame` is what makes an onset
+/// measurable: subtract the frame stamped on the gesture's `Down` from the frame
+/// the depth reached its target (camera task 12b, SPIKE-SYNC §2.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TailTrace {
+    /// The hold depth now in force, in display frames (`0` = gate-only).
+    pub depth: u32,
+    /// The depth the signals asked for this tick — equal to `depth` except
+    /// while a mid-gesture change is ramping.
+    pub target_depth: u32,
+    /// Whether the acquire-bound regime is latched (the depth alone cannot
+    /// distinguish "submit-bound" from "acquire-bound with no timeline sample").
+    pub acquire_bound: bool,
+    /// This tail's monotonic display-frame counter at the change.
+    pub display_frame: u64,
+}
+
 /// One batch waiting out its hold: the differ generation the frame-id gate has
 /// released, plus the display frame on which it *became* releasable.
 #[derive(Debug, Clone, Copy)]
@@ -176,9 +248,10 @@ pub(crate) struct ScrollSyncTail {
     /// it.
     regime: Regime,
     pending_flip_frames: u32,
-    /// The depth the signals currently ask for, and the ramped depth actually in
-    /// force (one step per tick, so a regime edge slews over `depth` frames
-    /// rather than stepping the geometry by four frames in one tick).
+    /// The depth the signals currently ask for, and the depth actually in force.
+    /// The two differ only while a mid-gesture change ramps toward the target
+    /// (one step per tick, so a live hold is never stepped by several frames at
+    /// once); the entry edge itself is applied whole — see [`Self::tick`].
     target_depth: u32,
     depth: u32,
     /// Gate-released generations still inside their hold, ascending in both
@@ -215,26 +288,42 @@ impl ScrollSyncTail {
     /// display frames and a skipped or surface-less tick is still a display
     /// frame.
     ///
-    /// Returns the new depth **only on the ticks where it changed**, which is
-    /// what the shell logs (behind `perf::enabled()`): a handful of lines per
-    /// fling instead of one per frame, and the only on-device read-out of what
-    /// the regime decided.
-    pub(crate) fn tick(&mut self, signals: TailSignals) -> Option<u32> {
+    /// Returns a [`TailTrace`] **only on the ticks where the depth or the
+    /// regime changed**, which is what the shell logs behind `perf::enabled()`.
+    pub(crate) fn tick(&mut self, signals: TailSignals) -> Option<TailTrace> {
         self.display_frame += 1;
         self.update_period(signals.frame_time_nanos);
+        let regime_before = self.regime;
         self.update_regime(signals.acquire_wait_us);
+        let regime_changed = self.regime != regime_before;
         self.target_depth = self.derive_depth(signals.expected_present_delta_nanos);
-        // Ramp one frame per tick toward the target in both directions: on
-        // regime entry the hold deepens gradually instead of freezing the
-        // geometry for `depth` frames in one step, and on exit it drains the
-        // same way.
+
         let previous = self.depth;
         self.depth = match self.depth.cmp(&self.target_depth) {
+            // Pre-seed (camera task 12b, rung 2): a rise off a depth of zero, or
+            // off the tick the regime just latched, applies the derived depth
+            // whole. The ramp's job is to stop a depth *change* from stepping a
+            // live hold by several frames at once — at onset there is no live
+            // hold to step (the tail was passing the gate through), and the
+            // timeline delta the depth derives from is already stable, so
+            // ramping here only postpones the correction one display frame per
+            // unit of depth at the exact moment the desync is visible.
+            std::cmp::Ordering::Less if regime_changed || self.depth == 0 => self.target_depth,
             std::cmp::Ordering::Less => self.depth + 1,
+            // Downward is always ramped, entry edge or not: dropping the depth
+            // whole would release every held batch in one tick and jump the
+            // geometry forward by `depth` frames — the mirror of the artifact
+            // the ramp exists to prevent. Draining one frame per tick is also
+            // what keeps the stand-down invisible.
             std::cmp::Ordering::Greater => self.depth - 1,
             std::cmp::Ordering::Equal => self.depth,
         };
-        (self.depth != previous).then_some(self.depth)
+        (self.depth != previous || regime_changed).then(|| TailTrace {
+            depth: self.depth,
+            target_depth: self.target_depth,
+            acquire_bound: self.regime_active(),
+            display_frame: self.display_frame,
+        })
     }
 
     /// The tail's answer for this poll: the highest generation whose hold has
@@ -302,6 +391,14 @@ impl ScrollSyncTail {
         self.period_ms
     }
 
+    /// This tail's monotonic display-frame counter — the clock every onset
+    /// measurement counts in. The shell stamps it on a gesture's `Down` so the
+    /// frames between the first touch and the depth reaching its target can be
+    /// read straight out of a trace (camera task 12b, SPIKE-SYNC §2.8).
+    pub(crate) fn display_frame(&self) -> u64 {
+        self.display_frame
+    }
+
     /// Fold this tick's cadence into the display-period EWMA, ignoring gaps (app
     /// pause, long stall, clock jump) so only plausible vsync deltas feed the
     /// depth's divisor.
@@ -316,20 +413,28 @@ impl ScrollSyncTail {
     }
 
     /// Run the regime state machine over this tick's acquire-wait EWMA: level
-    /// hysteresis (two thresholds) plus time hysteresis
-    /// ([`REGIME_CONFIRM_FRAMES`] consecutive agreeing ticks) before a flip.
+    /// hysteresis (two thresholds) plus time hysteresis (consecutive agreeing
+    /// ticks) before a flip. The time hysteresis is **asymmetric** — see
+    /// [`REGIME_ENTER_CONFIRM_FRAMES`] / [`REGIME_EXIT_CONFIRM_FRAMES`] for why
+    /// the two directions do not cost the same.
     fn update_regime(&mut self, acquire_wait_us: u64) {
         let acquire_ms = acquire_wait_us as f64 / 1000.0;
-        let wants_flip = match self.regime {
-            Regime::SubmitBound => acquire_ms > self.period_ms * REGIME_ENTER_FRACTION,
-            Regime::AcquireBound => acquire_ms < self.period_ms * REGIME_EXIT_FRACTION,
+        let (wants_flip, confirm_frames) = match self.regime {
+            Regime::SubmitBound => (
+                acquire_ms > self.period_ms * REGIME_ENTER_FRACTION,
+                REGIME_ENTER_CONFIRM_FRAMES,
+            ),
+            Regime::AcquireBound => (
+                acquire_ms < self.period_ms * REGIME_EXIT_FRACTION,
+                REGIME_EXIT_CONFIRM_FRAMES,
+            ),
         };
         if !wants_flip {
             self.pending_flip_frames = 0;
             return;
         }
         self.pending_flip_frames += 1;
-        if self.pending_flip_frames >= REGIME_CONFIRM_FRAMES {
+        if self.pending_flip_frames >= confirm_frames {
             self.regime = match self.regime {
                 Regime::SubmitBound => Regime::AcquireBound,
                 Regime::AcquireBound => Regime::SubmitBound,
@@ -508,33 +613,37 @@ mod tests {
     }
 
     #[test]
-    fn regime_entry_and_exit_ramp_one_frame_per_tick() {
+    fn regime_entry_seeds_the_depth_and_exit_ramps_one_frame_per_tick() {
         let mut tail = ScrollSyncTail::new();
-        // Entry: nothing happens until the confirm window fills...
-        run_ticks(&mut tail, REGIME_CONFIRM_FRAMES as i64 - 1, cupid_signals);
+        // Entry: nothing happens until the (short) entry confirm window fills...
+        run_ticks(
+            &mut tail,
+            REGIME_ENTER_CONFIRM_FRAMES as i64 - 1,
+            cupid_signals,
+        );
         assert!(!tail.regime_active());
         assert_eq!(tail.depth(), 0);
-        // ...and even then the depth climbs one frame per tick rather than
-        // stepping the geometry four frames back in a single tick.
-        for (tick, expected) in (1u32..=4).enumerate() {
-            tail.tick(cupid_signals(REGIME_CONFIRM_FRAMES as i64 + tick as i64));
-            assert!(tail.regime_active());
-            assert_eq!(tail.depth(), expected);
-        }
+        // ...and on the tick it does, the derived depth applies WHOLE (camera
+        // task 12b, rung 2): there is no live hold to step, and every ramped
+        // frame here is a frame of visible desync at the start of the gesture.
+        tail.tick(cupid_signals(REGIME_ENTER_CONFIRM_FRAMES as i64));
+        assert!(tail.regime_active());
+        assert_eq!(tail.depth(), 4, "the entry edge is not ramped");
         tail.tick(cupid_signals(100));
         assert_eq!(tail.depth(), 4, "and then holds at the derived depth");
 
-        // Exit: the same ramp in reverse once the queue drains away.
+        // Exit: still ramped, one frame per tick, once the queue drains away —
+        // dropping the depth whole would release every held batch at once.
         let submit_bound = |frame: i64| TailSignals {
             acquire_wait_us: 100,
             ..cupid_signals(frame)
         };
-        run_ticks(&mut tail, REGIME_CONFIRM_FRAMES as i64 - 1, |f| {
+        run_ticks(&mut tail, REGIME_EXIT_CONFIRM_FRAMES as i64 - 1, |f| {
             submit_bound(200 + f)
         });
         assert!(
             tail.regime_active(),
-            "still latched inside the confirm window"
+            "still latched inside the exit confirm window"
         );
         assert_eq!(tail.depth(), 4);
         for (tick, expected) in (0u32..4).rev().enumerate() {
@@ -542,6 +651,134 @@ mod tests {
             assert!(!tail.regime_active());
             assert_eq!(tail.depth(), expected);
         }
+    }
+
+    /// The quarter-weight acquire EWMA the render side publishes, replayed here
+    /// so the onset tests drive the *real* rise curve rather than a step: the
+    /// regime cannot latch before this signal has climbed past `period/2`, which
+    /// is the first of the three onset delays (camera task 12b).
+    struct AcquireEwma {
+        value_ms: f64,
+    }
+
+    impl AcquireEwma {
+        fn idle() -> Self {
+            Self { value_ms: 0.0 }
+        }
+
+        /// Fold one frame's raw acquire wait in and return the published µs.
+        fn push(&mut self, sample_ms: f64) -> u64 {
+            self.value_ms = 0.75 * self.value_ms + 0.25 * sample_ms;
+            (self.value_ms * 1000.0) as u64
+        }
+    }
+
+    #[test]
+    fn onset_reaches_full_depth_in_three_frames() {
+        let mut tail = ScrollSyncTail::new();
+        let mut acquire = AcquireEwma::idle();
+        // At rest the GPU is unloaded, so the acquire wait is ~0 and the tail is
+        // gate-only — the state every gesture starts from.
+        for frame in 1..=30 {
+            tail.tick(TailSignals {
+                acquire_wait_us: acquire.push(0.05),
+                ..cupid_signals(frame)
+            });
+        }
+        assert!(!tail.regime_active());
+        assert_eq!(tail.depth(), 0);
+
+        // The gesture starts: the swapchain queue fills and each frame now waits
+        // ~14 ms in acquire (cupid, SPIKE-SYNC §2.5). Count the display frames
+        // from the first loaded frame to the hold reaching its full depth.
+        let mut onset_frames = 0;
+        for frame in 31..=60 {
+            onset_frames += 1;
+            tail.tick(TailSignals {
+                acquire_wait_us: acquire.push(14.0),
+                ..cupid_signals(frame)
+            });
+            if tail.depth() == 4 {
+                break;
+            }
+        }
+        // Two frames for the EWMA to climb past period/2 (3.50 ms, then
+        // 6.13 ms against a 4.17 ms threshold), a third to confirm it, and the
+        // depth applies whole on that tick. The as-merged task-12 constants took
+        // **twelve** frames for the same signal (6 more confirm ticks + a
+        // 4-frame ramp) — ~100 ms at 120 Hz, which is the onset desync Ed saw.
+        assert_eq!(
+            onset_frames, 3,
+            "onset must not cost a whole confirm window"
+        );
+        assert_eq!(tail.depth(), 4);
+    }
+
+    #[test]
+    fn a_single_acquire_spike_cannot_arm_a_submit_bound_device() {
+        let mut tail = ScrollSyncTail::new();
+        let mut acquire = AcquireEwma::idle();
+        // OP9-shaped: ~0.12 ms acquire, with a one-frame 20 ms stall dropped in
+        // every twelfth frame (a compositor hiccup, not a queue). The EWMA jumps
+        // above the enter threshold on the spike's own tick and falls back below
+        // it on the next, so the two-tick entry window is never satisfied —
+        // which is what makes rung 1's short window safe.
+        for frame in 1..=240 {
+            let sample_ms = if frame % 12 == 0 { 20.0 } else { 0.12 };
+            tail.tick(TailSignals {
+                acquire_wait_us: acquire.push(sample_ms),
+                ..op9_signals(frame)
+            });
+            assert!(
+                !tail.regime_active(),
+                "a spike is not a queue (frame {frame})"
+            );
+            assert_eq!(tail.depth(), 0);
+        }
+    }
+
+    #[test]
+    fn a_mid_gesture_depth_change_still_ramps() {
+        let mut tail = ScrollSyncTail::new();
+        run_ticks(&mut tail, 40, cupid_signals);
+        assert_eq!(tail.depth(), 4);
+        // The timeline delta shortens mid-fling (58 ms -> depth 6 -> 4 again).
+        // A live hold is stepped one frame per tick in both directions: the seed
+        // arm is the entry edge only, never a running adjustment.
+        for expected in [5, 6] {
+            tail.tick(TailSignals {
+                expected_present_delta_nanos: 54_000_000,
+                ..cupid_signals(41)
+            });
+            assert_eq!(tail.depth(), expected);
+        }
+        for expected in [5, 4] {
+            tail.tick(cupid_signals(42));
+            assert_eq!(tail.depth(), expected);
+        }
+    }
+
+    #[test]
+    fn tick_reports_a_trace_only_on_depth_or_regime_changes() {
+        let mut tail = ScrollSyncTail::new();
+        let mut traces = Vec::new();
+        for frame in 1..=40 {
+            if let Some(trace) = tail.tick(cupid_signals(frame)) {
+                traces.push(trace);
+            }
+        }
+        // Exactly one change over a steady gesture: the latch, which also seeds
+        // the depth. Its `display_frame` is what an onset measurement subtracts
+        // the gesture's `Down` frame from.
+        assert_eq!(
+            traces,
+            vec![TailTrace {
+                depth: 4,
+                target_depth: 4,
+                acquire_bound: true,
+                display_frame: u64::from(REGIME_ENTER_CONFIRM_FRAMES),
+            }]
+        );
     }
 
     #[test]

@@ -1648,6 +1648,25 @@ impl AndroidAppHandle {
         // "must run" when in doubt.
         self.events_since_last_frame = true;
 
+        // Gesture markers for the scroll-sync onset measurement (camera task
+        // 12b): the tail's own display-frame counter stamped at the start and
+        // end of a gesture, so the frames between the first touch and the hold
+        // reaching its depth can be read straight out of a trace instead of
+        // eyeballed against logcat wall-clock stamps. Down/Up only (a Move line
+        // per frame would drown the trace it serves), and behind the same
+        // `perf::enabled()` switch as every other instrumented line here.
+        if matches!(core_phase, PointerPhase::Down | PointerPhase::Up) && perf::enabled() {
+            log::info!(
+                "frust-perf platform-view gesture phase={} frame={}",
+                if core_phase == PointerPhase::Down {
+                    "down"
+                } else {
+                    "up"
+                },
+                self.sync_tail.display_frame(),
+            );
+        }
+
         // Pointer resampling (plan phase 10.C.1): buffer the raw sample (stamped
         // on the shared resample clock) so [`Self::frame`] can emit a
         // frame-boundary-interpolated position; Down/Up/Cancel still pass through
@@ -1763,22 +1782,28 @@ impl AndroidAppHandle {
         // over from the last frame of a fling lands on schedule even though the
         // scroll produced no further frust frame (SPIKE-SYNC §2.4).
         let acquire_wait_us = self.executor.acquire_wait_us();
-        let tail_depth = self.sync_tail.tick(TailSignals {
+        let tail_trace = self.sync_tail.tick(TailSignals {
             frame_time_nanos: frame_time_nanos as i64,
             expected_present_delta_nanos: self.frame_timeline_delta_nanos,
             acquire_wait_us,
         });
-        // One line per depth *change* (a handful per fling, never per frame),
-        // behind the same `perf::enabled()` switch as every other instrumented
-        // line here — the only on-device read-out of what the regime decided,
-        // and the line a band measurement is correlated against.
-        if let Some(depth) = tail_depth
+        // One line per depth-or-regime *change* (a handful per fling, never per
+        // frame), behind the same `perf::enabled()` switch as every other
+        // instrumented line here — the only on-device read-out of what the
+        // regime decided, and the line a band measurement is correlated
+        // against. `frame=` is the tail's display-frame counter, which the
+        // gesture markers in `dispatch_touch` stamp too: subtracting the two is
+        // the onset measurement (camera task 12b, SPIKE-SYNC §2.8).
+        if let Some(trace) = tail_trace
             && perf::enabled()
         {
             log::info!(
-                "frust-perf platform-view tail depth={depth} acquire_bound={} \
-                 expected_present_us={} acquire_us={acquire_wait_us} period_us={}",
-                self.sync_tail.regime_active(),
+                "frust-perf platform-view tail depth={} target={} acquire_bound={} \
+                 frame={} expected_present_us={} acquire_us={acquire_wait_us} period_us={}",
+                trace.depth,
+                trace.target_depth,
+                trace.acquire_bound,
+                trace.display_frame,
                 self.frame_timeline_delta_nanos / 1000,
                 (self.sync_tail.period_ms() * 1000.0) as u64,
             );
