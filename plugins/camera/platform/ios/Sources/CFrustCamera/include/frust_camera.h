@@ -26,17 +26,27 @@
 
 #include <stdint.h>
 
-// Returns an `AVCaptureSession *` (bridged, not retained beyond the caller's
-// own use) for the open `frust-camera` session identified by `session` — an
-// opaque handle id `plugins/camera/src/lib.rs`'s `CameraSession` never
-// exposes directly to Swift; `CameraPreviewFactory` recovers it only from
-// the `{"session": N}` params JSON its `createView`/`updateParams` receive.
-// A caller wraps the returned pointer as an `AVCaptureSession` via
-// `Unmanaged<AVCaptureSession>.fromOpaque(ptr).takeUnretainedValue()` —
-// ownership stays with the Rust-side session; the returned pointer is valid
-// only while that session is open (`CameraSession::close`d elsewhere
-// invalidates it — never cache it past a single `createView`/`updateParams`
-// call). A session id with no matching open session returns NULL.
+// Returns a RETAINED (+1) `AVCaptureSession *` for the open `frust-camera`
+// session identified by `session` — an opaque handle id
+// `plugins/camera/src/lib.rs`'s `CameraSession` never exposes directly to
+// Swift; `CameraPreviewFactory` recovers it only from the `{"session": N}`
+// params JSON its `createView`/`updateParams` receive.
+//
+// OWNERSHIP IS TRANSFERRED (the `CFBridgingRetain` idiom): the callee takes
+// the retain, the caller owns it and must release it exactly once — from
+// Swift, `Unmanaged<AVCaptureSession>.fromOpaque(ptr).takeRetainedValue()`
+// (ARC then owns the object); from C/ObjC, `CFRelease`/`release`. Dropping
+// the pointer without releasing leaks the session object; taking it
+// *unretained* leaks the callee's retain instead.
+//
+// It is +1 rather than a +0 borrow because the Rust side can close a session
+// from ANY thread, and this caller cannot observe that close: a +0 pointer
+// could be freed between this call returning and the caller retaining it
+// (use-after-free). The returned object therefore stays valid until released,
+// even if its session is closed meanwhile — a closed session simply stops
+// running, and the caller re-asks on its next `createView`/`updateParams`.
+// A session id with no matching open session returns NULL (which owns
+// nothing and must not be released).
 void *frust_camera_session_handle(int32_t session);
 
 #endif /* FRUST_CAMERA_H */

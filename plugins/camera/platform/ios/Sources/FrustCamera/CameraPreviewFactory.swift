@@ -72,8 +72,15 @@ public final class CameraPreviewFactory: NSObject, FrustPlatformViewFactory {
         else { return }
 
         // `frust_camera_session_handle`'s documented contract (frust_camera.h):
-        // ownership stays with the Rust-side session — bridge unretained.
-        let session = Unmanaged<AVCaptureSession>.fromOpaque(handle).takeUnretainedValue()
+        // ownership is TRANSFERRED at +1, so this side must consume that
+        // retain exactly once — `takeRetainedValue` hands it to ARC (which
+        // balances it when `session` goes out of scope, after the preview
+        // layer has taken its own). `takeUnretainedValue` here would leak the
+        // session object; the +1 exists because a +0 borrow would race a
+        // close on another thread (see the Rust-side retain contract).
+        // The handle is non-NULL past the guard above, so there is no path
+        // that drops an owned pointer without releasing it.
+        let session = Unmanaged<AVCaptureSession>.fromOpaque(handle).takeRetainedValue()
         view.attach(session: session)
     }
 }

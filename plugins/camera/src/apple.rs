@@ -51,6 +51,13 @@
 //! ([`PERMISSION_TIMEOUT`]/[`CAPTURE_TIMEOUT`]) so a lost platform callback
 //! degrades to a typed result instead of a permanently parked thread.
 //!
+//! [`SessionInner::take_picture`] additionally **fails fast** when it is
+//! called on the main run loop ([`reject_on_main_thread`]) — the Apple half
+//! of the crate-wide main-thread rule whose Android half
+//! (`Looper.myLooper() == Looper.getMainLooper()`) lives in the `android`
+//! backend module. A UI-thread caller gets an immediate, diagnosable
+//! [`CameraError::Platform`] instead of a ten-second frozen frame.
+//!
 //! # `unsafe`
 //!
 //! Confined to this module and each `# Safety`-noted, the
@@ -81,7 +88,7 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, ProtocolObject};
-use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_av_foundation::{
     AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput,
     AVCaptureDevicePosition, AVCaptureDeviceType, AVCaptureDeviceTypeBuiltInWideAngleCamera,
@@ -349,7 +356,12 @@ impl SessionInner {
     }
 
     /// See [`crate::CameraSession::take_picture`].
+    ///
+    /// Blocks the calling thread for up to [`CAPTURE_TIMEOUT`], so it refuses
+    /// the main run loop outright ([`reject_on_main_thread`]) rather than
+    /// freezing the frame it was called from.
     fn take_picture(&self, path: &Path) -> Result<(), CameraError> {
+        reject_on_main_thread("take_picture")?;
         if self.closed.load(Ordering::Acquire) {
             return Err(CameraError::SessionClosed);
         }
@@ -694,17 +706,31 @@ impl SessionBackend for AppleSession {
 /// [`CameraSession::params_json`](crate::CameraSession::params_json), which
 /// the platform-view host hands the factory as its `paramsJson` payload.
 ///
-/// # Retain contract
+/// # Retain contract — ownership is TRANSFERRED at +1
 ///
-/// The returned pointer is an **unretained (+0) borrow** of a session this
-/// crate owns, valid only until that session is closed (or its
-/// [`CameraSession`](crate::CameraSession) dropped). The caller must retain
-/// it if it needs to outlive the call —
-/// `AVCaptureVideoPreviewLayer(session:)` does exactly that, so the Swift
-/// factory needs no explicit `CFRetain`. Never `CFRelease`/`release` it.
+/// The returned pointer carries a **retain the caller owns** (the
+/// `CFBridgingRetain` idiom): this function takes an ObjC-level retain on the
+/// session before returning, and the caller is responsible for releasing it
+/// exactly once —
+/// `Unmanaged<AVCaptureSession>.fromOpaque(ptr).takeRetainedValue()` from
+/// Swift (ARC then owns it), or `CFRelease`/`release` from plain C/ObjC.
+/// Dropping the pointer without releasing leaks the session object.
+///
+/// It is +1 rather than a +0 borrow because a +0 borrow is **not honourable
+/// here**: `SessionInner::close`/`AppleSession::drop` can run on any thread
+/// (an `on_cleanup`, a `spawn_blocking` worker, a drop inside a background
+/// task), and the caller has no way to observe that close. A close landing
+/// between this function's return and the caller's own retain would leave the
+/// caller messaging a freed object — a use-after-free across the FFI
+/// boundary. Taking the retain on this side, while the registry's
+/// `Arc<SessionInner>` (and with it the session's own strong reference) is
+/// still alive, closes that window entirely: a session closed a microsecond
+/// later stops running, but the returned pointer stays a valid object until
+/// the caller releases it.
 ///
 /// Returns null for an unknown or already-closed id; the Swift side treats
-/// null as "no preview yet" and re-asks on the next params update.
+/// null as "no preview yet" and re-asks on the next params update. A null
+/// return owns nothing and must not be released.
 ///
 /// # Symbol survival (UNVERIFIED — device gate owns this)
 ///
@@ -719,22 +745,31 @@ impl SessionBackend for AppleSession {
 ///
 /// This function is safe to call with any `session` value; it is `extern "C"`
 /// only so Swift can. It never panics across the FFI boundary (the body is
-/// [`catch_unwind`](std::panic::catch_unwind)-wrapped) and returns a raw
-/// pointer under the retain contract above.
+/// [`catch_unwind`](std::panic::catch_unwind)-wrapped). What the *caller* must
+/// uphold is the release half of the retain contract above — the returned
+/// pointer is owned, and leaking or double-releasing it is on that side of
+/// the boundary.
 #[unsafe(no_mangle)]
 pub extern "C" fn frust_camera_session_handle(session: i32) -> *mut c_void {
     std::panic::catch_unwind(|| {
+        // The registry clone is what keeps the session graph alive across the
+        // retain below: a concurrent `close()` removes the registry entry, but
+        // this `Arc` still holds `AvObjects` (and therefore the session's own
+        // strong reference) until this function returns.
         let Some(inner) = sessions().get(&session).cloned() else {
             log::debug!("frust-camera: no live apple session {session}");
             return std::ptr::null_mut();
         };
-        // SAFETY (the assertion, not a call): reading the session pointer out
-        // of the queue-bound graph is not a message send — no AVFoundation
-        // state is touched here, so the serial-queue confinement
-        // (`QueueBound`'s doc) is not weakened. The pointer is +0 per this
-        // function's retain contract.
-        let session_ptr = Retained::as_ptr(&inner.objects.get().session);
-        session_ptr as *mut c_void
+        // SAFETY (the assertion, not a call): cloning a `Retained` is an
+        // `objc_retain`, which is thread-safe on any ObjC object — the same
+        // exemption `QueueBound`'s `# Safety` doc already grants release. No
+        // AVFoundation *state* is touched, so the serial-queue confinement is
+        // not weakened by doing this off the session queue.
+        let retained: Retained<AVCaptureSession> = inner.objects.get().session.clone();
+        // Hand the +1 out (the `CFBridgingRetain` idiom): `into_raw` forgets
+        // the `Retained` without releasing, so the retain taken above is the
+        // one the caller now owns per this function's retain contract.
+        Retained::into_raw(retained).cast::<c_void>()
     })
     .unwrap_or_else(|_| {
         log::error!("frust-camera: panic in frust_camera_session_handle — returning null");
@@ -1431,6 +1466,36 @@ fn aspect_ratio_of(device: &AVCaptureDevice) -> f32 {
     dimensions.height as f32 / dimensions.width as f32
 }
 
+/// Refuse a blocking camera operation attempted on the main run loop.
+///
+/// The Apple half of the crate-wide main-thread rule (the module doc's
+/// *Threading*; the Android half is the `Looper.myLooper() ==
+/// Looper.getMainLooper()` check in the `android` backend). Both halves exist
+/// for the same reason: an operation that parks its caller for seconds turns
+/// into a frozen UI — or, on Android, an ANR — when that caller is the thread
+/// the platform runs its frame loop on. Failing immediately makes the
+/// misuse diagnosable at the call site instead of surfacing as a timeout
+/// long after the fact.
+///
+/// `MainThreadMarker::new()` is `pthread_main_np()` underneath — a plain
+/// thread-identity check, no message send and no allocation, so it is cheap
+/// enough to sit in front of every blocking entry point.
+///
+/// The error is a [`CameraError::Platform`] rather than a variant of its own:
+/// `plugins/camera/src/lib.rs` (the enum's home) is another task's file this
+/// round, and the message below is the distinguishing payload. If the enum
+/// later grows a dedicated main-thread variant, this function is the single
+/// place the Apple side changes.
+fn reject_on_main_thread(operation: &str) -> Result<(), CameraError> {
+    if MainThreadMarker::new().is_none() {
+        return Ok(());
+    }
+    Err(CameraError::Platform(format!(
+        "apple camera backend: {operation} blocks and must not be called on \
+         the main thread — pair it with frust_reactive::spawn_blocking"
+    )))
+}
+
 /// `AVMediaTypeVideo`, or a typed error if the framework constant is missing
 /// (it never is on a real Apple target — this is the `Option` the binding
 /// hands back, not a runtime condition worth a panic near FFI).
@@ -1487,6 +1552,22 @@ mod tests {
     #[test]
     fn ios_exports_macro_expands() {
         crate::ios_exports!();
+    }
+
+    /// The main-thread guard lets a worker thread through.
+    ///
+    /// Only the permissive direction is assertable here: the test harness
+    /// already runs each test on a spawned thread, and nothing in a `cargo
+    /// test` process can *become* the main thread to check the rejecting one
+    /// (that half is the device gate's, task 14). This still pins the guard's
+    /// signature and its "off the main run loop is always fine" contract.
+    #[test]
+    fn main_thread_guard_admits_a_worker_thread() {
+        std::thread::spawn(|| {
+            assert!(super::reject_on_main_thread("take_picture").is_ok());
+        })
+        .join()
+        .expect("worker thread panicked");
     }
 
     /// The preview `viewType` is the bare iOS runtime name — never Android's
