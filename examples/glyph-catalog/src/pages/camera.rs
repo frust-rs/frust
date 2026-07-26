@@ -38,19 +38,22 @@
 //! component's owner and runs it — **never a `Drop` impl**
 //! (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions).
 //!
-//! # Image-stream readout (task 09 not yet landed)
+//! # Image-stream readout
 //!
 //! [`CameraSession::start_image_stream`]'s callback runs on a plugin-owned
 //! thread and must never write a signal directly
 //! (`plugins/camera`'s own module docs, PLAN.md Phase 3): this page hands
 //! frames off through a plain `Arc<`[`StreamStats`]`>` of atomics instead of
-//! any reactive primitive, and reads it back from [`CameraPage::build`] while
-//! a [`FrameTicker`] (the same escape hatch `interactions.rs` documents) keeps
-//! that rebuild running once per frame. Task 09 hasn't landed yet in this
-//! phase, so [`CameraSession::start_image_stream`] currently reports
-//! [`CameraError::Platform`]`("not yet implemented")` on every real backend —
-//! this page surfaces that error text rather than claiming stream delivery
-//! (task 11's Acceptance: "device behavior... is task 14's").
+//! any reactive primitive (see [`start_stream`], which wires the real
+//! callback), and reads it back from [`CameraPage::build`] while a
+//! [`FrameTicker`] (the same escape hatch `interactions.rs` documents) keeps
+//! that rebuild running once per frame. The stream is real and wired on both
+//! shipped backends — the device gate measured it delivering frames at
+//! ~29 fps on Android and ~22 fps on iOS through this exact path (task 14's
+//! gate rows); this page's readout is the live proof of that, not a stub.
+//! [`ImageFormat::Bgra`] stays Apple-only (see that variant's doc), so this
+//! page always requests [`ImageFormat::Yuv420`], the cross-platform format
+//! both backends deliver.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -96,11 +99,11 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
 // Retained state + Component
 // ---------------------------------------------------------------------------
 
-/// Shared, thread-safe counters the (task 09, not yet wired) image-stream
-/// callback writes into — see the [module docs](self)'s Image-stream readout
-/// section. `Ordering::Relaxed` throughout: these are display-only counters
-/// with no synchronization requirement beyond "eventually visible" to the
-/// next UI-thread rebuild.
+/// Shared, thread-safe counters the image-stream callback ([`start_stream`])
+/// writes into — see the [module docs](self)'s Image-stream readout section.
+/// `Ordering::Relaxed` throughout: these are display-only counters with no
+/// synchronization requirement beyond "eventually visible" to the next
+/// UI-thread rebuild.
 #[derive(Default)]
 struct StreamStats {
     /// Total frames delivered since the current stream started.
@@ -129,6 +132,13 @@ struct CameraPageState {
     /// is crate-private in `frust-camera`), so cloning the wrapper `Arc` is
     /// the only way to get an owned, `'static` handle into `spawn_blocking`.
     session_cell: Arc<Mutex<Option<Arc<CameraSession>>>>,
+    /// The lens the current (or next-to-open) session targets — defaults to
+    /// [`Lens::Back`], [`Camera::open`]'s original hardcoded value.
+    /// [`switch_lens_handler`] flips this and clears [`Self::open_attempted`]
+    /// so [`CameraPage::build`]'s existing open branch reopens on the new
+    /// lens next rebuild, rather than adding a second open path (see the
+    /// [module docs](self)).
+    lens: Lens,
     /// Set once [`Camera::open`] has been attempted for the current
     /// permission grant, so a failed open doesn't retry every rebuild.
     open_attempted: bool,
@@ -220,6 +230,7 @@ impl Component for CameraPage {
         CameraPageState {
             permission,
             session_cell,
+            lens: Lens::Back,
             open_attempted: false,
             open_error: None,
             capture,
@@ -239,7 +250,7 @@ impl Component for CameraPage {
             && !state.open_attempted
         {
             state.open_attempted = true;
-            match Camera::open(Lens::Back, Resolution::Auto) {
+            match Camera::open(state.lens, Resolution::Auto) {
                 Ok(session) => {
                     *state.session_cell.lock().expect("session cell poisoned") =
                         Some(Arc::new(session));
@@ -265,6 +276,7 @@ impl Component for CameraPage {
                 )),
             ]),
             permission_block(&permission, state.open_error.as_deref()),
+            lens_block(state, has_session),
         ];
 
         if has_session {
@@ -420,6 +432,87 @@ fn retry_permission_handler(state: &mut CameraPageState) {
     state.open_attempted = false;
     state.open_error = None;
     state.permission.restart();
+}
+
+// ---------------------------------------------------------------------------
+// Lens switch (C5)
+// ---------------------------------------------------------------------------
+
+/// Close the current session (if any) and flip [`CameraPageState::lens`],
+/// then clear [`CameraPageState::open_attempted`] so [`CameraPage::build`]'s
+/// existing open branch — not a second one — reopens on the new lens next
+/// rebuild. A no-op while no session is open (guarded by the early
+/// `let...else` below), matching this control's "disabled (or a no-op)
+/// while no session exists" contract (this task's Acceptance).
+///
+/// `Camera::open` isn't itself one of the crate's two blocking calls (only
+/// [`Camera::request_permission`]/[`CameraSession::take_picture`] are — the
+/// crate's own Blocking API table); [`CameraPage::build`]'s open branch
+/// already calls it directly on the UI thread for the very first open, so
+/// reopening the same way here adds no second blocking call.
+fn switch_lens_handler(state: &mut CameraPageState) {
+    let outgoing = state
+        .session_cell
+        .lock()
+        .expect("session cell poisoned")
+        .take();
+    let Some(session) = outgoing else {
+        // No session yet — nothing to switch.
+        return;
+    };
+    session.close();
+
+    state.lens = match state.lens {
+        Lens::Front => Lens::Back,
+        // `Lens` is `#[non_exhaustive]`; `Back` and any future variant both
+        // just park on `Front` rather than failing to compile.
+        _ => Lens::Front,
+    };
+    state.open_attempted = false;
+    state.open_error = None;
+
+    // Capture/stream state belongs to the outgoing session — reset both so
+    // nothing from it leaks into the new one (this task's Acceptance).
+    state.streaming = false;
+    state.stream_started_at = None;
+    state.stream_error = None;
+    state.stream_stats.frames.store(0, Ordering::Relaxed);
+    state.stream_stats.has_frame.store(false, Ordering::Relaxed);
+    state.stream_stats.last_byte.store(0, Ordering::Relaxed);
+    // Re-runs the capture task against the now-empty `session_cell`,
+    // resolving to `Ready(None)` ("No capture requested yet.") rather than
+    // showing a stale path/error from the outgoing session — the same
+    // `restart` idiom [`take_picture_handler`] uses, not a new mechanism.
+    state.capture.restart();
+}
+
+fn lens_block(state: &CameraPageState, has_session: bool) -> FlexChild<CameraPageState> {
+    let switch_label = match state.lens {
+        Lens::Back => "Switch to front camera",
+        Lens::Front => "Switch to back camera",
+        _ => "Switch camera",
+    };
+    let current = match state.lens {
+        Lens::Back => "back",
+        Lens::Front => "front",
+        _ => "unknown",
+    };
+
+    block(vec![
+        inflexible(label("Lens")),
+        gap(6.0),
+        inflexible(caption(format!("Current: {current}."))),
+        gap(6.0),
+        inflexible(any(button(switch_label, switch_lens_handler)
+            .style(ButtonStyle::Secondary)
+            .small())),
+        gap(6.0),
+        inflexible(caption(if has_session {
+            "Closes the current session and reopens it on the other lens."
+        } else {
+            "No active session yet \u{2014} a no-op until one opens."
+        })),
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -604,8 +697,7 @@ fn stream_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
                  delivery proof, not a real luma sample)"
             )
         } else {
-            "streaming \u{2014} waiting for the first frame (task 09 wires real delivery)"
-                .to_string()
+            "streaming \u{2014} waiting for the first frame\u{2026}".to_string()
         }
     } else if let Some(err) = &state.stream_error {
         format!("stream error: {err}")
