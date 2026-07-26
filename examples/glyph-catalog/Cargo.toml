@@ -65,6 +65,14 @@ kurbo = "0.13.1"
 # hand-added exactly as the applier would add it.
 frust-camera = { path = "../../plugins/camera" }
 
+# frust-native-widgets (native-widgets p1-06): the device-gate vehicle for the
+# "Native Widgets" catalog section — `src/pages/native_widgets.rs`. Same
+# hand-added-path-dep shape as `frust-camera` above (not yet a `frust tui` Add
+# Plugin contribution — that registry entry is Phase 3's packaging work).
+# Default features on: this catalog wants the `frust-api` builders
+# (`native_button`/etc.), not just the bare platform plugin.
+frust-native-widgets = { path = "../../plugins/native-widgets" }
+
 # Dev-only: the headless smoke test drives Frust's `RenderRoot` directly (the
 # desktop shell's own rebuild/layout/paint seam) — no GPU, no window — the
 # same harness shape as `examples/huddle`'s own headless `tests/*.rs`. `frust-core`/

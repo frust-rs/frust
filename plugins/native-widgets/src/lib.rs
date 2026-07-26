@@ -62,6 +62,18 @@
 //! native event straight into a signal write, which is what wakes exactly
 //! one frust frame.
 
+// The app-facing builders (p1-06): default-on so an app that just adds this
+// crate to its `Cargo.toml` gets `native_button`/`native_label`/etc. for
+// free, but fully feature-gated — see `api`'s module doc and `Cargo.toml`'s
+// comment on why the crate stays a pure platform plugin without it.
+#[cfg(feature = "frust-api")]
+pub mod api;
+// Flat re-export at the crate root, mirroring the `frust` facade's own
+// flatten-every-widget convention — `native_button(...)` rather than
+// `api::native_button(...)`, matching PLAN.md's own call-shape example.
+#[cfg(feature = "frust-api")]
+pub use api::*;
+
 #[cfg(target_os = "android")]
 mod android;
 // The six v1 controls. Compiled on every target on purpose: each control's

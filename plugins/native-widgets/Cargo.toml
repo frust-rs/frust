@@ -20,6 +20,26 @@ thiserror = { workspace = true }
 # stdout/stderr the way `frust-drive` does.
 log = { workspace = true }
 
+# The app-facing `api` feature (p1-06): the facade-glue half PLAN.md's Phase 3
+# sanctions depending on `frust`. Both `optional = true`, gated behind the
+# `frust-api` feature below — `cargo check -p frust-native-widgets
+# --no-default-features` must still hold the platform-plugin charter line
+# (`frust-plugin` + FFI crates only): with the feature off, neither crate
+# reaches this crate's dependency graph at all.
+#
+# `frust-core` rides alongside `frust` rather than `frust` alone, because the
+# builders (`src/api/builders.rs`) hand-implement `View<Outer>` for every
+# outer app-state type (mirroring `ComponentView<C>`'s own blanket impl,
+# unreachable from outside `frust-core` since its `component: C` field is
+# private) — that impl's own method signatures need `BuildCtx`/`ChangeFlags`,
+# which the `frust` facade does not re-export (its own re-export list stops at
+# `Component`/`ComponentView`/`component`). The same documented
+# `frust-core`/`kurbo`(/`peniko`) escape hatch `examples/*` apps use
+# (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions) applies here for
+# the same reason: a gap no facade widget covers.
+frust = { workspace = true, optional = true }
+frust-core = { workspace = true, optional = true }
+
 # The Android `(JavaVM, application Context)` platform-handle substrate
 # this crate's Android backend calls through
 # (`frust_plugin::android::with_jni_env`, the `with_jni_env` idiom every
@@ -84,3 +104,21 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UILabel",
     "UIResponder",
 ] }
+
+[dev-dependencies]
+# The `frust-api` feature's host tests build/paint a widget tree directly
+# (`src/api/builders.rs`'s tests, mirroring `frust-widgets::platform_view`'s
+# own `NullScene`/`PaintCtx` test style) — a minimal `PaintScene` needs
+# `kurbo`'s `Point`/`Size` and `peniko::Color` regardless of the feature gate,
+# so both ride as dev-only (never shipped, never counted against
+# `--no-default-features`).
+kurbo = { workspace = true }
+peniko = { workspace = true }
+
+[features]
+default = ["frust-api"]
+# The app-facing builders (`native_button`/`native_label`/etc., p1-06).
+# Default-on so an app that adds this crate to its `Cargo.toml` gets them for
+# free; `--no-default-features` is the charter-line gate (`Cargo.toml`'s
+# `[dependencies]` comment above `frust`/`frust-core`).
+frust-api = ["dep:frust", "dep:frust-core"]
