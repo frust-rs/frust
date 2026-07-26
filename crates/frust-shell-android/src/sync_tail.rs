@@ -177,6 +177,19 @@ const MAX_PLAUSIBLE_PERIOD_MS: f64 = 50.0;
 /// bogus timeline read and is treated the same way — gate-only.
 const MAX_PLAUSIBLE_PRESENT_DELTA_MS: f64 = 100.0;
 
+/// Bounded interval, in display frames, at which [`ScrollSyncTail::tick`]
+/// emits a diagnostic [`TailTrace`] **even with no depth-or-regime change**
+/// (g2, C3). The change-only trace answers nothing on a device where the
+/// regime never latches at all, or hovers near a threshold without crossing
+/// it — exactly the "why didn't it latch" question a new-device gate check
+/// needs, and the reason a throwaway instrumented APK was previously the only
+/// way to see it. 120 display frames is ~1 s at 120 Hz / ~2 s at 60 Hz: short
+/// enough that a single gesture (typically several hundred ms to a few
+/// seconds) produces at least one snapshot even with zero changes, long
+/// enough that it stays a handful of lines per session rather than
+/// perturbing what it measures like a per-frame line would.
+const DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES: u64 = 120;
+
 /// One tick's worth of signal, gathered by the shell at the top of every
 /// Choreographer frame (skipped frames included — the hold ages in *display*
 /// frames, which keep coming while frust produces nothing).
@@ -206,12 +219,15 @@ enum Regime {
     AcquireBound,
 }
 
-/// One tick's diagnostic read-out, returned by [`ScrollSyncTail::tick`] **only
-/// on the ticks where the depth or the regime actually changed** — a handful of
-/// lines per gesture instead of one per frame, and the only on-device read-out
-/// of what the regime decided. `display_frame` is what makes an onset
-/// measurable: subtract the frame stamped on the gesture's `Down` from the frame
-/// the depth reached its target (camera task 12b, SPIKE-SYNC §2.8).
+/// One tick's diagnostic read-out, returned by [`ScrollSyncTail::tick`] on the
+/// ticks where the depth or the regime actually changed, **plus** at least
+/// once every [`DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES`] regardless (g2, C3) — a
+/// handful of lines per gesture instead of one per frame, and the only
+/// on-device read-out of what the regime decided, including the "it never
+/// latched" case a change-only trace cannot show. `display_frame` is what
+/// makes an onset measurable: subtract the frame stamped on the gesture's
+/// `Down` from the frame the depth reached its target (camera task 12b,
+/// SPIKE-SYNC §2.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TailTrace {
     /// The hold depth now in force, in display frames (`0` = gate-only).
@@ -264,6 +280,10 @@ pub(crate) struct ScrollSyncTail {
     /// The highest generation whose hold has expired: this tail's own answer,
     /// clamped against the gate's on every poll so it can only ever *delay*.
     released_generation: u64,
+    /// The `display_frame` the last [`TailTrace`] was emitted on (change or
+    /// periodic) — [`Self::tick`]'s rate-limit clock for the bounded-interval
+    /// diagnostic (g2, C3).
+    last_diagnostic_frame: u64,
 }
 
 impl ScrollSyncTail {
@@ -279,6 +299,7 @@ impl ScrollSyncTail {
             holds: VecDeque::new(),
             last_gate_generation: 0,
             released_generation: 0,
+            last_diagnostic_frame: 0,
         }
     }
 
@@ -288,8 +309,12 @@ impl ScrollSyncTail {
     /// display frames and a skipped or surface-less tick is still a display
     /// frame.
     ///
-    /// Returns a [`TailTrace`] **only on the ticks where the depth or the
-    /// regime changed**, which is what the shell logs behind `perf::enabled()`.
+    /// Returns a [`TailTrace`] on the ticks where the depth or the regime
+    /// changed, **plus** at least once every
+    /// [`DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES`] regardless (g2, C3's
+    /// rate-limited diagnostic) — the decision of *when* to emit lives here,
+    /// host-tested, so the shell's log call site stays a single
+    /// `perf::enabled()`-gated `log::info!`.
     pub(crate) fn tick(&mut self, signals: TailSignals) -> Option<TailTrace> {
         self.display_frame += 1;
         self.update_period(signals.frame_time_nanos);
@@ -318,11 +343,26 @@ impl ScrollSyncTail {
             std::cmp::Ordering::Greater => self.depth - 1,
             std::cmp::Ordering::Equal => self.depth,
         };
-        (self.depth != previous || regime_changed).then(|| TailTrace {
-            depth: self.depth,
-            target_depth: self.target_depth,
-            acquire_bound: self.regime_active(),
-            display_frame: self.display_frame,
+        let changed = self.depth != previous || regime_changed;
+        // Bounded-interval fallback (g2, C3): a change-only trace is silent
+        // for an entire session on a device whose regime never latches (or
+        // sits just under the threshold without crossing it), which is
+        // exactly the case a new-device gate check needs to see. Firing this
+        // in `saturating_sub` terms (not `%`) means a change resets the
+        // clock rather than leaving the periodic cadence out of phase with
+        // it.
+        let interval_elapsed = self
+            .display_frame
+            .saturating_sub(self.last_diagnostic_frame)
+            >= DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES;
+        (changed || interval_elapsed).then(|| {
+            self.last_diagnostic_frame = self.display_frame;
+            TailTrace {
+                depth: self.depth,
+                target_depth: self.target_depth,
+                acquire_bound: self.regime_active(),
+                display_frame: self.display_frame,
+            }
         })
     }
 
@@ -762,6 +802,9 @@ mod tests {
     fn tick_reports_a_trace_only_on_depth_or_regime_changes() {
         let mut tail = ScrollSyncTail::new();
         let mut traces = Vec::new();
+        // 40 ticks stays well inside `DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES`, so
+        // this only exercises the change-triggered path — the periodic
+        // fallback is covered separately below.
         for frame in 1..=40 {
             if let Some(trace) = tail.tick(cupid_signals(frame)) {
                 traces.push(trace);
@@ -778,6 +821,51 @@ mod tests {
                 acquire_bound: true,
                 display_frame: u64::from(REGIME_ENTER_CONFIRM_FRAMES),
             }]
+        );
+    }
+
+    #[test]
+    fn a_steady_state_still_gets_a_periodic_diagnostic_after_the_latch() {
+        let mut tail = ScrollSyncTail::new();
+        let mut trace_frames = Vec::new();
+        for frame in 1..=(DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES as i64 * 3) {
+            if let Some(trace) = tail.tick(cupid_signals(frame)) {
+                trace_frames.push(trace.display_frame);
+            }
+        }
+        // One trace for the latch itself (resets the interval clock), then one
+        // every bounded interval thereafter — three elapsed intervals means two
+        // more beyond the latch.
+        assert_eq!(
+            trace_frames.len(),
+            3,
+            "latch + two periodic snapshots over three elapsed intervals: {trace_frames:?}"
+        );
+        for pair in trace_frames.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES,
+                "no two diagnostics closer than the bounded interval: {trace_frames:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_whose_regime_never_latches_still_gets_periodic_snapshots() {
+        // The exact gap g2 exists to close: a change-only trace is silent for
+        // the whole session here, which previously meant no on-device signal
+        // existed to answer "why didn't it latch" without a throwaway build.
+        let mut tail = ScrollSyncTail::new();
+        let mut trace_count = 0;
+        for frame in 1..=(DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES as i64 * 2) {
+            if tail.tick(op9_signals(frame)).is_some() {
+                trace_count += 1;
+            }
+        }
+        assert!(!tail.regime_active(), "OP9-shaped signal never latches");
+        assert_eq!(tail.depth(), 0);
+        assert_eq!(
+            trace_count, 2,
+            "one periodic snapshot per elapsed interval, no change required"
         );
     }
 

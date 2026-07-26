@@ -1787,13 +1787,21 @@ impl AndroidAppHandle {
             expected_present_delta_nanos: self.frame_timeline_delta_nanos,
             acquire_wait_us,
         });
-        // One line per depth-or-regime *change* (a handful per fling, never per
-        // frame), behind the same `perf::enabled()` switch as every other
-        // instrumented line here — the only on-device read-out of what the
-        // regime decided, and the line a band measurement is correlated
-        // against. `frame=` is the tail's display-frame counter, which the
-        // gesture markers in `dispatch_touch` stamp too: subtracting the two is
-        // the onset measurement (camera task 12b, SPIKE-SYNC §2.8).
+        // One line per depth-or-regime *change*, plus a rate-limited periodic
+        // snapshot even without one (g2, C3 — `ScrollSyncTail::tick`'s
+        // `DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES`, so the emit-or-not decision
+        // stays host-tested rather than living here): a handful of lines per
+        // fling, never per frame, behind the same `perf::enabled()` switch as
+        // every other instrumented line here. The periodic fallback is what
+        // makes a stock `FRUST_TRACE` profile build answer "why didn't the
+        // regime latch" on a new device — a change-only line stays silent for
+        // the whole session there. `acquire_us` is the render side's
+        // acquire-wait EWMA (the regime discriminator), not a raw sample;
+        // `expected_present_us`/`period_us` are the depth's numerator/divisor;
+        // `depth`/`target` are the ramped-vs-requested hold. `frame=` is the
+        // tail's display-frame counter, which the gesture markers in
+        // `dispatch_touch` stamp too: subtracting the two is the onset
+        // measurement (camera task 12b, SPIKE-SYNC §2.8).
         if let Some(trace) = tail_trace
             && perf::enabled()
         {
