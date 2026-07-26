@@ -52,7 +52,10 @@
 //! degrades to a typed result instead of a permanently parked thread.
 //!
 //! [`SessionInner::take_picture`] additionally **fails fast** when it is
-//! called on the main run loop ([`reject_on_main_thread`]) — the Apple half
+//! called on the main run loop ([`reject_on_main_thread`], applied to
+//! `take_picture` and to `request_permission`'s prompt path — the fast
+//! already-decided statuses never block, so they stay callable anywhere) —
+//! the Apple half
 //! of the crate-wide main-thread rule whose Android half
 //! (`Looper.myLooper() == Looper.getMainLooper()`) lives in the `android`
 //! backend module. A UI-thread caller gets an immediate, diagnosable
@@ -534,6 +537,15 @@ pub(crate) fn request_permission() -> Result<PermissionStatus, CameraError> {
             return Ok(PermissionStatus::Denied);
         }
     }
+
+    // Only the prompt path blocks, so only the prompt path is guarded: the
+    // three statuses above returned without waiting for anything and are safe
+    // from any thread. From here the call parks until the user answers a
+    // consent alert — and that alert needs the main thread to be free to
+    // present it, so a main-thread caller waits 120 s for a dialog its own
+    // wait is preventing. Refuse it with the same typed error the Android half
+    // and `take_picture` use.
+    reject_on_main_thread("request_permission")?;
 
     let (tx, rx) = sync_channel::<bool>(1);
     let handler = RcBlock::new(move |granted: Bool| {

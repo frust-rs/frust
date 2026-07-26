@@ -57,10 +57,20 @@
 //! Activity lifecycle the permission relay rides on), so a UI-thread caller
 //! would park on the very queue carrying its own wake-up — a self-deadlock
 //! that could only end at the deadline above, far past Android's ~5 s ANR
-//! threshold. Both backends therefore **fail fast** instead of parking: a call
-//! made on the platform's UI thread (Android: `Looper.myLooper() ==
+//! threshold. On Apple the shape differs — `requestAccess`'s completion runs
+//! on an arbitrary queue — but the consent alert still needs a free main
+//! thread to be presented, so a UI-thread caller waits out the deadline for a
+//! dialog its own wait is suppressing.
+//!
+//! Both backends therefore **fail fast** instead of parking: a call made on
+//! the platform's UI thread (Android: `Looper.myLooper() ==
 //! Looper.getMainLooper()`; Apple: the main run loop) returns
 //! [`CameraError::UiThread`] immediately, before any platform work starts.
+//! The guard covers every path that can block. Calls that answer without
+//! waiting are exempt and remain callable from anywhere: on Apple,
+//! [`Camera::request_permission`] when the authorization status is already
+//! decided (granted/denied/restricted) returns straight away and is never
+//! refused — only the prompt-and-wait path is guarded.
 
 // Platform backends (Plan Phase 1 preamble lands the crate + frozen contract;
 // Phases 1-3 / tasks 06/07/09 fill the real implementations behind the same

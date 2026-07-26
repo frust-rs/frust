@@ -161,11 +161,17 @@ let path = photo_path.clone();
 frust_reactive::spawn_blocking(move || session.take_picture(&path)).await??;
 ```
 
-**Never call either on the UI thread.** Every completion is relayed through the
-platform's main thread, so a UI-thread caller would park on the very queue
-carrying its own wake-up. Both backends refuse such a call immediately with
+**Never call either on the UI thread.** On Android every completion is relayed
+through the main `Looper`, so a UI-thread caller parks on the very queue
+carrying its own wake-up; on Apple the completion arrives on an arbitrary
+queue, but the permission alert still needs a free main thread to be shown.
+Either way both backends refuse such a call immediately with
 `CameraError::UiThread` instead of freezing until the deadline above — a
 diagnosable error, not a silent hang.
+
+The guard covers every path that can block. Paths that answer without waiting
+are exempt: on Apple, `request_permission` with an already-decided
+authorization status returns immediately and is callable from any thread.
 
 `take_picture` correlates each attempt with its own completion, so `Ok(())`
 means *that* call's photo was written to the path you passed.
