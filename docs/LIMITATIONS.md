@@ -23,9 +23,18 @@ camera preview) rendered above/behind an Android surface that takes the
 **blit** render path is completely invisible — the surface resolves opaque
 instead of translucent, so the native view sits behind an opaque frust
 surface. Measured: the preview slot's pixels are pure page background (std
-5.4, exactly `bg-surface`); every other chrome renders normally. The app is
-never told — `translucencyRefused` is filed but not implemented, so this is
-silent from the app's point of view.
+5.4, exactly `bg-surface`); every other chrome renders normally.
+
+**The app is now told** (native-widgets p1-01, `translucencyRefused` shipped):
+`frust::resolved_surface_mode()` answers
+`ResolvedSurfaceMode::RefusedTranslucent` on exactly this surface — a poll,
+read during rebuild like any other process-global shell state, never a
+reactive wake. The *degrade itself is unchanged*: frust still paints the
+opaque Mode A contract, and the host's native-sibling z-order is still fixed
+at build time, so the sibling stays behind the opaque surface (invisible and
+untappable) until the host is rebuilt in Mode A. What the signal buys is a
+deliberate app-side fallback (render your own content in the slot) instead of
+a dead rect.
 
 **Applies to**: Android, any surface that takes the blit path — a GPU-tier
 surface missing `Rgba8Unorm`+`STORAGE_BINDING` (no flag set by anyone; reach
@@ -38,13 +47,15 @@ premultiplied, so it stays translucent-capable and is never affected.
 `STORAGE_BINDING`, so the compute pass that premultiplies vello's straight-
 alpha output (the fix for the Direct path's over-bright fringing defect)
 cannot run there. Refusing translucency was chosen over shipping a silently
-fringing surface — the gap is the missing app-facing signal, not the refusal
+fringing surface — the gap was the missing app-facing signal, not the refusal
 itself; do not remove the refusal to "fix" this. Accepted by Ed 2026-07-27 as
 a documented limitation rather than a merge blocker, binding before Mode B GA
-on Android — `translucencyRefused` is tracked work, not abandoned.
+on Android. `translucencyRefused` has since shipped (above), so what remains
+here is the *invisible sibling* itself, not the silence.
 
 **Evidence**: `workflow/plans/features/frust-camera/research/VERIFY-CAMERA.md`
-§R2 and its "the reach, corrected" subsection; `followups/review-fix-2/03`.
+§R2 and its "the reach, corrected" subsection; `followups/review-fix-2/03`;
+the signal: `workflow/plans/features/frust-native-widgets/tasks/p1-01-translucency-refused.md`.
 
 ---
 

@@ -42,7 +42,8 @@ use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
     RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher, ViewCommand,
-    effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
+    effective_brightness_for_platform_change, logical_insets, logical_size,
+    publish_resolved_surface_mode, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, DesignLanguage, Theme};
@@ -1102,9 +1103,14 @@ impl AndroidAppHandle {
         // installing render-side, so this reads the request-seeded flag; the
         // per-frame `sync_translucent_resolved` below re-reads it every frame
         // and downgrades within one frame of a fallback.
-        app.set_surface_translucent(crate::ffi_support::read_resolved_translucency(
-            &translucent_resolved,
-        ));
+        let resolved_translucent =
+            crate::ffi_support::read_resolved_translucency(&translucent_resolved);
+        app.set_surface_translucent(resolved_translucent);
+        // Seed the app-facing RESOLVED slot from that same value (task p1-01),
+        // so app/plugin code reading `frust::resolved_surface_mode()` during
+        // the very first rebuild below sees a real verdict rather than
+        // `Unknown`. Re-published every frame by `sync_translucent_resolved`.
+        publish_resolved_surface_mode(resolved_translucent);
         provide_context(theme.clone());
         app.rebuild();
         let mut executor = executor;
@@ -1168,6 +1174,13 @@ impl AndroidAppHandle {
     /// and [`AppTree::set_surface_translucent`] is no-op-if-unchanged (it marks
     /// `ChangeFlags::PAINT` only on an actual flip, which is exactly what makes
     /// a downgrade repaint without the punch).
+    ///
+    /// Also the shell's single publish point for the app-facing RESOLVED slot
+    /// (`frust::resolved_surface_mode()`, task p1-01): app code polls that slot
+    /// during rebuild, so it has to be current *before* the rebuild this frame
+    /// leads into — publishing here rather than at the install sites keeps one
+    /// UI-thread beat as the source for both consumers (the render root and the
+    /// app), split and inline alike. One uncontended `Mutex` store per frame.
     fn sync_translucent_resolved(&mut self) -> bool {
         if let FrameExecutor::Inline(inline) = &self.executor {
             crate::ffi_support::publish_resolved_translucency(
@@ -1176,6 +1189,7 @@ impl AndroidAppHandle {
             );
         }
         let resolved = crate::ffi_support::read_resolved_translucency(&self.translucent_resolved);
+        publish_resolved_surface_mode(resolved);
         self.app.set_surface_translucent(resolved);
         resolved
     }
