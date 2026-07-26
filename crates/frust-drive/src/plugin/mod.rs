@@ -143,6 +143,36 @@ pub enum Contribution {
         /// the project root a relative `frust` path dep is written against.
         rel_path: &'static str,
     },
+    /// A macro invocation appended to the app crate's `src/lib.rs`.
+    ///
+    /// The escape hatch for a plugin whose platform side needs something the
+    /// **app crate itself** must emit — because the app crate is the staticlib
+    /// root, and some linker-visible properties only hold when the reference
+    /// originates there.
+    ///
+    /// It exists for exactly one measured reason (frust-camera task 14): a
+    /// `#[unsafe(no_mangle)]` C export that lives in a *dependency* crate and
+    /// is called only from Swift is dropped by the release profile's
+    /// `lto = "fat"` before the Swift side links, because nothing in Rust
+    /// references it. An app that merely *added* the plugin and never calls its
+    /// API is precisely the failing case — and precisely what Add Plugin
+    /// produces. Planting a `#[used]` reference in the app crate keeps LTO from
+    /// treating the symbol as dead.
+    ///
+    /// Prefer any other variant. Reach for this only when the contribution
+    /// genuinely cannot live in the plugin's own crate or platform module.
+    AppCrateMacro {
+        /// The invocation to append, e.g. `"frust_camera::ios_exports!();"`.
+        /// Also the idempotence key — an exact substring match against the
+        /// existing file means the edit is already present.
+        invocation: &'static str,
+        /// An optional `#[cfg(...)]` predicate written above the invocation,
+        /// e.g. `"target_vendor = \"apple\""`. `None` emits it unguarded.
+        cfg: Option<&'static str>,
+        /// A short `//` comment written above, explaining why the app crate has
+        /// to carry this.
+        comment: &'static str,
+    },
 }
 
 impl Contribution {
@@ -160,6 +190,9 @@ impl Contribution {
             }
             Contribution::SwiftPackageRef { package_name, .. } => {
                 format!("Xcode Swift package `{package_name}`")
+            }
+            Contribution::AppCrateMacro { invocation, .. } => {
+                format!("app crate `src/lib.rs` invocation `{invocation}`")
             }
         }
     }

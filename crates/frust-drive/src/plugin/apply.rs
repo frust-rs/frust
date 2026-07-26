@@ -19,6 +19,7 @@ const PLIST_REL: &str = "ios/Runner/Info.plist";
 const SETTINGS_GRADLE_REL: &str = "android/settings.gradle.kts";
 const APP_BUILD_GRADLE_REL: &str = "android/app/build.gradle.kts";
 const PBXPROJ_REL: &str = "ios/Runner.xcodeproj/project.pbxproj";
+const LIB_RS_REL: &str = "src/lib.rs";
 
 /// The marker comments the Android app template ships for plugin-contributed
 /// Gradle wiring (`templates/app/android.tmpl/settings.gradle.kts.tmpl` and
@@ -140,7 +141,51 @@ fn apply_contribution(
             package_name,
             rel_path,
         } => apply_swift_package_ref(project_root, frust_path, package_name, rel_path),
+        Contribution::AppCrateMacro {
+            invocation,
+            cfg,
+            comment,
+        } => apply_app_crate_macro(project_root, invocation, *cfg, comment),
     }
+}
+
+/// Append a macro invocation to the app crate's `src/lib.rs`
+/// ([`Contribution::AppCrateMacro`]).
+///
+/// Appending — rather than inserting at an anchor — is deliberate. The
+/// scaffold's `lib.rs` ends with `frust::app!(AppName);`, and its own doc
+/// comment tells the app author never to edit that invocation; everything these
+/// contributions plant belongs *after* it, at file scope, where item order does
+/// not matter. So there is no anchor to maintain and nothing to half-edit.
+///
+/// Idempotence keys on the invocation text itself, so an author who moved the
+/// line elsewhere in the file — or wrote it by hand before running Add Plugin,
+/// which is exactly what the task-14 device gate did — is not handed a
+/// duplicate.
+fn apply_app_crate_macro(
+    project_root: &Path,
+    invocation: &str,
+    cfg: Option<&str>,
+    comment: &str,
+) -> Result<AddOutcome, PluginAddError> {
+    let path = project_root.join(LIB_RS_REL);
+    let src = read_required(&path, LIB_RS_REL)?;
+    if src.contains(invocation) {
+        return Ok(AddOutcome::AlreadyPresent);
+    }
+    let mut block = String::new();
+    if !src.ends_with('\n') {
+        block.push('\n');
+    }
+    block.push('\n');
+    block.push_str(&format!("// {comment}\n"));
+    if let Some(predicate) = cfg {
+        block.push_str(&format!("#[cfg({predicate})]\n"));
+    }
+    block.push_str(invocation);
+    block.push('\n');
+    write_file(&path, LIB_RS_REL, &format!("{src}{block}"))?;
+    Ok(AddOutcome::Applied)
 }
 
 /// The `frust` dependency's `path` value (relative or absolute, as written),

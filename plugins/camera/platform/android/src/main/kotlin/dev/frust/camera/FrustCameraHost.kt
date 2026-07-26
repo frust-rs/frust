@@ -301,10 +301,15 @@ object FrustCameraHost {
     private var appContext: Context? = null
 
     /**
-     * The hosting Activity, cached from the platform-view factory seam
-     * ([CameraPreviewFactory.createView]) — the only Activity handle this
-     * module is given. Permission dialogs need it; [requestPermission] reports
+     * The hosting Activity. Learned from **either** the process-wide lifecycle
+     * callbacks (registered at process start — [ensureLifecycleCallbacks]) or
+     * the platform-view factory seam ([CameraPreviewFactory.createView]).
+     * Permission dialogs need it; [requestPermission] reports
      * [PERMISSION_NEEDS_UI] while it is null.
+     *
+     * The callbacks path exists because the factory seam alone deadlocks: it
+     * cannot fire until a preview slot mounts, and a host page will not mount
+     * one until permission is granted (task-14 device gate).
      */
     @Volatile
     private var activity: Activity? = null
@@ -589,25 +594,61 @@ object FrustCameraHost {
      * [FrustCameraInitProvider], before any Activity or view exists. Idempotent
      * and first-writer-wins: [cacheActivity] installs the same context as a
      * fallback if the provider was somehow stripped from the merged manifest.
+     *
+     * This also registers the process-wide lifecycle callbacks, which is what
+     * lets [requestPermission] work before any preview slot has ever mounted —
+     * see [ensureLifecycleCallbacks].
      */
     internal fun installApplicationContext(context: Context) {
         if (appContext == null) appContext = context
+        ensureLifecycleCallbacks(context)
+    }
+
+    /**
+     * Register the process-wide [Application.ActivityLifecycleCallbacks] once.
+     *
+     * These callbacks do three jobs: drive session pause/resume, relay a
+     * pending permission answer on the next resume, and — since the task-14
+     * device gate — **discover the foreground Activity in the first place**.
+     *
+     * Registering them at process start (from [installApplicationContext],
+     * i.e. [FrustCameraInitProvider.onCreate]) rather than from
+     * [cacheActivity] is what breaks the permission deadlock the gate found:
+     * the Activity used to be observable *only* through the platform-view
+     * factory seam, but that seam only fires once a preview slot mounts, and a
+     * host page only mounts its slot once permission is already granted. No
+     * preview → no Activity → `PERMISSION_NEEDS_UI` → no grant → no preview.
+     * A `ContentProvider` runs before any Activity is created, so the callbacks
+     * are in place for the very first `onActivityCreated` and the cycle cannot
+     * form.
+     *
+     * [Context.getApplicationContext] is the `Application` instance on every
+     * supported API level; the `as?` keeps a non-`Application` context (a test
+     * double, an oddly-wrapped host) from throwing at process start — the
+     * module then degrades to the old factory-seam path rather than crashing
+     * the app in a provider.
+     */
+    private fun ensureLifecycleCallbacks(context: Context) {
+        if (lifecycleCallbacksRegistered) return
+        val app = context.applicationContext as? Application ?: return
+        lifecycleCallbacksRegistered = true
+        app.registerActivityLifecycleCallbacks(activityCallbacks)
     }
 
     /**
      * Cache the hosting Activity, handed to us through the platform-view
-     * factory seam ([CameraPreviewFactory.createView]) — the only Activity this
-     * module ever sees. The first call also registers the process-wide
-     * [Application.ActivityLifecycleCallbacks] that drive session
-     * pause/resume and relay a pending permission answer.
+     * factory seam ([CameraPreviewFactory.createView]).
+     *
+     * No longer the *only* way this module learns its Activity — the lifecycle
+     * callbacks registered at process start ([ensureLifecycleCallbacks]) adopt
+     * whichever Activity is resumed. This path is kept because it is exact (the
+     * Activity actually hosting the slot) and because it still works if the
+     * merged provider was stripped.
      */
     internal fun cacheActivity(activity: Activity) {
         this.activity = activity
         if (appContext == null) appContext = activity.applicationContext
-        if (!lifecycleCallbacksRegistered) {
-            lifecycleCallbacksRegistered = true
-            activity.application.registerActivityLifecycleCallbacks(activityCallbacks)
-        }
+        ensureLifecycleCallbacks(activity)
     }
 
     /**
@@ -872,11 +913,33 @@ object FrustCameraHost {
      * Activity).
      */
     private val activityCallbacks = object : Application.ActivityLifecycleCallbacks {
-        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+        /**
+         * Adopt `activity` as the host if none is cached yet.
+         *
+         * This is the task-14 fix for the permission deadlock: the module used
+         * to learn its Activity only from the platform-view factory seam, which
+         * cannot fire before permission is granted (see
+         * [ensureLifecycleCallbacks]). Adoption is deliberately
+         * first-resumed-wins and never *replaces* a live cached Activity —
+         * [cacheActivity]'s handle is the exact slot host and stays
+         * authoritative, and [onActivityDestroyed] is what clears the slot.
+         */
+        private fun adoptIfUnset(activity: Activity) {
+            if (this@FrustCameraHost.activity == null) {
+                this@FrustCameraHost.activity = activity
+            }
+        }
 
-        override fun onActivityStarted(activity: Activity) {}
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+            adoptIfUnset(activity)
+        }
+
+        override fun onActivityStarted(activity: Activity) {
+            adoptIfUnset(activity)
+        }
 
         override fun onActivityResumed(activity: Activity) {
+            adoptIfUnset(activity)
             if (activity !== this@FrustCameraHost.activity) return
             activityResumed = true
             for (session in sessions.values) {

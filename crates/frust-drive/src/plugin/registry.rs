@@ -4,8 +4,9 @@
 //! library module and the iOS plist key its README documents),
 //! `clean-signals-frust` (dependency, gated on the sibling `clean-signals-rs`
 //! checkout), and `camera` (dependency, an app-side plist key, the plugin's
-//! own Android library module, and its own iOS Swift package — the first
-//! registry entry to use [`Contribution::SwiftPackageRef`], `workflow/plans/
+//! own Android library module, its own iOS Swift package — the first
+//! registry entry to use [`Contribution::SwiftPackageRef`] — and an app-crate
+//! export shim the task-14 device gate proved necessary; `workflow/plans/
 //! features/frust-camera/PLAN.md`'s Affected Modules final accounting).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
@@ -115,6 +116,24 @@ const CAMERA_BASE: &[Contribution] = &[
         package_name: "FrustCamera",
         rel_path: "plugins/camera/platform/ios",
     },
+    // Added by the task-14 device gate, which measured the failure this
+    // prevents: without it a freshly scaffolded app that added the camera
+    // plugin does **not link on iOS** —
+    // `Undefined symbols: _frust_camera_session_handle`.
+    //
+    // That export lives in the plugin crate and is called only from Swift, so
+    // nothing in Rust references it and the release profile's `lto = "fat"`
+    // internalizes it away before the Swift side links. The catalog never hit
+    // this because its own page calls the camera API heavily; an app that
+    // merely *added* the plugin — i.e. every Add Plugin user — does not.
+    // `apple.rs`'s `ios_exports!` doc says to invoke it "only if the device
+    // gate shows the direct export missing". The gate showed exactly that.
+    Contribution::AppCrateMacro {
+        invocation: "frust_camera::ios_exports!();",
+        cfg: Some("target_vendor = \"apple\""),
+        comment: "Keeps frust-camera's Swift-called C export alive through \
+                  release LTO (see frust_camera::ios_exports).",
+    },
 ];
 
 const CAMERA: PluginSpec = PluginSpec {
@@ -178,7 +197,7 @@ mod tests {
         assert!(spec.optional_features.is_empty());
         assert_eq!(spec.requires_sibling, None);
 
-        assert_eq!(spec.base.len(), 4);
+        assert_eq!(spec.base.len(), 5);
         assert!(matches!(
             spec.base[0],
             Contribution::CargoDep {
@@ -204,6 +223,17 @@ mod tests {
             Contribution::SwiftPackageRef {
                 package_name: "FrustCamera",
                 rel_path: "plugins/camera/platform/ios",
+            }
+        ));
+        // The task-14 addition. Pinned by exact invocation because this string
+        // IS the idempotence key, and because it is what keeps a fresh
+        // scaffold's iOS link from failing on `_frust_camera_session_handle`.
+        assert!(matches!(
+            spec.base[4],
+            Contribution::AppCrateMacro {
+                invocation: "frust_camera::ios_exports!();",
+                cfg: Some("target_vendor = \"apple\""),
+                ..
             }
         ));
     }
@@ -403,14 +433,14 @@ mod tests {
 
         let first = add_plugin(&root, "camera", &[]).unwrap();
         assert_eq!(first.plugin_id, "camera");
-        assert_eq!(first.items.len(), 4, "{first:?}");
+        assert_eq!(first.items.len(), 5, "{first:?}");
         assert!(
             first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
             "{first:?}"
         );
 
-        // The Cargo dependency, Info.plist key, Gradle module wiring and
-        // Swift package reference all actually landed.
+        // The Cargo dependency, Info.plist key, Gradle module wiring, Swift
+        // package reference and app-crate export shim all actually landed.
         let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
         assert!(cargo.contains("frust-camera"), "{cargo}");
         let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
@@ -429,10 +459,16 @@ mod tests {
             fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
         assert!(pbxproj.contains("FrustCamera"), "{pbxproj}");
         assert_pbxproj_well_formed(&pbxproj);
+        let lib_rs = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert!(lib_rs.contains("frust_camera::ios_exports!();"), "{lib_rs}");
+        assert!(
+            lib_rs.contains("#[cfg(target_vendor = \"apple\")]"),
+            "{lib_rs}"
+        );
 
         let after_first = snapshot_tree(&root);
         let second = add_plugin(&root, "camera", &[]).unwrap();
-        assert_eq!(second.items.len(), 4);
+        assert_eq!(second.items.len(), 5);
         assert!(
             second
                 .items
