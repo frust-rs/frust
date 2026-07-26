@@ -385,6 +385,12 @@ fn install_surface(
 /// presenting here (see [`crate::app::PresentHandoff`]). Any parked frame is
 /// dropped around a surface (re)install below — it belongs to a swapchain that
 /// no longer exists.
+///
+/// `surface_reinstalled` is the UI thread's only notice that the self-heal above
+/// happened (camera gate-fix g4): this thread sets it on every self-heal attempt
+/// so the next `CADisplayLink` tick runs a real frame against the fresh
+/// swapchain instead of being skipped by the now-actually-idling frame gate. See
+/// [`crate::app::SplitExecutor::surface_reinstalled`] for the full rationale.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableMetalLayer>,
@@ -395,6 +401,7 @@ pub(crate) fn render_loop(
     alpha: SurfaceAlphaRequest,
     translucent_resolved: Arc<AtomicBool>,
     present: Arc<PresentHandoff>,
+    surface_reinstalled: Arc<AtomicBool>,
 ) {
     // Render-thread QoS self-boost (phase-11 fix F6): tag this dedicated render
     // thread as user-interactive so the scheduler treats its GPU submit work at
@@ -553,6 +560,16 @@ pub(crate) fn render_loop(
                     // parked for the old (lost) swapchain may survive into the
                     // new one.
                     present.clear();
+                    // Tell the UI thread a self-heal happened (camera gate-fix
+                    // g4) — set for the ATTEMPT, not just a success: either way
+                    // the frame that was in flight never presented, and the next
+                    // tick must run rather than be skipped by the frame gate. On
+                    // success it repaints the fresh swapchain; on failure it
+                    // hands this arm another scene to retry from, still bounded
+                    // by `MAX_RECREATE_ATTEMPTS` above (once the budget is spent
+                    // this arm stops running, so the flag stops being set and the
+                    // loop settles back to idle instead of storming).
+                    surface_reinstalled.store(true, Ordering::Release);
                     match install_surface(
                         &mut renderer,
                         &mut render_cx,
@@ -870,6 +887,14 @@ fn spawn_split_executor(
     // as the two counters above — no channel, no protocol.
     let present_render = Arc::clone(&present);
 
+    // Surface-self-heal signal (camera gate-fix g4): one clone into the render
+    // thread (set on each render-side `SurfaceLost` recreate attempt), one in the
+    // `SplitExecutor` for the UI thread to take once per frame — the same
+    // `Arc<AtomicBool>` shape as the `fatal` flag above. Created here rather than
+    // in `create_handle` because only these two owners ever touch it.
+    let surface_reinstalled = Arc::new(AtomicBool::new(false));
+    let surface_reinstalled_render = Arc::clone(&surface_reinstalled);
+
     // Move `startup` (init_entry + font spans already recorded) into the render
     // thread, which owns the rest of the startup line. The raw `metal_layer`
     // pointer is NOT captured by the closure (it is `!Send`); it crosses the
@@ -891,6 +916,7 @@ fn spawn_split_executor(
                     alpha,
                     translucent_resolved,
                     present_render,
+                    surface_reinstalled_render,
                 )
             })
         })
@@ -912,6 +938,7 @@ fn spawn_split_executor(
             scene_return_rx,
             presented,
             present,
+            surface_reinstalled,
         )),
         text_ctx,
     )

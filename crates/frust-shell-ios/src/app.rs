@@ -581,6 +581,33 @@ pub(crate) struct SplitExecutor {
     /// empty — when the host did not arm present-sync, which is the default.
     /// See [`PresentHandoff`].
     present: Arc<PresentHandoff>,
+    /// The render thread's "I just (re)installed the surface myself" signal
+    /// (camera gate-fix g4): set by [`crate::ffi_glue::render_loop`]'s
+    /// `SurfaceLost` self-heal arm, taken once per frame by
+    /// [`FrameExecutor::take_surface_reinstalled`] and fed into
+    /// [`FrameInputs::surface_changed_or_resized`].
+    ///
+    /// # Why the flag exists
+    ///
+    /// iOS is the one shell whose surface loss has **no platform entry point**:
+    /// the `CAMetalLayer` is permanent, so nothing external re-drives creation
+    /// and the render thread heals itself (see [`crate::ffi_glue::render_loop`]'s
+    /// iOS surface recovery). Android's equivalent arrives as a Kotlin
+    /// `surfaceChanged`, which latches its own gate input. Before the frame gate
+    /// actually idled on iOS that gap was invisible — the next of an unbroken
+    /// stream of frames repainted the healed surface within a tick. Now that a
+    /// resting screen produces no frames at all, a self-heal with no UI-side
+    /// signal would leave the fresh swapchain un-painted (and, under
+    /// present-sync, the platform-view batch paired with the lost frame held)
+    /// until some unrelated dirtiness happened along. So the render thread says
+    /// so, and the next tick runs a real frame.
+    ///
+    /// A plain `Arc<AtomicBool>` — one clone here, one on the render thread —
+    /// the same shape as [`Self::fatal`]/[`Self::presented`], no channel or
+    /// protocol. Inert on the inline path, which recovers UI-side in
+    /// `frust_render_frame`/`frust_resize` (and re-opens the gate's warmup
+    /// through `IosAppHandle::set_surface`) instead.
+    surface_reinstalled: Arc<AtomicBool>,
 }
 
 impl SplitExecutor {
@@ -591,6 +618,7 @@ impl SplitExecutor {
         scene_return: SceneReturnReceiver<Scene>,
         presented: Arc<AtomicU64>,
         present: Arc<PresentHandoff>,
+        surface_reinstalled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             sender: Some(sender),
@@ -602,6 +630,7 @@ impl SplitExecutor {
             spare_scene: None,
             presented,
             present,
+            surface_reinstalled,
         }
     }
 
@@ -753,6 +782,22 @@ impl FrameExecutor {
         match self {
             FrameExecutor::Inline(_) => 0,
             FrameExecutor::Split(split) => split.frame_id,
+        }
+    }
+
+    /// Take (and clear) the render thread's surface-self-heal signal — `true`
+    /// exactly once per render-side surface (re)install attempt (camera gate-fix
+    /// g4; see [`SplitExecutor::surface_reinstalled`] for why iOS needs it and
+    /// Android does not). Always `false` on the inline path, which recovers
+    /// UI-side instead.
+    ///
+    /// `swap` rather than a load: the signal must be consumed by the one frame
+    /// it forces to run, or a single self-heal would keep forcing `Run` forever
+    /// — the very defect this gate-fix task exists to close.
+    fn take_surface_reinstalled(&self) -> bool {
+        match self {
+            FrameExecutor::Inline(_) => false,
+            FrameExecutor::Split(split) => split.surface_reinstalled.swap(false, Ordering::AcqRel),
         }
     }
 
@@ -1754,6 +1799,22 @@ impl IosAppHandle {
             }
         }
 
+        // Render-side surface self-heal (camera gate-fix g4), taken past the
+        // ready/paused gate like the drains below so a signal can never be
+        // consumed on a no-op tick: the render thread recreated the surface from
+        // the retained `CAMetalLayer` on its own (nothing external re-drives
+        // creation on iOS — see `SplitExecutor::surface_reinstalled`), so this
+        // frame must actually run and repaint the fresh swapchain. Replay every
+        // live platform-view slot too, mirroring the inline path's
+        // `recover_surface`: the replay supersedes any batch still held by the
+        // present-sync release gate and clears the pairing, so geometry paired
+        // with the frame that was lost cannot strand now that a resting screen
+        // produces no further frames to release it.
+        let surface_reinstalled = self.executor.take_surface_reinstalled();
+        if surface_reinstalled {
+            self.reset_platform_views_for_surface_recreate();
+        }
+
         // Gather the RESEARCH §C OR-list of "something changed" signals and let
         // the frame gate decide whether this frame runs (spec §14 phase 7, task
         // 18 — mirrors the Android shell's task-17 wiring). `signals_dirty` is
@@ -1789,10 +1850,12 @@ impl IosAppHandle {
             // mirroring the Android shell input-for-input.
             theme_or_appearance_changed: theme_or_appearance_changed
                 || std::mem::take(&mut self.appearance_dirty),
-            // Surface (re)creation/resize is folded into the gate's resume-warmup
-            // via `note_resumed` (see `resize`/`set_surface`/`resume`), so it is
-            // not threaded as a separate per-frame latch here.
-            surface_changed_or_resized: false,
+            // A UI-driven surface (re)creation/resize is folded into the gate's
+            // resume-warmup via `note_resumed` (see `resize`/`set_surface`/
+            // `resume`), so it needs no per-frame latch. What DOES need one is
+            // the split's render-side self-heal, which never passes through a
+            // UI-thread entry point at all (gate-fix g4, above).
+            surface_changed_or_resized: surface_reinstalled,
             a11y_action_performed,
             // Driven by the gate's own warmup countdown (`note_resumed`).
             resumed_recently: false,
@@ -1887,6 +1950,34 @@ impl IosAppHandle {
             None => self.app.rebuild(),
         }
         let rebuild = rebuild_start.map(|t| t.elapsed()).unwrap_or_default();
+
+        // Change-flag DRAIN (camera gate-fix g4) — the fix for "the iOS frame
+        // gate never idles at rest".
+        //
+        // `FrameInputs::change_flags_pending` above reads
+        // `has_pending_change_flags()`, a deliberately NON-draining peek, so a
+        // frame the gate SKIPS leaves the dirtiness for the next frame that runs
+        // (spec §14 phase 7). Draining is the running frame's job — and this
+        // shell never did it: `RenderRoot::pending` is only ever cleared by
+        // `take_change_flags`, so from the very first frame on (construction's
+        // `push_theme` marks LAYOUT|PAINT, and the first rebuild marks
+        // LAYOUT|PAINT again) that input latched `true` forever and every
+        // `CADisplayLink` tick therefore decided `Run`. Measured on an iPhone SE
+        // before this drain: ~44-59 fps of full pipeline work on a screen where
+        // nothing changes, `skipped=0` on every raw line, against Android's zero
+        // frames in 60 s on the same page.
+        //
+        // Android drains at exactly this point in its own frame body, as the
+        // input to its layout-skip seam (`take_change_flags().needs_layout()`),
+        // which is why its gate does idle. iOS still relayouts every `Run`
+        // unconditionally (the intra-frame layout skip is not wired here — see
+        // `docs/ARCHITECTURE.md`'s iOS frame pipeline), so the drained flags are
+        // deliberately dropped rather than gating the layout call below: this
+        // frame runs both passes regardless, so nothing is lost by clearing
+        // them. Anything that marks flags between frames (`set_theme`,
+        // `set_insets`, `set_surface_translucent`, a rebuild) still forces the
+        // next frame to run, exactly as on Android.
+        let _drained = self.app.take_change_flags();
 
         // Sanitize once per frame; layout and the paint transform below MUST
         // consume this identical value (an untrusted `f32` scale from the FFI
