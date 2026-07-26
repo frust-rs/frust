@@ -239,6 +239,7 @@ cargo check --target aarch64-linux-android -p frust-plugin
 cargo check --target aarch64-linux-android -p frust-shared-preferences
 cargo check --target aarch64-linux-android -p frust-secure-storage
 cargo check --target aarch64-linux-android -p frust-camera
+cargo check --target aarch64-linux-android -p frust-native-widgets
 
 # iOS compile gate (no device/Xcode needed — a type-check, runs on Linux
 # too; only building/running an iOS app needs macOS, see Prerequisites):
@@ -249,13 +250,13 @@ cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences
 cargo check --target aarch64-apple-ios-sim -p frust-secure-storage
 cargo check --target aarch64-apple-ios -p frust-secure-storage
 cargo check --target aarch64-apple-ios-sim -p frust-camera
+cargo check --target aarch64-apple-ios-sim -p frust-native-widgets
 ```
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
 uncompiled on any host in this repo's history. Screen-reader verification
 (TalkBack/VoiceOver) and the `cpu-tier` tier's visual behavior on real hardware are
-unverified — both need a device/Simulator or physical GPU this headless host cannot
-provide.
+unverified — both need a device/Simulator or physical GPU this headless host cannot provide.
 
 **Neither compile gate above touches Kotlin or Swift.** `cargo check --target
 aarch64-linux-android`/`aarch64-apple-ios*` only type-checks the Rust `frust-*` graph —
