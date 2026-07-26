@@ -29,9 +29,18 @@
 //! this crate's one Android factory (`dev.frust.FrustNativeControlFactory`)
 //! — N controls = N slots, within the differ's design envelope (a
 //! shared-container optimization is future work).
+//!
+//! # Theme ladder L2 (p1-07)
+//!
+//! Each builder's `Component::build` reads the active theme
+//! (`use_context::<Theme>()`) and folds it, via [`theme::resolve`], into the
+//! same `params_json` body every other property already rides — see
+//! [`theme`]'s module doc for the mapping table and `crate::android::theme`
+//! for L1 (the night-qualified `Context` control creation builds against).
 
 mod builders;
 mod signals;
+mod theme;
 
 pub use builders::{
     NativeButtonView, NativeImageFit, NativeImageView, NativeLabelView, NativeProgressView,

@@ -27,10 +27,29 @@
 //! testbed, `crate`'s module doc's "Mode B background" section, turns
 //! translucency ON process-wide) — nothing on this page needs to special-case
 //! that; it is the builders' own contract.
+//!
+//! # Theme ladder (L1 brightness pinning + L2 token pinning, p1-07)
+//!
+//! [`theme_toggle_demo`] is a page-local light/dark toggle proving the six
+//! controls above re-theme LIVE: `frust_native_widgets::api`'s builders read
+//! `use_context::<Theme>()` every rebuild and fold the resolved tokens
+//! (background/text/accent colour, corner radius, text size) into each
+//! control's `params_json`, so a `set_app_theme` write (spike 4a's proven
+//! re-run mechanism, `crates/frust/tests/theme_reactivity_spike.rs`) repaints
+//! every mounted native view through the ordinary `UpdateParams` diff path —
+//! no remount, no flicker of a fresh platform view. It mirrors the header's
+//! own brightness toggle (`crate::catalog_app_bar`) exactly, kept as its own
+//! row here so a person gating this page doesn't need to scroll to the
+//! header to exercise it. **L1's own effect is the one thing this toggle does
+//! NOT demonstrate live**: the night-qualified `Context` a control's
+//! platform-default chrome (ripple/thumb resting colour) resolves against is
+//! baked at construction, so it stays pinned to whichever brightness the
+//! control was first created under — a documented approximation
+//! (`plugins/native-widgets/src/android/theme.rs`'s module doc), not a bug.
 
 use frust::{
-    AnyView, Axis, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding, RwSignal,
-    Set, SizedBox, Theme, any, inflexible, text, use_context,
+    AnyView, Axis, Brightness, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
+    RwSignal, Set, SizedBox, Theme, any, button, inflexible, text, use_context,
 };
 use frust_native_widgets::{
     NativeImageFit, native_button, native_image, native_label, native_progress, native_slider,
@@ -191,16 +210,44 @@ fn image_demo() -> AnyView<CatalogState> {
         .size(96.0, 96.0))
 }
 
+/// The theme-ladder toggle row (module doc's *Theme ladder* section): flips
+/// [`CatalogState::brightness`] and forces the app-wide theme through
+/// `crate::apply_theme`/`frust::set_app_theme` — the exact mechanism the
+/// header's own brightness toggle uses (`crate::catalog_app_bar`'s
+/// `brightness_btn`), so every native control above re-resolves its theme
+/// tokens on the very next rebuild.
+fn theme_toggle_demo(brightness: Brightness) -> AnyView<CatalogState> {
+    let label_text = match brightness {
+        Brightness::Dark => "\u{25d0} Dark \u{2014} tap for Light",
+        Brightness::Light => "\u{25d1} Light \u{2014} tap for Dark",
+    };
+    any(button(label_text, |state: &mut CatalogState| {
+        let next = match state.brightness.get_untracked() {
+            Brightness::Dark => Brightness::Light,
+            Brightness::Light => Brightness::Dark,
+        };
+        state.brightness.set(next);
+        crate::apply_theme(
+            next,
+            crate::effective_reduce_motion(
+                state.reduce_motion.get_untracked(),
+                state.animations_enabled.get_untracked(),
+            ),
+        );
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
 /// See the page-fn contract in [`crate::pages`]. See the [module docs](self)
 /// for the full section breakdown.
-pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
+pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     let taps = tap_count_sig().get();
     let checked = switch_checked_sig().get();
     let slider = slider_value_sig().get();
+    let brightness = state.brightness.get();
 
     let intro = block(vec![
         inflexible(label("Native Widgets: real platform views from pure Rust")),
@@ -212,6 +259,21 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
              nothing there (or a frust-drawn placeholder if this app's Mode B translucency is \
              refused by the platform).",
         )),
+    ]);
+
+    let theme_block = block(vec![
+        inflexible(label("Theme ladder (L1 brightness + L2 tokens)")),
+        gap(6.0),
+        inflexible(caption(
+            "Flip light/dark below and watch every control above re-theme LIVE \u{2014} \
+             background/text colour, corner radius, and tint lists update through the same \
+             UpdateParams path as any other prop change, with no remount. Only each \
+             control's platform-default chrome (ripple/thumb resting colour) stays pinned to \
+             whichever brightness it was first created under (L1's documented \
+             approximation).",
+        )),
+        gap(6.0),
+        inflexible(theme_toggle_demo(brightness)),
     ]);
 
     let button_block = block(vec![
@@ -272,6 +334,7 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
             Axis::Vertical,
             vec![
                 intro,
+                theme_block,
                 button_block,
                 label_block,
                 switch_block,

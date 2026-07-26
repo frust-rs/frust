@@ -52,20 +52,24 @@ use std::sync::{Arc, Once};
 
 use frust::glyph::{AlertVariant, alert};
 use frust::{
-    PlatformViewView, ResolvedSurfaceMode, SizedBox, platform_view, resolved_surface_mode,
+    PlatformViewView, ResolvedSurfaceMode, SizedBox, Theme, platform_view, resolved_surface_mode,
+    use_context,
 };
 use frust_core::{
     AnyView, BuildCtx, ChangeFlags, Component, ComponentWidget, View, any, component,
 };
 
 use crate::controls::{
-    CHECKED, CONTENT_DESCRIPTION, ENABLED, FIT, INDETERMINATE, MAX, MIN, TEXT, VALUE,
+    BACKGROUND_COLOR, CHECKED, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, DARK, ENABLED, FIT,
+    INDETERMINATE, MAX, MIN, PROGRESS_TINT, TEXT, TEXT_COLOR, TEXT_SIZE_SP, THUMB_TINT, TRACK_TINT,
+    VALUE,
 };
 use crate::controls::{button, image, label, progress, slider, switch};
 use crate::registry::SlotId;
 use crate::runtime::{escape, with_identity, with_runtime};
 
 use super::signals::{on_click, on_toggled, on_value_changed};
+use super::theme::{self, ResolvedTheme};
 
 /// The one Android factory class every control resolves through
 /// (`dev.frust.FrustNativeControlFactory`, this crate's canonical Kotlin
@@ -134,6 +138,21 @@ fn resolve_size(size: Option<(f64, f64)>, view: PlatformViewView) -> PlatformVie
         Some((w, h)) => view.size(w, h),
         None => view,
     }
+}
+
+/// The active theme's resolved tokens (theme ladder L2, p1-07), or `None`
+/// when no theme has been threaded — `use_context::<Theme>()`'s own
+/// documented `None` cases (a bare-core test, a build running outside any
+/// reactive `Owner`; `reactive_graph::owner::use_context`'s own doc: "Panics
+/// if no value is found" only applies to its `expect_context` sibling, never
+/// this one). Every builder's `Component::build` calls this once per
+/// rebuild — spike 4a's proven mechanism (`crates/frust/tests/
+/// theme_reactivity_spike.rs`) is what makes that rebuild re-run, and
+/// therefore re-resolve, on `set_app_theme` — and threads the result into
+/// `build_with_mode` explicitly, the same "thread it as a parameter so a
+/// test can force it" shape `resolved_surface_mode()` already uses above.
+fn ambient_theme_tokens() -> Option<ResolvedTheme> {
+    use_context::<Theme>().as_ref().map(theme::resolve)
 }
 
 /// A tiny flat-JSON body writer — this crate hand-rolls JSON at the wire
@@ -241,25 +260,43 @@ impl NativeButtonView {
     }
 
     /// The encoded `params_json` for `slot` — split out from
-    /// [`Component::build`] so a test can snapshot it directly.
-    fn params_for(&self, slot: SlotId) -> String {
+    /// [`Component::build`] so a test can snapshot it directly. `tokens`
+    /// (theme ladder L2, p1-07) folds the active theme's background/text
+    /// colour, corner radius, and text size in, threaded explicitly like
+    /// `mode` below so a test can pin an exact resolved value without a live
+    /// reactive context.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
         let mut body = ParamsBody::new();
         body.push_str(TEXT, &self.text);
         body.push_raw(ENABLED, self.enabled);
         body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TEXT_COLOR, t.on_accent_fill);
+            body.push_raw(BACKGROUND_COLOR, t.accent_fill);
+            body.push_raw(CORNER_RADIUS_DP, t.corner_radius_dp);
+            body.push_raw(TEXT_SIZE_SP, t.button_text_size_sp);
+        }
         with_identity(button::KIND, slot, &body.finish())
     }
 
-    /// [`Component::build`]'s real body, with `mode` threaded explicitly so a
-    /// test can force the [`ResolvedSurfaceMode::RefusedTranslucent`] branch
-    /// without touching the process-global resolved-mode slot (whose writer
-    /// is pinned to the two shells' own FFI glue,
-    /// `crates/frust/tests/surface_mode_conformance.rs`).
-    fn build_with_mode(&self, slot: SlotId, mode: ResolvedSurfaceMode) -> AnyView<SlotId> {
+    /// [`Component::build`]'s real body, with `mode`/`tokens` threaded
+    /// explicitly so a test can force the
+    /// [`ResolvedSurfaceMode::RefusedTranslucent`] branch or an exact theme
+    /// resolution without touching the process-global resolved-mode slot
+    /// (whose writer is pinned to the two shells' own FFI glue,
+    /// `crates/frust/tests/surface_mode_conformance.rs`) or a live reactive
+    /// context.
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
         if mode.translucency_refused() {
             return placeholder(self.size, "Button");
         }
-        let params = self.params_for(slot);
+        let params = self.params_for(slot, tokens);
         if let Some(on_press) = self.on_press.clone() {
             with_runtime(|rt| rt.set_callback(slot, on_click(on_press)));
         }
@@ -283,7 +320,7 @@ impl Component for NativeButtonView {
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
-        self.build_with_mode(*state, resolved_surface_mode())
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
 
@@ -332,19 +369,32 @@ impl NativeLabelView {
         self
     }
 
-    fn params_for(&self, slot: SlotId) -> String {
+    /// `tokens` (theme ladder L2, p1-07) folds the active theme's body-text
+    /// colour and size in — see [`NativeButtonView::params_for`]'s doc for
+    /// why it's threaded explicitly.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
         let mut body = ParamsBody::new();
         body.push_str(TEXT, &self.text);
         body.push_raw(ENABLED, self.enabled);
         body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TEXT_COLOR, t.body_text);
+            body.push_raw(TEXT_SIZE_SP, t.body_text_size_sp);
+        }
         with_identity(label::KIND, slot, &body.finish())
     }
 
-    fn build_with_mode(&self, slot: SlotId, mode: ResolvedSurfaceMode) -> AnyView<SlotId> {
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
         if mode.translucency_refused() {
             return placeholder(self.size, "Label");
         }
-        let params = self.params_for(slot);
+        let params = self.params_for(slot, tokens);
         let view = platform_view(VIEW_TYPE)
             .params_json(params)
             .semantics_label(
@@ -364,7 +414,7 @@ impl Component for NativeLabelView {
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
-        self.build_with_mode(*state, resolved_surface_mode())
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
 
@@ -426,19 +476,32 @@ impl NativeSwitchView {
         self
     }
 
-    fn params_for(&self, slot: SlotId) -> String {
+    /// `tokens` (theme ladder L2, p1-07) folds the active theme's thumb/track
+    /// tints in — see [`NativeButtonView::params_for`]'s doc for why it's
+    /// threaded explicitly.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
         let mut body = ParamsBody::new();
         body.push_raw(CHECKED, self.checked);
         body.push_raw(ENABLED, self.enabled);
         body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(THUMB_TINT, t.accent_ink);
+            body.push_raw(TRACK_TINT, t.accent_fill);
+        }
         with_identity(switch::KIND, slot, &body.finish())
     }
 
-    fn build_with_mode(&self, slot: SlotId, mode: ResolvedSurfaceMode) -> AnyView<SlotId> {
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
         if mode.translucency_refused() {
             return placeholder(self.size, "Switch");
         }
-        let params = self.params_for(slot);
+        let params = self.params_for(slot, tokens);
         if let Some(on_toggle) = self.on_toggle.clone() {
             with_runtime(|rt| rt.set_callback(slot, on_toggled(on_toggle)));
         }
@@ -462,7 +525,7 @@ impl Component for NativeSwitchView {
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
-        self.build_with_mode(*state, resolved_surface_mode())
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
 
@@ -526,21 +589,34 @@ impl NativeSliderView {
         self
     }
 
-    fn params_for(&self, slot: SlotId) -> String {
+    /// `tokens` (theme ladder L2, p1-07) folds the active theme's progress/
+    /// thumb tints in — see [`NativeButtonView::params_for`]'s doc for why
+    /// it's threaded explicitly.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
         let mut body = ParamsBody::new();
         body.push_raw(VALUE, self.value);
         body.push_raw(MIN, self.min);
         body.push_raw(MAX, self.max);
         body.push_raw(ENABLED, self.enabled);
         body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(PROGRESS_TINT, t.accent_fill);
+            body.push_raw(THUMB_TINT, t.accent_ink);
+        }
         with_identity(slider::KIND, slot, &body.finish())
     }
 
-    fn build_with_mode(&self, slot: SlotId, mode: ResolvedSurfaceMode) -> AnyView<SlotId> {
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
         if mode.translucency_refused() {
             return placeholder(self.size, "Slider");
         }
-        let params = self.params_for(slot);
+        let params = self.params_for(slot, tokens);
         if let Some(on_change) = self.on_change.clone() {
             with_runtime(|rt| rt.set_callback(slot, on_value_changed(on_change)));
         }
@@ -564,7 +640,7 @@ impl Component for NativeSliderView {
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
-        self.build_with_mode(*state, resolved_surface_mode())
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
 
@@ -617,21 +693,33 @@ impl NativeProgressView {
         self
     }
 
-    fn params_for(&self, slot: SlotId) -> String {
+    /// `tokens` (theme ladder L2, p1-07) folds the active theme's progress
+    /// tint in — see [`NativeButtonView::params_for`]'s doc for why it's
+    /// threaded explicitly.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
         let mut body = ParamsBody::new();
         body.push_raw(VALUE, self.value);
         body.push_raw(MIN, self.min);
         body.push_raw(MAX, self.max);
         body.push_raw(INDETERMINATE, self.indeterminate);
         body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(PROGRESS_TINT, t.accent_fill);
+        }
         with_identity(progress::KIND, slot, &body.finish())
     }
 
-    fn build_with_mode(&self, slot: SlotId, mode: ResolvedSurfaceMode) -> AnyView<SlotId> {
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
         if mode.translucency_refused() {
             return placeholder(self.size, "ProgressBar");
         }
-        let params = self.params_for(slot);
+        let params = self.params_for(slot, tokens);
         let view = platform_view(VIEW_TYPE)
             .params_json(params)
             .semantics_label(
@@ -651,7 +739,7 @@ impl Component for NativeProgressView {
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
-        self.build_with_mode(*state, resolved_surface_mode())
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
 
@@ -732,16 +820,28 @@ impl NativeImageView {
     /// The encoded `params_json` for `slot`, given the publish revision
     /// [`crate::controls::image::publish_bytes`] already returned — split out
     /// from [`Self::build_with_mode`] so a test can snapshot it without
-    /// re-publishing.
-    fn params_for(&self, slot: SlotId, rev: u64) -> String {
+    /// re-publishing. `tokens` only ever contributes [`DARK`] here (theme
+    /// ladder L1, p1-07): an app-supplied image's *content* is arbitrary
+    /// bytes, so folding an accent tint over it the way the other five
+    /// controls fold colour tokens would corrupt a real photo rather than
+    /// theme a control — [`NativeImageView`] exposes no tint builder yet for
+    /// the same reason (`api::builders`' own "left for a future task" note
+    /// on styling knobs).
+    fn params_for(&self, slot: SlotId, rev: u64, tokens: Option<ResolvedTheme>) -> String {
         let mut body = ParamsBody::new();
         body.push_raw(image::REV, rev);
         body.push_str(FIT, self.fit.wire());
         body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
         with_identity(image::KIND, slot, &body.finish())
     }
 
-    fn build_with_mode(&self, slot: SlotId, mode: ResolvedSurfaceMode) -> AnyView<SlotId> {
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
         if mode.translucency_refused() {
             return placeholder(self.size, "Image");
         }
@@ -751,7 +851,7 @@ impl NativeImageView {
         // params change and no decode"), and the runtime's later
         // `ImageProps::decode` reads this same table back by slot.
         let rev = image::publish_bytes(slot, Arc::clone(&self.bytes));
-        let params = self.params_for(slot, rev);
+        let params = self.params_for(slot, rev, tokens);
         let view = platform_view(VIEW_TYPE)
             .params_json(params)
             .semantics_label(
@@ -771,7 +871,7 @@ impl Component for NativeImageView {
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
-        self.build_with_mode(*state, resolved_surface_mode())
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
 
@@ -857,7 +957,12 @@ mod tests {
         view.build(&mut BuildCtx::new(&mut counter))
     }
 
-    // --- params_json snapshots, one per control -----------------------------
+    // --- params_json snapshots, one per control (no theme) -------------------
+    //
+    // `None` is exactly what `ambient_theme_tokens()` returns absent a live
+    // reactive context (this module's own doc comment) — every snapshot
+    // below carries a plain `"dark":false` and no other theme field, the
+    // p1-06 shape plus theme ladder L1's always-present flag.
 
     #[test]
     fn button_params_snapshot() {
@@ -865,9 +970,9 @@ mod tests {
             .enabled(false)
             .content_description("Save the note");
         assert_eq!(
-            view.params_for(7),
+            view.params_for(7, None),
             "{\"__frustControl\":\"button\",\"__frustSlot\":7,\"text\":\"Save\",\"enabled\":false,\
-             \"contentDescription\":\"Save the note\"}"
+             \"contentDescription\":\"Save the note\",\"dark\":false}"
         );
     }
 
@@ -875,8 +980,9 @@ mod tests {
     fn label_params_snapshot() {
         let view = native_label("42 fps");
         assert_eq!(
-            view.params_for(3),
-            "{\"__frustControl\":\"label\",\"__frustSlot\":3,\"text\":\"42 fps\",\"enabled\":true}"
+            view.params_for(3, None),
+            "{\"__frustControl\":\"label\",\"__frustSlot\":3,\"text\":\"42 fps\",\"enabled\":true,\
+             \"dark\":false}"
         );
     }
 
@@ -884,9 +990,9 @@ mod tests {
     fn switch_params_snapshot() {
         let view = native_switch(true).content_description("wifi");
         assert_eq!(
-            view.params_for(11),
+            view.params_for(11, None),
             "{\"__frustControl\":\"switch\",\"__frustSlot\":11,\"checked\":true,\"enabled\":true,\
-             \"contentDescription\":\"wifi\"}"
+             \"contentDescription\":\"wifi\",\"dark\":false}"
         );
     }
 
@@ -894,9 +1000,9 @@ mod tests {
     fn slider_params_snapshot() {
         let view = native_slider(25, 0, 50);
         assert_eq!(
-            view.params_for(5),
+            view.params_for(5, None),
             "{\"__frustControl\":\"slider\",\"__frustSlot\":5,\"value\":25,\"min\":0,\"max\":50,\
-             \"enabled\":true}"
+             \"enabled\":true,\"dark\":false}"
         );
     }
 
@@ -904,9 +1010,9 @@ mod tests {
     fn progress_params_snapshot() {
         let view = native_progress(30, 10, 110).indeterminate(false);
         assert_eq!(
-            view.params_for(2),
+            view.params_for(2, None),
             "{\"__frustControl\":\"progress\",\"__frustSlot\":2,\"value\":30,\"min\":10,\
-             \"max\":110,\"indeterminate\":false}"
+             \"max\":110,\"indeterminate\":false,\"dark\":false}"
         );
     }
 
@@ -915,9 +1021,147 @@ mod tests {
         let view =
             native_image(Arc::from(vec![1u8, 2, 3].into_boxed_slice())).fit(NativeImageFit::Cover);
         assert_eq!(
-            view.params_for(900, 42),
-            "{\"__frustControl\":\"image\",\"__frustSlot\":900,\"imageRev\":42,\"fit\":\"cover\"}"
+            view.params_for(900, 42, None),
+            "{\"__frustControl\":\"image\",\"__frustSlot\":900,\"imageRev\":42,\"fit\":\"cover\",\
+             \"dark\":false}"
         );
+    }
+
+    // --- theme ladder L2: token folding, one snapshot per colour-bearing
+    // control (dark + light, real Glyph hex via `theme::resolve`) ----------
+
+    fn dark_tokens() -> ResolvedTheme {
+        theme::resolve(&Theme::glyph_baseline())
+    }
+
+    fn light_tokens() -> ResolvedTheme {
+        theme::resolve(&Theme::glyph_baseline().with_brightness(frust::Brightness::Light))
+    }
+
+    #[test]
+    fn button_folds_background_text_radius_and_size_from_a_dark_theme() {
+        let view = native_button("Save");
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(7, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"button\",\"__frustSlot\":7,\"text\":\"Save\",\"enabled\":\
+                 true,\"dark\":true,\"textColor\":{},\"backgroundColor\":{},\"cornerRadiusDp\":{},\
+                 \"textSizeSp\":{}}}",
+                tokens.on_accent_fill,
+                tokens.accent_fill,
+                tokens.corner_radius_dp,
+                tokens.button_text_size_sp
+            )
+        );
+    }
+
+    #[test]
+    fn button_folds_a_light_theme_distinctly_from_dark() {
+        let view = native_button("Save");
+        let dark = view.params_for(7, Some(dark_tokens()));
+        let light = view.params_for(7, Some(light_tokens()));
+        assert_ne!(
+            dark, light,
+            "Glyph's accent-role split changes `primary` between brightnesses \
+             (dark: primary == primary_container; light: they diverge)"
+        );
+        assert!(light.contains("\"dark\":false"));
+        assert!(dark.contains("\"dark\":true"));
+    }
+
+    #[test]
+    fn label_folds_body_text_colour_and_size() {
+        let view = native_label("42 fps");
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(3, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"label\",\"__frustSlot\":3,\"text\":\"42 fps\",\"enabled\":\
+                 true,\"dark\":true,\"textColor\":{},\"textSizeSp\":{}}}",
+                tokens.body_text, tokens.body_text_size_sp
+            )
+        );
+    }
+
+    #[test]
+    fn switch_folds_thumb_and_track_tint() {
+        let view = native_switch(true);
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(11, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"switch\",\"__frustSlot\":11,\"checked\":true,\"enabled\":\
+                 true,\"dark\":true,\"thumbTint\":{},\"trackTint\":{}}}",
+                tokens.accent_ink, tokens.accent_fill
+            )
+        );
+    }
+
+    #[test]
+    fn slider_folds_progress_and_thumb_tint() {
+        let view = native_slider(25, 0, 50);
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(5, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"slider\",\"__frustSlot\":5,\"value\":25,\"min\":0,\"max\":\
+                 50,\"enabled\":true,\"dark\":true,\"progressTint\":{},\"thumbTint\":{}}}",
+                tokens.accent_fill, tokens.accent_ink
+            )
+        );
+    }
+
+    #[test]
+    fn progress_folds_progress_tint_only() {
+        let view = native_progress(30, 10, 110);
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(2, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"progress\",\"__frustSlot\":2,\"value\":30,\"min\":10,\
+                 \"max\":110,\"indeterminate\":false,\"dark\":true,\"progressTint\":{}}}",
+                tokens.accent_fill
+            )
+        );
+    }
+
+    #[test]
+    fn image_folds_only_the_dark_flag_never_a_tint() {
+        // An app-supplied photo is arbitrary content — theming it would
+        // corrupt the image, not style a control (module doc on
+        // `NativeImageView::params_for`).
+        let view = native_image(Arc::from(vec![1u8].into_boxed_slice()));
+        assert_eq!(
+            view.params_for(900, 42, Some(dark_tokens())),
+            "{\"__frustControl\":\"image\",\"__frustSlot\":900,\"imageRev\":42,\"fit\":\"contain\",\
+             \"dark\":true}"
+        );
+    }
+
+    // --- the zero-FFI property: an unchanged theme yields PartialEq-equal
+    // Props (acceptance criterion) -------------------------------------------
+
+    #[test]
+    fn an_unchanged_theme_yields_partial_eq_equal_button_props() {
+        use crate::controls::button::ButtonProps;
+        use crate::runtime::Params;
+
+        let view = native_button("Save").content_description("Save the note");
+        let tokens = dark_tokens();
+        let a = ButtonProps::decode(&Params::new(&view.params_for(7, Some(tokens)))).unwrap();
+        let b = ButtonProps::decode(&Params::new(&view.params_for(7, Some(tokens)))).unwrap();
+        assert_eq!(
+            a, b,
+            "the SAME resolved theme, folded twice, must decode to PartialEq-equal \
+             Props — this is what keeps the runtime's diff gate from crossing the FFI \
+             boundary on a rebuild the theme didn't actually change"
+        );
+
+        // A genuinely different theme (light) must NOT compare equal.
+        let c =
+            ButtonProps::decode(&Params::new(&view.params_for(7, Some(light_tokens())))).unwrap();
+        assert_ne!(a, c);
     }
 
     // --- the translucency-refused fallback ----------------------------------
@@ -927,11 +1171,19 @@ mod tests {
         for (name, view) in [
             (
                 "Button",
-                native_button("Save").build_with_mode(1, ResolvedSurfaceMode::RefusedTranslucent),
+                native_button("Save").build_with_mode(
+                    1,
+                    ResolvedSurfaceMode::RefusedTranslucent,
+                    None,
+                ),
             ),
             (
                 "Switch",
-                native_switch(true).build_with_mode(2, ResolvedSurfaceMode::RefusedTranslucent),
+                native_switch(true).build_with_mode(
+                    2,
+                    ResolvedSurfaceMode::RefusedTranslucent,
+                    None,
+                ),
             ),
         ] {
             let mut element = build_any(view);
@@ -953,8 +1205,8 @@ mod tests {
             ResolvedSurfaceMode::Translucent,
         ] {
             let btn = native_button("Save").size(120.0, 44.0);
-            let expected_params = btn.params_for(9);
-            let view = btn.build_with_mode(9, mode);
+            let expected_params = btn.params_for(9, None);
+            let view = btn.build_with_mode(9, mode, None);
             let mut element = build_any(view);
             let mut lctx = LayoutCtx::new();
             element.layout(&mut lctx, &BoxConstraints::tight(Size::new(120.0, 44.0)));
@@ -971,7 +1223,7 @@ mod tests {
 
     #[test]
     fn a_display_only_control_never_sets_interactive() {
-        let view = native_label("hi").build_with_mode(4, ResolvedSurfaceMode::Opaque);
+        let view = native_label("hi").build_with_mode(4, ResolvedSurfaceMode::Opaque, None);
         let mut element = build_any(view);
         let mut scene = NullScene;
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 30.0));

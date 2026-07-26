@@ -66,6 +66,10 @@
 //! deliberately recorded here.
 
 mod ctx;
+// `pub(crate)`, not private like `ctx`: `controls::platform`'s
+// `Setter::ThemedBackground` apply arm (theme ladder L2, p1-07) needs
+// `theme::dp_to_px` from OUTSIDE this module's own subtree.
+pub(crate) mod theme;
 
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JObject, JString};
@@ -132,14 +136,34 @@ pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeCreateCont
 
 /// The typed half of [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`]:
 /// dispatch, build, retain, and hand a fresh local reference back to Kotlin.
+///
+/// Theme ladder L1 (p1-07): builds every control against a night-qualified
+/// `Context` (`theme::night_qualified_context`) before dispatching to the
+/// runtime — see `theme`'s module doc for why. A qualification failure
+/// degrades to the factory's own unqualified `context` (logged), never a
+/// reason to fail the whole create.
 fn create_control<'local>(
     env: &mut Env<'local>,
     params: &str,
     activity: &JObject<'local>,
     context: &JObject<'local>,
 ) -> Option<jobject> {
+    let dark = theme::brightness_is_dark(params);
+    let qualified = theme::night_qualified_context(env, context, dark);
+    let themed_context: &JObject<'local> = match &qualified {
+        Ok(qualified) => qualified,
+        Err(e) => {
+            log::warn!(
+                "frust-native-widgets: L1 night-qualified Context failed ({e}) — creating \
+                 against the unqualified Context; the control still renders, only its \
+                 platform-default chrome may resolve the wrong brightness"
+            );
+            context
+        }
+    };
+
     let outcome = runtime::with_runtime(|runtime| {
-        let mut ctx = NativeCtx::for_create(env, activity, context);
+        let mut ctx = NativeCtx::for_create(env, activity, themed_context);
         let slot_id = runtime.create(&mut ctx, params)?;
         let handed_back = {
             let view = runtime

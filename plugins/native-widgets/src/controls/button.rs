@@ -15,8 +15,8 @@
 //! so unlike `Switch`/`Slider` this control needs no echo guard.
 
 use super::{
-    BACKGROUND_COLOR, CONTENT_DESCRIPTION, ENABLED, Plan, Setter, TEXT, TEXT_COLOR, TEXT_SIZE_SP,
-    color, owned_text, plan_color, slot_of, text_or_empty,
+    BACKGROUND_COLOR, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, ENABLED, Plan, Setter, TEXT,
+    TEXT_COLOR, TEXT_SIZE_SP, color, owned_text, plan_color, slot_of, text_or_empty,
 };
 use crate::NativeWidgetError;
 use crate::registry::SlotId;
@@ -51,6 +51,13 @@ pub(crate) struct ButtonProps {
     pub(crate) text_size_sp: Option<f32>,
     /// The TalkBack label; `None` lets the platform fall back to the caption.
     pub(crate) content_description: Option<String>,
+    /// Corner radius, dp — theme ladder L2 (p1-07:
+    /// `crate::api::theme::ResolvedTheme::corner_radius_dp`, folded in by
+    /// `api::builders`). `Some` alongside a `Some` [`Self::background_color`]
+    /// plans [`Setter::ThemedBackground`]; a background colour with no radius
+    /// keeps the pre-p1-07 flat [`Setter::BackgroundColor`] path (see
+    /// [`Self::plan`]).
+    pub(crate) corner_radius_dp: Option<f32>,
 }
 
 impl ButtonProps {
@@ -67,6 +74,7 @@ impl ButtonProps {
             background_color: None,
             text_size_sp: None,
             content_description: None,
+            corner_radius_dp: None,
         }
     }
 
@@ -89,6 +97,7 @@ impl ButtonProps {
             background_color: color(params, BACKGROUND_COLOR),
             text_size_sp: params.float(TEXT_SIZE_SP).map(|size| size as f32),
             content_description: owned_text(params, CONTENT_DESCRIPTION),
+            corner_radius_dp: params.float(CORNER_RADIUS_DP).map(|radius| radius as f32),
         })
     }
 
@@ -103,12 +112,7 @@ impl ButtonProps {
             plan.push(Setter::Enabled(new.enabled));
         }
         plan_color(&mut plan, old.text_color, new.text_color, Setter::TextColor);
-        plan_color(
-            &mut plan,
-            old.background_color,
-            new.background_color,
-            Setter::BackgroundColor,
-        );
+        plan_themed_background(&mut plan, old, new);
         if old.text_size_sp != new.text_size_sp
             && let Some(size) = new.text_size_sp
         {
@@ -120,6 +124,28 @@ impl ButtonProps {
             ));
         }
         plan
+    }
+}
+
+/// Plan [`Self::background_color`]/[`Self::corner_radius_dp`] together — the
+/// two need ONE combined [`Setter::ThemedBackground`] whenever a corner
+/// radius is present (theme ladder L2, p1-07), because Android has no "round
+/// this `ColorDrawable`'s corners" call; a background colour with no radius
+/// keeps the pre-p1-07 flat [`Setter::BackgroundColor`] (a possible future
+/// explicit-colour-only override, and the exact plan every p1-04 test still
+/// pins, since a payload with no `cornerRadiusDp` key decodes `None` on both
+/// sides of any diff).
+///
+/// [`Self`]: ButtonProps
+fn plan_themed_background<'a>(plan: &mut Plan<'a>, old: &ButtonProps, new: &'a ButtonProps) {
+    if old.background_color == new.background_color && old.corner_radius_dp == new.corner_radius_dp
+    {
+        return;
+    }
+    match (new.background_color, new.corner_radius_dp) {
+        (Some(fill), Some(radius_dp)) => plan.push(Setter::ThemedBackground { fill, radius_dp }),
+        (Some(fill), None) => plan.push(Setter::BackgroundColor(fill)),
+        (None, _) => {}
     }
 }
 
@@ -289,5 +315,56 @@ mod tests {
             ButtonProps::decode(&Params::new("{\"text\":\"x\"}")),
             Err(NativeWidgetError::Params(_))
         ));
+    }
+
+    // --- theme ladder L2: the combined themed-background setter ------------
+
+    #[test]
+    fn a_fill_with_a_radius_plans_the_combined_themed_background() {
+        let props = decode("\"backgroundColor\":255,\"cornerRadiusDp\":6.0");
+        assert_eq!(props.corner_radius_dp, Some(6.0));
+        assert_eq!(
+            ButtonProps::plan(&ButtonProps::platform_default(7), &props),
+            vec![Setter::ThemedBackground {
+                fill: 255,
+                radius_dp: 6.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_fill_with_no_radius_keeps_the_pre_p1_07_flat_setter() {
+        // No `cornerRadiusDp` key at all: exactly the p1-04 shape, still the
+        // plan a future explicit-colour-only override takes.
+        let props = decode("\"backgroundColor\":255");
+        assert_eq!(props.corner_radius_dp, None);
+        assert_eq!(
+            ButtonProps::plan(&ButtonProps::platform_default(7), &props),
+            vec![Setter::BackgroundColor(255)]
+        );
+    }
+
+    #[test]
+    fn a_radius_change_alone_replans_the_themed_background() {
+        let old = decode("\"backgroundColor\":255,\"cornerRadiusDp\":6.0");
+        let new = decode("\"backgroundColor\":255,\"cornerRadiusDp\":10.0");
+        assert_eq!(
+            ButtonProps::plan(&old, &new),
+            vec![Setter::ThemedBackground {
+                fill: 255,
+                radius_dp: 10.0,
+            }]
+        );
+        assert_eq!(ButtonProps::plan(&new, &new), vec![]);
+    }
+
+    #[test]
+    fn clearing_a_radius_back_to_a_flat_fill_falls_back_to_background_color() {
+        let themed = decode("\"backgroundColor\":255,\"cornerRadiusDp\":6.0");
+        let flat = decode("\"backgroundColor\":255");
+        assert_eq!(
+            ButtonProps::plan(&themed, &flat),
+            vec![Setter::BackgroundColor(255)]
+        );
     }
 }

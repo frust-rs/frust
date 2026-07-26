@@ -35,7 +35,7 @@
 //! |---|---|---|---|
 //! | (floor) | the bare JNI crossing (`isEnabled()`) | **~0.14–0.27 µs** | — no setter is cheaper |
 //! | [`Tier::Cheap`] | invalidate/repaint only | **~0.8 µs** (`setTextColor`) | [`Setter::Enabled`], [`Setter::TextColor`], [`Setter::ContentDescription`], [`Setter::Checked`], [`Setter::Progress`], [`Setter::Max`], [`Setter::Indeterminate`], the four tint setters |
-//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`] |
+//! | [`Tier::Relayout`] | `requestLayout()` + a measure/layout pass | **~29 µs** (`setText`) — ~35× a colour set | [`Setter::Text`], [`Setter::TextSizeSp`], [`Setter::BackgroundColor`], [`Setter::ScaleType`], [`Setter::ThemedBackground`] |
 //! | [`Tier::Decode`] | bytes → `Bitmap`, allocation + image decode | milliseconds, size-dependent (not micro-benchmarked) | [`Setter::ImageBytes`] |
 //!
 //! **Per-frame guidance:** ~500 [`Tier::Cheap`] setters per frame ≈ 0.4 ms and
@@ -130,6 +130,18 @@ pub(crate) const TRACK_TINT: &str = "trackTint";
 pub(crate) const TINT: &str = "tint";
 /// `"fit"` — `Image`'s scale-type hint (see [`Fit`]).
 pub(crate) const FIT: &str = "fit";
+/// `"dark"` — whether the active theme's `Brightness` is `Dark` (theme
+/// ladder L1, p1-07): the input to the night-qualified `Context`
+/// `crate::android`'s `create_control` builds every control's view against
+/// (`crate::android::theme::night_qualified_context`). Read straight off a
+/// slot's raw params by `crate::android::theme::brightness_is_dark` *before*
+/// any per-control typed decode runs — at that point in `create_control`
+/// there is no registered kind yet to decode against — so it is never a
+/// field on any control's own `Props`, unlike every other key in this list.
+pub(crate) const DARK: &str = "dark";
+/// `"cornerRadiusDp"` — [`Setter::ThemedBackground`]'s corner radius, dp
+/// (theme ladder L2, p1-07: `button::ButtonProps::corner_radius_dp`).
+pub(crate) const CORNER_RADIUS_DP: &str = "cornerRadiusDp";
 
 // --- tiers ------------------------------------------------------------------
 
@@ -259,15 +271,35 @@ pub(crate) enum Setter<'a> {
     /// publish revision — see [`ImageBytes`]), never per rebuild; empty bytes
     /// plan a `setImageBitmap(null)`, which clears the view.
     ImageBytes(&'a ImageBytes),
+
+    /// A `GradientDrawable` background carrying BOTH a fill colour and a
+    /// corner radius — `View.setBackground(Drawable)` — **[`Tier::Relayout`]**,
+    /// the same tier and ripple-replacing caveat as [`Self::BackgroundColor`]
+    /// (which this variant supersedes whenever a corner radius is also
+    /// requested — see `Button`'s `plan`).
+    ///
+    /// Theme ladder L2 (p1-07): `Button`'s background/corner-radius pinning
+    /// ([`crate::api::theme::ResolvedTheme`]'s `accent_fill`/
+    /// `corner_radius_dp`). A fill colour and a corner radius can't be two
+    /// independent setters the way a colour and a tint list can: Android has
+    /// no "just round this `ColorDrawable`'s corners" call, so both values
+    /// have to go into ONE freshly built `GradientDrawable` together. `radius_dp`
+    /// is in dp, converted to device pixels at apply time
+    /// (`crate::android::theme::dp_to_px`) — unlike [`Setter::TextSizeSp`]
+    /// (already SP, self-scaling), `GradientDrawable.setCornerRadius` takes
+    /// raw pixels.
+    ThemedBackground { fill: i32, radius_dp: f32 },
 }
 
 impl Setter<'_> {
     /// This setter's cost tier — the module doc's table, in code.
     pub(crate) fn tier(&self) -> Tier {
         match self {
-            Self::Text(_) | Self::TextSizeSp(_) | Self::BackgroundColor(_) | Self::ScaleType(_) => {
-                Tier::Relayout
-            }
+            Self::Text(_)
+            | Self::TextSizeSp(_)
+            | Self::BackgroundColor(_)
+            | Self::ScaleType(_)
+            | Self::ThemedBackground { .. } => Tier::Relayout,
             Self::ImageBytes(_) => Tier::Decode,
             Self::Enabled(_)
             | Self::TextColor(_)
@@ -400,6 +432,9 @@ pub(crate) mod platform {
     pub(crate) const BITMAP_FACTORY_CLASS: &str = "android.graphics.BitmapFactory";
     /// `android.widget.ImageView$ScaleType` — [`Setter::ScaleType`]'s enum.
     pub(crate) const SCALE_TYPE_CLASS: &str = "android.widget.ImageView$ScaleType";
+    /// `android.graphics.drawable.GradientDrawable` —
+    /// [`Setter::ThemedBackground`]'s drawable (theme ladder L2, p1-07).
+    pub(crate) const GRADIENT_DRAWABLE_CLASS: &str = "android.graphics.drawable.GradientDrawable";
 
     /// How many local references a control's create/update frame reserves.
     ///
@@ -728,6 +763,34 @@ pub(crate) mod platform {
                     )
                 }
             }
+            Setter::ThemedBackground { fill, radius_dp } => {
+                // Device px: `GradientDrawable.setCornerRadius` takes raw
+                // pixels, unlike `setTextSize` (already SP) — see the
+                // variant's own doc.
+                let radius_px = crate::android::theme::dp_to_px(ctx, radius_dp);
+                let class = ctx.class(GRADIENT_DRAWABLE_CLASS)?;
+                let drawable = ctx.run_jni("new GradientDrawable()", |env| {
+                    env.new_object(&class, jni_sig!("()V"), &[])
+                })?;
+                ctx.call_void(
+                    &drawable,
+                    jni_str!("setColor"),
+                    jni_sig!("(I)V"),
+                    &[JValue::Int(fill)],
+                )?;
+                ctx.call_void(
+                    &drawable,
+                    jni_str!("setCornerRadius"),
+                    jni_sig!("(F)V"),
+                    &[JValue::Float(radius_px)],
+                )?;
+                ctx.call_void(
+                    view,
+                    jni_str!("setBackground"),
+                    jni_sig!("(Landroid/graphics/drawable/Drawable;)V"),
+                    &[JValue::Object(&drawable)],
+                )
+            }
         }
     }
 
@@ -828,6 +891,10 @@ mod tests {
             Setter::TextSizeSp(12.0),
             Setter::BackgroundColor(0),
             Setter::ScaleType(Fit::Cover),
+            Setter::ThemedBackground {
+                fill: 0,
+                radius_dp: 6.0,
+            },
         ];
         for setter in relayout {
             assert_eq!(setter.tier(), Tier::Relayout, "{setter:?}");
