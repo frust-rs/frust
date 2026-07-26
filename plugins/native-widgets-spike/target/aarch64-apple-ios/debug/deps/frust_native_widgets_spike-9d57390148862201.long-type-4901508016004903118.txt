@@ -1,1 +1,0 @@
-extern "C-unwind" fn(&FrustNativeSpikeFactory, objc2::runtime::Sel, &NSString) -> Retained<UIView>

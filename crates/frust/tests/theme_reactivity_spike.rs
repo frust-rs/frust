@@ -1,11 +1,16 @@
-//! THROWAWAY — native-widgets Phase 0 spike 4a probe (not for merge).
+//! Durable regression pin for the L2 live re-theme mechanism (originally
+//! written as native-widgets Phase 0 spike 4a's probe — see
+//! `workflow/plans/features/frust-native-widgets/research/SPIKE.md`'s Spike
+//! 4a section for that session's GO verdict and device corroboration; this
+//! file is the mechanism's permanent regression test, not the spike record
+//! itself).
 //!
-//! Question (PLAN.md Phase 0.4a): does a `use_context::<Theme>()`-derived
-//! builder param rebuild on `set_app_theme`? The L2 live re-theme story for
-//! native widgets depends on it: the plugin's `api` layer reads the active
-//! `Theme` during rebuild and applies concrete tokens via direct FFI setters,
-//! so a forced theme change must (a) reach the context slot before the next
-//! rebuild and (b) actually re-run the component's `build`.
+//! Question this pins: does a `use_context::<Theme>()`-derived builder param
+//! rebuild on `set_app_theme`? The L2 live re-theme story for native widgets
+//! depends on it: the plugin's `api` layer reads the active `Theme` during
+//! rebuild and applies concrete tokens via direct FFI setters, so a forced
+//! theme change must (a) reach the context slot before the next rebuild and
+//! (b) actually re-run the component's `build`.
 //!
 //! This probe emulates the exact shell frame flow (the same sequence
 //! `frust-shell-android`'s frame callback and the desktop `RedrawRequested`

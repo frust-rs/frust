@@ -65,10 +65,6 @@ kurbo = "0.13.1"
 # hand-added exactly as the applier would add it.
 frust-camera = { path = "../../plugins/camera" }
 
-# THROWAWAY (native-widgets Phase 0 spike): the spike plugin crate — removed
-# when the spike branch is folded up. Hand-wired like frust-camera above.
-frust-native-widgets-spike = { path = "../../plugins/native-widgets-spike" }
-
 # Dev-only: the headless smoke test drives Frust's `RenderRoot` directly (the
 # desktop shell's own rebuild/layout/paint seam) — no GPU, no window — the
 # same harness shape as `examples/huddle`'s own headless `tests/*.rs`. `frust-core`/

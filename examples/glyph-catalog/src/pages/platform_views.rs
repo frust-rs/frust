@@ -52,8 +52,8 @@
 use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Padding, PlatformViewView, ProgressValue, RwSignal, Set, SizedBox, Stack, Theme,
-    any, button, circular_progress, inflexible, platform_view, text, use_context,
+    GetUntracked, Padding, PlatformViewView, RwSignal, Set, SizedBox, Stack, Theme, any, button,
+    inflexible, platform_view, text, use_context,
 };
 
 use crate::CatalogState;
@@ -112,23 +112,6 @@ macro_rules! local_sig {
 local_sig!(slot_visible_sig, bool, true); // dispose/create stress toggle
 local_sig!(params_bump_sig, u32, 0); // updateParams stress toggle
 local_sig!(second_slot_visible_sig, bool, false); // multi-slot stress toggle
-
-// --- THROWAWAY: native-widgets Phase 0 spike signals (spikes 1/3/4b) --------
-local_sig!(spike_visible_sig, bool, false); // spike button slot mount toggle
-local_sig!(spike_stress_sig, bool, false); // 50-control + 500 sets/frame stress
-local_sig!(spike_click_bump_sig, i64, 0); // performClick trigger (round-trip)
-local_sig!(spike_bars_sig, bool, false); // spike 4b: hide/show system bars
-local_sig!(spike_clicks_sig, u64, 0); // written by the NATIVE click handler
-local_sig!(spike_overlay_clicks_sig, u64, 0); // frust overlay button (z-shield bar)
-
-/// The spike factory's view type — Android FQCN convention (see
-/// [`DEMO_STREAM_VIEW_TYPE`]'s doc for the naming law).
-#[cfg(target_os = "android")]
-const SPIKE_VIEW_TYPE: &str = "dev.frust.FrustNativeSpikeFactory";
-#[cfg(target_os = "ios")]
-const SPIKE_VIEW_TYPE: &str = "FrustNativeSpikeFactory";
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-const SPIKE_VIEW_TYPE: &str = "dev.frust.FrustNativeSpikeFactory";
 
 // ---------------------------------------------------------------------------
 // Section chrome (see appbar.rs/interactions.rs/motion.rs's identical helpers)
@@ -280,157 +263,6 @@ fn second_slot() -> AnyView<CatalogState> {
 }
 
 // ---------------------------------------------------------------------------
-// THROWAWAY: native-widgets Phase 0 spike section (spikes 1/3/4b)
-// ---------------------------------------------------------------------------
-
-/// The spike's native-button slot: a Rust-JNI-built `android.widget.Button`
-/// behind the Mode B surface. `click` bumps ride `params_json` and trigger
-/// `performClick` native-side — the round-trip proof that needs no touch
-/// forwarding. Spike 3 layers the REAL tap path on top: the slot is marked
-/// `.interactive()`, and a frust "Overlay" button pinned to the slot's
-/// top-right sits inside a matching `.shield_local` region — the z-shield
-/// bar (a tap there must reach the FRUST button, not the native sibling).
-fn spike_button_slot(click_bump: i64, bars: bool) -> AnyView<CatalogState> {
-    let params = format!(
-        "{{\"control\":\"button\",\"id\":1,\"click\":{click_bump},\"bars\":{}}}",
-        i32::from(bars)
-    );
-    let slot = platform_view(SPIKE_VIEW_TYPE)
-        .size(240.0, 56.0)
-        .params_json(params)
-        .interactive()
-        .shield_local(kurbo::Rect::new(150.0, 0.0, 240.0, 40.0))
-        .semantics_label("Native spike button (Rust-built)");
-    let overlay = button("Ovl", |_: &mut CatalogState| {
-        let sig = spike_overlay_clicks_sig();
-        sig.set(sig.get_untracked() + 1);
-    })
-    .style(ButtonStyle::Primary)
-    .small();
-    // Constrain the Stack to exactly the slot's box, so TOP_RIGHT genuinely
-    // overlaps the native button's right end (the z-shield bar) instead of
-    // landing beside it in a wider flex row.
-    any(SizedBox(Some(240.0), Some(56.0)).child(any(Stack(vec![
-        any(slot),
-        any(Align(
-            Alignment::TOP_RIGHT,
-            SizedBox(Some(90.0), Some(40.0)).child(any(overlay)),
-        )),
-    ]))))
-}
-
-/// The spike's stress slot: 50 Rust-JNI-built `TextView`s in one container.
-/// While mounted, [`spike_stress_area`]'s builder performs 500 direct property
-/// sets per rebuild via [`frust_native_widgets_spike::stress_tick`].
-fn spike_stress_slot() -> AnyView<CatalogState> {
-    any(platform_view(SPIKE_VIEW_TYPE)
-        .size(260.0, 220.0)
-        .params_json("{\"control\":\"stress\",\"id\":100}")
-        .semantics_label("Native spike stress hierarchy"))
-}
-
-/// The stress area: the slot + an indeterminate spinner whose cosmetic loop
-/// keeps frames running (each Run frame rebuilds this page, and this builder
-/// calls `stress_tick(500)` — the exact Phase 1 rebuild-time property-set
-/// path). µs numbers land in logcat as `spike-perf stress ...` lines.
-fn spike_stress_area() -> AnyView<CatalogState> {
-    let us = frust_native_widgets_spike::stress_tick(500);
-    let readout = match us {
-        Some(us) => format!("last batch: 500 sets in {us}\u{b5}s (see logcat spike-perf)"),
-        None => "stress hierarchy not live yet \u{2014} first frame creates it".to_string(),
-    };
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(any(FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(any(SizedBox(Some(16.0), Some(16.0))
-                        .child(any(circular_progress(ProgressValue::Indeterminate))))),
-                    gap_h(8.0),
-                    inflexible(caption(readout)),
-                ],
-            ))),
-            gap(6.0),
-            inflexible(spike_stress_slot()),
-        ],
-    ))
-}
-
-/// The whole spike section, mounted below the existing demo sections.
-fn spike_section(
-    visible: bool,
-    stress: bool,
-    click_bump: i64,
-    bars: bool,
-    clicks: u64,
-) -> FlexChild<CatalogState> {
-    let mut rows = vec![
-        inflexible(label("Native-widgets spike (Phase 0, throwaway)")),
-        inflexible(caption(format!(
-            "native clicks seen by Rust: {clicks} \u{2014} overlay (frust) clicks: {} \u{2014} live spike refs: {}",
-            spike_overlay_clicks_sig().get(),
-            frust_native_widgets_spike::live_ref_count()
-        ))),
-        gap(6.0),
-        inflexible(any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button(
-                    if visible { "Unmount" } else { "Mount" },
-                    |_: &mut CatalogState| {
-                        let sig = spike_visible_sig();
-                        sig.set(!sig.get_untracked());
-                    },
-                )
-                .style(ButtonStyle::Secondary)
-                .small())),
-                gap_h(8.0),
-                inflexible(any(button("Sim click", |_: &mut CatalogState| {
-                    let sig = spike_click_bump_sig();
-                    sig.set(sig.get_untracked() + 1);
-                })
-                .style(ButtonStyle::Secondary)
-                .small())),
-                gap_h(8.0),
-                inflexible(any(button(
-                    if stress { "Stress off" } else { "Stress on" },
-                    |_: &mut CatalogState| {
-                        let sig = spike_stress_sig();
-                        sig.set(!sig.get_untracked());
-                    },
-                )
-                .style(ButtonStyle::Secondary)
-                .small())),
-                gap_h(8.0),
-                inflexible(any(button(
-                    if bars { "Bars show" } else { "Bars hide" },
-                    |_: &mut CatalogState| {
-                        let sig = spike_bars_sig();
-                        sig.set(!sig.get_untracked());
-                    },
-                )
-                .style(ButtonStyle::Secondary)
-                .small())),
-            ],
-        ))),
-        gap(8.0),
-    ];
-    if visible {
-        rows.push(inflexible(spike_button_slot(click_bump, bars)));
-    } else {
-        rows.push(inflexible(caption(
-            "spike button unmounted \u{2014} refs above must read 0 with stress off",
-        )));
-    }
-    if stress {
-        rows.push(gap(8.0));
-        rows.push(inflexible(spike_stress_area()));
-    }
-    block(rows)
-}
-
-// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -440,24 +272,6 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
     let slot_visible = slot_visible_sig().get();
     let bump = params_bump_sig().get();
     let second_visible = second_slot_visible_sig().get();
-
-    // THROWAWAY spike state + the native-event handler registration (a signal
-    // write on the platform main thread — the exact "native event → signal →
-    // one frame" chain spike 1 measures).
-    let spike_visible = spike_visible_sig().get();
-    let spike_stress = spike_stress_sig().get();
-    let spike_click_bump = spike_click_bump_sig().get();
-    let spike_bars = spike_bars_sig().get();
-    let spike_clicks = spike_clicks_sig().get();
-    frust_native_widgets_spike::set_click_handler(|_control_id, _kind| {
-        let sig = spike_clicks_sig();
-        sig.set(sig.get_untracked() + 1);
-    });
-    // Spike 2 (iOS): force the Rust `define_class!` factory's lazy ObjC
-    // registration during rebuild — strictly before the host can poll the
-    // first `create` command (see the spike crate's apple module doc).
-    #[cfg(target_os = "ios")]
-    frust_native_widgets_spike::apple::ensure_registered();
 
     let intro = block(vec![
         inflexible(label("Mode B: native-view compositing")),
@@ -546,13 +360,6 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
             inflexible(second_slot()),
         ]));
     }
-    children.push(spike_section(
-        spike_visible,
-        spike_stress,
-        spike_click_bump,
-        spike_bars,
-        spike_clicks,
-    ));
     children.push(proof_strip);
     children.push(gap(12.0));
     children.push(inflexible(filler_rows()));
