@@ -66,6 +66,12 @@
 //! deliberately recorded here.
 
 mod ctx;
+// Theme ladder L3 (p1-08): registering Glyph font bytes with Android and
+// creating/caching the resulting `Typeface` objects. `pub(crate)`, not
+// private like `ctx`: `controls::platform`'s `Setter::Typeface` apply arm
+// needs `fonts::typeface_for` from OUTSIDE this module's own subtree, the
+// same reason `theme` below is `pub(crate)`.
+pub(crate) mod fonts;
 // `pub(crate)`, not private like `ctx`: `controls::platform`'s
 // `Setter::ThemedBackground` apply arm (theme ladder L2, p1-07) needs
 // `theme::dp_to_px` from OUTSIDE this module's own subtree.

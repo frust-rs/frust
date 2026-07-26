@@ -12,10 +12,11 @@
 //! re-layout per update (see [`super`]'s per-frame guidance).
 
 use super::{
-    CONTENT_DESCRIPTION, ENABLED, Plan, Setter, TEXT, TEXT_COLOR, TEXT_SIZE_SP, color, owned_text,
-    plan_color, slot_of, text_or_empty,
+    CONTENT_DESCRIPTION, ENABLED, Plan, Setter, TEXT, TEXT_COLOR, TEXT_SIZE_SP, TYPEFACE, color,
+    owned_text, plan_color, slot_of, text_or_empty,
 };
 use crate::NativeWidgetError;
+use crate::controls::typeface::{self, Typeface};
 use crate::registry::SlotId;
 use crate::runtime::Params;
 
@@ -44,6 +45,10 @@ pub(crate) struct LabelProps {
     pub(crate) text_size_sp: Option<f32>,
     /// The TalkBack label; `None` lets the platform read the text itself.
     pub(crate) content_description: Option<String>,
+    /// Theme ladder L3 (p1-08): the resolved
+    /// [`crate::api::theme::ResolvedTheme::body_typeface`], or
+    /// [`Typeface::System`] when absent.
+    pub(crate) typeface: Typeface,
 }
 
 impl LabelProps {
@@ -56,6 +61,7 @@ impl LabelProps {
             text_color: None,
             text_size_sp: None,
             content_description: None,
+            typeface: Typeface::System,
         }
     }
 
@@ -73,6 +79,7 @@ impl LabelProps {
             text_color: color(params, TEXT_COLOR),
             text_size_sp: params.float(TEXT_SIZE_SP).map(|size| size as f32),
             content_description: owned_text(params, CONTENT_DESCRIPTION),
+            typeface: typeface::decode(params, TYPEFACE),
         })
     }
 
@@ -90,6 +97,9 @@ impl LabelProps {
             && let Some(size) = new.text_size_sp
         {
             plan.push(Setter::TextSizeSp(size));
+        }
+        if old.typeface != new.typeface {
+            plan.push(Setter::Typeface(new.typeface));
         }
         if old.content_description != new.content_description {
             plan.push(Setter::ContentDescription(
@@ -211,6 +221,30 @@ mod tests {
         assert!(
             plan.iter()
                 .all(|setter| setter.tier() == super::super::Tier::Cheap)
+        );
+    }
+
+    // --- theme ladder L3: the typeface setter, and Props gating ------------
+
+    #[test]
+    fn typeface_defaults_to_system_when_absent() {
+        let props = decode("");
+        assert_eq!(props.typeface, Typeface::System);
+        assert_eq!(props, LabelProps::platform_default(3));
+    }
+
+    #[test]
+    fn a_typeface_change_alone_plans_exactly_one_setter() {
+        let old = decode("\"typeface\":\"system\"");
+        let new = decode("\"typeface\":\"glyphPlex\"");
+        assert_eq!(
+            LabelProps::plan(&old, &new),
+            vec![Setter::Typeface(Typeface::GlyphPlex)]
+        );
+        assert_eq!(
+            LabelProps::plan(&new, &new),
+            vec![],
+            "an unchanged typeface plans nothing — the zero-FFI property"
         );
     }
 }

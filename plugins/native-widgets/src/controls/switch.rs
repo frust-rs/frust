@@ -35,10 +35,11 @@
 //! the trait, which Phase 3 decides.
 
 use super::{
-    CHECKED, CONTENT_DESCRIPTION, ENABLED, Plan, Setter, THUMB_TINT, TRACK_TINT, color, owned_text,
-    slot_of,
+    CHECKED, CONTENT_DESCRIPTION, ENABLED, Plan, Setter, THUMB_TINT, TRACK_TINT, TYPEFACE, color,
+    owned_text, slot_of,
 };
 use crate::NativeWidgetError;
+use crate::controls::typeface::{self, Typeface};
 use crate::events::{EVENT_KIND_TOGGLED, EventPayload, unpack_bool};
 use crate::registry::SlotId;
 use crate::runtime::{NativeEvent, Params};
@@ -67,6 +68,13 @@ pub(crate) struct SwitchProps {
     pub(crate) track_tint: Option<i32>,
     /// The TalkBack label.
     pub(crate) content_description: Option<String>,
+    /// Theme ladder L3 (p1-08): the resolved
+    /// [`crate::api::theme::ResolvedTheme::body_typeface`], or
+    /// [`Typeface::System`] when absent. `Switch` never sets on/off text
+    /// through this plugin today, but it's a `TextView` subclass under the
+    /// hood, so this still costs a real (if today invisible) `setTypeface`
+    /// call — see `crate::api::theme`'s module doc.
+    pub(crate) typeface: Typeface,
 }
 
 impl SwitchProps {
@@ -79,6 +87,7 @@ impl SwitchProps {
             thumb_tint: None,
             track_tint: None,
             content_description: None,
+            typeface: Typeface::System,
         }
     }
 
@@ -95,6 +104,7 @@ impl SwitchProps {
             thumb_tint: color(params, THUMB_TINT),
             track_tint: color(params, TRACK_TINT),
             content_description: owned_text(params, CONTENT_DESCRIPTION),
+            typeface: typeface::decode(params, TYPEFACE),
         })
     }
 
@@ -119,6 +129,9 @@ impl SwitchProps {
         }
         if old.track_tint != new.track_tint {
             plan.push(Setter::TrackTint(new.track_tint));
+        }
+        if old.typeface != new.typeface {
+            plan.push(Setter::Typeface(new.typeface));
         }
         if old.content_description != new.content_description {
             plan.push(Setter::ContentDescription(
@@ -341,6 +354,30 @@ mod tests {
             SwitchProps::plan(&tinted, &plain, None),
             vec![Setter::ThumbTint(None), Setter::TrackTint(None)],
             "unlike a text colour, a tint list is clearable (setter takes null)"
+        );
+    }
+
+    // --- theme ladder L3: the typeface setter, and Props gating ------------
+
+    #[test]
+    fn typeface_defaults_to_system_when_absent() {
+        let props = decode("");
+        assert_eq!(props.typeface, Typeface::System);
+        assert_eq!(props, SwitchProps::platform_default(11));
+    }
+
+    #[test]
+    fn a_typeface_change_alone_plans_exactly_one_setter() {
+        let old = decode("\"typeface\":\"system\"");
+        let new = decode("\"typeface\":\"glyphPlex\"");
+        assert_eq!(
+            SwitchProps::plan(&old, &new, None),
+            vec![Setter::Typeface(Typeface::GlyphPlex)]
+        );
+        assert_eq!(
+            SwitchProps::plan(&new, &new, None),
+            vec![],
+            "an unchanged typeface plans nothing — the zero-FFI property"
         );
     }
 

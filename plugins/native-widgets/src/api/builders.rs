@@ -62,7 +62,7 @@ use frust_core::{
 use crate::controls::{
     BACKGROUND_COLOR, CHECKED, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, DARK, ENABLED, FIT,
     INDETERMINATE, MAX, MIN, PROGRESS_TINT, TEXT, TEXT_COLOR, TEXT_SIZE_SP, THUMB_TINT, TRACK_TINT,
-    VALUE,
+    TYPEFACE, VALUE,
 };
 use crate::controls::{button, image, label, progress, slider, switch};
 use crate::registry::SlotId;
@@ -276,6 +276,7 @@ impl NativeButtonView {
             body.push_raw(BACKGROUND_COLOR, t.accent_fill);
             body.push_raw(CORNER_RADIUS_DP, t.corner_radius_dp);
             body.push_raw(TEXT_SIZE_SP, t.button_text_size_sp);
+            body.push_str(TYPEFACE, t.button_typeface.wire());
         }
         with_identity(button::KIND, slot, &body.finish())
     }
@@ -381,6 +382,7 @@ impl NativeLabelView {
         if let Some(t) = tokens {
             body.push_raw(TEXT_COLOR, t.body_text);
             body.push_raw(TEXT_SIZE_SP, t.body_text_size_sp);
+            body.push_str(TYPEFACE, t.body_typeface.wire());
         }
         with_identity(label::KIND, slot, &body.finish())
     }
@@ -488,6 +490,12 @@ impl NativeSwitchView {
         if let Some(t) = tokens {
             body.push_raw(THUMB_TINT, t.accent_ink);
             body.push_raw(TRACK_TINT, t.accent_fill);
+            // `Switch` never sets on/off text through this plugin today, but
+            // it's a `TextView` subclass under the hood (`android.widget.Switch
+            // extends CompoundButton extends Button extends TextView`) — see
+            // `crate::api::theme`'s module doc on why this shares `Label`'s
+            // typeface rather than going unset.
+            body.push_str(TYPEFACE, t.body_typeface.wire());
         }
         with_identity(switch::KIND, slot, &body.finish())
     }
@@ -1047,11 +1055,12 @@ mod tests {
             format!(
                 "{{\"__frustControl\":\"button\",\"__frustSlot\":7,\"text\":\"Save\",\"enabled\":\
                  true,\"dark\":true,\"textColor\":{},\"backgroundColor\":{},\"cornerRadiusDp\":{},\
-                 \"textSizeSp\":{}}}",
+                 \"textSizeSp\":{},\"typeface\":\"{}\"}}",
                 tokens.on_accent_fill,
                 tokens.accent_fill,
                 tokens.corner_radius_dp,
-                tokens.button_text_size_sp
+                tokens.button_text_size_sp,
+                tokens.button_typeface.wire()
             )
         );
     }
@@ -1078,8 +1087,10 @@ mod tests {
             view.params_for(3, Some(tokens)),
             format!(
                 "{{\"__frustControl\":\"label\",\"__frustSlot\":3,\"text\":\"42 fps\",\"enabled\":\
-                 true,\"dark\":true,\"textColor\":{},\"textSizeSp\":{}}}",
-                tokens.body_text, tokens.body_text_size_sp
+                 true,\"dark\":true,\"textColor\":{},\"textSizeSp\":{},\"typeface\":\"{}\"}}",
+                tokens.body_text,
+                tokens.body_text_size_sp,
+                tokens.body_typeface.wire()
             )
         );
     }
@@ -1092,8 +1103,10 @@ mod tests {
             view.params_for(11, Some(tokens)),
             format!(
                 "{{\"__frustControl\":\"switch\",\"__frustSlot\":11,\"checked\":true,\"enabled\":\
-                 true,\"dark\":true,\"thumbTint\":{},\"trackTint\":{}}}",
-                tokens.accent_ink, tokens.accent_fill
+                 true,\"dark\":true,\"thumbTint\":{},\"trackTint\":{},\"typeface\":\"{}\"}}",
+                tokens.accent_ink,
+                tokens.accent_fill,
+                tokens.body_typeface.wire()
             )
         );
     }

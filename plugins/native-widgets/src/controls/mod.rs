@@ -83,6 +83,7 @@ pub(crate) mod label;
 pub(crate) mod progress;
 pub(crate) mod slider;
 pub(crate) mod switch;
+pub(crate) mod typeface;
 
 use std::borrow::Cow;
 
@@ -91,6 +92,7 @@ use crate::registry::SlotId;
 use crate::runtime::Params;
 
 use self::image::{Fit, ImageBytes};
+use self::typeface::Typeface;
 
 // --- the params wire keys ---------------------------------------------------
 //
@@ -142,6 +144,9 @@ pub(crate) const DARK: &str = "dark";
 /// `"cornerRadiusDp"` — [`Setter::ThemedBackground`]'s corner radius, dp
 /// (theme ladder L2, p1-07: `button::ButtonProps::corner_radius_dp`).
 pub(crate) const CORNER_RADIUS_DP: &str = "cornerRadiusDp";
+/// `"typeface"` — [`Setter::Typeface`]'s wire spelling (theme ladder L3,
+/// p1-08: `typeface::Typeface::wire`/`decode`).
+pub(crate) const TYPEFACE: &str = "typeface";
 
 // --- tiers ------------------------------------------------------------------
 
@@ -289,6 +294,20 @@ pub(crate) enum Setter<'a> {
     /// (already SP, self-scaling), `GradientDrawable.setCornerRadius` takes
     /// raw pixels.
     ThemedBackground { fill: i32, radius_dp: f32 },
+
+    /// `TextView.setTypeface(Typeface)` — **[`Tier::Relayout`]**: a font swap
+    /// changes every glyph's metrics (ascent/descent/advance width), so the
+    /// platform re-measures and re-lays-out the view exactly like
+    /// [`Self::TextSizeSp`] — never a per-frame setter.
+    ///
+    /// Theme ladder L3 (p1-08): the resolved
+    /// [`typeface::Typeface`] a text-bearing control (`Button`/`Label`/
+    /// `Switch`) renders in. [`typeface::Typeface::System`] plans this same
+    /// setter with a `null` argument (`crate::android::fonts::typeface_for`
+    /// returns `None`), restoring the platform's own face — both the
+    /// explicit choice and the registration-failure degrade path
+    /// (`crate::android::fonts`'s module doc) land on the exact same call.
+    Typeface(Typeface),
 }
 
 impl Setter<'_> {
@@ -299,7 +318,8 @@ impl Setter<'_> {
             | Self::TextSizeSp(_)
             | Self::BackgroundColor(_)
             | Self::ScaleType(_)
-            | Self::ThemedBackground { .. } => Tier::Relayout,
+            | Self::ThemedBackground { .. }
+            | Self::Typeface(_) => Tier::Relayout,
             Self::ImageBytes(_) => Tier::Decode,
             Self::Enabled(_)
             | Self::TextColor(_)
@@ -791,6 +811,28 @@ pub(crate) mod platform {
                     &[JValue::Object(&drawable)],
                 )
             }
+            Setter::Typeface(typeface) => {
+                // `crate::android::fonts::typeface_for` resolves (and
+                // process-wide caches) the real `android.graphics.Typeface`
+                // for a Glyph face, or reports the registration-failure
+                // degrade path with its own one-warning contract — either
+                // way `None` here means "restore the platform's own face",
+                // `Typeface::System`'s own meaning too (the variant's doc).
+                match crate::android::fonts::typeface_for(ctx, typeface) {
+                    Some(resolved) => ctx.call_void(
+                        view,
+                        jni_str!("setTypeface"),
+                        jni_sig!("(Landroid/graphics/Typeface;)V"),
+                        &[JValue::Object(resolved)],
+                    ),
+                    None => ctx.call_void(
+                        view,
+                        jni_str!("setTypeface"),
+                        jni_sig!("(Landroid/graphics/Typeface;)V"),
+                        &[JValue::Object(&JObject::null())],
+                    ),
+                }
+            }
         }
     }
 
@@ -895,6 +937,7 @@ mod tests {
                 fill: 0,
                 radius_dp: 6.0,
             },
+            Setter::Typeface(Typeface::GlyphMono),
         ];
         for setter in relayout {
             assert_eq!(setter.tier(), Tier::Relayout, "{setter:?}");

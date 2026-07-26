@@ -1507,6 +1507,7 @@ dependencies = [
  "frust",
  "frust-core",
  "frust-plugin",
+ "frust-theme",
  "jni 0.22.4",
  "kurbo",
  "log",

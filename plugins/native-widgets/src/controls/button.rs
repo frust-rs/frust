@@ -16,9 +16,10 @@
 
 use super::{
     BACKGROUND_COLOR, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, ENABLED, Plan, Setter, TEXT,
-    TEXT_COLOR, TEXT_SIZE_SP, color, owned_text, plan_color, slot_of, text_or_empty,
+    TEXT_COLOR, TEXT_SIZE_SP, TYPEFACE, color, owned_text, plan_color, slot_of, text_or_empty,
 };
 use crate::NativeWidgetError;
+use crate::controls::typeface::{self, Typeface};
 use crate::registry::SlotId;
 use crate::runtime::Params;
 
@@ -58,6 +59,11 @@ pub(crate) struct ButtonProps {
     /// keeps the pre-p1-07 flat [`Setter::BackgroundColor`] path (see
     /// [`Self::plan`]).
     pub(crate) corner_radius_dp: Option<f32>,
+    /// Theme ladder L3 (p1-08): the resolved
+    /// [`crate::api::theme::ResolvedTheme::button_typeface`], or
+    /// [`Typeface::System`] when absent (an older api layer, or a control
+    /// built with no theme threaded).
+    pub(crate) typeface: Typeface,
 }
 
 impl ButtonProps {
@@ -75,6 +81,7 @@ impl ButtonProps {
             text_size_sp: None,
             content_description: None,
             corner_radius_dp: None,
+            typeface: Typeface::System,
         }
     }
 
@@ -98,6 +105,7 @@ impl ButtonProps {
             text_size_sp: params.float(TEXT_SIZE_SP).map(|size| size as f32),
             content_description: owned_text(params, CONTENT_DESCRIPTION),
             corner_radius_dp: params.float(CORNER_RADIUS_DP).map(|radius| radius as f32),
+            typeface: typeface::decode(params, TYPEFACE),
         })
     }
 
@@ -117,6 +125,9 @@ impl ButtonProps {
             && let Some(size) = new.text_size_sp
         {
             plan.push(Setter::TextSizeSp(size));
+        }
+        if old.typeface != new.typeface {
+            plan.push(Setter::Typeface(new.typeface));
         }
         if old.content_description != new.content_description {
             plan.push(Setter::ContentDescription(
@@ -365,6 +376,36 @@ mod tests {
         assert_eq!(
             ButtonProps::plan(&themed, &flat),
             vec![Setter::BackgroundColor(255)]
+        );
+    }
+
+    // --- theme ladder L3: the typeface setter, and Props gating ------------
+
+    #[test]
+    fn typeface_defaults_to_system_when_absent() {
+        let props = decode("");
+        assert_eq!(props.typeface, Typeface::System);
+        assert_eq!(props, ButtonProps::platform_default(7));
+    }
+
+    #[test]
+    fn a_typeface_change_alone_plans_exactly_one_setter() {
+        let old = decode("\"typeface\":\"glyphPlex\"");
+        let new = decode("\"typeface\":\"glyphMono\"");
+        assert_eq!(
+            ButtonProps::plan(&old, &new),
+            vec![Setter::Typeface(Typeface::GlyphMono)]
+        );
+    }
+
+    #[test]
+    fn an_unchanged_typeface_plans_nothing_the_zero_ffi_property() {
+        let props = decode("\"typeface\":\"glyphMono\"");
+        assert_eq!(
+            ButtonProps::plan(&props, &props),
+            vec![],
+            "identical typeface Props must plan no setter — the whole-struct \
+             PartialEq gate this crate's `Props: PartialEq` contract relies on"
         );
     }
 }

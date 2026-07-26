@@ -25,6 +25,28 @@
 //! | `button_text_size_sp` | `type_scale.label_large.size` | `Button` text size |
 //! | `body_text_size_sp` | `type_scale.body_large.size` | `Label` text size |
 //! | `dark` | `brightness == Brightness::Dark` | every control (L1's `Context` qualification) |
+//! | `button_typeface` | `design_language == Glyph` ⇒ Space Mono, else the platform's own | `Button` `Typeface` (theme ladder L3, p1-08) |
+//! | `body_typeface` | `design_language == Glyph` ⇒ IBM Plex Mono, else the platform's own | `Label`/`Switch` `Typeface` (theme ladder L3, p1-08) |
+//!
+//! # Theme ladder L3 (p1-08): typography, gated on `design_language`
+//!
+//! Unlike every other row above (folded unconditionally from whichever
+//! `Theme` is active), the two typeface rows first check
+//! [`Theme::design_language`]: only the Glyph baseline ships bundled fonts
+//! (`frust-theme`'s `glyph-fonts` feature), so a Material3/Cupertino theme
+//! resolves both to [`typeface::Typeface::System`] — imposing Glyph's
+//! monospace faces on a theme that never asked for them would be a worse
+//! regression than leaving the platform's own face alone. `Button` gets
+//! Space Mono (Glyph's bolder display/heading face — an assertive face for
+//! a call-to-action caption) while `Label`/`Switch` share IBM Plex Mono
+//! (Glyph's body/reading face); `Switch` never actually shows text through
+//! this plugin today, but it's still a `TextView` subclass under the hood
+//! (`android.widget.Switch extends CompoundButton extends Button extends
+//! TextView`), so setting it costs nothing and future-proofs against a later
+//! on/off-text builder. This is the same "PIN, not full fidelity"
+//! approximation policy as every other row (module doc above) — a future
+//! task can widen this to per-slot `TypeScale` family resolution if a
+//! control ever needs Glyph's display face specifically.
 //!
 //! `Image` folds only `dark` — tinting an app-supplied photo from the theme
 //! would corrupt its content, and no builder method exposes an explicit tint
@@ -54,7 +76,9 @@
 //! overrides must thread an explicit value through [`resolve`]'s callers
 //! ahead of the theme, not into this module.
 
-use frust::{Brightness, Color, Theme};
+use frust::{Brightness, Color, DesignLanguage, Theme};
+
+use crate::controls::typeface::Typeface;
 
 /// Whether `theme`'s active brightness is [`Brightness::Dark`] — L1's input
 /// (theme ladder, p1-07): [`crate::android::theme::night_qualified_context`]
@@ -100,12 +124,20 @@ pub(crate) struct ResolvedTheme {
     pub(crate) button_text_size_sp: f32,
     /// `type_scale.body_large.size`, sp.
     pub(crate) body_text_size_sp: f32,
+    /// `Button`'s `Typeface` (theme ladder L3, p1-08) — see the module doc's
+    /// *typography, gated on `design_language`* section.
+    pub(crate) button_typeface: Typeface,
+    /// `Label`/`Switch`'s `Typeface` (theme ladder L3, p1-08) — see the
+    /// module doc's *typography, gated on `design_language`* section.
+    pub(crate) body_typeface: Typeface,
 }
 
 /// Resolve `theme` into the packed primitives every builder folds into its
 /// control's `params_json` — see the module doc's mapping table.
 pub(crate) fn resolve(theme: &Theme) -> ResolvedTheme {
+    publish_glyph_font_bytes();
     let scheme = theme.scheme();
+    let is_glyph = theme.design_language == DesignLanguage::Glyph;
     ResolvedTheme {
         dark: is_dark(theme),
         accent_ink: argb_u32(scheme.primary),
@@ -115,8 +147,54 @@ pub(crate) fn resolve(theme: &Theme) -> ResolvedTheme {
         corner_radius_dp: theme.shape.small as f32,
         button_text_size_sp: theme.type_scale.label_large.size,
         body_text_size_sp: theme.type_scale.body_large.size,
+        button_typeface: if is_glyph {
+            Typeface::GlyphMono
+        } else {
+            Typeface::System
+        },
+        body_typeface: if is_glyph {
+            Typeface::GlyphPlex
+        } else {
+            Typeface::System
+        },
     }
 }
+
+/// Publish `frust-theme`'s embedded Glyph font bytes to the Android backend,
+/// once per process (theme ladder L3, p1-08) — the api→runtime seam
+/// `crate::android::fonts`'s module doc describes: this crate's `Cargo.toml`
+/// allows a `frust-theme` dependency only behind this crate's own
+/// `frust-api` feature, and only this function ever names it, so the
+/// platform half (`crate::android::fonts`) stays free of it regardless of
+/// platform or feature state.
+///
+/// `frust_theme::glyph::font_data()` always exists — an empty slice with
+/// `frust-theme`'s own `glyph-fonts` feature off
+/// (`crates/frust-theme/src/glyph/mod.rs`'s own doc) — so this quietly does
+/// nothing on that configuration rather than panicking on an out-of-bounds
+/// index. Indices 0/3 are a documented coupling to `frust-theme`'s own
+/// (private) `font_data()` array literal — Space Mono ×3
+/// (Regular/Bold/Italic) then IBM Plex Mono ×4
+/// (Regular/Medium/SemiBold/Italic), each family's first entry being its
+/// Regular face; no public API names a face by weight, so a future reorder
+/// there would silently pick a different (but still valid) face, never a
+/// panic or crash.
+#[cfg(target_os = "android")]
+fn publish_glyph_font_bytes() {
+    static PUBLISHED: std::sync::Once = std::sync::Once::new();
+    PUBLISHED.call_once(|| {
+        let faces = frust_theme::glyph::font_data();
+        if let (Some(&mono), Some(&plex)) = (faces.first(), faces.get(3)) {
+            crate::android::fonts::set_glyph_bytes(mono, plex);
+        }
+    });
+}
+
+/// No other platform backend reads the published bytes yet (iOS Phase 2,
+/// `p2-01`, hasn't landed) — a no-op here rather than a
+/// `crate::android::fonts` reference this configuration can't compile.
+#[cfg(not(target_os = "android"))]
+fn publish_glyph_font_bytes() {}
 
 #[cfg(test)]
 mod tests {
@@ -148,6 +226,8 @@ mod tests {
         assert_eq!(tokens.corner_radius_dp, 6.0, "shape.small (Glyph)");
         assert_eq!(tokens.button_text_size_sp, 12.5, "type_scale.label_large");
         assert_eq!(tokens.body_text_size_sp, 13.0, "type_scale.body_large");
+        assert_eq!(tokens.button_typeface, Typeface::GlyphMono);
+        assert_eq!(tokens.body_typeface, Typeface::GlyphPlex);
     }
 
     #[test]
@@ -176,6 +256,25 @@ mod tests {
         assert_eq!(tokens.corner_radius_dp, 6.0);
         assert_eq!(tokens.button_text_size_sp, 12.5);
         assert_eq!(tokens.body_text_size_sp, 13.0);
+        // Neither does the typeface choice — `design_language`, not
+        // `brightness`, gates it (module doc's *typography* section).
+        assert_eq!(tokens.button_typeface, Typeface::GlyphMono);
+        assert_eq!(tokens.body_typeface, Typeface::GlyphPlex);
+    }
+
+    #[test]
+    fn non_glyph_baselines_resolve_the_system_typeface() {
+        // Imposing Glyph's bundled monospace faces on a Material3/Cupertino
+        // theme that never asked for them would be a worse regression than
+        // leaving the platform's own face alone (module doc's *typography,
+        // gated on `design_language`* section).
+        let m3 = resolve(&Theme::m3_baseline());
+        assert_eq!(m3.button_typeface, Typeface::System);
+        assert_eq!(m3.body_typeface, Typeface::System);
+
+        let cupertino = resolve(&Theme::cupertino_baseline());
+        assert_eq!(cupertino.button_typeface, Typeface::System);
+        assert_eq!(cupertino.body_typeface, Typeface::System);
     }
 
     // --- the zero-FFI property: an unchanged theme resolves identically ---

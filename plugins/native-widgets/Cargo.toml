@@ -39,6 +39,21 @@ log = { workspace = true }
 # the same reason: a gap no facade widget covers.
 frust = { workspace = true, optional = true }
 frust-core = { workspace = true, optional = true }
+# Theme ladder L3 (p1-08, `src/api/theme.rs`'s `publish_glyph_font_bytes`):
+# the source of the bundled Glyph font bytes (`frust_theme::glyph::font_data`)
+# this crate's Android backend registers into a real `Typeface`. The `frust`
+# facade does NOT re-export these bytes (confirmed at implementation time —
+# neither `frust_theme::glyph` nor its `font_data` accessor appears anywhere
+# in `crates/frust/src/lib.rs`'s re-export list), so this is a direct,
+# feature-gated dependency rather than reaching the bytes through the facade.
+# `optional = true`, gated behind `frust-api` below — same charter-line gate
+# as `frust`/`frust-core` above: with the feature off, this crate never
+# reaches this crate's dependency graph either. Inherits the workspace's own
+# `default-features = false` entry (the gf2 glyph-fonts opt-out chain,
+# `docs/DEVELOPMENT.md`'s *Glyph bundled fonts*) — this crate's own
+# `glyph-fonts` feature below re-requests the bundled bytes, mirroring
+# `frust-widgets`' identical edge.
+frust-theme = { workspace = true, optional = true }
 
 # The Android `(JavaVM, application Context)` platform-handle substrate
 # this crate's Android backend calls through
@@ -116,9 +131,20 @@ kurbo = { workspace = true }
 peniko = { workspace = true }
 
 [features]
-default = ["frust-api"]
+default = ["frust-api", "glyph-fonts"]
 # The app-facing builders (`native_button`/`native_label`/etc., p1-06).
 # Default-on so an app that adds this crate to its `Cargo.toml` gets them for
 # free; `--no-default-features` is the charter-line gate (`Cargo.toml`'s
-# `[dependencies]` comment above `frust`/`frust-core`).
-frust-api = ["dep:frust", "dep:frust-core"]
+# `[dependencies]` comment above `frust`/`frust-core`/`frust-theme`).
+frust-api = ["dep:frust", "dep:frust-core", "dep:frust-theme"]
+# Forwards into `frust-theme`'s own `glyph-fonts` (gf2 opt-out chain,
+# mirroring `frust-widgets`'/`frust`'s own edges, `docs/DEVELOPMENT.md`'s
+# *Glyph bundled fonts*) — theme ladder L3's (p1-08) bundled Space Mono/IBM
+# Plex Mono bytes. A separate feature (not folded into `frust-api` itself) so
+# an app can drop the ~1MB of font bytes while keeping every other
+# `frust-api` capability: `frust-native-widgets = { default-features = false,
+# features = ["frust-api"] }`. Only meaningful alongside `frust-api` (nothing
+# else in this crate touches `frust-theme`) — `--no-default-features` drops
+# both together, preserving this crate's platform-plugin charter line
+# (`cargo tree -p frust-native-widgets --no-default-features -e normal`).
+glyph-fonts = ["frust-theme/glyph-fonts"]
