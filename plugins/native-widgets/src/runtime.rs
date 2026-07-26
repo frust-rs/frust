@@ -95,8 +95,10 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::NativeWidgetError;
+use crate::events::EventPayload;
 use crate::registry::{Registry, SlotId};
 
 #[cfg(not(target_os = "android"))]
@@ -406,7 +408,10 @@ fn unescape(raw: &str) -> Cow<'_, str> {
 
 // --- events -----------------------------------------------------------------
 
-/// A platform listener callback, as the generic listener glue delivers it.
+/// A platform listener callback, as the generic listener glue delivers it —
+/// the raw `(kind, detail)` wire [`NativeRuntime::on_event`] decodes into the
+/// crate's typed [`EventPayload`](crate::events::EventPayload) vocabulary
+/// (`crate::events`).
 ///
 /// **Native-widget events bypass `RenderRoot::event` entirely** (see the crate
 /// doc): this is a platform interaction surfacing as a callback, not a frust
@@ -416,19 +421,16 @@ fn unescape(raw: &str) -> Cow<'_, str> {
 /// The payload stays primitive on purpose: ONE `dev.frust.FrustNativeListener`
 /// class funnels every listener interface into one native method
 /// `(slotId, kind, detail)`, so a value event packs its payload into the
-/// `detail` bits rather than allocating JSON on the hot path. p1-05 adds the
-/// typed event vocabulary (`Toggled`/`ValueChanged`/…) over this transport.
+/// `detail` bits rather than allocating JSON on the hot path — see
+/// `crate::events`'s kind table and detail codec.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NativeEvent {
-    /// Which listener fired — one of the `EVENT_KIND_*` codes, shared
-    /// verbatim with `FrustNativeListener`'s companion constants.
+    /// Which listener fired — one of `crate::events`'s `EVENT_KIND_*` codes,
+    /// shared verbatim with `FrustNativeListener`'s companion constants.
     pub(crate) kind: i32,
     /// The listener's primitive payload; `0` for a kind that carries none.
     pub(crate) detail: i64,
 }
-
-/// `View.OnClickListener.onClick` — the v1 kind (p1-05 extends the space).
-pub(crate) const EVENT_KIND_CLICK: i32 = 1;
 
 // --- the trait --------------------------------------------------------------
 
@@ -501,14 +503,21 @@ pub(crate) trait NativeWidget: 'static {
         new: &Self::Props,
     ) -> Result<(), NativeWidgetError>;
 
-    /// A platform listener fired for this instance (main thread). The api
-    /// layer's callbacks — typically a signal write, which wakes exactly one
-    /// frust frame — hang off the state this receives.
+    /// A platform listener fired for this instance (main thread): decode the
+    /// raw `(kind, detail)` pair into the crate's typed
+    /// [`EventPayload`](crate::events::EventPayload) vocabulary, or return
+    /// `None` to swallow it — the seam a controlled control's echo guard
+    /// (`crate::controls`'s controlled-component note) uses to drop an event
+    /// its own `update` caused. [`NativeRuntime::on_event`] forwards
+    /// whatever this returns to the slot's registered
+    /// `Arc<dyn Fn(EventPayload) + Send + Sync>` callback (the app-facing
+    /// api, p1-06, wraps that into a signal write).
     ///
-    /// Defaults to ignoring the event: a display-only control (Label,
-    /// ProgressBar, Image) emits none.
-    fn on_event(state: &mut Self::State, event: NativeEvent) {
+    /// Defaults to `None` unconditionally: a display-only control (Label,
+    /// ProgressBar, Image) emits nothing and never overrides this.
+    fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
         let _ = (state, event);
+        None
     }
 
     /// The slot is going away: detach listeners and release anything the
@@ -553,8 +562,8 @@ type UpdateFn =
     fn(&mut NativeCtx<'_, '_>, &mut dyn Any, &dyn Any, &dyn Any) -> Result<(), NativeWidgetError>;
 /// Erased `Props: PartialEq` — the diff gate itself.
 type PropsEqFn = fn(&dyn Any, &dyn Any) -> bool;
-/// Erased [`NativeWidget::on_event`]: `(state, event)`.
-type EventFn = fn(&mut dyn Any, NativeEvent);
+/// Erased [`NativeWidget::on_event`]: `(state, event) -> decoded payload`.
+type EventFn = fn(&mut dyn Any, NativeEvent) -> Option<EventPayload>;
 /// Erased [`NativeWidget::dispose`]: `(ctx, state)`, taking the state by
 /// value.
 type DisposeFn = fn(&mut NativeCtx<'_, '_>, Box<dyn Any>) -> Result<(), NativeWidgetError>;
@@ -612,13 +621,21 @@ fn downcast_mut<'a, T: 'static>(value: &'a mut dyn Any, what: &str) -> &'a mut T
 // --- instances --------------------------------------------------------------
 
 /// One live control: its native view, its last applied props (the diff
-/// baseline), its retained state, and the vtable that types all three.
+/// baseline), its retained state, the vtable that types all three, and the
+/// app-facing callback its decoded events are forwarded to.
 pub(crate) struct Instance {
     kind: &'static str,
     view: NativeView,
     props: Box<dyn Any>,
     state: Box<dyn Any>,
     vtable: KindVTable,
+    /// The callback a slot's decoded [`EventPayload`]s are handed to —
+    /// `None` until [`NativeRuntime::set_callback`] registers one (the
+    /// app-facing api, p1-06, is the production caller). Not type-erased
+    /// like `props`/`state`: its type
+    /// (`Arc<dyn Fn(EventPayload) + Send + Sync>`) is already uniform across
+    /// every control kind.
+    callback: Option<Arc<dyn Fn(EventPayload) + Send + Sync>>,
 }
 
 impl Instance {
@@ -648,6 +665,7 @@ impl Instance {
             props: _,
             state,
             vtable,
+            callback: _,
         } = self;
         let outcome = (vtable.dispose)(ctx, state);
         // Explicit, and explicitly *after* the control's own teardown: on
@@ -771,6 +789,7 @@ impl NativeRuntime {
             props,
             state,
             vtable,
+            callback: None,
         };
 
         if let Some(previous) = self.instances.insert(slot_id, instance) {
@@ -825,14 +844,53 @@ impl NativeRuntime {
         Ok(UpdateOutcome::Applied)
     }
 
-    /// Route a platform listener callback to its slot's control.
+    /// Route a platform listener callback to its slot's control, decode it
+    /// into the typed [`EventPayload`] vocabulary via the control's own
+    /// [`NativeWidget::on_event`], and — unless that decode swallowed it (a
+    /// controlled control's echo guard) — invoke the slot's registered
+    /// callback with it.
+    ///
+    /// **Bypasses `RenderRoot::event` entirely** (crate doc): this is a
+    /// platform interaction surfacing as a callback, never a frust pointer
+    /// event.
     pub(crate) fn on_event(&mut self, slot_id: SlotId, event: NativeEvent) -> EventOutcome {
+        let Some(instance) = self.instances.get_mut(slot_id) else {
+            return EventOutcome::UnknownSlot;
+        };
+        let payload = (instance.vtable.on_event)(&mut *instance.state, event);
+        // Clone the callback out (and let `instance`'s borrow end here) so
+        // invoking it — arbitrary app code — never holds a live borrow of
+        // `self.instances`; a callback that re-enters `with_runtime` is
+        // caught by its own re-entrancy tolerance either way.
+        let callback = payload
+            .is_some()
+            .then(|| instance.callback.clone())
+            .flatten();
+        if let (Some(payload), Some(callback)) = (payload, callback) {
+            callback(payload);
+        }
+        EventOutcome::Delivered
+    }
+
+    /// Register (or replace) the callback a slot's decoded [`EventPayload`]s
+    /// are handed to, invoked on the platform main thread from
+    /// [`Self::on_event`] — the seam the app-facing api (p1-06) wraps into a
+    /// signal write (PLAN 1.3).
+    ///
+    /// Returns `false` when the slot has no live instance (a registration
+    /// racing a dispose), tolerated rather than an error — mirroring every
+    /// other slot-keyed lookup in this module.
+    pub(crate) fn set_callback(
+        &mut self,
+        slot_id: SlotId,
+        callback: Arc<dyn Fn(EventPayload) + Send + Sync>,
+    ) -> bool {
         match self.instances.get_mut(slot_id) {
             Some(instance) => {
-                (instance.vtable.on_event)(&mut *instance.state, event);
-                EventOutcome::Delivered
+                instance.callback = Some(callback);
+                true
             }
-            None => EventOutcome::UnknownSlot,
+            None => false,
         }
     }
 
@@ -976,6 +1034,7 @@ pub(crate) mod host {
 #[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
+    use crate::events::EVENT_KIND_CLICK;
 
     /// A control whose "platform calls" are strings recorded into the host
     /// [`NativeCtx`] — enough to assert the runtime's dispatch, diff gate and
@@ -1037,8 +1096,12 @@ mod tests {
             Ok(())
         }
 
-        fn on_event(state: &mut Self::State, event: NativeEvent) {
+        fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
             state.events.push(event);
+            // A stand-in payload — enough for the dispatch/callback tests
+            // below, which don't care about decode fidelity (that's
+            // `crate::events`'s and each control's own job).
+            Some(EventPayload::Click)
         }
 
         fn dispose(
@@ -1369,6 +1432,43 @@ mod tests {
         };
         assert!(state_of(&runtime, 1).is_empty(), "no cross-talk");
         assert_eq!(state_of(&runtime, 2), vec![click]);
+    }
+
+    // --- callbacks --------------------------------------------------------
+
+    #[test]
+    fn a_registered_callback_fires_only_for_its_own_slot() {
+        use std::sync::Mutex;
+
+        let mut runtime = runtime();
+        let mut calls = Vec::new();
+        let mut ctx = NativeCtx::new(&mut calls);
+        runtime.create(&mut ctx, &params(1, "a", true)).unwrap();
+        runtime.create(&mut ctx, &params(2, "b", true)).unwrap();
+
+        let fired: Arc<Mutex<Vec<EventPayload>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&fired);
+        assert!(runtime.set_callback(
+            2,
+            Arc::new(move |payload| recorder.lock().unwrap().push(payload))
+        ));
+        // Slot 1 never gets a callback registered — its event must not
+        // panic and must not show up in `fired`.
+
+        let click = NativeEvent {
+            kind: EVENT_KIND_CLICK,
+            detail: 0,
+        };
+        assert_eq!(runtime.on_event(1, click), EventOutcome::Delivered);
+        assert_eq!(runtime.on_event(2, click), EventOutcome::Delivered);
+
+        assert_eq!(*fired.lock().unwrap(), vec![EventPayload::Click]);
+    }
+
+    #[test]
+    fn registering_a_callback_for_an_unknown_slot_is_tolerated() {
+        let mut runtime = runtime();
+        assert!(!runtime.set_callback(404, Arc::new(|_| {})));
     }
 
     #[test]

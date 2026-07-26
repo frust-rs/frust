@@ -250,8 +250,12 @@ fn dispose_control(env: &mut Env<'_>, view: &JObject<'_>) {
 
 // --- exports: FrustNativeListener -------------------------------------------
 
-/// `FrustNativeListener.onClick` (and, once p1-05 lands, its value-listener
-/// siblings) → the runtime's event dispatch.
+/// `FrustNativeListener`'s `onClick`/`onCheckedChanged`/
+/// `onProgressChanged`/`onStartTrackingTouch`/`onStopTrackingTouch` → the
+/// runtime's event dispatch, which decodes the raw `(kind, detail)` pair
+/// into the typed `crate::events::EventPayload` vocabulary
+/// (`crate::runtime::NativeWidget::on_event`) and hands it to the slot's
+/// registered callback (`crate::runtime::NativeRuntime::set_callback`).
 ///
 /// Runs on the main thread, so the control's handler — typically a signal
 /// write, which wakes exactly one frust frame (SPIKE.md's receipt) — runs

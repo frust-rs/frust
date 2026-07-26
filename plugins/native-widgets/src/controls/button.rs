@@ -6,11 +6,13 @@
 //! [`Tier::Relayout`](super::Tier::Relayout); the rest are
 //! [`Tier::Cheap`](super::Tier::Cheap) — see [`super`]'s tier table.
 //!
-//! Clicks are platform-owned: p1-05 attaches the shared
-//! `dev.frust.FrustNativeListener` in
-//! [`create`](crate::runtime::NativeWidget::create) and routes `onClick` into
-//! the runtime's event dispatch. Nothing about that goes through
-//! `RenderRoot::event` (the crate doc's event-bypass rule).
+//! Clicks are platform-owned: `create` attaches the shared
+//! `dev.frust.FrustNativeListener` as an `OnClickListener`, and
+//! [`on_event`](crate::runtime::NativeWidget::on_event) decodes its firing
+//! via [`crate::events::decode_click`] into the runtime's event dispatch.
+//! Nothing about that goes through `RenderRoot::event` (the crate doc's
+//! event-bypass rule) — a click is never caused by `update`'s own setters,
+//! so unlike `Switch`/`Slider` this control needs no echo guard.
 
 use super::{
     BACKGROUND_COLOR, CONTENT_DESCRIPTION, ENABLED, Plan, Setter, TEXT, TEXT_COLOR, TEXT_SIZE_SP,
@@ -33,8 +35,8 @@ pub(crate) struct Button;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ButtonProps {
     /// The differ's slot id. **Not a property** — no setter is ever planned
-    /// for it; `create` needs it to construct the slot's listener (p1-05) and
-    /// it cannot change for a live instance.
+    /// for it; `create` needs it to construct the slot's listener and it
+    /// cannot change for a live instance.
     pub(crate) slot: SlotId,
     /// The caption. Empty is legal (an icon-only button).
     pub(crate) text: String,
@@ -133,7 +135,8 @@ pub(crate) mod platform {
     use crate::NativeWidgetError;
     use crate::android::{NativeCtx, NativeView};
     use crate::controls::platform::{FRAME_CAPACITY, apply_all};
-    use crate::runtime::{NativeWidget, Params};
+    use crate::events::{EventPayload, decode_click};
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
 
     /// `android.widget.Button` — the framework class, not a support/material
     /// one: this plugin never assumes an app dependency it did not ship.
@@ -164,14 +167,21 @@ pub(crate) mod platform {
             props: &Self::Props,
         ) -> Result<(NativeView, Self::State), NativeWidgetError> {
             let view = ctx.new_view(CLASS)?;
-            // p1-05 attaches `ctx.new_listener(props.slot)` here and retains
-            // it in the handle's `extra` list, so the listener is
-            // pair-deleted with the view.
             let plan = ButtonProps::plan(&ButtonProps::platform_default(props.slot), props);
             ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &view, &plan))?;
+            // Attached after the initial plan, matching `Switch`/`Slider`'s
+            // create order (`switch.rs`'s module doc) — a click setter never
+            // fires anyway, but the same order keeps the three controls
+            // predictable.
+            let listener = ctx.new_listener(props.slot)?;
+            ctx.set_on_click_listener(&view, &listener)?;
             let handle = ctx.retain(&view)?;
             let retained = ctx.retain(&view)?;
-            Ok((NativeView::new(handle), ButtonState { view: retained }))
+            let listener_ref = ctx.retain(&listener)?;
+            Ok((
+                NativeView::with_extra(handle, vec![listener_ref]),
+                ButtonState { view: retained },
+            ))
         }
 
         fn update(
@@ -184,15 +194,22 @@ pub(crate) mod platform {
             ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &state.view, &plan))
         }
 
+        fn on_event(_state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_click(event)
+        }
+
         fn dispose(
-            _ctx: &mut NativeCtx<'_, '_>,
-            _state: Self::State,
+            ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
         ) -> Result<(), NativeWidgetError> {
-            // Nothing to detach in p1-04 (p1-05's listener detaches here);
-            // dropping the state releases its global reference, and the
-            // runtime drops the view's immediately afterwards — the paired
-            // delete.
-            Ok(())
+            // Detach so a stray in-flight click can't fire after this slot's
+            // instance is gone (tolerated either way —
+            // `crate::runtime`'s late/duplicate disposal — but nothing keeps
+            // the listener attached once this returns). Dropping `state`
+            // releases its own global reference, and the runtime drops the
+            // view's (and the listener's, retained in `extra`) immediately
+            // afterwards — the paired delete.
+            ctx.set_on_click_listener(&state.view, &JObject::null())
         }
     }
 }

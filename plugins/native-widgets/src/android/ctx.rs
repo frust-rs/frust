@@ -46,9 +46,11 @@
 //! Class lookups still work on those paths — the cached loader outlives the
 //! call that seeded it.
 
-// This module is the *whole* helper surface the six controls (p1-04) and
-// their listeners (p1-05) build on; until those land, most of it has no
-// caller on any target. The attribute is removed with them.
+// This module is the *whole* helper surface the six controls and their
+// listeners build on. Most of it now has a caller on Android; a couple of
+// items (`set_enabled`, `add_child`) stay genuinely unused until a control
+// needs the checked path or a hierarchy-building one is added — the
+// attribute stays for those rather than growing per-item `allow`s.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -342,8 +344,9 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
 
     /// `new FrustNativeListener(slot_id)` — the ONE generic listener class
     /// (`crate::android`'s contract table). Attach it with
-    /// [`Self::set_on_click_listener`] (or, for the value listeners p1-05
-    /// adds, the matching setter), and retain it in the control's
+    /// [`Self::set_on_click_listener`]/[`Self::set_on_checked_change_listener`]/
+    /// [`Self::set_on_seek_bar_change_listener`] (whichever interface the
+    /// control needs), and retain it in the control's
     /// [`NativeView`](crate::android::NativeView) `extra` list so it is
     /// pair-deleted with the view.
     ///
@@ -364,7 +367,8 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
         })
     }
 
-    /// `view.setOnClickListener(listener)`.
+    /// `view.setOnClickListener(listener)` — `Button`'s listener attach.
+    /// Pass `&JObject::null()` to detach (the trait's `dispose` contract).
     ///
     /// # Errors
     /// [`NativeWidgetError::Platform`] when the call throws.
@@ -377,6 +381,42 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
             view,
             jni_str!("setOnClickListener"),
             jni_sig!("(Landroid/view/View$OnClickListener;)V"),
+            &[JValue::Object(listener)],
+        )
+    }
+
+    /// `CompoundButton.setOnCheckedChangeListener(listener)` — `Switch`'s
+    /// value listener attach. Pass `&JObject::null()` to detach.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when the call throws.
+    pub(crate) fn set_on_checked_change_listener(
+        &mut self,
+        view: &JObject<'_>,
+        listener: &JObject<'_>,
+    ) -> Result<(), NativeWidgetError> {
+        self.call_void(
+            view,
+            jni_str!("setOnCheckedChangeListener"),
+            jni_sig!("(Landroid/widget/CompoundButton$OnCheckedChangeListener;)V"),
+            &[JValue::Object(listener)],
+        )
+    }
+
+    /// `SeekBar.setOnSeekBarChangeListener(listener)` — `Slider`'s value
+    /// listener attach. Pass `&JObject::null()` to detach.
+    ///
+    /// # Errors
+    /// [`NativeWidgetError::Platform`] when the call throws.
+    pub(crate) fn set_on_seek_bar_change_listener(
+        &mut self,
+        view: &JObject<'_>,
+        listener: &JObject<'_>,
+    ) -> Result<(), NativeWidgetError> {
+        self.call_void(
+            view,
+            jni_str!("setOnSeekBarChangeListener"),
+            jni_sig!("(Landroid/widget/SeekBar$OnSeekBarChangeListener;)V"),
             &[JValue::Object(listener)],
         )
     }

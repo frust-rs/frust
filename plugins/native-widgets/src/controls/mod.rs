@@ -64,14 +64,15 @@
 //! (`docs/CODE_STANDARDS.md`'s Interaction Semantics): the platform reports a
 //! *requested* value through its listener, and `update` writes the
 //! app-confirmed value back. Two seams make that safe, both live here and both
-//! wired to a real listener by p1-05:
+//! wired to a real listener:
 //!
 //! - **write-back**: `plan` takes the value the platform last reported
 //!   (`observed`), so a props change that leaves the value untouched still
 //!   re-asserts it when the platform has drifted;
 //! - **echo guard**: the state carries a `suppress_events` flag `update` holds
 //!   while it writes the value, because a value setter notifies the platform's
-//!   own listener — p1-05's `on_event` drops an event that arrives while it is
+//!   own listener — each control's `decode_toggled`/`decode_event` (its
+//!   `NativeWidget::on_event` impl) drops an event that arrives while it is
 //!   set. (Android's *synchronous* notification is already dropped one level
 //!   lower, by the runtime's re-entrancy tolerance; the flag is what covers a
 //!   posted one. See `switch.rs` for the full account.)

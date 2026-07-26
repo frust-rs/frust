@@ -10,7 +10,8 @@
 //! `NoSuchMethodError` on two supported API levels. The control therefore maps
 //! the app's `[min, max]` onto the platform's `[0, max - min]`: the plan emits
 //! [`Setter::Max`] as the *span* and [`Setter::Progress`] as the *offset*
-//! value, and p1-05's event decoding adds `min` back on the way out.
+//! value, and [`decode_event`]'s event decoding adds `min` back on the way
+//! out.
 //!
 //! [`Setter::Max`] is always planned **before** [`Setter::Progress`], because
 //! the platform clamps progress to the current max — raising both in the
@@ -28,8 +29,12 @@ use super::{
     owned_text, slot_of,
 };
 use crate::NativeWidgetError;
+use crate::events::{
+    EVENT_KIND_DRAG_END, EVENT_KIND_DRAG_START, EVENT_KIND_VALUE_CHANGED, EventPayload,
+    unpack_value_changed,
+};
 use crate::registry::SlotId;
-use crate::runtime::Params;
+use crate::runtime::{NativeEvent, Params};
 
 /// The registered kind string the api layer injects as `__frustControl`.
 pub(crate) const KIND: &str = "slider";
@@ -47,7 +52,7 @@ pub(crate) struct Slider;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SliderProps {
     /// The differ's slot id — **not a property**; `create` needs it for the
-    /// listener p1-05 attaches.
+    /// listener it attaches.
     pub(crate) slot: SlotId,
     /// The app-owned position, in the app's own `[min, max]` (controlled).
     pub(crate) value: i32,
@@ -114,8 +119,9 @@ impl SliderProps {
     }
 
     /// The setter-call plan for `old` → `new`, given the platform-space value
-    /// the platform last reported (`observed` — p1-05's drag callback), in
-    /// the module doc's mandatory max-before-progress order.
+    /// the platform last reported (`observed` — the drag callback's write,
+    /// via [`decode_event`]), in the module doc's mandatory
+    /// max-before-progress order.
     pub(crate) fn plan<'a>(old: &Self, new: &'a Self, observed: Option<i32>) -> Plan<'a> {
         let mut plan = Plan::new();
         if old.span() != new.span() {
@@ -152,6 +158,37 @@ fn int_or(params: &Params<'_>, key: &str, fallback: i32) -> i32 {
         .unwrap_or(fallback)
 }
 
+/// Decode a `SeekBar.OnSeekBarChangeListener` firing into the typed
+/// vocabulary: a value change reports **platform-space** (module doc's *no
+/// `setMin`*) until `min` is added back here, and the echo guard (module
+/// doc, `switch.rs`'s reference description) suppresses only the value
+/// change a [`Setter::Progress`] we just issued would otherwise echo — a
+/// `DragStart`/`DragEnd` is always user-caused (touch-driven, never
+/// something one of our own setters triggers) and is never suppressed.
+///
+/// Pure and host-testable: no JNI, no `SliderState` — the Android glue
+/// (`platform::Slider`'s `on_event`) is a three-field forward onto this.
+pub(crate) fn decode_event(
+    suppress_events: bool,
+    observed: &mut Option<i32>,
+    min: i32,
+    event: NativeEvent,
+) -> Option<EventPayload> {
+    match event.kind {
+        EVENT_KIND_VALUE_CHANGED => {
+            let (platform_value, from_user) = unpack_value_changed(event.detail);
+            *observed = Some(platform_value);
+            (!suppress_events).then_some(EventPayload::ValueChanged {
+                value: platform_value + min,
+                from_user,
+            })
+        }
+        EVENT_KIND_DRAG_START => Some(EventPayload::DragStart),
+        EVENT_KIND_DRAG_END => Some(EventPayload::DragEnd),
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "android")]
 pub(crate) mod platform {
     //! The Android half: build the `SeekBar`, apply its planned setters, and
@@ -160,11 +197,11 @@ pub(crate) mod platform {
     use jni::objects::JObject;
     use jni::refs::Global;
 
-    use super::{Slider, SliderProps};
+    use super::{EventPayload, Slider, SliderProps, decode_event};
     use crate::NativeWidgetError;
     use crate::android::{NativeCtx, NativeView};
     use crate::controls::platform::{FRAME_CAPACITY, apply_all};
-    use crate::runtime::{NativeWidget, Params};
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
 
     /// `android.widget.SeekBar` — the framework class (a `ProgressBar`
     /// subclass, which is why the progress/max setters resolve there).
@@ -175,13 +212,20 @@ pub(crate) mod platform {
         /// The slider's own global reference (the second one — see
         /// `button.rs`'s note).
         view: Global<JObject<'static>>,
+        /// The app-space range floor as of the last successfully applied
+        /// props — kept here (rather than re-decoding `Props`, which
+        /// `on_event` is never handed) so [`decode_event`] can map a
+        /// platform-space `SeekBar` report back to app space (module doc's
+        /// *no `setMin`*). Updated by `create` and every successful
+        /// `update`.
+        min: i32,
         /// The **platform-space** progress the platform last reported, or
-        /// `None` while the user has never dragged it. p1-05 writes it from
-        /// `on_event`; [`SliderProps::plan`] reads it as the write-back's
-        /// drift signal.
+        /// `None` while the user has never dragged it. Written from
+        /// [`NativeWidget::on_event`] via [`decode_event`];
+        /// [`SliderProps::plan`] reads it as the write-back's drift signal.
         pub(crate) observed: Option<i32>,
         /// Held while `update` writes a value the platform will notify a
-        /// listener about — p1-05's `on_event` drops an event that arrives
+        /// listener about — [`decode_event`] drops an event that arrives
         /// while it is set.
         pub(crate) suppress_events: bool,
     }
@@ -199,17 +243,20 @@ pub(crate) mod platform {
             props: &Self::Props,
         ) -> Result<(NativeView, Self::State), NativeWidgetError> {
             let view = ctx.new_view(CLASS)?;
-            // p1-05 attaches `ctx.new_listener(props.slot)` here (as an
-            // `OnSeekBarChangeListener`) and retains it in the handle's
-            // `extra` list.
+            // The plan runs before the listener is attached — see
+            // `switch.rs`'s create for why (the reference description).
             let plan = SliderProps::plan(&SliderProps::platform_default(props.slot), props, None);
             ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &view, &plan))?;
+            let listener = ctx.new_listener(props.slot)?;
+            ctx.set_on_seek_bar_change_listener(&view, &listener)?;
             let handle = ctx.retain(&view)?;
             let retained = ctx.retain(&view)?;
+            let listener_ref = ctx.retain(&listener)?;
             Ok((
-                NativeView::new(handle),
+                NativeView::with_extra(handle, vec![listener_ref]),
                 SliderState {
                     view: retained,
+                    min: props.min,
                     observed: None,
                     suppress_events: false,
                 },
@@ -228,17 +275,23 @@ pub(crate) mod platform {
             state.suppress_events = false;
             if applied.is_ok() {
                 state.observed = None;
+                state.min = new.min;
             }
             applied
         }
 
+        fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_event(state.suppress_events, &mut state.observed, state.min, event)
+        }
+
         fn dispose(
-            _ctx: &mut NativeCtx<'_, '_>,
-            _state: Self::State,
+            ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
         ) -> Result<(), NativeWidgetError> {
-            // p1-05 detaches the listener here; dropping the state releases
-            // its global reference either way.
-            Ok(())
+            // Detach so a stray in-flight drag can't fire after this slot's
+            // instance is gone; dropping `state` releases its own global
+            // reference either way.
+            ctx.set_on_seek_bar_change_listener(&state.view, &JObject::null())
         }
     }
 }
@@ -335,5 +388,79 @@ mod tests {
             SliderProps::plan(&old, &new, None),
             vec![Setter::Max(20), Setter::Progress(0)]
         );
+    }
+
+    // --- events / echo guard --------------------------------------------
+
+    fn value_changed_event(platform_value: i32, from_user: bool) -> NativeEvent {
+        NativeEvent {
+            kind: EVENT_KIND_VALUE_CHANGED,
+            detail: crate::events::pack_value_changed(platform_value, from_user),
+        }
+    }
+
+    #[test]
+    fn a_user_drag_decodes_to_app_space_and_updates_the_drift_signal() {
+        // Platform-space 5 with an app-space min of 10 is app-space 15.
+        let mut observed = None;
+        let payload = decode_event(false, &mut observed, 10, value_changed_event(5, true));
+        assert_eq!(
+            payload,
+            Some(EventPayload::ValueChanged {
+                value: 15,
+                from_user: true,
+            })
+        );
+        assert_eq!(observed, Some(5), "observed stays platform-space");
+    }
+
+    #[test]
+    fn an_echo_from_updates_own_setter_is_suppressed_but_still_updates_observed() {
+        // The dispatch plan p1-05's acceptance criterion asks for: a
+        // `ValueChanged` `update`'s own `Setter::Progress` caused must not
+        // fire the app callback, but the write-back drift signal still has
+        // to see the platform's true (platform-space) value.
+        let mut observed = None;
+        let payload = decode_event(true, &mut observed, 0, value_changed_event(7, false));
+        assert_eq!(payload, None, "an echo must not reach the app callback");
+        assert_eq!(
+            observed,
+            Some(7),
+            "the write-back signal is still updated during the echo"
+        );
+    }
+
+    #[test]
+    fn drag_start_and_end_are_never_suppressed_and_do_not_touch_observed() {
+        let mut observed = Some(3);
+        let start = NativeEvent {
+            kind: EVENT_KIND_DRAG_START,
+            detail: 0,
+        };
+        let end = NativeEvent {
+            kind: EVENT_KIND_DRAG_END,
+            detail: 0,
+        };
+        assert_eq!(
+            decode_event(true, &mut observed, 0, start),
+            Some(EventPayload::DragStart),
+            "a drag gesture is always user-caused, never suppressed"
+        );
+        assert_eq!(
+            decode_event(true, &mut observed, 0, end),
+            Some(EventPayload::DragEnd)
+        );
+        assert_eq!(observed, Some(3), "neither kind touches the drift signal");
+    }
+
+    #[test]
+    fn a_misrouted_kind_decodes_to_nothing() {
+        let mut observed = Some(1);
+        let click = NativeEvent {
+            kind: crate::events::EVENT_KIND_CLICK,
+            detail: 0,
+        };
+        assert_eq!(decode_event(false, &mut observed, 0, click), None);
+        assert_eq!(observed, Some(1));
     }
 }

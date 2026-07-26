@@ -7,7 +7,7 @@
 //!
 //! A `Switch` is **controlled** (`docs/CODE_STANDARDS.md`'s Interaction
 //! Semantics): the platform reports the *requested* value through
-//! `OnCheckedChangeListener` (p1-05), and the app-confirmed value comes back
+//! `OnCheckedChangeListener`, and the app-confirmed value comes back
 //! down as props. The platform, unlike a frust widget, flips its own visual
 //! state the instant the user touches it — so two things have to be true, and
 //! both live in this module:
@@ -23,7 +23,7 @@
 //!    runtime mid-`update` and is dropped there (`crate::runtime`'s
 //!    re-entrancy tolerance — free, but it only covers the synchronous case),
 //!    and the Android state's `suppress_events` flag, held across the whole
-//!    write, which is the explicit check p1-05's `on_event` makes and which
+//!    write, which is the explicit check [`decode_toggled`] makes and which
 //!    also covers a posted or animation-deferred notification arriving after
 //!    `update` returned.
 //!
@@ -39,8 +39,9 @@ use super::{
     slot_of,
 };
 use crate::NativeWidgetError;
+use crate::events::{EVENT_KIND_TOGGLED, EventPayload, unpack_bool};
 use crate::registry::SlotId;
-use crate::runtime::Params;
+use crate::runtime::{NativeEvent, Params};
 
 /// The registered kind string the api layer injects as `__frustControl`.
 pub(crate) const KIND: &str = "switch";
@@ -54,7 +55,7 @@ pub(crate) struct Switch;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SwitchProps {
     /// The differ's slot id — **not a property**; `create` needs it for the
-    /// listener p1-05 attaches.
+    /// listener it attaches.
     pub(crate) slot: SlotId,
     /// The app-owned checked state (controlled — see the module doc).
     pub(crate) checked: bool,
@@ -128,6 +129,32 @@ impl SwitchProps {
     }
 }
 
+/// Decode a `CompoundButton.OnCheckedChangeListener` firing into the typed
+/// vocabulary (module doc's *echo guard*): the write-back drift signal
+/// (`observed`) is updated unconditionally, but the app-facing
+/// [`EventPayload`] is suppressed while `suppress_events` is held — a
+/// `Toggled` `update`'s own [`Setter::Checked`] caused must never reach the
+/// app callback.
+///
+/// `None` when `event.kind` is not the toggled kind — defensive, since
+/// `Switch`'s listener is only ever attached as an
+/// `OnCheckedChangeListener` and so can only ever report this one kind.
+///
+/// Pure and host-testable: no JNI, no `SwitchState` — the Android glue
+/// (`platform::Switch`'s `on_event`) is a two-field forward onto this.
+pub(crate) fn decode_toggled(
+    suppress_events: bool,
+    observed: &mut Option<bool>,
+    event: NativeEvent,
+) -> Option<EventPayload> {
+    if event.kind != EVENT_KIND_TOGGLED {
+        return None;
+    }
+    let checked = unpack_bool(event.detail);
+    *observed = Some(checked);
+    (!suppress_events).then_some(EventPayload::Toggled(checked))
+}
+
 #[cfg(target_os = "android")]
 pub(crate) mod platform {
     //! The Android half: build the `Switch`, apply its planned setters, and
@@ -136,11 +163,11 @@ pub(crate) mod platform {
     use jni::objects::JObject;
     use jni::refs::Global;
 
-    use super::{Switch, SwitchProps};
+    use super::{EventPayload, Switch, SwitchProps, decode_toggled};
     use crate::NativeWidgetError;
     use crate::android::{NativeCtx, NativeView};
     use crate::controls::platform::{FRAME_CAPACITY, apply_all};
-    use crate::runtime::{NativeWidget, Params};
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
 
     /// `android.widget.Switch` — the *framework* switch, not
     /// `SwitchCompat`/`SwitchMaterial`: this plugin never assumes an
@@ -153,13 +180,14 @@ pub(crate) mod platform {
         /// `button.rs`'s note).
         view: Global<JObject<'static>>,
         /// The value the platform last reported through its listener, or
-        /// `None` while the user has never touched it. **p1-05 writes this**
-        /// from `on_event`; [`SwitchProps::plan`] reads it as the
-        /// write-back's drift signal (module doc).
+        /// `None` while the user has never touched it. Written from
+        /// [`NativeWidget::on_event`] via [`decode_toggled`];
+        /// [`SwitchProps::plan`] reads it as the write-back's drift signal
+        /// (module doc).
         pub(crate) observed: Option<bool>,
         /// Held while `update` writes a value the platform will notify a
-        /// listener about — the echo guard p1-05's `on_event` checks before
-        /// invoking the app's callback (module doc).
+        /// listener about — the echo guard [`decode_toggled`] checks before
+        /// producing an [`EventPayload`] (module doc).
         pub(crate) suppress_events: bool,
     }
 
@@ -176,16 +204,20 @@ pub(crate) mod platform {
             props: &Self::Props,
         ) -> Result<(NativeView, Self::State), NativeWidgetError> {
             let view = ctx.new_view(CLASS)?;
-            // p1-05 attaches `ctx.new_listener(props.slot)` here (as an
-            // `OnCheckedChangeListener`) and retains it in the handle's
-            // `extra` list. Nothing is attached yet, so the create plan below
-            // cannot echo.
+            // The plan runs before the listener is attached, so an initial
+            // props value that differs from the platform default (e.g.
+            // `checked: true` from the start) can never echo back into the
+            // runtime at all — stronger than the re-entrancy tolerance
+            // `update`'s own writes rely on.
             let plan = SwitchProps::plan(&SwitchProps::platform_default(props.slot), props, None);
             ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &view, &plan))?;
+            let listener = ctx.new_listener(props.slot)?;
+            ctx.set_on_checked_change_listener(&view, &listener)?;
             let handle = ctx.retain(&view)?;
             let retained = ctx.retain(&view)?;
+            let listener_ref = ctx.retain(&listener)?;
             Ok((
-                NativeView::new(handle),
+                NativeView::with_extra(handle, vec![listener_ref]),
                 SwitchState {
                     view: retained,
                     observed: None,
@@ -202,7 +234,7 @@ pub(crate) mod platform {
         ) -> Result<(), NativeWidgetError> {
             let plan = SwitchProps::plan(old, new, state.observed);
             // The guard is held across the whole plan, not just the checked
-            // setter: the flag is what p1-05's listener consults, and a
+            // setter: the flag is what `decode_toggled` consults, and a
             // partially-applied plan must not leave it set.
             state.suppress_events = true;
             let applied = ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &state.view, &plan));
@@ -217,13 +249,18 @@ pub(crate) mod platform {
             applied
         }
 
+        fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_toggled(state.suppress_events, &mut state.observed, event)
+        }
+
         fn dispose(
-            _ctx: &mut NativeCtx<'_, '_>,
-            _state: Self::State,
+            ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
         ) -> Result<(), NativeWidgetError> {
-            // p1-05 detaches the listener here; dropping the state releases
-            // its global reference either way.
-            Ok(())
+            // Detach so a stray in-flight toggle can't fire after this
+            // slot's instance is gone; dropping `state` releases its own
+            // global reference either way.
+            ctx.set_on_checked_change_listener(&state.view, &JObject::null())
         }
     }
 }
@@ -305,5 +342,49 @@ mod tests {
             vec![Setter::ThumbTint(None), Setter::TrackTint(None)],
             "unlike a text colour, a tint list is clearable (setter takes null)"
         );
+    }
+
+    // --- events / echo guard --------------------------------------------
+
+    fn toggled_event(checked: bool) -> NativeEvent {
+        NativeEvent {
+            kind: EVENT_KIND_TOGGLED,
+            detail: crate::events::pack_bool(checked),
+        }
+    }
+
+    #[test]
+    fn a_user_toggle_decodes_and_updates_the_drift_signal() {
+        let mut observed = None;
+        let payload = decode_toggled(false, &mut observed, toggled_event(true));
+        assert_eq!(payload, Some(EventPayload::Toggled(true)));
+        assert_eq!(observed, Some(true));
+    }
+
+    #[test]
+    fn an_echo_from_updates_own_setter_is_suppressed_but_still_updates_observed() {
+        // The dispatch plan p1-05's acceptance criterion asks for: a
+        // `Toggled` `update`'s own `Setter::Checked` caused must not fire the
+        // app callback (it decodes to `None`), but the write-back drift
+        // signal still has to see the platform's true value.
+        let mut observed = None;
+        let payload = decode_toggled(true, &mut observed, toggled_event(true));
+        assert_eq!(payload, None, "an echo must not reach the app callback");
+        assert_eq!(
+            observed,
+            Some(true),
+            "the write-back signal is still updated during the echo"
+        );
+    }
+
+    #[test]
+    fn a_misrouted_kind_decodes_to_nothing_and_leaves_observed_untouched() {
+        let mut observed = Some(false);
+        let click = NativeEvent {
+            kind: crate::events::EVENT_KIND_CLICK,
+            detail: 0,
+        };
+        assert_eq!(decode_toggled(false, &mut observed, click), None);
+        assert_eq!(observed, Some(false));
     }
 }

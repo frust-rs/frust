@@ -9,10 +9,10 @@
 //! this crate lands incrementally across that plan's tasks — today it is the
 //! crate skeleton, the retained-handle [`registry`] every later phase's
 //! create/update/dispose path is built over, the `runtime` those paths
-//! dispatch through, and the six Android `controls` (`Button`, `Label`,
-//! `Switch`, `Slider`, `ProgressBar`, `Image`) that runtime serves. Still to
-//! come: their listeners (p1-05), the app-facing builders (p1-06) and the
-//! Apple arm (Phase 2).
+//! dispatch through, the six Android `controls` (`Button`, `Label`,
+//! `Switch`, `Slider`, `ProgressBar`, `Image`) that runtime serves, and the
+//! typed `events` vocabulary their listeners decode into. Still to come:
+//! the app-facing builders (p1-06) and the Apple arm (Phase 2).
 //!
 //! # One factory, one listener, N controls
 //!
@@ -72,10 +72,15 @@ mod android;
 // props/plan surface has no caller outside the tests.
 #[allow(dead_code)]
 mod controls;
+// The typed event vocabulary (`EventPayload`) and the kind/detail codec every
+// interactive control's listener decodes through — platform-agnostic and
+// host-tested for the same reason `controls` is (see that module's `allow`).
+#[allow(dead_code)]
+mod events;
 mod registry;
 // The runtime's surface is consumed by the platform arms — this crate's JNI
-// exports and the six controls today, their listeners in p1-05, the Apple arm
-// in Phase 2 — plus its own host tests, which a plain (non-test) build does
+// exports, the six controls, and their listeners today, the Apple arm in
+// Phase 2 — plus its own host tests, which a plain (non-test) build does
 // not count. On a non-Android host none of those arms compile, so much of the
 // surface is legitimately uncalled there; the attribute goes away with the
 // Apple arm rather than growing per-item `allow`s in the meantime.
