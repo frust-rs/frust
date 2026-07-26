@@ -36,6 +36,11 @@
     blob (see `docs/ARCHITECTURE.md`'s GPU pipeline cache).
   - `frust-drive`'s `process` module — a `kill(2)` FFI shim (std exposes no
     `killpg`) that group-kills a streamed child's Unix process group.
+  - `frust-camera`'s `apple` backend — AVFoundation message sends behind one
+    `QueueBound<T>` `unsafe impl Send/Sync` (serial-queue confinement, one
+    `# Safety` note), and `frust_camera_session_handle`'s raw-pointer C
+    export (retain contract **+1** — a +0 borrow proved unhonourable across
+    the FFI boundary).
 - **No unwind across FFI.** Every platform export routes through
   `frust-shell-common`'s `guard` helper (`catch_unwind` + log, returning a benign
   default) rather than unwinding into JVM-/Swift-owned stack frames — a panic
@@ -117,15 +122,18 @@ This keeps the tunable visible in one place and tells a future reader whether
 | Test-only fakes | `Fake<Trait>` | `FakeProcessRunner`, `FakeEnv` |
 | Widget pairs | `<Name>View` (declarative) / `<Name>Widget` (retained) | `TextView` / `TextWidget` |
 | JNI exports | `Java_<fixed_package>_<FixedClass>_native<Name>` | `Java_dev_frust_FrustSurfaceView_nativeOnFrame` |
-| Platform-view factory `viewType` | Android: fully-qualified `dev.frust.<Name>Factory` class; iOS: bare `@objc(<Name>)` runtime name | `dev.frust.MapFactory` / `@objc(MapFactory)` |
+| Platform-view factory `viewType` | Android: any fully-qualified class under `dev.frust.*` (the embedding owns the root package); iOS: bare `@objc(<Name>)` runtime name | `dev.frust.camera.CameraPreviewFactory` / `@objc(MapFactory)` |
 
 JNI export names are LAW: the package/class (`dev.frust.FrustSurfaceView`)
 is fixed across every generated app, so the mangled symbol stays stable
 regardless of the app's own package. A `platform_view` factory's `viewType`
-naming is LAW too: the embedding module's `FrustViewHost` resolves it as a
-`dev.frust.<Name>Factory` class via the app classloader (Android) or the
-bare `@objc(<Name>)` name via `NSClassFromString` (iOS) — the embedding
-module hard-codes both lookup shapes, so neither convention is optional.
+naming is LAW too, widened from `dev.frust.<Name>Factory`: **any
+fully-qualified class under `dev.frust.*`** via the app classloader
+(Android; `dev.frust.camera.CameraPreviewFactory` is the precedent) or the
+bare `@objc(<Name>)` name via `NSClassFromString` (iOS). Both hosts check in
+the same order — **prefix (Android) then interface/protocol assignability,
+before instantiation** — never the reverse; constructing an untrusted class
+before the check passes runs its side effects unchecked.
 
 ## Plugin Conventions
 
@@ -161,6 +169,13 @@ Structure) follow these conventions:
   Info.plist key, or a Gradle module include) checks first and no-ops if already
   present — the contract `frust-drive::plugin::add_plugin` implements (see
   `docs/ARCHITECTURE.md`'s Plugin flow).
+- **A call that blocks pairs with `spawn_blocking`, and every blockable path
+  is UI-thread-guarded.** A gated/platform-answer call (secure-storage's
+  biometric prompt; camera's `request_permission`/`take_picture`) fails fast
+  with a typed error (`CameraError::UiThread`) on the platform's UI thread
+  instead of parking there. A call that answers without waiting (e.g. an
+  already-decided permission status) is exempt and stays callable from
+  anywhere.
 
 ## Platform-View Conventions
 
@@ -262,29 +277,24 @@ interactive widget in `frust-widgets`:
 
 - **Controlled components never self-mutate.** `Checkbox`/`Slider` report the
   *requested* value through `on_toggle`/`on_change` and leave `checked`/`value`
-  untouched until the next `rebuild` feeds the app-confirmed value back down —
-  never flip `self.checked` (or similar) inline in a handler. `TextInput` is
-  controlled too: `rebuild` applies the view's `value` to the widget's
-  `TextEditor` set-if-different, so an app that rejects/transforms input in
-  `on_change` sees its own value win next frame.
+  untouched until the next `rebuild` feeds the app-confirmed value back down
+  — never flip `self.checked` inline in a handler. `TextInput` is controlled
+  too: `rebuild` applies the view's `value` set-if-different, so an app that
+  rejects/transforms input in `on_change` sees its own value win next frame.
 
 - **Focus routes by recorded path, like capture; `Key`/`Ime` events never
-  hit-test.** `EventCtx::request_focus`/`release_focus` record/clear the focused
-  child exactly like `capture_pointer`, and a container simply forwards
-  `Key`/`Ime` events to its focused child; a `Down` that doesn't (re)claim focus
-  on the child it hits blurs the chain. **A structural container rebuild clears
-  capture and focus only where identity is actually lost** —
-  stable-prefix/key-matched, not a blanket clear: positional reconciliation clears
-  a path only at/after the first index whose type changed; keyed reconciliation
-  clears it only for a removed/type-swapped child. `RenderRoot`'s cached
-  `focus_active`/`ime_state` self-correct on the next event pass.
+  hit-test.** A container simply forwards `Key`/`Ime` events to its focused
+  child; a `Down` that doesn't (re)claim focus on the child it hits blurs the
+  chain. **A structural container rebuild clears capture and focus only
+  where identity is actually lost** — stable-prefix/key-matched, not a
+  blanket clear. `RenderRoot`'s cached `focus_active`/`ime_state`
+  self-correct on the next event pass.
 
-- **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)`
-  marks a `Flex` child list for identity-based reconciliation; once any child in a
-  list is keyed, every child must be (a mixed or duplicate key set
-  `debug_assert!`s and falls back to positional matching in release builds — never
-  panics live). A matched reorder relocates the existing widget, preserving its
-  state, rather than rebuilding it.
+- **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key,
+  view)` marks a `Flex` child list for identity-based reconciliation; a
+  mixed or duplicate key set `debug_assert!`s and falls back to positional
+  matching in release (never panics live). A matched reorder relocates the
+  existing widget rather than rebuilding it.
 
 - **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`,
   `MOUSE_SLOP`), scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`,
@@ -311,14 +321,12 @@ interactive widget in `frust-widgets`:
   (`docs/ARCHITECTURE.md`'s Event pipeline) — a handler reaching for real state
   there panics on the `()` downcast, a deliberate tripwire.
 
-- **A container that suppresses routing to its children must cancel their capture,
-  clear their focus, and publish a cleared IME surface — in that order, with no
-  bypass.** This binds any container that stops forwarding events to an
-  already-interactive child (the navigator's mid-transition input block is the
-  reference impl — see `docs/ARCHITECTURE.md`'s Navigation flow). Skipping this
-  leaves a child armed (a later `Up` it never receives fires against a widget the
-  container stopped routing to) or a stale focus/IME surface behind after the
-  block lifts.
+- **A container that suppresses routing to its children must cancel their
+  capture, clear their focus, and publish a cleared IME surface — in that
+  order, with no bypass.** This binds any container that stops forwarding
+  events to an already-interactive child (the navigator's mid-transition
+  input block is the reference impl). Skipping this leaves a child armed or
+  a stale focus/IME surface behind after the block lifts.
 
 ## Semantics Conventions
 
@@ -329,26 +337,18 @@ pass):
   role/label/state worth reporting; a widget with nothing to say about itself
   needs no impl at all.
 - **A container MUST forward to every child via `ChildPod::semantics_child`**,
-  never by calling a child's `semantics` directly — this threads the absolute
-  origin the same way `paint_child`/`event_child` do. Skipping a child here
+  never by calling a child's `semantics` directly. Skipping a child here
   silently drops its whole subtree from the accessibility tree with no
-  compile-time or test signal, so every new container widget needs a `semantics`
-  impl even a transparent one that just forwards:
-
-  ```rust
-  fn semantics(&self, ctx: &mut SemanticsCtx) { self.child.semantics_child(ctx); }
-  ```
-
+  compile-time or test signal, so every new container widget needs a
+  `semantics` impl even a transparent one that just forwards
+  (`self.child.semantics_child(ctx)`).
 - **Keep it minimal: role, label, state, and bounds only.** This gives the
-  per-shell adapter (`accesskit_winit`/`accesskit_android`/`accesskit_ios` — see
-  `docs/ARCHITECTURE.md`'s Semantics pass) just enough to build on — no
-  live-region announcements, custom actions, or adapter wiring belong here; that
-  integration lives in a shell, not `frust-core`.
-- **A platform adapter gates its pushes on `semantics_generation`/
-  `semantics_if_changed`, not on pushing every frame unconditionally.** All three
-  shipping adapters compare the last-seen generation before rebuilding a
-  `TreeUpdate`; iOS also serves a cached snapshot to a newly-activated screen
-  reader so gating never starves a VoiceOver connect.
+  per-shell adapter just enough to build on — no live-region announcements,
+  custom actions, or adapter wiring belong here; that integration lives in a
+  shell, not `frust-core`.
+- **A platform adapter gates its pushes on `semantics_generation`, not on
+  pushing every frame unconditionally.** All three shipping adapters compare
+  the last-seen generation before rebuilding a `TreeUpdate`.
 
 ## Instrumentation & Frame-Gate Conventions
 
