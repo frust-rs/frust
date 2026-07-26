@@ -47,14 +47,16 @@ import java.util.concurrent.atomic.AtomicInteger
  * | [requestPermission] | `() -> int` | 0 Granted / 1 Denied / 2 NeedsUi / 3 Pending |
  * | [openCamera] | `(int lensFacing) -> int` | ≥0 session id; <0 error code |
  * | [closeCamera] | `(int session) -> void` | |
- * | [takePicture] | `(int session, String path) -> int` | 0 started |
+ * | [takePicture] | `(int session, long requestId, String path) -> int` | 0 started; [nativeOnPictureTaken] echoes `requestId` back |
  * | [previewAspectRatio] | `(int session) -> float` | 0.0 until the first `TransformationInfo` |
  * | [startImageStream] | `(int session, int format) -> int` | 0 started; <0 refused |
  * | [stopImageStream] | `(int session) -> void` | unbinds the analyzer only |
  *
  * Kotlin → Rust ([nativeOnPermissionResult], [nativeOnCameraState],
  * [nativeOnPictureTaken], [nativeOnImageFrame] — the last one is task 09's
- * single contract addition). The package is
+ * single contract addition; [nativeOnPictureTaken]'s `requestId` is round-1 fix
+ * f1's, the one widening since the contract was frozen — see *Correlating a
+ * capture completion* below). The package is
  * baked into those symbols' mangled names
  * (`Java_dev_frust_camera_FrustCameraHost_native*`), so **this class may never
  * move once shipped** — same rule as `dev.frust.FrustSurfaceView`'s exports.
@@ -64,11 +66,34 @@ import java.util.concurrent.atomic.AtomicInteger
  * ## Threading
  *
  * Every static above is called over JNI from a Rust background thread (the
- * plugin never-on-the-UI-thread invariant) and **must not block**. CameraX's
- * binding APIs and [LifecycleRegistry] are main-thread-only, so each static
- * does its bookkeeping synchronously (allocating the session id, reading a
- * volatile) and posts the platform work to [mainExecutor]; results come back
- * asynchronously through the `nativeOn*` exports.
+ * plugin never-on-the-UI-thread invariant, which the Rust side now enforces
+ * with a `Looper.myLooper() == Looper.getMainLooper()` guard) and **must not
+ * block**. CameraX's binding APIs and [LifecycleRegistry] are main-thread-only,
+ * so each static does its bookkeeping synchronously (allocating the session id,
+ * reading a volatile) and posts the platform work to [mainExecutor]; results
+ * come back asynchronously through the `nativeOn*` exports.
+ *
+ * **A completion must never be delivered on the main thread.** The Rust caller
+ * of [takePicture] blocks until [nativeOnPictureTaken] answers it, so routing
+ * that answer through [mainExecutor] would make the answer depend on the main
+ * Looper being free — a self-deadlock for a (misbehaving, now refused)
+ * main-thread caller, and needless coupling to UI-thread congestion for
+ * everyone else. Still capture therefore runs on its own [captureExecutor]:
+ * both the `takePicture` issue and the `OnImageSavedCallback` it hands CameraX,
+ * matching what [analysisExecutor] already does for the image stream. Only work
+ * CameraX genuinely requires on the main thread — `bindToLifecycle`,
+ * [LifecycleRegistry] mutations, `setSurfaceProvider` — stays on
+ * [mainExecutor].
+ *
+ * ## Correlating a capture completion (LAW)
+ *
+ * [takePicture] carries a Rust-minted `requestId` and [nativeOnPictureTaken]
+ * **must echo back the id of the capture it belongs to** — never a "current"
+ * id read from session state. Each call's `OnImageSavedCallback` is a fresh
+ * closure, so it simply captures its own `requestId`. The Rust side drops any
+ * completion whose id is not the one it is waiting for; without the echo, a
+ * late completion for a timed-out capture would resolve the *next* one and a
+ * caller would believe a photo was written when none was.
  *
  * ## Session lifetime is independent of any view
  *
@@ -197,15 +222,45 @@ object FrustCameraHost {
 
     /**
      * Runs inline when already on the main thread, else posts. Used for every
-     * CameraX call, every [LifecycleRegistry] mutation, and as the callback
-     * executor handed to CameraX (`provideSurface`,
-     * `setTransformationInfoListener`, `takePicture`).
+     * main-thread-only CameraX call (`bindToLifecycle`, `unbind`,
+     * `setSurfaceProvider`), every [LifecycleRegistry] mutation, and as the
+     * callback executor for the preview seam (`provideSurface`,
+     * `setTransformationInfoListener`).
+     *
+     * **Not** for still capture or image analysis: both deliver into a blocked
+     * or app-visible Rust callback, so they run on [captureExecutor] /
+     * [analysisExecutor] instead (class doc's *Threading*).
      */
     internal val mainExecutor: Executor = Executor { command ->
         if (Looper.myLooper() == Looper.getMainLooper()) {
             command.run()
         } else {
             mainHandler.post(command)
+        }
+    }
+
+    /**
+     * The plugin-owned thread still capture runs on: [takePicture]'s own
+     * issue-side work (creating the parent directory — disk I/O that has no
+     * business on the main thread — and building the
+     * [ImageCapture.OutputFileOptions]) *and* the executor CameraX delivers
+     * that capture's [ImageCapture.OnImageSavedCallback] on.
+     *
+     * The callback half is the load-bearing one: it is what makes a
+     * [nativeOnPictureTaken] answer independent of the main Looper being free,
+     * so a blocked Rust caller is woken by this thread rather than by a queue
+     * it might itself be sitting in (class doc's *Threading*).
+     *
+     * CameraX's `ImageCapture.takePicture` re-posts itself to the main thread
+     * internally when called from anywhere else (verified in camera-core
+     * 1.6.1), so the *initiation* is main-thread-bound by CameraX no matter
+     * which executor issues it — that post returns immediately and never
+     * occupies this thread, which is why one shared single-thread executor is
+     * enough. Same shape as [analysisExecutor]: lazy, single-threaded, daemon.
+     */
+    private val captureExecutor: ExecutorService by lazy {
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "frust-camera-capture").apply { isDaemon = true }
         }
     }
 
@@ -368,35 +423,45 @@ object FrustCameraHost {
     }
 
     /**
-     * `takePicture(int session, String path) -> int`. Returns `0` once the
-     * capture has been started (completion arrives via [nativeOnPictureTaken])
-     * or [ERROR_UNKNOWN_SESSION].
+     * `takePicture(int session, long requestId, String path) -> int`. Returns
+     * `0` once the capture has been *accepted* (its completion arrives via
+     * [nativeOnPictureTaken], stamped with this exact [requestId]) or
+     * [ERROR_UNKNOWN_SESSION].
+     *
+     * [requestId] is minted by the Rust caller and is opaque here: this method
+     * only has to carry it into the per-call [ImageCapture.OnImageSavedCallback]
+     * closure and hand it back unchanged (class doc's *Correlating a capture
+     * completion* LAW).
+     *
+     * Everything below runs on [captureExecutor], never [mainExecutor] — the
+     * completion must not depend on the main Looper being free (class doc's
+     * *Threading*).
      */
     @JvmStatic
-    fun takePicture(session: Int, path: String): Int {
+    fun takePicture(session: Int, requestId: Long, path: String): Int {
         val entry = sessions[session] ?: return ERROR_UNKNOWN_SESSION
-        mainExecutor.execute {
+        captureExecutor.execute {
             val file = File(path)
             try {
                 file.parentFile?.mkdirs()
                 val options = ImageCapture.OutputFileOptions.Builder(file).build()
                 entry.imageCapture.takePicture(
                     options,
-                    mainExecutor,
+                    captureExecutor,
                     object : ImageCapture.OnImageSavedCallback {
                         override fun onImageSaved(results: ImageCapture.OutputFileResults) {
-                            notifyPictureTaken(session, true, path)
+                            notifyPictureTaken(session, requestId, true, path)
                         }
 
                         override fun onError(exception: ImageCaptureException) {
                             Log.w(TAG, "frust-camera: takePicture($session) failed", exception)
-                            notifyPictureTaken(session, false, path)
+                            notifyPictureTaken(session, requestId, false, path)
                         }
                     },
                 )
             } catch (e: Throwable) {
                 Log.w(TAG, "frust-camera: takePicture($session) could not start", e)
-                notifyPictureTaken(session, false, path)
+                notifyPictureTaken(session, requestId, false, path)
             }
         }
         return 0
@@ -474,9 +539,18 @@ object FrustCameraHost {
     @JvmStatic
     external fun nativeOnCameraState(session: Int, state: Int)
 
-    /** Reports a [takePicture] completion. */
+    /**
+     * Reports a [takePicture] completion, echoing back the `requestId` **that
+     * capture was started with** — class doc's *Correlating a capture
+     * completion* LAW.
+     */
     @JvmStatic
-    external fun nativeOnPictureTaken(session: Int, ok: Boolean, path: String)
+    external fun nativeOnPictureTaken(
+        session: Int,
+        requestId: Long,
+        ok: Boolean,
+        path: String,
+    )
 
     /**
      * Delivers one [ImageAnalysis] frame, on [analysisExecutor].
@@ -855,9 +929,9 @@ object FrustCameraHost {
         }
     }
 
-    private fun notifyPictureTaken(session: Int, ok: Boolean, path: String) {
+    private fun notifyPictureTaken(session: Int, requestId: Long, ok: Boolean, path: String) {
         try {
-            nativeOnPictureTaken(session, ok, path)
+            nativeOnPictureTaken(session, requestId, ok, path)
         } catch (e: Throwable) {
             Log.w(TAG, "frust-camera: nativeOnPictureTaken unavailable", e)
         }

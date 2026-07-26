@@ -138,22 +138,37 @@ no capture/permission code of its own.
 
 ---
 
-## 3. Blocking calls — pair with `spawn_blocking`
+## 3. Blocking calls — pair with `spawn_blocking`, never the UI thread
 
-`Camera::request_permission` **blocks** until the platform's permission
-machinery resolves (a system dialog on Android; AVFoundation's
-`requestAccessForMediaType:completionHandler:` bridged to a blocking call on
-iOS) — exactly like `frust-secure-storage`'s gated calls. Pair it with
-`frust-reactive`'s `spawn_blocking` (an app-tier concern — the plugin itself
-stays framework-free per the platform-plugin charter):
+**Two** calls block until the platform answers, exactly like
+`frust-secure-storage`'s gated calls:
+
+| Call | Blocks until | Deadline (Android / Apple) |
+|---|---|---|
+| `Camera::request_permission` | the permission machinery resolves (a system dialog on Android; AVFoundation's `requestAccessForMediaType:completionHandler:` on iOS) | 120 s / 120 s |
+| `CameraSession::take_picture` | the photo has been written to disk, or the capture failed | 15 s / 10 s |
+
+Pair each with `frust-reactive`'s `spawn_blocking` (an app-tier concern — the
+plugin itself stays framework-free per the platform-plugin charter):
 
 ```rust
 let status = frust_reactive::spawn_blocking(Camera::request_permission).await??;
+
+// `take_picture` takes `&self`, so hold the session behind a shared handle
+// (e.g. `Arc<CameraSession>`) and move a clone of that into the closure:
+let session = Arc::clone(&session);
+let path = photo_path.clone();
+frust_reactive::spawn_blocking(move || session.take_picture(&path)).await??;
 ```
 
-`CameraSession::take_picture` is asynchronous on both real backends (it only
-reports whether the capture *request* was accepted); its result arrives
-through the platform-specific completion path, not a blocking return.
+**Never call either on the UI thread.** Every completion is relayed through the
+platform's main thread, so a UI-thread caller would park on the very queue
+carrying its own wake-up. Both backends refuse such a call immediately with
+`CameraError::UiThread` instead of freezing until the deadline above — a
+diagnosable error, not a silent hang.
+
+`take_picture` correlates each attempt with its own completion, so `Ok(())`
+means *that* call's photo was written to the path you passed.
 
 ### Close-deadline contract (image stream)
 

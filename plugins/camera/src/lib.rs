@@ -41,13 +41,26 @@
 //! One capability is deliberately **not** symmetric:
 //! [`ImageFormat::Bgra`] is an Apple-only stream format (see its own doc).
 //!
-//! # Blocking API — pair with `spawn_blocking`
+//! # Blocking API — pair with `spawn_blocking`, never the UI thread
 //!
-//! [`Camera::request_permission`] blocks on the platform permission
-//! machinery (a system dialog on Android; `AVCaptureDevice`'s
-//! `requestAccessForMediaType:completionHandler:` bridged to a blocking call
-//! on iOS). Like `frust-secure-storage`'s gated calls, callers pair it with
-//! `frust_reactive::spawn_blocking` — never call it on the UI thread.
+//! **Two** calls block until the platform answers. Like
+//! `frust-secure-storage`'s gated calls, callers pair each with
+//! `frust_reactive::spawn_blocking`:
+//!
+//! | Call | Blocks until | Deadline (Android / Apple) |
+//! |---|---|---|
+//! | [`Camera::request_permission`] | the permission machinery resolves (a system dialog on Android; `AVCaptureDevice`'s `requestAccessForMediaType:completionHandler:` on iOS) | 120 s / 120 s |
+//! | [`CameraSession::take_picture`] | the photo has been written to disk, or the capture failed | 15 s / 10 s |
+//!
+//! **Never call either on the UI thread.** On Android every answer above is
+//! relayed through the main `Looper` (CameraX's completion callbacks, the
+//! Activity lifecycle the permission relay rides on), so a UI-thread caller
+//! would park on the very queue carrying its own wake-up — a self-deadlock
+//! that could only end at the deadline above, far past Android's ~5 s ANR
+//! threshold. Both backends therefore **fail fast** instead of parking: a call
+//! made on the platform's UI thread (Android: `Looper.myLooper() ==
+//! Looper.getMainLooper()`; Apple: the main run loop) returns
+//! [`CameraError::UiThread`] immediately, before any platform work starts.
 
 // Platform backends (Plan Phase 1 preamble lands the crate + frozen contract;
 // Phases 1-3 / tasks 06/07/09 fill the real implementations behind the same
@@ -241,6 +254,21 @@ pub enum CameraError {
     #[error("the camera session is closed")]
     SessionClosed,
 
+    /// A **blocking** call (the module doc's *Blocking API* table:
+    /// [`Camera::request_permission`], [`CameraSession::take_picture`]) was
+    /// made on the platform's UI thread, where parking on a platform answer
+    /// deadlocks the thread that has to deliver it. The call is refused
+    /// immediately, before any platform work starts — re-issue it from
+    /// `frust_reactive::spawn_blocking`.
+    ///
+    /// A fail-fast guard, not a capability report: nothing about the camera
+    /// is wrong, only the calling thread.
+    #[error(
+        "camera call refused: this is a blocking call and was made on the UI thread — re-issue it \
+         from `spawn_blocking`"
+    )]
+    UiThread,
+
     /// An underlying file I/O operation failed (e.g.
     /// [`CameraSession::take_picture`] writing to an unwritable path).
     #[error("camera I/O error: {0}")]
@@ -290,9 +318,11 @@ impl Camera {
     /// [`PermissionStatus::Pending`] — see that type's docs).
     ///
     /// Pair with `frust_reactive::spawn_blocking`; never call on the UI
-    /// thread (module doc's *Blocking API*).
+    /// thread — a UI-thread call is refused with [`CameraError::UiThread`]
+    /// rather than parking (module doc's *Blocking API*).
     ///
     /// # Errors
+    /// [`CameraError::UiThread`] when called on the platform's UI thread;
     /// [`CameraError::PlatformNotInitialized`] on a platform with no camera
     /// backend, or an old Android scaffold predating `nativeInitPlatform`;
     /// [`CameraError::Platform`] on a platform failure (a JNI error, a
@@ -393,15 +423,27 @@ impl CameraSession {
         self.backend.preview_aspect_ratio()
     }
 
-    /// Capture a still photo to `path`. Completion is asynchronous on the
-    /// real backends (Android: `nativeOnPictureTaken`); this call reports
-    /// only whether the capture request itself was accepted.
+    /// Capture a still photo to `path`, **blocking** until the platform
+    /// reports the capture finished (Android: `nativeOnPictureTaken`; Apple:
+    /// the photo-capture delegate) or the per-backend deadline elapses — 15 s
+    /// Android / 10 s Apple, the module doc's *Blocking API* table.
+    ///
+    /// Pair with `frust_reactive::spawn_blocking`; never call on the UI
+    /// thread — a UI-thread call is refused with [`CameraError::UiThread`]
+    /// rather than parking (module doc's *Blocking API*).
+    ///
+    /// Each attempt is correlated with its own completion (Android: a
+    /// Rust-minted request id echoed back through `nativeOnPictureTaken`;
+    /// Apple: a per-capture channel bound to one delegate), so a late answer
+    /// to a timed-out capture can never resolve a later one. `Ok(())`
+    /// therefore means **this** call's photo was written to `path`.
     ///
     /// # Errors
-    /// [`CameraError::SessionClosed`] after [`Self::close`].
+    /// [`CameraError::UiThread`] when called on the platform's UI thread;
+    /// [`CameraError::SessionClosed`] after [`Self::close`];
     /// [`CameraError::Io`] if `path` can't be written;
-    /// [`CameraError::Platform`] if the platform refuses or never completes
-    /// the capture.
+    /// [`CameraError::Platform`] if the platform refuses the capture, reports
+    /// a failed one, or never completes it within the deadline.
     pub fn take_picture(&self, path: &Path) -> Result<(), CameraError> {
         self.backend.take_picture(path)
     }
@@ -438,5 +480,165 @@ impl CameraSession {
     /// [`CameraError::SessionClosed`].
     pub fn close(&self) {
         self.backend.close();
+    }
+}
+
+// --- Still-capture completion correlation ------------------------------------
+
+/// Pure, platform-independent correlation of a still-capture **request** with
+/// **its own** completion.
+///
+/// Only the Android backend (`android.rs`) routes through this: its
+/// completions arrive as a fire-and-forget `nativeOnPictureTaken` callback
+/// that has to be matched back to the caller waiting for it. The Apple
+/// backend needs nothing here — it correlates structurally, giving each
+/// capture its own `sync_channel` bound to one delegate, so a stale
+/// completion has nowhere to land.
+///
+/// It lives here, in the platform-independent crate root, rather than inside
+/// `android.rs` for one reason: `android.rs` compiles only for `--target
+/// *-linux-android`, so nothing defined there can be exercised by `cargo
+/// test` on any host. The correctness argument this type carries — *a late
+/// completion for a timed-out or superseded request must never resolve the
+/// one now in flight* — is the whole point, so it is checked by the tests
+/// below rather than only asserted in a doc comment.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod capture {
+    /// One session's in-flight still capture: the request id the blocked
+    /// caller is waiting for, plus the completion that has landed **for that
+    /// request**.
+    #[derive(Debug, Default)]
+    pub(crate) struct CaptureSlot {
+        /// The last id [`Self::arm`] minted. Ids are per-session, start at
+        /// `1`, and are never reused, so `0` is a safe "no request" sentinel
+        /// where one has to cross an FFI boundary.
+        last_request_id: i64,
+        /// The request the current caller is blocked on, if any.
+        awaited: Option<i64>,
+        /// The completion delivered for [`Self::awaited`] — never for any
+        /// other request (see [`Self::deliver`]).
+        outcome: Option<bool>,
+    }
+
+    impl CaptureSlot {
+        /// Mint the next request id and arm the wait on it, discarding any
+        /// previous request's state: that caller has either already read its
+        /// outcome or given up at its deadline, so its completion is stale by
+        /// definition.
+        pub(crate) fn arm(&mut self) -> i64 {
+            // `wrapping_add` rather than `+`: an overflow panic near an FFI
+            // boundary is worse than a wrap that needs 2^63 captures in one
+            // session to reach.
+            self.last_request_id = self.last_request_id.wrapping_add(1);
+            self.awaited = Some(self.last_request_id);
+            self.outcome = None;
+            self.last_request_id
+        }
+
+        /// Record `request_id`'s completion.
+        ///
+        /// Returns `false` — recording **nothing** — when the completion is
+        /// not the awaited request's. That is the whole guard: a late answer
+        /// to a timed-out or superseded capture must never resolve the one
+        /// now in flight, or the caller would believe a photo was written
+        /// when none was. The caller logs the drop.
+        pub(crate) fn deliver(&mut self, request_id: i64, ok: bool) -> bool {
+            if self.awaited != Some(request_id) {
+                return false;
+            }
+            self.outcome = Some(ok);
+            true
+        }
+
+        /// The completion for `request_id`: `Some(ok)` once it has landed,
+        /// `None` while it is still outstanding — and `None` forever for a
+        /// request some later [`Self::arm`] superseded.
+        pub(crate) fn outcome(&self, request_id: i64) -> Option<bool> {
+            if self.awaited == Some(request_id) {
+                self.outcome
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture::CaptureSlot;
+
+    #[test]
+    fn a_completion_resolves_its_own_request() {
+        let mut slot = CaptureSlot::default();
+        let request = slot.arm();
+
+        assert_eq!(slot.outcome(request), None, "outstanding before delivery");
+        assert!(
+            slot.deliver(request, true),
+            "the awaited request is accepted"
+        );
+        assert_eq!(slot.outcome(request), Some(true));
+    }
+
+    #[test]
+    fn a_failed_completion_is_reported_as_such() {
+        let mut slot = CaptureSlot::default();
+        let request = slot.arm();
+
+        assert!(slot.deliver(request, false));
+        assert_eq!(slot.outcome(request), Some(false));
+    }
+
+    /// The review's root cause C, as a test: capture #1 times out, capture #2
+    /// arms, then #1's completion finally arrives. It must NOT resolve #2.
+    #[test]
+    fn a_late_completion_never_resolves_the_request_that_superseded_it() {
+        let mut slot = CaptureSlot::default();
+        let timed_out = slot.arm();
+        let in_flight = slot.arm();
+        assert_ne!(timed_out, in_flight, "each request gets its own id");
+
+        assert!(
+            !slot.deliver(timed_out, true),
+            "a completion for the superseded request is dropped"
+        );
+        assert_eq!(
+            slot.outcome(in_flight),
+            None,
+            "the in-flight capture is still outstanding"
+        );
+        assert_eq!(
+            slot.outcome(timed_out),
+            None,
+            "and the superseded one can never settle either"
+        );
+
+        // The real completion still resolves the in-flight request normally.
+        assert!(slot.deliver(in_flight, true));
+        assert_eq!(slot.outcome(in_flight), Some(true));
+        assert_eq!(
+            slot.outcome(timed_out),
+            None,
+            "the superseded request never reads the newer outcome"
+        );
+    }
+
+    #[test]
+    fn a_completion_for_an_unarmed_slot_is_dropped() {
+        let mut slot = CaptureSlot::default();
+
+        // Nothing armed: a host-side completion (a session torn down and
+        // reopened, a version-skewed host) has no caller to resolve.
+        assert!(!slot.deliver(1, true));
+        assert_eq!(slot.outcome(1), None);
+    }
+
+    #[test]
+    fn request_ids_are_unique_and_start_at_one() {
+        let mut slot = CaptureSlot::default();
+
+        assert_eq!(slot.arm(), 1, "0 stays free as an FFI-side sentinel");
+        assert_eq!(slot.arm(), 2);
+        assert_eq!(slot.arm(), 3);
     }
 }

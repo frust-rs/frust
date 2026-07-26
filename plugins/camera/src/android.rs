@@ -13,7 +13,11 @@
 //!
 //! **Tasks 05 (`FrustCameraHost.kt`) and 06 (this module's real backend)
 //! build to this table — changing it means updating both task files
-//! first.** `dev.frust.camera` is a subpackage of the embedding module's
+//! first.** The one **widening since the freeze** is round-1 fix f1's
+//! still-capture request id (`takePicture`'s `long requestId`, echoed back by
+//! `nativeOnPictureTaken`) — see *Correlating a completion* below;
+//! `FrustCameraHost.kt`'s copy of this table was updated in the same change.
+//! `dev.frust.camera` is a subpackage of the embedding module's
 //! `dev.frust` (`dev.frust` is `frust-embedding`'s exclusive package —
 //! `docs/CODE_STANDARDS.md`'s Plugin Conventions); `FrustCameraHost`'s
 //! package is baked into every JNI symbol name below, so it may never move
@@ -28,7 +32,7 @@
 //! | `requestPermission` | `() -> int` | `0` [`PermissionStatus::Granted`] / `1` [`PermissionStatus::Denied`] / `2` [`PermissionStatus::NeedsUi`] (no Activity cached yet) / `3` [`PermissionStatus::Pending`] (dialog shown; result arrives via [`Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionResult`]) |
 //! | `openCamera` | `(int lensFacing) -> int` | ≥0 session id; <0 error code. Async config; state via [`Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState`] |
 //! | `closeCamera` | `(int session) -> void` | |
-//! | `takePicture` | `(int session, String path) -> int` | `0` started; completion via [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`] |
+//! | `takePicture` | `(int session, long requestId, String path) -> int` | `0` started; completion via [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`], which echoes `requestId` back. `requestId` is minted by Rust ([`crate::capture::CaptureSlot::arm`]), opaque to the host |
 //! | `previewAspectRatio` | `(int session) -> float` | `0.0` until the first `TransformationInfo` |
 //! | `startImageStream` | `(int session, int format) -> int` | `0` started (frames arrive via [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]); <0 refused. `format`: [`FORMAT_CODE_YUV420`] / [`FORMAT_CODE_BGRA`] (Android refuses the latter — see [`stream_format_code`]) |
 //! | `stopImageStream` | `(int session) -> void` | Unbinds the `ImageAnalysis` use case only; the preview keeps running |
@@ -39,7 +43,7 @@
 //!
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionResult`]`(env, class, granted: jboolean)`
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState`]`(env, class, session: jint, state: jint)` — `0` Configuring / `1` Running / `2` Closed / `3` Error
-//! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`]`(env, class, session: jint, ok: jboolean, path: JString)`
+//! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`]`(env, class, session: jint, request_id: jlong, ok: jboolean, path: JString)` — `request_id` is the value the matching `takePicture` was given, echoed back unchanged (*Correlating a completion* below)
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]`(env, class, session: jint, format: jint, width: jint, height: jint, rotationDegrees: jint, planeCount: jint, plane0: JByteBuffer, rowStride0: jint, pixelStride0: jint, plane1: …, plane2: …)` — **the task-09 contract addition.** Three fixed plane slots (never an array: an array would allocate on the Kotlin side once per frame at camera rate); slots past `planeCount` are null. Called on the host's own analyzer executor, and `ImageProxy.close()` runs only after it returns — see [`AndroidSession::start_image_stream`]'s close-deadline contract.
 //!
 //! Each export upgrades its [`jni::EnvUnowned`] via
@@ -67,6 +71,39 @@
 //! ([`frust_plugin::android::with_jni_env`] returns before the wait starts),
 //! so a blocked caller never pins a JVM attachment and the callback thread is
 //! free to deliver its answer.
+//!
+//! # Never on the UI thread — the fail-fast guard
+//!
+//! Both blocking calls above are answered through the main `Looper`: CameraX
+//! posts its own callbacks there, and the permission relay rides the
+//! Activity's `onResume`. A caller **on** that Looper would therefore park on
+//! the very queue that carries its own wake-up — a self-deadlock that could
+//! only end at the timeout (15 s / 120 s), an eternity past Android's ~5 s
+//! input-ANR threshold, with the capture never even starting.
+//!
+//! So each of the two entry points calls [`ensure_off_ui_thread`] **before**
+//! doing anything else and reports [`CameraError::UiThread`] immediately — no
+//! dialog shown, no capture armed, nothing to unwind. This is defence in
+//! depth, not the primary fix: the host also delivers completions off the main
+//! `Looper` now (`FrustCameraHost`'s `captureExecutor`), so an off-main-thread
+//! caller is served even while the UI thread is busy. The guard is what turns
+//! *one* misplaced call anywhere in an app from a 15 s silent freeze into a
+//! diagnosable typed error.
+//!
+//! # Correlating a completion
+//!
+//! `nativeOnPictureTaken` is a fire-and-forget callback, so the completion has
+//! to be matched back to the caller waiting for it. [`AndroidSession::take_picture`]
+//! mints a request id ([`crate::capture::CaptureSlot`]), hands it to
+//! `takePicture`, and the host echoes it back unchanged from the
+//! `OnImageSavedCallback` that capture created; a completion whose id is not
+//! the awaited one is **dropped**, never recorded. That is what keeps a late
+//! answer to a timed-out capture from resolving the next one — the failure
+//! mode where a caller believes a photo was written when none was. (Before
+//! round-1 fix f1 the export stamped completions with the session's
+//! *current* generation at delivery time, which defeated the guard entirely.)
+//! The pure matching logic lives in [`crate::capture`] so it can be
+//! unit-tested on a host that cannot compile this module at all.
 //!
 //! # Session state
 //!
@@ -113,9 +150,10 @@ use std::time::Duration;
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JByteBuffer, JClass, JObject, JString, JValue};
 use jni::refs::Global;
-use jni::sys::{jboolean, jint};
+use jni::sys::{jboolean, jint, jlong};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
+use crate::capture::CaptureSlot;
 use crate::{
     CameraError, ImageFormat, ImageFrame, ImageFrameCallback, ImagePlane, Lens, PermissionStatus,
     Resolution, SessionBackend,
@@ -264,12 +302,11 @@ struct SessionState {
     /// The latest phase `nativeOnCameraState` reported. A `Closed` state is
     /// not a phase: it removes the entry outright (see the module doc).
     phase: SessionPhase,
-    /// Bumped by each [`AndroidSession::take_picture`] call, so a completion
-    /// is matched to the caller that started it rather than to a previous,
-    /// timed-out one.
-    capture_generation: u64,
-    /// `(generation, ok)` as `nativeOnPictureTaken` delivered it.
-    capture_result: Option<(u64, bool)>,
+    /// This session's still-capture request/completion correlation — armed by
+    /// [`AndroidSession::take_picture`], settled by `nativeOnPictureTaken`
+    /// only when the echoed request id matches (module doc's *Correlating a
+    /// completion*).
+    capture: CaptureSlot,
 }
 
 /// Every open session's callback state, keyed by the host's session id.
@@ -458,6 +495,47 @@ fn take_pending_exception(env: &mut Env<'_>, op: &str) -> CameraError {
     ))
 }
 
+/// Refuse a blocking call made on the UI thread, before it does anything at
+/// all (module doc's *Never on the UI thread*).
+///
+/// The test is Android's own: `Looper.myLooper() == Looper.getMainLooper()`.
+/// A plain Rust worker thread has no `Looper` at all, so `myLooper()` returns
+/// null there and `IsSameObject(null, mainLooper)` is false — no separate
+/// null check is needed (it *would* be needed if both sides could be null,
+/// since `IsSameObject` calls two nulls equal, and `getMainLooper()` never
+/// is).
+///
+/// `android.os.Looper` is a framework class, so the bare `find_class` works on
+/// any thread — unlike an app class, which needs the application classloader
+/// ([`load_host_class`]).
+fn ensure_off_ui_thread(env: &mut Env<'_>) -> Result<(), CameraError> {
+    let on_ui_thread = run_jni(env, "android.os.Looper.myLooper", |env| {
+        let looper_class = env.find_class(jni_str!("android/os/Looper"))?;
+        let mine = env
+            .call_static_method(
+                &looper_class,
+                jni_str!("myLooper"),
+                jni_sig!("()Landroid/os/Looper;"),
+                &[],
+            )?
+            .l()?;
+        let main = env
+            .call_static_method(
+                &looper_class,
+                jni_str!("getMainLooper"),
+                jni_sig!("()Landroid/os/Looper;"),
+                &[],
+            )?
+            .l()?;
+        env.is_same_object(&mine, &main)
+    })?;
+
+    if on_ui_thread {
+        return Err(CameraError::UiThread);
+    }
+    Ok(())
+}
+
 // --- Permission -------------------------------------------------------------
 
 /// [`crate::Camera::request_permission`]'s Android arm.
@@ -468,11 +546,21 @@ fn take_pending_exception(env: &mut Env<'_>, op: &str) -> CameraError {
 /// `nativeOnPermissionResult` — pair with `frust_reactive::spawn_blocking`,
 /// never call it on the UI thread (the crate doc's *Blocking API*).
 ///
+/// A UI-thread call is refused up front with [`CameraError::UiThread`], before
+/// the dialog is requested: the answer is relayed through the Activity's
+/// `onResume`, so a caller parked on the main `Looper` could never receive it
+/// (module doc's *Never on the UI thread*). Refusing before the request means
+/// nothing is left half-done — the caller simply re-issues from
+/// `spawn_blocking`.
+///
 /// # Errors
+/// [`CameraError::UiThread`] when called on the main `Looper`;
 /// [`CameraError::PlatformNotInitialized`] before the host shell installs the
 /// `(JavaVM, Context)` handles; [`CameraError::Platform`] on any JNI failure
 /// or an unrecognised return code.
 pub(crate) fn request_permission() -> Result<PermissionStatus, CameraError> {
+    with_host(|env, _class| ensure_off_ui_thread(env))?;
+
     // Arm the wait *before* the JNI call so a result relayed while
     // `requestPermission` is still returning cannot be missed.
     let generation = {
@@ -663,8 +751,20 @@ impl SessionBackend for AndroidSession {
         }
     }
 
+    /// `FrustCameraHost.takePicture`, then a **blocking** wait on
+    /// [`PICTURE_TIMEOUT`] for the completion carrying this request's own id
+    /// (module doc's *Which calls block* and *Correlating a completion*).
+    ///
+    /// # Errors
+    /// [`CameraError::UiThread`] when called on the main `Looper` — refused
+    /// before anything is armed (module doc's *Never on the UI thread*);
+    /// [`CameraError::SessionClosed`] after [`Self::close`];
+    /// [`CameraError::Io`] if `path` is not valid UTF-8 (it has to cross JNI
+    /// as a Java `String`); [`CameraError::Platform`] if the host refuses the
+    /// request, reports a failed capture, or never completes it.
     fn take_picture(&self, path: &Path) -> Result<(), CameraError> {
         self.ensure_open()?;
+        with_host(|env, _class| ensure_off_ui_thread(env))?;
 
         let path_str = path.to_str().ok_or_else(|| {
             CameraError::Io(std::io::Error::new(
@@ -678,15 +778,15 @@ impl SessionBackend for AndroidSession {
         })?;
 
         // Arm the completion slot *before* the JNI call so a capture that
-        // completes while `takePicture` is still returning cannot be missed.
-        let generation = {
+        // completes while `takePicture` is still returning cannot be missed —
+        // and mint the request id the host will echo back, so only *this*
+        // attempt's completion can settle the wait below.
+        let request_id = {
             let mut sessions = lock(&SESSIONS);
             let Some(state) = sessions.get_mut(&self.session_id) else {
                 return Err(CameraError::SessionClosed);
             };
-            state.capture_generation = state.capture_generation.wrapping_add(1);
-            state.capture_result = None;
-            state.capture_generation
+            state.capture.arm()
         };
 
         let code = with_host(|env, class| {
@@ -695,8 +795,12 @@ impl SessionBackend for AndroidSession {
                 env.call_static_method(
                     class,
                     jni_str!("takePicture"),
-                    jni_sig!("(ILjava/lang/String;)I"),
-                    &[JValue::Int(self.session_id), JValue::Object(&path_jstr)],
+                    jni_sig!("(IJLjava/lang/String;)I"),
+                    &[
+                        JValue::Int(self.session_id),
+                        JValue::Long(request_id),
+                        JValue::Object(&path_jstr),
+                    ],
                 )?
                 .i()
             })
@@ -711,7 +815,7 @@ impl SessionBackend for AndroidSession {
 
         // Block outside the JNI attachment (`with_host` already dropped it)
         // so the callback thread can attach and deliver the completion.
-        await_capture(self.session_id, generation)
+        await_capture(self.session_id, request_id)
     }
 
     /// `FrustCameraHost.startImageStream` — binds an `ImageAnalysis` use case
@@ -861,13 +965,17 @@ impl Drop for AndroidSession {
     }
 }
 
-/// Block until `nativeOnPictureTaken` answers capture `generation` on
+/// Block until `nativeOnPictureTaken` answers capture `request_id` on
 /// `session_id`, the session ends, or [`PICTURE_TIMEOUT`] elapses.
-fn await_capture(session_id: i32, generation: u64) -> Result<(), CameraError> {
+///
+/// Only the completion carrying **this** request's id can end the wait
+/// successfully (module doc's *Correlating a completion*); a late answer to a
+/// superseded capture was already dropped by the export.
+fn await_capture(session_id: i32, request_id: i64) -> Result<(), CameraError> {
     let sessions = lock(&SESSIONS);
     let (sessions, _timeout) = SESSIONS_UPDATED
         .wait_timeout_while(sessions, PICTURE_TIMEOUT, |sessions| {
-            !capture_settled(sessions, session_id, generation)
+            !capture_settled(sessions, session_id, request_id)
         })
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
@@ -875,20 +983,20 @@ fn await_capture(session_id: i32, generation: u64) -> Result<(), CameraError> {
         // The entry is gone: `close` ran, or the host reported `Closed`.
         return Err(CameraError::SessionClosed);
     };
-    match state.capture_result {
-        Some((delivered, true)) if delivered == generation => Ok(()),
-        Some((delivered, false)) if delivered == generation => Err(CameraError::Platform(
+    match state.capture.outcome(request_id) {
+        Some(true) => Ok(()),
+        Some(false) => Err(CameraError::Platform(
             "android camera backend: take_picture failed (the host reported an unsuccessful \
              capture)"
                 .to_string(),
         )),
-        // No answer for *our* generation: either the session errored or we
-        // hit the deadline.
-        _ if state.phase == SessionPhase::Error => Err(CameraError::Platform(
+        // No answer for *our* request: either the session errored or we hit
+        // the deadline.
+        None if state.phase == SessionPhase::Error => Err(CameraError::Platform(
             "android camera backend: take_picture aborted — the session reported an error state"
                 .to_string(),
         )),
-        _ => Err(CameraError::Platform(format!(
+        None => Err(CameraError::Platform(format!(
             "android camera backend: take_picture did not complete within {}s",
             PICTURE_TIMEOUT.as_secs()
         ))),
@@ -896,17 +1004,16 @@ fn await_capture(session_id: i32, generation: u64) -> Result<(), CameraError> {
 }
 
 /// Whether [`await_capture`]'s wait is over: the session ended, it reported an
-/// error, or the completion for `generation` landed.
+/// error, or the completion for `request_id` landed.
 fn capture_settled(
     sessions: &HashMap<i32, SessionState>,
     session_id: i32,
-    generation: u64,
+    request_id: i64,
 ) -> bool {
     match sessions.get(&session_id) {
         None => true,
         Some(state) => {
-            state.phase == SessionPhase::Error
-                || matches!(state.capture_result, Some((delivered, _)) if delivered == generation)
+            state.phase == SessionPhase::Error || state.capture.outcome(request_id).is_some()
         }
     }
 }
@@ -1133,25 +1240,41 @@ pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState
 
 /// `Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken` — completion
 /// callback for [`AndroidSession::take_picture`] (contract table above),
-/// waking the caller blocked in [`await_capture`]. The completion is tagged
-/// with the session's current capture generation, so a late answer to a
-/// timed-out capture can never resolve the next one.
+/// waking the caller blocked in [`await_capture`].
+///
+/// `request_id` is the id that capture was started with, echoed back by the
+/// host: a completion whose id is not the awaited one is **dropped**, so a
+/// late answer to a timed-out or superseded capture can never resolve the one
+/// now in flight (module doc's *Correlating a completion* — the guard
+/// [`crate::capture::CaptureSlot::deliver`] enforces and the crate's own unit
+/// tests pin).
+///
+/// Since round-1 fix f1 this runs on the host's `captureExecutor`, not the
+/// main `Looper`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
     session: jint,
+    request_id: jlong,
     ok: jboolean,
     path: JString<'local>,
 ) {
     env.with_env(|_env| {
-        log::debug!("frust-camera: nativeOnPictureTaken(session={session}, ok={ok}, path={path})");
+        log::debug!(
+            "frust-camera: nativeOnPictureTaken(session={session}, request={request_id}, ok={ok}, \
+             path={path})"
+        );
         {
             let mut sessions = lock(&SESSIONS);
             match sessions.get_mut(&session) {
                 Some(state) => {
-                    let generation = state.capture_generation;
-                    state.capture_result = Some((generation, ok));
+                    if !state.capture.deliver(request_id, ok) {
+                        log::debug!(
+                            "frust-camera: nativeOnPictureTaken(session={session}) for request \
+                             {request_id}, which is no longer awaited — dropped"
+                        );
+                    }
                 }
                 None => log::debug!(
                     "frust-camera: nativeOnPictureTaken for unknown session {session} — dropped"
