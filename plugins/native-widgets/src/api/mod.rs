@@ -47,3 +47,30 @@ pub use builders::{
     NativeSliderView, NativeSwitchView, native_button, native_image, native_label, native_progress,
     native_slider, native_switch,
 };
+
+/// The number of native controls this crate's internal runtime currently
+/// retains — the leak bar `registry::Registry::live_count`'s own doc comment
+/// describes ("the number the leak bar every create/dispose cycle must
+/// return to `0`"), surfaced app-side for exactly one reason: task
+/// p1-11's device-gate harness (a mount/unmount cycler plus a 50-slot stress
+/// toggle, `examples/glyph-catalog/src/pages/native_widgets.rs`'s GATE
+/// HARNESS section) needs an in-app readout to prove the p1-09 teardown-retire
+/// path disposes promptly rather than waiting out the differ's
+/// missing-streak backstop (`crate::registry`'s module doc's Idle-deferred
+/// dispose finding).
+///
+/// **Diagnostics/gate accessor, not a supported production API.** It leaks
+/// no registry type, no `NativeWidget` trait, and no handle — just a plain
+/// count — but its very existence is subject to Phase 3's public-surface
+/// decision (`RESEARCH-NATIVE-COMPONENT.md`'s "What v1 deliberately
+/// excludes"): a future release may narrow, rename, or remove it outright.
+/// Don't build product behavior on this number.
+///
+/// Returns `0` on a re-entrant call (the runtime's own thread-local is
+/// already borrowed on this thread — `crate::runtime::with_runtime`'s
+/// documented re-entrancy tolerance) as well as on a platform with no live
+/// runtime at all; either way indistinguishable from "nothing is mounted"
+/// for this accessor's diagnostic purpose.
+pub fn live_slot_count() -> usize {
+    crate::runtime::with_runtime(|runtime| runtime.live_count()).unwrap_or(0)
+}
