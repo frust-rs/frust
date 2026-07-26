@@ -6,10 +6,13 @@
 //! JNI bindings on Android, `objc2-ui-kit` on iOS (the factory itself a Rust
 //! `define_class!` class — zero Swift, Phase 0 spike 2, GO). See
 //! `workflow/plans/features/frust-native-widgets/PLAN.md` for the full plan;
-//! this crate lands incrementally across that plan's tasks — today it is
-//! the crate skeleton, the retained-handle [`registry`] every later phase's
-//! create/update/dispose path is built over, and the `runtime` those paths
-//! dispatch through.
+//! this crate lands incrementally across that plan's tasks — today it is the
+//! crate skeleton, the retained-handle [`registry`] every later phase's
+//! create/update/dispose path is built over, the `runtime` those paths
+//! dispatch through, and the six Android `controls` (`Button`, `Label`,
+//! `Switch`, `Slider`, `ProgressBar`, `Image`) that runtime serves. Still to
+//! come: their listeners (p1-05), the app-facing builders (p1-06) and the
+//! Apple arm (Phase 2).
 //!
 //! # One factory, one listener, N controls
 //!
@@ -61,13 +64,21 @@
 
 #[cfg(target_os = "android")]
 mod android;
+// The six v1 controls. Compiled on every target on purpose: each control's
+// props/decode/diff half is platform-agnostic and host-tested, and only its
+// `NativeWidget` impl (the JNI half) is `#[cfg(target_os = "android")]` —
+// which is also why the modules live here rather than under `android/`. The
+// `allow` matches `runtime`'s below: on a non-Android host the whole
+// props/plan surface has no caller outside the tests.
+#[allow(dead_code)]
+mod controls;
 mod registry;
 // The runtime's surface is consumed by the platform arms — this crate's JNI
-// exports today, the six controls in p1-04 and their listeners in p1-05, the
-// Apple arm in Phase 2 — plus its own host tests, which a plain (non-test)
-// build does not count. Until those controls land, roughly half the surface
-// is legitimately uncalled on every target; the attribute goes away with
-// them rather than growing per-item `allow`s in the meantime.
+// exports and the six controls today, their listeners in p1-05, the Apple arm
+// in Phase 2 — plus its own host tests, which a plain (non-test) build does
+// not count. On a non-Android host none of those arms compile, so much of the
+// surface is legitimately uncalled there; the attribute goes away with the
+// Apple arm rather than growing per-item `allow`s in the meantime.
 #[allow(dead_code)]
 mod runtime;
 

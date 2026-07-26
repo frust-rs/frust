@@ -75,6 +75,7 @@ use jni::{Env, EnvUnowned};
 pub(crate) use ctx::NativeCtx;
 
 use crate::NativeWidgetError;
+use crate::controls::{button, image, label, progress, slider, switch};
 use crate::registry::SlotId;
 use crate::runtime::{self, NativeEvent, NativeRuntime, UpdateOutcome};
 
@@ -91,9 +92,17 @@ pub(crate) type NativeView = crate::registry::android::AndroidHandle;
 ///
 /// Registration is explicit and central by design — `inventory`-style
 /// link-time discovery is banned here (RESEARCH-NATIVE-COMPONENT §Open
-/// questions). The six v1 controls land in p1-04; the runtime and both
-/// generic Kotlin classes are already complete without them.
-pub(crate) fn register_controls(_runtime: &mut NativeRuntime) {}
+/// questions). This table and the api layer's builders (p1-06) are the two
+/// ends of the same kind strings, which is why each one is a `KIND` const in
+/// its own control module rather than a literal here.
+pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
+    runtime.register::<button::Button>(button::KIND);
+    runtime.register::<label::Label>(label::KIND);
+    runtime.register::<switch::Switch>(switch::KIND);
+    runtime.register::<slider::Slider>(slider::KIND);
+    runtime.register::<progress::Progress>(progress::KIND);
+    runtime.register::<image::Image>(image::KIND);
+}
 
 // --- exports: FrustNativeControlFactory -------------------------------------
 
