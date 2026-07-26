@@ -120,21 +120,29 @@ struct CameraPageState {
     permission: UseTask<PermissionStatus>,
     /// The open session, if any. `Arc<Mutex<..>>` (not `Rc`) only because
     /// [`on_cleanup`] requires a `Send + Sync` closure — see the
-    /// [module docs](self).
-    session_cell: Arc<Mutex<Option<CameraSession>>>,
+    /// [module docs](self). The held value is itself `Arc`-wrapped so
+    /// [`take_picture_handler`]'s background fetch can cheaply *clone* a
+    /// handle out under a brief lock and release it before making the
+    /// blocking `take_picture` call — never holding this mutex across that
+    /// call (root cause A's consumer half, this module's own Details point
+    /// 3). `CameraSession` itself has no public `Clone` (its backend field
+    /// is crate-private in `frust-camera`), so cloning the wrapper `Arc` is
+    /// the only way to get an owned, `'static` handle into `spawn_blocking`.
+    session_cell: Arc<Mutex<Option<Arc<CameraSession>>>>,
     /// Set once [`Camera::open`] has been attempted for the current
     /// permission grant, so a failed open doesn't retry every rebuild.
     open_attempted: bool,
     /// [`Camera::open`]'s error, if the attempt above failed.
     open_error: Option<String>,
-    /// Bumped every successful open; feeds the preview slot's
-    /// `params_json` (`{"session": N}` — task's own Details wording, and
-    /// exactly what `CameraPreviewFactory`/`FrustCameraHost` parse).
-    session_generation: u64,
-    /// The last `take_picture` outcome: `Ok(path)` echoes the requested
+    /// The still-capture task: `Ready(Some(path))` echoes the requested
     /// path (capture completion itself is asynchronous and unobservable
-    /// from this v1 API — see [`take_picture_handler`]).
-    capture_result: Option<Result<String, String>>,
+    /// from this v1 API — see [`take_picture_handler`]); `Ready(None)`
+    /// covers the (UI-unreachable, since [`capture_block`] only mounts
+    /// once a session exists) no-session case, including this task's own
+    /// automatic first fetch at page mount, before any session is open —
+    /// deliberately not an [`AsyncValue::Error`], so it never flashes a
+    /// spurious failure message on load.
+    capture: UseTask<Option<String>>,
     /// Whether an image stream is currently (believed) running.
     streaming: bool,
     /// The last `start_image_stream`/`stop_image_stream` error, if any.
@@ -166,7 +174,7 @@ impl Component for CameraPage {
             }
         });
 
-        let session_cell: Arc<Mutex<Option<CameraSession>>> = Arc::new(Mutex::new(None));
+        let session_cell: Arc<Mutex<Option<Arc<CameraSession>>>> = Arc::new(Mutex::new(None));
         {
             let cell = session_cell.clone();
             on_cleanup(move || {
@@ -176,13 +184,45 @@ impl Component for CameraPage {
             });
         }
 
+        // `take_picture` blocks up to 15s (Android) / 10s (Apple) — same
+        // "pair with `spawn_blocking`, never call on the UI thread" contract
+        // as `request_permission` above (f1 documents this on the crate
+        // side). Extracting the session is a brief-lock `Arc` *clone* (see
+        // `session_cell`'s doc comment), never a lock held across the
+        // blocking call itself. `T = Option<String>`: `None` covers both
+        // "no active session" and this task's own automatic first fetch at
+        // page mount (before `Camera::open` has run) without surfacing a
+        // spurious error — see `capture`'s doc comment.
+        let capture = {
+            let cell = session_cell.clone();
+            use_task(move || {
+                let cell = cell.clone();
+                async move {
+                    let session = cell.lock().expect("session cell poisoned").clone();
+                    let Some(session) = session else {
+                        return Ok(None);
+                    };
+                    let path = capture_path();
+                    match spawn_blocking(move || {
+                        let display = path.display().to_string();
+                        session.take_picture(&path).map(|()| display)
+                    })
+                    .await
+                    {
+                        Ok(Ok(display)) => Ok(Some(display)),
+                        Ok(Err(err)) => Err(err),
+                        Err(join_err) => Err(CameraError::Platform(join_err.to_string())),
+                    }
+                }
+            })
+        };
+
         CameraPageState {
             permission,
             session_cell,
             open_attempted: false,
             open_error: None,
-            session_generation: 0,
-            capture_result: None,
+            capture,
             streaming: false,
             stream_error: None,
             stream_started_at: None,
@@ -201,8 +241,8 @@ impl Component for CameraPage {
             state.open_attempted = true;
             match Camera::open(Lens::Back, Resolution::Auto) {
                 Ok(session) => {
-                    state.session_generation += 1;
-                    *state.session_cell.lock().expect("session cell poisoned") = Some(session);
+                    *state.session_cell.lock().expect("session cell poisoned") =
+                        Some(Arc::new(session));
                 }
                 Err(err) => state.open_error = Some(err.to_string()),
             }
@@ -412,7 +452,10 @@ fn preview_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
     // a fully-qualified class name, iOS a bare runtime name —
     // `docs/CODE_STANDARDS.md`'s platform-view factory `viewType` LAW).
     let view_type = session.preview_view_type().to_string();
-    let params = format!("{{\"session\":{}}}", state.session_generation);
+    // The real backend-minted session id (`{"sessionId":N}` on Android,
+    // `{"session":N}` on Apple) — not a page-local counter, which drifts
+    // from Android's zero-based ids (root cause D).
+    let params = session.params_json();
     drop(guard);
 
     let slot = maybe_debug_fill(
@@ -444,27 +487,26 @@ fn capture_path() -> PathBuf {
     std::env::temp_dir().join(format!("glyphcatalog-capture-{epoch_ms}.jpg"))
 }
 
+/// `take_picture` blocks up to 15s (Android) / 10s (Apple) — this only
+/// re-triggers the [`CameraPageState::capture`] task built in
+/// [`CameraPage::init`] (the same `spawn_blocking`-off-the-UI-thread
+/// pattern [`retry_permission_handler`] already uses for `permission`);
+/// the mutex is never held across the blocking call itself (see
+/// `session_cell`'s doc comment).
 fn take_picture_handler(state: &mut CameraPageState) {
-    let path = capture_path();
-    let result = {
-        let guard = state.session_cell.lock().expect("session cell poisoned");
-        guard.as_ref().map(|session| session.take_picture(&path))
-    };
-    state.capture_result = Some(match result {
-        Some(Ok(())) => Ok(path.display().to_string()),
-        Some(Err(err)) => Err(err.to_string()),
-        None => Err("no active camera session".to_string()),
-    });
+    state.capture.restart();
 }
 
 fn capture_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
-    let status = match &state.capture_result {
-        None => "No capture requested yet.".to_string(),
+    let capture = state.capture.signal().get();
+    let status = match &capture {
+        AsyncValue::Idle | AsyncValue::Ready(None) => "No capture requested yet.".to_string(),
+        AsyncValue::Loading(_) => "Capturing\u{2026}".to_string(),
         // Capture completion is asynchronous and unobservable from this v1
         // API (module docs) — this echoes the requested path, not a
         // confirmed-written one.
-        Some(Ok(path)) => format!("Capture requested \u{2192} {path}"),
-        Some(Err(err)) => format!("Capture failed: {err}"),
+        AsyncValue::Ready(Some(path)) => format!("Capture requested \u{2192} {path}"),
+        AsyncValue::Error(err) => format!("Capture failed: {err}"),
     };
 
     block(vec![
@@ -484,8 +526,14 @@ fn capture_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
 
 /// Wires [`CameraSession::start_image_stream`]'s callback to plain atomics
 /// only — never a signal write off the UI thread (module docs).
+///
+/// Requests [`ImageFormat::Yuv420`], the cross-platform choice both `lib.rs`
+/// and `android.rs` document: CameraX only ever delivers RGBA_8888, so the
+/// Android backend refuses [`ImageFormat::Bgra`] with a typed error (root
+/// cause E) — no `cfg(target_os)` branching needed since the callback below
+/// is format-agnostic.
 fn start_stream(session: &CameraSession, stats: Arc<StreamStats>) -> Result<(), CameraError> {
-    session.start_image_stream(ImageFormat::Bgra, move |frame| {
+    session.start_image_stream(ImageFormat::Yuv420, move |frame| {
         stats.frames.fetch_add(1, Ordering::Relaxed);
         if let Some(plane) = frame.planes.first()
             && let Some(&byte) = plane.data.first()
