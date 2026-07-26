@@ -102,7 +102,9 @@ use objc2_av_foundation::{
     AVCaptureSessionPreset3840x2160, AVCaptureSessionPresetPhoto, AVCaptureVideoDataOutput,
     AVCaptureVideoDataOutputSampleBufferDelegate, AVError, AVMediaType, AVMediaTypeVideo,
 };
-use objc2_core_media::{CMSampleBuffer, CMVideoFormatDescriptionGetDimensions};
+use objc2_core_media::{
+    CMSampleBuffer, CMTime, CMTimeFlags, CMVideoFormatDescriptionGetDimensions,
+};
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane,
     CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
@@ -1335,6 +1337,7 @@ fn configure(objects: &AvObjects, resolution: Resolution, lens: Lens) -> Result<
     // already owns.
     let device = unsafe { input.device() };
     let aspect = aspect_ratio_of(&device);
+    log_expected_frame_rate(&device);
 
     // `startRunning` is deliberately NOT called here — it is queued
     // separately by `SessionInner::start`, so `Camera::open` never waits on
@@ -1477,6 +1480,60 @@ fn aspect_ratio_of(device: &AVCaptureDevice) -> f32 {
     }
     // Portrait: the short sensor edge becomes the displayed width.
     dimensions.height as f32 / dimensions.width as f32
+}
+
+/// Log `device`'s active frame-duration bounds as an fps range — the gate
+/// follow-up (g5) that turns "stream fps ≈ camera rate" from a plausibility
+/// note into an actual comparison: previously nothing on the Apple side told
+/// a device pass what fps the platform itself expected to deliver.
+///
+/// `activeVideoMinFrameDuration`/`activeVideoMaxFrameDuration` are the
+/// properties that actually bound delivery (their doc's own words — see the
+/// binding), read only after `setSessionPreset:` above has settled
+/// `activeFormat` for exactly the same reason [`aspect_ratio_of`] reads
+/// geometry only now. There is currently no post-open path that changes
+/// `activeFormat` (v1 has no runtime format switch), so logging once here
+/// covers every "session opens or format changes" case this crate has.
+///
+/// Same `"frust-camera: ... expected fps"` shape the Android backend's twin
+/// (`android.rs`'s `log_expected_frame_rate`) logs, so a device pass can grep
+/// one string on either platform.
+fn log_expected_frame_rate(device: &AVCaptureDevice) {
+    // SAFETY: read-only property reads on a live device already owned by
+    // this session's input, on the session's own serial queue like every
+    // other device read in `configure`.
+    let (min_duration, max_duration) = unsafe {
+        (
+            device.activeVideoMinFrameDuration(),
+            device.activeVideoMaxFrameDuration(),
+        )
+    };
+    match (
+        fps_from_duration(min_duration),
+        fps_from_duration(max_duration),
+    ) {
+        // A duration's reciprocal is a *rate*: the min duration is the max
+        // fps and vice versa (the properties' own doc, cited above).
+        (Some(max_fps), Some(min_fps)) => log::debug!(
+            "frust-camera: apple expected fps {min_fps:.1}-{max_fps:.1} \
+             (activeVideoMinFrameDuration/activeVideoMaxFrameDuration)"
+        ),
+        _ => log::debug!(
+            "frust-camera: apple expected fps unavailable (activeVideoMinFrameDuration/\
+             activeVideoMaxFrameDuration invalid)"
+        ),
+    }
+}
+
+/// `duration`'s reciprocal in Hz, or `None` for an invalid/zero `CMTime`
+/// (`kCMTimeInvalid`'s shape — never expected for a live device's active
+/// frame duration, but a diagnostic log must not divide by zero or trust an
+/// unset flag).
+fn fps_from_duration(duration: CMTime) -> Option<f64> {
+    if !duration.flags.contains(CMTimeFlags::Valid) || duration.value == 0 {
+        return None;
+    }
+    Some(duration.timescale as f64 / duration.value as f64)
 }
 
 /// Refuse a blocking camera operation attempted on the main run loop.

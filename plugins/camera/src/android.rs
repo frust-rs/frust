@@ -148,7 +148,7 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use jni::errors::LogErrorAndDefault;
-use jni::objects::{JByteBuffer, JClass, JObject, JString, JValue};
+use jni::objects::{JByteBuffer, JClass, JObject, JObjectArray, JString, JValue};
 use jni::refs::Global;
 use jni::sys::{jboolean, jint, jlong};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
@@ -695,6 +695,7 @@ impl AndroidSession {
         }
 
         lock(&SESSIONS).insert(session_id, SessionState::default());
+        log_expected_frame_rate(session_id, lens_facing);
 
         Ok(Self {
             session_id,
@@ -711,6 +712,192 @@ impl AndroidSession {
         }
         Ok(())
     }
+}
+
+// --- Frame-rate diagnostics -------------------------------------------------
+
+/// Log Camera2's `CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES` for the just-opened
+/// `lens_facing` — the gate follow-up (g5) that turns "stream fps ≈ camera
+/// rate" from a plausibility note into an actual comparison: the gate already
+/// saw a "CameraX-reported max 30 fps" value, but only in CameraX's own
+/// internal logging, never in this plugin's own. Same `"frust-camera: ...
+/// expected fps"` shape the Apple backend's twin
+/// (`apple.rs`'s `log_expected_frame_rate`) logs, so a device pass can grep
+/// one string on either platform.
+///
+/// Queried directly against `CameraManager`/`CameraCharacteristics`
+/// (`android.hardware.camera2`, framework classes reachable with a bare
+/// `find_class` like [`ensure_off_ui_thread`]'s `Looper` lookup) rather than
+/// through `FrustCameraHost` — the frozen Rust↔Kotlin contract (module doc)
+/// gains no new method for this, and CameraX's own use cases already resolve
+/// their frame rate from these same characteristics.
+///
+/// Best-effort and diagnostics-only, called once from [`AndroidSession::open`]
+/// after the session id is already live: any JNI failure or missing platform
+/// handle is logged at debug and never surfaces as a [`CameraError`] — the
+/// crate's documented `open()` behavior does not depend on this succeeding.
+fn log_expected_frame_rate(session_id: i32, lens_facing: i32) {
+    let outcome = frust_plugin::android::with_jni_env(|env, context| {
+        ae_target_fps_range(env, context, lens_facing)
+    });
+    match outcome {
+        Ok(Ok(Some((min_fps, max_fps)))) => log::debug!(
+            "frust-camera: android session {session_id} expected fps {min_fps}-{max_fps} \
+             (CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)"
+        ),
+        Ok(Ok(None)) => log::debug!(
+            "frust-camera: android session {session_id} expected fps unavailable (no matching \
+             camera characteristics)"
+        ),
+        Ok(Err(err)) => log::debug!(
+            "frust-camera: android session {session_id} expected fps query failed: {err}"
+        ),
+        Err(err) => log::debug!(
+            "frust-camera: android session {session_id} expected fps query skipped: platform \
+             handle error: {err}"
+        ),
+    }
+}
+
+/// The widest `(min, max)` fps bound across the target-fps ranges of the
+/// camera device whose `LENS_FACING` matches `lens_facing`, or `None` if no
+/// such device or no ranges were reported. See [`log_expected_frame_rate`]'s
+/// doc for why this queries Camera2 directly instead of going through
+/// `FrustCameraHost`.
+fn ae_target_fps_range(
+    env: &mut Env<'_>,
+    context: &JObject,
+    lens_facing: i32,
+) -> Result<Option<(i32, i32)>, jni::errors::Error> {
+    // (CameraManager) context.getSystemService("camera")
+    let service_name = env.new_string("camera")?;
+    let manager = env
+        .call_method(
+            context,
+            jni_str!("getSystemService"),
+            jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+            &[JValue::Object(&service_name)],
+        )?
+        .l()?;
+    if manager.is_null() {
+        return Ok(None);
+    }
+
+    let ids = env
+        .call_method(
+            &manager,
+            jni_str!("getCameraIdList"),
+            jni_sig!("()[Ljava/lang/String;"),
+            &[],
+        )?
+        .l()?;
+    let ids = env.cast_local::<JObjectArray>(ids)?;
+    let count = ids.len(env)?;
+
+    let key_class = env.find_class(jni_str!("android/hardware/camera2/CameraCharacteristics"))?;
+    let lens_facing_key = env
+        .get_static_field(
+            &key_class,
+            jni_str!("LENS_FACING"),
+            jni_sig!("Landroid/hardware/camera2/CameraCharacteristics$Key;"),
+        )?
+        .l()?;
+    let fps_ranges_key = env
+        .get_static_field(
+            &key_class,
+            jni_str!("CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES"),
+            jni_sig!("Landroid/hardware/camera2/CameraCharacteristics$Key;"),
+        )?
+        .l()?;
+
+    for index in 0..count {
+        let id = ids.get_element(env, index)?;
+        if id.is_null() {
+            continue;
+        }
+        let characteristics = env
+            .call_method(
+                &manager,
+                jni_str!("getCameraCharacteristics"),
+                jni_sig!("(Ljava/lang/String;)Landroid/hardware/camera2/CameraCharacteristics;"),
+                &[JValue::Object(&id)],
+            )?
+            .l()?;
+        if characteristics.is_null() {
+            continue;
+        }
+
+        let facing = env
+            .call_method(
+                &characteristics,
+                jni_str!("get"),
+                jni_sig!(
+                    "(Landroid/hardware/camera2/CameraCharacteristics$Key;)Ljava/lang/Object;"
+                ),
+                &[JValue::Object(&lens_facing_key)],
+            )?
+            .l()?;
+        if facing.is_null() {
+            continue;
+        }
+        let facing = env
+            .call_method(&facing, jni_str!("intValue"), jni_sig!("()I"), &[])?
+            .i()?;
+        if facing != lens_facing {
+            continue;
+        }
+
+        let ranges = env
+            .call_method(
+                &characteristics,
+                jni_str!("get"),
+                jni_sig!(
+                    "(Landroid/hardware/camera2/CameraCharacteristics$Key;)Ljava/lang/Object;"
+                ),
+                &[JValue::Object(&fps_ranges_key)],
+            )?
+            .l()?;
+        if ranges.is_null() {
+            return Ok(None);
+        }
+        let ranges = env.cast_local::<JObjectArray>(ranges)?;
+        let range_count = ranges.len(env)?;
+        let mut widest: Option<(i32, i32)> = None;
+        for range_index in 0..range_count {
+            let range = ranges.get_element(env, range_index)?;
+            if range.is_null() {
+                continue;
+            }
+            let lower = env
+                .call_method(
+                    &range,
+                    jni_str!("getLower"),
+                    jni_sig!("()Ljava/lang/Object;"),
+                    &[],
+                )?
+                .l()?;
+            let upper = env
+                .call_method(
+                    &range,
+                    jni_str!("getUpper"),
+                    jni_sig!("()Ljava/lang/Object;"),
+                    &[],
+                )?
+                .l()?;
+            let lower = env
+                .call_method(&lower, jni_str!("intValue"), jni_sig!("()I"), &[])?
+                .i()?;
+            let upper = env
+                .call_method(&upper, jni_str!("intValue"), jni_sig!("()I"), &[])?
+                .i()?;
+            widest = Some(match widest {
+                Some((min, max)) => (min.min(lower), max.max(upper)),
+                None => (lower, upper),
+            });
+        }
+        return Ok(widest);
+    }
+    Ok(None)
 }
 
 impl SessionBackend for AndroidSession {
