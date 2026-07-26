@@ -1,0 +1,86 @@
+# `frust-native-widgets`: the native-controls-from-pure-Rust platform
+# plugin (`workflow/plans/features/frust-native-widgets/PLAN.md`). Leaf
+# platform plugin per `docs/CODE_STANDARDS.md`'s Plugin Conventions:
+# `frust-plugin` + FFI crates only, never another `frust-*` framework
+# crate. Feature lists below start from the throwaway spike crate's
+# proven shape (`plugins/native-widgets-spike/Cargo.toml`, commit
+# `92b7674`), trimmed/annotated the way `plugins/camera/Cargo.toml`
+# documents its own objc2 surface.
+[package]
+name = "frust-native-widgets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# NativeWidgetError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# Exports/backends log rather than print — platform plugins never own
+# stdout/stderr the way `frust-drive` does.
+log = { workspace = true }
+
+# The Android `(JavaVM, application Context)` platform-handle substrate
+# this crate's Android backend calls through
+# (`frust_plugin::android::with_jni_env`, the `with_jni_env` idiom every
+# platform plugin's Android arm reuses). Unconditional per the platform-
+# plugin charter (`docs/ARCHITECTURE.md`'s Module Structure /
+# `docs/CODE_STANDARDS.md`'s Plugin Conventions) — inert
+# (`NotInitialized`) on non-Android targets, so it stays an unconditional
+# dependency rather than target-gated.
+frust-plugin = { path = "../../crates/frust-plugin" }
+
+# Android: the plugin's own JNI exports (the generic
+# `Java_dev_frust_FrustNativeControlFactory_native*` / `FrustNativeListener`
+# contract p1-03 lands) and the retained-handle registry's `Global<JObject>`
+# RAII wrapper (this task) both need `jni` directly, matching every other
+# plugin's Android arm.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# iOS only — **not** `target_vendor = "apple"`. Unlike
+# `plugins/camera`/`plugins/shared-preferences`/`plugins/secure-storage`,
+# this plugin's Apple surface is UIKit (`objc2-ui-kit`), which doesn't
+# exist on macOS (no AppKit backend, no Mac Catalyst support here); gating
+# on `target_vendor = "apple"` would try to link the `UIKit` framework into
+# a macOS desktop-preview host build and fail (`ld: framework 'UIKit' not
+# found`) — confirmed by `cargo test -p frust-native-widgets` on this
+# macOS host. Controls via `objc2-ui-kit`, the Rust `define_class!` factory
+# via `objc2`/`objc2-foundation` (Phase 0 spike 2 — no Swift factory
+# needed). Every objc2-family crate below is `default-features = false` +
+# an explicit feature list per CODE_STANDARDS (pulling the default set
+# would compile in the whole UIKit surface this plugin never touches).
+#
+# Not `{ workspace = true }` for `objc2-foundation`/`objc2-ui-kit`: Cargo's
+# workspace-dependency inheritance forbids a member from overriding
+# `default-features` unless the workspace-level entry already sets it
+# explicitly, and neither does (see `plugins/camera/Cargo.toml`'s comment
+# for the same restriction) — so both repeat the workspace pin literally.
+# `objc2` itself keeps its (lighter) default features, matching every
+# other plugin's Apple arm (`objc2 = { workspace = true }`).
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = { workspace = true }
+# `NSObject`/`NSString`: the `define_class!` factory's superclass and
+# params-json marshalling (spike 2's proven shape) — this task's registry
+# doesn't need either directly, but every later native-widgets task
+# (runtime, controls, events) builds on this crate and needs both, so they
+# land now rather than in a second Cargo.toml touch.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSObject",
+    "NSString",
+] }
+# `UIView`: this task's retained-handle registry (`AppleHandle` wraps a
+# `Retained<UIView>`, the type every future control view specializes to).
+# `UIButton`/`UIControl`/`UILabel`/`UIResponder`: the v1 control set
+# (p2-02) — carried now per the spike's starting-point feature list so
+# this crate's only Cargo.toml touch for the Apple arm's control surface
+# is this one.
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "UIView",
+    "UIButton",
+    "UIControl",
+    "UILabel",
+    "UIResponder",
+] }
