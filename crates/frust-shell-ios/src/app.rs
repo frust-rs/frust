@@ -1969,6 +1969,20 @@ impl IosAppHandle {
         }
         let rebuild = rebuild_start.map(|t| t.elapsed()).unwrap_or_default();
 
+        // Prompt teardown retire (native-widgets p1-09): the rebuild just above
+        // is where a removed `platform_view` widget's `View::teardown` runs and
+        // reports its slot id. Drain those and dispose each native view right
+        // now, instead of waiting out the differ's ~30-frame missing-streak
+        // heuristic (which cannot tell a torn-down slot from a culled one). A
+        // merely culled slot reports nothing here, so the streak still covers
+        // it — that asymmetry is the camera keep-alive contract. Mirrors the
+        // Android shell's placement exactly; the resulting batch is a lifecycle
+        // command, deliberately NOT paired with a frame (like `suspend_all`), so
+        // the present-sync release gate never holds it.
+        for slot_id in self.app.take_retired_platform_views() {
+            self.platform_views.retire(slot_id);
+        }
+
         // Change-flag DRAIN (camera gate-fix g4) — the fix for "the iOS frame
         // gate never idles at rest".
         //
@@ -2057,7 +2071,9 @@ impl IosAppHandle {
         // behind the gate's early `return`, so a Skip records nothing AND
         // submits nothing: the recorded id can never run ahead of what will
         // actually be sent.
-        let produced = self.platform_views.ingest(self.app.platform_view_frames());
+        let produced = self
+            .platform_views
+            .ingest(self.app.platform_view_frames(), self.app.input_shields());
         if produced && self.present_sync {
             let (generation, _) = self.platform_views.commands();
             self.platform_view_due

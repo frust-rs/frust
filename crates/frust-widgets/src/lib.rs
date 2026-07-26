@@ -76,7 +76,9 @@ pub use nav::router::{
 };
 pub use nav::transition::{PageTransition, Timing, TransitionSpec};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
-pub use platform_view::{PlatformViewView, PlatformViewWidget, platform_view};
+pub use platform_view::{
+    PlatformViewView, PlatformViewWidget, ShieldView, ShieldWidget, platform_view, shield,
+};
 pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use safe_area::{SafeAreaView, SafeAreaWidget, safe_area};
 pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};

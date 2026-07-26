@@ -136,7 +136,16 @@ pub use frust_widgets::{
 /// frust::app!(MapDemo);
 /// # fn main() {}
 /// ```
-pub use frust_widgets::{PlatformViewView, platform_view};
+///
+/// # Z-shields ([`shield`])
+///
+/// A slot marked `.interactive()` forwards a touch-DOWN inside its rect to the
+/// native view, including one that landed on frust chrome painted over it (the
+/// OS-side hit test knows nothing about the frust scene). Wrap that chrome in
+/// [`shield`] and it keeps winning input: the wrapper reports the rect it
+/// painted every frame, and the shell hands the overlapping ones to the host
+/// with the slot's placement.
+pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 
 /// The vendored Material Symbols starter icon set (Huddle showcase, Phase A),
 /// flat-re-exported so app code names `frust::icons::HOME` rather than the

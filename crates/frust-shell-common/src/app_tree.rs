@@ -224,6 +224,34 @@ pub trait AppTree {
     fn platform_view_frames(&self) -> &[PlatformViewFrame] {
         &[]
     }
+
+    /// The z-shield rects the tree reported during the most recent paint pass
+    /// (native-widgets p1-09; delegates to [`RenderRoot::input_shields`]) — the
+    /// second argument of the same
+    /// [`ingest`](crate::platform_view::PlatformViewState::ingest) call
+    /// [`AppTree::platform_view_frames`] feeds.
+    ///
+    /// Defaulted to an empty slice like the frames getter above, so an
+    /// [`AppTree`] impl that predates the shield channel still compiles (and
+    /// simply ships no auto-collected shields).
+    fn input_shields(&self) -> &[kurbo::Rect] {
+        &[]
+    }
+
+    /// Drain the slot ids whose `platform_view` widgets were torn down since the
+    /// last call (native-widgets p1-09; delegates to
+    /// [`RenderRoot::take_retired_platform_views`]).
+    ///
+    /// A shell calls this right after [`AppTree::rebuild`] and retires each id
+    /// in its [`PlatformViewState`](crate::platform_view::PlatformViewState), so
+    /// a disposed slot's native view goes away on the next frame instead of
+    /// waiting out the differ's missing-streak heuristic. Draining is
+    /// destructive — an id is reported exactly once.
+    ///
+    /// Defaulted to an empty `Vec`, mirroring the two getters above.
+    fn take_retired_platform_views(&mut self) -> Vec<u64> {
+        Vec::new()
+    }
 }
 
 /// Concrete [`AppTree`] holding one app's state, logic and retained root.
@@ -324,6 +352,14 @@ where
 
     fn platform_view_frames(&self) -> &[PlatformViewFrame] {
         self.root.platform_view_frames()
+    }
+
+    fn input_shields(&self) -> &[kurbo::Rect] {
+        self.root.input_shields()
+    }
+
+    fn take_retired_platform_views(&mut self) -> Vec<u64> {
+        self.root.take_retired_platform_views()
     }
 }
 
@@ -469,6 +505,15 @@ mod tests {
         // pre-platform-views `AppTree` impl is unaffected.
         let tree = MinimalTree;
         assert!(tree.platform_view_frames().is_empty());
+    }
+
+    #[test]
+    fn app_tree_shield_and_retire_channels_default_to_empty() {
+        // Same additive contract for the two p1-09 channels: an `AppTree` impl
+        // that predates them compiles and reports nothing.
+        let mut tree = MinimalTree;
+        assert!(tree.input_shields().is_empty());
+        assert!(tree.take_retired_platform_views().is_empty());
     }
 
     #[test]

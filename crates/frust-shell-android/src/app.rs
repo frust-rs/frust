@@ -2059,6 +2059,20 @@ impl AndroidAppHandle {
         }
         let rebuild_time = rebuild_start.map_or(Duration::ZERO, |t| t.elapsed());
 
+        // Prompt teardown retire (native-widgets p1-09): the rebuild just above
+        // is where a removed `platform_view` widget's `View::teardown` runs and
+        // reports its slot id. Drain those and dispose each native view right
+        // now, instead of waiting out the differ's ~30-frame missing-streak
+        // heuristic (which cannot tell a torn-down slot from a culled one). A
+        // merely culled slot reports nothing here, so the streak still covers
+        // it — that asymmetry is the camera keep-alive contract. Emitted before
+        // this frame's `ingest` below, so the Dispose leads the batch; it is a
+        // lifecycle command, deliberately NOT paired with a frame (like
+        // `suspend_all`), so it releases immediately.
+        for slot_id in self.app.take_retired_platform_views() {
+            self.platform_view_state.retire(slot_id);
+        }
+
         // Layout-skip seam (task 16 / frame_gate module docs): drain the change
         // flags the rebuild (or a prior `set_theme`) accumulated, and run layout
         // only if they need it — or the first frame / a surface resize forces it.
@@ -2139,7 +2153,7 @@ impl AndroidAppHandle {
         // the recorded id can never run ahead of what will actually be sent.
         if self
             .platform_view_state
-            .ingest(self.app.platform_view_frames())
+            .ingest(self.app.platform_view_frames(), self.app.input_shields())
         {
             let (generation, _) = self.platform_view_state.commands();
             self.platform_view_due
