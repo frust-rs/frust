@@ -54,7 +54,15 @@ objc2 = { workspace = true }
 # still-capture delegate flattens to bytes, and `objc2-av-foundation` enables
 # only `objc2-foundation/alloc` itself, so naming the type needs this feature
 # here. `NSNotification`: session runtime-error/interruption notifications
-# (Phase 2).
+# (Phase 2). `NSDictionary` + `NSValue` (which is where `NSNumber` lives) +
+# `objc2-core-foundation`: TASK-02 GAP (added by task 09) — the image stream
+# pins its delivered pixel format through
+# `AVCaptureVideoDataOutput.videoSettings`, a
+# `{kCVPixelBufferPixelFormatTypeKey: NSNumber}` dictionary whose key is a
+# CoreVideo `CFString`, and the `CFString`→`NSString` toll-free-bridge `AsRef`
+# impls are behind this crate's own `objc2-core-foundation` feature. That
+# feature adds no package to the graph (`objc2-core-foundation` is already
+# there, via `objc2-av-foundation`/`objc2-core-video`).
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
@@ -62,7 +70,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSError",
     "NSArray",
     "NSData",
+    "NSDictionary",
     "NSNotification",
+    "NSValue",
+    "objc2-core-foundation",
 ] }
 # TASK-02 GAP (added by task 07): the `AVCaptureDevice
 # requestAccessForMediaType:completionHandler:` permission bridge needs to
@@ -125,23 +136,31 @@ objc2-av-foundation = { version = "0.3", default-features = false, features = [
 ] }
 # `CMSampleBuffer`/`CMTime`: the sample-buffer delegate's per-frame timing and
 # plane access (task 09). `CMFormatDescription`: the sample buffer's media
-# format. Direct dependency (not just `objc2-av-foundation`'s transitively
-# activated one) since `apple.rs` names `objc2_core_media` types itself.
+# format. `objc2-core-video`: TASK-02 GAP (added by task 09) —
+# `CMSampleBuffer::image_buffer()` (the `CVPixelBuffer` every streamed frame
+# hangs off) is `#[cfg]`-gated on it. Direct dependency (not just
+# `objc2-av-foundation`'s transitively activated one) since `apple.rs` names
+# `objc2_core_media` types itself.
 objc2-core-media = { version = "0.3", default-features = false, features = [
     "std",
     "CMBase",
     "CMFormatDescription",
     "CMSampleBuffer",
     "CMTime",
+    "objc2-core-video",
 ] }
 # `CVPixelBuffer`: zero-copy plane access for the image stream (task 09,
-# `CVPixelBufferLockBaseAddress`/`GetBaseAddressOfPlane`).
+# `CVPixelBufferLockBaseAddress`/`GetBaseAddressOfPlane`). `CVReturn`:
+# TASK-02 GAP (added by task 09) — the lock/unlock pair returns a `CVReturn`
+# and is `#[cfg]`-gated on that feature, so without it those two symbols are
+# simply absent.
 objc2-core-video = { version = "0.3", default-features = false, features = [
     "std",
     "CVBase",
     "CVBuffer",
     "CVImageBuffer",
     "CVPixelBuffer",
+    "CVReturn",
 ] }
 # `CALayer` ONLY — `AVCaptureVideoPreviewLayer` itself lives in
 # `objc2-av-foundation` (RESEARCH-REFRESH.md §5 correction), not here.

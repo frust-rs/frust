@@ -1,12 +1,13 @@
 //! The Android backend — CameraX, driven from a `dev.frust.camera.FrustCameraHost`
 //! Kotlin helper (`plugins/camera/platform/android/`) over this crate's own
-//! JNI surface. **Task 06** (this module's current state) drives the real
-//! Rust→Kotlin calls and fills the `nativeOn*` export bodies against the
-//! frozen contract task 02 fixed; only the image stream
-//! ([`AndroidSession::start_image_stream`]/[`AndroidSession::stop_image_stream`]
-//! and the host's `startImageStream`/`stopImageStream`/`nativeOnImageFrame`)
-//! is still reported as [`CameraError::Platform`]`("not yet implemented")` —
-//! task 09 lands it on both backends at once.
+//! JNI surface. **Task 06** drove the real Rust→Kotlin calls and filled the
+//! `nativeOn*` export bodies against the frozen contract task 02 fixed;
+//! **task 09** (this module's current state) added the image stream —
+//! [`AndroidSession::start_image_stream`]/[`AndroidSession::stop_image_stream`],
+//! the host's `startImageStream`/`stopImageStream`, and the one contract
+//! addition task 02 reserved,
+//! [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]. Every
+//! operation this backend exposes is now real.
 //!
 //! # The frozen contract
 //!
@@ -29,8 +30,8 @@
 //! | `closeCamera` | `(int session) -> void` | |
 //! | `takePicture` | `(int session, String path) -> int` | `0` started; completion via [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`] |
 //! | `previewAspectRatio` | `(int session) -> float` | `0.0` until the first `TransformationInfo` |
-//! | `startImageStream` | `(int session, int format) -> int` | wired in task 09 |
-//! | `stopImageStream` | `(int session) -> void` | task 09 |
+//! | `startImageStream` | `(int session, int format) -> int` | `0` started (frames arrive via [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]); <0 refused. `format`: [`FORMAT_CODE_YUV420`] / [`FORMAT_CODE_BGRA`] (Android refuses the latter — see [`stream_format_code`]) |
+//! | `stopImageStream` | `(int session) -> void` | Unbinds the `ImageAnalysis` use case only; the preview keeps running |
 //!
 //! ## Kotlin → Rust (this crate's own `#[unsafe(no_mangle)]` JNI exports —
 //! package baked into the symbol names, so `dev.frust.camera.FrustCameraHost`
@@ -39,16 +40,16 @@
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionResult`]`(env, class, granted: jboolean)`
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState`]`(env, class, session: jint, state: jint)` — `0` Configuring / `1` Running / `2` Closed / `3` Error
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`]`(env, class, session: jint, ok: jboolean, path: JString)`
-//! - (task 09 adds `nativeOnImageFrame`)
+//! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]`(env, class, session: jint, format: jint, width: jint, height: jint, rotationDegrees: jint, planeCount: jint, plane0: JByteBuffer, rowStride0: jint, pixelStride0: jint, plane1: …, plane2: …)` — **the task-09 contract addition.** Three fixed plane slots (never an array: an array would allocate on the Kotlin side once per frame at camera rate); slots past `planeCount` are null. Called on the host's own analyzer executor, and `ImageProxy.close()` runs only after it returns — see [`AndroidSession::start_image_stream`]'s close-deadline contract.
 //!
 //! Each export upgrades its [`jni::EnvUnowned`] via
 //! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind` — the
 //! crate's own no-unwind-across-FFI guarantee (`docs/CODE_STANDARDS.md`'s
 //! Language Idioms), matching the pattern `frust-shell-android`'s own JNI
-//! exports use. This module contains **no `unsafe` block**: the only `unsafe`
-//! token is each export's `#[unsafe(no_mangle)]` attribute, so the
-//! sanctioned-zone `# Safety` rule has nothing to document beyond the symbol
-//! names above.
+//! exports use. The **one** `unsafe` block in this module is the image
+//! stream's zero-copy plane view ([`plane_data`]) — the sanctioned
+//! `GetDirectBufferAddress` pattern, `# Safety`-noted there; every other
+//! `unsafe` token is an export's `#[unsafe(no_mangle)]` attribute.
 //!
 //! # Which calls block, and on what
 //!
@@ -77,6 +78,11 @@
 //! `Send + Sync` and holds no JNI reference across calls (the
 //! `frust-secure-storage` per-call-attachment shape).
 //!
+//! A running image stream's callback lives in a **second**, deliberately
+//! separate map ([`STREAMS`]): `nativeOnImageFrame` holds the callback's lock
+//! for the whole user callback, and routing that through [`SESSIONS`] would
+//! block `preview_aspect_ratio`/`take_picture` bookkeeping behind every frame.
+//!
 //! # Fail-soft, never a panic
 //!
 //! Every entry point routes through [`with_host`], which checks
@@ -101,18 +107,18 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use jni::errors::LogErrorAndDefault;
-use jni::objects::{JClass, JObject, JString, JValue};
+use jni::objects::{JByteBuffer, JClass, JObject, JString, JValue};
 use jni::refs::Global;
 use jni::sys::{jboolean, jint};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
 use crate::{
-    CameraError, ImageFormat, ImageFrameCallback, Lens, PermissionStatus, Resolution,
-    SessionBackend,
+    CameraError, ImageFormat, ImageFrame, ImageFrameCallback, ImagePlane, Lens, PermissionStatus,
+    Resolution, SessionBackend,
 };
 
 /// The `viewType` this crate's Android preview slot resolves to — the
@@ -158,6 +164,27 @@ const STATE_CODE_ERROR: i32 = 3;
 /// `FrustCameraHost.takePicture`'s "capture started" return code; anything
 /// else is a rejected request.
 const TAKE_PICTURE_STARTED: i32 = 0;
+
+/// `FrustCameraHost.startImageStream`'s "stream started" return code; anything
+/// else is a rejected request (the host's `ERROR_UNKNOWN_SESSION` /
+/// `ERROR_UNSUPPORTED_FORMAT` / `ERROR_NOT_CONFIGURED`).
+const START_IMAGE_STREAM_STARTED: i32 = 0;
+
+/// `startImageStream`'s `format` code for [`ImageFormat::Yuv420`] — CameraX's
+/// `ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888` (contract table above).
+const FORMAT_CODE_YUV420: i32 = 0;
+
+/// `startImageStream`'s `format` code for [`ImageFormat::Bgra`].
+///
+/// Reserved in the contract for symmetry with the Apple backend and
+/// **refused** by this one — see [`stream_format_code`] for why CameraX
+/// cannot deliver it.
+const FORMAT_CODE_BGRA: i32 = 1;
+
+/// The number of plane slots the `nativeOnImageFrame` contract carries — 3,
+/// which covers `ImageFormat.YUV_420_888`'s Y/U/V and leaves room for a
+/// single-plane packed format. Slots past the reported `planeCount` are null.
+const MAX_PLANES: usize = 3;
 
 /// How long [`request_permission`] waits for `nativeOnPermissionResult` after
 /// the host reports [`PERMISSION_CODE_PENDING`], before reporting
@@ -258,6 +285,30 @@ static SESSIONS: LazyLock<Mutex<HashMap<i32, SessionState>>> =
 /// Woken by `nativeOnCameraState`/`nativeOnPictureTaken` and by
 /// [`AndroidSession::close`]; waited on by [`await_capture`].
 static SESSIONS_UPDATED: Condvar = Condvar::new();
+
+/// One running image stream's user callback.
+///
+/// The [`Mutex`] is **not** contention control — delivery is serialized by the
+/// host's single-threaded analyzer executor already. It is what makes the slot
+/// `Sync`, so an `Arc` of it can live in the [`STREAMS`] static: a bare
+/// `Box<dyn Fn(..) + Send>` is `Send` but not `Sync`, and `Arc<T>` is only
+/// `Send` for `T: Send + Sync`.
+struct StreamSlot {
+    /// Invoked once per delivered frame by
+    /// [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`].
+    on_frame: Mutex<Box<ImageFrameCallback>>,
+}
+
+/// Every running image stream's callback, keyed by session id (module doc's
+/// *Session state*).
+///
+/// [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`] clones the
+/// `Arc` under a **short** lock and releases the map before invoking the
+/// callback, so a stream that stops itself from inside its own callback
+/// (removing the entry) cannot deadlock — the in-flight frame simply finishes
+/// against the `Arc` it already holds, and the callback drops afterwards.
+static STREAMS: LazyLock<Mutex<HashMap<i32, Arc<StreamSlot>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Lock a module-global mutex, recovering from poisoning instead of
 /// panicking: a panic caught by an export's `catch_unwind` must not turn every
@@ -663,17 +714,104 @@ impl SessionBackend for AndroidSession {
         await_capture(self.session_id, generation)
     }
 
+    /// `FrustCameraHost.startImageStream` — binds an `ImageAnalysis` use case
+    /// beside the already-bound preview/capture pair.
+    ///
+    /// # Close-deadline contract (the failure mode this backend can produce)
+    ///
+    /// The host analyzer calls `nativeOnImageFrame` **synchronously** and only
+    /// then `ImageProxy.close()`, so `on_frame`'s return *is* the close
+    /// deadline. With `STRATEGY_KEEP_ONLY_LATEST` exactly one image may be in
+    /// flight, so a callback that blocks (or squirrels the borrowed planes
+    /// away and returns late) **stalls every subsequent frame** — the stream
+    /// goes quiet rather than dropping frames. Copy or consume before
+    /// returning; see [`crate::ImageFrame`]'s doc, which states the same
+    /// contract on the public API.
+    ///
+    /// Never blocks: the bind itself happens on the host's main thread and
+    /// frames start arriving once it lands.
+    ///
+    /// # Errors
+    /// [`CameraError::SessionClosed`] after [`Self::close`];
+    /// [`CameraError::Platform`] for [`ImageFormat::Bgra`] (see
+    /// [`stream_format_code`]), a host refusal, or a JNI failure.
     fn start_image_stream(
         &self,
-        _format: ImageFormat,
-        _on_frame: Box<ImageFrameCallback>,
+        format: ImageFormat,
+        on_frame: Box<ImageFrameCallback>,
     ) -> Result<(), CameraError> {
         self.ensure_open()?;
-        Err(not_yet_implemented("start_image_stream"))
+        let format_code = stream_format_code(format)?;
+
+        // Register *before* the JNI call: the analyzer can deliver its first
+        // frame while `startImageStream` is still returning, and a frame with
+        // no registered slot is dropped.
+        lock(&STREAMS).insert(
+            self.session_id,
+            Arc::new(StreamSlot {
+                on_frame: Mutex::new(on_frame),
+            }),
+        );
+
+        let code = with_host(|env, class| {
+            run_jni(env, "FrustCameraHost.startImageStream", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("startImageStream"),
+                    jni_sig!("(II)I"),
+                    &[JValue::Int(self.session_id), JValue::Int(format_code)],
+                )?
+                .i()
+            })
+        });
+
+        match code {
+            Ok(START_IMAGE_STREAM_STARTED) => Ok(()),
+            Ok(other) => {
+                lock(&STREAMS).remove(&self.session_id);
+                Err(CameraError::Platform(format!(
+                    "android camera backend: FrustCameraHost.startImageStream refused the request \
+                     (code {other})"
+                )))
+            }
+            Err(err) => {
+                lock(&STREAMS).remove(&self.session_id);
+                Err(err)
+            }
+        }
     }
 
+    /// `FrustCameraHost.stopImageStream` — unbinds the analyzer only; the
+    /// preview slot and the camera device are untouched.
+    ///
+    /// Dropping the [`STREAMS`] entry first means no frame delivered between
+    /// here and the host's main-thread unbind reaches the callback.
     fn stop_image_stream(&self) {
-        log::debug!("frust-camera: stop_image_stream — stub, task 09 fills");
+        if lock(&STREAMS).remove(&self.session_id).is_none() {
+            // No stream running — `CameraSession::stop_image_stream`'s
+            // documented no-op, and no reason to cross JNI for it.
+            return;
+        }
+
+        let stopped = with_host(|env, class| {
+            run_jni(env, "FrustCameraHost.stopImageStream", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("stopImageStream"),
+                    jni_sig!("(I)V"),
+                    &[JValue::Int(self.session_id)],
+                )?
+                .v()
+            })
+        });
+        if let Err(err) = stopped {
+            // Infallible by API shape; our own bookkeeping is already dropped,
+            // so the callback is unreachable either way.
+            log::warn!(
+                "frust-camera: stop_image_stream(session_id={}) failed: {err}",
+                self.session_id
+            );
+        }
     }
 
     fn close(&self) {
@@ -682,6 +820,11 @@ impl SessionBackend for AndroidSession {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+
+        // Drop any running stream's callback first — `closeCamera` unbinds the
+        // analyzer host-side, and a frame already queued for delivery must not
+        // reach a callback the app considers dead.
+        lock(&STREAMS).remove(&self.session_id);
 
         let closed = with_host(|env, class| {
             run_jni(env, "FrustCameraHost.closeCamera", |env| {
@@ -768,15 +911,153 @@ fn capture_settled(
     }
 }
 
-/// The operations this phase still reports unimplemented, named per call site
-/// so a log/error message says exactly what hasn't landed yet (the crate
-/// doc's *Phased delivery*). Only the image stream remains — task 09 wires
-/// `startImageStream`/`stopImageStream`/`nativeOnImageFrame` on both backends
-/// at once.
-fn not_yet_implemented(op: &str) -> CameraError {
-    CameraError::Platform(format!(
-        "android camera backend: {op} not yet implemented (task 09)"
-    ))
+// --- Image stream -----------------------------------------------------------
+
+/// The contract's `format` code for a requested [`ImageFormat`].
+///
+/// [`ImageFormat::Bgra`] is **refused here**, before any JNI call: CameraX's
+/// only packed-32-bit `ImageAnalysis` output is
+/// `OUTPUT_IMAGE_FORMAT_RGBA_8888`, whose bytes are `R,G,B,A` — not the BGRA
+/// order [`ImageFormat::Bgra`] promises — and this backend will not silently
+/// hand a caller mislabelled bytes or pay for a per-frame channel swizzle in
+/// the zero-copy path. Flutter's `camera` plugin draws the same platform line
+/// (its `bgra8888` group is iOS-only). Callers that need one code path on both
+/// platforms request [`ImageFormat::Yuv420`], which both backends deliver.
+fn stream_format_code(format: ImageFormat) -> Result<i32, CameraError> {
+    match format {
+        ImageFormat::Yuv420 => Ok(FORMAT_CODE_YUV420),
+        ImageFormat::Bgra => Err(CameraError::Platform(
+            "android camera backend: ImageFormat::Bgra is not available on Android — CameraX's \
+             ImageAnalysis delivers RGBA_8888 (byte order R,G,B,A), never BGRA. Request \
+             ImageFormat::Yuv420, which both backends support."
+                .to_string(),
+        )),
+    }
+}
+
+/// The [`ImageFormat`] a contract `format` code names, or `None` for a code
+/// this backend never sends (a host/Rust version skew).
+fn image_format_from_code(code: i32) -> Option<ImageFormat> {
+    match code {
+        FORMAT_CODE_YUV420 => Some(ImageFormat::Yuv420),
+        FORMAT_CODE_BGRA => Some(ImageFormat::Bgra),
+        _ => None,
+    }
+}
+
+/// One delivered frame's scalar header — the `nativeOnImageFrame` arguments
+/// that aren't plane triples, bundled so [`deliver_image_frame`] keeps a
+/// readable signature.
+struct FrameHeader {
+    /// The session the frame belongs to (its [`STREAMS`] key).
+    session: i32,
+    /// The contract format code — see [`image_format_from_code`].
+    format: i32,
+    /// `ImageProxy.getWidth()`.
+    width: i32,
+    /// `ImageProxy.getHeight()`.
+    height: i32,
+    /// `ImageProxy.getImageInfo().getRotationDegrees()`.
+    rotation_degrees: i32,
+    /// How many of the three plane slots carry a buffer.
+    plane_count: i32,
+}
+
+/// The zero-copy byte view of one plane's direct `ByteBuffer`.
+///
+/// `GetDirectBufferAddress`/`GetDirectBufferCapacity` (the sanctioned
+/// `ImageAnalysis` pattern — the plan's RESEARCH §5) hand back the buffer's
+/// own memory, so the returned slice aliases the platform's in-flight image
+/// with **no copy**. `None` if the buffer is null or not direct.
+///
+/// # Safety
+///
+/// The returned slice is valid only until `ImageProxy.close()` runs, which the
+/// host defers until [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]
+/// returns. Callers must therefore keep the slice (and anything derived from
+/// it by reference) inside that export's body — which is exactly what
+/// [`crate::ImageFrame`]'s close-deadline contract passes on to the user
+/// callback. Android's plane buffers are freshly positioned at 0, so the
+/// capacity is the whole plane.
+unsafe fn plane_data<'frame>(env: &mut Env<'_>, buffer: &JByteBuffer<'_>) -> Option<&'frame [u8]> {
+    let address = env.get_direct_buffer_address(buffer).ok()?;
+    let capacity = env.get_direct_buffer_capacity(buffer).ok()?;
+    if address.is_null() {
+        return None;
+    }
+    // SAFETY: `address`/`capacity` describe one direct `ByteBuffer`'s own
+    // allocation, kept alive by the un-closed `ImageProxy` per this function's
+    // `# Safety` contract; the bytes are only read, never written, and no Java
+    // code touches the image while the analyzer holds it.
+    Some(unsafe { std::slice::from_raw_parts(address.cast_const(), capacity) })
+}
+
+/// Resolve one frame's planes and hand it to the session's registered
+/// callback. A frame for a session with no running stream (a late delivery
+/// racing [`AndroidSession::stop_image_stream`]) is dropped.
+fn deliver_image_frame(
+    env: &mut Env<'_>,
+    header: &FrameHeader,
+    planes: &[(JByteBuffer<'_>, jint, jint); MAX_PLANES],
+) {
+    // Clone the `Arc` out and release the map immediately — see [`STREAMS`].
+    let Some(slot) = lock(&STREAMS).get(&header.session).cloned() else {
+        return;
+    };
+    let Some(format) = image_format_from_code(header.format) else {
+        log::warn!(
+            "frust-camera: nativeOnImageFrame(session={}) reported unknown format code {} — frame \
+             dropped",
+            header.session,
+            header.format
+        );
+        return;
+    };
+
+    let count = header.plane_count.clamp(0, MAX_PLANES as i32) as usize;
+    let mut frame_planes = [
+        ImagePlane {
+            data: &[],
+            row_stride: 0,
+            pixel_stride: 0,
+        },
+        ImagePlane {
+            data: &[],
+            row_stride: 0,
+            pixel_stride: 0,
+        },
+        ImagePlane {
+            data: &[],
+            row_stride: 0,
+            pixel_stride: 0,
+        },
+    ];
+    for (index, plane) in frame_planes.iter_mut().enumerate().take(count) {
+        let (buffer, row_stride, pixel_stride) = &planes[index];
+        // SAFETY: the slice is used only below, inside this call — the export
+        // returns (and only then does the host close the `ImageProxy`) after
+        // the user callback has returned. See `plane_data`'s `# Safety`.
+        let Some(data) = (unsafe { plane_data(env, buffer) }) else {
+            log::warn!(
+                "frust-camera: nativeOnImageFrame(session={}) plane {index} is not a direct \
+                 ByteBuffer — frame dropped",
+                header.session
+            );
+            return;
+        };
+        plane.data = data;
+        plane.row_stride = (*row_stride).max(0) as usize;
+        plane.pixel_stride = (*pixel_stride).max(0) as usize;
+    }
+
+    let frame = ImageFrame {
+        format,
+        width: header.width.max(0) as u32,
+        height: header.height.max(0) as u32,
+        rotation_degrees: header.rotation_degrees,
+        planes: &frame_planes[..count],
+    };
+    (lock(&slot.on_frame))(&frame);
 }
 
 // --- Kotlin -> Rust JNI exports (contract table above) ---------------------
@@ -878,6 +1159,63 @@ pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTake
             }
         }
         SESSIONS_UPDATED.notify_all();
+        Ok::<(), jni::errors::Error>(())
+    })
+    .resolve::<LogErrorAndDefault>();
+}
+
+/// `Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame` — one
+/// `ImageAnalysis` frame, delivered on the host's analyzer executor (contract
+/// table above; **the task-09 contract addition**).
+///
+/// Runs the user callback **synchronously**: the host closes the `ImageProxy`
+/// only after this returns, which is what makes the plane views zero-copy and
+/// what makes a slow callback stall the stream — see
+/// [`AndroidSession::start_image_stream`]'s close-deadline contract. A panic
+/// inside the callback is caught by [`jni::EnvUnowned::with_env`] rather than
+/// unwinding into the JVM frame below it.
+///
+/// The three fixed plane slots (rather than a `ByteBuffer[]`) keep the Kotlin
+/// side allocation-free at camera rate; slots past `plane_count` are null and
+/// never read.
+// The argument list *is* the frozen JNI contract — one flat signature per the
+// module doc's table, not a shape clippy's 7-argument heuristic can improve.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    session: jint,
+    format: jint,
+    width: jint,
+    height: jint,
+    rotation_degrees: jint,
+    plane_count: jint,
+    plane0: JByteBuffer<'local>,
+    row_stride0: jint,
+    pixel_stride0: jint,
+    plane1: JByteBuffer<'local>,
+    row_stride1: jint,
+    pixel_stride1: jint,
+    plane2: JByteBuffer<'local>,
+    row_stride2: jint,
+    pixel_stride2: jint,
+) {
+    env.with_env(|env| {
+        let header = FrameHeader {
+            session,
+            format,
+            width,
+            height,
+            rotation_degrees,
+            plane_count,
+        };
+        let planes = [
+            (plane0, row_stride0, pixel_stride0),
+            (plane1, row_stride1, pixel_stride1),
+            (plane2, row_stride2, pixel_stride2),
+        ];
+        deliver_image_frame(env, &header, &planes);
         Ok::<(), jni::errors::Error>(())
     })
     .resolve::<LogErrorAndDefault>();

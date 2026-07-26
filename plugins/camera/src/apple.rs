@@ -22,9 +22,11 @@
 //! - **The preview seam** ([`frust_camera_session_handle`]): the C symbol the
 //!   Swift `CameraPreviewFactory` (task 08) calls to attach an
 //!   `AVCaptureVideoPreviewLayer` to a live session.
-//!
-//! The image stream ([`SessionBackend::start_image_stream`]) is **task 09**;
-//! it still reports [`CameraError::Platform`] here.
+//! - **The image stream** ([`SessionInner::start_image_stream`], task 09): an
+//!   `AVCaptureVideoDataOutput` plus a [`SampleBufferDelegate`]
+//!   (`define_class!`, [`AnyThread`](objc2::AnyThread) — same shape as the
+//!   photo delegate) delivering `CVPixelBuffer` planes zero-copy on its own
+//!   serial queue.
 //!
 //! # Threading
 //!
@@ -34,6 +36,12 @@
 //! thread, and never on the `CADisplayLink`/UI thread mid-frame (PLAN.md's
 //! iOS *Threading* risk). Object *allocation* (`AVCaptureSession::new()` and
 //! friends) happens on the calling thread, which mutates no live session.
+//!
+//! A running image stream gets a **second**, dedicated serial queue
+//! ([`FRAMES_QUEUE_LABEL`]) for its sample-buffer delegate, never the session
+//! queue: a frame callback runs app code for as long as it likes, and sharing
+//! the session queue would both stall session operations behind it and
+//! deadlock a callback that stops its own stream.
 //!
 //! [`Camera::request_permission`](crate::Camera::request_permission) and
 //! [`CameraSession::take_picture`](crate::CameraSession::take_picture) both
@@ -54,11 +62,12 @@
 //! compiler cannot check.
 //!
 //! Nothing here unwinds across an FFI boundary: the `define_class!` delegate
-//! method and the `extern "C"` export each wrap their body in
+//! methods and the `extern "C"` export each wrap their body in
 //! [`std::panic::catch_unwind`] (`docs/CODE_STANDARDS.md`'s Plugin
 //! Conventions — this crate cannot use `frust-shell-common`'s `guard`, which
 //! lives above the plugin charter line).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::panic::AssertUnwindSafe;
@@ -71,23 +80,31 @@ use std::time::Duration;
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::{Bool, NSObject, ProtocolObject};
+use objc2::runtime::{AnyObject, Bool, NSObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_av_foundation::{
     AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput,
     AVCaptureDevicePosition, AVCaptureDeviceType, AVCaptureDeviceTypeBuiltInWideAngleCamera,
-    AVCapturePhoto, AVCapturePhotoCaptureDelegate, AVCapturePhotoOutput, AVCapturePhotoSettings,
-    AVCaptureSession, AVCaptureSessionPreset, AVCaptureSessionPreset640x480,
-    AVCaptureSessionPreset1280x720, AVCaptureSessionPreset1920x1080,
-    AVCaptureSessionPreset3840x2160, AVCaptureSessionPresetPhoto, AVError, AVMediaType,
-    AVMediaTypeVideo,
+    AVCaptureOutput, AVCapturePhoto, AVCapturePhotoCaptureDelegate, AVCapturePhotoOutput,
+    AVCapturePhotoSettings, AVCaptureSession, AVCaptureSessionPreset,
+    AVCaptureSessionPreset640x480, AVCaptureSessionPreset1280x720, AVCaptureSessionPreset1920x1080,
+    AVCaptureSessionPreset3840x2160, AVCaptureSessionPresetPhoto, AVCaptureVideoDataOutput,
+    AVCaptureVideoDataOutputSampleBufferDelegate, AVError, AVMediaType, AVMediaTypeVideo,
 };
-use objc2_core_media::CMVideoFormatDescriptionGetDimensions;
-use objc2_foundation::{NSError, NSObjectProtocol};
+use objc2_core_media::{CMSampleBuffer, CMVideoFormatDescriptionGetDimensions};
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane,
+    CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
+    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPlaneCount, CVPixelBufferGetWidth,
+    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+};
+use objc2_foundation::{NSDictionary, NSError, NSNumber, NSObjectProtocol, NSString};
 
 use crate::{
-    CameraError, ImageFormat, ImageFrameCallback, Lens, PermissionStatus, Resolution,
-    SessionBackend,
+    CameraError, ImageFormat, ImageFrame, ImageFrameCallback, ImagePlane, Lens, PermissionStatus,
+    Resolution, SessionBackend,
 };
 
 /// The `viewType` this crate's iOS preview slot resolves to — the bare
@@ -103,6 +120,31 @@ const PREVIEW_VIEW_TYPE: &str = "CameraPreviewFactory";
 /// session, so the label repeats across sessions by design (labels are
 /// diagnostic, not identifying).
 const SESSION_QUEUE_LABEL: &str = "dev.frust.camera.session";
+
+/// The label of a running image stream's sample-buffer queue (module doc's
+/// *Threading*) — one per stream, deliberately separate from
+/// [`SESSION_QUEUE_LABEL`]'s session queue.
+const FRAMES_QUEUE_LABEL: &str = "dev.frust.camera.frames";
+
+/// The clockwise rotation [`crate::ImageFrame::rotation_degrees`] reports for
+/// every streamed frame.
+///
+/// Buffers are delivered **un-rotated** — the video connection is left alone
+/// rather than paying `videoRotationAngle`'s per-frame rotation cost on a
+/// stream a consumer usually feeds to its own pipeline. That matches the
+/// Android backend, where `ImageAnalysis` hands over sensor-oriented buffers
+/// plus `ImageInfo.rotationDegrees`.
+///
+/// The value is a constant `90` for the same reason
+/// [`PORTRAIT_ROTATION_ANGLE`] is: v1 pins portrait (this plugin has no
+/// `UIWindowScene` to read an interface orientation from), so an upright
+/// presentation of a sensor-native buffer is one quarter turn clockwise.
+/// Rotation tracking is the same follow-up, not a separate gap.
+const STREAM_ROTATION_DEGREES: i32 = 90;
+
+/// How many plane slots a delivered [`crate::ImageFrame`] can carry — 3, the
+/// crate-wide maximum; iOS uses 2 (`420f`) or 1 (`BGRA`).
+const MAX_PLANES: usize = 3;
 
 /// How long [`request_permission`] waits for
 /// `requestAccessForMediaType:completionHandler:` before giving up on the
@@ -208,6 +250,13 @@ impl<T> QueueBound<T> {
     fn get(&self) -> &T {
         &self.value
     }
+
+    /// Take the wrapped value, consuming the wrapper. Used to hand freshly
+    /// allocated objects *into* a queue body that then owns them (the image
+    /// stream's output/delegate/queue triple).
+    fn into_inner(self) -> T {
+        self.value
+    }
 }
 
 /// The AVFoundation object graph one open session owns.
@@ -217,6 +266,29 @@ struct AvObjects {
     /// release the device the session is still wired to.
     input: Retained<AVCaptureDeviceInput>,
     photo_output: Retained<AVCapturePhotoOutput>,
+    /// The running image stream, or `None`.
+    ///
+    /// A [`RefCell`] rather than a lock: every read and write happens inside a
+    /// body on the owning session's **serial** queue ([`QueueBound`]'s
+    /// `# Safety` doc), so there is never a second borrower to contend with —
+    /// and a lock here would only hide a threading mistake instead of the
+    /// `RefCell` panicking on it.
+    stream: RefCell<Option<VideoStream>>,
+}
+
+/// One running image stream's AVFoundation graph, owned by [`AvObjects`] and
+/// therefore queue-confined like the rest of it.
+struct VideoStream {
+    /// The output added to the session; removed again by [`detach_stream`].
+    output: Retained<AVCaptureVideoDataOutput>,
+    /// The delegate the output calls. `AVCaptureVideoDataOutput` retains its
+    /// sample-buffer delegate, but this crate keeps its own strong reference
+    /// too so the object's lifetime is never inferred from framework
+    /// behaviour.
+    delegate: Retained<SampleBufferDelegate>,
+    /// The serial queue frames are delivered on (module doc's *Threading*).
+    /// Held so it outlives the delegate registration.
+    queue: DispatchRetained<DispatchQueue>,
 }
 
 /// One open camera — the state [`AppleSession`] and the C export share.
@@ -335,6 +407,65 @@ impl SessionInner {
         }
     }
 
+    /// See [`crate::CameraSession::start_image_stream`].
+    ///
+    /// # Close-deadline contract (the failure mode this backend can produce)
+    ///
+    /// The delegate locks the `CVPixelBuffer`, calls `on_frame`, and unlocks
+    /// again the moment it returns; AVFoundation then recycles the buffer into
+    /// its capture pool. A callback that keeps a plane slice past its return
+    /// would be reading recycled memory, and one that simply *takes too long*
+    /// blocks its serial delivery queue — with
+    /// `alwaysDiscardsLateVideoFrames` (the lossy-latest analogue of Android's
+    /// `STRATEGY_KEEP_ONLY_LATEST`) the frames that arrive meanwhile are
+    /// dropped rather than queued. Copy or consume before returning; see
+    /// [`crate::ImageFrame`]'s doc, which states the same contract on the
+    /// public API.
+    ///
+    /// Blocks only for the configuration transaction on the session queue, not
+    /// for any frame.
+    fn start_image_stream(
+        &self,
+        format: ImageFormat,
+        on_frame: Box<ImageFrameCallback>,
+    ) -> Result<(), CameraError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CameraError::SessionClosed);
+        }
+
+        // Allocation on the calling thread — no live session is touched (module
+        // doc's *Threading*).
+        // SAFETY: an argument-free constructor returning a fresh, owned
+        // instance.
+        let output = unsafe { AVCaptureVideoDataOutput::new() };
+        let queue = DispatchQueue::new(FRAMES_QUEUE_LABEL, DispatchQueueAttr::SERIAL);
+        let delegate = SampleBufferDelegate::new(format, on_frame);
+        let staged = QueueBound::new((output, delegate, queue));
+
+        let outcome: Mutex<Result<(), String>> = Mutex::new(Ok(()));
+        {
+            let outcome = &outcome;
+            self.on_queue(move |objects| {
+                let (output, delegate, queue) = staged.into_inner();
+                *outcome.lock().unwrap_or_else(|e| e.into_inner()) =
+                    attach_stream(objects, output, delegate, queue, pixel_format_for(format));
+            });
+        }
+        outcome
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner())
+            .map_err(CameraError::Platform)
+    }
+
+    /// See [`crate::CameraSession::stop_image_stream`] — the preview and the
+    /// capture device are untouched. A no-op if no stream is running.
+    fn stop_image_stream(&self) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.on_queue(detach_stream);
+    }
+
     /// See [`crate::CameraSession::close`] — idempotent.
     fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -342,6 +473,9 @@ impl SessionInner {
         }
         sessions().remove(&self.id);
         self.on_queue(|objects| {
+            // Drop any running stream first: its delegate owns the app's frame
+            // callback, which must not outlive the session that fed it.
+            detach_stream(objects);
             // SAFETY: `stopRunning` is a plain session-lifecycle message on a
             // live session, sent from the session's own serial queue (the
             // module doc's threading rule).
@@ -460,6 +594,7 @@ impl AppleSession {
             session,
             input,
             photo_output,
+            stream: RefCell::new(None),
         });
         let queue = DispatchQueue::new(SESSION_QUEUE_LABEL, DispatchQueueAttr::SERIAL);
 
@@ -535,14 +670,14 @@ impl SessionBackend for AppleSession {
 
     fn start_image_stream(
         &self,
-        _format: ImageFormat,
-        _on_frame: Box<ImageFrameCallback>,
+        format: ImageFormat,
+        on_frame: Box<ImageFrameCallback>,
     ) -> Result<(), CameraError> {
-        Err(not_yet_implemented("start_image_stream"))
+        self.inner.start_image_stream(format, on_frame)
     }
 
     fn stop_image_stream(&self) {
-        log::debug!("frust-camera: stop_image_stream — stub, task 09 fills");
+        self.inner.stop_image_stream();
     }
 
     fn close(&self) {
@@ -776,6 +911,310 @@ fn flatten_photo(
         )
     })?;
     Ok(data.to_vec())
+}
+
+// --- The image stream ------------------------------------------------------
+
+/// The `CVPixelBuffer` format type a requested [`ImageFormat`] maps to.
+///
+/// `420f` (full-range bi-planar) rather than `420v` (video-range) for
+/// [`ImageFormat::Yuv420`]: full range is what Android's `YUV_420_888` carries,
+/// so one callback can treat both platforms' luma identically.
+fn pixel_format_for(format: ImageFormat) -> u32 {
+    match format {
+        ImageFormat::Yuv420 => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        ImageFormat::Bgra => kCVPixelFormatType_32BGRA,
+    }
+}
+
+/// The `videoSettings` dictionary that pins an output's delivered pixel
+/// format: `{ kCVPixelBufferPixelFormatTypeKey: <pixel_format> }`.
+fn video_settings(pixel_format: u32) -> Retained<NSDictionary<NSString, AnyObject>> {
+    // SAFETY: reading an `extern` CoreVideo constant static (edition-2024
+    // unsafe); linker-provided and non-null wherever CoreVideo is linked. The
+    // `CFString` → `NSString` view is the toll-free bridge `objc2-foundation`
+    // itself models as `AsRef`.
+    let key: &NSString = AsRef::as_ref(unsafe { kCVPixelBufferPixelFormatTypeKey });
+    let value = NSNumber::numberWithUnsignedInt(pixel_format);
+    let value: &AnyObject = &value;
+    NSDictionary::from_slices(&[key], &[value])
+}
+
+/// Wire `output` into the session and start delivering frames to `delegate` on
+/// `queue`. Runs on the session's serial queue; replaces any stream already
+/// running (a restart at another format is just another `start_image_stream`).
+///
+/// Returns the message for a [`CameraError::Platform`] on failure, in which
+/// case nothing was left attached.
+fn attach_stream(
+    objects: &AvObjects,
+    output: Retained<AVCaptureVideoDataOutput>,
+    delegate: Retained<SampleBufferDelegate>,
+    queue: DispatchRetained<DispatchQueue>,
+    pixel_format: u32,
+) -> Result<(), String> {
+    detach_stream(objects);
+
+    let session = &objects.session;
+    // SAFETY: plain message sends on live, correctly typed objects, from the
+    // session's own serial queue (module doc's *Threading*). `addOutput` is
+    // guarded by `canAddOutput`, which is what keeps it from throwing.
+    let added = unsafe {
+        session.beginConfiguration();
+        let added = session.canAddOutput(&output);
+        if added {
+            session.addOutput(&output);
+        }
+        session.commitConfiguration();
+        added
+    };
+    if !added {
+        return Err("apple camera backend: the session rejected the video data output".to_string());
+    }
+
+    // SAFETY: as above, plus: `videoSettings` is set *after* the output joined
+    // the session (the point at which its supported pixel formats are known),
+    // and both formats this crate offers are stock capture formats every iOS
+    // device advertises. The delegate conforms to
+    // `AVCaptureVideoDataOutputSampleBufferDelegate` (its `define_class!` block
+    // below implements the protocol) and `queue` is a live serial queue, which
+    // the setter requires whenever the delegate is non-nil.
+    unsafe {
+        // The lossy-latest policy: a frame that arrives while the delegate
+        // queue is busy is dropped, never queued (`docs/ARCHITECTURE.md`'s
+        // gRPC-stream conflation guidance, applied to frames).
+        output.setAlwaysDiscardsLateVideoFrames(true);
+        output.setVideoSettings(Some(&video_settings(pixel_format)));
+        let protocol = ProtocolObject::from_ref(&*delegate);
+        output.setSampleBufferDelegate_queue(Some(protocol), Some(&queue));
+    }
+
+    objects.stream.replace(Some(VideoStream {
+        output,
+        delegate,
+        queue,
+    }));
+    Ok(())
+}
+
+/// Stop and remove a running stream, if any. Runs on the session's serial
+/// queue; leaves the preview and photo output untouched.
+///
+/// Clearing the delegate first is what guarantees no *new* callback starts;
+/// AVFoundation retains the delegate for the duration of one in-flight call,
+/// so dropping this crate's own reference immediately afterwards is safe (and
+/// avoids a barrier that would deadlock a callback stopping its own stream).
+fn detach_stream(objects: &AvObjects) {
+    let Some(stream) = objects.stream.borrow_mut().take() else {
+        return;
+    };
+    // SAFETY: message sends on live objects from the session's serial queue;
+    // `setSampleBufferDelegate:queue:` accepts a nil queue exactly when the
+    // delegate is nil, which is the pair passed here.
+    unsafe {
+        stream.output.setSampleBufferDelegate_queue(None, None);
+        objects.session.beginConfiguration();
+        objects.session.removeOutput(&stream.output);
+        objects.session.commitConfiguration();
+    }
+    // Release in teardown order: the output is detached from the session
+    // above, then the delegate it called, then the queue those calls ran on.
+    drop(stream.output);
+    drop(stream.delegate);
+    drop(stream.queue);
+}
+
+/// [`SampleBufferDelegate`]'s instance state.
+struct SampleDelegateIvars {
+    /// The format the stream was started with — the one
+    /// [`attach_stream`] pinned via `videoSettings`, and therefore the one
+    /// every delivered [`crate::ImageFrame`] reports.
+    format: ImageFormat,
+    /// The app's frame callback, invoked synchronously per frame.
+    on_frame: Box<ImageFrameCallback>,
+}
+
+define_class!(
+    // SAFETY:
+    // - `NSObject` has no subclassing requirements.
+    // - This class implements `Drop` only through its ivars (no manual impl),
+    //   so the macro's generated `dealloc` has nothing extra to uphold.
+    #[unsafe(super(NSObject))]
+    // Sample buffers are delivered on the queue passed to
+    // `setSampleBufferDelegate:queue:` — this plugin's own, never the main
+    // one — so this class must be usable from any thread.
+    #[thread_kind = AnyThread]
+    #[ivars = SampleDelegateIvars]
+    struct SampleBufferDelegate;
+
+    unsafe impl NSObjectProtocol for SampleBufferDelegate {}
+
+    // SAFETY: the one method implemented below is the protocol's own
+    // `captureOutput:didOutputSampleBuffer:fromConnection:`, with the signature
+    // the binding declares. Every member of the protocol is `@optional`.
+    unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for SampleBufferDelegate {
+        #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
+        fn did_output_sample_buffer(
+            &self,
+            _output: &AVCaptureOutput,
+            sample_buffer: &CMSampleBuffer,
+            _connection: &AVCaptureConnection,
+        ) {
+            // This runs on a plugin-owned queue but is *called* from an
+            // Objective-C frame: a panic here (including one out of the app's
+            // own callback) would unwind into it, which is undefined behavior
+            // (`docs/CODE_STANDARDS.md`'s no-unwind-across-FFI rule).
+            let delivered = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                self.deliver(sample_buffer);
+            }));
+            if delivered.is_err() {
+                log::error!("frust-camera: panic in an image-stream frame callback — frame lost");
+            }
+        }
+    }
+);
+
+impl SampleBufferDelegate {
+    /// A delegate delivering `format` frames to `on_frame`.
+    fn new(format: ImageFormat, on_frame: Box<ImageFrameCallback>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(SampleDelegateIvars { format, on_frame });
+        // SAFETY: `NSObject`'s designated initializer, called on a freshly
+        // allocated instance whose ivars are already set.
+        unsafe { msg_send![super(this), init] }
+    }
+
+    /// Lock one sample buffer's pixel buffer, hand its planes to the app
+    /// callback, unlock. A frame carrying no image buffer (or one that cannot
+    /// be locked) is dropped with a log line — never a panic on the delivery
+    /// queue.
+    fn deliver(&self, sample_buffer: &CMSampleBuffer) {
+        // SAFETY: `sample_buffer` is the live buffer AVFoundation just handed
+        // this delegate; `image_buffer` is a +1 accessor returning `None` for a
+        // non-video sample.
+        let Some(pixel_buffer) = (unsafe { sample_buffer.image_buffer() }) else {
+            log::warn!("frust-camera: sample buffer carried no image buffer — frame dropped");
+            return;
+        };
+
+        // SAFETY: a read-only lock on the live pixel buffer, released by the
+        // guard below — including on an unwind out of the callback, which is
+        // why this is a guard and not a bare unlock call.
+        let status = unsafe {
+            CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly)
+        };
+        if status != 0 {
+            log::warn!(
+                "frust-camera: CVPixelBufferLockBaseAddress failed ({status}) — frame dropped"
+            );
+            return;
+        }
+        let _guard = PixelBufferLock {
+            buffer: &pixel_buffer,
+        };
+
+        self.deliver_locked(&pixel_buffer);
+    }
+
+    /// The locked half of [`Self::deliver`]: build the borrowed plane views and
+    /// run the app callback.
+    fn deliver_locked(&self, buffer: &CVPixelBuffer) {
+        let format = self.ivars().format;
+        let planar_count = CVPixelBufferGetPlaneCount(buffer);
+        let mut planes = [
+            ImagePlane {
+                data: &[],
+                row_stride: 0,
+                pixel_stride: 0,
+            },
+            ImagePlane {
+                data: &[],
+                row_stride: 0,
+                pixel_stride: 0,
+            },
+            ImagePlane {
+                data: &[],
+                row_stride: 0,
+                pixel_stride: 0,
+            },
+        ];
+
+        // A non-planar buffer (BGRA) reports plane count 0 and answers the
+        // whole-buffer accessors instead of the per-plane ones.
+        let count = if planar_count == 0 {
+            1
+        } else {
+            planar_count.min(MAX_PLANES)
+        };
+        for (index, plane) in planes.iter_mut().enumerate().take(count) {
+            let (address, row_stride, rows) = if planar_count == 0 {
+                (
+                    CVPixelBufferGetBaseAddress(buffer),
+                    CVPixelBufferGetBytesPerRow(buffer),
+                    CVPixelBufferGetHeight(buffer),
+                )
+            } else {
+                (
+                    CVPixelBufferGetBaseAddressOfPlane(buffer, index),
+                    CVPixelBufferGetBytesPerRowOfPlane(buffer, index),
+                    CVPixelBufferGetHeightOfPlane(buffer, index),
+                )
+            };
+            if address.is_null() {
+                log::warn!("frust-camera: pixel buffer plane {index} has no base address");
+                return;
+            }
+            // SAFETY: the base address and row stride come from CoreVideo for
+            // this locked plane, so `row_stride * rows` bytes are readable
+            // until the lock guard in `deliver` releases it — which happens
+            // only after the app callback below has returned (the
+            // close-deadline contract on `SessionInner::start_image_stream`).
+            plane.data = unsafe {
+                std::slice::from_raw_parts(address.cast::<u8>().cast_const(), row_stride * rows)
+            };
+            plane.row_stride = row_stride;
+            plane.pixel_stride = plane_pixel_stride(format, index);
+        }
+
+        let frame = ImageFrame {
+            format,
+            width: CVPixelBufferGetWidth(buffer) as u32,
+            height: CVPixelBufferGetHeight(buffer) as u32,
+            rotation_degrees: STREAM_ROTATION_DEGREES,
+            planes: &planes[..count],
+        };
+        (self.ivars().on_frame)(&frame);
+    }
+}
+
+/// Releases a `CVPixelBuffer`'s read lock on drop, so an unwind out of the app
+/// callback cannot leave the capture pool's buffer locked forever.
+struct PixelBufferLock<'a> {
+    /// The locked buffer.
+    buffer: &'a CVPixelBuffer,
+}
+
+impl Drop for PixelBufferLock<'_> {
+    fn drop(&mut self) {
+        // SAFETY: symmetrical with the `ReadOnly` lock taken in
+        // `SampleBufferDelegate::deliver` — CoreVideo requires the same flags
+        // on both sides, and this guard exists only while that lock is held.
+        unsafe { CVPixelBufferUnlockBaseAddress(self.buffer, CVPixelBufferLockFlags::ReadOnly) };
+    }
+}
+
+/// The bytes between consecutive pixels within one plane's row.
+///
+/// CoreVideo has no per-plane pixel-stride accessor (unlike Android's
+/// `Plane.pixelStride`), so it follows from the pinned pixel format:
+/// `32BGRA` is 4 bytes per pixel; `420f`'s luma plane is 1, and its chroma
+/// plane interleaves Cb and Cr, so 2 — the same values Android's
+/// `YUV_420_888` reports for an NV12-packed image.
+fn plane_pixel_stride(format: ImageFormat, plane: usize) -> usize {
+    match (format, plane) {
+        (ImageFormat::Bgra, _) => 4,
+        (ImageFormat::Yuv420, 0) => 1,
+        (ImageFormat::Yuv420, _) => 2,
+    }
 }
 
 // --- Session configuration -------------------------------------------------
@@ -1027,14 +1466,6 @@ fn device_input_error(error: &NSError) -> CameraError {
 /// An `NSError` rendered for a [`CameraError::Platform`] message.
 fn describe(error: &NSError) -> String {
     format!("{}, code {}", error.localizedDescription(), error.code())
-}
-
-/// The one operation this phase still defers — the image stream is task 09
-/// (crate module doc's *Phased delivery*).
-fn not_yet_implemented(op: &str) -> CameraError {
-    CameraError::Platform(format!(
-        "apple camera backend: {op} not yet implemented (task 09)"
-    ))
 }
 
 #[cfg(test)]

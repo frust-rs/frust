@@ -189,12 +189,17 @@ full contract.
   that Android's permission dialog needs a live `Activity` — request
   permission once a `platform_view` preview slot exists (and hence an
   Activity is cached), not necessarily before `Camera::open`.
-- **Phased delivery.** This crate ships its full public API and Android JNI
-  export surface up front, but early phases of `workflow/plans/features/
-  frust-camera/PLAN.md` land the real Android/iOS backends incrementally —
-  an operation not yet wired reports `CameraError::Platform("not yet
-  implemented")` rather than a panic (the crate's own module doc, *Phased
-  delivery*, is the source of truth for what's live in your checkout).
+- **`ImageFormat::Bgra` is Apple-only.** CameraX's one packed-32-bit
+  `ImageAnalysis` output is `RGBA_8888` (byte order `R,G,B,A`), so
+  `start_image_stream` reports `CameraError::Platform` for `Bgra` on Android
+  rather than handing over mislabelled bytes — Flutter's `camera` plugin
+  draws the same line. Ask for `ImageFormat::Yuv420` in cross-platform code.
+- **An image-stream callback has a hard deadline.** It runs on a
+  plugin-owned thread with the platform's own buffer borrowed, and must copy
+  or consume before returning: a late return stalls the Android stream
+  outright (`STRATEGY_KEEP_ONLY_LATEST` holds one image in flight) and drops
+  frames on iOS. Never write a signal from inside it — hand work off with
+  `frust_reactive::use_task` (`docs/CODE_STANDARDS.md`'s heavy-work routing).
 
 ---
 

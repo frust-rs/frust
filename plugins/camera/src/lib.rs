@@ -27,20 +27,19 @@
 //! fully-qualified class name, iOS a bare runtime name — never one shared
 //! literal.
 //!
-//! # Phased delivery
+//! # Backends
 //!
-//! This module lands as the **crate + frozen contract** (Plan Phase 1
-//! preamble, task 02): the full public API and the Android JNI export
-//! surface compile and are documented, but every backend operation beyond
-//! the target-gated [`CameraSession::preview_view_type`] constant reports
-//! [`CameraError::Platform`] ("not yet implemented") rather than driving a
-//! real camera. Later phases fill the real backends behind this same API:
-//! [`android`] (task 06, CameraX via `FrustCameraHost.kt`), [`apple`] (task
-//! 07, AVFoundation), the image stream (task 09, both backends). On every
+//! The crate landed as the **crate + frozen contract** (Plan Phase 1
+//! preamble, task 02) and the real backends filled in behind that unchanged
+//! API: [`android`] (task 06, CameraX via `FrustCameraHost.kt`), [`apple`]
+//! (task 07, AVFoundation), and the image stream on both (task 09). On every
 //! other target — desktop preview, wasm, anything without a camera backend —
 //! [`unsupported`] fails every call soft with
 //! [`CameraError::PlatformNotInitialized`], never a panic (the
 //! `frust-shared-preferences` old-scaffold-degrade shape).
+//!
+//! One capability is deliberately **not** symmetric:
+//! [`ImageFormat::Bgra`] is an Apple-only stream format (see its own doc).
 //!
 //! # Blocking API — pair with `spawn_blocking`
 //!
@@ -128,7 +127,7 @@ pub enum PermissionStatus {
     Pending,
 }
 
-/// A delivered image-stream frame's pixel format (task 09) — v1 is exactly
+/// A delivered image-stream frame's pixel format — v1 is exactly
 /// the two Flutter `camera`-parity formats: Android `ImageFormat.YUV_420_888`
 /// / iOS `kCVPixelFormatType_420YpCbCr8BiPlanarFullRange` ("420f") for
 /// [`Yuv420`](Self::Yuv420), and a packed 32-bit BGRA buffer for
@@ -136,14 +135,21 @@ pub enum PermissionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ImageFormat {
-    /// YUV 4:2:0, planar (Android) or bi-planar (iOS) — 2-3
-    /// [`ImagePlane`]s depending on platform packing.
+    /// YUV 4:2:0, planar (Android: 3 planes) or bi-planar (iOS: 2) — the
+    /// format **both** platforms deliver, and the one a cross-platform
+    /// callback should ask for.
     Yuv420,
-    /// Packed 32-bit BGRA — 1 [`ImagePlane`].
+    /// Packed 32-bit BGRA — 1 [`ImagePlane`]. **Apple-only.**
+    ///
+    /// [`CameraSession::start_image_stream`] reports
+    /// [`CameraError::Platform`] for this format on Android: CameraX's only
+    /// packed-32-bit `ImageAnalysis` output is `RGBA_8888` (byte order
+    /// `R,G,B,A`), so no zero-copy BGRA buffer exists to hand over. Flutter's
+    /// `camera` plugin draws the same platform line.
     Bgra,
 }
 
-/// One image plane of a delivered [`ImageFrame`] (task 09): a **borrowed**,
+/// One image plane of a delivered [`ImageFrame`]: a **borrowed**,
 /// zero-copy view onto the platform's own buffer, valid only for the
 /// duration of the [`CameraSession::start_image_stream`] callback — see that
 /// method's close-deadline contract.
@@ -160,7 +166,7 @@ pub struct ImagePlane<'a> {
     pub pixel_stride: usize,
 }
 
-/// One delivered camera frame (task 09).
+/// One delivered camera frame.
 ///
 /// # Close-deadline contract
 ///
@@ -170,7 +176,11 @@ pub struct ImagePlane<'a> {
 /// callback must copy or fully consume the data before returning — Android's
 /// `ImageProxy.close()` runs only after the JNI call back into Kotlin
 /// completes, and with `STRATEGY_KEEP_ONLY_LATEST` a deferred `close()`
-/// stalls every subsequent frame (only one may be in flight). Never store an
+/// **stalls every subsequent frame** (only one may be in flight); on Apple
+/// the `CVPixelBuffer` read lock is released the moment the callback returns
+/// and AVFoundation recycles the buffer, while a slow callback blocks its own
+/// serial delivery queue and the frames behind it are discarded
+/// (`alwaysDiscardsLateVideoFrames`). Never store an
 /// [`ImageFrame`]/[`ImagePlane`] past the callback's return.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -236,10 +246,9 @@ pub enum CameraError {
     #[error("camera I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A backend-specific failure that isn't one of the above — including,
-    /// during this crate's phased delivery, an operation this phase hasn't
-    /// wired up yet ("not yet implemented" — see the module doc's *Phased
-    /// delivery*).
+    /// A backend-specific failure that isn't one of the above — including a
+    /// capability the requesting platform does not have (the module doc's
+    /// *Backends*, e.g. [`ImageFormat::Bgra`] on Android).
     #[error("camera platform error: {0}")]
     Platform(String),
 }
@@ -285,11 +294,9 @@ impl Camera {
     ///
     /// # Errors
     /// [`CameraError::PlatformNotInitialized`] on a platform with no camera
-    /// backend, or an old Android scaffold predating `nativeInitPlatform`.
-    /// During this crate's current phase (module doc's *Phased delivery*),
-    /// every Android/Apple call also reports
-    /// [`CameraError::Platform`]`("not yet implemented")` — the permission
-    /// backends land in tasks 06/07.
+    /// backend, or an old Android scaffold predating `nativeInitPlatform`;
+    /// [`CameraError::Platform`] on a platform failure (a JNI error, a
+    /// missing AVFoundation constant).
     pub fn request_permission() -> Result<PermissionStatus, CameraError> {
         #[cfg(target_os = "android")]
         {
@@ -318,10 +325,9 @@ impl Camera {
     ///
     /// # Errors
     /// [`CameraError::PlatformNotInitialized`] on a platform with no camera
-    /// backend (module doc's *Phased delivery*: on Android/Apple this
-    /// crate's current phase instead succeeds and returns an inert session
-    /// whose capture/stream operations report
-    /// [`CameraError::Platform`]`("not yet implemented")`).
+    /// backend (module doc's *Backends*); [`CameraError::PermissionDenied`],
+    /// [`CameraError::InUse`], or [`CameraError::Platform`] when the platform
+    /// refuses to open the device.
     // Split by target at the function level (rather than an early-return
     // arm inside one body) so neither cfg configuration leaves the other's
     // dead branch for clippy's `needless_return`/`unreachable_code` to trip
@@ -339,7 +345,7 @@ impl Camera {
     }
 
     /// No camera backend exists on this target at all (module doc's
-    /// *Phased delivery*) — fail soft before ever constructing a session,
+    /// *Backends*) — fail soft before ever constructing a session,
     /// matching [`unsupported::request_permission`]'s arm above.
     #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
     pub fn open(lens: Lens, resolution: Resolution) -> Result<CameraSession, CameraError> {
@@ -348,9 +354,9 @@ impl Camera {
     }
 }
 
-/// An open camera — preview slot wiring, still capture, and (task 09) an
-/// image stream. Cheap to hold; every operation dispatches to the platform
-/// backend [`Camera::open`] selected.
+/// An open camera — preview slot wiring, still capture, and an image stream.
+/// Cheap to hold; every operation dispatches to the platform backend
+/// [`Camera::open`] selected.
 pub struct CameraSession {
     backend: Arc<dyn SessionBackend>,
 }
@@ -393,10 +399,9 @@ impl CameraSession {
     ///
     /// # Errors
     /// [`CameraError::SessionClosed`] after [`Self::close`].
-    /// [`CameraError::Io`] if `path` can't be written. During this crate's
-    /// current phase (module doc's *Phased delivery*),
-    /// [`CameraError::Platform`]`("not yet implemented")` on every real
-    /// backend — task 06 (Android) / task 07 (iOS) wire the capture.
+    /// [`CameraError::Io`] if `path` can't be written;
+    /// [`CameraError::Platform`] if the platform refuses or never completes
+    /// the capture.
     pub fn take_picture(&self, path: &Path) -> Result<(), CameraError> {
         self.backend.take_picture(path)
     }
@@ -406,11 +411,13 @@ impl CameraSession {
     /// frames rather than queuing). See [`ImageFrame`]'s close-deadline
     /// contract and [`ImageFrameCallback`]'s threading contract.
     ///
+    /// Never blocks on a frame; calling it again restarts the stream at the
+    /// newly requested format.
+    ///
     /// # Errors
-    /// [`CameraError::SessionClosed`] after [`Self::close`]. During this
-    /// crate's current phase (module doc's *Phased delivery*),
-    /// [`CameraError::Platform`]`("not yet implemented")` on every real
-    /// backend — task 09 wires the stream on both platforms.
+    /// [`CameraError::SessionClosed`] after [`Self::close`];
+    /// [`CameraError::Platform`] for [`ImageFormat::Bgra`] on Android (see
+    /// that variant's doc), or if the platform refuses the stream.
     pub fn start_image_stream(
         &self,
         format: ImageFormat,
@@ -425,10 +432,10 @@ impl CameraSession {
         self.backend.stop_image_stream();
     }
 
-    /// Close the session and release the camera. A no-op if already closed;
-    /// every subsequent [`CameraSession`] method call reports
-    /// [`CameraError::SessionClosed`] once the real backends (task 06/07)
-    /// track live/closed state.
+    /// Close the session and release the camera, stopping any running image
+    /// stream with it. A no-op if already closed; every subsequent fallible
+    /// [`CameraSession`] method call reports
+    /// [`CameraError::SessionClosed`].
     pub fn close(&self) {
         self.backend.close();
     }

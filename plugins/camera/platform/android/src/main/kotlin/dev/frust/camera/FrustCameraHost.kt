@@ -14,8 +14,10 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
@@ -23,8 +25,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import java.io.File
+import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -44,11 +49,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * | [closeCamera] | `(int session) -> void` | |
  * | [takePicture] | `(int session, String path) -> int` | 0 started |
  * | [previewAspectRatio] | `(int session) -> float` | 0.0 until the first `TransformationInfo` |
- * | [startImageStream] | `(int session, int format) -> int` | task 09 |
- * | [stopImageStream] | `(int session) -> void` | task 09 |
+ * | [startImageStream] | `(int session, int format) -> int` | 0 started; <0 refused |
+ * | [stopImageStream] | `(int session) -> void` | unbinds the analyzer only |
  *
  * Kotlin → Rust ([nativeOnPermissionResult], [nativeOnCameraState],
- * [nativeOnPictureTaken]; task 09 adds `nativeOnImageFrame`). The package is
+ * [nativeOnPictureTaken], [nativeOnImageFrame] — the last one is task 09's
+ * single contract addition). The package is
  * baked into those symbols' mangled names
  * (`Java_dev_frust_camera_FrustCameraHost_native*`), so **this class may never
  * move once shipped** — same rule as `dev.frust.FrustSurfaceView`'s exports.
@@ -80,6 +86,17 @@ import java.util.concurrent.atomic.AtomicInteger
  * [Lifecycle.State.CREATED] (CameraX releases the camera device), `onResume`
  * lifts it back to [Lifecycle.State.RESUMED]. Baking that in here is deliberate
  * — an app must not have to remember to release the camera when it backgrounds.
+ *
+ * ## The image stream's close deadline (LAW)
+ *
+ * [startImageStream]'s analyzer calls [nativeOnImageFrame] **synchronously**
+ * and closes the [ImageProxy] only after that call returns — which is what
+ * makes the plane access on the Rust side zero-copy
+ * (`GetDirectBufferAddress`). With
+ * [ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST] one image may be in flight at a
+ * time, so a Rust callback that returns late stalls every subsequent frame.
+ * Never defer the `close()` out of the analyzer callback, and never hand the
+ * plane buffers to another thread here.
  */
 object FrustCameraHost {
     // --- Contract constants ------------------------------------------------
@@ -137,8 +154,37 @@ object FrustCameraHost {
     /** [takePicture]/[startImageStream] error: unknown or already-closed session id. */
     private const val ERROR_UNKNOWN_SESSION = -1
 
-    /** [startImageStream] error: not implemented yet (task 09 wires the stream). */
-    private const val ERROR_NOT_IMPLEMENTED = -3
+    /**
+     * [startImageStream] error: the requested [FORMAT_BGRA] has no CameraX
+     * equivalent (see that constant). The Rust backend refuses `Bgra` before it
+     * ever reaches this seam; this code exists so a version-skewed caller gets a
+     * typed refusal rather than an unrelated format.
+     */
+    private const val ERROR_UNSUPPORTED_FORMAT = -4
+
+    /** [startImageStream]: the stream request was accepted. */
+    private const val IMAGE_STREAM_STARTED = 0
+
+    /**
+     * [startImageStream] `format`: `ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888`
+     * — three planes (Y/U/V), the format both platforms deliver.
+     */
+    private const val FORMAT_YUV_420_888 = 0
+
+    /**
+     * [startImageStream] `format`: packed 32-bit BGRA — **iOS only**. CameraX's
+     * one packed output is `OUTPUT_IMAGE_FORMAT_RGBA_8888` (byte order
+     * `R,G,B,A`), so this backend refuses the code with
+     * [ERROR_UNSUPPORTED_FORMAT] rather than delivering mislabelled bytes.
+     */
+    private const val FORMAT_BGRA = 1
+
+    /**
+     * How many plane slots [nativeOnImageFrame] carries. Three covers
+     * `YUV_420_888`; unused slots are passed as null. A fixed argument list
+     * rather than an array keeps the per-frame path allocation-free.
+     */
+    private const val MAX_PLANES = 3
 
     /** [ActivityCompat.requestPermissions] request code — module-local, arbitrary. */
     private const val PERMISSION_REQUEST_CODE = 0x6672 // 'f','r'
@@ -162,6 +208,31 @@ object FrustCameraHost {
             mainHandler.post(command)
         }
     }
+
+    /**
+     * The plugin-owned thread every [ImageAnalysis] analyzer runs on — never
+     * the main thread (a frame callback crosses into Rust and runs app code)
+     * and never a CameraX-internal one.
+     *
+     * One shared single-thread executor for the whole process: two concurrently
+     * streaming sessions is not a v1 shape, and serializing them is preferable
+     * to spawning a thread per session. Created lazily so a process that never
+     * streams never pays for the thread; daemon, so it cannot keep the JVM
+     * alive.
+     */
+    private val analysisExecutor: ExecutorService by lazy {
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "frust-camera-analysis").apply { isDaemon = true }
+        }
+    }
+
+    /**
+     * Set once [nativeOnImageFrame] has proven unavailable (an app taking this
+     * Gradle module without the `frust-camera` Rust crate), so the per-frame
+     * guard logs once instead of once per frame at camera rate.
+     */
+    @Volatile
+    private var imageFrameNativeMissing: Boolean = false
 
     /**
      * The application [Context], installed at process start by
@@ -280,9 +351,11 @@ object FrustCameraHost {
     fun closeCamera(session: Int) {
         val entry = sessions.remove(session) ?: return
         entry.closed = true
+        entry.streamFormat = null
         mainExecutor.execute {
             try {
                 entry.preview.setSurfaceProvider(null)
+                unbindImageAnalysis(entry)
                 // `unbind(useCases)`, never `unbindAll()`: another session may
                 // be bound to the same process-wide provider.
                 entry.provider?.unbind(entry.preview, entry.imageCapture)
@@ -339,24 +412,47 @@ object FrustCameraHost {
     fun previewAspectRatio(session: Int): Float = sessions[session]?.aspectRatio ?: 0.0f
 
     /**
-     * `startImageStream(int session, int format) -> int`. **Task 09** wires the
-     * real `ImageAnalysis` use case; the signature is fixed here so the
-     * contract's shape is complete.
+     * `startImageStream(int session, int format) -> int`. Binds an
+     * [ImageAnalysis] use case beside the already-bound preview/capture pair and
+     * starts delivering frames through [nativeOnImageFrame].
+     *
+     * Returns [IMAGE_STREAM_STARTED] once the request is accepted — the bind
+     * itself happens on the main thread, and for a session still configuring it
+     * happens as part of [configure]'s own bind (the requested format is
+     * remembered on the session). Backpressure is
+     * [ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST]: a slow consumer drops frames
+     * rather than queueing them — and stalls the stream outright if it misses
+     * the close deadline (class doc's LAW).
+     *
+     * Calling it twice on one session re-binds the analyzer with the new format.
      */
     @JvmStatic
     fun startImageStream(session: Int, format: Int): Int {
-        if (!sessions.containsKey(session)) return ERROR_UNKNOWN_SESSION
-        Log.d(TAG, "frust-camera: startImageStream($session, $format) — not implemented (task 09)")
-        return ERROR_NOT_IMPLEMENTED
+        val entry = sessions[session] ?: return ERROR_UNKNOWN_SESSION
+        if (outputImageFormatFor(format) == null) {
+            Log.w(TAG, "frust-camera: startImageStream($session) unsupported format $format")
+            return ERROR_UNSUPPORTED_FORMAT
+        }
+        entry.streamFormat = format
+        mainExecutor.execute {
+            // A session that has not resolved its provider yet binds the
+            // analyzer as part of `configure`; nothing to do here.
+            if (entry.provider != null) bindImageAnalysis(entry, format)
+        }
+        return IMAGE_STREAM_STARTED
     }
 
     /**
-     * `stopImageStream(int session) -> void`. **Task 09** fills this alongside
-     * [startImageStream].
+     * `stopImageStream(int session) -> void`. Unbinds this session's
+     * [ImageAnalysis] use case — **the preview and the camera device are
+     * untouched** — and clears its analyzer. A no-op for an unknown session or
+     * one with no stream running.
      */
     @JvmStatic
     fun stopImageStream(session: Int) {
-        Log.d(TAG, "frust-camera: stopImageStream($session) — not implemented (task 09)")
+        val entry = sessions[session] ?: return
+        entry.streamFormat = null
+        mainExecutor.execute { unbindImageAnalysis(entry) }
     }
 
     // --- Kotlin -> Rust: this plugin's own JNI exports ---------------------
@@ -381,6 +477,36 @@ object FrustCameraHost {
     /** Reports a [takePicture] completion. */
     @JvmStatic
     external fun nativeOnPictureTaken(session: Int, ok: Boolean, path: String)
+
+    /**
+     * Delivers one [ImageAnalysis] frame, on [analysisExecutor].
+     *
+     * Called synchronously from the analyzer with the [ImageProxy] still open,
+     * so the Rust side can read the plane buffers zero-copy
+     * (`GetDirectBufferAddress`); the proxy is closed as soon as this returns
+     * (class doc's close-deadline LAW).
+     *
+     * [MAX_PLANES] fixed plane slots rather than arrays: an array per frame
+     * would allocate at camera rate. Slots past [planeCount] are null.
+     */
+    @JvmStatic
+    external fun nativeOnImageFrame(
+        session: Int,
+        format: Int,
+        width: Int,
+        height: Int,
+        rotationDegrees: Int,
+        planeCount: Int,
+        plane0: ByteBuffer?,
+        rowStride0: Int,
+        pixelStride0: Int,
+        plane1: ByteBuffer?,
+        rowStride1: Int,
+        pixelStride1: Int,
+        plane2: ByteBuffer?,
+        rowStride2: Int,
+        pixelStride2: Int,
+    )
 
     // --- Module-internal seam (NOT part of the JNI contract) ---------------
 
@@ -451,8 +577,12 @@ object FrustCameraHost {
      */
     internal fun setTargetRotation(sessionId: Int, rotation: Int) {
         val entry = sessions[sessionId] ?: return
+        entry.targetRotation = rotation
         entry.preview.targetRotation = rotation
         entry.imageCapture.targetRotation = rotation
+        // A running analyzer's frames carry `rotationDegrees` derived from this,
+        // so the stream tracks the display exactly like the preview does.
+        entry.imageAnalysis?.targetRotation = rotation
     }
 
     // --- Internals ---------------------------------------------------------
@@ -481,6 +611,28 @@ object FrustCameraHost {
 
         /** The process-wide provider, once resolved. */
         var provider: ProcessCameraProvider? = null
+
+        /**
+         * The bound `ImageAnalysis` use case while a stream is running, else
+         * null. Main thread only.
+         */
+        var imageAnalysis: ImageAnalysis? = null
+
+        /**
+         * The format `startImageStream` asked for, or null when no stream is
+         * wanted. Read on the main thread by [configure] (a stream requested
+         * while the session was still configuring) and by `bindImageAnalysis`.
+         */
+        @Volatile
+        var streamFormat: Int? = null
+
+        /**
+         * The last display rotation `setTargetRotation` reported, replayed onto
+         * an analyzer bound after that call. `ROTATION_0` until a preview slot
+         * exists — the same default CameraX's use cases start at.
+         */
+        @Volatile
+        var targetRotation: Int = android.view.Surface.ROTATION_0
 
         /** Set by `closeCamera` before the main-thread teardown runs. */
         @Volatile
@@ -515,6 +667,9 @@ object FrustCameraHost {
                         session.preview,
                         session.imageCapture,
                     )
+                    // A stream requested while this session was still
+                    // configuring binds now, as part of the same bring-up.
+                    session.streamFormat?.let { bindImageAnalysis(session, it) }
                     notifyCameraState(session.id, STATE_RUNNING)
                 } catch (e: Throwable) {
                     Log.w(TAG, "frust-camera: session ${session.id} failed to configure", e)
@@ -529,6 +684,95 @@ object FrustCameraHost {
     private fun selectorFor(lensFacing: Int): CameraSelector = when (lensFacing) {
         CameraSelector.LENS_FACING_FRONT -> CameraSelector.DEFAULT_FRONT_CAMERA
         else -> CameraSelector.DEFAULT_BACK_CAMERA
+    }
+
+    /**
+     * The `ImageAnalysis.OUTPUT_IMAGE_FORMAT_*` value a contract format code
+     * names, or null for one CameraX cannot deliver ([FORMAT_BGRA]).
+     */
+    private fun outputImageFormatFor(format: Int): Int? = when (format) {
+        FORMAT_YUV_420_888 -> ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888
+        else -> null
+    }
+
+    /**
+     * Main thread. Bind (or re-bind) session [entry]'s analyzer at [format].
+     *
+     * `bindToLifecycle` is called again with only the new use case — CameraX
+     * combines it with the preview/capture pair already bound to the same
+     * lifecycle owner, so the camera device is never reopened and the preview
+     * never blinks.
+     */
+    private fun bindImageAnalysis(entry: Session, format: Int) {
+        if (entry.closed || entry.isDestroyed()) return
+        val provider = entry.provider ?: return
+        val outputFormat = outputImageFormatFor(format) ?: return
+
+        // Re-binding replaces any analyzer already running for this session.
+        unbindImageAnalysis(entry)
+
+        try {
+            val analysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setOutputImageFormat(outputFormat)
+                .build()
+            analysis.targetRotation = entry.targetRotation
+            analysis.setAnalyzer(analysisExecutor) { proxy ->
+                // `use`-style: the proxy closes as soon as the native call
+                // returns, whatever it did — the KEEP_ONLY_LATEST slot must not
+                // be held by a failed delivery either.
+                try {
+                    deliverImageFrame(entry.id, format, proxy)
+                } finally {
+                    proxy.close()
+                }
+            }
+            provider.bindToLifecycle(entry, selectorFor(entry.lensFacing), analysis)
+            entry.imageAnalysis = analysis
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-camera: startImageStream(${entry.id}) failed to bind", e)
+            entry.streamFormat = null
+        }
+    }
+
+    /** Main thread. Drop session [entry]'s analyzer, leaving the preview bound. */
+    private fun unbindImageAnalysis(entry: Session) {
+        val analysis = entry.imageAnalysis ?: return
+        entry.imageAnalysis = null
+        try {
+            analysis.clearAnalyzer()
+            entry.provider?.unbind(analysis)
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-camera: stopImageStream(${entry.id}) failed to unbind", e)
+        }
+    }
+
+    /**
+     * [analysisExecutor]. Hand one open [ImageProxy]'s planes to Rust.
+     *
+     * Reads nothing out of the buffers itself — the whole point is that the
+     * Rust callback sees the platform's own memory (class doc's LAW).
+     */
+    private fun deliverImageFrame(session: Int, format: Int, proxy: ImageProxy) {
+        val planes = proxy.planes
+        val count = if (planes.size < MAX_PLANES) planes.size else MAX_PLANES
+        notifyImageFrame(
+            session,
+            format,
+            proxy.width,
+            proxy.height,
+            proxy.imageInfo.rotationDegrees,
+            count,
+            if (count > 0) planes[0].buffer else null,
+            if (count > 0) planes[0].rowStride else 0,
+            if (count > 0) planes[0].pixelStride else 0,
+            if (count > 1) planes[1].buffer else null,
+            if (count > 1) planes[1].rowStride else 0,
+            if (count > 1) planes[1].pixelStride else 0,
+            if (count > 2) planes[2].buffer else null,
+            if (count > 2) planes[2].rowStride else 0,
+            if (count > 2) planes[2].pixelStride else 0,
+        )
     }
 
     /** The lifecycle state a live session should sit at right now. */
@@ -616,6 +860,55 @@ object FrustCameraHost {
             nativeOnPictureTaken(session, ok, path)
         } catch (e: Throwable) {
             Log.w(TAG, "frust-camera: nativeOnPictureTaken unavailable", e)
+        }
+    }
+
+    /**
+     * The per-frame guard. Unlike its siblings this one latches
+     * [imageFrameNativeMissing] on the first failure: at camera rate an
+     * unresolvable symbol would otherwise log 30 times a second.
+     */
+    private fun notifyImageFrame(
+        session: Int,
+        format: Int,
+        width: Int,
+        height: Int,
+        rotationDegrees: Int,
+        planeCount: Int,
+        plane0: ByteBuffer?,
+        rowStride0: Int,
+        pixelStride0: Int,
+        plane1: ByteBuffer?,
+        rowStride1: Int,
+        pixelStride1: Int,
+        plane2: ByteBuffer?,
+        rowStride2: Int,
+        pixelStride2: Int,
+    ) {
+        if (imageFrameNativeMissing) return
+        try {
+            nativeOnImageFrame(
+                session,
+                format,
+                width,
+                height,
+                rotationDegrees,
+                planeCount,
+                plane0,
+                rowStride0,
+                pixelStride0,
+                plane1,
+                rowStride1,
+                pixelStride1,
+                plane2,
+                rowStride2,
+                pixelStride2,
+            )
+        } catch (e: UnsatisfiedLinkError) {
+            imageFrameNativeMissing = true
+            Log.w(TAG, "frust-camera: nativeOnImageFrame unavailable — stream frames dropped", e)
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-camera: nativeOnImageFrame($session) failed", e)
         }
     }
 }
