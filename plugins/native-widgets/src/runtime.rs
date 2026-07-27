@@ -519,12 +519,19 @@ pub(crate) trait NativeWidget: 'static {
     /// A platform listener fired for this instance (main thread): decode the
     /// raw `(kind, detail)` pair into the crate's typed
     /// [`EventPayload`](crate::events::EventPayload) vocabulary, or return
-    /// `None` to swallow it — the seam a controlled control's echo guard
-    /// (`crate::controls`'s controlled-component note) uses to drop an event
-    /// its own `update` caused. [`NativeRuntime::on_event`] forwards
-    /// whatever this returns to the slot's registered
-    /// `Arc<dyn Fn(EventPayload) + Send + Sync>` callback (the app-facing
-    /// api, p1-06, wraps that into a signal write).
+    /// `None` to swallow an event this crate has no vocabulary for.
+    /// [`NativeRuntime::on_event`] forwards whatever this returns to the
+    /// slot's registered `Arc<dyn Fn(EventPayload) + Send + Sync>` callback
+    /// (the app-facing api, p1-06, wraps that into a signal write).
+    ///
+    /// **This `None` seam is not the echo guard** (c1-03). A programmatic
+    /// echo — the listener a control's own `update` provokes synchronously —
+    /// never reaches this method at all: it re-enters the thread-local
+    /// runtime, fails `try_borrow_mut`, and is dropped one layer up in
+    /// [`with_runtime`]. `crate::controls`'s module doc carries the full
+    /// account, including why that guard is incidental to the call site
+    /// rather than a designed invariant; `tests::the_thread_local_runtime_is_reentrancy_tolerant`
+    /// pins it.
     ///
     /// Defaults to `None` unconditionally: a display-only control (Label,
     /// ProgressBar, Image) emits nothing and never overrides this.
@@ -904,9 +911,14 @@ impl NativeRuntime {
 
     /// Route a platform listener callback to its slot's control, decode it
     /// into the typed [`EventPayload`] vocabulary via the control's own
-    /// [`NativeWidget::on_event`], and — unless that decode swallowed it (a
-    /// controlled control's echo guard) — invoke the slot's registered
-    /// callback with it.
+    /// [`NativeWidget::on_event`], and — unless that decode returned `None`
+    /// (an event this crate has no vocabulary for) — invoke the slot's
+    /// registered callback with it.
+    ///
+    /// That `None` is **not** how a programmatic echo is suppressed (c1-03):
+    /// an echo never reaches this method, because it re-enters
+    /// [`with_runtime`] mid-borrow and is dropped there. See
+    /// [`NativeWidget::on_event`]'s doc and `crate::controls`'s module doc.
     ///
     /// **Bypasses `RenderRoot::event` entirely** (crate doc): this is a
     /// platform interaction surfacing as a callback, never a frust pointer
