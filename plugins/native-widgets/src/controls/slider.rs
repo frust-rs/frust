@@ -27,10 +27,21 @@
 //! flag: `ProgressBar.setProgress`'s listener notification (`SeekBar`'s
 //! `onProgressRefresh` override) is synchronous-only too, on every supported
 //! API level.
+//!
+//! # No explicit background (f2-04)
+//!
+//! Unlike `Label`/`ProgressBar`, `SliderProps` deliberately carries no
+//! `background_color` field — `AbsSeekBar` (this control's superclass) also
+//! draws its default background from
+//! `?attr/selectableItemBackgroundBorderless`, so an explicit
+//! `View.setBackgroundColor` (the fix f1-01 shipped, and this followup
+//! reverts for this control) would replace the Material touch ripple exactly
+//! as `switch.rs`'s own *No explicit background* section describes. The
+//! progress/thumb tints below already carry the theme with no such tradeoff.
 
 use super::{
-    BACKGROUND_COLOR, CONTENT_DESCRIPTION, ENABLED, MAX, MIN, PROGRESS_TINT, Plan, Setter,
-    THUMB_TINT, VALUE, color, owned_text, plan_color, slot_of,
+    CONTENT_DESCRIPTION, ENABLED, MAX, MIN, PROGRESS_TINT, Plan, Setter, THUMB_TINT, VALUE, color,
+    owned_text, slot_of,
 };
 use crate::NativeWidgetError;
 use crate::events::{
@@ -66,12 +77,6 @@ pub(crate) struct SliderProps {
     pub(crate) max: i32,
     /// `View.setEnabled`.
     pub(crate) enabled: bool,
-    /// Packed ARGB background fill (theme ladder L2 followup, f1-01 — see
-    /// `crate::controls::label::LabelProps::background_color`'s doc for the
-    /// full "why explicit" account), matching the page surface this
-    /// `Slider` sits on. `None` leaves the platform's own default when no
-    /// theme is threaded.
-    pub(crate) background_color: Option<i32>,
     /// Packed ARGB track tint, or `None` to restore the platform's.
     pub(crate) progress_tint: Option<i32>,
     /// Packed ARGB thumb tint, or `None` to restore the platform's.
@@ -90,7 +95,6 @@ impl SliderProps {
             min: 0,
             max: PLATFORM_DEFAULT_MAX,
             enabled: true,
-            background_color: None,
             progress_tint: None,
             thumb_tint: None,
             content_description: None,
@@ -109,7 +113,6 @@ impl SliderProps {
             min: int_or(params, MIN, 0),
             max: int_or(params, MAX, PLATFORM_DEFAULT_MAX),
             enabled: params.flag(ENABLED).unwrap_or(true),
-            background_color: color(params, BACKGROUND_COLOR),
             progress_tint: color(params, PROGRESS_TINT),
             thumb_tint: color(params, THUMB_TINT),
             content_description: owned_text(params, CONTENT_DESCRIPTION),
@@ -146,12 +149,6 @@ impl SliderProps {
         if old.enabled != new.enabled {
             plan.push(Setter::Enabled(new.enabled));
         }
-        plan_color(
-            &mut plan,
-            old.background_color,
-            new.background_color,
-            Setter::BackgroundColor,
-        );
         if old.progress_tint != new.progress_tint {
             plan.push(Setter::ProgressTint(new.progress_tint));
         }
@@ -408,33 +405,13 @@ mod tests {
         );
     }
 
-    // --- theme ladder L2 followup (f1-01): the explicit background setter --
-
-    #[test]
-    fn a_background_color_alone_plans_exactly_one_setter() {
-        let old = decode("\"backgroundColor\":1");
-        let new = decode("\"backgroundColor\":2");
-        assert_eq!(
-            SliderProps::plan(&old, &new, None),
-            vec![Setter::BackgroundColor(2)]
-        );
-        assert_eq!(
-            SliderProps::plan(&new, &new, None),
-            vec![],
-            "an unchanged background plans nothing — the zero-FFI property"
-        );
-    }
-
-    #[test]
-    fn clearing_a_background_plans_nothing_unlike_a_tint() {
-        let with_bg = decode("\"backgroundColor\":5");
-        let without = decode("");
-        assert_eq!(SliderProps::plan(&with_bg, &without, None), vec![]);
-        assert_eq!(
-            SliderProps::plan(&without, &with_bg, None),
-            vec![Setter::BackgroundColor(5)]
-        );
-    }
+    // f2-04: `SliderProps` carries no `background_color` field at all
+    // (module doc's *No explicit background* section) — there is no
+    // wire-shape left to plan a `Setter::BackgroundColor` for, so the two
+    // background-setter tests that used to live here (mirroring
+    // `label.rs`/`progress.rs`) are deleted rather than updated.
+    // `backgroundColor` sent by an old client is simply an unrecognized key
+    // `Params` ignores, per `crate::controls`'s degrade-don't-fail rule.
 
     // --- events / echo guard --------------------------------------------
 

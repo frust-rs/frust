@@ -3,6 +3,19 @@
 //! Five properties: checked, enabled, thumb tint, track tint, accessibility
 //! label. Every one of them is [`Tier::Cheap`](super::Tier::Cheap).
 //!
+//! # No explicit background (f2-04)
+//!
+//! Unlike `Label`/`ProgressBar`, `SwitchProps` deliberately carries no
+//! `background_color` field. `android.widget.Switch`
+//! (`Widget.Material.CompoundButton.Switch`) draws its default background
+//! from `?attr/selectableItemBackgroundBorderless`, which paints the
+//! Material touch ripple; a flat `View.setBackgroundColor` (the fix f1-01
+//! shipped, and this followup reverts for this control) replaces that
+//! drawable outright, so a themed `Switch` lost its ripple. The thumb/track
+//! tints below already carry the theme with no such tradeoff — see
+//! `crate::api::theme`'s module doc's *Explicit backgrounds* section for the
+//! full account.
+//!
 //! # The controlled-component contract, and its two seams
 //!
 //! A `Switch` is **controlled** (`docs/CODE_STANDARDS.md`'s Interaction
@@ -44,8 +57,8 @@
 //! the trait, which Phase 3 decides.
 
 use super::{
-    BACKGROUND_COLOR, CHECKED, CONTENT_DESCRIPTION, ENABLED, Plan, Setter, THUMB_TINT, TRACK_TINT,
-    TYPEFACE, color, owned_text, plan_color, slot_of,
+    CHECKED, CONTENT_DESCRIPTION, ENABLED, Plan, Setter, THUMB_TINT, TRACK_TINT, TYPEFACE, color,
+    owned_text, slot_of,
 };
 use crate::NativeWidgetError;
 use crate::controls::typeface::{self, Typeface};
@@ -71,12 +84,6 @@ pub(crate) struct SwitchProps {
     pub(crate) checked: bool,
     /// `View.setEnabled`.
     pub(crate) enabled: bool,
-    /// Packed ARGB background fill (theme ladder L2 followup, f1-01 — see
-    /// `crate::controls::label::LabelProps::background_color`'s doc for the
-    /// full "why explicit" account), matching the page surface this
-    /// `Switch` sits on. `None` leaves the platform's own default when no
-    /// theme is threaded.
-    pub(crate) background_color: Option<i32>,
     /// Packed ARGB thumb tint, or `None` to restore the platform's.
     pub(crate) thumb_tint: Option<i32>,
     /// Packed ARGB track tint, or `None` to restore the platform's.
@@ -99,7 +106,6 @@ impl SwitchProps {
             slot,
             checked: false,
             enabled: true,
-            background_color: None,
             thumb_tint: None,
             track_tint: None,
             content_description: None,
@@ -117,7 +123,6 @@ impl SwitchProps {
             slot: slot_of(params)?,
             checked: params.flag(CHECKED).unwrap_or(false),
             enabled: params.flag(ENABLED).unwrap_or(true),
-            background_color: color(params, BACKGROUND_COLOR),
             thumb_tint: color(params, THUMB_TINT),
             track_tint: color(params, TRACK_TINT),
             content_description: owned_text(params, CONTENT_DESCRIPTION),
@@ -141,12 +146,6 @@ impl SwitchProps {
         if old.enabled != new.enabled {
             plan.push(Setter::Enabled(new.enabled));
         }
-        plan_color(
-            &mut plan,
-            old.background_color,
-            new.background_color,
-            Setter::BackgroundColor,
-        );
         if old.thumb_tint != new.thumb_tint {
             plan.push(Setter::ThumbTint(new.thumb_tint));
         }
@@ -373,37 +372,13 @@ mod tests {
         );
     }
 
-    // --- theme ladder L2 followup (f1-01): the explicit background setter --
-
-    #[test]
-    fn a_background_color_alone_plans_exactly_one_setter() {
-        let old = decode("\"backgroundColor\":1");
-        let new = decode("\"backgroundColor\":2");
-        assert_eq!(
-            SwitchProps::plan(&old, &new, None),
-            vec![Setter::BackgroundColor(2)]
-        );
-        assert_eq!(
-            SwitchProps::plan(&new, &new, None),
-            vec![],
-            "an unchanged background plans nothing — the zero-FFI property"
-        );
-    }
-
-    #[test]
-    fn clearing_a_background_plans_nothing_unlike_a_tint() {
-        // Same shape as `TextColor`: an int-taking colour setter has no
-        // "restore the platform default" call (unlike the nullable tint
-        // setters tested above), so a `Some` -> `None` transition plans
-        // nothing.
-        let with_bg = decode("\"backgroundColor\":5");
-        let without = decode("");
-        assert_eq!(SwitchProps::plan(&with_bg, &without, None), vec![]);
-        assert_eq!(
-            SwitchProps::plan(&without, &with_bg, None),
-            vec![Setter::BackgroundColor(5)]
-        );
-    }
+    // f2-04: `SwitchProps` carries no `background_color` field at all (module
+    // doc's *No explicit background* section) — there is no wire-shape left
+    // to plan a `Setter::BackgroundColor` for, so the two background-setter
+    // tests that used to live here (mirroring `label.rs`/`progress.rs`) are
+    // deleted rather than updated. `backgroundColor` sent by an old client is
+    // simply an unrecognized key `Params` ignores, per `crate::controls`'s
+    // degrade-don't-fail rule.
 
     // --- theme ladder L3: the typeface setter, and Props gating ------------
 

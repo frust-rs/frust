@@ -569,10 +569,14 @@ impl NativeSwitchView {
         self
     }
 
-    /// `tokens` (theme ladder L2, p1-07 + the f1-01 followup) folds the
-    /// active theme's background/thumb/track tints in — see
-    /// [`NativeButtonView::params_for`]'s doc for why it's threaded
-    /// explicitly.
+    /// `tokens` (theme ladder L2, p1-07) folds the active theme's
+    /// thumb/track tints in — see [`NativeButtonView::params_for`]'s doc for
+    /// why it's threaded explicitly. Deliberately **no** background fold
+    /// (f2-04, reversing the f1-01 followup): see [`crate::api::theme`]'s
+    /// module doc's *Explicit backgrounds* section for why `Switch` is
+    /// excluded — a flat `View.setBackgroundColor` here would replace
+    /// `?attr/selectableItemBackgroundBorderless`'s touch ripple, and the
+    /// thumb/track tints below already carry the theme without it.
     fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
         let mut body = ParamsBody::new();
         body.push_raw(CHECKED, self.checked);
@@ -580,7 +584,6 @@ impl NativeSwitchView {
         body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
         body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
         if let Some(t) = tokens {
-            body.push_raw(BACKGROUND_COLOR, t.surface_bg);
             body.push_raw(THUMB_TINT, t.accent_ink);
             body.push_raw(TRACK_TINT, t.accent_fill);
             // `Switch` never sets on/off text through this plugin today, but
@@ -690,10 +693,15 @@ impl NativeSliderView {
         self
     }
 
-    /// `tokens` (theme ladder L2, p1-07 + the f1-01 followup) folds the
-    /// active theme's background/progress/thumb tints in — see
-    /// [`NativeButtonView::params_for`]'s doc for why it's threaded
-    /// explicitly.
+    /// `tokens` (theme ladder L2, p1-07) folds the active theme's
+    /// progress/thumb tints in — see [`NativeButtonView::params_for`]'s doc
+    /// for why it's threaded explicitly. Deliberately **no** background fold
+    /// (f2-04, reversing the f1-01 followup): see [`crate::api::theme`]'s
+    /// module doc's *Explicit backgrounds* section for why `Slider` is
+    /// excluded — a flat `View.setBackgroundColor` here would replace
+    /// `AbsSeekBar`'s `?attr/selectableItemBackgroundBorderless` touch
+    /// ripple, and the progress/thumb tints below already carry the theme
+    /// without it.
     fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
         let mut body = ParamsBody::new();
         body.push_raw(VALUE, self.value);
@@ -703,7 +711,6 @@ impl NativeSliderView {
         body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
         body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
         if let Some(t) = tokens {
-            body.push_raw(BACKGROUND_COLOR, t.surface_bg);
             body.push_raw(PROGRESS_TINT, t.accent_fill);
             body.push_raw(THUMB_TINT, t.accent_ink);
         }
@@ -1208,35 +1215,51 @@ mod tests {
     }
 
     #[test]
-    fn switch_folds_thumb_and_track_tint() {
+    fn switch_folds_thumb_and_track_tint_but_never_a_background() {
+        // f2-04: `Switch` deliberately folds no background — the thumb/track
+        // tints already carry the theme, and an explicit `backgroundColor`
+        // would replace `?attr/selectableItemBackgroundBorderless`'s ripple
+        // (`crate::api::theme`'s module doc's *Explicit backgrounds*
+        // section).
         let view = native_switch(true);
         let tokens = dark_tokens();
+        let params = view.params_for(11, Some(tokens));
         assert_eq!(
-            view.params_for(11, Some(tokens)),
+            params,
             format!(
                 "{{\"__frustControl\":\"switch\",\"__frustSlot\":11,\"checked\":true,\"enabled\":\
-                 true,\"dark\":true,\"backgroundColor\":{},\"thumbTint\":{},\"trackTint\":{},\
+                 true,\"dark\":true,\"thumbTint\":{},\"trackTint\":{},\
                  \"typeface\":\"{}\"}}",
-                tokens.surface_bg,
                 tokens.accent_ink,
                 tokens.accent_fill,
                 tokens.body_typeface.wire()
             )
         );
+        assert!(
+            !params.contains("backgroundColor"),
+            "Switch must never fold an explicit background — it would defeat the ripple"
+        );
     }
 
     #[test]
-    fn slider_folds_progress_and_thumb_tint() {
+    fn slider_folds_progress_and_thumb_tint_but_never_a_background() {
+        // f2-04: same rationale as the Switch test above — `AbsSeekBar` also
+        // carries `?attr/selectableItemBackgroundBorderless`.
         let view = native_slider(25, 0, 50);
         let tokens = dark_tokens();
+        let params = view.params_for(5, Some(tokens));
         assert_eq!(
-            view.params_for(5, Some(tokens)),
+            params,
             format!(
                 "{{\"__frustControl\":\"slider\",\"__frustSlot\":5,\"value\":25,\"min\":0,\"max\":\
-                 50,\"enabled\":true,\"dark\":true,\"backgroundColor\":{},\"progressTint\":{},\
+                 50,\"enabled\":true,\"dark\":true,\"progressTint\":{},\
                  \"thumbTint\":{}}}",
-                tokens.surface_bg, tokens.accent_fill, tokens.accent_ink
+                tokens.accent_fill, tokens.accent_ink
             )
+        );
+        assert!(
+            !params.contains("backgroundColor"),
+            "Slider must never fold an explicit background — it would defeat the ripple"
         );
     }
 
