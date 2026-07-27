@@ -51,9 +51,17 @@
 //! # No unwind across FFI
 //!
 //! Every export body runs inside [`jni::EnvUnowned::with_env`], which wraps it
-//! in `catch_unwind` and resolves to a benign default
-//! (`LogErrorAndDefault`) — the crate's half of `docs/CODE_STANDARDS.md`'s
-//! no-unwind-across-FFI rule, the same shape `frust-camera`'s exports use.
+//! in `catch_unwind` and resolves to a benign default — the crate's half of
+//! `docs/CODE_STANDARDS.md`'s no-unwind-across-FFI rule, the same shape
+//! `frust-camera`'s exports use. Every export but
+//! [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`] resolves
+//! via `LogErrorAndDefault` (log and return the default). That one export
+//! resolves via `ThrowRuntimeExAndDefault` instead: the *frozen Kotlin ↔
+//! Rust contract* table above promises `createView` throws on **any**
+//! failure, not only the ones [`create_control`] catches and throws for
+//! itself — a JNI-level error reading `paramsJson`, or a caught panic
+//! anywhere in the call, must throw too, or the contract and the code
+//! disagree again (`c1-02-create-contract-honesty.md`).
 //! The only `unsafe` tokens in this module are the exports'
 //! `#[unsafe(no_mangle)]` attributes.
 //!
@@ -77,7 +85,7 @@ pub(crate) mod fonts;
 // `theme::dp_to_px` from OUTSIDE this module's own subtree.
 pub(crate) mod theme;
 
-use jni::errors::LogErrorAndDefault;
+use jni::errors::{LogErrorAndDefault, ThrowRuntimeExAndDefault};
 use jni::objects::{JObject, JString};
 use jni::strings::JNIString;
 use jni::sys::{jint, jlong, jobject};
@@ -120,12 +128,18 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
 /// `FrustNativeControlFactory.createView` → the Rust-built control.
 ///
 /// Returns the new view as a local reference on success. On failure — the
-/// params carry no known control kind, the control's own `create` failed, or
-/// a caught panic — this throws a Java exception instead of returning
-/// `null`, honouring `FrustPlatformViewFactory`'s documented contract
-/// (`createView` returns a non-null `View`; a thrown exception, not a `null`
-/// return, is the failure channel the host's `applyCreate` already catches
-/// and treats as a dead slot rather than crashing its frame loop).
+/// params carry no known control kind, the control's own `create` failed, a
+/// re-entrant runtime borrow, an unreadable `paramsJson`, or a caught panic
+/// — this throws a Java exception instead of returning `null`, honouring
+/// `FrustPlatformViewFactory`'s documented contract (`createView` returns a
+/// non-null `View`; a thrown exception, not a `null` return, is the failure
+/// channel the host's `applyCreate` already catches and treats as a dead
+/// slot rather than crashing its frame loop). The
+/// `resolve::<ThrowRuntimeExAndDefault>()` below is what covers the last two
+/// of those (a JNI-level error reading `paramsJson`, and a caught panic
+/// anywhere in this call) — every other export in this module resolves via
+/// the quieter `LogErrorAndDefault` instead, since only this one export's
+/// contract promises a throw (`c1-02-create-contract-honesty.md`).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeCreateControl<'local>(
     mut env: EnvUnowned<'local>,
@@ -140,7 +154,7 @@ pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeCreateCont
             let params = params.try_to_string(env)?;
             Ok(create_control(env, &params, &activity, &context))
         })
-        .resolve::<LogErrorAndDefault>();
+        .resolve::<ThrowRuntimeExAndDefault>();
     created.unwrap_or(std::ptr::null_mut())
 }
 
@@ -148,7 +162,14 @@ pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeCreateCont
 /// dispatch, build, retain, and hand a fresh local reference back to Kotlin.
 /// On failure this throws a Java exception ([`throw_create_failed`]) rather
 /// than returning `null` — see that function's doc and the module doc's
-/// contract table above.
+/// contract table above. This now includes [`runtime::with_runtime`]
+/// returning `None` (the runtime's `RefCell` already borrowed — a
+/// re-entrant call): [`reentrant_create_failure`] turns that into the same
+/// `NativeWidgetError` shape every other failure takes, so it rides the
+/// identical `match outcome` / `throw_create_failed` path below instead of
+/// `?`-ing straight past it the way it used to
+/// (`c1-02-create-contract-honesty.md` — f2-05 left this one path silently
+/// returning `null`).
 ///
 /// Theme ladder L1 (p1-07): builds every control against a night-qualified
 /// `Context` (`theme::night_qualified_context`) before dispatching to the
@@ -195,7 +216,15 @@ fn create_control<'local>(
                 Err(e)
             }
         }
-    })?;
+    })
+    // `with_runtime` returns `None` only when the runtime's `RefCell` is
+    // already borrowed (a re-entrant call — a platform setter fired its own
+    // listener back into create). `with_runtime` itself already
+    // `log::warn!`s that at the point of detection; folding it into the
+    // same `Result` shape here is what makes it fall through the `match
+    // outcome` arm below and throw, instead of `?`-ing straight past the
+    // throwing contract like before (`c1-02-create-contract-honesty.md`).
+    .unwrap_or_else(reentrant_create_failure);
 
     match outcome {
         Ok((slot_id, raw)) => {
@@ -210,6 +239,17 @@ fn create_control<'local>(
     }
 }
 
+/// The typed failure [`create_control`] reports in place of the bare `?`
+/// early return `f2-05` left over `runtime::with_runtime`'s `None` arm (the
+/// runtime's `RefCell` already borrowed) — see that function's doc. Kept as
+/// its own function, mirroring [`create_failure_message`] below, so the
+/// message is host-testable the same way.
+fn reentrant_create_failure() -> Result<(SlotId, jobject), NativeWidgetError> {
+    Err(NativeWidgetError::Platform(
+        "runtime re-entrant — a platform setter fired its own listener during create".into(),
+    ))
+}
+
 /// Throws a Java exception reporting a create failure — the fix for
 /// `f2-05-null-create-npe.md`: `createView` returns a non-null `View` by
 /// contract (`FrustPlatformViewFactory`'s KDoc), so a failure must surface
@@ -220,11 +260,14 @@ fn create_control<'local>(
 /// returns `Err(Error::JavaException)` to signal that success (see its own
 /// doc comment) — deliberately discarded here (`let _ =`) since the caller
 /// ([`create_control`]) already logged the original failure and only needs
-/// to fall through to its own `None`; `resolve::<LogErrorAndDefault>()`
-/// back in [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`]
-/// never re-clears a pending exception, so it rides the JNI call back to
-/// Kotlin, where `applyCreate`'s `catch (Throwable)` is exactly what turns
-/// it into a dead slot instead of an NPE.
+/// to fall through to its own `None`. That `None` rides back as `Ok(None)`
+/// from the outer `with_env` closure, so
+/// `resolve::<ThrowRuntimeExAndDefault>()` back in
+/// [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`] never
+/// even runs for it (its `on_error`/`on_panic` fire only on `Err`/a panic,
+/// never on `Ok`) — the pending exception this function set rides the JNI
+/// call back to Kotlin untouched, where `applyCreate`'s `catch (Throwable)`
+/// is exactly what turns it into a dead slot instead of an NPE.
 fn throw_create_failed(env: &mut Env<'_>, error: &NativeWidgetError) {
     let msg = JNIString::new(create_failure_message(error));
     let _ = env.throw_new(jni_str!("java/lang/RuntimeException"), msg);
@@ -256,6 +299,40 @@ mod create_failure_message_tests {
         let msg = create_failure_message(&err);
         assert!(msg.contains("createView failed"));
         assert!(msg.contains("bogus"));
+    }
+}
+
+/// Host-testable coverage for the re-entrancy path
+/// (`c1-02-create-contract-honesty.md`): [`reentrant_create_failure`] is
+/// the pure function that stands in for `runtime::with_runtime`'s `None`
+/// arm, so it can be exercised the same way [`create_failure_message_tests`]
+/// exercises the create-failed message above, without a JVM.
+///
+/// The **panic** path has no equivalent pure function to unit-test here —
+/// `resolve::<ThrowRuntimeExAndDefault>()`'s `on_panic` arm is the jni crate's
+/// own `ErrorPolicy` impl (`jni-0.22.4/src/errors/policy.rs`), exercised by
+/// its own upstream test suite, not this crate's. What this crate owns and
+/// *can* verify without a device is that `nativeCreateControl` actually
+/// resolves via that throwing policy rather than `LogErrorAndDefault` — the
+/// `.resolve::<ThrowRuntimeExAndDefault>()` call above, confirmed by
+/// `cargo check --target aarch64-linux-android -p frust-native-widgets`
+/// (a policy-name typo would be a compile error, since `EnvOutcome::resolve`
+/// is generic over the `ErrorPolicy` type parameter) — the same
+/// "documented compile-gated equivalent" shape `create_failure_message`'s
+/// doc above already uses for the parts of this contract no host process
+/// can execute end-to-end.
+#[cfg(test)]
+mod reentrant_create_failure_tests {
+    use super::*;
+
+    #[test]
+    fn reports_reentrancy_distinctly() {
+        let Err(err) = reentrant_create_failure() else {
+            panic!("reentrant_create_failure must always return Err");
+        };
+        let msg = create_failure_message(&err);
+        assert!(msg.contains("createView failed"));
+        assert!(msg.contains("re-entrant"));
     }
 }
 
