@@ -1,7 +1,40 @@
 //! Source-scan conformance test guarding the bare `dev.frust` Kotlin package
 //! exception (`docs/CODE_STANDARDS.md`'s Plugin Conventions) — a
-//! cross-cutting invariant that must see every plugin under `plugins/**`, not
-//! just one.
+//! cross-cutting invariant that must see every plugin's **Kotlin** under
+//! `plugins/**`, not just one.
+//!
+//! # Scope: Kotlin only, by design — not "every file under `plugins/**`"
+//!
+//! **Task p3-04 narrowed this claim (Option B)** after a conformance sweep
+//! found the scan reporting green while silently skipping Swift
+//! (`workflow/plans/features/frust-native-widgets/research/RESEARCH-P3.md`
+//! §8; flagged as a latent trap earlier in
+//! `RESEARCH-P2-REFRESH.md` §7). The bare-`dev.frust`-package rule this test
+//! pins is a **Kotlin/JNI-export-symbol-naming concept**: a Java-style
+//! `package` declaration gets baked verbatim into a JNI export's mangled
+//! symbol name (`docs/CODE_STANDARDS.md`'s "JNI export names are LAW"), which
+//! is exactly why a second plugin copying the bare `dev.frust` package would
+//! be a real, silent collision risk worth scanning for. **Swift has no
+//! equivalent mechanism to police the same way** — a Swift module is its own
+//! separate compilation unit with no `package`-style declaration statement, so
+//! there is no way for a stray `.swift` file to "declare itself" inside
+//! another module's namespace the way a stray `.kt` file could copy `package
+//! dev.frust`. Broadening this specific scan to Swift would be checking for a
+//! defect class that structurally cannot occur there.
+//!
+//! **Swift is intentionally, visibly out of scope for this reason.** As of
+//! this writing the only Swift under `plugins/**` is
+//! `plugins/camera/platform/ios/Package.swift` and
+//! `plugins/camera/platform/ios/Sources/FrustCamera/CameraPreviewFactory.swift`
+//! — both unaffected by, and untested by, this scan. iOS's own
+//! platform-view-factory naming rule (`docs/CODE_STANDARDS.md`'s Naming
+//! Conventions table: a bare `@objc(<Name>)` runtime name, e.g.
+//! `@objc(CameraPreviewFactory)`, no package prefix — the opposite convention
+//! from Android's fully-qualified `dev.frust.*` requirement) is a SEPARATE LAW
+//! governing a different concern (the `viewType` string a host resolves via
+//! `NSClassFromString`), and this test does not check it — that invariant, if
+//! it ever needs a conformance scan of its own, belongs in a differently-named
+//! test, not a broadened version of this one.
 //!
 //! **Relocated by task c1-04** from
 //! `crates/frust/tests/plugin_kotlin_conformance.rs`'s Part 2 (f2-06), which
@@ -35,14 +68,18 @@
 //! symbol names — moving them is a breaking symbol rename, correctly
 //! deferred to Phase 3 packaging and NOT attempted here.
 //!
-//! [`only_the_two_known_files_use_the_bare_dev_frust_package`] fails if any
-//! OTHER `.kt` file under `plugins/**` declares the bare `package dev.frust`
-//! (a second plugin copying the exception rather than following the
-//! `dev.frust.<plugin>` precedent), and fails just as loudly if either of
+//! [`only_the_two_known_kotlin_files_use_the_bare_dev_frust_package`] fails if
+//! any OTHER `.kt` file under `plugins/**` declares the bare `package
+//! dev.frust` (a second plugin copying the exception rather than following
+//! the `dev.frust.<plugin>` precedent), and fails just as loudly if either of
 //! the two allowlisted files stops declaring it (a stale allowlist entry is
 //! as much drift as a new violation). Scoped to `plugins/**` only — the
 //! embedding module's own `platform/android/frust-embedding` legitimately
-//! ships bare `dev.frust` Kotlin and must never trip this scan.
+//! ships bare `dev.frust` Kotlin and must never trip this scan. Non-`.kt`
+//! files under `plugins/**` (Swift included — see the Scope section above)
+//! are walked but deliberately filtered out before the bare-package check
+//! runs; that filter is this test's Kotlin-only scope boundary, not an
+//! oversight.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,7 +119,10 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every file under `plugins/`, sorted for a stable failure order.
+/// Every file under `plugins/` of any extension (Kotlin, Swift, TOML, …),
+/// sorted for a stable failure order. The Kotlin-only scope boundary lives at
+/// the call site's extension filter, not here — this helper itself makes no
+/// claim about which files matter to any particular check.
 fn all_plugin_files() -> Vec<PathBuf> {
     let root = workspace_root().join("plugins");
     let mut out = Vec::new();
@@ -111,10 +151,15 @@ fn declares_bare_dev_frust(contents: &str) -> bool {
 }
 
 #[test]
-fn only_the_two_known_files_use_the_bare_dev_frust_package() {
+fn only_the_two_known_kotlin_files_use_the_bare_dev_frust_package() {
     let mut found_bare: Vec<String> = Vec::new();
 
     for path in all_plugin_files() {
+        // Kotlin-only, deliberately: the bare-`dev.frust`-package exception
+        // this test pins is a JNI-export-symbol-naming concept with no Swift
+        // equivalent (see this file's module doc, "Scope: Kotlin only, by
+        // design"). Every non-`.kt` file under `plugins/**` — Swift included
+        // — is walked above and skipped here on purpose, not silently missed.
         if path.extension().is_none_or(|ext| ext != "kt") {
             continue;
         }
