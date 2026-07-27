@@ -20,9 +20,13 @@
 //! # Controlled, exactly like `Switch`
 //!
 //! The drag reports a *requested* value; `update` writes the app-confirmed one
-//! back, with the same two seams (`observed` write-back + `suppress_events`
-//! echo guard) and the same v1 limitation. See `switch.rs`'s module doc — it
-//! is the reference description for both.
+//! back, with the same two seams (`observed` write-back + the
+//! `crate::runtime::with_runtime` re-entrancy drop as the sole echo guard) and
+//! the same v1 limitation. See `switch.rs`'s module doc — it is the reference
+//! description for both, including why there is no per-instance suppression
+//! flag: `ProgressBar.setProgress`'s listener notification (`SeekBar`'s
+//! `onProgressRefresh` override) is synchronous-only too, on every supported
+//! API level.
 
 use super::{
     BACKGROUND_COLOR, CONTENT_DESCRIPTION, ENABLED, MAX, MIN, PROGRESS_TINT, Plan, Setter,
@@ -174,16 +178,18 @@ fn int_or(params: &Params<'_>, key: &str, fallback: i32) -> i32 {
 
 /// Decode a `SeekBar.OnSeekBarChangeListener` firing into the typed
 /// vocabulary: a value change reports **platform-space** (module doc's *no
-/// `setMin`*) until `min` is added back here, and the echo guard (module
-/// doc, `switch.rs`'s reference description) suppresses only the value
-/// change a [`Setter::Progress`] we just issued would otherwise echo — a
-/// `DragStart`/`DragEnd` is always user-caused (touch-driven, never
-/// something one of our own setters triggers) and is never suppressed.
+/// `setMin`*) until `min` is added back here. Every event this decoder is
+/// ever handed in production is a genuine platform report — a
+/// [`Setter::Progress`] echo is dropped one layer up by
+/// `crate::runtime::with_runtime`'s re-entrancy tolerance, before
+/// `NativeWidget::on_event` runs (module doc, `switch.rs`'s reference
+/// description) — so there is nothing left to suppress here; `DragStart`/
+/// `DragEnd` were never suppressed either, being always user-caused
+/// (touch-driven, never something one of our own setters triggers).
 ///
 /// Pure and host-testable: no JNI, no `SliderState` — the Android glue
-/// (`platform::Slider`'s `on_event`) is a three-field forward onto this.
+/// (`platform::Slider`'s `on_event`) is a two-field forward onto this.
 pub(crate) fn decode_event(
-    suppress_events: bool,
     observed: &mut Option<i32>,
     min: i32,
     event: NativeEvent,
@@ -192,7 +198,7 @@ pub(crate) fn decode_event(
         EVENT_KIND_VALUE_CHANGED => {
             let (platform_value, from_user) = unpack_value_changed(event.detail);
             *observed = Some(platform_value);
-            (!suppress_events).then_some(EventPayload::ValueChanged {
+            Some(EventPayload::ValueChanged {
                 value: platform_value + min,
                 from_user,
             })
@@ -238,10 +244,6 @@ pub(crate) mod platform {
         /// [`NativeWidget::on_event`] via [`decode_event`];
         /// [`SliderProps::plan`] reads it as the write-back's drift signal.
         pub(crate) observed: Option<i32>,
-        /// Held while `update` writes a value the platform will notify a
-        /// listener about — [`decode_event`] drops an event that arrives
-        /// while it is set.
-        pub(crate) suppress_events: bool,
     }
 
     impl NativeWidget for Slider {
@@ -272,7 +274,6 @@ pub(crate) mod platform {
                     view: retained,
                     min: props.min,
                     observed: None,
-                    suppress_events: false,
                 },
             ))
         }
@@ -284,9 +285,12 @@ pub(crate) mod platform {
             new: &Self::Props,
         ) -> Result<(), NativeWidgetError> {
             let plan = SliderProps::plan(old, new, state.observed);
-            state.suppress_events = true;
+            // Any Progress setter here that echoes synchronously re-enters
+            // `with_runtime` mid-borrow and is dropped there (module doc's
+            // *Controlled* section, `switch.rs`'s Echo guard) — there is no
+            // suppression state here to hold across the call or to leave
+            // latched by a panic mid-`apply_all`.
             let applied = ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &state.view, &plan));
-            state.suppress_events = false;
             if applied.is_ok() {
                 state.observed = None;
                 state.min = new.min;
@@ -295,7 +299,7 @@ pub(crate) mod platform {
         }
 
         fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
-            decode_event(state.suppress_events, &mut state.observed, state.min, event)
+            decode_event(&mut state.observed, state.min, event)
         }
 
         fn dispose(
@@ -445,7 +449,7 @@ mod tests {
     fn a_user_drag_decodes_to_app_space_and_updates_the_drift_signal() {
         // Platform-space 5 with an app-space min of 10 is app-space 15.
         let mut observed = None;
-        let payload = decode_event(false, &mut observed, 10, value_changed_event(5, true));
+        let payload = decode_event(&mut observed, 10, value_changed_event(5, true));
         assert_eq!(
             payload,
             Some(EventPayload::ValueChanged {
@@ -456,24 +460,17 @@ mod tests {
         assert_eq!(observed, Some(5), "observed stays platform-space");
     }
 
-    #[test]
-    fn an_echo_from_updates_own_setter_is_suppressed_but_still_updates_observed() {
-        // The dispatch plan p1-05's acceptance criterion asks for: a
-        // `ValueChanged` `update`'s own `Setter::Progress` caused must not
-        // fire the app callback, but the write-back drift signal still has
-        // to see the platform's true (platform-space) value.
-        let mut observed = None;
-        let payload = decode_event(true, &mut observed, 0, value_changed_event(7, false));
-        assert_eq!(payload, None, "an echo must not reach the app callback");
-        assert_eq!(
-            observed,
-            Some(7),
-            "the write-back signal is still updated during the echo"
-        );
-    }
+    // f2-02: there is no `suppress_events` parameter to test an echo against
+    // anymore. `ProgressBar.setProgress`'s listener notification is
+    // synchronous-only (same AOSP-source basis as `switch.rs`'s), so the ONLY
+    // guard against a `Setter::Progress` echo is
+    // `crate::runtime::with_runtime`'s re-entrancy drop, one layer up. There
+    // is no per-instance flag left for this decoder to consult or for a panic
+    // mid-`apply_all` to latch; the guard mechanism itself is pinned by
+    // `runtime::tests::the_thread_local_runtime_is_reentrancy_tolerant`.
 
     #[test]
-    fn drag_start_and_end_are_never_suppressed_and_do_not_touch_observed() {
+    fn drag_start_and_end_decode_unconditionally_and_do_not_touch_observed() {
         let mut observed = Some(3);
         let start = NativeEvent {
             kind: EVENT_KIND_DRAG_START,
@@ -484,12 +481,12 @@ mod tests {
             detail: 0,
         };
         assert_eq!(
-            decode_event(true, &mut observed, 0, start),
+            decode_event(&mut observed, 0, start),
             Some(EventPayload::DragStart),
-            "a drag gesture is always user-caused, never suppressed"
+            "a drag gesture is always user-caused"
         );
         assert_eq!(
-            decode_event(true, &mut observed, 0, end),
+            decode_event(&mut observed, 0, end),
             Some(EventPayload::DragEnd)
         );
         assert_eq!(observed, Some(3), "neither kind touches the drift signal");
@@ -502,7 +499,7 @@ mod tests {
             kind: crate::events::EVENT_KIND_CLICK,
             detail: 0,
         };
-        assert_eq!(decode_event(false, &mut observed, 0, click), None);
+        assert_eq!(decode_event(&mut observed, 0, click), None);
         assert_eq!(observed, Some(1));
     }
 }

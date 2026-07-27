@@ -18,14 +18,23 @@
 //!    otherwise a props change that touched some other field would leave the
 //!    platform's optimistic flip standing.
 //! 2. **Echo guard.** `setChecked` notifies the listener, so writing the app's
-//!    value would otherwise look like a fresh user toggle. Two things stop
-//!    that, in this order: Android's *synchronous* notification re-enters the
-//!    runtime mid-`update` and is dropped there (`crate::runtime`'s
-//!    re-entrancy tolerance — free, but it only covers the synchronous case),
-//!    and the Android state's `suppress_events` flag, held across the whole
-//!    write, which is the explicit check [`decode_toggled`] makes and which
-//!    also covers a posted or animation-deferred notification arriving after
-//!    `update` returned.
+//!    value would otherwise look like a fresh user toggle. `CompoundButton`'s
+//!    AOSP source (every supported API level) invokes `onCheckedChanged`
+//!    **synchronously, in the same call stack as `setChecked`** — guarded
+//!    only by its own reentrancy flag (`mBroadcasting`), never posted to a
+//!    `Handler` or deferred to an animation callback; there is no OEM/vendor
+//!    override path either, since `Switch` here is always the framework
+//!    class (this module's own `CLASS` const), not a themed subclass. `update`
+//!    runs inside `crate::runtime::with_runtime`, so that synchronous echo
+//!    re-enters the same thread-local `RefCell` mid-borrow, fails
+//!    `try_borrow_mut`, and is dropped **before** `NativeWidget::on_event`/
+//!    [`decode_toggled`] ever see it (`crate::runtime`'s re-entrancy
+//!    tolerance) — this is the SOLE guard. There is no per-instance
+//!    suppression flag, and therefore nothing a panic mid-`update` could
+//!    leave latched; the re-entrancy mechanism itself is pinned by
+//!    `crate::runtime`'s `the_thread_local_runtime_is_reentrancy_tolerant`.
+//!    [`decode_toggled`] has nothing left to suppress: every event it is ever
+//!    handed in production is a genuine platform report.
 //!
 //! **v1 limitation, deliberate:** an app that *rejects* a toggle (reports the
 //! same value back) produces no props change at all, so `update` never runs
@@ -157,20 +166,19 @@ impl SwitchProps {
 }
 
 /// Decode a `CompoundButton.OnCheckedChangeListener` firing into the typed
-/// vocabulary (module doc's *echo guard*): the write-back drift signal
-/// (`observed`) is updated unconditionally, but the app-facing
-/// [`EventPayload`] is suppressed while `suppress_events` is held — a
-/// `Toggled` `update`'s own [`Setter::Checked`] caused must never reach the
-/// app callback.
+/// vocabulary: updates the write-back drift signal (`observed`) and always
+/// decodes to an [`EventPayload::Toggled`] — a `Toggled` `update`'s own
+/// [`Setter::Checked`] echo never reaches this decoder at all in production
+/// (module doc's *Echo guard*: `crate::runtime::with_runtime`'s re-entrancy
+/// tolerance drops it one layer up, before `NativeWidget::on_event` runs).
 ///
 /// `None` when `event.kind` is not the toggled kind — defensive, since
 /// `Switch`'s listener is only ever attached as an
 /// `OnCheckedChangeListener` and so can only ever report this one kind.
 ///
 /// Pure and host-testable: no JNI, no `SwitchState` — the Android glue
-/// (`platform::Switch`'s `on_event`) is a two-field forward onto this.
+/// (`platform::Switch`'s `on_event`) is a one-field forward onto this.
 pub(crate) fn decode_toggled(
-    suppress_events: bool,
     observed: &mut Option<bool>,
     event: NativeEvent,
 ) -> Option<EventPayload> {
@@ -179,7 +187,7 @@ pub(crate) fn decode_toggled(
     }
     let checked = unpack_bool(event.detail);
     *observed = Some(checked);
-    (!suppress_events).then_some(EventPayload::Toggled(checked))
+    Some(EventPayload::Toggled(checked))
 }
 
 #[cfg(target_os = "android")]
@@ -212,10 +220,6 @@ pub(crate) mod platform {
         /// [`SwitchProps::plan`] reads it as the write-back's drift signal
         /// (module doc).
         pub(crate) observed: Option<bool>,
-        /// Held while `update` writes a value the platform will notify a
-        /// listener about — the echo guard [`decode_toggled`] checks before
-        /// producing an [`EventPayload`] (module doc).
-        pub(crate) suppress_events: bool,
     }
 
     impl NativeWidget for Switch {
@@ -248,7 +252,6 @@ pub(crate) mod platform {
                 SwitchState {
                     view: retained,
                     observed: None,
-                    suppress_events: false,
                 },
             ))
         }
@@ -260,12 +263,11 @@ pub(crate) mod platform {
             new: &Self::Props,
         ) -> Result<(), NativeWidgetError> {
             let plan = SwitchProps::plan(old, new, state.observed);
-            // The guard is held across the whole plan, not just the checked
-            // setter: the flag is what `decode_toggled` consults, and a
-            // partially-applied plan must not leave it set.
-            state.suppress_events = true;
+            // Any Checked setter here that echoes synchronously re-enters
+            // `with_runtime` mid-borrow and is dropped there (module doc's
+            // *Echo guard*) — there is no suppression state here to hold
+            // across the call or to leave latched by a panic mid-`apply_all`.
             let applied = ctx.with_frame(FRAME_CAPACITY, |ctx| apply_all(ctx, &state.view, &plan));
-            state.suppress_events = false;
             if applied.is_ok() {
                 // The platform now matches the app again — including the case
                 // where the write-back above reverted a drifted value. A
@@ -277,7 +279,7 @@ pub(crate) mod platform {
         }
 
         fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
-            decode_toggled(state.suppress_events, &mut state.observed, event)
+            decode_toggled(&mut state.observed, event)
         }
 
         fn dispose(
@@ -439,26 +441,22 @@ mod tests {
     #[test]
     fn a_user_toggle_decodes_and_updates_the_drift_signal() {
         let mut observed = None;
-        let payload = decode_toggled(false, &mut observed, toggled_event(true));
+        let payload = decode_toggled(&mut observed, toggled_event(true));
         assert_eq!(payload, Some(EventPayload::Toggled(true)));
         assert_eq!(observed, Some(true));
     }
 
-    #[test]
-    fn an_echo_from_updates_own_setter_is_suppressed_but_still_updates_observed() {
-        // The dispatch plan p1-05's acceptance criterion asks for: a
-        // `Toggled` `update`'s own `Setter::Checked` caused must not fire the
-        // app callback (it decodes to `None`), but the write-back drift
-        // signal still has to see the platform's true value.
-        let mut observed = None;
-        let payload = decode_toggled(true, &mut observed, toggled_event(true));
-        assert_eq!(payload, None, "an echo must not reach the app callback");
-        assert_eq!(
-            observed,
-            Some(true),
-            "the write-back signal is still updated during the echo"
-        );
-    }
+    // f2-02: there is no `suppress_events` parameter to test an echo against
+    // anymore. `CompoundButton.setChecked`'s listener notification is
+    // synchronous-only on every supported Android version (AOSP source: the
+    // call happens in the same stack frame as `setChecked`, guarded only by
+    // `CompoundButton`'s own `mBroadcasting` reentrancy flag, never posted or
+    // animation-deferred), so the ONLY guard against a `Setter::Checked` echo
+    // is `crate::runtime::with_runtime`'s re-entrancy drop — one layer up,
+    // before this decoder is ever called. `decode_toggled` has nothing left
+    // to suppress, and there is no per-instance flag a panic mid-`apply_all`
+    // could leave latched; the guard mechanism itself is pinned by
+    // `runtime::tests::the_thread_local_runtime_is_reentrancy_tolerant`.
 
     #[test]
     fn a_misrouted_kind_decodes_to_nothing_and_leaves_observed_untouched() {
@@ -467,7 +465,7 @@ mod tests {
             kind: crate::events::EVENT_KIND_CLICK,
             detail: 0,
         };
-        assert_eq!(decode_toggled(false, &mut observed, click), None);
+        assert_eq!(decode_toggled(&mut observed, click), None);
         assert_eq!(observed, Some(false));
     }
 }

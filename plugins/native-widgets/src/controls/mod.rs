@@ -63,19 +63,22 @@
 //! `Switch`/`Slider` follow frust's controlled-component convention
 //! (`docs/CODE_STANDARDS.md`'s Interaction Semantics): the platform reports a
 //! *requested* value through its listener, and `update` writes the
-//! app-confirmed value back. Two seams make that safe, both live here and both
-//! wired to a real listener:
+//! app-confirmed value back. Two seams make that safe:
 //!
 //! - **write-back**: `plan` takes the value the platform last reported
 //!   (`observed`), so a props change that leaves the value untouched still
 //!   re-asserts it when the platform has drifted;
-//! - **echo guard**: the state carries a `suppress_events` flag `update` holds
-//!   while it writes the value, because a value setter notifies the platform's
-//!   own listener — each control's `decode_toggled`/`decode_event` (its
-//!   `NativeWidget::on_event` impl) drops an event that arrives while it is
-//!   set. (Android's *synchronous* notification is already dropped one level
-//!   lower, by the runtime's re-entrancy tolerance; the flag is what covers a
-//!   posted one. See `switch.rs` for the full account.)
+//! - **echo guard**: a value setter (`setChecked`/`setProgress`) notifies the
+//!   platform's own listener **synchronously, on every supported Android
+//!   version** (AOSP source: the same call stack as the setter, guarded only
+//!   by the widget's own reentrancy flag, never posted or animation-deferred —
+//!   see `switch.rs`'s module doc for the full account). `update` runs inside
+//!   `crate::runtime::with_runtime`, so that echo re-enters the same
+//!   thread-local `RefCell` mid-borrow and is dropped there, before
+//!   `NativeWidget::on_event`/each control's `decode_toggled`/`decode_event`
+//!   ever see it — the runtime's re-entrancy tolerance is the SOLE guard.
+//!   There is no per-instance suppression flag, and therefore nothing a panic
+//!   mid-`update` could leave latched.
 
 pub(crate) mod button;
 pub(crate) mod image;
@@ -225,8 +228,8 @@ pub(crate) enum Setter<'a> {
 
     /// `CompoundButton.setChecked(boolean)` — **[`Tier::Cheap`]**, *and* the
     /// one setter that calls back into us: it notifies
-    /// `OnCheckedChangeListener` synchronously, which is what the
-    /// `suppress_events` echo guard exists for (module doc).
+    /// `OnCheckedChangeListener` synchronously, which is what the runtime's
+    /// re-entrancy tolerance exists to drop (module doc).
     Checked(bool),
 
     /// `ProgressBar.setProgress(int)` — **[`Tier::Cheap`]**. Platform-space:
