@@ -129,7 +129,23 @@
 //! Every ObjC-entered method body below runs inside
 //! `catch_unwind(AssertUnwindSafe(…))` — this crate's half of
 //! `docs/CODE_STANDARDS.md`'s no-unwind-across-FFI rule, the Apple mirror of
-//! what `jni::EnvUnowned::with_env` does for the Android exports. A caught
+//! what `jni::EnvUnowned::with_env` does for the Android exports.
+//!
+//! **One precise exception, stated rather than glossed** (p2-01 validation):
+//! `createViewWithParamsJson:` acquires its `MainThreadMarker` *before*
+//! entering the guard, because it must return a `UIView` on every path and so
+//! its `Err` arm needs a marker as well — acquiring one there instead would
+//! re-run the same failing call with nothing left to catch it. Under
+//! `debug_assertions`, `MainThreadMarker::from` asserts, so a genuinely
+//! off-main-thread call panics outside the guard. That is bounded and
+//! deliberate: it can only happen when the host has already violated the
+//! `MainThreadOnly` contract (in which case no sound recovery exists — you
+//! cannot touch UIKit off the main thread), and the release profile is
+//! `panic = "abort"`, so no unwind crosses this boundary in a shipped build.
+//! `updateParams:paramsJson:` and `disposeView:` return `()` and therefore
+//! acquire their markers INSIDE the guard, with no such exception.
+//!
+//! A caught
 //! panic is logged and resolves to that method's benign default: an empty
 //! placeholder view for `createView` (the failure contract above), and nothing
 //! at all for the two `void` methods.
@@ -231,6 +247,16 @@ define_class!(
         #[unsafe(method_id(createViewWithParamsJson:))]
         #[allow(non_snake_case)]
         fn createView_paramsJson(&self, params_json: &NSString) -> Retained<UIView> {
+            // Deliberately OUTSIDE the guard, unlike the two methods below.
+            // This method must return a `UIView` on every path, so the `Err`
+            // arm needs a marker too; acquiring one there instead would mean a
+            // second `MainThreadMarker::from` AFTER the first already panicked
+            // — and that one would be uncaught, turning a caught panic into an
+            // unwind across ObjC. Failing fast here is the safer shape. The
+            // residual is bounded: `MainThreadMarker::from`'s assertion exists
+            // only under `debug_assertions`, and the release profile is
+            // `panic = "abort"`, so no unwind can cross this boundary in a
+            // shipped build. See the module doc's no-unwind section.
             let mtm = MainThreadMarker::from(self);
             let created = catch_unwind(AssertUnwindSafe(|| {
                 create_control(mtm, &params_json.to_string())
@@ -256,8 +282,12 @@ define_class!(
         /// instance is tolerated rather than an error.
         #[unsafe(method(updateParams:paramsJson:))]
         fn update_params(&self, _view: &UIView, params_json: &NSString) {
-            let mtm = MainThreadMarker::from(self);
             let outcome = catch_unwind(AssertUnwindSafe(|| {
+                // Marker acquired INSIDE the guard, unlike `createView` above:
+                // this method returns `()`, so nothing after the guard needs a
+                // marker, and `MainThreadMarker::from`'s own debug assertion is
+                // therefore caught here rather than unwinding past ObjC.
+                let mtm = MainThreadMarker::from(self);
                 update_control(mtm, &params_json.to_string());
             }));
             if outcome.is_err() {
@@ -272,8 +302,11 @@ define_class!(
         /// slot id*.
         #[unsafe(method(disposeView:))]
         fn dispose_view(&self, view: &UIView) {
-            let mtm = MainThreadMarker::from(self);
-            let outcome = catch_unwind(AssertUnwindSafe(|| dispose_control(mtm, view)));
+            // Marker acquired inside the guard, for the reason given in
+            // `updateParams:paramsJson:` above.
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                dispose_control(MainThreadMarker::from(self), view)
+            }));
             if outcome.is_err() {
                 log::warn!("{}", PANIC_MESSAGE_DISPOSE);
             }
