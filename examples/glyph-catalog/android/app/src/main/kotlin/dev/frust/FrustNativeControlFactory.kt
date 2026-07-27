@@ -21,9 +21,10 @@ import android.view.View
 
 class FrustNativeControlFactory : FrustPlatformViewFactory {
     /**
-     * Build the control this slot's params name. Rust returns the freshly
-     * created `View`, or null when the params carry no known control kind or
-     * construction failed — `FrustViewHost` logs that and marks the slot dead
+     * Build the control this slot's params name. On success Rust returns the
+     * freshly created `View`; on failure (the params carry no known control
+     * kind, or construction failed) Rust throws instead of returning null —
+     * `FrustViewHost`'s `catch (Throwable)` logs that and marks the slot dead
      * rather than crashing its frame loop.
      */
     override fun createView(activity: Activity, context: Context, paramsJson: String): View =

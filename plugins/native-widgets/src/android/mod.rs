@@ -13,7 +13,7 @@
 //!
 //! | Kotlin | Export | Contract |
 //! |---|---|---|
-//! | `createView(activity, context, paramsJson)` | [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`] | Rust builds the real control and returns it; `null` on any failure, which the host logs and treats as a dead slot |
+//! | `createView(activity, context, paramsJson)` | [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`] | Rust builds the real control and returns it; on any failure it throws a Java exception instead of returning `null` — honouring `FrustPlatformViewFactory`'s non-null contract — which the host's `catch (Throwable)` logs and treats as a dead slot |
 //! | `updateParams(view, paramsJson)` | [`Java_dev_frust_FrustNativeControlFactory_nativeUpdateParams`] | Props change, Rust-diffed before any setter runs |
 //! | `disposeView(view)` | [`Java_dev_frust_FrustNativeControlFactory_nativeDisposeControl`] | Paired-delete of every reference the control retained |
 //!
@@ -79,8 +79,9 @@ pub(crate) mod theme;
 
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JObject, JString};
+use jni::strings::JNIString;
 use jni::sys::{jint, jlong, jobject};
-use jni::{Env, EnvUnowned};
+use jni::{Env, EnvUnowned, jni_str};
 
 pub(crate) use ctx::NativeCtx;
 
@@ -118,10 +119,13 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
 
 /// `FrustNativeControlFactory.createView` → the Rust-built control.
 ///
-/// Returns the new view as a local reference, or `null` when the params carry
-/// no known control kind or the control's own `create` failed — the host
-/// logs a `null`/exception and marks the slot dead rather than crashing its
-/// frame loop.
+/// Returns the new view as a local reference on success. On failure — the
+/// params carry no known control kind, the control's own `create` failed, or
+/// a caught panic — this throws a Java exception instead of returning
+/// `null`, honouring `FrustPlatformViewFactory`'s documented contract
+/// (`createView` returns a non-null `View`; a thrown exception, not a `null`
+/// return, is the failure channel the host's `applyCreate` already catches
+/// and treats as a dead slot rather than crashing its frame loop).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeCreateControl<'local>(
     mut env: EnvUnowned<'local>,
@@ -142,6 +146,9 @@ pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeCreateCont
 
 /// The typed half of [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`]:
 /// dispatch, build, retain, and hand a fresh local reference back to Kotlin.
+/// On failure this throws a Java exception ([`throw_create_failed`]) rather
+/// than returning `null` — see that function's doc and the module doc's
+/// contract table above.
 ///
 /// Theme ladder L1 (p1-07): builds every control against a night-qualified
 /// `Context` (`theme::night_qualified_context`) before dispatching to the
@@ -197,8 +204,58 @@ fn create_control<'local>(
         }
         Err(e) => {
             log::warn!("frust-native-widgets: createView failed: {e}");
+            throw_create_failed(env, &e);
             None
         }
+    }
+}
+
+/// Throws a Java exception reporting a create failure — the fix for
+/// `f2-05-null-create-npe.md`: `createView` returns a non-null `View` by
+/// contract (`FrustPlatformViewFactory`'s KDoc), so a failure must surface
+/// as a thrown exception rather than a `null` return that later NPEs on
+/// `view.visibility` in the embedding's `FrustViewHost.applyCreate`.
+///
+/// `Env::throw_new` sets the pending exception as a side effect and then
+/// returns `Err(Error::JavaException)` to signal that success (see its own
+/// doc comment) — deliberately discarded here (`let _ =`) since the caller
+/// ([`create_control`]) already logged the original failure and only needs
+/// to fall through to its own `None`; `resolve::<LogErrorAndDefault>()`
+/// back in [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`]
+/// never re-clears a pending exception, so it rides the JNI call back to
+/// Kotlin, where `applyCreate`'s `catch (Throwable)` is exactly what turns
+/// it into a dead slot instead of an NPE.
+fn throw_create_failed(env: &mut Env<'_>, error: &NativeWidgetError) {
+    let msg = JNIString::new(create_failure_message(error));
+    let _ = env.throw_new(jni_str!("java/lang/RuntimeException"), msg);
+}
+
+/// Builds the exception message [`throw_create_failed`] throws — factored
+/// out as a pure function so the message itself is host-testable (below)
+/// even though the JNI throw call that consumes it isn't: this module is
+/// `#[cfg(target_os = "android")]`-gated and this repo carries no
+/// embedded-JVM test harness (confirmed by inspection — no other plugin's
+/// Android arm has one either), so no host process can actually execute a
+/// `Java_..._nativeCreateControl` call and observe a pending exception.
+/// This task's acceptance criteria's "documented compile-gated equivalent"
+/// is the test below plus `cargo check --target aarch64-linux-android -p
+/// frust-native-widgets --tests`, which type-checks it; it cannot *run*
+/// without an Android device/emulator test runner, the same limitation as
+/// every other android-cfg-gated test in this crate.
+fn create_failure_message(error: &NativeWidgetError) -> String {
+    format!("frust-native-widgets: createView failed: {error}")
+}
+
+#[cfg(test)]
+mod create_failure_message_tests {
+    use super::*;
+
+    #[test]
+    fn names_the_underlying_error() {
+        let err = NativeWidgetError::UnknownControl("bogus".into());
+        let msg = create_failure_message(&err);
+        assert!(msg.contains("createView failed"));
+        assert!(msg.contains("bogus"));
     }
 }
 
@@ -326,7 +383,7 @@ pub extern "system" fn Java_dev_frust_FrustNativeListener_nativeOnEvent<'local>(
 /// release build.
 #[cfg(debug_assertions)]
 fn debug_assert_main_thread(env: &mut Env<'_>, op: &str) {
-    use jni::{jni_sig, jni_str};
+    use jni::jni_sig;
 
     let on_main = ctx::run_jni(env, "Looper.myLooper", |env| {
         let looper = env.find_class(jni_str!("android/os/Looper"))?;

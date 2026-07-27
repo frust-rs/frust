@@ -162,13 +162,6 @@ class FrustViewHost(
             deadSlots.add(slotId)
             return
         }
-        val view = try {
-            factory.createView(activity, activity, params)
-        } catch (e: Throwable) {
-            Log.w(TAG, "factory '$viewType' failed to create slot $slotId — marking dead", e)
-            deadSlots.add(slotId)
-            return
-        }
         val lp = FrameLayout.LayoutParams(0, 0, Gravity.TOP or Gravity.START)
         // Mode A (opaque): host views ABOVE the render surface (index just after
         // it). Mode B (translucent): BELOW, so they show through the alpha
@@ -179,8 +172,23 @@ class FrustViewHost(
             translucent -> surfaceIndex
             else -> surfaceIndex + 1
         }
-        view.visibility = View.INVISIBLE
-        root.addView(view, index, lp)
+        // `view.visibility`/`root.addView` live INSIDE this try, not just
+        // `createView` itself: a null return with no thrown exception (a
+        // future/misbehaving factory, or today's re-entrant-runtime edge
+        // case) would otherwise NPE on `view.visibility` unguarded — the
+        // defect this whole block fixes (f2-05-null-create-npe.md). Catching
+        // here means ANY factory's null-or-throw failure, present or future,
+        // lands in the same guarded path.
+        val view = try {
+            val created = factory.createView(activity, activity, params)
+            created.visibility = View.INVISIBLE
+            root.addView(created, index, lp)
+            created
+        } catch (e: Throwable) {
+            Log.w(TAG, "factory '$viewType' failed to create slot $slotId — marking dead", e)
+            deadSlots.add(slotId)
+            return
+        }
         slots[slotId] =
             Slot(view, factory, lp, Rect(), cmd.optBoolean("interactive", false), mutableListOf())
     }
