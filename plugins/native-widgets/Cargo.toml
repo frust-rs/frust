@@ -110,17 +110,31 @@ objc2 = { workspace = true }
 # doesn't need either directly, but every later native-widgets task
 # (runtime, controls, events) builds on this crate and needs both, so they
 # land now rather than in a second Cargo.toml touch.
+# `NSData`: `Image`'s `UIImage::imageWithData:` payload (p2-02). The
+# `objc2-ui-kit/UIImage` feature below already turns it on transitively, but
+# this crate *names* `NSData` in its own source, so it is requested here
+# explicitly rather than relied on as a side effect of someone else's
+# feature list.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
     "NSString",
+    "NSData",
 ] }
-# `UIView`: this task's retained-handle registry (`AppleHandle` wraps a
-# `Retained<UIView>`, the type every future control view specializes to).
-# `UIButton`/`UIControl`/`UILabel`/`UIResponder`: the v1 control set
-# (p2-02) — carried now per the spike's starting-point feature list so
-# this crate's only Cargo.toml touch for the Apple arm's control surface
-# is this one.
+# `UIView`: the retained-handle registry (`AppleHandle` wraps a
+# `Retained<UIView>`, the type every control view specializes to, p1-02).
+# `UIButton`/`UIControl`/`UILabel`/`UIResponder` + `UISwitch`/`UISlider`/
+# `UIProgressView`/`UIImage`/`UIImageView`: the v1 control set's six classes
+# and the `UIImage` payload one of them decodes (p2-02, PLAN 2.1's parity
+# set). `UIColor`/`UIFont`: the shared property surface every control's
+# `Setter` plan applies through (packed-ARGB colours, `TextSizeSp`).
+# `UIAccessibility`: `Setter::ContentDescription`'s
+# `NSObject.accessibilityLabel` category — the VoiceOver counterpart of
+# Android's `setContentDescription`. `objc2-core-foundation`: NOT a control,
+# a *type* gate — every `CGFloat`-taking constructor this arm calls
+# (`UIColor::colorWithRed:green:blue:alpha:`, `UIFont::systemFontOfSize:`)
+# is `#[cfg(feature = "objc2-core-foundation")]`-gated in objc2-ui-kit,
+# because `CGFloat` itself lives in that crate.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -128,6 +142,15 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIControl",
     "UILabel",
     "UIResponder",
+    "UISwitch",
+    "UISlider",
+    "UIProgressView",
+    "UIImage",
+    "UIImageView",
+    "UIColor",
+    "UIFont",
+    "UIAccessibility",
+    "objc2-core-foundation",
 ] }
 
 [dev-dependencies]

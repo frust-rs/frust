@@ -11,11 +11,16 @@
 //! built over, the `runtime` those paths dispatch through, the six `controls`
 //! (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`) that
 //! runtime serves, the typed `events` vocabulary their listeners decode into,
-//! the app-facing `api` builders, and both platform arms' factory glue. Still
-//! to come on the Apple arm: the controls' own UIKit halves and their
-//! target-action events (p2-02/p2-03), so an iOS `create` today reports an
-//! unknown control kind and the factory hands back its documented dead-slot
-//! placeholder.
+//! the app-facing `api` builders, and both platform arms' factory glue. Each
+//! control now carries **both** platform halves — a
+//! `#[cfg(target_os = "android")] mod platform` and a
+//! `#[cfg(target_os = "ios")] mod platform`, side by side in the same file,
+//! executing the same shared setter plan (p1-04/p2-02). Still to come on the
+//! Apple arm: target-action events (p2-03), so an iOS control renders and
+//! updates but does not yet report a tap/toggle/drag back to the app; and the
+//! theme ladder's Apple L1/L2/L3 (p2-04), so a themed corner radius and the
+//! Glyph typefaces degrade to the platform's own with one logged warning
+//! apiece.
 //!
 //! # One factory, one listener, N controls
 //!

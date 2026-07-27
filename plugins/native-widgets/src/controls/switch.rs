@@ -55,6 +55,39 @@
 //!    `update` outside that borrow would silently remove the only echo
 //!    protection this crate has.
 //!
+//! # The same contract on iOS, with NO iOS-specific machinery
+//!
+//! Seam 1 (write-back) is platform-neutral — it lives in [`SwitchProps::plan`]
+//! above, which both arms call. Seam 2 (the echo guard) is where the two
+//! platforms genuinely differ, and the difference is that **iOS is expected to
+//! have no echo to guard**:
+//!
+//! - Apple's UIControl guidance is *"As a rule UIKit does not send events when
+//!   programmatic changes are made to controls"*, and `UISwitch` states
+//!   explicitly of `setOn(_:animated:)` that setting the switch *"does not
+//!   result in an action message being sent"*. React Native's iOS switch
+//!   relies on exactly this: `RCTSwitchComponentView.mm`'s `updateProps`
+//!   applies values through `setOn:animated:` and its `-onChange:` simply does
+//!   not fire (`research/RESEARCH-P2-REFRESH.md` §3–§4).
+//! - **Caveat A**: Apple documents that guarantee *explicitly* only for
+//!   `setOn(_:animated:)` — which is why the Apple arm below calls exactly
+//!   that (with `animated: false`, so the visible result matches the plain
+//!   property setter) rather than the bare `isOn` setter, whose no-action
+//!   behaviour rests on the general UIControl rule alone.
+//! - **Caveat B**: a developer-filed report (Apple Developer Forums thread
+//!   108027, report #43955023) claims `setOn:` called *from inside* a
+//!   `valueChanged` handler can re-enter that handler — which is precisely
+//!   this crate's write-back path. Unconfirmed by Apple's own docs, and
+//!   therefore not dismissed.
+//!
+//! So this arm ships **no iOS-specific echo machinery, and no per-instance
+//! suppression flag** (f2-02 deleted Android's; there is nothing to
+//! reinstate). Should Caveat B ever bite, the protection is *inherited from
+//! the shared runtime*, not built here: a re-entrant callback lands in the
+//! same `crate::runtime::with_runtime` borrow and is dropped there, exactly as
+//! Android's synchronous echo is. Whether it bites at all is **proven on
+//! device in task p2-05**, not asserted here.
+//!
 //! **v1 limitation, deliberate:** an app that *rejects* a toggle (reports the
 //! same value back) produces no props change at all, so `update` never runs
 //! and the platform's flip stands until the next differing params.
@@ -295,6 +328,141 @@ pub(crate) mod platform {
             // slot's instance is gone; dropping `state` releases its own
             // global reference either way.
             ctx.set_on_checked_change_listener(&state.view, &JObject::null())
+        }
+    }
+}
+
+#[cfg(target_os = "ios")]
+pub(crate) mod platform {
+    //! The Apple half: build the `UISwitch` and apply the same planned setters
+    //! the Android half hands JNI — with no echo guard of its own (module
+    //! doc's *The same contract on iOS*).
+    //!
+    //! # The two tint setters do not line up one-to-one
+    //!
+    //! Android's `Switch` has an independent thumb tint and track tint, both
+    //! state-list-valued. `UISwitch` has `thumbTintColor` and `onTintColor` —
+    //! and `onTintColor` colours the track **only while the switch is on**;
+    //! UIKit exposes no setter for the off-state track at all. So
+    //! [`Setter::TrackTint`](crate::controls::Setter::TrackTint) maps to
+    //! `onTintColor` as the closest available analogue, and an app that tints
+    //! the track sees it on the on-state only. That is a UIKit surface limit,
+    //! not a mapping choice this module could make differently.
+
+    use objc2::MainThreadMarker;
+    use objc2::rc::Retained;
+    use objc2_ui_kit::UISwitch;
+
+    use super::{KIND, Switch, SwitchProps};
+    use crate::NativeWidgetError;
+    use crate::apple::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::runtime::{NativeWidget, Params};
+
+    /// A live switch's retained state.
+    pub(crate) struct SwitchState {
+        view: Retained<UISwitch>,
+        /// The value the platform last reported through its action, or `None`
+        /// while the user has never touched it — [`SwitchProps::plan`]'s
+        /// write-back drift signal, identical in meaning to the Android
+        /// state's field of the same name.
+        ///
+        /// Nothing writes it yet: the target-action that would
+        /// (`NativeWidget::on_event`, via [`super::decode_toggled`]) lands in
+        /// task p2-03. The field exists now because the *write-back seam* is
+        /// shared and already live — `plan` takes `observed` on both arms —
+        /// and because reintroducing it later would mean re-deriving the
+        /// clear-on-successful-apply rule below from scratch.
+        observed: Option<bool>,
+    }
+
+    impl NativeWidget for Switch {
+        type Props = SwitchProps;
+        type State = SwitchState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            SwitchProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = UISwitch::new(mtm);
+            let plan = SwitchProps::plan(&SwitchProps::platform_default(props.slot), props, None);
+            apply_all(mtm, &view, &plan);
+            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            Ok((
+                handle,
+                SwitchState {
+                    view,
+                    observed: None,
+                },
+            ))
+        }
+
+        fn update(
+            ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            let plan = SwitchProps::plan(old, new, state.observed);
+            apply_all(ctx.mtm(), &state.view, &plan);
+            // The platform now matches the app again — including the case
+            // where the write-back above reverted a drifted value. Cleared
+            // unconditionally, unlike the Android arm's `if applied.is_ok()`,
+            // because nothing on this arm can fail (`crate::controls`'s Apple
+            // `platform` module doc) and so there is no half-applied plan to
+            // keep a drift signal alive for.
+            state.observed = None;
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            _state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // No target attached yet (p2-03); dropping the state releases its
+            // retain.
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back.
+    fn apply_all(mtm: MainThreadMarker, view: &UISwitch, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(mtm, view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(mtm: MainThreadMarker, view: &UISwitch, setter: &Setter<'_>) {
+        match *setter {
+            // `setOn:animated:` rather than the plain `isOn` setter — the
+            // module doc's Caveat A: this is the one spelling Apple documents
+            // as sending no action message. `animated: false` keeps the
+            // visible result identical to a property write.
+            Setter::Checked(checked) => view.setOn_animated(checked, false),
+            Setter::Enabled(enabled) => view.setEnabled(enabled),
+            Setter::ThumbTint(argb) => {
+                view.setThumbTintColor(platform::optional_ui_color(argb).as_deref());
+            }
+            Setter::TrackTint(argb) => {
+                view.setOnTintColor(platform::optional_ui_color(argb).as_deref());
+            }
+            // A `UISwitch` renders no text at all on iOS (its `title` property
+            // is unavailable here), so there is no font to set — silently, not
+            // via `apply_typeface`'s degrade warning, because nothing is being
+            // degraded. The field exists in the shared `Props` because
+            // Android's `Switch` IS a `TextView` (see `SwitchProps::typeface`).
+            Setter::Typeface(_) => {}
+            Setter::ContentDescription(label) => {
+                platform::set_accessibility_label(view, label, mtm);
+            }
+            ref other => platform::warn_unexpected_setter(KIND, other),
         }
     }
 }

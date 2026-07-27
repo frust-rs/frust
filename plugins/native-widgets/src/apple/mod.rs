@@ -37,6 +37,7 @@ mod factory;
 pub(crate) use ctx::NativeCtx;
 pub(crate) use factory::ensure_registered;
 
+use crate::controls::{button, image, label, progress, slider, switch};
 use crate::runtime::NativeRuntime;
 
 /// A control's retained native reference — on Apple that is exactly the
@@ -52,20 +53,27 @@ pub(crate) type NativeView = crate::registry::apple::AppleHandle;
 
 /// Register every control kind this backend serves, once, when the thread's
 /// runtime is first touched (`crate::runtime`'s `seeded_runtime`) — the Apple
-/// mirror of `crate::android::register_controls`.
+/// mirror of `crate::android::register_controls`, **line for line**.
 ///
-/// **Empty until p2-02.** The six controls live in the shared
-/// `crate::controls`, where the props/plan half is platform-neutral and
-/// host-tested and only the platform half is a per-target `mod platform`
-/// inside each control file; the Apple `platform` arms (and therefore the
-/// `NativeWidget` impls this function would register) land in p2-02. Until
-/// then an iOS `create` reports
-/// [`NativeWidgetError::UnknownControl`](crate::NativeWidgetError::UnknownControl)
-/// and the factory returns its documented dead-slot placeholder — visible in
-/// the log, not a crash.
+/// The six controls live in the shared `crate::controls`, where the
+/// props/plan half is platform-neutral and host-tested and only the platform
+/// half is a per-target `mod platform` inside each control file (p1-04's
+/// Android arm, p2-02's Apple one). So the two backends register the same six
+/// types under the same six `KIND` consts — never a literal here, which is
+/// what keeps the api layer's builders and both arms reading from one
+/// definition (`crate::controls::tests`'
+/// `the_six_control_kinds_are_the_same_strings_both_platform_arms_register`
+/// is the host-visible half of that pin).
 ///
 /// Registration stays explicit and central by design: `inventory`-style
 /// link-time discovery is banned here (RESEARCH-NATIVE-COMPONENT §Open
 /// questions), which matters even more on this arm, where `lto = "fat"` +
 /// `strip = "symbols"` is the shipping configuration.
-pub(crate) fn register_controls(_runtime: &mut NativeRuntime) {}
+pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
+    runtime.register::<button::Button>(button::KIND);
+    runtime.register::<label::Label>(label::KIND);
+    runtime.register::<switch::Switch>(switch::KIND);
+    runtime.register::<slider::Slider>(slider::KIND);
+    runtime.register::<progress::Progress>(progress::KIND);
+    runtime.register::<image::Image>(image::KIND);
+}

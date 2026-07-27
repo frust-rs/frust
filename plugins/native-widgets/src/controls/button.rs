@@ -251,6 +251,146 @@ pub(crate) mod platform {
     }
 }
 
+#[cfg(target_os = "ios")]
+pub(crate) mod platform {
+    //! The Apple half: build the `UIButton` and apply the same planned setters
+    //! the Android half hands JNI.
+    //!
+    //! # `UIButtonType::System`, not a bare `UIButton::new`
+    //!
+    //! `ButtonProps::platform_default` describes *"the state a freshly
+    //! constructed button is already in"*, and the create plan diffs against
+    //! it — so which constructor runs decides which setters a default control
+    //! pays for. `UIButton::new` yields `UIButtonType::Custom`: no title
+    //! colour, no highlight behaviour, an invisible control until an app sets
+    //! something. `buttonWithType(System)` yields UIKit's own button — the
+    //! tinted title and press feedback a user recognizes — which is the honest
+    //! analogue of Android's `new Button(context)` picking up the themed
+    //! `Widget.Material.Button`.
+    //!
+    //! Together with the fill and title colour the theme ladder folds into
+    //! `Props` (p1-07), that closes the Phase 0 spike's *"black box with
+    //! text"* cosmetic gap: the spike hand-built a `Custom` button and got
+    //! exactly that.
+    //!
+    //! # Clicks are p2-03's
+    //!
+    //! No target-action is attached here; a `Button` on this arm is inert
+    //! until task p2-03 wires `TouchUpInside` into the shared runtime
+    //! dispatch. `NativeWidget::on_event` therefore stays the trait default
+    //! for now — the same shape the display-only controls keep forever.
+
+    use objc2::MainThreadMarker;
+    use objc2::rc::Retained;
+    use objc2_foundation::NSString;
+    use objc2_ui_kit::{UIButton, UIButtonType, UIControlState};
+
+    use super::{Button, ButtonProps, KIND};
+    use crate::NativeWidgetError;
+    use crate::apple::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::runtime::{NativeWidget, Params};
+
+    /// A live button's retained state.
+    ///
+    /// One `Retained<UIButton>`, and no second reference: where the Android
+    /// state has to hold its own global ref beside the runtime's (`update` is
+    /// handed only the state), ARC makes the extra retain free and untracked —
+    /// there is no paired-delete discipline to keep, and no leak bar to return
+    /// to zero beyond the retain count itself.
+    pub(crate) struct ButtonState {
+        /// The button, kept typed: `update` needs `UIButton`'s own
+        /// state-keyed setters, which a `UIView` handle could not reach.
+        view: Retained<UIButton>,
+    }
+
+    impl NativeWidget for Button {
+        type Props = ButtonProps;
+        type State = ButtonState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            ButtonProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = UIButton::buttonWithType(UIButtonType::System, mtm);
+            let plan = ButtonProps::plan(&ButtonProps::platform_default(props.slot), props);
+            apply_all(mtm, &view, &plan);
+            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            Ok((handle, ButtonState { view }))
+        }
+
+        fn update(
+            ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            apply_all(ctx.mtm(), &state.view, &ButtonProps::plan(old, new));
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            _state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Nothing attached yet (targets land in p2-03), and dropping the
+            // state releases its retain — ARC's own paired delete.
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back — the same order contract the
+    /// Android arm's `apply_all` keeps.
+    fn apply_all(mtm: MainThreadMarker, view: &UIButton, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(mtm, view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(mtm: MainThreadMarker, view: &UIButton, setter: &Setter<'_>) {
+        match *setter {
+            // A `UIButton`'s caption is per-control-state, unlike a
+            // `TextView`'s: `Normal` is the base every other state falls back
+            // to, so setting it alone is what "the button's title" means.
+            Setter::Text(text) => {
+                view.setTitle_forState(Some(&NSString::from_str(text)), UIControlState::Normal);
+            }
+            Setter::Enabled(enabled) => view.setEnabled(enabled),
+            Setter::TextColor(argb) => {
+                view.setTitleColor_forState(
+                    Some(&platform::ui_color(argb)),
+                    UIControlState::Normal,
+                );
+            }
+            Setter::BackgroundColor(argb) => platform::set_background_color(view, argb),
+            Setter::TextSizeSp(sp) => {
+                // `titleLabel` is documented non-null for every stock button
+                // type, but the binding is `Option`-typed, so a missing one
+                // degrades to "no size change" rather than a panic.
+                if let Some(label) = view.titleLabel() {
+                    platform::set_label_font(&label, &platform::system_font(sp));
+                }
+            }
+            Setter::ThemedBackground { fill, radius_dp } => {
+                platform::set_background_color(view, fill);
+                platform::warn_corner_radius_unsupported(radius_dp);
+            }
+            Setter::Typeface(face) => platform::apply_typeface(face),
+            Setter::ContentDescription(label) => {
+                platform::set_accessibility_label(view, label, mtm);
+            }
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

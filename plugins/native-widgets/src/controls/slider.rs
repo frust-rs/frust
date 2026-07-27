@@ -312,6 +312,163 @@ pub(crate) mod platform {
     }
 }
 
+#[cfg(target_os = "ios")]
+pub(crate) mod platform {
+    //! The Apple half: build the `UISlider` and apply the same planned setters
+    //! the Android half hands JNI — with no echo guard of its own
+    //! (`switch.rs`'s module doc is the reference description for this arm
+    //! too, Caveats A/B included).
+    //!
+    //! # The `[0, span]` mapping still applies, for a different reason
+    //!
+    //! `UISlider` *does* have a real `minimumValue`, unlike `SeekBar` below
+    //! API 26 — so this arm could in principle carry the app's `min`
+    //! natively. It deliberately does not: the plan it executes is the shared
+    //! one, which already emits [`Setter::Max`] as the *span* and
+    //! [`Setter::Progress`] as the *offset* value (module doc's *no `setMin`*).
+    //! Re-deriving app space here would mean a second, platform-specific
+    //! mapping to keep in step with `decode_event`'s inverse — the exact
+    //! duplication the shared-plan design exists to avoid. So the slider is
+    //! pinned at `minimumValue = 0` and driven in platform space, and the one
+    //! visible consequence is that a value the app placed outside its own
+    //! range is clamped identically on both platforms.
+    //!
+    //! # Construction-time normalization
+    //!
+    //! A fresh `UISlider` is `[0.0, 1.0]` at `0.0`, while
+    //! [`SliderProps::platform_default`] describes the fresh *`SeekBar`* —
+    //! `[0, 100]` at 0 — and the create plan diffs against that. A control
+    //! whose span happens to be [`super::PLATFORM_DEFAULT_MAX`] plans **no**
+    //! [`Setter::Max`] at all, and would silently keep UIKit's 1.0 ceiling. So
+    //! `create` normalizes the fresh view into the state the shared default
+    //! describes *before* running the plan, rather than special-casing the
+    //! plan itself — one extra setter at create, and the diff stays the shared
+    //! one (`label.rs`'s module doc names this shape).
+
+    use objc2::MainThreadMarker;
+    use objc2::rc::Retained;
+    use objc2_ui_kit::UISlider;
+
+    use super::{KIND, Slider, SliderProps};
+    use crate::NativeWidgetError;
+    use crate::apple::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::runtime::{NativeWidget, Params};
+
+    /// A live slider's retained state.
+    pub(crate) struct SliderState {
+        view: Retained<UISlider>,
+        /// The app-space range floor as of the last applied props — kept for
+        /// the same reason the Android state keeps it: `on_event` is never
+        /// handed `Props`, and [`super::decode_event`] needs `min` to map a
+        /// platform-space report back to app space.
+        min: i32,
+        /// The **platform-space** progress the platform last reported — see
+        /// `switch.rs`'s Apple `SwitchState::observed` for why the field
+        /// exists before the target-action that writes it (p2-03) does.
+        observed: Option<i32>,
+    }
+
+    impl NativeWidget for Slider {
+        type Props = SliderProps;
+        type State = SliderState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            SliderProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = UISlider::new(mtm);
+            let default = SliderProps::platform_default(props.slot);
+            // Module doc's *Construction-time normalization*: bring the fresh
+            // UIKit control into the state `SliderProps::platform_default`
+            // describes, so the shared create plan diffs against the truth.
+            // The ceiling is read off that default rather than named again
+            // here, so a change to it cannot leave the normalization and the
+            // diff baseline disagreeing; the floor is structurally 0, because
+            // this arm runs entirely in platform space (module doc's *The
+            // `[0, span]` mapping*) and never carries the app's own `min`.
+            view.setMinimumValue(0.0);
+            view.setMaximumValue(default.span() as f32);
+            let plan = SliderProps::plan(&default, props, None);
+            apply_all(mtm, &view, &plan);
+            let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
+            Ok((
+                handle,
+                SliderState {
+                    view,
+                    min: props.min,
+                    observed: None,
+                },
+            ))
+        }
+
+        fn update(
+            ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            let plan = SliderProps::plan(old, new, state.observed);
+            apply_all(ctx.mtm(), &state.view, &plan);
+            // Cleared unconditionally — see `switch.rs`'s Apple `update` for
+            // why this arm has no `is_ok()` gate.
+            state.observed = None;
+            state.min = new.min;
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            _state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // No target attached yet (p2-03); dropping the state releases its
+            // retain.
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back — max before progress, the
+    /// order the shared plan already guarantees (module doc).
+    fn apply_all(mtm: MainThreadMarker, view: &UISlider, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(mtm, view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(mtm: MainThreadMarker, view: &UISlider, setter: &Setter<'_>) {
+        match *setter {
+            Setter::Max(span) => view.setMaximumValue(span as f32),
+            // The plain `setValue:`, not `setValue:animated:` — the animated
+            // spelling is documented as a *transition*, which would make a
+            // controlled write-back visibly lag the app's own value. Its
+            // no-action behaviour rests on the general UIControl rule either
+            // way (`switch.rs`'s Caveat A).
+            Setter::Progress(progress) => view.setValue(progress as f32),
+            Setter::Enabled(enabled) => view.setEnabled(enabled),
+            // Android's `progressTint` colours the filled part of the track,
+            // which is `minimumTrackTintColor` here; the unfilled part
+            // (`maximumTrackTintColor`) has no `Props` field on either arm.
+            Setter::ProgressTint(argb) => {
+                view.setMinimumTrackTintColor(platform::optional_ui_color(argb).as_deref());
+            }
+            Setter::ThumbTint(argb) => {
+                view.setThumbTintColor(platform::optional_ui_color(argb).as_deref());
+            }
+            Setter::ContentDescription(label) => {
+                platform::set_accessibility_label(view, label, mtm);
+            }
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,10 +14,19 @@
 //!    `cargo test` pins every control's diff behaviour on any host with no
 //!    JNI at all (this is why the modules live in `src/controls/` rather than
 //!    under `src/android/`, which compiles on Android only);
-//! 2. an **Android half** (`#[cfg(target_os = "android")] mod platform`) — the
-//!    `NativeWidget` impl: build the view, hand each planned [`Setter`] to
-//!    `platform::apply`, retain/release the global refs. Phase 2's Apple
-//!    arm re-uses half 1 unchanged and swaps half 2.
+//! 2. a **platform half** — one `mod platform` per target, side by side in
+//!    the same file, each holding that platform's `NativeWidget` impl:
+//!    - `#[cfg(target_os = "android")] mod platform` (p1-04) — build the
+//!      `android.widget.*` view, hand each planned [`Setter`] to
+//!      `platform::apply`, retain/release the global refs;
+//!    - `#[cfg(target_os = "ios")] mod platform` (p2-02) — build the UIKit
+//!      view, apply the **same plan** through typed `objc2-ui-kit` setters,
+//!      and let ARC own the references.
+//!
+//!    Half 1 is shared verbatim: one `Props` definition, one `decode`, one
+//!    `plan`, two arms. That is the whole point of the split — a control's
+//!    diff behaviour is asserted once, on a host, and both platforms execute
+//!    the identical plan.
 //!
 //! The *only* thing a plan cannot express is view construction, so `create`
 //! is written as "apply the plan from the platform's own freshly-constructed
@@ -49,6 +58,15 @@
 //!
 //! Debug builds are 2–5× worse across the board (SPIKE.md) — only judge these
 //! numbers on an optimized build.
+//!
+//! **The table is Android-measured, and [`Tier`] is deliberately not
+//! re-derived per platform.** No equivalent UIKit measurement exists (Phase 0
+//! spike 1 ran on Android only), so the iOS arm applies the same plan without
+//! claiming the same costs. The *shape* is expected to carry — a UIKit
+//! caption/font change invalidates intrinsic content size and re-lays-out the
+//! view, a colour change only redisplays it — but the numbers above are not
+//! evidence for iOS and must not be cited as if they were. Re-measuring on
+//! device is p2-05's business, not a claim this module gets to make.
 //!
 //! # Field-level diffing is the control's job
 //!
@@ -85,6 +103,16 @@
 //!   (`crate::android`'s `nativeUpdateParams`). A future refactor that moved
 //!   `update` outside that borrow would silently remove the only echo
 //!   protection this crate has.
+//!
+//! **On iOS there is no echo to guard at all — and still no iOS-specific
+//! machinery.** UIKit's documented rule is that it does not send control
+//! events for programmatic changes, so `setOn:animated:`/`setValue:` are not
+//! expected to re-enter this crate the way `setChecked` does. That
+//! expectation carries two caveats worth keeping honest, and the same
+//! `with_runtime` re-entrancy drop above covers both if either bites — see
+//! `switch.rs`'s module doc, which is the reference description for this arm
+//! too. **Do not add a per-instance suppression flag on either platform**
+//! (f2-02 deleted Android's for good reasons; there is nothing to reinstate).
 
 pub(crate) mod button;
 pub(crate) mod image;
@@ -402,6 +430,22 @@ pub(crate) fn plan_color<'a>(
     {
         plan.push(setter(argb));
     }
+}
+
+/// Split a packed ARGB colour into its four `[0.0, 1.0]` channels, in the
+/// `(red, green, blue, alpha)` order every Apple colour constructor takes.
+///
+/// Platform-neutral and host-tested on purpose, even though only the Apple
+/// arm calls it ([`platform::ui_color`] on iOS): the packing convention is
+/// *this crate's wire format*, not UIKit's, so it is worth pinning where a
+/// plain `cargo test` can see it. The Android arm needs no counterpart —
+/// its colour setters take the packed int verbatim.
+pub(crate) fn argb_channels(argb: i32) -> (f64, f64, f64, f64) {
+    // `as u32` first: the wire carries both spellings of an Android colour
+    // (see [`color`]), and shifting a negative `i32` right would sign-extend.
+    let packed = argb as u32;
+    let channel = |shift: u32| f64::from((packed >> shift) & 0xFF) / 255.0;
+    (channel(16), channel(8), channel(0), channel(24))
 }
 
 // --- the Android half -------------------------------------------------------
@@ -913,6 +957,254 @@ pub(crate) mod platform {
     }
 }
 
+// --- the Apple half ---------------------------------------------------------
+
+#[cfg(target_os = "ios")]
+pub(crate) mod platform {
+    //! Turning a [`Setter`] into a real UIKit call — the Apple mirror of the
+    //! Android half above, and the only place in this crate's iOS arm that
+    //! reaches for a shared `objc2-ui-kit` helper.
+    //!
+    //! # Why there is no single `apply` here, unlike Android
+    //!
+    //! Android's whole control set descends from one `android.view.View`, and
+    //! the interesting setters are declared on *shared superclasses*:
+    //! `TextView.setText` serves `Label` **and** `Button`, because a `Button`
+    //! IS a `TextView`. That is what lets one `apply` over an untyped
+    //! `JObject` serve every control there.
+    //!
+    //! UIKit has no such spine. `UIButton` is not a `UILabel`, and its caption
+    //! is `setTitle:forState:` — a *different selector with a different
+    //! argument list* from `UILabel.setText:`. Dispatching [`Setter::Text`]
+    //! therefore depends on the receiver's class, which only each control's
+    //! own `#[cfg(target_os = "ios")] mod platform` knows (it holds a
+    //! `Retained<UIButton>`, not a `Retained<UIView>`). So **each control
+    //! applies its own plan against its own typed view**, and this module
+    //! holds only what is genuinely shared:
+    //!
+    //! - the packed-ARGB → [`UIColor`] bridge ([`ui_color`]);
+    //! - the setters every control inherits from `UIView`/`NSObject`
+    //!   ([`set_background_color`], [`set_accessibility_label`]);
+    //! - the three nullable-argument setters objc2 marks `unsafe`, confined
+    //!   and documented once (below) rather than re-justified per control;
+    //! - the one-time warnings for the setters this arm cannot honour yet.
+    //!
+    //! Keeping the typed views is not incidental: it is what makes "every
+    //! UIKit call main-thread-typed" (PLAN 2.1) a compile-time property
+    //! rather than a review promise — every class here is
+    //! `#[thread_kind = MainThreadOnly]`, so a call without a
+    //! [`MainThreadMarker`] in hand does not compile.
+    //!
+    //! # Nothing here can fail
+    //!
+    //! Every function returns `()`, where the Android arm threads a
+    //! `Result<(), NativeWidgetError>` through every setter. That asymmetry is
+    //! real, not laziness: a JNI call can throw and a class can fail to load,
+    //! while an ObjC message send to a statically linked UIKit class has
+    //! neither failure mode — there is no exception channel and no
+    //! classloader. The one genuinely fallible step on this arm is
+    //! `UIImage::imageWithData:` returning nil for undecodable bytes, which is
+    //! `crate::controls::image`'s own clear-the-view path, exactly as
+    //! `BitmapFactory.decodeByteArray` is on Android.
+    //!
+    //! # The `unsafe` here, and why objc2 asks for it
+    //!
+    //! objc2 marks a generated property setter `unsafe` when the ObjC header
+    //! leaves its argument's nullability unannotated — the generated doc says
+    //! only *"`x` might not allow `None`"*. It is not a memory-safety claim;
+    //! it is "the header did not say". Each wrapper below is a **safe**
+    //! function that closes exactly that question by construction (a
+    //! non-optional parameter, or a documented-nullable one), carrying the
+    //! `// SAFETY:` note at the single call site — the same
+    //! one-confined-helper shape `docs/CODE_STANDARDS.md` sanctions for the
+    //! Android arm's `call_void_cached`.
+    //!
+    //! [`MainThreadMarker`]: objc2::MainThreadMarker
+
+    use std::sync::Once;
+
+    use objc2::MainThreadMarker;
+    use objc2::rc::Retained;
+    use objc2_foundation::NSString;
+    use objc2_ui_kit::{NSObjectUIAccessibility, UIColor, UIFont, UIImageView, UILabel, UIView};
+
+    use super::{Setter, argb_channels};
+    use crate::controls::typeface::Typeface;
+
+    /// A packed ARGB colour as a [`UIColor`] (see [`super::argb_channels`]).
+    ///
+    /// The four channel values are `CGFloat`s, which is `f64` on every 64-bit
+    /// Apple target — i.e. on every target this crate's iOS arm compiles for
+    /// (arm64 device, arm64/x86_64 Simulator). A hypothetical 32-bit Apple
+    /// target would be a loud type error here, never a silent narrowing.
+    pub(crate) fn ui_color(argb: i32) -> Retained<UIColor> {
+        let (red, green, blue, alpha) = argb_channels(argb);
+        UIColor::colorWithRed_green_blue_alpha(red, green, blue, alpha)
+    }
+
+    /// An optional packed ARGB colour. `None` stays `None`, which every tint
+    /// setter on this arm passes through as nil — restoring the platform's own
+    /// tint, the same clearable contract [`Setter::ProgressTint`] documents.
+    pub(crate) fn optional_ui_color(argb: Option<i32>) -> Option<Retained<UIColor>> {
+        argb.map(ui_color)
+    }
+
+    /// `UIView.backgroundColor` — [`Setter::BackgroundColor`], and the fill
+    /// half of [`Setter::ThemedBackground`]. Every control inherits it, so
+    /// this takes the `UIView` superclass and lets deref coercion do the rest.
+    pub(crate) fn set_background_color(view: &UIView, argb: i32) {
+        view.setBackgroundColor(Some(&ui_color(argb)));
+    }
+
+    /// `NSObject.accessibilityLabel` — [`Setter::ContentDescription`]'s Apple
+    /// counterpart, read by VoiceOver exactly as TalkBack reads Android's
+    /// `contentDescription`. `None` clears it (the property is nullable), so a
+    /// control falls back to whatever UIKit derives from its own content.
+    ///
+    /// Native controls are exposed to VoiceOver by the platform itself, never
+    /// through frust's semantics pass (`crate`'s event-bypass note).
+    pub(crate) fn set_accessibility_label(
+        view: &UIView,
+        label: Option<&str>,
+        mtm: MainThreadMarker,
+    ) {
+        let text = label.map(NSString::from_str);
+        view.setAccessibilityLabel(text.as_deref(), mtm);
+    }
+
+    /// The system font at `size_sp` points — [`Setter::TextSizeSp`].
+    ///
+    /// **`sp` is read as points here, unscaled.** Android's scale-independent
+    /// pixel already carries the user's font-size preference; UIKit's
+    /// equivalent is Dynamic Type, which is opt-in per font
+    /// (`UIFontMetrics`), and wiring it would change the *value* an app's
+    /// theme asked for rather than the unit it is expressed in. A control
+    /// therefore renders at exactly the size its `Props` named, and Dynamic
+    /// Type participation stays a deliberate non-goal of v1.
+    pub(crate) fn system_font(size_sp: f32) -> Retained<UIFont> {
+        UIFont::systemFontOfSize(f64::from(size_sp))
+    }
+
+    /// `UILabel.textColor` — [`Setter::TextColor`] for `Label` (a `Button`
+    /// uses the state-keyed `setTitleColor:forState:` instead).
+    pub(crate) fn set_label_text_color(label: &UILabel, color: &UIColor) {
+        // SAFETY: objc2 marks `setTextColor:` unsafe solely because the header
+        // does not annotate whether the argument may be nil. This wrapper's
+        // parameter is a non-optional `&UIColor`, so nil is unrepresentable at
+        // the call site and the open question is closed by the signature.
+        unsafe { label.setTextColor(Some(color)) };
+    }
+
+    /// `UILabel.font` — [`Setter::TextSizeSp`] for `Label`, and for a
+    /// `Button` via its `titleLabel`.
+    pub(crate) fn set_label_font(label: &UILabel, font: &UIFont) {
+        // SAFETY: same as `set_label_text_color` — objc2's only stated concern
+        // is whether nil is allowed, and this wrapper cannot pass nil.
+        unsafe { label.setFont(Some(font)) };
+    }
+
+    /// `UIImageView.tintColor` — [`Setter::ImageTint`].
+    pub(crate) fn set_image_tint(view: &UIImageView, color: Option<&UIColor>) {
+        // SAFETY: objc2's stated concern is whether nil is allowed, and here
+        // it is: `UIView.tintColor` is documented as inheriting from the
+        // superview when set to nil, which is exactly the "restore the
+        // platform's own tint" meaning `Setter::ImageTint(None)` carries.
+        unsafe { view.setTintColor(color) };
+    }
+
+    /// One-time warning that [`Setter::ThemedBackground`]'s corner radius is
+    /// not applied on this arm yet.
+    ///
+    /// The fill **is** applied (see [`set_background_color`]); only the radius
+    /// waits, because rounding a UIKit view means `layer.cornerRadius`, and
+    /// `UIView.layer` is gated behind an `objc2-quartz-core` dependency this
+    /// crate does not carry yet. Theme ladder L2 on Apple is task p2-04's, and
+    /// its own Cargo.toml touch is where that dependency lands — so this is a
+    /// scheduled gap with a named owner, not an oversight.
+    ///
+    /// `Once`-guarded, mirroring
+    /// [`crate::controls::typeface::degrade_on_failure`]'s "exactly one
+    /// warning" contract: a themed `Button` plans this setter on every create,
+    /// so a per-call log would drown the device console.
+    pub(crate) fn warn_corner_radius_unsupported(radius_dp: f32) {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            log::warn!(
+                "frust-native-widgets: iOS applies a themed background's fill but not its \
+                 {radius_dp}dp corner radius yet (needs `layer.cornerRadius`, which task p2-04 \
+                 wires up with the theme ladder's Apple arm) — the control renders square"
+            );
+        });
+    }
+
+    /// [`Setter::Typeface`] on this arm: keep the system font, and say so
+    /// exactly once when the request was for a real Glyph face.
+    ///
+    /// [`Typeface::System`] is a genuine no-op here, not a degrade — nothing
+    /// on this arm ever changes a control's font *family*, so "restore the
+    /// platform's own face" (that variant's whole meaning) is already true.
+    ///
+    /// A Glyph face is a real request this arm cannot serve yet: resolving one
+    /// needs the embedded bytes registered via
+    /// `CTFontManagerRegisterFontsForData`, which is theme ladder L3 on Apple
+    /// and therefore task p2-04's. Falling back to the system font is exactly
+    /// what `crate::android::fonts`' own registration-failure path does
+    /// (`crate::controls::typeface`'s [`Typeface::System`] doc: the platform
+    /// default and the degrade target are deliberately the same case), so the
+    /// visible behaviour is a shape this crate already contracts for.
+    ///
+    /// `Once`-guarded, mirroring
+    /// [`crate::controls::typeface::degrade_on_failure`]'s "exactly one
+    /// warning" contract: the Glyph design language is every shell's default,
+    /// so a themed `Button`/`Label` plans this setter on every create.
+    pub(crate) fn apply_typeface(face: Typeface) {
+        if face == Typeface::System {
+            return;
+        }
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            log::warn!(
+                "frust-native-widgets: iOS cannot resolve the Glyph typeface '{}' yet (needs \
+                 CTFontManager registration, which task p2-04 lands) — the control keeps the \
+                 system font",
+                face.wire()
+            );
+        });
+    }
+
+    /// One-time warning that [`Setter::Indeterminate`] has no
+    /// `UIProgressView` equivalent — see `crate::controls::progress`'s Apple
+    /// module doc for why the gap is a UIKit class split rather than a missing
+    /// setter, and what closing it would cost.
+    ///
+    /// Warns for **either** direction: an app switching a live spinner *off*
+    /// gets no visible change on this arm either, so a one-sided warning would
+    /// under-report the gap.
+    pub(crate) fn warn_indeterminate_unsupported(indeterminate: bool) {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            log::warn!(
+                "frust-native-widgets: iOS has no indeterminate UIProgressView (the spinner is a \
+                 separate UIActivityIndicatorView class), so `indeterminate: {indeterminate}` is \
+                 not applied — the bar keeps showing its determinate value"
+            );
+        });
+    }
+
+    /// A [`Setter`] a control's own `plan` never emits reached its `apply`.
+    ///
+    /// Only a bug can produce this (a plan and its apply drifting apart), so
+    /// it warns rather than degrading silently — but it still does not fail
+    /// the call: a mis-planned property is not worth a dead slot
+    /// (`crate::controls`'s degrade-don't-fail rule).
+    pub(crate) fn warn_unexpected_setter(kind: &str, setter: &Setter<'_>) {
+        log::warn!(
+            "frust-native-widgets: control '{kind}' planned a setter its iOS arm does not \
+             implement ({setter:?}) — ignored"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,6 +1259,85 @@ mod tests {
             color(&Params::new(&unsigned), TEXT_COLOR),
             Some(0xFF00_0000_u32 as i32)
         );
+    }
+
+    // --- the Apple arm's shared pure logic (p2-02) -------------------------
+
+    #[test]
+    fn argb_splits_into_the_four_apple_channels_in_rgba_order() {
+        // Opaque pure red: alpha 1.0, red 1.0, the rest 0. The tuple order is
+        // (r, g, b, a) — the argument order `UIColor`'s constructor takes,
+        // deliberately NOT the packing order the wire uses.
+        assert_eq!(argb_channels(0xFFFF_0000_u32 as i32), (1.0, 0.0, 0.0, 1.0));
+        assert_eq!(argb_channels(0xFF00_FF00_u32 as i32), (0.0, 1.0, 0.0, 1.0));
+        assert_eq!(argb_channels(0xFF00_00FF_u32 as i32), (0.0, 0.0, 1.0, 1.0));
+        // Fully transparent white, and fully transparent black: the alpha
+        // channel is read independently of the colour channels.
+        assert_eq!(argb_channels(0x00FF_FFFF), (1.0, 1.0, 1.0, 0.0));
+        assert_eq!(argb_channels(0x0000_0000), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn argb_reads_the_signed_spelling_without_sign_extending() {
+        // The wire carries both spellings of an Android colour (see
+        // `colors_decode_from_both_the_signed_and_unsigned_spelling` above),
+        // so the negative one — every opaque colour, since the alpha byte sets
+        // the sign bit — must decode identically. A `>>` on the raw `i32`
+        // would sign-extend and hand every channel `1.0`.
+        let opaque_black_signed: i32 = -16_777_216;
+        assert_eq!(argb_channels(opaque_black_signed), (0.0, 0.0, 0.0, 1.0));
+        assert_eq!(
+            argb_channels(opaque_black_signed),
+            argb_channels(0xFF00_0000_u32 as i32)
+        );
+    }
+
+    #[test]
+    fn every_channel_is_a_unit_interval_fraction_of_255() {
+        for byte in 0..=255u32 {
+            let argb = ((byte << 24) | (byte << 16) | (byte << 8) | byte) as i32;
+            let (r, g, b, a) = argb_channels(argb);
+            let expected = f64::from(byte) / 255.0;
+            assert_eq!((r, g, b, a), (expected, expected, expected, expected));
+            assert!((0.0..=1.0).contains(&r), "channel out of range for {byte}");
+        }
+    }
+
+    // --- shared-Props parity: one kind table, two platform arms ------------
+
+    #[test]
+    fn the_six_control_kinds_are_the_same_strings_both_platform_arms_register() {
+        // `crate::android::register_controls` and
+        // `crate::apple::register_controls` are each `#[cfg(target_os = ...)]`
+        // -gated, so no host test can call either. What a host CAN pin is the
+        // thing they both register *by*: these six `KIND` consts. Neither arm
+        // spells a kind literally (`crate::android`'s own registration note),
+        // so a drift in the wire vocabulary has to pass through here.
+        //
+        // The other half of "shared-Props parity" needs no assertion at all:
+        // there is exactly ONE `Props` type per control, in this same module
+        // tree, used verbatim by both arms — same fields by construction, not
+        // by agreement. A second, per-platform Props definition is the thing
+        // this file's layout exists to prevent.
+        let kinds = [
+            button::KIND,
+            label::KIND,
+            switch::KIND,
+            slider::KIND,
+            progress::KIND,
+            image::KIND,
+        ];
+        assert_eq!(
+            kinds,
+            ["button", "label", "switch", "slider", "progress", "image"],
+            "the control kind strings are a shipped wire contract — the api \
+             layer's builders inject them and both platform arms register \
+             against them"
+        );
+        let mut unique = kinds.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), kinds.len(), "two controls share a kind");
     }
 
     #[test]

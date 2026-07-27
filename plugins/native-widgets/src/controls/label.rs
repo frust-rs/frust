@@ -195,6 +195,120 @@ pub(crate) mod platform {
     }
 }
 
+#[cfg(target_os = "ios")]
+pub(crate) mod platform {
+    //! The Apple half: build the `UILabel` and apply the same planned setters
+    //! the Android half hands JNI.
+    //!
+    //! # One construction-time normalization: `numberOfLines = 0`
+    //!
+    //! A fresh `UILabel` shows **one** line and truncates; a fresh Android
+    //! `TextView` wraps to as many lines as its box allows. Neither is
+    //! expressible as a [`Setter`](crate::controls::Setter) — no `Props` field
+    //! names a line count — so leaving UIKit's own default would silently give
+    //! the same `Label` different content on the two platforms. `create`
+    //! therefore sets `numberOfLines = 0` (UIKit's "as many as needed") once,
+    //! before the plan runs, bringing the fresh view into the behaviour
+    //! `LabelProps` already describes rather than adding a property to it.
+    //!
+    //! This is the *shape* every control on this arm uses where UIKit's own
+    //! constructor lands somewhere other than `Props::platform_default`
+    //! describes: normalize in `create`, then diff against the shared default
+    //! exactly as Android does (see `slider.rs`/`image.rs`, which normalize a
+    //! real `Props` field rather than an unmodelled one).
+
+    use objc2::MainThreadMarker;
+    use objc2::rc::Retained;
+    use objc2_foundation::NSString;
+    use objc2_ui_kit::UILabel;
+
+    use super::{KIND, Label, LabelProps};
+    use crate::NativeWidgetError;
+    use crate::apple::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::runtime::{NativeWidget, Params};
+
+    /// UIKit's "wrap to as many lines as the box allows" — the behaviour a
+    /// fresh Android `TextView` already has (module doc).
+    const UNLIMITED_LINES: isize = 0;
+
+    /// A live label's retained state (see `button.rs`'s note on why one
+    /// reference is enough on this arm).
+    pub(crate) struct LabelState {
+        view: Retained<UILabel>,
+    }
+
+    impl NativeWidget for Label {
+        type Props = LabelProps;
+        type State = LabelState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            LabelProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = UILabel::new(mtm);
+            view.setNumberOfLines(UNLIMITED_LINES);
+            let plan = LabelProps::plan(&LabelProps::platform_default(props.slot), props);
+            apply_all(mtm, &view, &plan);
+            let handle = NativeView::new(Retained::clone(&view).into_super(), mtm);
+            Ok((handle, LabelState { view }))
+        }
+
+        fn update(
+            ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            apply_all(ctx.mtm(), &state.view, &LabelProps::plan(old, new));
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            _state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Display-only: nothing attached, and dropping the state releases
+            // its retain.
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back.
+    fn apply_all(mtm: MainThreadMarker, view: &UILabel, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(mtm, view, setter);
+        }
+    }
+
+    /// Execute one planned property write against `view`.
+    fn apply(mtm: MainThreadMarker, view: &UILabel, setter: &Setter<'_>) {
+        match *setter {
+            Setter::Text(text) => view.setText(Some(&NSString::from_str(text))),
+            // `UILabel` carries its own `isEnabled` (it dims the text) — it is
+            // NOT the `UIControl` property the interactive controls set, since
+            // a label is not a control at all.
+            Setter::Enabled(enabled) => view.setEnabled(enabled),
+            Setter::BackgroundColor(argb) => platform::set_background_color(view, argb),
+            Setter::TextColor(argb) => {
+                platform::set_label_text_color(view, &platform::ui_color(argb));
+            }
+            Setter::TextSizeSp(sp) => platform::set_label_font(view, &platform::system_font(sp)),
+            Setter::Typeface(face) => platform::apply_typeface(face),
+            Setter::ContentDescription(label) => {
+                platform::set_accessibility_label(view, label, mtm);
+            }
+            ref other => platform::warn_unexpected_setter(KIND, other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

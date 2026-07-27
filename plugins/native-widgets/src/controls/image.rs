@@ -133,6 +133,20 @@ impl Fit {
             Self::Center => jni_str!("CENTER"),
         }
     }
+
+    /// The `UIViewContentMode` this fit selects — the Apple counterpart of
+    /// [`Self::scale_type_constant`], and a one-to-one mapping: UIKit's
+    /// content modes cover exactly the four behaviours this enum names.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn content_mode(self) -> objc2_ui_kit::UIViewContentMode {
+        use objc2_ui_kit::UIViewContentMode;
+        match self {
+            Self::Contain => UIViewContentMode::ScaleAspectFit,
+            Self::Cover => UIViewContentMode::ScaleAspectFill,
+            Self::Fill => UIViewContentMode::ScaleToFill,
+            Self::Center => UIViewContentMode::Center,
+        }
+    }
 }
 
 /// The encoded bytes a slot should show, compared by **identity** (module
@@ -497,6 +511,193 @@ pub(crate) mod platform {
             // Dropping the state then releases its global reference.
             release_bytes(state.slot);
             Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "ios")]
+pub(crate) mod platform {
+    //! The Apple half: build the `UIImageView` and apply the same planned
+    //! setters the Android half hands JNI.
+    //!
+    //! # Two construction-time normalizations
+    //!
+    //! 1. **`contentMode`.** A fresh `UIImageView` is `ScaleToFill` (aspect
+    //!    ignored); [`ImageProps::platform_default`] describes the fresh
+    //!    Android `ImageView` — `FIT_CENTER`, i.e. [`Fit::Contain`] — and the
+    //!    create plan diffs against that, so a slot asking for `Contain` plans
+    //!    **no** [`Setter::ScaleType`] and would silently stretch. `create`
+    //!    sets the shared default first (`slider.rs`'s module doc names this
+    //!    shape).
+    //! 2. **`clipsToBounds`.** [`Fit::Cover`] means "fill the box, crop the
+    //!    overflow"; UIKit's `ScaleAspectFill` scales but does **not** clip
+    //!    unless the view does, so an uncropped image would paint over its
+    //!    siblings. Android's `CENTER_CROP` crops by construction. Set once at
+    //!    create rather than toggled per fit: clipping a `Contain`/`Center`
+    //!    image changes nothing (its content already fits), so there is no
+    //!    behaviour to preserve by leaving it off.
+    //!
+    //! # The tint needs the image to be a template
+    //!
+    //! Android's `setImageTintList` tints through `SRC_IN` by default: the
+    //! image becomes a silhouette in the tint colour. UIKit's `tintColor`
+    //! applies **only** to an image whose rendering mode is
+    //! `AlwaysTemplate` — on an ordinary decoded PNG it does nothing at all.
+    //! So this arm re-derives the view's image from the decoded original
+    //! whenever either half of that pair changes ([`ImageState::install`]),
+    //! keeping the original around so an app that clears the tint gets its
+    //! colours back rather than a permanently flattened silhouette. The
+    //! decode itself still runs once per bytes identity — the module doc's
+    //! whole point — since re-deriving a rendering mode is a wrapper around
+    //! the same backing store, not a re-decode.
+
+    use objc2::MainThreadMarker;
+    use objc2::rc::Retained;
+    use objc2_foundation::NSData;
+    use objc2_ui_kit::{UIImage, UIImageRenderingMode, UIImageView};
+
+    use super::{Image, ImageProps, KIND, claim_bytes, release_bytes};
+    use crate::NativeWidgetError;
+    use crate::apple::{NativeCtx, NativeView};
+    use crate::controls::platform;
+    use crate::controls::{Plan, Setter};
+    use crate::registry::SlotId;
+    use crate::runtime::{NativeWidget, Params};
+
+    /// A live image's retained state.
+    pub(crate) struct ImageState {
+        view: Retained<UIImageView>,
+        /// Which slot's publish-table hold this instance took in `create`
+        /// ([`claim_bytes`]) and gives back in `dispose` ([`release_bytes`]).
+        slot: SlotId,
+        /// The decoded image as `imageWithData:` produced it, kept in its
+        /// **original** rendering mode so a tint can be applied and removed
+        /// without re-decoding (module doc).
+        image: Option<Retained<UIImage>>,
+        /// Whether a tint colour is currently set, which decides the rendering
+        /// mode [`Self::install`] gives the view.
+        tinted: bool,
+    }
+
+    impl ImageState {
+        /// Push [`Self::image`] onto the view in the rendering mode
+        /// [`Self::tinted`] calls for (module doc's *The tint needs the image
+        /// to be a template*). `None` clears the view, exactly as
+        /// `setImageBitmap(null)` does on Android.
+        fn install(&self) {
+            let rendered = self.image.as_ref().map(|image| {
+                if self.tinted {
+                    image.imageWithRenderingMode(UIImageRenderingMode::AlwaysTemplate)
+                } else {
+                    Retained::clone(image)
+                }
+            });
+            self.view.setImage(rendered.as_deref());
+        }
+    }
+
+    impl NativeWidget for Image {
+        type Props = ImageProps;
+        type State = ImageState;
+
+        fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
+            ImageProps::decode(params)
+        }
+
+        fn create(
+            ctx: &mut NativeCtx<'_, '_>,
+            props: &Self::Props,
+        ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            let mtm = ctx.mtm();
+            let view = UIImageView::new(mtm);
+            let default = ImageProps::platform_default(props.slot);
+            // Module doc's *Two construction-time normalizations*. The fit is
+            // read off the shared default rather than named again here, so a
+            // change to `ImageProps::platform_default` cannot leave the
+            // normalization and the diff baseline disagreeing.
+            view.setContentMode(default.fit.content_mode());
+            view.setClipsToBounds(true);
+            let mut state = ImageState {
+                view,
+                slot: props.slot,
+                image: None,
+                tinted: false,
+            };
+            let plan = ImageProps::plan(&default, props);
+            apply_all(mtm, &mut state, &plan);
+            let handle = NativeView::new(Retained::clone(&state.view).into_super(), mtm);
+            // Claimed last, mirroring the Android arm: an earlier failure
+            // would return before taking a hold nothing would ever release.
+            claim_bytes(props.slot);
+            Ok((handle, state))
+        }
+
+        fn update(
+            ctx: &mut NativeCtx<'_, '_>,
+            state: &mut Self::State,
+            old: &Self::Props,
+            new: &Self::Props,
+        ) -> Result<(), NativeWidgetError> {
+            let plan = ImageProps::plan(old, new);
+            apply_all(ctx.mtm(), state, &plan);
+            Ok(())
+        }
+
+        fn dispose(
+            _ctx: &mut NativeCtx<'_, '_>,
+            state: Self::State,
+        ) -> Result<(), NativeWidgetError> {
+            // Give back this instance's hold on the slot's bytes; the payload
+            // is dropped only when the last holder is gone (the runtime
+            // creates a replacement *before* disposing what it replaced).
+            release_bytes(state.slot);
+            Ok(())
+        }
+    }
+
+    /// Execute a whole [`Plan`], front to back.
+    fn apply_all(mtm: MainThreadMarker, state: &mut ImageState, plan: &Plan<'_>) {
+        for setter in plan {
+            apply(mtm, state, setter);
+        }
+    }
+
+    /// Execute one planned property write against `state`'s view.
+    ///
+    /// Takes the whole state, not just the view, because the decoded original
+    /// and the tint flag together decide what the view actually shows (module
+    /// doc).
+    fn apply(mtm: MainThreadMarker, state: &mut ImageState, setter: &Setter<'_>) {
+        match *setter {
+            Setter::ImageBytes(bytes) => {
+                state.image = bytes
+                    .as_slice()
+                    .and_then(|raw| UIImage::imageWithData(&NSData::with_bytes(raw)));
+                if state.image.is_none() && bytes.as_slice().is_some() {
+                    // `imageWithData:` returning nil is its own documented
+                    // contract for a payload it cannot read — a bad image
+                    // clears the view, it never kills the slot (the same
+                    // degrade `BitmapFactory.decodeByteArray` gets).
+                    log::warn!(
+                        "frust-native-widgets: UIImage could not decode {} image byte(s) — \
+                         clearing the view",
+                        bytes.len()
+                    );
+                }
+                state.install();
+            }
+            Setter::ScaleType(fit) => state.view.setContentMode(fit.content_mode()),
+            Setter::ImageTint(argb) => {
+                platform::set_image_tint(&state.view, platform::optional_ui_color(argb).as_deref());
+                state.tinted = argb.is_some();
+                // The rendering mode is a property of the IMAGE, not of the
+                // view, so a tint change has to re-derive it (module doc).
+                state.install();
+            }
+            Setter::ContentDescription(label) => {
+                platform::set_accessibility_label(&state.view, label, mtm);
+            }
+            ref other => platform::warn_unexpected_setter(KIND, other),
         }
     }
 }
