@@ -1007,6 +1007,7 @@ dependencies = [
  "frust-plugin",
  "frust-theme",
  "jni 0.22.4",
+ "kurbo",
  "log",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",

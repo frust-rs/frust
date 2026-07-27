@@ -39,6 +39,16 @@ log = { workspace = true }
 # the same reason: a gap no facade widget covers.
 frust = { workspace = true, optional = true }
 frust-core = { workspace = true, optional = true }
+# The `ClipToSlot` wrapper (`src/api/builders.rs`'s f1-02 refusal-placeholder
+# overflow fix, `workflow/plans/features/frust-native-widgets/followups/
+# p1-fix-1/f1-02-placeholder-layout.md`) hand-implements `Widget::layout`,
+# whose trait signature returns a bare `kurbo::Size` — the same
+# `frust-core`/`kurbo` escape hatch pairing described above, now needed
+# outside `#[cfg(test)]` too (previously dev-only, below). `optional = true`
+# + gated into `frust-api` below for the same reason as `frust`/`frust-core`:
+# `--no-default-features` must keep this crate's platform-plugin charter
+# line intact.
+kurbo = { workspace = true, optional = true }
 # Theme ladder L3 (p1-08, `src/api/theme.rs`'s `publish_glyph_font_bytes`):
 # the source of the bundled Glyph font bytes (`frust_theme::glyph::font_data`)
 # this crate's Android backend registers into a real `Typeface`. The `frust`
@@ -129,6 +139,17 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
 # `--no-default-features`).
 kurbo = { workspace = true }
 peniko = { workspace = true }
+# f1-02's `placeholder_paints_within_its_slot_rect_at_every_slot_size` test
+# lays out a real `alert()` banner (`AlertWidget::layout` calls
+# `ctx.text_context::<frust_text::TextContext>()`), so it needs a genuine
+# `TextContext` to shape the title/body runs rather than a stub — dev-only,
+# same rationale as `kurbo`/`peniko` above.
+frust-text = { workspace = true }
+# Same test's recording `PaintScene` impl names `frust_scene::GlyphRun` in
+# its `draw_glyph_run` signature (`PaintScene::draw_glyph_run`'s own
+# parameter type) — dev-only, mirroring `crates/frust-widgets/src/glyph/
+# alert.rs`'s own test module doing the same.
+frust-scene = { workspace = true }
 
 [features]
 default = ["frust-api", "glyph-fonts"]
@@ -136,7 +157,7 @@ default = ["frust-api", "glyph-fonts"]
 # Default-on so an app that adds this crate to its `Cargo.toml` gets them for
 # free; `--no-default-features` is the charter-line gate (`Cargo.toml`'s
 # `[dependencies]` comment above `frust`/`frust-core`/`frust-theme`).
-frust-api = ["dep:frust", "dep:frust-core", "dep:frust-theme"]
+frust-api = ["dep:frust", "dep:frust-core", "dep:frust-theme", "dep:kurbo"]
 # Forwards into `frust-theme`'s own `glyph-fonts` (gf2 opt-out chain,
 # mirroring `frust-widgets`'/`frust`'s own edges, `docs/DEVELOPMENT.md`'s
 # *Glyph bundled fonts*) — theme ladder L3's (p1-08) bundled Space Mono/IBM

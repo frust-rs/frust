@@ -56,8 +56,10 @@ use frust::{
     use_context,
 };
 use frust_core::{
-    AnyView, BuildCtx, ChangeFlags, Component, ComponentWidget, View, any, component,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentWidget, LayoutCtx,
+    PaintCtx, PaintScene, SemanticsCtx, View, Widget, any, component,
 };
+use kurbo::Size;
 
 use crate::controls::{
     BACKGROUND_COLOR, CHECKED, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, DARK, ENABLED, FIT,
@@ -117,6 +119,26 @@ fn warn_refusal_once() {
 /// `Role::Alert` semantics node carrying `control` as its label — the
 /// "semantics label" half of the task's fallback spec), instead of an
 /// invisible, untappable native slot.
+///
+/// # Device-gate bar 7 fix (`research/VERIFY-P1.md`)
+///
+/// `alert`'s explanatory body prose is longer than most slot boxes allow
+/// (e.g. `native_switch`'s 70x40, `native_progress`'s 260x24) — `SizedBox`
+/// only tightens the reported [`Size`] the layout pass sees, it does not
+/// stop `AlertWidget::paint` from drawing glyph runs sized off its own
+/// unclamped content, so the prose used to spill straight through into
+/// whatever the neighbouring slot painted. `AlertWidget` also drives its
+/// screen-reader description off that same body string
+/// (`docs/CODE_STANDARDS.md`'s Semantics Conventions — a widget's `body`
+/// text doubles as both its painted prose and its accessibility
+/// description), and it lives in `frust-widgets`, outside this crate's
+/// charter to change for this task (`docs/ARCHITECTURE.md`'s Plugin
+/// Conventions: a platform plugin depends on `frust`/`frust-core` only, and
+/// this task's own scope is `builders.rs`). Clipping the whole banner's
+/// paint to the slot rect (below) is what lets the full explanation stay in
+/// the semantics tree and the one-time [`warn_refusal_once`] log while
+/// guaranteeing the placeholder never paints outside its own slot, at any
+/// slot size the builders allow.
 fn placeholder<State: 'static>(size: Option<(f64, f64)>, control: &str) -> AnyView<State> {
     warn_refusal_once();
     let banner = alert(
@@ -125,7 +147,71 @@ fn placeholder<State: 'static>(size: Option<(f64, f64)>, control: &str) -> AnyVi
         "the host declared a translucent surface but the platform refused it — rendering a \
          frust placeholder instead of an invisible native slot.",
     );
-    any(SizedBox(size.map(|(w, _)| w), size.map(|(_, h)| h)).child(banner))
+    let sized = SizedBox(size.map(|(w, _)| w), size.map(|(_, h)| h)).child(banner);
+    any(ClipToSlot { child: any(sized) })
+}
+
+/// Clips its child's paint to this widget's own laid-out bounds — see
+/// [`placeholder`]'s "Device-gate bar 7 fix" doc for why this exists instead
+/// of shrinking or wrapping the prose itself. A thin, crate-local wrapper
+/// (not a `frust-widgets` container) built directly against
+/// [`AnyView`]/[`Widget`] rather than `frust-widgets`' crate-private
+/// `ChildPod` plumbing, which this crate has no access to
+/// (`docs/CODE_STANDARDS.md`'s Plugin Conventions).
+struct ClipToSlot<State: 'static> {
+    child: AnyView<State>,
+}
+
+/// The retained widget for [`ClipToSlot`].
+struct ClipToSlotWidget {
+    child: Box<dyn Widget>,
+}
+
+impl<State: 'static> View<State> for ClipToSlot<State> {
+    type Element = ClipToSlotWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+        ClipToSlotWidget {
+            child: self.child.build(ctx),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut Self::Element,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        self.child.rebuild(&prev.child, &mut element.child, ctx)
+    }
+
+    fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
+        self.child.teardown(&mut element.child, ctx);
+    }
+}
+
+impl Widget for ClipToSlotWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        self.child.layout(ctx, bc)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // The clip rect is THIS widget's own laid-out origin/size — exactly
+        // the slot rect the placeholder was given, never the child's
+        // unclamped natural content size.
+        scene.push_clip(ctx.origin(), ctx.size());
+        self.child.paint(ctx, scene);
+        scene.pop_clip();
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent wrapper: forward unchanged so the full title+body
+        // detail still reaches a screen reader regardless of what got
+        // visually clipped (`docs/CODE_STANDARDS.md`'s Semantics
+        // Conventions — a container must forward, never drop, a child's
+        // subtree).
+        self.child.semantics(ctx);
+    }
 }
 
 /// Apply an explicit `.size(w, h)` if the caller provided one, else leave the
@@ -957,8 +1043,10 @@ impl_native_view!(NativeImageView);
 mod tests {
     use super::*;
     use frust_core::{BoxConstraints, LayoutCtx, PaintCtx, PaintScene, Widget};
-    use kurbo::{Point, Size};
-    use peniko::Color;
+    use frust_text::TextContext;
+    use kurbo::{Point, Rect, Shape, Size};
+    use peniko::{Brush, Color};
+    use std::any::Any;
 
     /// A minimal `PaintScene` — only `fill_rect`/`draw_text` have no default
     /// (see `frust_core::widget::PaintScene`'s trait definition); every other
@@ -1261,5 +1349,181 @@ mod tests {
         let frames = pctx.take_platform_views();
         assert_eq!(frames.len(), 1);
         assert!(!frames[0].interactive, "Label never forwards native input");
+    }
+
+    // --- device-gate bar 7 (`research/VERIFY-P1.md`): the refusal
+    // placeholder's prose must never paint outside its own slot rect -------
+
+    /// A recording [`PaintScene`] that actually honours the clip stack
+    /// (unlike [`NullScene`] above), so it models what a real backend would
+    /// visually produce: every primitive's own reported bounds get
+    /// intersected against whatever clip is active *at paint time* before
+    /// being recorded. With no clip pushed (the pre-fix shape), a
+    /// primitive's raw, unclamped bounds are recorded as-is — which is
+    /// exactly what makes this test capable of catching the original
+    /// overflow rather than trivially passing by construction.
+    #[derive(Default)]
+    struct BoundsRecorder {
+        clip_stack: Vec<Rect>,
+        /// Every painted primitive's bounds, already clipped against
+        /// whatever was active when it painted.
+        painted: Vec<Rect>,
+    }
+
+    impl BoundsRecorder {
+        fn record(&mut self, rect: Rect) {
+            let bounded = match self.clip_stack.last() {
+                Some(clip) => rect.intersect(*clip),
+                None => rect,
+            };
+            // A fully-clipped-away rect never actually paints a pixel —
+            // skip it rather than recording a degenerate zero-size rect.
+            if bounded.width() > 0.0 && bounded.height() > 0.0 {
+                self.painted.push(bounded);
+            }
+        }
+    }
+
+    impl PaintScene for BoundsRecorder {
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: Color) {
+            self.record(Rect::from_origin_size(origin, size));
+        }
+
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, _radius: f64, _color: Color) {
+            self.record(Rect::from_origin_size(origin, size));
+        }
+
+        fn stroke_path(
+            &mut self,
+            origin: Point,
+            path: &kurbo::BezPath,
+            width: f64,
+            _brush: &Brush,
+        ) {
+            let bbox = path.bounding_box() + origin.to_vec2();
+            // Pad by the stroke width so the border's own ink is covered,
+            // not just its centerline path.
+            self.record(bbox.inflate(width, width));
+        }
+
+        fn push_clip(&mut self, origin: Point, size: Size) {
+            let rect = Rect::from_origin_size(origin, size);
+            let bounded = match self.clip_stack.last() {
+                Some(prev) => rect.intersect(*prev),
+                None => rect,
+            };
+            self.clip_stack.push(bounded);
+        }
+
+        fn pop_clip(&mut self) {
+            self.clip_stack.pop();
+        }
+
+        fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+            let Some(first) = run.glyphs.first() else {
+                return;
+            };
+            // The run's transform is a pure translation baked from the
+            // paint-time origin (`frust_text::TextLayout::to_scene_runs`) —
+            // `.translation()` recovers it directly. Glyph x/y are local
+            // (pre-transform) positions; no font-metrics access exists at
+            // this layer, so a generous `font_size`-wide margin around the
+            // glyphs' local extent stands in for real ascent/descent —
+            // over-approximating is fine here, since this test only needs
+            // to catch genuine overflow, not measure exact ink bounds.
+            let base = run.transform.translation();
+            let margin = run.font_size as f64;
+            let (min_x, max_x) = run
+                .glyphs
+                .iter()
+                .map(|g| g.x as f64)
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
+                    (lo.min(x), hi.max(x))
+                });
+            let rect = Rect::new(
+                base.x + min_x - margin,
+                base.y + first.y as f64 - margin,
+                base.x + max_x + margin,
+                base.y + first.y as f64 + margin,
+            );
+            self.record(rect);
+        }
+    }
+
+    fn rect_fits_within(outer: Rect, inner: Rect) -> bool {
+        const TOLERANCE: f64 = 0.01;
+        inner.x0 >= outer.x0 - TOLERANCE
+            && inner.y0 >= outer.y0 - TOLERANCE
+            && inner.x1 <= outer.x1 + TOLERANCE
+            && inner.y1 <= outer.y1 + TOLERANCE
+    }
+
+    #[test]
+    fn placeholder_paints_within_its_slot_rect_at_every_slot_size() {
+        // A range of slot sizes the app-facing builders actually allow,
+        // including `native_switch`'s own deliberately small box
+        // (`examples/glyph-catalog/src/pages/native_widgets.rs`) and an
+        // even smaller one to stress the invariant further — the task's
+        // own "including the smallest" requirement.
+        for (label, (w, h)) in [
+            ("native_switch's own box (70x40)", (70.0, 40.0)),
+            ("native_progress's own box (260x24)", (260.0, 24.0)),
+            ("native_button's own box (160x48)", (160.0, 48.0)),
+            ("a deliberately tiny box (40x16)", (40.0, 16.0)),
+        ] {
+            let view: AnyView<()> = placeholder(Some((w, h)), "Switch");
+            let mut element = build_any(view);
+
+            let mut text_ctx = TextContext::new();
+            let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn Any);
+            let bc = BoxConstraints::tight(Size::new(w, h));
+            let laid = element.layout(&mut lctx, &bc);
+            assert_eq!(
+                laid,
+                Size::new(w, h),
+                "{label}: the placeholder's own reported size must stay exactly the \
+                 slot's declared size"
+            );
+
+            let mut rec = BoundsRecorder::default();
+            let mut pctx = PaintCtx::new(Point::ZERO, laid);
+            element.paint(&mut pctx, &mut rec);
+
+            assert!(
+                !rec.painted.is_empty(),
+                "{label}: expected the placeholder to paint something"
+            );
+            let slot_rect = Rect::from_origin_size(Point::ZERO, laid);
+            for bounds in &rec.painted {
+                assert!(
+                    rect_fits_within(slot_rect, *bounds),
+                    "{label}: painted bounds {bounds:?} escaped the slot rect {slot_rect:?}"
+                );
+            }
+        }
+    }
+
+    /// p1-06's refusal test must still pass unchanged after the clip wrapper
+    /// — re-asserted here (mirrors `a_refused_slot_publishes_no_platform_view_frame`
+    /// above) against the `BoundsRecorder`'s clip-aware scene too, so both
+    /// scenes agree the refusal path never touches platform-view frames.
+    #[test]
+    fn a_refused_slot_still_publishes_no_platform_view_frame_through_the_clip_wrapper() {
+        let view =
+            native_switch(true).build_with_mode(2, ResolvedSurfaceMode::RefusedTranslucent, None);
+        let mut element = build_any(view);
+        let mut text_ctx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn Any);
+        element.layout(&mut lctx, &BoxConstraints::tight(Size::new(70.0, 40.0)));
+        let mut rec = BoundsRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(70.0, 40.0));
+        element.paint(&mut pctx, &mut rec);
+        assert!(
+            pctx.take_platform_views().is_empty(),
+            "a refused slot must render no native platform_view frame, even through the \
+             clip wrapper"
+        );
     }
 }
