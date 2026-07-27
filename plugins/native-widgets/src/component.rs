@@ -12,7 +12,7 @@
 //! | | internal `NativeWidget` | public [`NativeComponent`] |
 //! |---|---|---|
 //! | receiver | associated functions | `&self` — the value the app constructs each rebuild |
-//! | props | decoded from `params_json` inside the impl | **already-typed Rust values** the app hands over ([`publish`]) |
+//! | props | decoded from `params_json` inside the impl | **already-typed Rust values** the app hands over, staged beside the wire (*Props travel beside the wire*, below) |
 //! | errors | every method returns `Result` | latched on the context ([`ComponentCtx::report_error`]); `create` may answer `None` |
 //! | events | decoded into the crate's typed `EventPayload` | the raw [`NativeEvent`] pair, handled by the component itself |
 //! | context | the platform's own `NativeCtx` | the opaque [`ComponentCtx`] wrapper |
@@ -20,7 +20,8 @@
 //! # The six v1 controls are NOT ported onto this trait
 //!
 //! They stay internal `NativeWidget` impls, and this module **bridges** to
-//! them rather than rewriting them: [`Bridge<C>`] is one `NativeWidget` impl,
+//! them rather than rewriting them: `Bridge<C>` (crate-private) is one
+//! `NativeWidget` impl,
 //! generic over every public component, so both kinds of implementation are
 //! dispatched by the same runtime, the same registry, the same props diff
 //! gate and the same disposal path. That is a deliberate p3-01 decision, on
@@ -48,7 +49,7 @@
 //!    [`NativeComponent::State`], which is born there — there is nothing
 //!    native to hold before it.
 //! 2. **Props coalesce until then, and are always whole state, never a
-//!    delta.** [`publish`] replaces a slot's staged props outright, so a
+//!    delta.** Each rebuild replaces a slot's staged props outright, so a
 //!    create landing after three rebuilds sees only the newest; replaying a
 //!    prefix of the command backlog (a surface-recreate replay, a backlog
 //!    compaction) lands in the same place.
@@ -76,7 +77,9 @@
 //! impl, and it is where the error latch lives, which is what lets the trait's
 //! own methods stay `Result`-free. The wrapper carries a deliberately narrow
 //! per-platform surface plus the platform's own escape hatch
-//! ([`ComponentCtx::env`] on Android, [`ComponentCtx::mtm`] on iOS): curated
+//! (`ComponentCtx::env` on Android, `ComponentCtx::mtm` on iOS — each
+//! `#[cfg]`-gated to its own target, so only a docs build for that target
+//! renders it): curated
 //! helpers can never cover "construct an arbitrary native view", and both
 //! escape-hatch types are already in this crate's public API (`AndroidHandle`
 //! names `jni`'s `Global<JObject>`, `AppleHandle` names objc2's
@@ -117,10 +120,16 @@
 //!
 //! | | Android | iOS |
 //! |---|---|---|
-//! | build a child | [`ComponentCtx::new_view`] | any `objc2-ui-kit` constructor, off [`ComponentCtx::mtm`] |
+//! | build a child | `ComponentCtx::new_view` | any `objc2-ui-kit` constructor, off `ComponentCtx::mtm` |
 //! | attach it | [`ComponentCtx::add_child`] (JNI `addView`) | [`ComponentCtx::add_child`] (`addSubview`) |
 //! | keep talking to it | [`ComponentCtx::retain_child`] → [`NativeChild`] (a global ref) | the same, or just keep your own `Retained<T>` |
 //! | bound the reference table | [`ComponentCtx::with_local_frame`] (real `PushLocalFrame`) | the same call, which does nothing here (ARC) |
+//!
+//! The two per-platform view constructors in the first row are `#[cfg]`-gated
+//! to Android/iOS respectively, so they render only in a docs build for that
+//! target — unlike the three below them, which every target carries (the host
+//! arm's stand-ins are what make a component's create/update/dispose plan
+//! assertable by an ordinary `cargo test`).
 //!
 //! **The platform lays the subtree out, and frust deliberately does not know
 //! the children exist.** frust's wire carries per-slot geometry only — a
@@ -162,15 +171,19 @@
 //! slot, and that is what the differ diffs to decide whether to emit an
 //! `UpdateParams` at all. A public component's props are typed Rust values
 //! that never touch JSON, so they ride a **thread-local staging table** here
-//! ([`publish`]/[`forget`]) while the slot's `params_json` carries only the
-//! runtime's two identity keys plus a props **generation** counter
-//! ([`component_params`]) that [`publish`] bumps when — and only when — the
+//! (written by this module's crate-private `publish`/`forget` pair, whose only
+//! production caller is the generic mounting builder) while the slot's
+//! `params_json` carries only the runtime's two identity keys plus a props
+//! **generation** counter that `publish` bumps when — and only when — the
 //! published props actually changed. The wire therefore changes exactly when
 //! the props do, which is what makes the differ emit the `UpdateParams` the
-//! typed props ride along with.
+//! typed props ride along with. None of that machinery is public: an app
+//! stages props by rebuilding
+//! [`native_component`](crate::api::native_component), never by calling into
+//! the table itself.
 //!
 //! Like every other slot-keyed table in this crate, the staging table is
-//! bounded by an explicit reaper ([`forget`], from the mounting widget's
+//! bounded by an explicit reaper (`forget`, from the mounting widget's
 //! teardown), never by disposal alone — the c1-01 leak shape
 //! (`crate::runtime`'s `forget_pending_callback`) applies here verbatim: a
 //! culled slot's dispose resolves by view identity and never sees this table.
@@ -617,10 +630,10 @@ impl ComponentCtx<'_, '_, '_> {
     /// Take a stand-in retained child handle — the host mirror of Android's
     /// global reference and iOS's `Retained`.
     ///
-    /// Live handles are counted process-thread-wide ([`live_child_count`]),
-    /// so a host test asserts the paired release the way ART's global-ref
-    /// count does on device (module doc's *Teardown*) rather than merely
-    /// asserting that nothing panicked.
+    /// Live handles are counted process-thread-wide (this module's
+    /// crate-private `live_child_count`), so a host test asserts the paired
+    /// release the way ART's global-ref count does on device (module doc's
+    /// *Teardown*) rather than merely asserting that nothing panicked.
     pub fn retain_child(&mut self, identity: u64) -> Option<NativeChild> {
         self.inner.record(format!("retainChild {identity}"));
         Some(NativeChild::new(identity))

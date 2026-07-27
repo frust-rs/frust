@@ -32,13 +32,13 @@
 //!
 //! # Two builder families, one slot shape
 //!
-//! [`builders`] is the six built-in controls; [`mount`] is the **generic**
-//! one — [`native_component`], which mounts any registered
+//! The six built-in controls above are one family; [`native_component`] is
+//! the **generic** one, mounting any registered
 //! [`NativeComponent`](crate::component::NativeComponent) (a third party's
 //! included) into the same single `platform_view` slot, reusing the six's
 //! own factory constant, slot counter, sizing rule and refusal placeholder.
 //! It is what closes *define → register → mount*; the six are deliberately
-//! not rewritten to route through it (see [`mount`]'s module doc).
+//! not rewritten to route through it (see `src/api/mount.rs`'s module doc).
 //!
 //! # One `platform_view` slot per control (PLAN 3.1)
 //!

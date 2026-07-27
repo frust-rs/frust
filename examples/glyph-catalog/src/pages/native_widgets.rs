@@ -1,8 +1,26 @@
-//! Native Widgets section (native-widgets p1-06): all six v1 controls
-//! (`Button`/`Label`/`Switch`/`Slider`/`ProgressBar`/`Image`) rendered from
-//! pure Rust via `frust-native-widgets`'s `frust-api` builders — this
-//! crate's device-gate vehicle for the whole native-widgets feature (mirrors
+//! Native Widgets section (native-widgets p1-06, redesigned in p3-05): all
+//! six v1 controls (`Button`/`Label`/`Switch`/`Slider`/`ProgressBar`/`Image`)
+//! rendered from pure Rust via `frust-native-widgets`'s `frust-api` builders,
+//! each one **beside its glyph (frust-drawn) counterpart** — this crate's
+//! device-gate vehicle for the whole native-widgets feature (mirrors
 //! `camera.rs`'s "device-gate vehicle" role for `frust-camera`).
+//!
+//! # Side by side: the page's whole argument
+//!
+//! Every row in [`page`]'s comparison section is a pair — the REAL platform
+//! control on the left, frust's own glyph-themed widget on the right, in a
+//! cell of **exactly the same size**, under **the same [`Theme`]**, bound to
+//! **the same signal**. That is the honest form of the question this feature
+//! exists to answer ("why would I use a native widget?"): a person holding
+//! the phone can see a real `android.widget.Switch`'s thumb travel, a real
+//! `SeekBar`'s ripple and a real `UISwitch`'s haptics against frust's own
+//! drawn equivalents, rather than being told about them.
+//!
+//! Because both columns read and write the *same* signals ([`confirm_switch`]
+//! / [`confirm_slider`] are shared by both sides), dragging the glyph slider
+//! also moves the native `SeekBar` and the native `ProgressBar` — the
+//! frust → native direction of the round trip, which the native → frust
+//! direction below completes.
 //!
 //! # Interaction round-trip
 //!
@@ -14,8 +32,71 @@
 //! REAL platform widget becomes visible frust state one frame later — the
 //! "native event → signal → visible frust state" round trip this page
 //! exists to demonstrate. The slider's value additionally drives the native
-//! `ProgressBar` below it (native → signal → **native**), proving the same
+//! `ProgressBar` beside it (native → signal → **native**), proving the same
 //! signal can fan out to more than one control.
+//!
+//! # Write-back affordance (closes p2-05 bar 8's gap)
+//!
+//! The Phase 2 device gate's echo bar could only be *partially* executed:
+//! `research/VERIFY-P2.md`'s Finding 1 recorded that this page was a plain
+//! signal mirror — it echoed whatever the control reported and never wrote a
+//! *different* value back, so the **rejecting** round trip had no affordance
+//! to exercise. [`writeback_toggle`] is that affordance: with it on, both
+//! [`confirm_switch`] and [`confirm_slider`] echo the app's OWN (unchanged)
+//! value back during the change handler instead of accepting the requested
+//! one, which is exactly the scenario `research/RESEARCH-P2-REFRESH.md` §3's
+//! Caveat B describes (a filed report that `setOn:` called from inside a
+//! `valueChanged` handler can re-enter it).
+//!
+//! ## Why the rejection also has to move a prop (a finding, not a hack)
+//!
+//! A naive "echo the same value" rejection never reaches the platform at all,
+//! and would have made the bar vacuous a third time. The chain: the app's
+//! value did not change → the builder's `params_json` is byte-identical →
+//! `frust-shell-common`'s platform-view differ emits no `UpdateParams` →
+//! `NativeWidget::update` never runs → `SwitchProps::plan`'s drift branch (the
+//! write-back seam, `plugins/native-widgets/src/controls/switch.rs`'s
+//! *controlled-component contract*) never fires → the platform control keeps
+//! the user's optimistic flip while the app believes it refused. So while
+//! rejecting, and **only** while rejecting, each control's
+//! `content_description` carries a monotonically increasing refusal count
+//! ([`switch_description`]/[`slider_description`]). That is a real, app-owned
+//! prop, so it moves the wire, which is what lets `plan` see
+//! `observed != app value` and actually plan the setter — and the setter is
+//! what p3-07 needs in order to test the echo guard at all. Accept mode is
+//! untouched: its params are byte-for-byte what the p2 gate measured.
+//!
+//! The glyph column rejects too, which is the instructive contrast: frust's
+//! own controlled `Switch`/`Slider` snap back within the same frame (their
+//! `rebuild` re-applies the app value), while the native ones have to be
+//! driven back across the wire a frame later.
+//!
+//! # No composite component on this page (p3-05)
+//!
+//! p3-02 shipped native-subtree support and the generic
+//! `native_component(kind, component, props)` mounting builder, and this page
+//! is where a reader *should* meet a composite — one component owning a whole
+//! native hierarchy frust does not lay out. It is deliberately **not** here:
+//! implementing `frust_native_widgets::NativeComponent` means writing
+//! per-platform view construction (`ComponentCtx::new_view`/`env` against
+//! `jni::objects::JObject` on Android, `objc2-ui-kit` constructors off
+//! `ComponentCtx::mtm` on iOS), and this crate's `Cargo.toml` carries neither
+//! FFI crate — `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions
+//! sanction only a `frust-core`/`kurbo`/`peniko` escape hatch for an
+//! `examples/*` app, and `docs/DEVELOPMENT.md`'s Version-Pin Policy notes
+//! `objc2-ui-kit` is already resolving at two versions in this workspace.
+//! Admitting raw `jni`/`objc2-ui-kit` into an example app is a charter
+//! decision, not a page-fill decision; see this task's completion summary for
+//! the two options handed back.
+//!
+//! # Exactly six native slots at rest
+//!
+//! The comparison section mounts **six** `platform_view` slots and no more —
+//! the number [`gate_harness_block`]'s `Total live:` readout settles back to
+//! after a cycler run, which every device gate so far has keyed on. Adding a
+//! seventh native slot to the always-mounted part of this page (a composite,
+//! a second sample control) changes that gate constant; add it inside the
+//! cycler's own group or behind a toggle instead.
 //!
 //! # Desktop safety / the translucency-refused fallback
 //!
@@ -71,8 +152,9 @@
 use std::time::Instant;
 
 use frust::{
-    AnyView, Axis, Brightness, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Padding, RwSignal, Set, SizedBox, Theme, any, button, inflexible, text,
+    Align, Alignment, AnyView, Axis, Brightness, ButtonStyle, Color, CrossAxisAlignment,
+    EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Image, ImageFit, ImageSource, Padding,
+    RwSignal, Set, SizedBox, Theme, any, button, checkbox, glyph, inflexible, slider, switch, text,
     use_context,
 };
 // Low-level escape hatch (see [`GateFrameTicker`]'s doc comment) —
@@ -101,6 +183,23 @@ fn logo_bytes() -> std::sync::Arc<[u8]> {
     std::sync::Arc::clone(
         LOGO.get_or_init(|| std::sync::Arc::from(include_bytes!("../../assets/logo.png").to_vec())),
     )
+}
+
+/// The same embedded logo [`logo_bytes`] hands the native `ImageView`,
+/// decoded ONCE for the frust-drawn [`Image`] counterpart beside it — an
+/// `ImageSource` is a cheaply-clonable handle over the decoded pixels
+/// (`ImageSource::same` is `Arc` pointer identity), so re-decoding per
+/// rebuild would be the exact cost its own doc says never to pay.
+fn logo_image() -> ImageSource {
+    static LOGO: std::sync::OnceLock<ImageSource> = std::sync::OnceLock::new();
+    LOGO.get_or_init(|| {
+        // A 1x1 transparent stand-in rather than a panic or an `expect`: the
+        // only way this fails is a corrupt embedded asset, and a catalog demo
+        // page must degrade rather than take the whole app down.
+        ImageSource::decode(&logo_bytes())
+            .unwrap_or_else(|_| ImageSource::from_rgba8(vec![0, 0, 0, 0], 1, 1))
+    })
+    .clone()
 }
 
 /// Defines a `fn $name() -> RwSignal<$ty>` returning a screen-local signal
@@ -132,6 +231,19 @@ macro_rules! local_sig {
 local_sig!(tap_count_sig, u32, 0);
 local_sig!(switch_checked_sig, bool, false);
 local_sig!(slider_value_sig, i32, 30);
+// Native EVENT counters, distinct from the values above (which a rejected
+// change deliberately leaves untouched): p2-05 bar 8's measurable half is
+// "one user interaction produces exactly ONE counter advance", and a re-entrant
+// echo (`RESEARCH-P2-REFRESH.md` §3's Caveat B) would show up here as two.
+local_sig!(switch_events_sig, u32, 0);
+local_sig!(slider_events_sig, u32, 0);
+// The glyph column's own tap counter — deliberately NOT `tap_count_sig`, which
+// is the device gate's `Taps:` readout and must count native presses only.
+local_sig!(glyph_tap_count_sig, u32, 0);
+// Write-back affordance (p2-05 bar 8, module doc's *Write-back affordance*).
+local_sig!(reject_writeback_sig, bool, false);
+local_sig!(switch_refused_sig, u32, 0);
+local_sig!(slider_refused_sig, u32, 0);
 // GATE HARNESS state (task p1-11) — see [`gate_harness_block`]'s doc comment.
 local_sig!(cycle_target_sig, u32, 0); // 0 == no cycler run started yet
 local_sig!(stress_visible_sig, bool, false); // 50-slot stress toggle, off by default
@@ -190,19 +302,199 @@ fn block(children: Vec<FlexChild<CatalogState>>) -> FlexChild<CatalogState> {
 }
 
 // ---------------------------------------------------------------------------
-// The six controls
+// Side-by-side comparison chrome (p3-05)
+// ---------------------------------------------------------------------------
+
+/// One comparison column's width (logical px). Two of these plus [`PAIR_GAP`]
+/// must fit inside this page's own padding on the narrowest device the gate
+/// runs on — an iPhone SE is 375pt wide, and `16` (page) + `12` (block) of
+/// padding on each side leaves 319pt, against `140 + 12 + 140 = 292`.
+const PAIR_CELL_W: f64 = 140.0;
+
+/// The gutter between a pair's native and glyph cells.
+const PAIR_GAP: f64 = 12.0;
+
+/// Per-control cell heights. Each is the box BOTH columns of that row get
+/// (the native slot declares it, the glyph cell is boxed to it), so a pair
+/// reads as one control shown twice.
+///
+/// Provenance: these are exactly the heights the pre-p3-05 page already gave
+/// its native slots, kept unchanged so the device gate's touch targets do not
+/// move. Only the *widths* changed, and only because two columns have to fit
+/// ([`PAIR_CELL_W`]'s own doc).
+const PAIR_BUTTON_H: f64 = 48.0;
+/// See [`PAIR_BUTTON_H`].
+const PAIR_LABEL_H: f64 = 32.0;
+/// See [`PAIR_BUTTON_H`].
+const PAIR_SWITCH_H: f64 = 40.0;
+/// See [`PAIR_BUTTON_H`].
+const PAIR_SLIDER_H: f64 = 40.0;
+/// See [`PAIR_BUTTON_H`].
+const PAIR_PROGRESS_H: f64 = 24.0;
+/// The image pair's square edge — both columns, so the row compares two
+/// renderers of the same asset at the same size. See [`PAIR_BUTTON_H`].
+const PAIR_IMAGE: f64 = 96.0;
+
+/// How a [`pair_row`] cell treats content narrower than the cell itself.
+#[derive(Clone, Copy)]
+enum CellFit {
+    /// Tight constraints — the control fills the whole cell. The shape for
+    /// anything with a width worth comparing (a button, a slider track, a
+    /// progress track).
+    Stretch,
+    /// Loosened constraints, content pinned to the cell's left edge — the
+    /// shape for a control with a fixed intrinsic size that must NOT be
+    /// stretched. `android.widget.Switch` is the load-bearing case: it is a
+    /// `TextView` subclass and draws its switch graphic at the far *right* of
+    /// an over-wide frame, which would put it nowhere near its glyph
+    /// counterpart.
+    Natural,
+}
+
+/// One `pair_row` cell: a fixed `w` x `h` box, so both columns are literally
+/// the same size and the difference a reader sees is the widget, not the box.
+fn cell(fit: CellFit, w: f64, h: f64, content: AnyView<CatalogState>) -> AnyView<CatalogState> {
+    match fit {
+        CellFit::Stretch => any(SizedBox(Some(w), Some(h)).child(content)),
+        // `Align` loosens the constraints it hands its child (see its own
+        // module doc), which is the only way to keep a control's natural size
+        // inside a tightened box.
+        CellFit::Natural => {
+            any(SizedBox(Some(w), Some(h)).child(Align(Alignment::new(-1.0, 0.0), content)))
+        }
+    }
+}
+
+/// One comparison row: the REAL platform control on the left, its glyph
+/// (frust-drawn) counterpart on the right, both in a [`cell`] of exactly the
+/// same size (module doc's *Side by side*).
+fn pair_row(
+    title: &str,
+    note: &str,
+    fit: CellFit,
+    height: f64,
+    native: AnyView<CatalogState>,
+    drawn: AnyView<CatalogState>,
+) -> FlexChild<CatalogState> {
+    block(vec![
+        inflexible(label(title)),
+        gap(4.0),
+        inflexible(caption(note)),
+        gap(6.0),
+        inflexible(any(FlexView::new(
+            Axis::Horizontal,
+            vec![
+                inflexible(cell(fit, PAIR_CELL_W, height, native)),
+                gap_h(PAIR_GAP),
+                inflexible(cell(fit, PAIR_CELL_W, height, drawn)),
+            ],
+        )
+        .cross_axis(CrossAxisAlignment::Center))),
+    ])
+}
+
+// ---------------------------------------------------------------------------
+// The write-back affordance (p2-05 bar 8) — see the [module docs](self)
+// ---------------------------------------------------------------------------
+
+/// Confirm (or refuse) one requested `Switch` value, from EITHER column.
+///
+/// Accept mode is the plain controlled-component confirmation
+/// (`docs/CODE_STANDARDS.md`'s Interaction Semantics). Reject mode writes the
+/// app's own current value straight back instead — the rejecting round trip
+/// p2-05 bar 8 could not exercise (module doc's *Write-back affordance*) —
+/// and bumps [`switch_refused_sig`], which is what puts the refusal on the
+/// wire at all.
+///
+/// Every read here is `*_untracked` on purpose: this runs inside an event
+/// handler (a native listener on the platform main thread, or a frust
+/// `on_toggle`), never inside a `build`, so it must not subscribe anything.
+fn confirm_switch(requested: bool) {
+    let value = switch_checked_sig();
+    if reject_writeback_sig().get_untracked() {
+        let refused = switch_refused_sig();
+        refused.set(refused.get_untracked() + 1);
+        // The echo: the app's OWN value, unchanged, written back during the
+        // change handler.
+        value.set(value.get_untracked());
+    } else {
+        value.set(requested);
+    }
+}
+
+/// [`confirm_switch`]'s slider twin — same two modes, over the app-space
+/// `0..=100` value both columns share.
+fn confirm_slider(requested: i32) {
+    let value = slider_value_sig();
+    if reject_writeback_sig().get_untracked() {
+        let refused = slider_refused_sig();
+        refused.set(refused.get_untracked() + 1);
+        value.set(value.get_untracked());
+    } else {
+        value.set(requested.clamp(0, 100));
+    }
+}
+
+/// The native `Switch`'s accessibility label, carrying the refusal count
+/// **only while rejecting**.
+///
+/// This is the module doc's *Why the rejection also has to move a prop*: in
+/// accept mode the string is constant, so this page's params stay byte-for-byte
+/// what the Phase 2 gate measured; in reject mode it changes on every refusal,
+/// which is the only reason the differ emits an `UpdateParams` for a change the
+/// app deliberately did not make — and therefore the only reason
+/// `SwitchProps::plan`'s write-back branch runs at all.
+fn switch_description(rejecting: bool, refused: u32) -> String {
+    if rejecting {
+        format!("Native round-trip switch \u{2014} write-back REJECT, {refused} refused")
+    } else {
+        "Native round-trip switch".to_string()
+    }
+}
+
+/// [`switch_description`]'s slider twin, for the same reason.
+fn slider_description(rejecting: bool, refused: u32) -> String {
+    if rejecting {
+        format!("Native round-trip slider \u{2014} write-back REJECT, {refused} refused")
+    } else {
+        "Native round-trip slider".to_string()
+    }
+}
+
+/// The write-back mode toggle itself — labelled on-screen so someone holding
+/// the phone knows what it does without reading this file (p3-05 acceptance).
+fn writeback_toggle(rejecting: bool) -> AnyView<CatalogState> {
+    any(checkbox(
+        rejecting,
+        "REJECT write-back",
+        |_: &mut CatalogState, on: bool| reject_writeback_sig().set(on),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// The six controls, each beside its glyph counterpart
 // ---------------------------------------------------------------------------
 
 /// A native `Button`: each tap bumps [`tap_count_sig`] — the round trip's
-/// first leg (native event → signal).
+/// first leg (native event → signal), and the device gate's `Taps:` readout.
 fn button_demo() -> AnyView<CatalogState> {
     any(native_button("Tap me")
         .content_description("Native tap counter button")
-        .size(160.0, 48.0)
+        .size(PAIR_CELL_W, PAIR_BUTTON_H)
         .on_press(move || {
             let sig = tap_count_sig();
             sig.set(sig.get_untracked() + 1);
         }))
+}
+
+/// The glyph counterpart of [`button_demo`] — a frust-drawn `Button` at the
+/// same size, counting into its OWN signal so the gate's `Taps:` readout
+/// keeps meaning "native presses" and nothing else.
+fn button_drawn() -> AnyView<CatalogState> {
+    any(button("Tap me", |_: &mut CatalogState| {
+        let sig = glyph_tap_count_sig();
+        sig.set(sig.get_untracked() + 1);
+    }))
 }
 
 /// A native `Label`: display-only, no round trip of its own — shows a fixed
@@ -211,37 +503,82 @@ fn button_demo() -> AnyView<CatalogState> {
 fn label_demo() -> AnyView<CatalogState> {
     any(native_label("Native Label")
         .content_description("A display-only native label")
-        .size(200.0, 32.0))
+        .size(PAIR_CELL_W, PAIR_LABEL_H))
+}
+
+/// The glyph counterpart of [`label_demo`] — frust's own shaped text, which
+/// is where the type-scale difference between a platform `TextView` and the
+/// Glyph type scale is easiest to see.
+fn label_drawn() -> AnyView<CatalogState> {
+    any(text("Glyph Label").size(13.0))
 }
 
 /// A native `Switch`, controlled: the app owns [`switch_checked_sig`] and
-/// feeds it back in every rebuild; [`Self::on_toggle`] only ever reports a
-/// *requested* value (`docs/CODE_STANDARDS.md`'s Interaction Semantics).
-fn switch_demo(checked: bool) -> AnyView<CatalogState> {
+/// feeds it back in every rebuild; `on_toggle` only ever reports a
+/// *requested* value (`docs/CODE_STANDARDS.md`'s Interaction Semantics),
+/// which [`confirm_switch`] then confirms or refuses.
+fn switch_demo(checked: bool, rejecting: bool, refused: u32) -> AnyView<CatalogState> {
     any(native_switch(checked)
-        .content_description("Native round-trip switch")
-        .size(70.0, 40.0)
-        .on_toggle(move |requested| switch_checked_sig().set(requested)))
+        .content_description(switch_description(rejecting, refused))
+        // Its natural size, not the cell's: see [`CellFit::Natural`].
+        .size(70.0, PAIR_SWITCH_H)
+        .on_toggle(move |requested| {
+            let events = switch_events_sig();
+            events.set(events.get_untracked() + 1);
+            confirm_switch(requested);
+        }))
+}
+
+/// The glyph counterpart of [`switch_demo`], bound to the very same signal —
+/// so a flip here moves the platform `Switch` beside it (frust → native), and
+/// a refusal snaps this one back within the frame while the native one has to
+/// be driven back across the wire.
+fn switch_drawn(checked: bool) -> AnyView<CatalogState> {
+    any(switch(checked, |_: &mut CatalogState, requested: bool| {
+        confirm_switch(requested)
+    }))
 }
 
 /// A native `Slider`, controlled like [`switch_demo`]: a drag reports the
-/// requested value through [`Self::on_change`], which this page writes
-/// straight into [`slider_value_sig`] — the same signal [`progress_demo`]
-/// below reads, so a drag here moves a SECOND native control too.
-fn slider_demo(value: i32) -> AnyView<CatalogState> {
+/// requested value through `on_change`, which [`confirm_slider`] writes into
+/// [`slider_value_sig`] — the same signal [`progress_demo`] reads, so a drag
+/// here moves a SECOND native control too.
+fn slider_demo(value: i32, rejecting: bool, refused: u32) -> AnyView<CatalogState> {
     any(native_slider(value, 0, 100)
-        .content_description("Native round-trip slider")
-        .size(260.0, 40.0)
-        .on_change(move |requested| slider_value_sig().set(requested)))
+        .content_description(slider_description(rejecting, refused))
+        .size(PAIR_CELL_W, PAIR_SLIDER_H)
+        .on_change(move |requested| {
+            let events = slider_events_sig();
+            events.set(events.get_untracked() + 1);
+            confirm_slider(requested);
+        }))
+}
+
+/// The glyph counterpart of [`slider_demo`], on the same shared signal.
+/// frust's `slider` is `0.0..=1.0` where the native one is app-space
+/// `0..=100`, so this is the one pair that converts rather than sharing a
+/// representation.
+fn slider_drawn(value: i32) -> AnyView<CatalogState> {
+    any(slider(
+        f64::from(value) / 100.0,
+        |_: &mut CatalogState, requested: f64| confirm_slider((requested * 100.0).round() as i32),
+    ))
 }
 
 /// A native `ProgressBar` mirroring [`slider_value_sig`] — display-only, but
-/// its value is entirely driven by the slider above (native → signal →
+/// its value is entirely driven by the sliders above (native → signal →
 /// native).
 fn progress_demo(value: i32) -> AnyView<CatalogState> {
     any(native_progress(value, 0, 100)
         .content_description("Progress mirroring the slider above")
-        .size(260.0, 24.0))
+        .size(PAIR_CELL_W, PAIR_PROGRESS_H))
+}
+
+/// The glyph counterpart of [`progress_demo`] — `frust::glyph::progress`, the
+/// Glyph catalog's own bar (`feedback.rs` shows it in its design-system
+/// context), on the same value.
+fn progress_drawn(value: i32) -> AnyView<CatalogState> {
+    any(glyph::progress(f64::from(value) / 100.0))
 }
 
 /// A native `Image` showing the embedded catalog logo, cover-fit into a
@@ -250,7 +587,15 @@ fn image_demo() -> AnyView<CatalogState> {
     any(native_image(logo_bytes())
         .fit(NativeImageFit::Cover)
         .content_description("Catalog logo, rendered by a native ImageView")
-        .size(96.0, 96.0))
+        .size(PAIR_IMAGE, PAIR_IMAGE))
+}
+
+/// The glyph counterpart of [`image_demo`] — the SAME bytes, decoded once by
+/// [`logo_image`] and painted by frust's own `Image` at the same size and
+/// fit, so the pair compares two decoders/samplers rather than two assets.
+fn image_drawn() -> AnyView<CatalogState> {
+    any(SizedBox(Some(PAIR_IMAGE), Some(PAIR_IMAGE))
+        .child(Image(logo_image()).fit(ImageFit::Cover)))
 }
 
 /// The theme-ladder toggle row (module doc's *Theme ladder* section): flips
@@ -574,8 +919,18 @@ fn gate_harness_block(
 pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     let taps = tap_count_sig().get();
     let checked = switch_checked_sig().get();
-    let slider = slider_value_sig().get();
+    let slider_value = slider_value_sig().get();
     let brightness = state.brightness.get();
+
+    // Tracked reads, same reason as the gate-harness block below: a write from
+    // a native listener (which is not a frust event pass) only wakes the page
+    // because `page` subscribed to the signal here.
+    let switch_events = switch_events_sig().get();
+    let slider_events = slider_events_sig().get();
+    let glyph_taps = glyph_tap_count_sig().get();
+    let rejecting = reject_writeback_sig().get();
+    let switch_refused = switch_refused_sig().get();
+    let slider_refused = slider_refused_sig().get();
 
     // GATE HARNESS (task p1-11) — tracked `.get()`s so a button tap (a
     // signal write) wakes the page even while it's otherwise idle (0fps at
@@ -599,13 +954,21 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
              nothing there (or a frust-drawn placeholder if this app's Mode B translucency is \
              refused by the platform).",
         )),
+        gap(6.0),
+        inflexible(caption(
+            "EVERY ROW BELOW IS A PAIR: on the LEFT the real platform control, on the RIGHT \
+             frust's own glyph-drawn widget \u{2014} same cell size, same theme, same signal. \
+             Drag either slider, flip either switch: both columns are wired to one value, so a \
+             glyph-side change drives the native control too (frust \u{2192} native) just as a \
+             native change drives the readout (native \u{2192} frust).",
+        )),
     ]);
 
     let theme_block = block(vec![
         inflexible(label("Theme ladder (L1 brightness + L2 tokens)")),
         gap(6.0),
         inflexible(caption(
-            "Flip light/dark below and watch every control above re-theme LIVE \u{2014} \
+            "Flip light/dark below and watch BOTH columns re-theme LIVE \u{2014} \
              background/text colour, corner radius, and tint lists update through the same \
              UpdateParams path as any other prop change, with no remount. Only each \
              control's platform-default chrome (ripple/thumb resting colour) stays pinned to \
@@ -616,45 +979,92 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
         inflexible(theme_toggle_demo(brightness)),
     ]);
 
-    let button_block = block(vec![
-        inflexible(label("Button")),
+    // The write-back affordance (p2-05 bar 8) — placed BEFORE the pairs so a
+    // person gating this page picks the mode, then interacts.
+    let writeback_block = block(vec![
+        inflexible(label(
+            "Write-back mode (p2-05 bar 8: the rejecting round trip)",
+        )),
         gap(6.0),
-        inflexible(button_demo()),
+        inflexible(caption(
+            "OFF (default) = ACCEPT: the app confirms whatever the control reports, the plain \
+             controlled-component contract. ON = REJECT: during the change handler the app \
+             echoes its OWN unchanged value back, refusing your change. Flip it on, then drag \
+             the Slider or flip the Switch in EITHER column: the glyph widget snaps back within \
+             the frame, and the native one has to be driven back across the wire a frame later. \
+             \u{201c}Switch events\u{201d} below must advance by exactly 1 per toggle \u{2014} 2 \
+             would be the re-entrant echo RESEARCH-P2-REFRESH \u{00a7}3's Caveat B warns about.",
+        )),
+        gap(6.0),
+        inflexible(writeback_toggle(rejecting)),
+        gap(4.0),
+        inflexible(caption(format!(
+            "Write-back: {} \u{2014} refused so far: {switch_refused} switch, {slider_refused} \
+             slider",
+            if rejecting { "REJECT" } else { "ACCEPT" }
+        ))),
     ]);
 
-    let label_block = block(vec![
-        inflexible(label("Label")),
-        gap(6.0),
-        inflexible(label_demo()),
-    ]);
+    let button_block = pair_row(
+        "Button",
+        "Native taps feed the gate's `Taps:` readout; the glyph one counts separately.",
+        CellFit::Stretch,
+        PAIR_BUTTON_H,
+        button_demo(),
+        button_drawn(),
+    );
 
-    let switch_block = block(vec![
-        inflexible(label("Switch")),
-        gap(6.0),
-        inflexible(switch_demo(checked)),
-    ]);
+    let label_block = pair_row(
+        "Label",
+        "A platform TextView against frust's own shaped text, at the same box.",
+        CellFit::Stretch,
+        PAIR_LABEL_H,
+        label_demo(),
+        label_drawn(),
+    );
 
-    let slider_block = block(vec![
-        inflexible(label("Slider")),
-        gap(6.0),
-        inflexible(slider_demo(slider)),
-    ]);
+    let switch_block = pair_row(
+        "Switch",
+        "One shared value. Natural size, not stretched \u{2014} a platform Switch draws its \
+         graphic at the right edge of an over-wide frame.",
+        CellFit::Natural,
+        PAIR_SWITCH_H,
+        switch_demo(checked, rejecting, switch_refused),
+        switch_drawn(checked),
+    );
 
-    let progress_block = block(vec![
-        inflexible(label("ProgressBar (mirrors the slider)")),
-        gap(6.0),
-        inflexible(progress_demo(slider)),
-    ]);
+    let slider_block = pair_row(
+        "Slider",
+        "One shared value, `0..=100` native / `0.0..=1.0` glyph. Drag either.",
+        CellFit::Stretch,
+        PAIR_SLIDER_H,
+        slider_demo(slider_value, rejecting, slider_refused),
+        slider_drawn(slider_value),
+    );
 
-    let image_block = block(vec![
-        inflexible(label("Image")),
-        gap(6.0),
-        inflexible(image_demo()),
-    ]);
+    let progress_block = pair_row(
+        "ProgressBar (mirrors the slider)",
+        "Display-only on both sides \u{2014} native \u{2192} signal \u{2192} native, and \
+         native \u{2192} signal \u{2192} glyph, from the one drag.",
+        CellFit::Stretch,
+        PAIR_PROGRESS_H,
+        progress_demo(slider_value),
+        progress_drawn(slider_value),
+    );
 
-    // Ordinary frust `Text` reading the same three signals the controls
-    // above write — the "visible frust state" half of the round trip
-    // (module doc's "Interaction round-trip").
+    let image_block = pair_row(
+        "Image",
+        "The same embedded PNG bytes, cover-fit: platform ImageView vs frust's own decoder.",
+        CellFit::Natural,
+        PAIR_IMAGE,
+        image_demo(),
+        image_drawn(),
+    );
+
+    // Ordinary frust `Text` reading the same signals the controls above write
+    // — the "visible frust state" half of the round trip (module doc's
+    // "Interaction round-trip"). `Taps:`/`Switch:`/`Slider:` are the device
+    // gate's machine-readable outputs and their spelling is load-bearing.
     let readout_block = block(vec![
         inflexible(label(
             "Round-trip readout (native event \u{2192} signal \u{2192} frust)",
@@ -665,12 +1075,22 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
             "Switch: {}",
             if checked { "ON" } else { "OFF" }
         ))),
-        inflexible(caption(format!("Slider: {slider}"))),
+        inflexible(caption(format!("Slider: {slider_value}"))),
+        gap(4.0),
+        inflexible(caption(format!("Switch events: {switch_events}"))),
+        inflexible(caption(format!("Slider events: {slider_events}"))),
+        inflexible(caption(format!("Glyph taps: {glyph_taps}"))),
+        gap(4.0),
+        inflexible(caption(
+            "The three values are the APP's confirmed state; the two event counters are raw \
+             native listener firings (a drag fires many, a toggle must fire exactly one).",
+        )),
     ]);
 
     let mut children = vec![
         intro,
         theme_block,
+        writeback_block,
         button_block,
         label_block,
         switch_block,
