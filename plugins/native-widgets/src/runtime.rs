@@ -38,7 +38,7 @@
 //! turns that mount into a `Create` command, and the host drains its command
 //! backlog on the **next post-frame poll**, on the platform main thread —
 //! that poll is what finally calls the factory, and therefore
-//! [`NativeRuntime::create`]. Two consequences the whole runtime is shaped
+//! [`NativeRuntime::create`]. Three consequences the whole runtime is shaped
 //! around:
 //!
 //! 1. **Per-instance state lives here, not in the widget.** A control's
@@ -52,6 +52,19 @@
 //!    Params are therefore always the **whole** state of a slot, never a
 //!    delta: replaying a prefix of the backlog (what a surface-recreate
 //!    replay or a backlog compaction does) lands in the same place.
+//! 3. **An event callback is registered before its instance exists**, so an
+//!    [`Instance`] is *born* with it. The api layer (`crate::api::builders`)
+//!    calls [`NativeRuntime::set_callback`] from the same rebuild that mounts
+//!    the slot — always before the create above. A registration naming a slot
+//!    with no live instance is therefore parked in `pending_callbacks` and
+//!    taken by [`NativeRuntime::create`], never dropped: nothing schedules a
+//!    retry frame on an idle screen (a native tap doesn't produce a frust
+//!    frame, and forcing one would forfeit the zero-frames-at-rest property
+//!    Mode B is built on), so a dropped registration would leave a visible,
+//!    tappable, permanently dead control. The same reasoning covers the
+//!    replay direction: a surface-recreate replay re-creates an instance with
+//!    no new registration at all, so a create with nothing pending inherits
+//!    the callback of the instance it replaces.
 //!
 //! # The props diff gate is Rust-side
 //!
@@ -629,10 +642,12 @@ pub(crate) struct Instance {
     props: Box<dyn Any>,
     state: Box<dyn Any>,
     vtable: KindVTable,
-    /// The callback a slot's decoded [`EventPayload`]s are handed to —
-    /// `None` until [`NativeRuntime::set_callback`] registers one (the
-    /// app-facing api, p1-06, is the production caller). Not type-erased
-    /// like `props`/`state`: its type
+    /// The callback a slot's decoded [`EventPayload`]s are handed to. Set at
+    /// birth from [`NativeRuntime::create`]'s pending table (module doc's
+    /// *two-phase identity* 3) — the app-facing api, p1-06, registers via
+    /// [`NativeRuntime::set_callback`] a frame or more earlier — and `None`
+    /// only for a slot nobody ever registered one for. Not type-erased like
+    /// `props`/`state`: its type
     /// (`Arc<dyn Fn(EventPayload) + Send + Sync>`) is already uniform across
     /// every control kind.
     callback: Option<Arc<dyn Fn(EventPayload) + Send + Sync>>,
@@ -719,6 +734,16 @@ pub(crate) enum EventOutcome {
 pub(crate) struct NativeRuntime {
     kinds: HashMap<&'static str, KindVTable>,
     instances: Registry<Instance>,
+    /// Callbacks registered for slots whose native [`Instance`] does not
+    /// exist **yet** — the normal case, since a registration rides the
+    /// rebuild that mounts the slot and the create only arrives on the
+    /// host's next post-frame poll (module doc's *two-phase identity* 3).
+    /// [`Self::create`] drains a slot's entry into the instance it builds;
+    /// [`Self::dispose_slot`] clears it so a slot that never creates cannot
+    /// strand a closure. An entry here and a live instance for the same slot
+    /// are mutually exclusive — [`Self::set_callback`] writes to exactly one
+    /// of the two.
+    pending_callbacks: HashMap<SlotId, Arc<dyn Fn(EventPayload) + Send + Sync>>,
 }
 
 impl NativeRuntime {
@@ -727,6 +752,7 @@ impl NativeRuntime {
         Self {
             kinds: HashMap::new(),
             instances: Registry::new(),
+            pending_callbacks: HashMap::new(),
         }
     }
 
@@ -763,6 +789,13 @@ impl NativeRuntime {
     /// then replaces and disposes the previous instance, so a failed create
     /// leaves the existing control untouched.
     ///
+    /// The new instance is **born with its event callback** (module doc's
+    /// *two-phase identity* 3), from two sources in order: this slot's
+    /// pending registration, else — for a replay, which re-creates the
+    /// instance with no new registration at all — the callback of the
+    /// instance being replaced. Neither source requests a frame; on an idle
+    /// screen there would be none to request.
+    ///
     /// # Errors
     /// [`NativeWidgetError::Params`] when the identity keys are missing,
     /// [`NativeWidgetError::UnknownControl`] when no kind is registered under
@@ -783,13 +816,21 @@ impl NativeRuntime {
 
         let props = (vtable.decode)(&params)?;
         let (view, state) = (vtable.create)(ctx, &*props)?;
+        // Taken only now that the create actually succeeded: a failed create
+        // must leave the registration pending for the next attempt. Pending
+        // first, the replaced instance's own callback second (the replay
+        // path) — see this method's doc.
+        let callback = self
+            .pending_callbacks
+            .remove(&slot_id)
+            .or_else(|| self.instances.get(slot_id).and_then(|p| p.callback.clone()));
         let instance = Instance {
             kind,
             view,
             props,
             state,
             vtable,
-            callback: None,
+            callback,
         };
 
         if let Some(previous) = self.instances.insert(slot_id, instance) {
@@ -877,9 +918,14 @@ impl NativeRuntime {
     /// [`Self::on_event`] — the seam the app-facing api (p1-06) wraps into a
     /// signal write (PLAN 1.3).
     ///
-    /// Returns `false` when the slot has no live instance (a registration
-    /// racing a dispose), tolerated rather than an error — mirroring every
-    /// other slot-keyed lookup in this module.
+    /// A slot with **no live instance yet** — the ordinary case, since this
+    /// runs during the rebuild that mounts the slot and the create only on
+    /// the host's next post-frame poll (module doc's *two-phase identity* 3)
+    /// — parks the callback in `pending_callbacks` for [`Self::create`] to
+    /// take, rather than dropping it. Returns whether the registration was
+    /// accepted: always `true` today (live or deferred, it is kept), with the
+    /// bool retained so the three call sites that already ignore it stay
+    /// correct if a genuine rejection is ever added.
     pub(crate) fn set_callback(
         &mut self,
         slot_id: SlotId,
@@ -888,9 +934,17 @@ impl NativeRuntime {
         match self.instances.get_mut(slot_id) {
             Some(instance) => {
                 instance.callback = Some(callback);
+                // Keeps "pending and live are mutually exclusive" true even
+                // if an earlier create failed after its slot was registered:
+                // a stale entry would otherwise shadow this newer callback at
+                // the next create.
+                self.pending_callbacks.remove(&slot_id);
                 true
             }
-            None => false,
+            None => {
+                self.pending_callbacks.insert(slot_id, callback);
+                true
+            }
         }
     }
 
@@ -914,12 +968,16 @@ impl NativeRuntime {
 
     /// Tear down the instance for `slot_id`, if any. A late or duplicate
     /// dispose reports [`DisposeOutcome::NotFound`] and does nothing (module
-    /// doc's *late and duplicate disposal*).
+    /// doc's *late and duplicate disposal*) — except for one thing it always
+    /// does: drop any *pending* registration for the slot, so a slot that
+    /// mounted and unmounted without ever reaching a create cannot strand its
+    /// callback closure for the process lifetime.
     pub(crate) fn dispose_slot(
         &mut self,
         ctx: &mut NativeCtx<'_, '_>,
         slot_id: SlotId,
     ) -> DisposeOutcome {
+        self.pending_callbacks.remove(&slot_id);
         let Some(instance) = self.instances.remove(slot_id) else {
             return DisposeOutcome::NotFound;
         };
@@ -1033,6 +1091,8 @@ pub(crate) mod host {
 // the real (device-only) types.
 #[cfg(all(test, not(target_os = "android")))]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::events::EVENT_KIND_CLICK;
 
@@ -1133,6 +1193,32 @@ mod tests {
             &format!("\"label\":\"{}\",\"enabled\":{enabled}", escape(label)),
         )
     }
+
+    /// Where a [`recorder`] callback appends what it was handed. Its
+    /// `Arc` doubles as the leak probe (see [`recorder`]).
+    type FiredLog = Arc<Mutex<Vec<EventPayload>>>;
+
+    /// The callback shape [`NativeRuntime::set_callback`] stores.
+    type TestCallback = Arc<dyn Fn(EventPayload) + Send + Sync>;
+
+    /// A callback recording every payload it is handed, plus the log it
+    /// appends to. The log's `Arc` is also the leak probe: once the runtime
+    /// has dropped the closure, its strong count is back to the one reference
+    /// the test itself holds.
+    fn recorder() -> (FiredLog, TestCallback) {
+        let fired: FiredLog = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&fired);
+        (
+            fired,
+            Arc::new(move |payload| sink.lock().unwrap().push(payload)),
+        )
+    }
+
+    /// The one event every callback test below fires.
+    const CLICK: NativeEvent = NativeEvent {
+        kind: EVENT_KIND_CLICK,
+        detail: 0,
+    };
 
     // --- params / identity ---------------------------------------------
 
@@ -1438,8 +1524,6 @@ mod tests {
 
     #[test]
     fn a_registered_callback_fires_only_for_its_own_slot() {
-        use std::sync::Mutex;
-
         let mut runtime = runtime();
         let mut calls = Vec::new();
         let mut ctx = NativeCtx::new(&mut calls);
@@ -1466,9 +1550,123 @@ mod tests {
     }
 
     #[test]
-    fn registering_a_callback_for_an_unknown_slot_is_tolerated() {
+    fn a_callback_registered_before_create_is_born_with_the_instance() {
+        // f2-01: the production order. The api layer registers during the
+        // rebuild that mounts the slot; the host's post-frame poll creates
+        // the native view only afterwards. Before the pending table this
+        // registration was dropped on the floor — permanently, since nothing
+        // schedules the rebuild that would retry it.
         let mut runtime = runtime();
-        assert!(!runtime.set_callback(404, Arc::new(|_| {})));
+        let mut calls = Vec::new();
+        let mut ctx = NativeCtx::new(&mut calls);
+        let (fired, callback) = recorder();
+
+        assert!(runtime.set_callback(5, callback));
+        assert_eq!(runtime.pending_callbacks.len(), 1, "deferred, not dropped");
+        assert_eq!(runtime.live_count(), 0);
+
+        runtime.create(&mut ctx, &params(5, "Save", true)).unwrap();
+        assert!(
+            runtime.pending_callbacks.is_empty(),
+            "the create took the pending registration"
+        );
+
+        assert_eq!(runtime.on_event(5, CLICK), EventOutcome::Delivered);
+        assert_eq!(*fired.lock().unwrap(), vec![EventPayload::Click]);
+    }
+
+    #[test]
+    fn a_callback_registered_after_create_still_attaches() {
+        // The other order — a registration reaching an already-live slot goes
+        // straight onto the instance and leaves nothing pending.
+        let mut runtime = runtime();
+        let mut calls = Vec::new();
+        let mut ctx = NativeCtx::new(&mut calls);
+        let (fired, callback) = recorder();
+
+        runtime.create(&mut ctx, &params(6, "Save", true)).unwrap();
+        assert!(runtime.set_callback(6, callback));
+        assert!(runtime.pending_callbacks.is_empty());
+
+        assert_eq!(runtime.on_event(6, CLICK), EventOutcome::Delivered);
+        assert_eq!(*fired.lock().unwrap(), vec![EventPayload::Click]);
+    }
+
+    #[test]
+    fn a_replay_create_inherits_the_replaced_instance_callback() {
+        // The f2-01 amendment's regression pin: a surface-recreate replay
+        // re-creates the slot with NO intervening registration (no frust
+        // rebuild ran), so the only surviving copy of the callback is the
+        // instance being replaced.
+        let mut runtime = runtime();
+        let mut calls = Vec::new();
+        let mut ctx = NativeCtx::new(&mut calls);
+        let (fired, callback) = recorder();
+
+        runtime.create(&mut ctx, &params(7, "first", true)).unwrap();
+        assert!(runtime.set_callback(7, callback));
+
+        runtime
+            .create(&mut ctx, &params(7, "second", true))
+            .unwrap();
+        assert_eq!(runtime.live_count(), 1, "the replay replaced in place");
+
+        assert_eq!(runtime.on_event(7, CLICK), EventOutcome::Delivered);
+        assert_eq!(*fired.lock().unwrap(), vec![EventPayload::Click]);
+    }
+
+    #[test]
+    fn a_pending_registration_outranks_the_replaced_instance_callback() {
+        // `create`'s documented order: pending first, previous second. A live
+        // instance clears its own pending entry, so the two only coexist by
+        // construction — seeded directly here to pin the order.
+        let mut runtime = runtime();
+        let mut calls = Vec::new();
+        let mut ctx = NativeCtx::new(&mut calls);
+        let (stale, stale_callback) = recorder();
+        let (fresh, fresh_callback) = recorder();
+
+        runtime.create(&mut ctx, &params(8, "first", true)).unwrap();
+        assert!(runtime.set_callback(8, stale_callback));
+        runtime.pending_callbacks.insert(8, fresh_callback);
+
+        runtime
+            .create(&mut ctx, &params(8, "second", true))
+            .unwrap();
+
+        assert_eq!(runtime.on_event(8, CLICK), EventOutcome::Delivered);
+        assert_eq!(*fresh.lock().unwrap(), vec![EventPayload::Click]);
+        assert!(stale.lock().unwrap().is_empty(), "the older callback lost");
+    }
+
+    #[test]
+    fn disposing_a_slot_that_never_created_drops_its_pending_callback() {
+        // A slot mounted and unmounted between two host polls: its create
+        // never runs, so only the dispose can release the closure.
+        let mut runtime = runtime();
+        let mut calls = Vec::new();
+        let mut ctx = NativeCtx::new(&mut calls);
+        let (fired, callback) = recorder();
+
+        assert!(runtime.set_callback(9, callback));
+        assert_eq!(runtime.pending_callbacks.len(), 1);
+        assert_eq!(
+            Arc::strong_count(&fired),
+            2,
+            "the runtime holds the closure"
+        );
+
+        assert_eq!(runtime.dispose_slot(&mut ctx, 9), DisposeOutcome::NotFound);
+        assert!(
+            runtime.pending_callbacks.is_empty(),
+            "no closure stranded for the process lifetime"
+        );
+        assert_eq!(Arc::strong_count(&fired), 1, "the closure was dropped");
+
+        // And a later create re-using the slot id starts callback-free.
+        runtime.create(&mut ctx, &params(9, "x", true)).unwrap();
+        assert_eq!(runtime.on_event(9, CLICK), EventOutcome::Delivered);
+        assert!(fired.lock().unwrap().is_empty());
     }
 
     #[test]
