@@ -73,13 +73,22 @@ use crate::runtime::{escape, with_identity, with_runtime};
 use super::signals::{on_click, on_toggled, on_value_changed};
 use super::theme::{self, ResolvedTheme};
 
-/// The one Android factory class every control resolves through
-/// (`dev.frust.FrustNativeControlFactory`, this crate's canonical Kotlin
-/// file — this task hand-copies it into the catalog app module; Phase 3
-/// packages it as a Gradle module, `crate`'s module doc). iOS's Phase 2
-/// factory has not landed yet (`p2-01`); the bare-runtime-name spelling below
-/// is a placeholder matching `platform_views.rs`'s own per-target
-/// `DEMO_STREAM_VIEW_TYPE` precedent, unused until then.
+/// The one factory class every control resolves through, per platform.
+///
+/// - **Android**: `dev.frust.FrustNativeControlFactory`, this crate's
+///   canonical Kotlin file (hand-copied into the consuming app module today;
+///   Phase 3 packages it as a Gradle module — `crate`'s module doc).
+/// - **iOS**: the bare Objective-C runtime name `FrustNativeControlFactory`,
+///   which `FrustViewHost.resolveFactory` feeds to `NSClassFromString`
+///   (`docs/CODE_STANDARDS.md`'s Naming Conventions: iOS has no package
+///   prefix). Since p2-01 that class is a Rust `define_class!` class — no
+///   Swift — and **this string must stay byte-identical to
+///   `crate::apple::factory::FACTORY_CLASS_NAME`**, which is the name that
+///   class registers under. A mismatch is silent: the lookup returns nil, the
+///   host takes its unresolvable-factory branch, and every native control on
+///   iOS renders nothing (`research/RESEARCH-P2-REFRESH.md` §6b).
+/// - **Anywhere else**: no factory exists; the Android spelling stands in so
+///   the constant is always defined.
 #[cfg(target_os = "android")]
 const VIEW_TYPE: &str = "dev.frust.FrustNativeControlFactory";
 #[cfg(target_os = "ios")]

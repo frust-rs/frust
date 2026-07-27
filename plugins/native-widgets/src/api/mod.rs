@@ -48,6 +48,28 @@ pub use builders::{
     native_slider, native_switch,
 };
 
+/// Make sure this build's platform factory exists before the host can look it
+/// up — **optional**: every builder already does this for you.
+///
+/// On iOS the factory a `platform_view` slot resolves to is a Rust
+/// `define_class!` Objective-C class (`crate::apple::factory` — zero Swift),
+/// and objc2 registers such a class with the Objective-C runtime **lazily**,
+/// on the first call from live Rust code. Nothing on the platform side can
+/// trigger that: `FrustViewHost` only ever asks for the class *by name*
+/// (`NSClassFromString`), which returns nil for a class that was never
+/// registered. Every builder in this module therefore forces registration on
+/// the same rebuild that publishes its slot — a whole frame before the host's
+/// post-frame command poll can resolve it — so an app that just calls
+/// `native_button(...)` needs nothing from this function.
+///
+/// Call it anyway if you want registration to happen at a moment you choose
+/// (app startup, say) rather than at first use; it is idempotent, cheap after
+/// the first call, and a no-op on every non-iOS target — Android's factory is
+/// a Kotlin class that exists whether or not Rust has run.
+pub fn ensure_native_factory_registered() {
+    crate::runtime::ensure_platform_factory();
+}
+
 /// The number of native controls this crate's internal runtime currently
 /// retains — the leak bar `registry::Registry::live_count`'s own doc comment
 /// describes ("the number the leak bar every create/dispose cycle must

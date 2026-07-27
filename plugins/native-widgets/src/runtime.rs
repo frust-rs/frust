@@ -13,10 +13,13 @@
 //!
 //! The framework's `platform_view` slot resolves a `viewType` to exactly one
 //! factory class — for this plugin, `dev.frust.FrustNativeControlFactory` on
-//! Android (`plugins/native-widgets/platform/android/`) — whose three methods
-//! call this crate's three JNI exports (`crate::android`). Which *control* a
-//! slot means is carried in the slot's `params_json`, under two reserved keys
-//! the api layer (p1-06) injects and this module reads back:
+//! Android (`plugins/native-widgets/platform/android/`, whose three methods
+//! call this crate's three JNI exports, `crate::android`) and the bare
+//! Objective-C runtime name `FrustNativeControlFactory` on iOS (a Rust
+//! `define_class!` class, `crate::apple::factory`; same three methods, no
+//! Swift and no exports at all). Which *control* a slot means is carried in
+//! the slot's `params_json`, under two reserved keys the api layer (p1-06)
+//! injects and this module reads back:
 //!
 //! - [`CONTROL_KEY`] (`"__frustControl"`) — the registered kind
 //!   ([`NativeRuntime::register`]) whose [`NativeWidget`] impl serves this
@@ -84,9 +87,9 @@
 //! The differ disposes a slot on a *missing streak of ingests*, and ingests
 //! only happen on gate-`Run` frames, so an unmounted control's `Dispose` can
 //! arrive many frames late — or after a replacement `Create` already re-used
-//! the same slot id (SPIKE.md's idle-deferred-dispose finding). Android's
-//! dispose export is handed the **view object**, not a slot id, so disposal
-//! resolves by identity ([`NativeRuntime::take_matching`], over
+//! the same slot id (SPIKE.md's idle-deferred-dispose finding). Both
+//! platforms' dispose entry point is handed the **view object**, not a slot
+//! id, so disposal resolves by identity ([`NativeRuntime::take_matching`], over
 //! [`Registry::remove_matching`]); a dispose naming a view that is already
 //! gone finds nothing and is a silent no-op, and never touches whatever
 //! instance currently occupies that slot.
@@ -114,10 +117,12 @@ use crate::NativeWidgetError;
 use crate::events::EventPayload;
 use crate::registry::{Registry, SlotId};
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) use self::host::{NativeCtx, NativeView};
 #[cfg(target_os = "android")]
 pub(crate) use crate::android::{NativeCtx, NativeView};
+#[cfg(target_os = "ios")]
+pub(crate) use crate::apple::{NativeCtx, NativeView};
 
 /// The reserved `params_json` key naming which registered [`NativeWidget`]
 /// kind a slot means — see the module doc's *generic-factory contract*.
@@ -217,7 +222,24 @@ impl<'a> Params<'a> {
 ///
 /// The api layer (p1-06) is the production caller; the round trip through
 /// [`Params::identity`] is pinned by this module's tests.
+///
+/// # This is also the iOS factory-registration trigger
+///
+/// Calling this function means one thing exactly: *the api layer is encoding
+/// the params for a `platform_view` slot that will resolve this plugin's
+/// factory*. On iOS that factory class is registered with the Objective-C
+/// runtime **lazily**, and nothing on the host side can trigger it (see
+/// [`ensure_platform_factory`] and `crate::apple::factory`'s *Registration is
+/// LAZY*) — so the encode is exactly the right, and the only crate-internal,
+/// place to force it: every builder calls this once per rebuild, on the same
+/// rebuild that publishes its slot, a whole frame before the host's
+/// post-frame poll can look the class up by name. A builder that degrades to
+/// its frust-drawn placeholder (`ResolvedSurfaceMode::RefusedTranslucent`)
+/// publishes no slot and never reaches here — correctly, since there is then
+/// no factory lookup to be ready for. The call is a `Once` behind an inlined
+/// no-op on every non-iOS target.
 pub(crate) fn with_identity(kind: &str, slot_id: SlotId, body: &str) -> String {
+    ensure_platform_factory();
     let mut out = String::with_capacity(body.len() + kind.len() + 48);
     out.push('{');
     out.push('"');
@@ -234,6 +256,29 @@ pub(crate) fn with_identity(kind: &str, slot_id: SlotId, body: &str) -> String {
     }
     out.push('}');
     out
+}
+
+/// Make sure this build's platform factory exists before the host can look it
+/// up — the crate's one platform-registration hook.
+///
+/// - **iOS**: forces the lazy Objective-C-runtime registration of the Rust
+///   `define_class!` factory class (`crate::apple::ensure_registered`), which
+///   `FrustViewHost` resolves by name via `NSClassFromString`. Idempotent; a
+///   `Once` after the first call. See `crate::apple::factory`'s *Registration
+///   is LAZY* for the ordering contract.
+/// - **Android**: nothing to do. The factory is a Kotlin class the app module
+///   already carries, found through the app classloader — it exists whether or
+///   not Rust has run.
+/// - **Everywhere else**: nothing to do; there is no factory.
+///
+/// [`with_identity`] calls this on every params encode (see its doc for why
+/// that is the right trigger), and `crate::api::ensure_native_factory_registered`
+/// re-exports it as an explicit, app-callable front door for anyone who wants
+/// registration to happen earlier still.
+#[inline]
+pub(crate) fn ensure_platform_factory() {
+    #[cfg(target_os = "ios")]
+    crate::apple::ensure_registered();
 }
 
 /// Escape a string for embedding in a JSON string literal (the encoder half's
@@ -1068,6 +1113,8 @@ fn seeded_runtime() -> NativeRuntime {
     let mut runtime = NativeRuntime::new();
     #[cfg(target_os = "android")]
     crate::android::register_controls(&mut runtime);
+    #[cfg(target_os = "ios")]
+    crate::apple::register_controls(&mut runtime);
     runtime
 }
 
@@ -1095,15 +1142,17 @@ pub(crate) fn with_runtime<T>(f: impl FnOnce(&mut NativeRuntime) -> T) -> Option
 
 // --- host stand-ins for the platform types ----------------------------------
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) mod host {
     //! Host stand-ins for the two platform-shaped types the runtime threads
     //! through untouched, so the whole dispatch/diff/lifecycle contract above
-    //! is exercised by ordinary `cargo test` on a machine with no JNI at all.
+    //! is exercised by ordinary `cargo test` on a machine with no JNI and no
+    //! Objective-C runtime at all.
     //!
-    //! The Android arm swaps in the real pair (`crate::android`); the Apple
-    //! arm does the same in Phase 2 (p2-01), at which point this module
-    //! narrows to non-mobile hosts only.
+    //! Both mobile arms swap in a real pair — `crate::android`'s
+    //! `Env`-borrowing context plus its global-ref handle, and (since p2-01)
+    //! `crate::apple`'s `MainThreadMarker` context plus its `Retained<UIView>`
+    //! handle — so this module is now the non-mobile hosts' arm only.
 
     use std::marker::PhantomData;
 
@@ -1145,7 +1194,7 @@ pub(crate) mod host {
 // Gated on the host arm, not merely on `test`: these exercise the runtime
 // through the [`host`] stand-ins above, which a platform build replaces with
 // the real (device-only) types.
-#[cfg(all(test, not(target_os = "android")))]
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod tests {
     use std::sync::Mutex;
 

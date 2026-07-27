@@ -7,12 +7,15 @@
 //! `define_class!` class — zero Swift, Phase 0 spike 2, GO). See
 //! `workflow/plans/features/frust-native-widgets/PLAN.md` for the full plan;
 //! this crate lands incrementally across that plan's tasks — today it is the
-//! crate skeleton, the retained-handle [`registry`] every later phase's
-//! create/update/dispose path is built over, the `runtime` those paths
-//! dispatch through, the six Android `controls` (`Button`, `Label`,
-//! `Switch`, `Slider`, `ProgressBar`, `Image`) that runtime serves, and the
-//! typed `events` vocabulary their listeners decode into. Still to come:
-//! the app-facing builders (p1-06) and the Apple arm (Phase 2).
+//! retained-handle [`registry`] every phase's create/update/dispose path is
+//! built over, the `runtime` those paths dispatch through, the six `controls`
+//! (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`) that
+//! runtime serves, the typed `events` vocabulary their listeners decode into,
+//! the app-facing `api` builders, and both platform arms' factory glue. Still
+//! to come on the Apple arm: the controls' own UIKit halves and their
+//! target-action events (p2-02/p2-03), so an iOS `create` today reports an
+//! unknown control kind and the factory hands back its documented dead-slot
+//! placeholder.
 //!
 //! # One factory, one listener, N controls
 //!
@@ -21,10 +24,12 @@
 //! `runtime`, and the platform side is fixed forever at ONE generic factory
 //! class plus ONE generic listener class (Android:
 //! `plugins/native-widgets/platform/android/`, driven by this crate's four
-//! JNI exports; iOS: a Rust `define_class!` factory, Phase 2). Which control
-//! a `platform_view` slot means travels in that slot's `params_json`, under
-//! two reserved keys the api layer injects — the same payload that carries
-//! the differ's slot id across a factory contract that does not pass it.
+//! JNI exports; iOS: a Rust `define_class!` factory registered straight into
+//! the Objective-C runtime, `crate::apple::factory` — zero Swift, and target
+//! -action instead of a listener class). Which control a `platform_view` slot
+//! means travels in that slot's `params_json`, under two reserved keys the api
+//! layer injects — the same payload that carries the differ's slot id across a
+//! factory contract that does not pass it.
 //!
 //! # Charter: a platform plugin
 //!
@@ -76,6 +81,12 @@ pub use api::*;
 
 #[cfg(target_os = "android")]
 mod android;
+// The Apple arm (p2-01): ONE Rust `define_class!` factory class conforming to
+// the embedding's `FrustPlatformViewFactory` protocol — no Swift, no exports.
+// iOS only, not `target_vendor = "apple"`: see `Cargo.toml`'s comment on why
+// (UIKit doesn't exist on macOS).
+#[cfg(target_os = "ios")]
+mod apple;
 // The six v1 controls. Compiled on every target on purpose: each control's
 // props/decode/diff half is platform-agnostic and host-tested, and only its
 // `NativeWidget` impl (the JNI half) is `#[cfg(target_os = "android")]` —
@@ -91,11 +102,11 @@ mod controls;
 mod events;
 mod registry;
 // The runtime's surface is consumed by the platform arms — this crate's JNI
-// exports, the six controls, and their listeners today, the Apple arm in
-// Phase 2 — plus its own host tests, which a plain (non-test) build does
-// not count. On a non-Android host none of those arms compile, so much of the
-// surface is legitimately uncalled there; the attribute goes away with the
-// Apple arm rather than growing per-item `allow`s in the meantime.
+// exports, the Apple `define_class!` factory, the six controls and their
+// listeners — plus its own host tests, which a plain (non-test) build does
+// not count. On a non-mobile host none of those arms compile, so much of the
+// surface is legitimately uncalled there; the attribute stays for that host
+// build rather than growing per-item `allow`s.
 #[allow(dead_code)]
 mod runtime;
 
