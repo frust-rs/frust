@@ -76,7 +76,7 @@ frust-theme = { workspace = true, optional = true }
 frust-plugin = { path = "../../crates/frust-plugin" }
 
 # Android: the plugin's own JNI exports (the generic
-# `Java_dev_frust_FrustNativeControlFactory_native*` / `FrustNativeListener`
+# `Java_dev_frust_nativewidgets_FrustNativeControlFactory_native*` / `FrustNativeListener`
 # contract p1-03 lands) and the retained-handle registry's `Global<JObject>`
 # RAII wrapper (this task) both need `jni` directly, matching every other
 # plugin's Android arm.

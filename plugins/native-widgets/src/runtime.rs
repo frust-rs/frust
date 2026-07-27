@@ -28,9 +28,11 @@
 //! # The generic-factory contract
 //!
 //! The framework's `platform_view` slot resolves a `viewType` to exactly one
-//! factory class — for this plugin, `dev.frust.FrustNativeControlFactory` on
-//! Android (`plugins/native-widgets/platform/android/`, whose three methods
-//! call this crate's three JNI exports, `crate::android`) and the bare
+//! factory class — for this plugin,
+//! `dev.frust.nativewidgets.FrustNativeControlFactory` on Android (the class
+//! in `plugins/native-widgets/platform/android`, this plugin's own Gradle
+//! library module, whose three methods call this crate's three JNI exports,
+//! `crate::android`) and the bare
 //! Objective-C runtime name `FrustNativeControlFactory` on iOS (a Rust
 //! `define_class!` class, `crate::apple::factory`; same three methods, no
 //! Swift and no exports at all). Which *control* a slot means is carried in
@@ -492,7 +494,8 @@ fn unescape(raw: &str) -> Cow<'_, str> {
 /// pointer event — no `EventCtx`, no capture/focus, none of
 /// `docs/CODE_STANDARDS.md`'s Interaction Semantics apply.
 ///
-/// The payload stays primitive on purpose: ONE `dev.frust.FrustNativeListener`
+/// The payload stays primitive on purpose: ONE
+/// `dev.frust.nativewidgets.FrustNativeListener`
 /// class funnels every listener interface into one native method
 /// `(slotId, kind, detail)`, so a value event packs its payload into the
 /// `detail` bits rather than allocating JSON on the hot path — see

@@ -4,24 +4,26 @@
 //!
 //! # The frozen Kotlin ↔ Rust contract
 //!
-//! Both classes live in `plugins/native-widgets/platform/android/`
-//! (`dev.frust` package — see *Package* below). The package and class names
-//! are baked into the mangled symbol names below, so **they may never move
-//! once shipped** (`docs/CODE_STANDARDS.md`'s JNI-export naming LAW).
+//! Both classes live in this plugin's own Gradle library module,
+//! `plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/`
+//! (`dev.frust.nativewidgets` package — see *Package* below). The package and
+//! class names are baked into the mangled symbol names below, so **they may
+//! never move once shipped** (`docs/CODE_STANDARDS.md`'s JNI-export naming
+//! LAW).
 //!
 //! ## `FrustNativeControlFactory` (a `dev.frust.FrustPlatformViewFactory`)
 //!
 //! | Kotlin | Export | Contract |
 //! |---|---|---|
-//! | `createView(activity, context, paramsJson)` | [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`] | Rust builds the real control and returns it; on any failure it throws a Java exception instead of returning `null` — honouring `FrustPlatformViewFactory`'s non-null contract — which the host's `catch (Throwable)` logs and treats as a dead slot |
-//! | `updateParams(view, paramsJson)` | [`Java_dev_frust_FrustNativeControlFactory_nativeUpdateParams`] | Props change, Rust-diffed before any setter runs |
-//! | `disposeView(view)` | [`Java_dev_frust_FrustNativeControlFactory_nativeDisposeControl`] | Paired-delete of every reference the control retained |
+//! | `createView(activity, context, paramsJson)` | [`Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeCreateControl`] | Rust builds the real control and returns it; on any failure it throws a Java exception instead of returning `null` — honouring `FrustPlatformViewFactory`'s non-null contract — which the host's `catch (Throwable)` logs and treats as a dead slot |
+//! | `updateParams(view, paramsJson)` | [`Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeUpdateParams`] | Props change, Rust-diffed before any setter runs |
+//! | `disposeView(view)` | [`Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeDisposeControl`] | Paired-delete of every reference the control retained |
 //!
 //! ## `FrustNativeListener` (the generic listener glue)
 //!
 //! | Kotlin | Export | Contract |
 //! |---|---|---|
-//! | `nativeOnEvent(slotId, kind, detail)` | [`Java_dev_frust_FrustNativeListener_nativeOnEvent`] | ONE class, ONE native method, dispatched by `(slot id, kind)`; `detail` packs a primitive payload, never JSON on the hot path |
+//! | `nativeOnEvent(slotId, kind, detail)` | [`Java_dev_frust_nativewidgets_FrustNativeListener_nativeOnEvent`] | ONE class, ONE native method, dispatched by `(slot id, kind)`; `detail` packs a primitive payload, never JSON on the hot path |
 //!
 //! ## Which call carries the slot id
 //!
@@ -54,7 +56,7 @@
 //! in `catch_unwind` and resolves to a benign default — the crate's half of
 //! `docs/CODE_STANDARDS.md`'s no-unwind-across-FFI rule, the same shape
 //! `frust-camera`'s exports use. Every export but
-//! [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`] resolves
+//! [`Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeCreateControl`] resolves
 //! via `LogErrorAndDefault` (log and return the default). That one export
 //! resolves via `ThrowRuntimeExAndDefault` instead: the *frozen Kotlin ↔
 //! Rust contract* table above promises `createView` throws on **any**
@@ -67,11 +69,23 @@
 //!
 //! # Package
 //!
-//! The two Kotlin files sit in `dev.frust` (not a `dev.frust.nativewidgets`
-//! subpackage) because v1 ships them as hand-copied app-module sources, the
-//! camera-style manual wiring the plan defers to Phase 3's packaging work;
-//! moving them later changes every symbol name below, so the decision is
-//! deliberately recorded here.
+//! The two Kotlin files sit in the `dev.frust.nativewidgets` subpackage of
+//! this plugin's own `com.android.library` module — the shape
+//! `docs/CODE_STANDARDS.md`'s Plugin Conventions requires of every plugin
+//! (`plugins/secure-storage`'s `dev.frust.securestorage`,
+//! `plugins/camera`'s `dev.frust.camera`), wired into a consuming app by
+//! `Contribution::GradleModule` rather than copied into it.
+//!
+//! The subpackage — rather than a package outside `dev.frust` entirely — is
+//! load-bearing twice over: AGP's `namespace` must differ from the embedding
+//! module's exclusive bare `dev.frust`, *and* the embedding's `FrustViewHost`
+//! only resolves a platform-view factory whose FQCN carries the `dev.frust.`
+//! prefix (its `FACTORY_PACKAGE_PREFIX`), which is the string
+//! [`crate::api`]'s Android `VIEW_TYPE` publishes.
+//!
+//! The package is baked into every symbol name below and into
+//! [`ctx::LISTENER_CLASS`], so this is a one-time move: it may not happen
+//! again once shipped.
 
 mod ctx;
 // Theme ladder L3 (p1-08): registering Glyph font bytes with Android and
@@ -141,7 +155,9 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
 /// the quieter `LogErrorAndDefault` instead, since only this one export's
 /// contract promises a throw (`c1-02-create-contract-honesty.md`).
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeCreateControl<'local>(
+pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeCreateControl<
+    'local,
+>(
     mut env: EnvUnowned<'local>,
     _this: JObject<'local>,
     params: JString<'local>,
@@ -158,7 +174,7 @@ pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeCreateCont
     created.unwrap_or(std::ptr::null_mut())
 }
 
-/// The typed half of [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`]:
+/// The typed half of [`Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeCreateControl`]:
 /// dispatch, build, retain, and hand a fresh local reference back to Kotlin.
 /// On failure this throws a Java exception ([`throw_create_failed`]) rather
 /// than returning `null` — see that function's doc and the module doc's
@@ -263,7 +279,7 @@ fn reentrant_create_failure() -> Result<(SlotId, jobject), NativeWidgetError> {
 /// to fall through to its own `None`. That `None` rides back as `Ok(None)`
 /// from the outer `with_env` closure, so
 /// `resolve::<ThrowRuntimeExAndDefault>()` back in
-/// [`Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`] never
+/// [`Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeCreateControl`] never
 /// even runs for it (its `on_error`/`on_panic` fire only on `Err`/a panic,
 /// never on `Ok`) — the pending exception this function set rides the JNI
 /// call back to Kotlin untouched, where `applyCreate`'s `catch (Throwable)`
@@ -343,7 +359,9 @@ mod reentrant_create_failure_tests {
 /// slot id*), and a params payload naming a slot with no live instance is
 /// tolerated rather than an error.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeUpdateParams<'local>(
+pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeUpdateParams<
+    'local,
+>(
     mut env: EnvUnowned<'local>,
     _this: JObject<'local>,
     _view: JObject<'local>,
@@ -373,7 +391,9 @@ pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeUpdatePara
 /// Resolution is by object identity, never by "whichever instance holds that
 /// slot now" — see the module doc's *Which call carries the slot id*.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeDisposeControl<'local>(
+pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeDisposeControl<
+    'local,
+>(
     mut env: EnvUnowned<'local>,
     _this: JObject<'local>,
     view: JObject<'local>,
@@ -386,7 +406,7 @@ pub extern "system" fn Java_dev_frust_FrustNativeControlFactory_nativeDisposeCon
     .resolve::<LogErrorAndDefault>();
 }
 
-/// The typed half of [`Java_dev_frust_FrustNativeControlFactory_nativeDisposeControl`].
+/// The typed half of [`Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeDisposeControl`].
 ///
 /// Identity is resolved **before** the teardown context exists: matching needs
 /// only a shared `&Env` (`is_same_object`), while the control's own `dispose`
@@ -425,7 +445,7 @@ fn dispose_control(env: &mut Env<'_>, view: &JObject<'_>) {
 /// write, which wakes exactly one frust frame (SPIKE.md's receipt) — runs
 /// there too.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_frust_FrustNativeListener_nativeOnEvent<'local>(
+pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativeListener_nativeOnEvent<'local>(
     mut env: EnvUnowned<'local>,
     _this: JObject<'local>,
     slot_id: jlong,

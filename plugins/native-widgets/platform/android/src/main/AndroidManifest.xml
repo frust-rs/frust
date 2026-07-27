@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Deliberately empty. This plugin needs **no** permission and declares **no**
+  manifest component: every control it hosts is a plain `android.widget` view
+  built from Rust over JNI, and its one factory class is instantiated
+  reflectively by the embedding's `FrustViewHost`, not by the system.
+
+  The file exists anyway so this module matches the shape both other plugin
+  modules use (`plugins/camera/platform/android`,
+  `plugins/secure-storage/platform/android`) and so a future addition has an
+  obvious home. The R8 keep rules that the camera module's manifest-declared
+  provider needs have no counterpart here — this plugin's two keep rules ride
+  `consumer-rules.pro` alone.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.nativewidgets`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+</manifest>

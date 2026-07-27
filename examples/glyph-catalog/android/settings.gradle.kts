@@ -47,3 +47,23 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("build/frust-camera"))
     }
 }
+
+// frust-native-widgets (native-widgets task p3-03): the same
+// include/projectDir/build-dir-redirect trio as `:frust-camera` above, and
+// exactly what `frust-drive::plugin::apply_gradle_module` writes for this
+// plugin's `Contribution::GradleModule`. Carried in-tree because the catalog
+// is a committed example, not a generated project.
+//
+// This module supersedes the two `dev.frust.*` Kotlin files that used to be
+// hand-copied into `app/src/main/kotlin/dev/frust/`; they were deleted with
+// this wiring, and the classes now arrive under `dev.frust.nativewidgets`
+// from the plugin's own library module.
+include(":frust-native-widgets")
+project(":frust-native-widgets").projectDir =
+    file("../../../plugins/native-widgets/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-native-widgets") {
+        layout.buildDirectory.set(rootDir.resolve("build/frust-native-widgets"))
+    }
+}

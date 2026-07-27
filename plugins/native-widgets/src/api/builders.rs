@@ -75,9 +75,14 @@ use super::theme::{self, ResolvedTheme};
 
 /// The one factory class every control resolves through, per platform.
 ///
-/// - **Android**: `dev.frust.FrustNativeControlFactory`, this crate's
-///   canonical Kotlin file (hand-copied into the consuming app module today;
-///   Phase 3 packages it as a Gradle module — `crate`'s module doc).
+/// - **Android**: `dev.frust.nativewidgets.FrustNativeControlFactory`, the
+///   class in this plugin's own `com.android.library` module
+///   (`plugins/native-widgets/platform/android`), which a consuming app wires
+///   in via `Contribution::GradleModule` — never a copied file. The
+///   `dev.frust.` prefix is required by `FrustViewHost`'s factory resolution
+///   and the `nativewidgets` subpackage by the packaging rule; both halves
+///   are baked into the JNI export symbol names (`crate::android`'s *Package*
+///   note), so this string is fixed once shipped.
 /// - **iOS**: the bare Objective-C runtime name `FrustNativeControlFactory`,
 ///   which `FrustViewHost.resolveFactory` feeds to `NSClassFromString`
 ///   (`docs/CODE_STANDARDS.md`'s Naming Conventions: iOS has no package
@@ -95,11 +100,11 @@ use super::theme::{self, ResolvedTheme};
 /// a public component is served by the same runtime, so it must resolve
 /// through the same class.
 #[cfg(target_os = "android")]
-pub(super) const VIEW_TYPE: &str = "dev.frust.FrustNativeControlFactory";
+pub(super) const VIEW_TYPE: &str = "dev.frust.nativewidgets.FrustNativeControlFactory";
 #[cfg(target_os = "ios")]
 pub(super) const VIEW_TYPE: &str = "FrustNativeControlFactory";
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(super) const VIEW_TYPE: &str = "dev.frust.FrustNativeControlFactory";
+pub(super) const VIEW_TYPE: &str = "dev.frust.nativewidgets.FrustNativeControlFactory";
 
 /// This plugin's own per-widget-instance identity counter (module doc: "this
 /// slot id is this plugin's OWN bookkeeping key"). Deliberately independent

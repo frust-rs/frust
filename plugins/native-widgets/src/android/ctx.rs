@@ -67,10 +67,16 @@ use crate::NativeWidgetError;
 use crate::registry::SlotId;
 
 /// The generic listener class every interactive control attaches
-/// (`plugins/native-widgets/platform/android/FrustNativeListener.kt`), in the
-/// **binary/dotted** form `ClassLoader.loadClass` expects — never the slash
-/// form `FindClass` wants.
-pub(crate) const LISTENER_CLASS: &str = "dev.frust.FrustNativeListener";
+/// (`plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/
+/// nativewidgets/FrustNativeListener.kt`), in the **binary/dotted** form
+/// `ClassLoader.loadClass` expects — never the slash form `FindClass` wants.
+///
+/// This string and the Kotlin file's `package` declaration are one contract:
+/// the class ships inside the plugin's own Gradle module under
+/// `dev.frust.nativewidgets` (`crate::android`'s *Package* note), and a
+/// mismatch here surfaces only at runtime, as a failed class lookup the first
+/// time an interactive control is created.
+pub(crate) const LISTENER_CLASS: &str = "dev.frust.nativewidgets.FrustNativeListener";
 
 /// The application classloader, resolved once from the first `Context` this
 /// plugin is handed (module doc's *Why the classloader*).

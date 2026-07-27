@@ -7,8 +7,9 @@
 //!
 //! Every [`EventPayload`] decoded here is a **platform interaction
 //! surfacing as a Rust callback**, delivered on the platform main thread
-//! straight from `dev.frust.FrustNativeListener` through `crate::android`'s
-//! JNI export and [`crate::runtime::NativeRuntime::on_event`] — never
+//! straight from `dev.frust.nativewidgets.FrustNativeListener` through
+//! `crate::android`'s JNI export and
+//! [`crate::runtime::NativeRuntime::on_event`] — never
 //! through `frust-core`'s `EventCtx`. No pointer capture, no focus, none of
 //! frust's fire-on-up-inside press semantics apply (see the crate doc's
 //! *Native-widget events bypass `RenderRoot::event`*, and
@@ -25,7 +26,7 @@
 //! `CompoundButton.OnCheckedChangeListener`,
 //! `SeekBar.OnSeekBarChangeListener` — and funnels all of them into the one
 //! native method `nativeOnEvent(slotId, kind, detail)`
-//! (`crate::android::Java_dev_frust_FrustNativeListener_nativeOnEvent`).
+//! (`crate::android::Java_dev_frust_nativewidgets_FrustNativeListener_nativeOnEvent`).
 //! `detail` packs a primitive payload into a `jlong`; a value listener can
 //! fire at drag rate, and allocating a JSON string per event on the main
 //! thread is exactly what `docs/CODE_STANDARDS.md`'s no-JSON-on-the-hot-path
@@ -34,7 +35,7 @@
 //! **The `EVENT_KIND_*` constants below are LAW, shared verbatim with
 //! `FrustNativeListener.kt`'s companion `KIND_*` constants — edit both
 //! tables together.** This is mechanically enforced, not just a comment:
-//! `crates/frust/tests/plugin_kotlin_conformance.rs` scans both files and
+//! `plugins/native-widgets/tests/kotlin_conformance.rs` scans both files and
 //! fails on any drift in the `KIND_*`/`EVENT_KIND_*` values or in
 //! [`pack_value_changed`]/[`unpack_value_changed`]'s mask/shift contract.
 //!

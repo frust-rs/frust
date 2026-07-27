@@ -1,7 +1,7 @@
 //! Source-scan conformance test guarding the bare `dev.frust` Kotlin package
-//! exception (`docs/CODE_STANDARDS.md`'s Plugin Conventions) — a
-//! cross-cutting invariant that must see every plugin's **Kotlin** under
-//! `plugins/**`, not just one.
+//! rule (`docs/CODE_STANDARDS.md`'s Plugin Conventions) — a cross-cutting
+//! invariant that must see every plugin's **Kotlin** under `plugins/**`, not
+//! just one.
 //!
 //! # Scope: Kotlin only, by design — not "every file under `plugins/**`"
 //!
@@ -44,8 +44,8 @@
 //! plugin." `frust-drive` is the right host instead: it is an explicit leaf
 //! with no `frust-*`/framework-crate dependencies, it already owns the
 //! analogous `print_free_cores.rs` source scan, and it is not the app-facing
-//! published facade. The `frust-native-widgets`-specific parity/packing/
-//! byte-identity checks from the same original file moved to
+//! published facade. The `frust-native-widgets`-specific parity/packing
+//! checks from the same original file moved to
 //! `plugins/native-widgets/tests/kotlin_conformance.rs` instead, beside the
 //! code they protect.
 //!
@@ -56,30 +56,34 @@
 //! parser — correct for the small, hand-written shapes these files take
 //! today.
 //!
-//! # The `dev.frust` exception must not spread
+//! # No plugin Kotlin may use the bare `dev.frust` package
 //!
 //! `docs/CODE_STANDARDS.md`'s Plugin Conventions requires a plugin's Android
 //! Kotlin to live in its own subpackage inside its own Gradle module
-//! (`plugins/secure-storage`'s `dev.frust.securestorage` is the precedent
-//! this scan expects everyone else to follow). `frust-native-widgets` has a
-//! documented, time-boxed exception putting its two generic classes
-//! (`FrustNativeControlFactory`, `FrustNativeListener`) directly in the bare
-//! `dev.frust` package, because that package is baked into their JNI export
-//! symbol names — moving them is a breaking symbol rename, correctly
-//! deferred to Phase 3 packaging and NOT attempted here.
+//! (`plugins/secure-storage`'s `dev.frust.securestorage`,
+//! `plugins/camera`'s `dev.frust.camera`). `dev.frust` itself belongs
+//! exclusively to the embedding module.
 //!
-//! [`only_the_two_known_kotlin_files_use_the_bare_dev_frust_package`] fails if
-//! any OTHER `.kt` file under `plugins/**` declares the bare `package
-//! dev.frust` (a second plugin copying the exception rather than following
-//! the `dev.frust.<plugin>` precedent), and fails just as loudly if either of
-//! the two allowlisted files stops declaring it (a stale allowlist entry is
-//! as much drift as a new violation). Scoped to `plugins/**` only — the
-//! embedding module's own `platform/android/frust-embedding` legitimately
-//! ships bare `dev.frust` Kotlin and must never trip this scan. Non-`.kt`
-//! files under `plugins/**` (Swift included — see the Scope section above)
-//! are walked but deliberately filtered out before the bare-package check
-//! runs; that filter is this test's Kotlin-only scope boundary, not an
-//! oversight.
+//! **The one exception is closed (task p3-03).** `frust-native-widgets` used
+//! to put its two generic classes (`FrustNativeControlFactory`,
+//! `FrustNativeListener`) directly in the bare `dev.frust` package and
+//! hand-copy them into the consuming app, on the grounds that the package is
+//! baked into their JNI export symbol names. p3-03 did the breaking symbol
+//! rename: both classes now sit in `dev.frust.nativewidgets` inside
+//! `plugins/native-widgets/platform/android`, this plugin's own
+//! `com.android.library` module, and the exports are spelled
+//! `Java_dev_frust_nativewidgets_*`. So the allowlist below is **empty**, and
+//! it should stay that way — the next plugin needing a fixed JNI package has
+//! the same subpackage answer available to it.
+//!
+//! [`no_plugin_kotlin_uses_the_bare_dev_frust_package`] therefore fails if
+//! ANY `.kt` file under `plugins/**` declares the bare `package dev.frust`.
+//! Scoped to `plugins/**` only — the embedding module's own
+//! `platform/android/frust-embedding` legitimately ships bare `dev.frust`
+//! Kotlin and must never trip this scan. Non-`.kt` files under `plugins/**`
+//! (Swift included — see the Scope section above) are walked but deliberately
+//! filtered out before the bare-package check runs; that filter is this
+//! test's Kotlin-only scope boundary, not an oversight.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -131,15 +135,15 @@ fn all_plugin_files() -> Vec<PathBuf> {
     out
 }
 
-/// Files allowed to declare the bare `package dev.frust` under `plugins/**`
-/// — `frust-native-widgets`'s documented, time-boxed exception
-/// (`docs/CODE_STANDARDS.md`'s Plugin Conventions), because the package is
-/// baked into these two classes' JNI export symbol names. Moving them is a
-/// breaking symbol rename, correctly deferred to Phase 3 packaging.
-const BARE_DEV_FRUST_ALLOWLIST: &[&str] = &[
-    "plugins/native-widgets/platform/android/FrustNativeControlFactory.kt",
-    "plugins/native-widgets/platform/android/FrustNativeListener.kt",
-];
+/// Files allowed to declare the bare `package dev.frust` under `plugins/**`.
+///
+/// **Empty, and meant to stay empty** (task p3-03 closed the one exception —
+/// see the module doc). It is kept as a named, empty constant rather than
+/// deleted so that adding an entry is a deliberate, reviewable act with an
+/// obvious place to justify itself, instead of a quiet edit to the assertion
+/// below. `docs/CODE_STANDARDS.md`'s Plugin Conventions has no exception
+/// clause for a new entry to point at.
+const BARE_DEV_FRUST_ALLOWLIST: &[&str] = &[];
 
 /// True if `contents`' package declaration is the bare `dev.frust` — NOT a
 /// subpackage like `dev.frust.camera`/`dev.frust.securestorage`, which are
@@ -151,7 +155,7 @@ fn declares_bare_dev_frust(contents: &str) -> bool {
 }
 
 #[test]
-fn only_the_two_known_kotlin_files_use_the_bare_dev_frust_package() {
+fn no_plugin_kotlin_uses_the_bare_dev_frust_package() {
     let mut found_bare: Vec<String> = Vec::new();
 
     for path in all_plugin_files() {
@@ -177,18 +181,22 @@ fn only_the_two_known_kotlin_files_use_the_bare_dev_frust_package() {
     unexpected.sort();
     assert!(
         unexpected.is_empty(),
-        "found {} `.kt` file(s) under plugins/** declaring the bare `package dev.frust` outside \
-         the allowlisted native-widgets exception ({} hit(s)): {:?} — docs/CODE_STANDARDS.md's \
-         Plugin Conventions requires a plugin's own subpackage (e.g. `dev.frust.<plugin>`, see \
-         plugins/secure-storage's `dev.frust.securestorage`); the bare package is a documented, \
-         time-boxed exception for frust-native-widgets's two JNI-symbol-fixed classes ONLY — see \
-         the exception clause in docs/CODE_STANDARDS.md and the Phase 3 packaging task that \
-         closes it",
-        unexpected.len(),
+        "found {} `.kt` file(s) under plugins/** declaring the bare `package dev.frust`: {:?} — \
+         docs/CODE_STANDARDS.md's Plugin Conventions requires a plugin's Android Kotlin to live \
+         in its OWN subpackage inside its OWN Gradle module (e.g. `dev.frust.<plugin>`, see \
+         plugins/secure-storage's `dev.frust.securestorage`, plugins/camera's `dev.frust.camera`, \
+         plugins/native-widgets's `dev.frust.nativewidgets`); `dev.frust` itself belongs \
+         exclusively to the embedding module. There is no exception clause to point at — \
+         frust-native-widgets's time-boxed one was closed by task p3-03, which renamed its JNI \
+         exports to `Java_dev_frust_nativewidgets_*` rather than keep the bare package",
         unexpected.len(),
         unexpected,
     );
 
+    // No stale-allowlist check: the allowlist is empty by design (its own doc
+    // comment), so there is nothing that could go stale. Re-adding one means
+    // re-adding this check too — an entry nothing verifies is exactly the
+    // drift the p3-04 version of this test was built to catch.
     let mut missing: Vec<&str> = BARE_DEV_FRUST_ALLOWLIST
         .iter()
         .filter(|p| !found_bare.contains(&p.to_string()))
@@ -198,8 +206,7 @@ fn only_the_two_known_kotlin_files_use_the_bare_dev_frust_package() {
     assert!(
         missing.is_empty(),
         "expected these allowlisted files to declare `package dev.frust` but they don't (a stale \
-         allowlist entry, or the exception was actually closed and this list needs shrinking): \
-         {missing:?}"
+         allowlist entry — the allowlist is supposed to be empty): {missing:?}"
     );
 }
 

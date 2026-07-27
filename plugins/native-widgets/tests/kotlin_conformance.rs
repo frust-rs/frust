@@ -17,9 +17,9 @@
 //! facade's own test suite to one plugin's Kotlin and one example's hand
 //! copy, in tension with `docs/ARCHITECTURE.md`'s "the facade never depends
 //! on or re-exports a plugin." This half (the `frust-native-widgets`-specific
-//! parity/packing/byte-identity checks) now lives beside the code it
-//! protects, in this crate's own test tree. The cross-cutting `dev.frust`
-//! bare-package scan (f2-06's Part 2) moved to
+//! parity/packing checks) now lives beside the code it protects, in this
+//! crate's own test tree. The cross-cutting `dev.frust` bare-package scan
+//! (f2-06's Part 2) moved to
 //! `crates/frust-drive/tests/plugin_package_conformance.rs` instead, since it
 //! must see every plugin under `plugins/**`, not just this one.
 //!
@@ -27,8 +27,9 @@
 //!
 //! `plugins/native-widgets/src/events.rs` defines the `EVENT_KIND_*`
 //! constants and the `pack_value_changed`/`unpack_value_changed` bit-packing
-//! contract; `plugins/native-widgets/platform/android/FrustNativeListener.kt`
-//! duplicates both **independently** (its own `KIND_*` constants, its own
+//! contract; the plugin's `FrustNativeListener.kt` (under
+//! `platform/android/src/main/kotlin/dev/frust/nativewidgets/`) duplicates
+//! both **independently** (its own `KIND_*` constants, its own
 //! `onProgressChanged` packing arithmetic). Both files carry "edit these
 //! together" comments; nothing previously failed if they drifted, and drift
 //! misroutes events silently (e.g. a slider drag decoding as a click).
@@ -40,19 +41,23 @@
 //! are never textually identical, so the two sides are compared as parsed
 //! numbers instead).
 //!
-//! [`native_widgets_canonical_kotlin_matches_the_catalogs_hand_copy`] is the
-//! packaging half: today's v1 packaging hand-copies `platform/android/*.kt`
-//! into `examples/glyph-catalog`'s app module
-//! (`docs/CODE_STANDARDS.md`'s documented, time-boxed `dev.frust` exception),
-//! so nothing currently re-derives the copy from the plugin's source of
-//! truth — a byte-identity check is the cheapest thing that would have
-//! caught a future hand-edit landing in one copy and not the other. This one
-//! reach outside this crate (into `examples/glyph-catalog`) is inherent to
-//! v1's hand-copy packaging shape, not a repeat of f2-06's facade-coupling
-//! defect — it is fine to keep here because it's this crate's OWN Kotlin
-//! source of truth being checked against its downstream copy, the same
-//! direction every other assertion in this file runs; Phase 3's Gradle-module
-//! packaging removes the hand-copy (and this check) entirely.
+//! # The byte-identity check is gone, and that is the point (task p3-03)
+//!
+//! A third test used to pin this crate's canonical `platform/android/*.kt`
+//! byte-for-byte against a hand-copied duplicate in
+//! `examples/glyph-catalog`'s own app module — the only defence v1's
+//! hand-copy packaging had against the two drifting apart. **There is no
+//! copy any more.** The plugin's Kotlin now ships inside its own
+//! `com.android.library` module (`plugins/native-widgets/platform/android`,
+//! package `dev.frust.nativewidgets`), wired into a consuming app by
+//! `Contribution::GradleModule`, so every consumer — the catalog included —
+//! compiles the one canonical file. Nothing can drift from it because
+//! nothing duplicates it; the check was deleted rather than weakened, and
+//! this crate's tests no longer reach into `examples/**` at all.
+//!
+//! Both parity checks above survive untouched: they guard a genuinely
+//! independent duplication (Kotlin arithmetic vs Rust arithmetic) that
+//! packaging does not remove.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -74,16 +79,11 @@ fn read(rel_path: &str) -> String {
 }
 
 const RUST_EVENTS_PATH: &str = "plugins/native-widgets/src/events.rs";
-const KOTLIN_LISTENER_PATH: &str = "plugins/native-widgets/platform/android/FrustNativeListener.kt";
-const KOTLIN_FACTORY_PATH: &str =
-    "plugins/native-widgets/platform/android/FrustNativeControlFactory.kt";
-
-/// The catalog's hand-copied duplicates of the plugin's canonical
-/// `platform/android/*.kt` (v1 packaging shape — see the module doc).
-const CATALOG_LISTENER_PATH: &str =
-    "examples/glyph-catalog/android/app/src/main/kotlin/dev/frust/FrustNativeListener.kt";
-const CATALOG_FACTORY_PATH: &str =
-    "examples/glyph-catalog/android/app/src/main/kotlin/dev/frust/FrustNativeControlFactory.kt";
+/// The listener class inside the plugin's own Gradle library module — the one
+/// canonical copy every consuming app now compiles (see the module doc's
+/// byte-identity section).
+const KOTLIN_LISTENER_PATH: &str = "plugins/native-widgets/platform/android/src/main/kotlin/\
+                                    dev/frust/nativewidgets/FrustNativeListener.kt";
 
 /// Parse every `const val KIND_<NAME> = <value>` line out of the Kotlin
 /// listener's companion object, keyed by `<NAME>` (the `KIND_` prefix
@@ -293,28 +293,6 @@ fn value_changed_bit_packing_matches_between_kotlin_and_rust() {
             "bit-32 shift (unpack)",
             u64::from(kotlin_shift),
             u64::from(rust_unpack_shift),
-        );
-    }
-}
-
-/// v1's packaging shape (module doc) hand-copies `platform/android/*.kt`
-/// into the catalog app's own module rather than building from a shared
-/// Gradle module — nothing re-derives the copy from the plugin's source of
-/// truth, so a byte-identity check is the cheapest thing that catches the
-/// copy drifting from the canonical file.
-#[test]
-fn native_widgets_canonical_kotlin_matches_the_catalogs_hand_copy() {
-    for (canonical, copy) in [
-        (KOTLIN_LISTENER_PATH, CATALOG_LISTENER_PATH),
-        (KOTLIN_FACTORY_PATH, CATALOG_FACTORY_PATH),
-    ] {
-        let canonical_contents = read(canonical);
-        let copy_contents = read(copy);
-        assert_eq!(
-            canonical_contents, copy_contents,
-            "{copy} has drifted from its source of truth, {canonical} — v1's packaging \
-             hand-copies this file into the catalog app module (Phase 3 packages it as a proper \
-             Gradle module instead); re-sync the copy"
         );
     }
 }

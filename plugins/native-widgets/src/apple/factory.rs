@@ -172,7 +172,8 @@ use crate::runtime::{self, Params, UpdateOutcome};
 /// feeds to `NSClassFromString`. A mismatch is silent: the lookup returns nil,
 /// the host takes its unresolvable-factory branch, and every native control on
 /// iOS renders nothing at all (`research/RESEARCH-P2-REFRESH.md` §6b). The
-/// name matches the Android Kotlin class (`dev.frust.FrustNativeControlFactory`)
+/// name matches the Android Kotlin class
+/// (`dev.frust.nativewidgets.FrustNativeControlFactory`)
 /// minus its package, which iOS does not have (`docs/CODE_STANDARDS.md`'s
 /// Naming Conventions: bare `@objc(<Name>)` names are the iOS contract).
 ///

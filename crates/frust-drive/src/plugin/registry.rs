@@ -1,13 +1,16 @@
-//! The static plugin registry (v1) — four entries mirroring `plugins/`:
+//! The static plugin registry (v1) — five entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
 //! `clean-signals-frust` (dependency, gated on the sibling `clean-signals-rs`
-//! checkout), and `camera` (dependency, an app-side plist key, the plugin's
+//! checkout), `camera` (dependency, an app-side plist key, the plugin's
 //! own Android library module, its own iOS Swift package — the first
 //! registry entry to use [`Contribution::SwiftPackageRef`] — and an app-crate
 //! export shim the task-14 device gate proved necessary; `workflow/plans/
-//! features/frust-camera/PLAN.md`'s Affected Modules final accounting).
+//! features/frust-camera/PLAN.md`'s Affected Modules final accounting), and
+//! `native-widgets` (dependency plus the plugin's own Android library module
+//! — and **nothing** on iOS, which is not an omission: that arm ships zero
+//! Swift by design).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -146,6 +149,46 @@ const CAMERA: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `native-widgets`' base contributions — deliberately just **two**, and the
+/// short list is the interesting part.
+///
+/// The Android half is one [`Contribution::GradleModule`]: the plugin's own
+/// `com.android.library` module carries both of its Kotlin classes
+/// (`dev.frust.nativewidgets.FrustNativeControlFactory` and
+/// `FrustNativeListener`) and its two R8 keep rules in its own
+/// `consumer-rules.pro`, so nothing is copied into the app and nothing can
+/// drift from the plugin it came from — the same shape secure-storage and
+/// camera already use. It needs **no** [`Contribution::ManifestPermission`]:
+/// hosting an `android.widget` view requires no permission at all.
+///
+/// The iOS half is **empty on purpose, not by omission**. There is no
+/// [`Contribution::SwiftPackageRef`] and no `.swift` file anywhere in this
+/// plugin: its platform-view factory is a Rust `objc2` `define_class!` type
+/// registered straight into the Objective-C runtime and resolved by
+/// `NSClassFromString`, proven out in Phase 2. And there is no
+/// [`Contribution::PlistEntry`] because nothing here touches a
+/// privacy-gated API. So an iOS app needs exactly the Cargo dependency.
+const NATIVE_WIDGETS_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-native-widgets",
+    },
+    Contribution::GradleModule {
+        gradle_name: ":frust-native-widgets",
+        rel_path: "plugins/native-widgets/platform/android",
+    },
+];
+
+const NATIVE_WIDGETS: PluginSpec = PluginSpec {
+    id: "native-widgets",
+    summary: "Real OS controls (button, label, switch, slider, progress, \
+              image) hosted as platform views and driven from Rust \
+              (android.widget / UIKit).",
+    crate_dir: "native-widgets",
+    base: NATIVE_WIDGETS_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -155,6 +198,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         SECURE_STORAGE,
         CLEAN_SIGNALS_FRUST,
         CAMERA,
+        NATIVE_WIDGETS,
     ]
 }
 
@@ -174,7 +218,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_four_v1_plugins() {
+    fn registry_lists_the_five_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -183,7 +227,45 @@ mod tests {
                 "secure-storage",
                 "clean-signals-frust",
                 "camera",
+                "native-widgets",
             ]
+        );
+    }
+
+    /// The `native-widgets` entry is exactly a Cargo dependency plus the
+    /// plugin's own Android library module — and the **absences** are the
+    /// assertion that matters (see `NATIVE_WIDGETS_BASE`'s doc): no
+    /// `SwiftPackageRef`, because that arm ships zero Swift by design, and no
+    /// `PlistEntry`/`ManifestPermission`, because hosting an OS control needs
+    /// neither. A later widening would have to come here and say why.
+    #[test]
+    fn native_widgets_is_a_cargo_dep_plus_one_gradle_module_and_nothing_else() {
+        let spec = find_plugin("native-widgets").unwrap();
+        assert_eq!(spec.crate_dir, "native-widgets");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 2, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-native-widgets"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-native-widgets",
+                rel_path: "plugins/native-widgets/platform/android",
+            }
+        ));
+        assert!(
+            !spec
+                .base
+                .iter()
+                .any(|c| matches!(c, Contribution::SwiftPackageRef { .. })),
+            "native-widgets ships no Swift — its iOS factory is a Rust \
+             define_class! type resolved by NSClassFromString"
         );
     }
 
@@ -469,6 +551,71 @@ mod tests {
         let after_first = snapshot_tree(&root);
         let second = add_plugin(&root, "camera", &[]).unwrap();
         assert_eq!(second.items.len(), 5);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `native-widgets` counterpart of the camera end-to-end case above
+    /// (task p3-03): a fresh scaffold, `add_plugin(.., "native-widgets", ..)`
+    /// applied twice. The second apply must report `AlreadyPresent` for both
+    /// contributions and leave a byte-identical tree — the idempotence
+    /// contract `docs/CODE_STANDARDS.md`'s Plugin Conventions requires of
+    /// every generated-project mutation.
+    #[test]
+    fn native_widgets_add_plugin_applies_both_contributions_and_reapply_is_idempotent() {
+        let root = scaffold_project("native-widgets-idempotence");
+
+        let first = add_plugin(&root, "native-widgets", &[]).unwrap();
+        assert_eq!(first.plugin_id, "native-widgets");
+        assert_eq!(first.items.len(), 2, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-native-widgets"), "{cargo}");
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(
+            settings.contains("include(\":frust-native-widgets\")"),
+            "{settings}"
+        );
+        assert!(
+            settings.contains("rootDir.resolve(\"build/frust-native-widgets\")"),
+            "{settings}"
+        );
+        let app_build = fs::read_to_string(root.join("android/app/build.gradle.kts")).unwrap();
+        assert!(
+            app_build.contains("implementation(project(\":frust-native-widgets\"))"),
+            "{app_build}"
+        );
+
+        // The iOS side must be untouched: no Swift package reference, no
+        // plist key. A regression here would mean the entry grew a
+        // contribution its own registry doc says it does not have.
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(
+            !pbxproj.contains("FrustNativeWidgets"),
+            "native-widgets must add no Swift package reference"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "native-widgets", &[]).unwrap();
+        assert_eq!(second.items.len(), 2);
         assert!(
             second
                 .items

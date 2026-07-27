@@ -8,16 +8,26 @@
 // `__frustControl`/`__frustSlot` keys, so a new control never needs a new
 // class here (the "no per-control Kotlin, ever" rule).
 //
-// Package `dev.frust` (not a subpackage) is baked into the mangled JNI symbol
-// names on the Rust side and therefore fixed once shipped — see the Rust
-// module's *Package* note for why v1 sits here. v1 ships this file as an
-// app-module source hand-copied by the plugin's consumer (the camera-style
-// manual wiring); packaging it as a Gradle module is Phase 3's work.
-package dev.frust
+// Package `dev.frust.nativewidgets` is baked into the mangled JNI symbol names
+// on the Rust side (`Java_dev_frust_nativewidgets_FrustNativeControlFactory_*`)
+// and is therefore **fixed once shipped** — `docs/CODE_STANDARDS.md`'s
+// JNI-export-names-are-LAW rule. The fully-qualified name
+// `dev.frust.nativewidgets.FrustNativeControlFactory` is also the platform-view
+// `viewType` string the api layer publishes (`crate::api::builders`' Android
+// `VIEW_TYPE`), which the embedding's `FrustViewHost` resolves reflectively
+// through the application classloader — the subpackage keeps the `dev.frust.`
+// prefix that host requires while staying OUT of the embedding module's
+// exclusive bare `dev.frust` package.
+//
+// This file ships inside the plugin's own `com.android.library` module
+// (`plugins/native-widgets/platform/android`), wired into a consuming app by
+// `Contribution::GradleModule` — never copied into an app's source tree.
+package dev.frust.nativewidgets
 
 import android.app.Activity
 import android.content.Context
 import android.view.View
+import dev.frust.FrustPlatformViewFactory
 
 class FrustNativeControlFactory : FrustPlatformViewFactory {
     /**

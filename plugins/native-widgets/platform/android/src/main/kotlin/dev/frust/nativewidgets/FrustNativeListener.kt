@@ -17,7 +17,14 @@
 // platform interaction surfacing as a Rust callback (typically a signal
 // write, waking exactly one frust frame), not a `RenderRoot::event` pointer
 // event — no capture, no focus, none of frust's press semantics apply.
-package dev.frust
+//
+// Package `dev.frust.nativewidgets` is baked into this class's mangled JNI
+// symbol name (`Java_dev_frust_nativewidgets_FrustNativeListener_nativeOnEvent`)
+// and into the binary class name Rust loads it by (`crate::android::ctx`'s
+// `LISTENER_CLASS`), so it is fixed once shipped — `docs/CODE_STANDARDS.md`'s
+// JNI-export-names-are-LAW rule. The class ships inside the plugin's own
+// `com.android.library` module, never copied into an app's source tree.
+package dev.frust.nativewidgets
 
 import android.view.View
 import android.widget.CompoundButton

@@ -43,7 +43,8 @@
 //! # One `platform_view` slot per control (PLAN 3.1)
 //!
 //! Each builder composes exactly one `frust::platform_view` slot resolving to
-//! this crate's one Android factory (`dev.frust.FrustNativeControlFactory`)
+//! this crate's one Android factory
+//! (`dev.frust.nativewidgets.FrustNativeControlFactory`)
 //! — N controls = N slots, within the differ's design envelope (a
 //! shared-container optimization is future work).
 //!

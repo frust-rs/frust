@@ -7,8 +7,8 @@
 //! [`Tier::Cheap`](super::Tier::Cheap) — see [`super`]'s tier table.
 //!
 //! Clicks are platform-owned: `create` attaches the shared
-//! `dev.frust.FrustNativeListener` as an `OnClickListener` on Android, and a
-//! `FrustNativeControlTarget` as the `TouchUpInside` action on iOS
+//! `dev.frust.nativewidgets.FrustNativeListener` as an `OnClickListener` on
+//! Android, and a `FrustNativeControlTarget` as the `TouchUpInside` action on iOS
 //! (`crate::apple::events`, task p2-03); both arms'
 //! [`on_event`](crate::runtime::NativeWidget::on_event) decode the firing via
 //! the SAME [`crate::events::decode_click`] into the runtime's event

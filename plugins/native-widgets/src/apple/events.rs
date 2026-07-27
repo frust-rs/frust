@@ -4,8 +4,8 @@
 //!
 //! # One class, five actions — the Android mirror
 //!
-//! Android's `dev.frust.FrustNativeListener` implements every listener
-//! interface a v1 control needs (`OnClickListener`/
+//! Android's `dev.frust.nativewidgets.FrustNativeListener` implements every
+//! listener interface a v1 control needs (`OnClickListener`/
 //! `OnCheckedChangeListener`/`OnSeekBarChangeListener`) on ONE class, with one
 //! method per callback. [`FrustNativeControlTarget`] is the same shape for
 //! UIKit target-action: one class, five action selectors
@@ -237,7 +237,7 @@ impl FrustNativeControlTarget {
             runtime::with_runtime(|runtime| runtime.on_event(slot, event))
         }));
         match outcome {
-            // Mirrors `crate::android`'s `Java_dev_frust_FrustNativeListener_nativeOnEvent`
+            // Mirrors `crate::android`'s `Java_dev_frust_nativewidgets_FrustNativeListener_nativeOnEvent`
             // exactly: `with_runtime` returning `None` means a re-entrant
             // call (module doc's *No echo guard* — the shared re-entrancy
             // drop, not anything this module built).
