@@ -15,13 +15,20 @@
 //! impl needs `BuildCtx`/`ChangeFlags`, which the `frust` facade does not
 //! re-export).
 //!
-//! # No public `NativeWidget` trait
+//! # The internal `NativeWidget` trait is still not the public one
 //!
 //! Every builder in [`builders`] is a plain data struct implementing
 //! [`frust_core::Component`] (`frust-core`'s retained-local-state seam) —
 //! never the crate's own `pub(crate)` [`crate::runtime::NativeWidget`] trait,
-//! which stays internal (Phase 3 decides its public form,
-//! `RESEARCH-NATIVE-COMPONENT.md`'s "What v1 deliberately excludes").
+//! which stays internal permanently (p3-01's public-surface decision).
+//!
+//! Phase 3 answered what the *public* form is, and it is a different trait:
+//! [`crate::component::NativeComponent`], with `&self` methods, already-typed
+//! `Props` the app constructs directly, no `decode_props` step and no `Result`
+//! returns. The six builders here keep riding the internal trait's wire
+//! (`params_json` in, `EventPayload` callbacks out) unchanged — bridging the
+//! public trait onto the same runtime (`crate::component::Bridge`) is what let
+//! that stay true.
 //!
 //! # One `platform_view` slot per control (PLAN 3.1)
 //!
@@ -83,10 +90,13 @@ pub fn ensure_native_factory_registered() {
 ///
 /// **Diagnostics/gate accessor, not a supported production API.** It leaks
 /// no registry type, no `NativeWidget` trait, and no handle — just a plain
-/// count — but its very existence is subject to Phase 3's public-surface
-/// decision (`RESEARCH-NATIVE-COMPONENT.md`'s "What v1 deliberately
-/// excludes"): a future release may narrow, rename, or remove it outright.
-/// Don't build product behavior on this number.
+/// count. Phase 3's public-surface decision (p3-01) kept it exactly as it is,
+/// for exactly that reason: it says nothing about the runtime's shape, so
+/// nothing about it constrains the public
+/// [`NativeComponent`](crate::component::NativeComponent) surface. It still
+/// carries no compatibility promise — a future release may narrow, rename or
+/// remove it outright, and a component's live count is included in the number.
+/// Don't build product behavior on it.
 ///
 /// Returns `0` on a re-entrant call (the runtime's own thread-local is
 /// already borrowed on this thread — `crate::runtime::with_runtime`'s

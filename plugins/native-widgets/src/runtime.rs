@@ -9,6 +9,22 @@
 //! what makes the whole create/update/dispose/event contract host-testable
 //! (see this module's `tests`) with no JNI/ObjC dependency at all.
 //!
+//! # Two kinds of implementation, one dispatch table
+//!
+//! [`NativeWidget`] has two families of impl, and everything below serves both
+//! identically:
+//!
+//! - the **six built-in controls** (`crate::controls`), whose props arrive
+//!   decoded from the slot's `params_json`; and
+//! - every **public [`NativeComponent`](crate::component::NativeComponent)** an
+//!   app or plugin author writes (p3-01), reaching this trait through the one
+//!   `crate::component::Bridge<C>` impl, whose props arrive as already-typed
+//!   Rust values staged beside the wire.
+//!
+//! The registry, the props diff gate, the event routing and the disposal
+//! contract below are therefore the *same* guarantees for both — which is the
+//! whole point of bridging rather than growing a second runtime.
+//!
 //! # The generic-factory contract
 //!
 //! The framework's `platform_view` slot resolves a `viewType` to exactly one
@@ -495,10 +511,15 @@ pub(crate) struct NativeEvent {
 /// One retained native control (or control *hierarchy*) driven entirely from
 /// Rust.
 ///
-/// Every method runs on the platform main thread. The trait is deliberately
-/// **`pub(crate)` in v1** — the six Android controls (p1-04) are its first
-/// impls, proving the shape before Phase 3 decides its public form
-/// (RESEARCH-NATIVE-COMPONENT §What v1 deliberately excludes).
+/// Every method runs on the platform main thread. The trait stays **`pub(crate)`
+/// — permanently** (p3-01's public-surface decision): it is this crate's
+/// *internal* dispatch contract, and the app/plugin-facing shape is
+/// [`crate::component::NativeComponent`], bridged onto this one by
+/// `component::Bridge<C>`. Keeping the two separate is what lets the wire-facing
+/// half here (a `decode_props` step, `Result` returns, an `EventPayload`
+/// callback channel) keep evolving without breaking a third-party impl — and it
+/// is why the six controls (p1-04/p2-02) did not have to move when the public
+/// trait landed.
 ///
 /// The methods are associated functions, not `&self` methods: a registration
 /// ([`NativeRuntime::register`]) names a *type*, never an instance, so there
@@ -842,6 +863,30 @@ impl NativeRuntime {
             log::warn!("frust-native-widgets: control kind '{kind}' registered twice");
         }
         fresh
+    }
+
+    /// Register `W` under `kind` **only if that kind is still free** — the
+    /// first-wins rule the public registration path
+    /// (`crate::component::register_component`) needs, and the one difference
+    /// between it and [`Self::register`].
+    ///
+    /// A third-party [`NativeComponent`](crate::component::NativeComponent)
+    /// must not be able to shadow one of the six built-in controls (or another
+    /// plugin's component) by claiming a kind string already taken: the
+    /// backend registers its own kinds when the thread's runtime is first
+    /// touched ([`seeded_runtime`]), so a collision here is either a
+    /// double-registration bug or a name clash, and in both cases keeping the
+    /// incumbent is the safe answer. Returns whether the registration was
+    /// accepted.
+    pub(crate) fn register_if_free<W: NativeWidget>(&mut self, kind: &'static str) -> bool {
+        if self.kinds.contains_key(kind) {
+            log::warn!(
+                "frust-native-widgets: control kind '{kind}' is already registered — keeping the \
+                 existing one"
+            );
+            return false;
+        }
+        self.register::<W>(kind)
     }
 
     /// Whether `kind` has a registered [`NativeWidget`].

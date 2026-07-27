@@ -29,7 +29,14 @@
 //!
 //! # One factory, one listener, N controls
 //!
-//! Adding a control never adds Kotlin or Swift. Every control is a Rust
+//! Adding a control never adds Kotlin or Swift — and since Phase 3 (p3-01)
+//! that holds for **your** components too: `NativeComponent` is the public
+//! trait an app or plugin author implements to drive a native view (or view
+//! hierarchy) from pure Rust, registered with `register_component` and served
+//! by the very same runtime, factory and listener as the six built-in
+//! controls (see the `component` module's own doc for the lifecycle contract;
+//! it ships with the `frust-api` feature, like the builders above).
+//! Every control is a Rust
 //! `NativeWidget` impl registered under a kind string in the plugin-internal
 //! `runtime`, and the platform side is fixed forever at ONE generic factory
 //! class plus ONE generic listener class (Android:
@@ -88,6 +95,19 @@ pub mod api;
 // `api::native_button(...)`, matching PLAN.md's own call-shape example.
 #[cfg(feature = "frust-api")]
 pub use api::*;
+
+// The public `NativeComponent` trait (Phase 3, p3-01) — see its module doc.
+// Behind the same `frust-api` gate as the builders above, for one reason: a
+// component is only *mountable* through a `platform_view` slot, which is
+// facade glue this crate only has with the feature on. With it off the crate
+// is a bare platform plugin (`frust-plugin` + FFI crates, the charter line
+// `cargo tree -p frust-native-widgets --no-default-features -e normal`
+// checks) and there would be nothing to hand a component to.
+#[cfg(feature = "frust-api")]
+pub mod component;
+// Flat re-export, same convention as `api` above.
+#[cfg(feature = "frust-api")]
+pub use component::{ComponentCtx, NativeComponent, NativeEvent, NativeRoot, register_component};
 
 #[cfg(target_os = "android")]
 mod android;
