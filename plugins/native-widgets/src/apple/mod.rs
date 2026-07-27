@@ -38,6 +38,19 @@
 mod ctx;
 mod events;
 mod factory;
+// Theme ladder L3 (p2-04): resolving the embedded Glyph font bytes to a
+// process-cached `CTFontDescriptor` via CoreText. `pub(crate)`, not private
+// like `ctx`/`events`: `controls::platform`'s `resolve_font` (theme ladder
+// L3's per-size `CTFont` construction) needs `fonts::descriptor_for` from
+// OUTSIDE this module's own subtree — the same reason
+// `crate::android::fonts` is `pub(crate)`.
+pub(crate) mod fonts;
+// Theme ladder L1 (p2-04): the night-qualified-`Context` mirror through
+// `overrideUserInterfaceStyle`. Private — its only caller, `create_control`
+// below, lives inside this same module tree (unlike `fonts`, nothing outside
+// `apple` needs it: L2's corner radius needs no density conversion on this
+// arm, see `theme`'s own module doc).
+mod theme;
 
 pub(crate) use ctx::NativeCtx;
 pub(crate) use events::FrustNativeControlTarget;

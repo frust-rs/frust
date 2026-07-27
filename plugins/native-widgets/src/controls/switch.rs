@@ -475,9 +475,10 @@ pub(crate) mod platform {
             }
             // A `UISwitch` renders no text at all on iOS (its `title` property
             // is unavailable here), so there is no font to set — silently, not
-            // via `apply_typeface`'s degrade warning, because nothing is being
-            // degraded. The field exists in the shared `Props` because
-            // Android's `Switch` IS a `TextView` (see `SwitchProps::typeface`).
+            // via `platform::resolve_font`'s degrade warning (theme ladder L3,
+            // p2-04), because nothing is being degraded. The field exists in
+            // the shared `Props` because Android's `Switch` IS a `TextView`
+            // (see `SwitchProps::typeface`).
             Setter::Typeface(_) => {}
             Setter::ContentDescription(label) => {
                 platform::set_accessibility_label(view, label, mtm);

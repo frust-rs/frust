@@ -237,6 +237,10 @@ pub(crate) mod platform {
     /// reference is enough on this arm).
     pub(crate) struct LabelState {
         view: Retained<UILabel>,
+        /// Theme ladder L3 (p2-04): the combined typeface/size state
+        /// `Setter::TextSizeSp`/`Setter::Typeface` share — see
+        /// `crate::controls::platform::FontState`'s doc.
+        font: platform::FontState,
     }
 
     impl NativeWidget for Label {
@@ -254,10 +258,11 @@ pub(crate) mod platform {
             let mtm = ctx.mtm();
             let view = UILabel::new(mtm);
             view.setNumberOfLines(UNLIMITED_LINES);
+            let mut font = platform::FontState::platform_default();
             let plan = LabelProps::plan(&LabelProps::platform_default(props.slot), props);
-            apply_all(mtm, &view, &plan);
+            apply_all(mtm, &view, &mut font, &plan);
             let handle = NativeView::new(Retained::clone(&view).into_super(), mtm);
-            Ok((handle, LabelState { view }))
+            Ok((handle, LabelState { view, font }))
         }
 
         fn update(
@@ -266,7 +271,12 @@ pub(crate) mod platform {
             old: &Self::Props,
             new: &Self::Props,
         ) -> Result<(), NativeWidgetError> {
-            apply_all(ctx.mtm(), &state.view, &LabelProps::plan(old, new));
+            apply_all(
+                ctx.mtm(),
+                &state.view,
+                &mut state.font,
+                &LabelProps::plan(old, new),
+            );
             Ok(())
         }
 
@@ -281,14 +291,24 @@ pub(crate) mod platform {
     }
 
     /// Execute a whole [`Plan`], front to back.
-    fn apply_all(mtm: MainThreadMarker, view: &UILabel, plan: &Plan<'_>) {
+    fn apply_all(
+        mtm: MainThreadMarker,
+        view: &UILabel,
+        font: &mut platform::FontState,
+        plan: &Plan<'_>,
+    ) {
         for setter in plan {
-            apply(mtm, view, setter);
+            apply(mtm, view, font, setter);
         }
     }
 
     /// Execute one planned property write against `view`.
-    fn apply(mtm: MainThreadMarker, view: &UILabel, setter: &Setter<'_>) {
+    fn apply(
+        mtm: MainThreadMarker,
+        view: &UILabel,
+        font: &mut platform::FontState,
+        setter: &Setter<'_>,
+    ) {
         match *setter {
             Setter::Text(text) => view.setText(Some(&NSString::from_str(text))),
             // `UILabel` carries its own `isEnabled` (it dims the text) — it is
@@ -299,8 +319,12 @@ pub(crate) mod platform {
             Setter::TextColor(argb) => {
                 platform::set_label_text_color(view, &platform::ui_color(argb));
             }
-            Setter::TextSizeSp(sp) => platform::set_label_font(view, &platform::system_font(sp)),
-            Setter::Typeface(face) => platform::apply_typeface(face),
+            Setter::TextSizeSp(sp) => {
+                platform::set_label_font(view, font.apply_size(sp).as_ui_font());
+            }
+            Setter::Typeface(face) => {
+                platform::set_label_font(view, font.apply_typeface(face).as_ui_font());
+            }
             Setter::ContentDescription(label) => {
                 platform::set_accessibility_label(view, label, mtm);
             }

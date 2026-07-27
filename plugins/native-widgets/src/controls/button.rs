@@ -320,6 +320,11 @@ pub(crate) mod platform {
         /// released) alongside the rest of `State` when
         /// `Instance::dispose` tears this slot down.
         target: Retained<FrustNativeControlTarget>,
+        /// Theme ladder L3 (p2-04): the combined typeface/size state
+        /// `Setter::TextSizeSp`/`Setter::Typeface` share — see
+        /// `crate::controls::platform::FontState`'s doc for why a `Button`
+        /// needs this at all.
+        font: platform::FontState,
     }
 
     impl NativeWidget for Button {
@@ -336,15 +341,16 @@ pub(crate) mod platform {
         ) -> Result<(NativeView, Self::State), NativeWidgetError> {
             let mtm = ctx.mtm();
             let view = UIButton::buttonWithType(UIButtonType::System, mtm);
+            let mut font = platform::FontState::platform_default();
             let plan = ButtonProps::plan(&ButtonProps::platform_default(props.slot), props);
-            apply_all(mtm, &view, &plan);
+            apply_all(mtm, &view, &mut font, &plan);
             // Attached after the initial plan, matching the Android arm's
             // create order (`switch.rs`'s module doc) — a click setter never
             // fires anyway, but the same order keeps the three controls
             // predictable.
             let target = FrustNativeControlTarget::attach_button(mtm, props.slot, &view);
             let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
-            Ok((handle, ButtonState { view, target }))
+            Ok((handle, ButtonState { view, target, font }))
         }
 
         fn update(
@@ -353,7 +359,12 @@ pub(crate) mod platform {
             old: &Self::Props,
             new: &Self::Props,
         ) -> Result<(), NativeWidgetError> {
-            apply_all(ctx.mtm(), &state.view, &ButtonProps::plan(old, new));
+            apply_all(
+                ctx.mtm(),
+                &state.view,
+                &mut state.font,
+                &ButtonProps::plan(old, new),
+            );
             Ok(())
         }
 
@@ -378,14 +389,24 @@ pub(crate) mod platform {
 
     /// Execute a whole [`Plan`], front to back — the same order contract the
     /// Android arm's `apply_all` keeps.
-    fn apply_all(mtm: MainThreadMarker, view: &UIButton, plan: &Plan<'_>) {
+    fn apply_all(
+        mtm: MainThreadMarker,
+        view: &UIButton,
+        font: &mut platform::FontState,
+        plan: &Plan<'_>,
+    ) {
         for setter in plan {
-            apply(mtm, view, setter);
+            apply(mtm, view, font, setter);
         }
     }
 
     /// Execute one planned property write against `view`.
-    fn apply(mtm: MainThreadMarker, view: &UIButton, setter: &Setter<'_>) {
+    fn apply(
+        mtm: MainThreadMarker,
+        view: &UIButton,
+        font: &mut platform::FontState,
+        setter: &Setter<'_>,
+    ) {
         match *setter {
             // A `UIButton`'s caption is per-control-state, unlike a
             // `TextView`'s: `Normal` is the base every other state falls back
@@ -402,18 +423,26 @@ pub(crate) mod platform {
             }
             Setter::BackgroundColor(argb) => platform::set_background_color(view, argb),
             Setter::TextSizeSp(sp) => {
+                let resolved = font.apply_size(sp);
                 // `titleLabel` is documented non-null for every stock button
                 // type, but the binding is `Option`-typed, so a missing one
-                // degrades to "no size change" rather than a panic.
+                // degrades to "no size change" rather than a panic — the
+                // combined-font state above still records the size for a
+                // later combining apply.
                 if let Some(label) = view.titleLabel() {
-                    platform::set_label_font(&label, &platform::system_font(sp));
+                    platform::set_label_font(&label, resolved.as_ui_font());
                 }
             }
             Setter::ThemedBackground { fill, radius_dp } => {
                 platform::set_background_color(view, fill);
-                platform::warn_corner_radius_unsupported(radius_dp);
+                platform::set_corner_radius(view, radius_dp);
             }
-            Setter::Typeface(face) => platform::apply_typeface(face),
+            Setter::Typeface(face) => {
+                let resolved = font.apply_typeface(face);
+                if let Some(label) = view.titleLabel() {
+                    platform::set_label_font(&label, resolved.as_ui_font());
+                }
+            }
             Setter::ContentDescription(label) => {
                 platform::set_accessibility_label(view, label, mtm);
             }

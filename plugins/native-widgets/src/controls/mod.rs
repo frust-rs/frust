@@ -1025,6 +1025,8 @@ pub(crate) mod platform {
 
     use objc2::MainThreadMarker;
     use objc2::rc::Retained;
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_text::CTFont;
     use objc2_foundation::NSString;
     use objc2_ui_kit::{NSObjectUIAccessibility, UIColor, UIFont, UIImageView, UILabel, UIView};
 
@@ -1112,64 +1114,146 @@ pub(crate) mod platform {
         unsafe { view.setTintColor(color) };
     }
 
-    /// One-time warning that [`Setter::ThemedBackground`]'s corner radius is
-    /// not applied on this arm yet.
+    /// `view.layer.cornerRadius` + `masksToBounds` — the corner-radius half
+    /// of [`Setter::ThemedBackground`] (theme ladder L2, p1-07/p2-04); the
+    /// fill half is [`set_background_color`].
     ///
-    /// The fill **is** applied (see [`set_background_color`]); only the radius
-    /// waits, because rounding a UIKit view means `layer.cornerRadius`, and
-    /// `UIView.layer` is gated behind an `objc2-quartz-core` dependency this
-    /// crate does not carry yet. Theme ladder L2 on Apple is task p2-04's, and
-    /// its own Cargo.toml touch is where that dependency lands — so this is a
-    /// scheduled gap with a named owner, not an oversight.
-    ///
-    /// `Once`-guarded, mirroring
-    /// [`crate::controls::typeface::degrade_on_failure`]'s "exactly one
-    /// warning" contract: a themed `Button` plans this setter on every create,
-    /// so a per-call log would drown the device console.
-    pub(crate) fn warn_corner_radius_unsupported(radius_dp: f32) {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            log::warn!(
-                "frust-native-widgets: iOS applies a themed background's fill but not its \
-                 {radius_dp}dp corner radius yet (needs `layer.cornerRadius`, which task p2-04 \
-                 wires up with the theme ladder's Apple arm) — the control renders square"
-            );
-        });
+    /// UIKit's own coordinate system is already point-based
+    /// (density-independent), so `radius_dp` — already the wire's
+    /// density-independent unit, the same one every other `_dp`-suffixed
+    /// value on this wire carries — applies to `CALayer.cornerRadius`
+    /// directly as `CGFloat` points. Unlike Android's `dp_to_px`
+    /// (`crate::android::theme`), which converts dp to raw device pixels for
+    /// `GradientDrawable`'s pixel-space API, this arm needs no density
+    /// lookup at all — a genuine platform difference, not a gap.
+    pub(crate) fn set_corner_radius(view: &UIView, radius_dp: f32) {
+        let layer = view.layer();
+        layer.setCornerRadius(f64::from(radius_dp));
+        layer.setMasksToBounds(radius_dp > 0.0);
     }
 
-    /// [`Setter::Typeface`] on this arm: keep the system font, and say so
-    /// exactly once when the request was for a real Glyph face.
+    /// A resolved [`UIFont`], from either the system font or a registered
+    /// Glyph face — the two shapes [`resolve_font`] can hand back, unified
+    /// behind one accessor so a control's `apply` never has to branch on
+    /// which arm it got (theme ladder L3, p2-04).
     ///
-    /// [`Typeface::System`] is a genuine no-op here, not a degrade — nothing
-    /// on this arm ever changes a control's font *family*, so "restore the
-    /// platform's own face" (that variant's whole meaning) is already true.
-    ///
-    /// A Glyph face is a real request this arm cannot serve yet: resolving one
-    /// needs the embedded bytes registered via
-    /// `CTFontManagerRegisterFontsForData`, which is theme ladder L3 on Apple
-    /// and therefore task p2-04's. Falling back to the system font is exactly
-    /// what `crate::android::fonts`' own registration-failure path does
-    /// (`crate::controls::typeface`'s [`Typeface::System`] doc: the platform
-    /// default and the degrade target are deliberately the same case), so the
-    /// visible behaviour is a shape this crate already contracts for.
-    ///
-    /// `Once`-guarded, mirroring
-    /// [`crate::controls::typeface::degrade_on_failure`]'s "exactly one
-    /// warning" contract: the Glyph design language is every shell's default,
-    /// so a themed `Button`/`Label` plans this setter on every create.
-    pub(crate) fn apply_typeface(face: Typeface) {
-        if face == Typeface::System {
-            return;
+    /// [`Self::Glyph`] holds a **sized** `CTFont`
+    /// (`CTFont::with_font_descriptor` bakes the point size in, mirroring
+    /// `UIFont`'s own immutability — see [`FontState`]'s doc), bridged to
+    /// `UIFont` via `objc2-ui-kit`'s `AsRef<UIFont> for CTFont` (a
+    /// toll-free bridge — the same underlying object, not a cast) —
+    /// gated by this crate's `objc2-core-text` feature on `objc2-ui-kit`
+    /// (`Cargo.toml`).
+    pub(crate) enum ResolvedFont {
+        /// [`system_font`] — [`Typeface::System`], or the degrade target of
+        /// a Glyph resolution failure.
+        System(Retained<UIFont>),
+        /// A registered Glyph face, sized for this call.
+        Glyph(CFRetained<CTFont>),
+    }
+
+    impl ResolvedFont {
+        /// Borrow this as a `&UIFont`, whichever arm it is — every UIKit
+        /// setter this crate calls ([`set_label_font`]) takes exactly this.
+        pub(crate) fn as_ui_font(&self) -> &UIFont {
+            match self {
+                Self::System(font) => font,
+                Self::Glyph(font) => font.as_ref(),
+            }
         }
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            log::warn!(
-                "frust-native-widgets: iOS cannot resolve the Glyph typeface '{}' yet (needs \
-                 CTFontManager registration, which task p2-04 lands) — the control keeps the \
-                 system font",
-                face.wire()
-            );
-        });
+    }
+
+    /// Resolve `typeface` to a real [`UIFont`] at `size_sp` points — the
+    /// Apple half of theme ladder L3 (p2-04), mirroring
+    /// `crate::android::fonts::typeface_for`'s contract:
+    /// [`Typeface::System`] is the platform default ([`system_font`]); a
+    /// Glyph face resolves through `crate::apple::fonts`'s thread-locally
+    /// cached [`objc2_core_text::CTFontDescriptor`], degrading to the system
+    /// font (with that module's own one-time warning) on any resolution
+    /// failure.
+    ///
+    /// Unlike Android's cached `Typeface` object (reusable at any size via an
+    /// independent `setTextSize` call), a Glyph arm here rebuilds a freshly
+    /// **sized** `CTFont` on every call — see [`FontState`]'s doc for why
+    /// `UIFont`/`CTFont`'s own immutability forces that.
+    pub(crate) fn resolve_font(typeface: Typeface, size_sp: f32) -> ResolvedFont {
+        match crate::apple::fonts::descriptor_for(typeface) {
+            Some(descriptor) => {
+                // SAFETY: `descriptor` is a live `CTFontDescriptor`, owned
+                // for the duration of this call
+                // (`crate::apple::fonts::descriptor_for` hands back a fresh
+                // `CFRetained` clone — a cheap `CFRetain`, not a copy);
+                // `size_sp` is a finite point size and the null matrix
+                // argument is `CTFontCreateWithFontDescriptor`'s own
+                // documented "use the identity matrix" default.
+                let font = unsafe {
+                    CTFont::with_font_descriptor(&descriptor, f64::from(size_sp), std::ptr::null())
+                };
+                ResolvedFont::Glyph(font)
+            }
+            None => ResolvedFont::System(system_font(size_sp)),
+        }
+    }
+
+    /// The point size a [`resolve_font`] call falls back to when neither
+    /// this arm's own [`Setter::TextSizeSp`] has ever applied one — the size
+    /// a freshly constructed `UILabel`/`UIButton.titleLabel`'s own system
+    /// font already renders at.
+    ///
+    /// **Community-approximate**: UIKit exposes no single named constant for
+    /// "a freshly constructed label/button's own font size" the way
+    /// `layer.cornerRadius` is a real property read; 17pt is where a fresh
+    /// `UILabel`'s default system font and `UIButton`'s default title font
+    /// converge on iOS.
+    const DEFAULT_POINT_SIZE: f32 = 17.0;
+
+    /// The per-control state theme ladder L3 (p2-04) needs on this arm to
+    /// keep [`Setter::TextSizeSp`]/[`Setter::Typeface`] independent, the way
+    /// Android's `setTextSize`/`setTypeface` genuinely are (two calls,
+    /// either one leaving the other alone).
+    ///
+    /// `UIFont`/`CTFont` bake family AND point size into one immutable
+    /// object — there is no "just change the family, keep the size" UIKit
+    /// call — so applying either setter alone on this arm means rebuilding
+    /// the WHOLE font from (the field that changed, the other field's
+    /// last-applied value). [`Self::apply_size`]/[`Self::apply_typeface`]
+    /// are that: each records its own half and re-resolves through
+    /// [`resolve_font`] with the OTHER half unchanged, so a
+    /// `Setter::Typeface` alone never resets a previously-applied size back
+    /// to the platform default, and vice versa. `Button`/`Label` (the only
+    /// two controls that render real text through a `Typeface` field on
+    /// this arm — `Switch`'s `Setter::Typeface` is a documented no-op, see
+    /// `switch.rs`) each carry one of these in their Apple `State`.
+    pub(crate) struct FontState {
+        typeface: Typeface,
+        size_sp: Option<f32>,
+    }
+
+    impl FontState {
+        /// The state a freshly constructed control (no `TextSizeSp`/
+        /// `Typeface` setter ever applied) is already in — mirrors
+        /// `ButtonProps`/`LabelProps::platform_default`'s own
+        /// `Typeface::System`, `text_size_sp: None`.
+        pub(crate) fn platform_default() -> Self {
+            Self {
+                typeface: Typeface::System,
+                size_sp: None,
+            }
+        }
+
+        /// [`Setter::TextSizeSp`]'s apply: record the new size, keep the
+        /// current typeface, and resolve the combined font.
+        pub(crate) fn apply_size(&mut self, size_sp: f32) -> ResolvedFont {
+            self.size_sp = Some(size_sp);
+            resolve_font(self.typeface, size_sp)
+        }
+
+        /// [`Setter::Typeface`]'s apply: record the new typeface, keep the
+        /// current size, and resolve the combined font.
+        pub(crate) fn apply_typeface(&mut self, typeface: Typeface) -> ResolvedFont {
+            self.typeface = typeface;
+            resolve_font(typeface, self.size_sp.unwrap_or(DEFAULT_POINT_SIZE))
+        }
     }
 
     /// One-time warning that [`Setter::Indeterminate`] has no

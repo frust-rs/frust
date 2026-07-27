@@ -276,10 +276,25 @@ fn publish_glyph_font_bytes() {
     });
 }
 
-/// No other platform backend reads the published bytes yet (iOS Phase 2,
-/// `p2-01`, hasn't landed) — a no-op here rather than a
-/// `crate::android::fonts` reference this configuration can't compile.
-#[cfg(not(target_os = "android"))]
+/// iOS half of the same publish (theme ladder L3, p2-04) —
+/// `crate::apple::fonts::set_glyph_bytes` mirrors the Android call above
+/// exactly (same indices into `frust_theme::glyph::font_data()`, same
+/// idempotent-publish contract).
+#[cfg(target_os = "ios")]
+fn publish_glyph_font_bytes() {
+    static PUBLISHED: std::sync::Once = std::sync::Once::new();
+    PUBLISHED.call_once(|| {
+        let faces = frust_theme::glyph::font_data();
+        if let (Some(&mono), Some(&plex)) = (faces.first(), faces.get(3)) {
+            crate::apple::fonts::set_glyph_bytes(mono, plex);
+        }
+    });
+}
+
+/// No other platform backend reads the published bytes at all (desktop
+/// preview, wasm) — a no-op here rather than a platform-module reference
+/// neither configuration can compile.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn publish_glyph_font_bytes() {}
 
 #[cfg(test)]

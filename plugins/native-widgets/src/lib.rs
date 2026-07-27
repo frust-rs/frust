@@ -18,10 +18,14 @@
 //! executing the same shared setter plan (p1-04/p2-02) and, since p2-03,
 //! reporting a tap/toggle/drag back to the app through the same event
 //! dispatch on both platforms (`crate::apple::events`'s Rust target-action
-//! object, mirroring Android's shared listener). Still to come on the Apple
-//! arm: the theme ladder's Apple L1/L2/L3 (p2-04), so a themed corner radius
-//! and the Glyph typefaces degrade to the platform's own with one logged
-//! warning apiece.
+//! object, mirroring Android's shared listener). The theme ladder's Apple
+//! arm (p2-04) is also in: L1 (`crate::apple::theme`) pins brightness via
+//! `overrideUserInterfaceStyle` at control-creation time; L2 applies the
+//! same folded `Props` tokens through typed `objc2-ui-kit`/`CALayer`
+//! setters, including a themed background's corner radius; L3
+//! (`crate::apple::fonts`) resolves the embedded Glyph faces to a real
+//! `CTFont` via CoreText, degrading to the system font (one logged warning)
+//! on any resolution failure.
 //!
 //! # One factory, one listener, N controls
 //!

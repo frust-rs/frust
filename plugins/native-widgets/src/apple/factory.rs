@@ -161,6 +161,7 @@ use objc2_ui_kit::UIView;
 
 use crate::NativeWidgetError;
 use crate::apple::NativeCtx;
+use crate::apple::theme;
 use crate::runtime::{self, UpdateOutcome};
 
 /// The Objective-C runtime name this crate's factory class registers under.
@@ -378,7 +379,15 @@ pub(crate) fn ensure_registered() {
 /// dispose it, so it rolls the slot back by hand). Here "handing it back" is a
 /// `Retained` clone — an infallible ARC retain — so a successful
 /// `NativeRuntime::create` is always a successful `createView`.
+///
+/// Theme ladder L1 (p2-04): applies `overrideUserInterfaceStyle` to the
+/// finished control's own top-level view (`crate::apple::theme`'s module doc
+/// — the single generic choke point every control's `createView` passes
+/// through, mirroring `crate::android::create_control`'s own context-wrapping
+/// call site). Read straight off the raw `params` before `runtime.create`
+/// dispatches, exactly like the Android arm's `theme::brightness_is_dark`.
 fn create_control(mtm: MainThreadMarker, params: &str) -> Option<Retained<UIView>> {
+    let dark = theme::brightness_is_dark(params);
     let outcome = runtime::with_runtime(|runtime| {
         let mut ctx = NativeCtx::new(mtm);
         let slot_id = runtime.create(&mut ctx, params)?;
@@ -388,6 +397,7 @@ fn create_control(mtm: MainThreadMarker, params: &str) -> Option<Retained<UIView
             .view()
             .view(mtm)
             .clone();
+        theme::apply_user_interface_style(&view, dark);
         Ok::<_, NativeWidgetError>((slot_id, view))
     })
     // `with_runtime` returns `None` only when the runtime's `RefCell` is
