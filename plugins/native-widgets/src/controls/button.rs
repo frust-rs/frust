@@ -7,12 +7,15 @@
 //! [`Tier::Cheap`](super::Tier::Cheap) — see [`super`]'s tier table.
 //!
 //! Clicks are platform-owned: `create` attaches the shared
-//! `dev.frust.FrustNativeListener` as an `OnClickListener`, and
-//! [`on_event`](crate::runtime::NativeWidget::on_event) decodes its firing
-//! via [`crate::events::decode_click`] into the runtime's event dispatch.
-//! Nothing about that goes through `RenderRoot::event` (the crate doc's
-//! event-bypass rule) — a click is never caused by `update`'s own setters,
-//! so unlike `Switch`/`Slider` this control needs no echo guard.
+//! `dev.frust.FrustNativeListener` as an `OnClickListener` on Android, and a
+//! `FrustNativeControlTarget` as the `TouchUpInside` action on iOS
+//! (`crate::apple::events`, task p2-03); both arms'
+//! [`on_event`](crate::runtime::NativeWidget::on_event) decode the firing via
+//! the SAME [`crate::events::decode_click`] into the runtime's event
+//! dispatch. Nothing about that goes through `RenderRoot::event` (the crate
+//! doc's event-bypass rule) — a click is never caused by `update`'s own
+//! setters, so unlike `Switch`/`Slider` this control needs no echo guard, on
+//! either platform.
 
 use super::{
     BACKGROUND_COLOR, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, ENABLED, Plan, Setter, TEXT,
@@ -273,12 +276,17 @@ pub(crate) mod platform {
     //! text"* cosmetic gap: the spike hand-built a `Custom` button and got
     //! exactly that.
     //!
-    //! # Clicks are p2-03's
+    //! # Clicks are platform-owned, exactly like Android's
     //!
-    //! No target-action is attached here; a `Button` on this arm is inert
-    //! until task p2-03 wires `TouchUpInside` into the shared runtime
-    //! dispatch. `NativeWidget::on_event` therefore stays the trait default
-    //! for now — the same shape the display-only controls keep forever.
+    //! `create` attaches a [`FrustNativeControlTarget`] as the button's
+    //! `TouchUpInside` action (task p2-03), and `on_event` decodes its firing
+    //! via [`crate::events::decode_click`] into the runtime's event dispatch —
+    //! the same decoder Android's `on_event` calls, so kind/detail parity is
+    //! automatic (`crate::apple::events`'s module doc). Nothing about that
+    //! goes through `RenderRoot::event` (the crate doc's event-bypass rule) —
+    //! a click is never caused by `update`'s own setters, so unlike
+    //! `Switch`/`Slider` this control needs no echo guard, on either
+    //! platform.
 
     use objc2::MainThreadMarker;
     use objc2::rc::Retained;
@@ -287,22 +295,31 @@ pub(crate) mod platform {
 
     use super::{Button, ButtonProps, KIND};
     use crate::NativeWidgetError;
-    use crate::apple::{NativeCtx, NativeView};
+    use crate::apple::{FrustNativeControlTarget, NativeCtx, NativeView};
     use crate::controls::platform;
     use crate::controls::{Plan, Setter};
-    use crate::runtime::{NativeWidget, Params};
+    use crate::events::{EventPayload, decode_click};
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
 
     /// A live button's retained state.
     ///
-    /// One `Retained<UIButton>`, and no second reference: where the Android
-    /// state has to hold its own global ref beside the runtime's (`update` is
-    /// handed only the state), ARC makes the extra retain free and untracked —
-    /// there is no paired-delete discipline to keep, and no leak bar to return
-    /// to zero beyond the retain count itself.
+    /// Two `Retained` fields, where the Android state holds two: one is the
+    /// same "`update` needs its own reference beside the runtime's" reason
+    /// (`button.rs`'s Android note) — except here ARC makes that extra retain
+    /// free and untracked, with no paired-delete discipline to keep. The
+    /// second, `target`, is the one retention this arm genuinely needs
+    /// explicitly: `UIControl` holds its target-action pair **weakly**, so
+    /// nothing but this field keeps the target alive for the slot's lifetime
+    /// (`crate::apple::events`'s module doc's *Target retention*).
     pub(crate) struct ButtonState {
         /// The button, kept typed: `update` needs `UIButton`'s own
         /// state-keyed setters, which a `UIView` handle could not reach.
         view: Retained<UIButton>,
+        /// The target-action object `create` attached as `view`'s
+        /// `TouchUpInside` action. Retained here only; dropped (and thereby
+        /// released) alongside the rest of `State` when
+        /// `Instance::dispose` tears this slot down.
+        target: Retained<FrustNativeControlTarget>,
     }
 
     impl NativeWidget for Button {
@@ -321,8 +338,13 @@ pub(crate) mod platform {
             let view = UIButton::buttonWithType(UIButtonType::System, mtm);
             let plan = ButtonProps::plan(&ButtonProps::platform_default(props.slot), props);
             apply_all(mtm, &view, &plan);
+            // Attached after the initial plan, matching the Android arm's
+            // create order (`switch.rs`'s module doc) — a click setter never
+            // fires anyway, but the same order keeps the three controls
+            // predictable.
+            let target = FrustNativeControlTarget::attach_button(mtm, props.slot, &view);
             let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
-            Ok((handle, ButtonState { view }))
+            Ok((handle, ButtonState { view, target }))
         }
 
         fn update(
@@ -335,12 +357,21 @@ pub(crate) mod platform {
             Ok(())
         }
 
+        fn on_event(_state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_click(event)
+        }
+
         fn dispose(
             _ctx: &mut NativeCtx<'_, '_>,
-            _state: Self::State,
+            state: Self::State,
         ) -> Result<(), NativeWidgetError> {
-            // Nothing attached yet (targets land in p2-03), and dropping the
-            // state releases its retain — ARC's own paired delete.
+            // Detach so a stray in-flight click can't fire after this slot's
+            // instance is gone (tolerated either way —
+            // `crate::runtime`'s late/duplicate disposal — mirroring the
+            // Android arm's explicit `setOnClickListener(null)`). Dropping
+            // `state` afterwards releases the target's own retain — ARC's
+            // own paired delete.
+            state.target.detach_button(&state.view);
             Ok(())
         }
     }

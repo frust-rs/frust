@@ -349,24 +349,33 @@ pub(crate) mod platform {
     use objc2::rc::Retained;
     use objc2_ui_kit::UISlider;
 
-    use super::{KIND, Slider, SliderProps};
+    use super::{KIND, Slider, SliderProps, decode_event};
     use crate::NativeWidgetError;
-    use crate::apple::{NativeCtx, NativeView};
+    use crate::apple::{FrustNativeControlTarget, NativeCtx, NativeView};
     use crate::controls::platform;
     use crate::controls::{Plan, Setter};
-    use crate::runtime::{NativeWidget, Params};
+    use crate::events::EventPayload;
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
 
     /// A live slider's retained state.
     pub(crate) struct SliderState {
         view: Retained<UISlider>,
+        /// The target-action object `create` attached as `view`'s
+        /// `ValueChanged`/`TouchDown`/`TouchUpInside|TouchUpOutside` actions
+        /// (task p2-03). `UIControl` holds it weakly, so this field is the
+        /// only thing keeping it alive for the slot's lifetime
+        /// (`crate::apple::events`'s module doc's *Target retention*) —
+        /// dropped alongside the rest of `State` when `Instance::dispose`
+        /// tears this slot down.
+        target: Retained<FrustNativeControlTarget>,
         /// The app-space range floor as of the last applied props — kept for
         /// the same reason the Android state keeps it: `on_event` is never
-        /// handed `Props`, and [`super::decode_event`] needs `min` to map a
+        /// handed `Props`, and [`decode_event`] needs `min` to map a
         /// platform-space report back to app space.
         min: i32,
         /// The **platform-space** progress the platform last reported — see
-        /// `switch.rs`'s Apple `SwitchState::observed` for why the field
-        /// exists before the target-action that writes it (p2-03) does.
+        /// `switch.rs`'s Apple `SwitchState::observed` for the same meaning.
+        /// Written from [`NativeWidget::on_event`] via [`decode_event`].
         observed: Option<i32>,
     }
 
@@ -397,11 +406,18 @@ pub(crate) mod platform {
             view.setMaximumValue(default.span() as f32);
             let plan = SliderProps::plan(&default, props, None);
             apply_all(mtm, &view, &plan);
+            // Attached after the initial plan and the construction-time
+            // normalization above, matching the Android arm's create order —
+            // a `Progress`/`Max` setter never echoes on this arm at all
+            // (`switch.rs`'s module doc's *The same contract on iOS*), but
+            // the same order keeps the three controls predictable.
+            let target = FrustNativeControlTarget::attach_slider(mtm, props.slot, &view);
             let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
             Ok((
                 handle,
                 SliderState {
                     view,
+                    target,
                     min: props.min,
                     observed: None,
                 },
@@ -423,12 +439,19 @@ pub(crate) mod platform {
             Ok(())
         }
 
+        fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_event(&mut state.observed, state.min, event)
+        }
+
         fn dispose(
             _ctx: &mut NativeCtx<'_, '_>,
-            _state: Self::State,
+            state: Self::State,
         ) -> Result<(), NativeWidgetError> {
-            // No target attached yet (p2-03); dropping the state releases its
-            // retain.
+            // Detach so a stray in-flight drag can't fire after this slot's
+            // instance is gone, mirroring the Android arm's explicit
+            // `setOnSeekBarChangeListener(null)`. Dropping `state` afterwards
+            // releases the target's own retain.
+            state.target.detach_slider(&state.view);
             Ok(())
         }
     }

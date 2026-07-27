@@ -15,12 +15,13 @@
 //! control now carries **both** platform halves — a
 //! `#[cfg(target_os = "android")] mod platform` and a
 //! `#[cfg(target_os = "ios")] mod platform`, side by side in the same file,
-//! executing the same shared setter plan (p1-04/p2-02). Still to come on the
-//! Apple arm: target-action events (p2-03), so an iOS control renders and
-//! updates but does not yet report a tap/toggle/drag back to the app; and the
-//! theme ladder's Apple L1/L2/L3 (p2-04), so a themed corner radius and the
-//! Glyph typefaces degrade to the platform's own with one logged warning
-//! apiece.
+//! executing the same shared setter plan (p1-04/p2-02) and, since p2-03,
+//! reporting a tap/toggle/drag back to the app through the same event
+//! dispatch on both platforms (`crate::apple::events`'s Rust target-action
+//! object, mirroring Android's shared listener). Still to come on the Apple
+//! arm: the theme ladder's Apple L1/L2/L3 (p2-04), so a themed corner radius
+//! and the Glyph typefaces degrade to the platform's own with one logged
+//! warning apiece.
 //!
 //! # One factory, one listener, N controls
 //!

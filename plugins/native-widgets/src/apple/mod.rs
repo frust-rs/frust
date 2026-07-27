@@ -1,15 +1,19 @@
-//! The Apple (iOS) backend: ONE Rust `define_class!` Objective-C factory
-//! class, and nothing else — the whole platform surface this plugin will ever
-//! need on Apple, however many controls [`crate::runtime`] grows.
+//! The Apple (iOS) backend: TWO Rust `define_class!` Objective-C classes,
+//! and nothing else — the whole platform surface this plugin will ever need
+//! on Apple, however many controls [`crate::runtime`] grows.
 //!
 //! The Android arm's mirror image, minus the glue. Android needs two Kotlin
-//! classes and four JNI exports because a Java factory has to call *into*
-//! Rust; on iOS the factory **is** Rust ([`factory`]), registered directly
-//! with the Objective-C runtime and looked up by name — **zero Swift** (PLAN
-//! Phase 0 spike 2, GO in a signed release build). Read [`factory`]'s module
-//! doc for the frozen protocol contract, the two load-bearing name pins, the
-//! non-nil failure contract, and why no `ios_exports!`/`#[used]` static is
-//! needed here.
+//! classes (a factory, a listener) and four JNI exports because a Java
+//! factory has to call *into* Rust; on iOS both the factory and the listener
+//! **are** Rust — the factory ([`factory`]) registered directly with the
+//! Objective-C runtime and looked up by name, the listener's target-action
+//! counterpart ([`events`]) constructed straight from live Rust code — **zero
+//! Swift** (PLAN Phase 0 spike 2, GO in a signed release build). Read
+//! [`factory`]'s module doc for the frozen protocol contract, the two
+//! load-bearing name pins, the non-nil failure contract, and why no
+//! `ios_exports!`/`#[used]` static is needed here; read [`events`]'s module
+//! doc for the target-action attach/detach contract and the per-slot
+//! retention story (task p2-03).
 //!
 //! # iOS only, not `target_vendor = "apple"`
 //!
@@ -24,17 +28,19 @@
 //! Every entry point runs on the platform main thread: the host drives the
 //! factory from its post-frame command poll (`FrustViewHost`, itself driven
 //! from `FrustViewController`'s `CADisplayLink`), and a `UIControl`'s
-//! target-action fires there too. Unlike the Android arm, that is not a
-//! `debug_assert` — the factory class is `#[thread_kind = MainThreadOnly]`, so
-//! its methods can only be entered with a [`MainThreadMarker`] in hand, and
-//! [`NativeCtx`] carries that proof into every control call (PLAN 2.1).
+//! target-action ([`events`]) fires there too. Unlike the Android arm, that is
+//! not a `debug_assert` — both classes are `#[thread_kind = MainThreadOnly]`,
+//! so their methods can only be entered with a [`MainThreadMarker`] in hand,
+//! and [`NativeCtx`] carries that proof into every control call (PLAN 2.1).
 //!
 //! [`MainThreadMarker`]: objc2::MainThreadMarker
 
 mod ctx;
+mod events;
 mod factory;
 
 pub(crate) use ctx::NativeCtx;
+pub(crate) use events::FrustNativeControlTarget;
 pub(crate) use factory::ensure_registered;
 
 use crate::controls::{button, image, label, progress, slider, switch};

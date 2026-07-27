@@ -353,27 +353,34 @@ pub(crate) mod platform {
     use objc2::rc::Retained;
     use objc2_ui_kit::UISwitch;
 
-    use super::{KIND, Switch, SwitchProps};
+    use super::{KIND, Switch, SwitchProps, decode_toggled};
     use crate::NativeWidgetError;
-    use crate::apple::{NativeCtx, NativeView};
+    use crate::apple::{FrustNativeControlTarget, NativeCtx, NativeView};
     use crate::controls::platform;
     use crate::controls::{Plan, Setter};
-    use crate::runtime::{NativeWidget, Params};
+    use crate::events::EventPayload;
+    use crate::runtime::{NativeEvent, NativeWidget, Params};
 
     /// A live switch's retained state.
     pub(crate) struct SwitchState {
         view: Retained<UISwitch>,
+        /// The target-action object `create` attached as `view`'s
+        /// `ValueChanged` action (task p2-03). `UIControl` holds it weakly,
+        /// so this field is the only thing keeping it alive for the slot's
+        /// lifetime (`crate::apple::events`'s module doc's *Target
+        /// retention*) — dropped alongside the rest of `State` when
+        /// `Instance::dispose` tears this slot down.
+        target: Retained<FrustNativeControlTarget>,
         /// The value the platform last reported through its action, or `None`
         /// while the user has never touched it — [`SwitchProps::plan`]'s
         /// write-back drift signal, identical in meaning to the Android
         /// state's field of the same name.
         ///
-        /// Nothing writes it yet: the target-action that would
-        /// (`NativeWidget::on_event`, via [`super::decode_toggled`]) lands in
-        /// task p2-03. The field exists now because the *write-back seam* is
-        /// shared and already live — `plan` takes `observed` on both arms —
-        /// and because reintroducing it later would mean re-deriving the
-        /// clear-on-successful-apply rule below from scratch.
+        /// Written from [`NativeWidget::on_event`] via [`decode_toggled`],
+        /// exactly like the Android arm's own field of this name — the
+        /// *write-back seam* was already shared before this task (`plan`
+        /// takes `observed` on both arms); this task wires the write side of
+        /// it in for the first time on this arm.
         observed: Option<bool>,
     }
 
@@ -393,11 +400,17 @@ pub(crate) mod platform {
             let view = UISwitch::new(mtm);
             let plan = SwitchProps::plan(&SwitchProps::platform_default(props.slot), props, None);
             apply_all(mtm, &view, &plan);
+            // Attached after the initial plan, matching the Android arm's
+            // create order — a `Checked` setter never echoes on this arm at
+            // all (module doc's *The same contract on iOS*), but the same
+            // order keeps the three controls predictable.
+            let target = FrustNativeControlTarget::attach_switch(mtm, props.slot, &view);
             let handle = NativeView::new(Retained::clone(&view).into_super().into_super(), mtm);
             Ok((
                 handle,
                 SwitchState {
                     view,
+                    target,
                     observed: None,
                 },
             ))
@@ -421,12 +434,19 @@ pub(crate) mod platform {
             Ok(())
         }
 
+        fn on_event(state: &mut Self::State, event: NativeEvent) -> Option<EventPayload> {
+            decode_toggled(&mut state.observed, event)
+        }
+
         fn dispose(
             _ctx: &mut NativeCtx<'_, '_>,
-            _state: Self::State,
+            state: Self::State,
         ) -> Result<(), NativeWidgetError> {
-            // No target attached yet (p2-03); dropping the state releases its
-            // retain.
+            // Detach so a stray in-flight toggle can't fire after this
+            // slot's instance is gone, mirroring the Android arm's explicit
+            // `setOnCheckedChangeListener(null)`. Dropping `state` afterwards
+            // releases the target's own retain.
+            state.target.detach_switch(&state.view);
             Ok(())
         }
     }
