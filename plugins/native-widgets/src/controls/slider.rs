@@ -24,9 +24,10 @@
 //! `crate::runtime::with_runtime` re-entrancy drop as the sole echo guard) and
 //! the same v1 limitation. See `switch.rs`'s module doc — it is the reference
 //! description for both, including why there is no per-instance suppression
-//! flag: `ProgressBar.setProgress`'s listener notification (`SeekBar`'s
-//! `onProgressRefresh` override) is synchronous-only too, on every supported
-//! API level.
+//! flag and why that guard is an incidental property of the call site (not a
+//! designed invariant): `ProgressBar.setProgress`'s listener notification
+//! (`SeekBar`'s `onProgressRefresh` override) is synchronous-only too, on
+//! every supported API level.
 //!
 //! # No explicit background (f2-04)
 //!
@@ -437,8 +438,8 @@ mod tests {
         assert_eq!(observed, Some(5), "observed stays platform-space");
     }
 
-    // f2-02: there is no `suppress_events` parameter to test an echo against
-    // anymore. `ProgressBar.setProgress`'s listener notification is
+    // f2-02: there is no per-instance suppression parameter to test an echo
+    // against anymore. `ProgressBar.setProgress`'s listener notification is
     // synchronous-only (same AOSP-source basis as `switch.rs`'s), so the ONLY
     // guard against a `Setter::Progress` echo is
     // `crate::runtime::with_runtime`'s re-entrancy drop, one layer up. There

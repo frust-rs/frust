@@ -78,7 +78,13 @@
 //!   `NativeWidget::on_event`/each control's `decode_toggled`/`decode_event`
 //!   ever see it — the runtime's re-entrancy tolerance is the SOLE guard.
 //!   There is no per-instance suppression flag, and therefore nothing a panic
-//!   mid-`update` could leave latched.
+//!   mid-`update` could leave latched. **This safety is incidental, not
+//!   designed**: it holds only because
+//!   `crate::runtime::NativeRuntime::update_params` — which calls `update` —
+//!   is itself always invoked from inside `with_runtime`
+//!   (`crate::android`'s `nativeUpdateParams`). A future refactor that moved
+//!   `update` outside that borrow would silently remove the only echo
+//!   protection this crate has.
 
 pub(crate) mod button;
 pub(crate) mod image;

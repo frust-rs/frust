@@ -86,10 +86,16 @@ pub(crate) enum EventPayload {
         /// The new value, in the app's own `[min, max]`.
         value: i32,
         /// Whether a user touch caused this change, as `SeekBar` reports it
-        /// — `false` for a programmatic `setProgress`, which the echo guard
-        /// (`crate::controls::slider::decode_event`) filters out before this
-        /// ever reaches the app callback; the bit is still decoded here in
-        /// case a future caller wants it.
+        /// — also `false` for a programmatic `setProgress` (the
+        /// controlled-component write-back), but such a call's echo never
+        /// reaches `crate::controls::slider::decode_event` in production at
+        /// all: it is dropped one layer up, before
+        /// `NativeWidget::on_event`/`decode_event` ever run, by
+        /// `crate::runtime::with_runtime`'s re-entrancy guard
+        /// (`crate::controls`'s module doc's *echo guard* — safety that is an
+        /// incidental property of `update_params` being called inside
+        /// `with_runtime`, not a designed invariant). The bit is still
+        /// decoded here in case a future caller wants it.
         from_user: bool,
     },
     /// `Slider`'s drag gesture began (`onStartTrackingTouch`).

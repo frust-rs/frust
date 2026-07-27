@@ -47,7 +47,13 @@
 //!    leave latched; the re-entrancy mechanism itself is pinned by
 //!    `crate::runtime`'s `the_thread_local_runtime_is_reentrancy_tolerant`.
 //!    [`decode_toggled`] has nothing left to suppress: every event it is ever
-//!    handed in production is a genuine platform report.
+//!    handed in production is a genuine platform report. **This safety is
+//!    incidental, not designed**: it holds only because
+//!    `crate::runtime::NativeRuntime::update_params` — which calls `update`
+//!    above — is itself always invoked from inside `with_runtime`
+//!    (`crate::android`'s `nativeUpdateParams`). A future refactor that moved
+//!    `update` outside that borrow would silently remove the only echo
+//!    protection this crate has.
 //!
 //! **v1 limitation, deliberate:** an app that *rejects* a toggle (reports the
 //! same value back) produces no props change at all, so `update` never runs
@@ -421,8 +427,8 @@ mod tests {
         assert_eq!(observed, Some(true));
     }
 
-    // f2-02: there is no `suppress_events` parameter to test an echo against
-    // anymore. `CompoundButton.setChecked`'s listener notification is
+    // f2-02: there is no per-instance suppression parameter to test an echo
+    // against anymore. `CompoundButton.setChecked`'s listener notification is
     // synchronous-only on every supported Android version (AOSP source: the
     // call happens in the same stack frame as `setChecked`, guarded only by
     // `CompoundButton`'s own `mBroadcasting` reentrancy flag, never posted or
