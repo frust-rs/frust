@@ -50,6 +50,23 @@
 //! positions a slot's content view by assigning `frame` from the differ's rect
 //! (`FrustViewHost.applyUpdate`), exactly as PLAN 2.2 specifies. A control
 //! that installed constraints would fight it.
+//!
+//! # Hierarchy (p3-02): `addSubview`, and nothing else
+//!
+//! [`NativeCtx::add_child`] is this arm's whole subtree surface — the mirror
+//! of `crate::android::ctx`'s JNI `addView` wrapper, and the piece that did
+//! not exist here before p3-02. **The platform lays the subtree out**, not
+//! frust: a component positions its children with explicit frames or a
+//! `UIStackView` of its own making, and frust keeps seeing one opaque slot
+//! with one rect (`research/RESEARCH-P3.md` §4).
+//!
+//! There is deliberately **no local-frame wrapper on this arm**: the
+//! discipline `crate::android::ctx`'s `with_frame` enforces (fifty children
+//! must not pin fifty-plus local references for the whole call) has no
+//! analogue under ARC, where a `Retained`'s own `Drop` is the release. The
+//! public `ComponentCtx::with_local_frame` (`crate::component`) still exists
+//! on this arm — it simply runs its closure — so a component's `create` reads
+//! the same on both platforms.
 
 // Mirrors `crate::android::ctx`'s own module-level allow: this is the helper
 // surface the six Apple controls (p2-02) and their target-action objects
@@ -61,6 +78,7 @@
 use std::marker::PhantomData;
 
 use objc2::MainThreadMarker;
+use objc2_ui_kit::UIView;
 
 /// The scoped call context handed to every Apple
 /// [`NativeWidget`](crate::runtime::NativeWidget) method — see the module doc.
@@ -101,5 +119,18 @@ impl NativeCtx<'_, '_> {
     /// [`AppleHandle::view`](crate::registry::apple::AppleHandle::view).
     pub(crate) fn mtm(&self) -> MainThreadMarker {
         self.mtm
+    }
+
+    /// `parent.addSubview(child)` — hierarchy building (p3-02), the Apple
+    /// mirror of `crate::android::ctx`'s JNI `addView` wrapper.
+    ///
+    /// UIKit retains `child` for as long as it is a subview, and releases it
+    /// on `removeFromSuperview` or when `parent` itself is released — so the
+    /// paired-delete discipline the Android arm has to hand-hold is ARC's job
+    /// here (module doc's table). Infallible: both arguments are typed,
+    /// non-nil `UIView`s and the only main-thread proof needed is already
+    /// carried by this context.
+    pub(crate) fn add_child(&mut self, parent: &UIView, child: &UIView) {
+        parent.addSubview(child);
     }
 }

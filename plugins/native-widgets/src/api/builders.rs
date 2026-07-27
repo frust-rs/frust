@@ -89,12 +89,17 @@ use super::theme::{self, ResolvedTheme};
 ///   iOS renders nothing (`research/RESEARCH-P2-REFRESH.md` §6b).
 /// - **Anywhere else**: no factory exists; the Android spelling stands in so
 ///   the constant is always defined.
+///
+/// `pub(super)` rather than private since p3-02: the generic mounting builder
+/// ([`crate::api::mount`]) composes the same one factory these six do —
+/// a public component is served by the same runtime, so it must resolve
+/// through the same class.
 #[cfg(target_os = "android")]
-const VIEW_TYPE: &str = "dev.frust.FrustNativeControlFactory";
+pub(super) const VIEW_TYPE: &str = "dev.frust.FrustNativeControlFactory";
 #[cfg(target_os = "ios")]
-const VIEW_TYPE: &str = "FrustNativeControlFactory";
+pub(super) const VIEW_TYPE: &str = "FrustNativeControlFactory";
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-const VIEW_TYPE: &str = "dev.frust.FrustNativeControlFactory";
+pub(super) const VIEW_TYPE: &str = "dev.frust.FrustNativeControlFactory";
 
 /// This plugin's own per-widget-instance identity counter (module doc: "this
 /// slot id is this plugin's OWN bookkeeping key"). Deliberately independent
@@ -102,7 +107,11 @@ const VIEW_TYPE: &str = "dev.frust.FrustNativeControlFactory";
 /// ever compares the two, so a private counter avoids reaching into
 /// `frust-core`'s widget-tree internals for a value nothing downstream reads
 /// as a differ id.
-fn next_local_slot() -> SlotId {
+///
+/// `pub(super)` since p3-02 — the generic mounting builder
+/// ([`crate::api::mount`]) draws its slot ids from the same counter, so a
+/// public component and a built-in control can never collide on one.
+pub(super) fn next_local_slot() -> SlotId {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
@@ -148,7 +157,14 @@ fn warn_refusal_once() {
 /// the semantics tree and the one-time [`warn_refusal_once`] log while
 /// guaranteeing the placeholder never paints outside its own slot, at any
 /// slot size the builders allow.
-fn placeholder<State: 'static>(size: Option<(f64, f64)>, control: &str) -> AnyView<State> {
+///
+/// `pub(super)` since p3-02: the generic mounting builder
+/// ([`crate::api::mount`]) degrades through this same placeholder — including
+/// its clip wrapper — rather than re-deriving the refusal path.
+pub(super) fn placeholder<State: 'static>(
+    size: Option<(f64, f64)>,
+    control: &str,
+) -> AnyView<State> {
     warn_refusal_once();
     let banner = alert(
         AlertVariant::Warning,
@@ -227,8 +243,9 @@ impl Widget for ClipToSlotWidget {
 /// slot at [`PlatformViewView`]'s own default (fill the parent) — v1 has no
 /// measure step either way (the task spec: "explicit `.size(w,h)` required
 /// (no measure in v1)"), so an omitted call degrades to filling the parent
-/// rather than a made-up constant.
-fn resolve_size(size: Option<(f64, f64)>, view: PlatformViewView) -> PlatformViewView {
+/// rather than a made-up constant. `pub(super)` since p3-02, for
+/// [`crate::api::mount`]'s generic builder.
+pub(super) fn resolve_size(size: Option<(f64, f64)>, view: PlatformViewView) -> PlatformViewView {
     match size {
         Some((w, h)) => view.size(w, h),
         None => view,

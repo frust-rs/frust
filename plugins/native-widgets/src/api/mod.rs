@@ -30,6 +30,16 @@
 //! public trait onto the same runtime (`crate::component::Bridge`) is what let
 //! that stay true.
 //!
+//! # Two builder families, one slot shape
+//!
+//! [`builders`] is the six built-in controls; [`mount`] is the **generic**
+//! one — [`native_component`], which mounts any registered
+//! [`NativeComponent`](crate::component::NativeComponent) (a third party's
+//! included) into the same single `platform_view` slot, reusing the six's
+//! own factory constant, slot counter, sizing rule and refusal placeholder.
+//! It is what closes *define → register → mount*; the six are deliberately
+//! not rewritten to route through it (see [`mount`]'s module doc).
+//!
 //! # One `platform_view` slot per control (PLAN 3.1)
 //!
 //! Each builder composes exactly one `frust::platform_view` slot resolving to
@@ -46,6 +56,7 @@
 //! for L1 (the night-qualified `Context` control creation builds against).
 
 mod builders;
+mod mount;
 mod signals;
 mod theme;
 
@@ -54,6 +65,7 @@ pub use builders::{
     NativeSliderView, NativeSwitchView, native_button, native_image, native_label, native_progress,
     native_slider, native_switch,
 };
+pub use mount::{NativeComponentView, native_component};
 
 /// Make sure this build's platform factory exists before the host can look it
 /// up — **optional**: every builder already does this for you.

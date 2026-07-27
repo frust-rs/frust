@@ -107,7 +107,9 @@ pub use api::*;
 pub mod component;
 // Flat re-export, same convention as `api` above.
 #[cfg(feature = "frust-api")]
-pub use component::{ComponentCtx, NativeComponent, NativeEvent, NativeRoot, register_component};
+pub use component::{
+    ComponentCtx, NativeChild, NativeComponent, NativeEvent, NativeRoot, register_component,
+};
 
 #[cfg(target_os = "android")]
 mod android;

@@ -46,11 +46,12 @@
 //! Class lookups still work on those paths — the cached loader outlives the
 //! call that seeded it.
 
-// This module is the *whole* helper surface the six controls and their
-// listeners build on. Most of it now has a caller on Android; a couple of
-// items (`set_enabled`, `add_child`) stay genuinely unused until a control
-// needs the checked path or a hierarchy-building one is added — the
-// attribute stays for those rather than growing per-item `allow`s.
+// This module is the *whole* helper surface the six controls, their
+// listeners, and (since p3-02) the public `NativeComponent` surface build on.
+// Most of it now has a caller on Android; one item (`set_enabled`) stays
+// genuinely unused until a control needs the checked path rather than the
+// cached one — the attribute stays for that rather than growing per-item
+// `allow`s.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -285,6 +286,21 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
     /// `parent.addView(child)` — hierarchy building, the piece no platform
     /// factory offered before this runtime (RESEARCH-NATIVE-COMPONENT §What
     /// the codebase already gives us).
+    ///
+    /// Load-bearing since p3-02: it is what
+    /// `crate::component::ComponentCtx::add_child` calls, and what Phase 0
+    /// spike 1 built 50 native children in ONE slot with (inside
+    /// [`Self::with_frame`], global refs back to zero after disposal —
+    /// `research/SPIKE.md`). **The platform lays the resulting subtree out**,
+    /// not frust: a `LinearLayout` parent measures and positions its own
+    /// children, and frust still sees one opaque slot with one rect
+    /// (`research/RESEARCH-P3.md` §4).
+    ///
+    /// The Java parent holds its own strong reference to `child`, so a child
+    /// that is merely *attached* needs no global ref at all; a component that
+    /// wants to keep talking to one retains it via
+    /// `crate::component::ComponentCtx::retain_child`, whose handle is
+    /// released with the component's state.
     ///
     /// # Errors
     /// [`NativeWidgetError::Platform`] when the call throws (e.g. `child`

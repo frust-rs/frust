@@ -81,8 +81,8 @@
 //! escape-hatch types are already in this crate's public API (`AndroidHandle`
 //! names `jni`'s `Global<JObject>`, `AppleHandle` names objc2's
 //! `Retained<UIView>`), so no new dependency is exposed by admitting them
-//! here. The hierarchy-building half of this surface is p3-02's, not this
-//! task's.
+//! here. The hierarchy-building half of that surface landed in p3-02 — see
+//! *A component owns its own native subtree* below.
 //!
 //! **2. How a component reaches the runtime's dispatch table.**
 //! [`register_component`], explicitly, from app or plugin init —
@@ -108,6 +108,54 @@
 //! `State` drops — which happens immediately after [`NativeComponent::dispose`]
 //! returns, alongside the runtime's paired delete of the [`NativeRoot`].
 //!
+//! # A component owns its own native subtree (p3-02)
+//!
+//! One component may build a whole native view *hierarchy* — a parent with
+//! native children — and ship it as ONE slot, which is what lets a composite
+//! (a card with an image and two buttons) stop leaking three slots to the
+//! consuming app. Four calls are the entire surface:
+//!
+//! | | Android | iOS |
+//! |---|---|---|
+//! | build a child | [`ComponentCtx::new_view`] | any `objc2-ui-kit` constructor, off [`ComponentCtx::mtm`] |
+//! | attach it | [`ComponentCtx::add_child`] (JNI `addView`) | [`ComponentCtx::add_child`] (`addSubview`) |
+//! | keep talking to it | [`ComponentCtx::retain_child`] → [`NativeChild`] (a global ref) | the same, or just keep your own `Retained<T>` |
+//! | bound the reference table | [`ComponentCtx::with_local_frame`] (real `PushLocalFrame`) | the same call, which does nothing here (ARC) |
+//!
+//! **The platform lays the subtree out, and frust deliberately does not know
+//! the children exist.** frust's wire carries per-slot geometry only — a
+//! `rect`, an optional `clip`, `shields` — with no hierarchical child
+//! geometry, so a component positions its own children the platform's way (a
+//! `LinearLayout`, a `UIStackView`, explicit frames) and frust keeps seeing
+//! one opaque slot with one rect. This is the SwiftUI `UIViewRepresentable` /
+//! Compose `AndroidView` model, chosen over React Native's — where the
+//! framework's own layout engine walks into native containers — because
+//! buying that would mean re-acquiring, per child, the frame-pairing
+//! synchronisation, shield collection, culling and accessibility bridging
+//! frust gets per slot today (`research/RESEARCH-P3.md` §4). **No wire
+//! change**: a subtree costs the differ exactly what a single leaf control
+//! costs it. A11y comes out ahead, in fact — the platform owns the subtree,
+//! so it traverses it natively.
+//!
+//! ## Teardown: children are released with the parent
+//!
+//! Phase 0 spike 1 built 50 native children in ONE slot on device and
+//! measured **52 global refs at peak → 0 after the dispose cycle**
+//! (`research/SPIKE.md`); this surface keeps that property by construction:
+//!
+//! - A child that is merely *attached* needs no handle at all — the platform
+//!   parent owns it (Android's `ViewGroup` holds its own strong reference,
+//!   UIKit retains a subview), so it dies with the parent.
+//! - A child you keep talking to lives in [`NativeComponent::State`] as a
+//!   [`NativeChild`], and `State` is dropped immediately after
+//!   [`NativeComponent::dispose`] returns, alongside the runtime's paired
+//!   delete of the [`NativeRoot`]. Dropping a [`NativeChild`] *is* the
+//!   release: `DeleteGlobalRef` on Android, `Retained`'s own `Drop` on iOS.
+//!
+//! So the leak bar is the same one the six controls already answer to, and
+//! `tests::a_component_builds_a_native_subtree_and_releases_every_child`
+//! counts it rather than merely surviving it.
+//!
 //! # Props travel beside the wire, not on it
 //!
 //! The framework's platform-view wire carries one `params_json` string per
@@ -128,14 +176,11 @@
 //! culled slot's dispose resolves by view identity and never sees this table.
 
 // The publication half of this module (`publish`/`forget`/`component_params`)
-// has no production caller yet: the app-facing builder that mounts a public
-// component into a `platform_view` slot — the generic counterpart of
-// `crate::api::builders`' six — is a later task, and p3-01's file scope is the
-// trait plus its bridge. The host tests below drive exactly the sequence that
-// builder will (`publish` → mount → `create` → `update` → `forget`), so the
-// contract is exercised rather than merely declared. One `allow` per item
-// rather than a module-level one, so anything else falling dead here still
-// warns.
+// got its production caller in p3-02: `crate::api::mount`'s generic builder
+// runs exactly the sequence the host tests below drive (`publish` → mount →
+// `create` → `update` → `forget`). `staged_count` stays test-only, and keeps
+// its own `allow` rather than a module-level one, so anything else falling
+// dead here still warns.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -333,6 +378,89 @@ impl ComponentCtx<'_, '_, '_> {
 }
 
 #[cfg(target_os = "android")]
+impl ComponentCtx<'_, '_, '_> {
+    /// `parent.addView(child)` — attach one native child, the subtree call
+    /// (module doc's *A component owns its own native subtree*).
+    ///
+    /// The parent owns the child from here: a `ViewGroup` holds its own
+    /// strong reference, so a child you never touch again needs no handle of
+    /// yours at all. Answers `Option` so it chains with `?` beside every
+    /// other fallible helper here; latches and answers `None` when the call
+    /// throws (the usual cause being a child that already has a parent).
+    pub fn add_child(
+        &mut self,
+        parent: &jni::objects::JObject<'_>,
+        child: &jni::objects::JObject<'_>,
+    ) -> Option<()> {
+        match self.inner.add_child(parent, child) {
+            Ok(()) => Some(()),
+            Err(error) => {
+                self.latch(error);
+                None
+            }
+        }
+    }
+
+    /// Promote a child's local reference into a [`NativeChild`] — one global
+    /// reference the component keeps in its [`NativeComponent::State`] to
+    /// drive that child later, released when `State` drops (module doc's
+    /// *Teardown*).
+    ///
+    /// Only a child you keep talking to needs this. Latches and answers
+    /// `None` when the JVM cannot allocate the reference — which, ART
+    /// aborting the process at 51,200 live global refs, is itself a leak
+    /// signal rather than an ordinary failure.
+    pub fn retain_child(&mut self, view: &jni::objects::JObject<'_>) -> Option<NativeChild> {
+        match self.inner.retain(view) {
+            Ok(global) => Some(NativeChild(global)),
+            Err(error) => {
+                self.latch(error);
+                None
+            }
+        }
+    }
+
+    /// Run `f` inside a pushed JNI local frame, so every local reference it
+    /// creates is released the moment it returns — **mandatory** around a
+    /// loop building more than a handful of children (module doc's subtree
+    /// table; `capacity` is the JVM's pre-allocation hint, not a cap).
+    ///
+    /// Fifty children built without one would pin fifty-plus local references
+    /// for the whole `create` call; Phase 0 spike 1 built exactly that,
+    /// inside this frame, on device (`research/SPIKE.md`). A value the
+    /// closure returns must not *be* a local reference — that is what
+    /// [`Self::retain_child`] is for, and its [`NativeChild`] outlives the
+    /// frame.
+    ///
+    /// An error the closure latched propagates to this context, and a frame
+    /// that cannot be pushed at all latches too; either way the answer is
+    /// `None`.
+    pub fn with_local_frame<T>(
+        &mut self,
+        capacity: usize,
+        f: impl FnOnce(&mut ComponentCtx<'_, '_, '_>) -> Option<T>,
+    ) -> Option<T> {
+        let mut inner_error = None;
+        let outcome = self.inner.with_frame(capacity, |inner| {
+            let mut cx = ComponentCtx::new(inner);
+            let value = f(&mut cx);
+            inner_error = cx.into_error();
+            Ok::<Option<T>, NativeWidgetError>(value)
+        });
+        if let Some(error) = inner_error {
+            self.latch(error);
+        }
+        match outcome {
+            Ok(value) => value,
+            Err(error) => {
+                self.latch(error);
+                None
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
 impl<'local, 'env> ComponentCtx<'_, 'local, 'env> {
     /// The live JNI `Env` — the escape hatch for everything the helpers here
     /// do not cover (a component's own cached `JMethodID`s and
@@ -409,6 +537,53 @@ impl ComponentCtx<'_, '_, '_> {
         let mtm = self.inner.mtm();
         Some(NativeRoot(NativeView::new(view, mtm)))
     }
+
+    /// `parent.addSubview(child)` — attach one native child, the subtree call
+    /// (module doc's *A component owns its own native subtree*).
+    ///
+    /// UIKit retains a subview, so a child you never touch again needs no
+    /// handle of yours at all — it is released when the parent is. Answers
+    /// `Option` only so a component reads the same on both platforms; this
+    /// arm never latches here.
+    ///
+    /// A typed view passes with objc2's own upcast, e.g. `&label` for a
+    /// `Retained<UILabel>` derefs through `UIView`'s superclass chain.
+    pub fn add_child(
+        &mut self,
+        parent: &objc2_ui_kit::UIView,
+        child: &objc2_ui_kit::UIView,
+    ) -> Option<()> {
+        self.inner.add_child(parent, child);
+        Some(())
+    }
+
+    /// Retain a child view as a [`NativeChild`] the component keeps in its
+    /// [`NativeComponent::State`], released when `State` drops (module doc's
+    /// *Teardown*).
+    ///
+    /// ARC already does this for any `Retained<T>` a component keeps itself,
+    /// with the child's own concrete type preserved — reach for that first.
+    /// This exists so a component that wants one `State` shape on both arms
+    /// can name [`NativeChild`] on both. Never latches.
+    pub fn retain_child(&mut self, view: &objc2_ui_kit::UIView) -> Option<NativeChild> {
+        use objc2::Message as _;
+        Some(NativeChild(view.retain()))
+    }
+
+    /// The Apple counterpart of Android's local-frame wrapper: it runs `f`
+    /// and nothing else.
+    ///
+    /// There is no reference table to bound here — a `Retained`'s own `Drop`
+    /// is the release (`crate::apple::ctx`'s module doc) — so `capacity` is
+    /// accepted and ignored. The method exists on this arm so a component's
+    /// `create` is written once and compiles on both.
+    pub fn with_local_frame<T>(
+        &mut self,
+        _capacity: usize,
+        f: impl FnOnce(&mut ComponentCtx<'_, '_, '_>) -> Option<T>,
+    ) -> Option<T> {
+        f(self)
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -429,6 +604,41 @@ impl ComponentCtx<'_, '_, '_> {
     pub fn root(&mut self, identity: u64) -> Option<NativeRoot> {
         Some(NativeRoot(NativeView { identity }))
     }
+
+    /// Record one would-be `addView`/`addSubview` — the host mirror of the
+    /// two platform arms' `add_child`, so a subtree's *plan* is assertable
+    /// (which child went under which parent, in what order) on a machine with
+    /// no view hierarchy at all.
+    pub fn add_child(&mut self, parent: u64, child: u64) -> Option<()> {
+        self.inner.record(format!("addChild {parent} <- {child}"));
+        Some(())
+    }
+
+    /// Take a stand-in retained child handle — the host mirror of Android's
+    /// global reference and iOS's `Retained`.
+    ///
+    /// Live handles are counted process-thread-wide ([`live_child_count`]),
+    /// so a host test asserts the paired release the way ART's global-ref
+    /// count does on device (module doc's *Teardown*) rather than merely
+    /// asserting that nothing panicked.
+    pub fn retain_child(&mut self, identity: u64) -> Option<NativeChild> {
+        self.inner.record(format!("retainChild {identity}"));
+        Some(NativeChild::new(identity))
+    }
+
+    /// Record a would-be `PushLocalFrame`/`PopLocalFrame` pair around `f` —
+    /// the host mirror of Android's real local frame, so a test can assert a
+    /// subtree build actually ran inside one.
+    pub fn with_local_frame<T>(
+        &mut self,
+        capacity: usize,
+        f: impl FnOnce(&mut ComponentCtx<'_, '_, '_>) -> Option<T>,
+    ) -> Option<T> {
+        self.inner.record(format!("pushLocalFrame {capacity}"));
+        let value = f(self);
+        self.inner.record("popLocalFrame");
+        value
+    }
 }
 
 /// The root native view a [`NativeComponent::create`] hands back — an opaque
@@ -446,6 +656,97 @@ impl NativeRoot {
     fn into_inner(self) -> NativeView {
         self.0
     }
+}
+
+/// One retained **child** of a component's native subtree — the handle a
+/// component keeps in its [`NativeComponent::State`] when it wants to drive
+/// that child later (module doc's *A component owns its own native subtree*).
+///
+/// Built only through [`ComponentCtx::retain_child`]. **Dropping it is the
+/// release** — `DeleteGlobalRef` on Android, `Retained`'s own `Drop` on iOS —
+/// and `State` is dropped immediately after [`NativeComponent::dispose`]
+/// returns, so a child is released with its parent by construction rather
+/// than by remembering to.
+///
+/// A child you never talk to again needs none of this: the platform parent
+/// already owns it.
+pub struct NativeChild(ChildHandle);
+
+/// [`NativeChild`]'s per-platform payload: a global reference on Android, an
+/// ARC retain on iOS, a counted stand-in on a non-mobile host.
+#[cfg(target_os = "android")]
+type ChildHandle = jni::refs::Global<jni::objects::JObject<'static>>;
+#[cfg(target_os = "ios")]
+type ChildHandle = objc2::rc::Retained<objc2_ui_kit::UIView>;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+type ChildHandle = HostChild;
+
+#[cfg(target_os = "android")]
+impl NativeChild {
+    /// The retained child, for the setters a component's `update` calls on it
+    /// (through [`ComponentCtx::env`], or a cached `JMethodID` of its own).
+    pub fn as_object(&self) -> &jni::objects::JObject<'static> {
+        &self.0
+    }
+}
+
+#[cfg(target_os = "ios")]
+impl NativeChild {
+    /// The retained child, for the `objc2-ui-kit` setters a component's
+    /// `update` calls on it. Takes the same main-thread proof
+    /// [`AppleHandle::view`](crate::registry::apple::AppleHandle::view) does —
+    /// a typestate guard, not a runtime cost.
+    pub fn view(&self, _mtm: objc2::MainThreadMarker) -> &objc2_ui_kit::UIView {
+        &self.0
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl NativeChild {
+    /// A counted stand-in handle with the given identity.
+    fn new(identity: u64) -> Self {
+        LIVE_CHILDREN.with(|live| live.set(live.get() + 1));
+        Self(HostChild { identity })
+    }
+
+    /// This child's stand-in identity — what a test asserts against.
+    pub fn identity(&self) -> u64 {
+        self.0.identity
+    }
+}
+
+/// The host arm's stand-in child handle: it decrements [`LIVE_CHILDREN`] when
+/// dropped, exactly as Android's `Global` issues its `DeleteGlobalRef` — the
+/// leak bar `crate::registry`'s own `CountingHandle` established, one table
+/// over.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) struct HostChild {
+    identity: u64,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl Drop for HostChild {
+    fn drop(&mut self) {
+        LIVE_CHILDREN.with(|live| live.set(live.get().saturating_sub(1)));
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+thread_local! {
+    /// How many host stand-in child handles are alive on this thread — the
+    /// mirror of ART's live-global-ref count (`research/SPIKE.md`'s "52 at
+    /// peak → 0 after the dispose cycle"). Thread-local for the same reason
+    /// [`STAGED`] is, which also keeps each `cargo test` thread's count its
+    /// own.
+    static LIVE_CHILDREN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many retained subtree children are currently alive — the host arm's
+/// leak bar, which every create/dispose cycle must return to `0`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[allow(dead_code)] // the leak bar's only caller is this module's own tests
+pub(crate) fn live_child_count() -> usize {
+    LIVE_CHILDREN.with(|live| live.get())
 }
 
 /// A platform listener firing for one component slot, as the generic listener
@@ -559,8 +860,12 @@ fn with_staged<T>(f: impl FnOnce(&mut HashMap<SlotId, Staged>) -> T) -> Option<T
 ///
 /// Publishing is idempotent and replaces outright: props are whole state, never
 /// a delta (module doc's lifecycle contract, point 2).
-#[allow(dead_code)] // see the note at the top of this module
-pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: C, props: C::Props) -> u64 {
+///
+/// The component arrives as an `Rc` the mounting builder already holds
+/// (`crate::api::mount`), so a rebuild that changes nothing costs one
+/// refcount bump rather than a deep clone of the app's component value — and
+/// the public trait needs no `Clone` bound as a result.
+pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: Rc<C>, props: C::Props) -> u64 {
     with_staged(|staged| {
         let generation = match staged.get(&slot) {
             // A slot whose staged props are a *different* component's (a kind
@@ -581,7 +886,7 @@ pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: C, props: C::
         staged.insert(
             slot,
             Staged {
-                component: Rc::new(component),
+                component,
                 props: Box::new(props),
                 generation,
             },
@@ -600,7 +905,6 @@ pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: C, props: C::
 /// disposed while off-screen and then re-published by a still-mounted widget
 /// would strand its entry for the process lifetime without this. Idempotent: a
 /// slot with nothing staged is a silent no-op.
-#[allow(dead_code)] // see the note at the top of this module
 pub(crate) fn forget(slot: SlotId) {
     with_staged(|staged| staged.remove(&slot));
 }
@@ -608,7 +912,6 @@ pub(crate) fn forget(slot: SlotId) {
 /// The `params_json` a component slot's `platform_view` carries: the runtime's
 /// two identity keys plus the props generation [`publish`] returned, and
 /// nothing else — a component's real props never cross the wire.
-#[allow(dead_code)] // see the note at the top of this module
 pub(crate) fn component_params(kind: &str, slot: SlotId, generation: u64) -> String {
     crate::runtime::with_identity(
         kind,
@@ -619,7 +922,7 @@ pub(crate) fn component_params(kind: &str, slot: SlotId, generation: u64) -> Str
 
 /// How many slots currently have staged props — the staging table's own leak
 /// bar, which every mount/unmount cycle must return to `0`.
-#[allow(dead_code)] // see the note at the top of this module
+#[allow(dead_code)] // the staging table's leak bar: tests only, by design
 pub(crate) fn staged_count() -> usize {
     with_staged(|staged| staged.len()).unwrap_or(0)
 }
@@ -932,7 +1235,7 @@ mod tests {
     /// its `platform_view` would carry — the exact sequence the app-facing
     /// builder will run on every rebuild.
     fn mount(slot: SlotId, component: Gauge, props: GaugeProps) -> String {
-        let generation = publish(slot, component, props);
+        let generation = publish(slot, Rc::new(component), props);
         component_params(GAUGE_KIND, slot, generation)
     }
 
@@ -1250,5 +1553,281 @@ mod tests {
             "the failed update applied nothing and left the baseline at create's props"
         );
         forget(6);
+    }
+
+    // --- p3-02: a component owns its own native subtree ---------------------
+
+    /// A **composite**: one component, one slot, a parent view with N native
+    /// children under it — the card-with-an-image-and-two-buttons shape the
+    /// public trait exists to make shippable without leaking three slots to
+    /// the consuming app.
+    struct Card {
+        /// How many children [`NativeComponent::create`] builds.
+        children: usize,
+        /// Stop after this many children and fail the slot — the
+        /// half-built-subtree path, which must strand nothing.
+        fail_after: Option<usize>,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct CardProps {
+        title: String,
+    }
+
+    struct CardState {
+        root: u64,
+        /// The children this component kept in order to drive them later.
+        /// Dropping `State` — which the runtime does immediately after
+        /// `dispose` returns — releases every one of them (module doc's
+        /// *Teardown*).
+        children: Vec<NativeChild>,
+    }
+
+    const CARD_KIND: &str = "test-card";
+
+    impl NativeComponent for Card {
+        type Props = CardProps;
+        type State = CardState;
+
+        fn create(
+            &self,
+            ctx: &mut ComponentCtx<'_, '_, '_>,
+            props: &Self::Props,
+        ) -> Option<(NativeRoot, Self::State)> {
+            let root = next_identity();
+            ctx.record(format!("card create {root} '{}'", props.title));
+            // Every child is built inside ONE local frame — the discipline
+            // spike 1 proved on device with fifty of them (module doc).
+            let children = ctx.with_local_frame(self.children + 2, |ctx| {
+                let mut retained = Vec::with_capacity(self.children);
+                for index in 0..self.children {
+                    if self.fail_after == Some(index) {
+                        ctx.report_error("card: the platform ran out of views");
+                        return None;
+                    }
+                    let child = next_identity();
+                    ctx.add_child(root, child)?;
+                    // Kept because this component drives its children later;
+                    // a child it never touched again would need no handle.
+                    retained.push(ctx.retain_child(child)?);
+                }
+                Some(retained)
+            })?;
+            self.log
+                .borrow_mut()
+                .push(format!("card create {} children", children.len()));
+            Some((ctx.root(root)?, CardState { root, children }))
+        }
+
+        fn update(
+            &self,
+            ctx: &mut ComponentCtx<'_, '_, '_>,
+            state: &mut Self::State,
+            _old: &Self::Props,
+            new: &Self::Props,
+        ) {
+            // A real component would drive individual children here, off the
+            // handles `State` retained.
+            ctx.record(format!(
+                "card update {} '{}' over {} children",
+                state.root,
+                new.title,
+                state.children.len()
+            ));
+        }
+
+        fn dispose(&self, ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
+            ctx.record(format!(
+                "card dispose {} with {} children",
+                state.root,
+                state.children.len()
+            ));
+            self.log.borrow_mut().push("card dispose".to_string());
+            // `state` — every retained child with it — drops as this returns.
+        }
+    }
+
+    /// Publish `card` for `slot` and return the `params_json` its
+    /// `platform_view` would carry.
+    fn mount_card(slot: SlotId, card: Card, title: &str) -> String {
+        let generation = publish(
+            slot,
+            Rc::new(card),
+            CardProps {
+                title: title.to_string(),
+            },
+        );
+        component_params(CARD_KIND, slot, generation)
+    }
+
+    #[test]
+    fn a_component_builds_a_native_subtree_and_releases_every_child() {
+        // Spike 1's own stress count (`research/SPIKE.md`: 50 children in ONE
+        // slot, 52 global refs at peak → 0 after the dispose cycle).
+        const CHILDREN: usize = 50;
+
+        assert_eq!(live_child_count(), 0, "this test thread starts clean");
+        assert!(register_component::<Card>(CARD_KIND));
+
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let params = mount_card(
+            7,
+            Card {
+                children: CHILDREN,
+                fail_after: None,
+                log: Rc::clone(&log),
+            },
+            "Now playing",
+        );
+
+        let mut calls = Vec::new();
+        {
+            let mut ctx = PlatformCtx::new(&mut calls);
+            with_runtime(|runtime| {
+                assert_eq!(runtime.create(&mut ctx, &params).unwrap(), 7);
+                assert_eq!(
+                    runtime.live_count(),
+                    1,
+                    "N children ship as ONE slot — that is the whole point"
+                );
+                assert_eq!(
+                    live_child_count(),
+                    CHILDREN,
+                    "every child is retained while the component is live"
+                );
+
+                let changed = mount_card(
+                    7,
+                    Card {
+                        children: CHILDREN,
+                        fail_after: None,
+                        log: Rc::clone(&log),
+                    },
+                    "Up next",
+                );
+                assert_eq!(
+                    runtime.update_params(&mut ctx, &changed).unwrap(),
+                    UpdateOutcome::Applied,
+                    "a subtree component diffs exactly like a leaf one"
+                );
+
+                assert_eq!(runtime.dispose_slot(&mut ctx, 7), DisposeOutcome::Disposed);
+                assert_eq!(runtime.live_count(), 0);
+            })
+            .expect("the thread's runtime");
+        }
+        forget(7);
+
+        // The teardown bar, counted rather than assumed: the M1/c1-01 leaks
+        // both looked fine until something counted.
+        assert_eq!(
+            live_child_count(),
+            0,
+            "every child was released with its parent"
+        );
+        assert_eq!(staged_count(), 0);
+
+        // …and the plan the component actually executed.
+        assert!(calls[0].starts_with("card create"), "{calls:?}");
+        assert_eq!(calls[1], format!("pushLocalFrame {}", CHILDREN + 2));
+        let root = calls[0]
+            .split(' ')
+            .nth(2)
+            .expect("the root identity")
+            .to_string();
+        let attached: Vec<&String> = calls
+            .iter()
+            .filter(|call| call.starts_with("addChild "))
+            .collect();
+        assert_eq!(attached.len(), CHILDREN, "one addChild per child");
+        assert!(
+            attached
+                .iter()
+                .all(|call| call.starts_with(&format!("addChild {root} <- "))),
+            "every child went under the component's own root: {attached:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("retainChild "))
+                .count(),
+            CHILDREN
+        );
+
+        let first_add = calls
+            .iter()
+            .position(|call| call.starts_with("addChild "))
+            .expect("an addChild");
+        let last_add = calls
+            .iter()
+            .rposition(|call| call.starts_with("addChild "))
+            .expect("an addChild");
+        let popped = calls
+            .iter()
+            .position(|call| call == "popLocalFrame")
+            .expect("the frame pops");
+        assert!(
+            first_add > 1 && last_add < popped,
+            "the whole subtree build ran inside ONE local frame: {calls:?}"
+        );
+        assert!(calls[popped + 1].contains("over 50 children"), "{calls:?}");
+        assert!(
+            calls.last().unwrap().starts_with("card dispose"),
+            "{calls:?}"
+        );
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "card create 50 children".to_string(),
+                "card dispose".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn a_half_built_subtree_strands_no_children() {
+        // The failure path of the same discipline: a component that gives up
+        // partway through its subtree must release what it already retained,
+        // and leave no live instance behind either.
+        assert_eq!(live_child_count(), 0);
+        register_component::<Card>(CARD_KIND);
+
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let params = mount_card(
+            8,
+            Card {
+                children: 20,
+                fail_after: Some(12),
+                log: Rc::clone(&log),
+            },
+            "doomed",
+        );
+
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        let error = with_runtime(|runtime| {
+            let outcome = runtime.create(&mut ctx, &params);
+            assert_eq!(runtime.live_count(), 0, "no instance was retained");
+            outcome
+        })
+        .expect("the thread's runtime")
+        .expect_err("the component gave up on its subtree");
+
+        assert!(
+            matches!(&error, NativeWidgetError::Platform(message)
+                if message.contains("ran out of views")),
+            "the latched error names the failure: {error:?}"
+        );
+        assert_eq!(
+            live_child_count(),
+            0,
+            "the twelve children built before the failure were released, not stranded"
+        );
+        assert!(
+            calls.iter().any(|call| call == "popLocalFrame"),
+            "the local frame is popped on the failure path too: {calls:?}"
+        );
+        forget(8);
     }
 }
