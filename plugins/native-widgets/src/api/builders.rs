@@ -403,7 +403,21 @@ impl Component for NativeButtonView {
     type State = SlotId;
 
     fn init(&self) -> SlotId {
-        next_local_slot()
+        let slot = next_local_slot();
+        // Ties this slot's `NativeRuntime::pending_callbacks` entry to the
+        // Component's own lifetime, not to the native create/dispose
+        // lifecycle (c1-01, applying `NativeImageView::init`'s f2-03 fix to
+        // the identical leak shape one table over — see
+        // `crate::runtime`'s doc on `pending_callbacks` and
+        // `NativeRuntime::forget_pending_callback`). `init` runs exactly
+        // once, under this component's own `Owner`, so `on_cleanup` fires
+        // exactly once when that owner disposes — regardless of whether a
+        // culled-then-republished cycle already parked a second pending
+        // entry `dispose_slot` never sees.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
@@ -502,6 +516,10 @@ impl NativeLabelView {
 impl Component for NativeLabelView {
     type State = SlotId;
 
+    // No `on_cleanup` here (c1-01): `Label` is display-only and never calls
+    // `set_callback`, so its slot never has a `pending_callbacks` entry to
+    // reap. `NativeButtonView::init`'s doc explains the cleanup this
+    // Component deliberately omits.
     fn init(&self) -> SlotId {
         next_local_slot()
     }
@@ -625,7 +643,14 @@ impl Component for NativeSwitchView {
     type State = SlotId;
 
     fn init(&self) -> SlotId {
-        next_local_slot()
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc (c1-01) — `Switch` registers a
+        // callback via `Self::on_toggle`, so it needs the same
+        // `pending_callbacks` reaper.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
@@ -746,7 +771,14 @@ impl Component for NativeSliderView {
     type State = SlotId;
 
     fn init(&self) -> SlotId {
-        next_local_slot()
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc (c1-01) — `Slider` registers a
+        // callback via `Self::on_change`, so it needs the same
+        // `pending_callbacks` reaper.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
@@ -846,6 +878,8 @@ impl NativeProgressView {
 impl Component for NativeProgressView {
     type State = SlotId;
 
+    // No `on_cleanup` here (c1-01): `ProgressBar` is display-only and never
+    // calls `set_callback` — see `NativeLabelView::init`'s doc.
     fn init(&self) -> SlotId {
         next_local_slot()
     }
@@ -989,6 +1023,10 @@ impl Component for NativeImageView {
         // regardless of whether paint culling already ran the counted
         // `claim_bytes`/`release_bytes` pair to zero and back on the
         // platform side in between (`crate::controls::image`'s module doc).
+        //
+        // No second `on_cleanup` for `NativeRuntime::pending_callbacks`
+        // (c1-01): `Image` is display-only and never calls `set_callback` —
+        // see `NativeLabelView::init`'s doc for the same reasoning.
         on_cleanup(move || image::retire(slot));
         slot
     }

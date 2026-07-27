@@ -738,11 +738,28 @@ pub(crate) struct NativeRuntime {
     /// exist **yet** — the normal case, since a registration rides the
     /// rebuild that mounts the slot and the create only arrives on the
     /// host's next post-frame poll (module doc's *two-phase identity* 3).
-    /// [`Self::create`] drains a slot's entry into the instance it builds;
-    /// [`Self::dispose_slot`] clears it so a slot that never creates cannot
-    /// strand a closure. An entry here and a live instance for the same slot
-    /// are mutually exclusive — [`Self::set_callback`] writes to exactly one
-    /// of the two.
+    /// [`Self::create`] drains a slot's entry into the instance it builds. An
+    /// entry here and a live instance for the same slot are mutually
+    /// exclusive — [`Self::set_callback`] writes to exactly one of the two.
+    ///
+    /// **Not bounded by [`Self::dispose_slot`] alone (c1-01).** An earlier
+    /// version of this doc claimed `dispose_slot` clearing this table was
+    /// enough to keep it from stranding a closure — wrong for the same
+    /// reason `crate::controls::image`'s "bounded by the live image slots"
+    /// claim was (f2-03): Android's production dispose
+    /// (`FrustNativeControlFactory.disposeView` →
+    /// `crate::android::dispose_control` → [`Self::take_matching`]) resolves
+    /// by view identity and never calls `dispose_slot` at all, so a slot
+    /// disposed while culled and then re-registered — still mounted, so it
+    /// never runs `View::teardown` — parks a second pending entry
+    /// `dispose_slot` never sees. [`Self::forget_pending_callback`] is the
+    /// actual bound: registered via `on_cleanup` in each interactive
+    /// builder's `Component::init` (`crate::api::builders`), it runs exactly
+    /// once per mounted Component regardless of how many times (if any) the
+    /// native create/dispose pair ran on the platform side in between.
+    /// `dispose_slot`'s own clear stays a secondary safety net for its own
+    /// callers (the create-rollback branch, tests), not the production
+    /// reclaim path.
     pending_callbacks: HashMap<SlotId, Arc<dyn Fn(EventPayload) + Send + Sync>>,
 }
 
@@ -969,9 +986,17 @@ impl NativeRuntime {
     /// Tear down the instance for `slot_id`, if any. A late or duplicate
     /// dispose reports [`DisposeOutcome::NotFound`] and does nothing (module
     /// doc's *late and duplicate disposal*) — except for one thing it always
-    /// does: drop any *pending* registration for the slot, so a slot that
-    /// mounted and unmounted without ever reaching a create cannot strand its
-    /// callback closure for the process lifetime.
+    /// does: drop any *pending* registration for the slot too.
+    ///
+    /// **Not the production reclaim path for [`Self::pending_callbacks`]
+    /// (c1-01).** Android's production dispose resolves by view identity
+    /// through [`Self::take_matching`] and never calls this method — it is
+    /// reached only by the create-rollback branch (a successful create whose
+    /// local reference then fails to hand back to Kotlin) and by tests. A
+    /// slot disposed the ordinary way can still strand a *later* pending
+    /// registration this method never sees;
+    /// [`Self::forget_pending_callback`] is what actually bounds
+    /// `pending_callbacks` for the process lifetime.
     pub(crate) fn dispose_slot(
         &mut self,
         ctx: &mut NativeCtx<'_, '_>,
@@ -985,6 +1010,25 @@ impl NativeRuntime {
             log::warn!("frust-native-widgets: disposing slot {slot_id}: {e}");
         }
         DisposeOutcome::Disposed
+    }
+
+    /// Remove `slot`'s pending callback registration unconditionally,
+    /// whatever the table currently holds for it — the Component-teardown
+    /// reaper for [`Self::pending_callbacks`] (c1-01), applying
+    /// `crate::controls::image::retire`'s f2-03 remedy to the identical leak
+    /// shape one table over. Registered via `on_cleanup` in each interactive
+    /// builder's `Component::init` (`crate::api::builders`), so it runs
+    /// exactly once per mounted Component regardless of how many times (if
+    /// any) the native create/dispose pair actually ran in between — the
+    /// case [`Self::dispose_slot`]'s own clear cannot see, since Android's
+    /// production dispose (`crate::android::dispose_control`) never calls
+    /// it.
+    ///
+    /// Idempotent: a slot with no pending entry (already taken by
+    /// [`Self::create`], already cleared, or never registered) is a silent
+    /// no-op.
+    pub(crate) fn forget_pending_callback(&mut self, slot: SlotId) {
+        self.pending_callbacks.remove(&slot);
     }
 
     /// How many controls are currently live — the leak bar every
@@ -1114,6 +1158,10 @@ mod tests {
 
     const FAKE_KIND: &str = "fake";
 
+    /// The sentinel [`FakeProps::label`] that makes [`FakeControl::create`]
+    /// fail — the failed-create-variant regression test's opt-in.
+    const FAIL_CREATE_LABEL: &str = "FAIL_CREATE";
+
     impl NativeWidget for FakeControl {
         type Props = FakeProps;
         type State = FakeState;
@@ -1132,6 +1180,13 @@ mod tests {
             ctx: &mut NativeCtx<'_, '_>,
             props: &Self::Props,
         ) -> Result<(NativeView, Self::State), NativeWidgetError> {
+            // A sentinel label the failed-create-variant test below opts
+            // into — no production props ever carry it, and no other test
+            // in this module uses this label.
+            if props.label == FAIL_CREATE_LABEL {
+                ctx.record("create failed".to_string());
+                return Err(NativeWidgetError::Platform("fake create failure".into()));
+            }
             let identity = params_identity_counter();
             ctx.record(format!("create {} '{}'", identity, props.label));
             Ok((
@@ -1667,6 +1722,122 @@ mod tests {
         runtime.create(&mut ctx, &params(9, "x", true)).unwrap();
         assert_eq!(runtime.on_event(9, CLICK), EventOutcome::Delivered);
         assert!(fired.lock().unwrap().is_empty());
+    }
+
+    // --- c1-01: `forget_pending_callback` is the actual bound -------------
+    //
+    // `dispose_slot`'s own clear (the test above) is a secondary safety net
+    // for its own callers — it is not Android's production dispose path
+    // (`crate::android::dispose_control`, which resolves by view identity
+    // via `take_matching` and never calls `dispose_slot` at all). The two
+    // tests below are the pin: a happy-path test would not have caught
+    // either shape of the leak.
+
+    #[test]
+    fn the_culled_dispose_then_republish_leak_is_reaped_on_component_teardown() {
+        // Mirrors `image.rs`'s identically-shaped f2-03 regression test.
+        // Steps 1-5 from the task's defect trace, using `take_matching` (not
+        // `dispose_slot`) for the culled dispose — the real production path.
+        let mut runtime = runtime();
+        let mut calls = Vec::new();
+        let mut ctx = NativeCtx::new(&mut calls);
+
+        // Step 1: mount — create takes the pending entry, the instance is
+        // born with the callback.
+        let (first_fired, first_callback) = recorder();
+        assert!(runtime.set_callback(20, first_callback));
+        runtime.create(&mut ctx, &params(20, "x", true)).unwrap();
+        assert!(
+            runtime.pending_callbacks.is_empty(),
+            "the create took the pending registration"
+        );
+        drop(first_fired);
+
+        // Step 2: culled while off-screen. The differ's missing-streak
+        // Dispose resolves by identity via `take_matching` — exactly what
+        // `crate::android::dispose_control` does — and never touches
+        // `pending_callbacks`. The widget stays mounted (a culled slot never
+        // runs `View::teardown`).
+        let identity = runtime.instance(20).unwrap().view().identity;
+        let (slot, instance) = runtime
+            .take_matching(|view| view.identity == identity)
+            .expect("the culled dispose finds the live view by identity");
+        assert_eq!(slot, 20);
+        instance.dispose(&mut ctx).unwrap();
+        assert_eq!(runtime.live_count(), 0);
+
+        // Step 3: still mounted, the next rebuild re-registers — no live
+        // instance exists, so this parks a fresh pending entry.
+        let (fresh, fresh_callback) = recorder();
+        assert!(runtime.set_callback(20, fresh_callback));
+        assert_eq!(runtime.pending_callbacks.len(), 1);
+        assert_eq!(
+            Arc::strong_count(&fresh),
+            2,
+            "the runtime holds the closure"
+        );
+
+        // Steps 4/5: navigate away — `View::teardown` disposes the
+        // Component's owner, running the `on_cleanup` closure every
+        // interactive builder registers in `init` (`api::builders`), which
+        // calls `forget_pending_callback` unconditionally.
+        runtime.forget_pending_callback(20);
+        assert!(
+            runtime.pending_callbacks.is_empty(),
+            "without forget_pending_callback the fresh entry would strand \
+             its closure for the process lifetime — the shipped c1-01 defect"
+        );
+        assert_eq!(
+            Arc::strong_count(&fresh),
+            1,
+            "the closure was actually dropped, not just unreachable"
+        );
+
+        // And a later create re-using the slot id starts callback-free.
+        runtime.create(&mut ctx, &params(20, "y", true)).unwrap();
+        assert_eq!(runtime.on_event(20, CLICK), EventOutcome::Delivered);
+        assert!(fresh.lock().unwrap().is_empty(), "reaped, never re-fires");
+    }
+
+    #[test]
+    fn a_failed_create_leaves_the_entry_pending_and_teardown_still_reaps_it() {
+        // The narrower permanent variant the task calls out: a create that
+        // FAILS leaves the registration pending forever (Kotlin marks the
+        // slot dead, so no create ever retries it) — only Component
+        // teardown's `forget_pending_callback` can reclaim it.
+        let mut runtime = runtime();
+        let mut calls = Vec::new();
+        let mut ctx = NativeCtx::new(&mut calls);
+        let (fired, callback) = recorder();
+
+        assert!(runtime.set_callback(30, callback));
+        assert_eq!(runtime.pending_callbacks.len(), 1);
+
+        let err = runtime
+            .create(&mut ctx, &params(30, FAIL_CREATE_LABEL, true))
+            .expect_err("the fake control's create fails for this sentinel label");
+        assert!(matches!(err, NativeWidgetError::Platform(_)));
+        assert_eq!(runtime.live_count(), 0, "no instance was ever retained");
+        assert_eq!(
+            runtime.pending_callbacks.len(),
+            1,
+            "a failed create must not touch the pending entry — nothing \
+             schedules a retry, so dropping it here would strand it \
+             instead of just leaving it pending"
+        );
+        assert_eq!(Arc::strong_count(&fired), 2, "the runtime still holds it");
+
+        runtime.forget_pending_callback(30);
+        assert!(
+            runtime.pending_callbacks.is_empty(),
+            "Component teardown still reaps a pending entry whose create \
+             never once succeeded"
+        );
+        assert_eq!(Arc::strong_count(&fired), 1, "the closure was dropped");
+
+        // Idempotent: a second call is a silent no-op.
+        runtime.forget_pending_callback(30);
+        assert!(runtime.pending_callbacks.is_empty());
     }
 
     #[test]
