@@ -12,8 +12,8 @@
 //! re-layout per update (see [`super`]'s per-frame guidance).
 
 use super::{
-    CONTENT_DESCRIPTION, ENABLED, Plan, Setter, TEXT, TEXT_COLOR, TEXT_SIZE_SP, TYPEFACE, color,
-    owned_text, plan_color, slot_of, text_or_empty,
+    BACKGROUND_COLOR, CONTENT_DESCRIPTION, ENABLED, Plan, Setter, TEXT, TEXT_COLOR, TEXT_SIZE_SP,
+    TYPEFACE, color, owned_text, plan_color, slot_of, text_or_empty,
 };
 use crate::NativeWidgetError;
 use crate::controls::typeface::{self, Typeface};
@@ -41,6 +41,16 @@ pub(crate) struct LabelProps {
     pub(crate) enabled: bool,
     /// Packed ARGB text colour, or `None` to leave the theme's own.
     pub(crate) text_color: Option<i32>,
+    /// Packed ARGB background fill (theme ladder L2 followup, f1-01:
+    /// `crate::api::theme::ResolvedTheme::surface_bg`), matching the page
+    /// surface this `Label` sits on — EXPLICIT so it re-paints live on a
+    /// brightness flip instead of pinning to whatever the platform's own
+    /// default background resolved to under L1's creation-time
+    /// night-qualified `Context` (`crate::android::theme`'s "Baked at
+    /// construction, not live" note — the exact defect this field closes,
+    /// `VERIFY-P1.md` bar 3). `None` leaves the platform's own default when
+    /// no theme is threaded.
+    pub(crate) background_color: Option<i32>,
     /// Text size in scale-independent pixels, or `None` for the platform's.
     pub(crate) text_size_sp: Option<f32>,
     /// The TalkBack label; `None` lets the platform read the text itself.
@@ -59,6 +69,7 @@ impl LabelProps {
             text: String::new(),
             enabled: true,
             text_color: None,
+            background_color: None,
             text_size_sp: None,
             content_description: None,
             typeface: Typeface::System,
@@ -77,6 +88,7 @@ impl LabelProps {
             text: text_or_empty(params, TEXT),
             enabled: params.flag(ENABLED).unwrap_or(true),
             text_color: color(params, TEXT_COLOR),
+            background_color: color(params, BACKGROUND_COLOR),
             text_size_sp: params.float(TEXT_SIZE_SP).map(|size| size as f32),
             content_description: owned_text(params, CONTENT_DESCRIPTION),
             typeface: typeface::decode(params, TYPEFACE),
@@ -92,6 +104,12 @@ impl LabelProps {
         if old.enabled != new.enabled {
             plan.push(Setter::Enabled(new.enabled));
         }
+        plan_color(
+            &mut plan,
+            old.background_color,
+            new.background_color,
+            Setter::BackgroundColor,
+        );
         plan_color(&mut plan, old.text_color, new.text_color, Setter::TextColor);
         if old.text_size_sp != new.text_size_sp
             && let Some(size) = new.text_size_sp
@@ -221,6 +239,37 @@ mod tests {
         assert!(
             plan.iter()
                 .all(|setter| setter.tier() == super::super::Tier::Cheap)
+        );
+    }
+
+    // --- theme ladder L2 followup (f1-01): the explicit background setter --
+
+    #[test]
+    fn a_background_color_alone_plans_exactly_one_setter() {
+        let old = decode("\"backgroundColor\":1");
+        let new = decode("\"backgroundColor\":2");
+        assert_eq!(
+            LabelProps::plan(&old, &new),
+            vec![Setter::BackgroundColor(2)]
+        );
+        assert_eq!(
+            LabelProps::plan(&new, &new),
+            vec![],
+            "an unchanged background plans nothing — the zero-FFI property"
+        );
+    }
+
+    #[test]
+    fn clearing_a_background_plans_nothing_no_platform_restore_call_exists() {
+        // Same shape as `TextColor`/`plan_color`'s own documented rule: an
+        // int-taking colour setter has no "restore the platform default"
+        // call, so a `Some` -> `None` transition plans nothing.
+        let with_bg = decode("\"backgroundColor\":5");
+        let without = decode("");
+        assert_eq!(LabelProps::plan(&with_bg, &without), vec![]);
+        assert_eq!(
+            LabelProps::plan(&without, &with_bg),
+            vec![Setter::BackgroundColor(5)]
         );
     }
 

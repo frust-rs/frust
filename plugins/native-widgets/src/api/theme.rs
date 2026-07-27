@@ -21,6 +21,7 @@
 //! | `accent_fill` | `scheme().primary_container` | `Button` background, `Switch` track tint, `Slider`/`ProgressBar` progress tint |
 //! | `on_accent_fill` | `scheme().on_primary_container` | `Button` text colour |
 //! | `body_text` | `scheme().on_surface` | `Label` text colour |
+//! | `surface_bg` | `scheme().surface` | `Label`/`Switch`/`Slider`/`ProgressBar` background (explicit — followup f1-01, see *Explicit backgrounds* below) |
 //! | `corner_radius_dp` | `shape.small` | `Button` background (via a `GradientDrawable`) |
 //! | `button_text_size_sp` | `type_scale.label_large.size` | `Button` text size |
 //! | `body_text_size_sp` | `type_scale.body_large.size` | `Label` text size |
@@ -51,6 +52,45 @@
 //! `Image` folds only `dark` — tinting an app-supplied photo from the theme
 //! would corrupt its content, and no builder method exposes an explicit tint
 //! yet (`crate::api::builders`' own "left for a future task" note).
+//!
+//! # Explicit backgrounds (followup f1-01): closing the light-theme
+//! dark-on-dark defect
+//!
+//! `VERIFY-P1.md` bar 3 (the Phase 1 Android device gate) found `Label`,
+//! `Switch`, `Slider` and `ProgressBar` all keeping a DARK background after a
+//! live flip to a light theme — worst for `Label`, whose text colour DID
+//! follow the theme (via the ordinary `TEXT_COLOR` setter below), landing
+//! dark text on a dark background. Root cause, confirmed against
+//! [`crate::android::theme`]'s own "Baked at construction, not live" doc: L1's
+//! night-qualified `Context` only resolves a control's platform-default
+//! background/chrome at CREATE time, so it stays pinned to whichever
+//! brightness the control was born under; only an EXPLICIT L2 setter
+//! re-applies live on a theme flip (the ordinary Props-diff-then-setter path
+//! every property already rides). `Button` never showed this defect because
+//! p1-07 already gave it an explicit background (`corner_radius_dp` row
+//! above, via `Setter::ThemedBackground`) — this row is the same fix widened
+//! to the four controls that had no explicit background setter at all.
+//!
+//! `surface_bg` (`scheme().surface`) is the role chosen for it: the same role
+//! `examples/glyph-catalog`'s own root `AppBackground` layer paints as the
+//! page's base fill, so a native control's background matches the page it
+//! sits on rather than floating as a mismatched rectangle — and, for `Label`
+//! specifically, so its background can never fail to contrast `body_text`
+//! (the two are resolved from the same `Theme` on the same rebuild, and
+//! `ColorScheme`'s surface/on_surface pairing is authored to contrast by
+//! construction, both brightnesses — see this module's own
+//! `text_bearing_controls_pair_a_contrasting_background_and_foreground_in_both_brightnesses`
+//! test). `Switch`/`Slider`/`ProgressBar` get the same field for the same
+//! "reads as part of the page, not a floating rectangle" reason, even though
+//! they carry no visible text of their own today. `Image` is deliberately
+//! excluded (previous paragraph) — a tint or a background fill are the same
+//! kind of risk to app-supplied photo content.
+//!
+//! This folds through the same `Setter::BackgroundColor` (`Tier::Relayout`)
+//! every other flat, non-`Button` background already would — no new
+//! [`crate::controls::Setter`] variant, since none of these four controls
+//! also carries a corner radius the way `Button`'s combined
+//! `Setter::ThemedBackground` needs.
 //!
 //! # Accent-role split (the catalog's most common accent bug —
 //! `docs/CODE_STANDARDS.md`'s Theming conventions)
@@ -118,6 +158,15 @@ pub(crate) struct ResolvedTheme {
     pub(crate) on_accent_fill: u32,
     /// `scheme().on_surface` — ordinary body-text ink.
     pub(crate) body_text: u32,
+    /// `scheme().surface` — the page-background role a native control's
+    /// EXPLICIT background resolves to (module doc's *Explicit backgrounds*
+    /// section, followup f1-01): `Label`/`Switch`/`Slider`/`ProgressBar`'s
+    /// background, so it re-paints live on a brightness flip instead of
+    /// pinning to L1's creation-time `Context` the way an unset (platform
+    /// default) background would. Not used by `Button` (already has its own
+    /// accent-filled `accent_fill` background) or `Image` (module doc's
+    /// no-tint rule).
+    pub(crate) surface_bg: u32,
     /// `shape.small`, dp.
     pub(crate) corner_radius_dp: f32,
     /// `type_scale.label_large.size`, sp.
@@ -144,6 +193,7 @@ pub(crate) fn resolve(theme: &Theme) -> ResolvedTheme {
         accent_fill: argb_u32(scheme.primary_container),
         on_accent_fill: argb_u32(scheme.on_primary_container),
         body_text: argb_u32(scheme.on_surface),
+        surface_bg: argb_u32(scheme.surface),
         corner_radius_dp: theme.shape.small as f32,
         button_text_size_sp: theme.type_scale.label_large.size,
         body_text_size_sp: theme.type_scale.body_large.size,
@@ -223,6 +273,7 @@ mod tests {
             "on_primary_container (ink atop the fill)"
         );
         assert_eq!(tokens.body_text, 0xFFF2_EAD9, "on_surface (body ink)");
+        assert_eq!(tokens.surface_bg, 0xFF16_1A23, "surface (bg-surface, dark)");
         assert_eq!(tokens.corner_radius_dp, 6.0, "shape.small (Glyph)");
         assert_eq!(tokens.button_text_size_sp, 12.5, "type_scale.label_large");
         assert_eq!(tokens.body_text_size_sp, 13.0, "type_scale.body_large");
@@ -252,6 +303,10 @@ mod tests {
             "on_primary_container (ink atop the fill)"
         );
         assert_eq!(tokens.body_text, 0xFF22_1D12, "on_surface (body ink)");
+        assert_eq!(
+            tokens.surface_bg, 0xFFFF_FFFF,
+            "surface (bg-surface, light — the lightest slot)"
+        );
         // Shape/type scales don't vary by brightness.
         assert_eq!(tokens.corner_radius_dp, 6.0);
         assert_eq!(tokens.button_text_size_sp, 12.5);
@@ -298,5 +353,72 @@ mod tests {
         // 0xFFFF0000 == 4_294_901_760.
         let red = Color::from_rgb8(0xFF, 0x00, 0x00);
         assert_eq!(argb_u32(red), 0xFFFF_0000);
+    }
+
+    // --- followup f1-01: the light-theme dark-on-dark regression guard -----
+
+    /// WCAG 2.x relative luminance, `[0.0, 1.0]`, of a packed ARGB colour —
+    /// test-only, used solely to compute [`contrast_ratio`] below.
+    fn relative_luminance(argb: u32) -> f64 {
+        let [_a, r, g, b] = argb.to_be_bytes();
+        let channel = |raw: u8| {
+            let c = f64::from(raw) / 255.0;
+            if c <= 0.039_28 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    /// WCAG contrast ratio between two packed ARGB colours (`>= 1.0`; `1.0`
+    /// is identical colours, no contrast at all) — the standard
+    /// `(lighter + 0.05) / (darker + 0.05)` formula, order-independent.
+    fn contrast_ratio(a: u32, b: u32) -> f64 {
+        let (la, lb) = (relative_luminance(a), relative_luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn text_bearing_controls_pair_a_contrasting_background_and_foreground_in_both_brightnesses() {
+        // VERIFY-P1.md bar 3: flipping to a light theme left `Label`'s
+        // background pinned dark (L1, baked at creation) while its text
+        // colour (L2) followed the theme live, landing dark text on a dark
+        // background — unreadable. A bare `!=` check (the p1-06 test style
+        // elsewhere in this crate) would NOT catch this: two colours can
+        // differ and still both be dark. A WCAG contrast-ratio floor would —
+        // this is that test, for every control this crate actually renders
+        // visible text on (`Button`, `Label`), across BOTH brightnesses.
+        const MIN_CONTRAST: f64 = 4.5; // WCAG AA, normal text
+
+        for brightness in [Brightness::Dark, Brightness::Light] {
+            let theme = Theme::glyph_baseline().with_brightness(brightness);
+            let t = resolve(&theme);
+
+            let label = contrast_ratio(t.body_text, t.surface_bg);
+            assert!(
+                label >= MIN_CONTRAST,
+                "{brightness:?}: Label's body_text {:#010x} over surface_bg \
+                 {:#010x} contrasts only {label:.2}:1 (need >= {MIN_CONTRAST}:1) \
+                 — exactly the dark-on-dark defect VERIFY-P1.md bar 3 found",
+                t.body_text,
+                t.surface_bg
+            );
+
+            // Button already had an explicit background (p1-07's
+            // `Setter::ThemedBackground`) — pinned here so a future change
+            // can't silently regress the one control this bug never hit.
+            let button = contrast_ratio(t.on_accent_fill, t.accent_fill);
+            assert!(
+                button >= MIN_CONTRAST,
+                "{brightness:?}: Button's on_accent_fill {:#010x} over \
+                 accent_fill {:#010x} contrasts only {button:.2}:1 (need >= \
+                 {MIN_CONTRAST}:1)",
+                t.on_accent_fill,
+                t.accent_fill
+            );
+        }
     }
 }

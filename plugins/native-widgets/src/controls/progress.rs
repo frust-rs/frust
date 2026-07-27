@@ -31,8 +31,8 @@
 //! create plan diffs against.
 
 use super::{
-    CONTENT_DESCRIPTION, INDETERMINATE, MAX, MIN, PROGRESS_TINT, Plan, Setter, VALUE, color,
-    owned_text, slot_of,
+    BACKGROUND_COLOR, CONTENT_DESCRIPTION, INDETERMINATE, MAX, MIN, PROGRESS_TINT, Plan, Setter,
+    VALUE, color, owned_text, plan_color, slot_of,
 };
 use crate::NativeWidgetError;
 use crate::registry::SlotId;
@@ -61,6 +61,12 @@ pub(crate) struct ProgressProps {
     pub(crate) max: i32,
     /// Spinner mode: `true` ignores the value entirely.
     pub(crate) indeterminate: bool,
+    /// Packed ARGB background fill (theme ladder L2 followup, f1-01 — see
+    /// `crate::controls::label::LabelProps::background_color`'s doc for the
+    /// full "why explicit" account), matching the page surface this
+    /// `ProgressBar` sits on. `None` leaves the platform's own default when
+    /// no theme is threaded.
+    pub(crate) background_color: Option<i32>,
     /// Packed ARGB bar tint, or `None` to restore the platform's.
     pub(crate) progress_tint: Option<i32>,
     /// The TalkBack label.
@@ -78,6 +84,7 @@ impl ProgressProps {
             min: 0,
             max: super::slider::PLATFORM_DEFAULT_MAX,
             indeterminate: false,
+            background_color: None,
             progress_tint: None,
             content_description: None,
         }
@@ -95,6 +102,7 @@ impl ProgressProps {
             min: int_or(params, MIN, 0),
             max: int_or(params, MAX, super::slider::PLATFORM_DEFAULT_MAX),
             indeterminate: params.flag(INDETERMINATE).unwrap_or(false),
+            background_color: color(params, BACKGROUND_COLOR),
             progress_tint: color(params, PROGRESS_TINT),
             content_description: owned_text(params, CONTENT_DESCRIPTION),
         })
@@ -130,6 +138,12 @@ impl ProgressProps {
         if old.indeterminate != new.indeterminate {
             plan.push(Setter::Indeterminate(new.indeterminate));
         }
+        plan_color(
+            &mut plan,
+            old.background_color,
+            new.background_color,
+            Setter::BackgroundColor,
+        );
         if old.progress_tint != new.progress_tint {
             plan.push(Setter::ProgressTint(new.progress_tint));
         }
@@ -320,6 +334,34 @@ mod tests {
         assert_eq!(
             ProgressProps::plan(&bar, &spinner),
             vec![Setter::Progress(6), Setter::Indeterminate(true)]
+        );
+    }
+
+    // --- theme ladder L2 followup (f1-01): the explicit background setter --
+
+    #[test]
+    fn a_background_color_alone_plans_exactly_one_setter() {
+        let old = decode("\"backgroundColor\":1");
+        let new = decode("\"backgroundColor\":2");
+        assert_eq!(
+            ProgressProps::plan(&old, &new),
+            vec![Setter::BackgroundColor(2)]
+        );
+        assert_eq!(
+            ProgressProps::plan(&new, &new),
+            vec![],
+            "an unchanged background plans nothing — the zero-FFI property"
+        );
+    }
+
+    #[test]
+    fn clearing_a_background_plans_nothing_unlike_a_tint() {
+        let with_bg = decode("\"backgroundColor\":5");
+        let without = decode("");
+        assert_eq!(ProgressProps::plan(&with_bg, &without), vec![]);
+        assert_eq!(
+            ProgressProps::plan(&without, &with_bg),
+            vec![Setter::BackgroundColor(5)]
         );
     }
 }
