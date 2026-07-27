@@ -26,10 +26,34 @@
 //! image, and reading the table gives exactly that.
 //!
 //! The payload is kept alive by a **hold** the control takes in `create`
-//! ([`claim_bytes`]) and gives back in `dispose` ([`release_bytes`]), so the
-//! table is bounded by the live image slots — and a slot that briefly has two
-//! instances (the runtime creates a replacement before disposing what it
-//! replaced) cannot have the older one delete the newer one's bytes.
+//! ([`claim_bytes`]) and gives back in `dispose` ([`release_bytes`]) — a
+//! counted pair that keeps a slot briefly holding two live instances (the
+//! runtime creates a replacement before disposing what it replaced) from
+//! having the older one delete the newer one's bytes.
+//!
+//! # The counted pair alone is NOT bounded (f2-03)
+//!
+//! An earlier version of this doc claimed the table was "bounded by the live
+//! image slots." It is not, and the false claim is part of why the leak
+//! shipped: paint culling can dispose a scrolled-off-screen slot
+//! (`DISPOSE_AFTER_MISSING_FRAMES` in `frust-shell-common::platform_view`)
+//! without ever running `View::teardown` on the still-mounted widget. The
+//! next rebuild republishes into a fresh, zero-holder entry the counted pair
+//! never released — so when `View::teardown` eventually does run (navigating
+//! away), it retires a slot the host already disposed at the culling step,
+//! and that `Dispose` command never reaches `release_bytes`. The entry then
+//! leaks for the process lifetime; slot ids are never reused, so nothing ever
+//! reclaims it.
+//!
+//! [`retire`] is the actual bound: registered via `on_cleanup` in
+//! `NativeImageView`'s `Component::init` (`api::builders`,
+//! `docs/CODE_STANDARDS.md`'s "Teardown disposes the component's `Owner`;
+//! register cleanup via `on_cleanup`, not `Drop`"), it removes the slot's
+//! entry unconditionally exactly once per mounted Component — independent of
+//! however many times (if any) the native create/dispose pair actually ran in
+//! between. The counted [`claim_bytes`]/[`release_bytes`] pair stays as an
+//! optimization (it frees a payload the instant the last native holder goes
+//! away in the ordinary case), not as the thing that bounds the table.
 //!
 //! # Decode once per bytes identity, never per rebuild
 //!
@@ -245,9 +269,10 @@ pub(crate) fn publish_bytes(slot: SlotId, bytes: Arc<[u8]>) -> u64 {
 /// once it has successfully built its view.
 ///
 /// An entry that was published but never claimed (a slot whose `Create`
-/// command never ran — the app unmounted it inside a single frame) stays until
-/// the same slot publishes again. That is the one bounded residue of this
-/// side channel, and it is one payload per such slot.
+/// command never ran — the app unmounted it inside a single frame) stays
+/// until the same slot publishes again, or the Component tears down —
+/// [`retire`] (the module doc's f2-03 fix) reaps this case too, not only the
+/// counted holders-reach-zero path.
 pub(crate) fn claim_bytes(slot: SlotId) {
     PUBLISHED.with(|table| {
         if let Some(entry) = table.borrow_mut().get_mut(&slot) {
@@ -268,6 +293,26 @@ pub(crate) fn release_bytes(slot: SlotId) {
         if entry.holders == 0 {
             table.remove(&slot);
         }
+    });
+}
+
+/// Remove `slot`'s published entry unconditionally, whatever its holder count
+/// — the Component-teardown reaper (module doc's f2-03 fix). Registered via
+/// `on_cleanup` in `NativeImageView`'s `Component::init` (`api::builders`),
+/// so it runs exactly once per mounted Component regardless of how many
+/// times (if any) the native `create`/`dispose` pair ran on the platform side
+/// in between — a culled slot that never ran `View::teardown`, then quietly
+/// republished, is exactly the case the counted [`claim_bytes`]/
+/// [`release_bytes`] pair alone cannot see.
+///
+/// Idempotent: a slot the counted path already emptied is a silent no-op
+/// (`HashMap::remove` on a missing key), and a [`claim_bytes`] arriving late
+/// — after this already ran — finds nothing to claim and no-ops too (its own
+/// `get_mut` on a missing entry, `crate::controls::image`'s existing
+/// contract). No ordering machinery needed between the two paths.
+pub(crate) fn retire(slot: SlotId) {
+    PUBLISHED.with(|table| {
+        table.borrow_mut().remove(&slot);
     });
 }
 
@@ -592,5 +637,118 @@ mod tests {
     fn releasing_a_slot_nobody_published_is_a_silent_no_op() {
         release_bytes(908);
         assert!(decode(908, "").bytes.as_slice().is_none());
+    }
+
+    // --- f2-03 regression: the culled-dispose-then-republish leak ----------
+    //
+    // The counted `claim_bytes`/`release_bytes` pair alone cannot see this:
+    // paint culling can dispose a scrolled-off slot without the widget ever
+    // running `View::teardown`, so a still-mounted widget republishes into a
+    // fresh, zero-holder entry the counted pair never releases. `retire`
+    // (registered via `on_cleanup` in `NativeImageView::init`,
+    // `api::builders`) is the actual fix — a Component-teardown reaper
+    // independent of the native create/dispose lifecycle.
+
+    #[test]
+    fn the_culled_dispose_then_republish_leak_is_reaped_on_component_teardown() {
+        // Step 1: mount — publish rev R1, `Create` lands, `claim_bytes` takes
+        // the hold (holders=1).
+        let slot = 950;
+        let r1 = publish_bytes(slot, payload(1));
+        claim_bytes(slot);
+        assert_eq!(decode(slot, "").bytes.rev(), r1, "R1 is live after claim");
+
+        // Step 2: scrolled out of view — paint culling suppresses the frame
+        // publish, and after `DISPOSE_AFTER_MISSING_FRAMES` the differ emits
+        // `Dispose` -> `nativeDisposeControl` -> `release_bytes` ->
+        // holders=0 -> entry removed. The widget stays mounted (a culled
+        // slot never runs `View::teardown`) — nothing here calls `retire`.
+        release_bytes(slot);
+        assert!(
+            decode(slot, "").bytes.as_slice().is_none(),
+            "the culled dispose emptied the table via the ordinary counted path"
+        );
+
+        // Step 3: still mounted, the next rebuild republishes — a fresh
+        // entry at rev R2 with holders: 0 (the `None => 0` fallback in
+        // `publish_bytes`). Nothing native has claimed R2.
+        let r2 = publish_bytes(slot, payload(2));
+        assert_ne!(r1, r2);
+        assert_eq!(
+            decode(slot, "").bytes.rev(),
+            r2,
+            "R2 is published but has zero holders — nothing native ever \
+             claimed it after the culled dispose"
+        );
+
+        // Steps 4/5: navigate away. `View::teardown` disposes the
+        // Component's owner, running the `on_cleanup` `NativeImageView`
+        // registered in `init` — which calls `retire(slot)` unconditionally,
+        // regardless of the (already-zero) holder count.
+        retire(slot);
+        assert!(
+            decode(slot, "").bytes.as_slice().is_none(),
+            "retire reaps the R2 entry on Component teardown even though \
+             nothing native ever claimed it — without `retire`, R2 would \
+             leak for the process lifetime (the shipped f2-03 defect)"
+        );
+    }
+
+    #[test]
+    fn the_ordinary_counted_path_still_works_with_no_premature_removal_while_a_claim_is_live() {
+        // A ordinary, non-culled mount: publish + claim, no `retire` in
+        // sight (the widget is still mounted, so `on_cleanup` has not run).
+        // Adding `retire` alongside the counted pair must not change this
+        // path's own behaviour at all.
+        let slot = 951;
+        let rev = publish_bytes(slot, payload(3));
+        claim_bytes(slot);
+        assert_eq!(
+            decode(slot, "").bytes.rev(),
+            rev,
+            "a live native claim must not be prematurely removed"
+        );
+        release_bytes(slot);
+        assert!(
+            decode(slot, "").bytes.as_slice().is_none(),
+            "the ordinary counted release path still empties the table on its own"
+        );
+    }
+
+    #[test]
+    fn retire_is_unconditional_and_reaps_a_live_claim_too() {
+        // `retire` is not the counted path — it removes the entry regardless
+        // of the holder count, because Component teardown must reap the
+        // bytes even if a native instance still holds a claim (e.g. a
+        // component torn down mid-navigation, before its own `Dispose`
+        // command ever lands).
+        let slot = 952;
+        publish_bytes(slot, payload(4));
+        claim_bytes(slot);
+        retire(slot);
+        assert!(decode(slot, "").bytes.as_slice().is_none());
+
+        // A late `release_bytes` for the claim taken before `retire` ran is a
+        // silent no-op — double-removal is harmless (both paths tolerate a
+        // missing entry).
+        release_bytes(slot);
+        assert!(decode(slot, "").bytes.as_slice().is_none());
+    }
+
+    #[test]
+    fn retire_on_an_already_empty_slot_is_a_silent_no_op() {
+        retire(953);
+        assert!(decode(953, "").bytes.as_slice().is_none());
+    }
+
+    #[test]
+    fn a_late_claim_after_retire_no_ops_rather_than_resurrecting_the_entry() {
+        let slot = 954;
+        publish_bytes(slot, payload(5));
+        retire(slot);
+        // A late `claim_bytes` arriving after teardown already no-ops on a
+        // missing entry — no machinery needed to order the two paths.
+        claim_bytes(slot);
+        assert!(decode(slot, "").bytes.as_slice().is_none());
     }
 }

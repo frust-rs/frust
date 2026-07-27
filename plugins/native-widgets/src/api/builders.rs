@@ -52,8 +52,8 @@ use std::sync::{Arc, Once};
 
 use frust::glyph::{AlertVariant, alert};
 use frust::{
-    PlatformViewView, ResolvedSurfaceMode, SizedBox, Theme, platform_view, resolved_surface_mode,
-    use_context,
+    PlatformViewView, ResolvedSurfaceMode, SizedBox, Theme, on_cleanup, platform_view,
+    resolved_surface_mode, use_context,
 };
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentWidget, LayoutCtx,
@@ -972,7 +972,18 @@ impl Component for NativeImageView {
     type State = SlotId;
 
     fn init(&self) -> SlotId {
-        next_local_slot()
+        let slot = next_local_slot();
+        // Tie the publish-table entry's lifetime to this Component, not to
+        // the native create/dispose lifecycle (f2-03,
+        // `docs/CODE_STANDARDS.md`'s "Teardown disposes the component's
+        // `Owner`; register cleanup via `on_cleanup`, not `Drop`"). `init`
+        // runs exactly once, under this component's own `Owner`, so
+        // `on_cleanup` here fires exactly once when that owner disposes —
+        // regardless of whether paint culling already ran the counted
+        // `claim_bytes`/`release_bytes` pair to zero and back on the
+        // platform side in between (`crate::controls::image`'s module doc).
+        on_cleanup(move || image::retire(slot));
+        slot
     }
 
     fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
