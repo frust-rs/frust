@@ -33,7 +33,10 @@
 //!
 //! **The `EVENT_KIND_*` constants below are LAW, shared verbatim with
 //! `FrustNativeListener.kt`'s companion `KIND_*` constants — edit both
-//! tables together.**
+//! tables together.** This is mechanically enforced, not just a comment:
+//! `crates/frust/tests/plugin_kotlin_conformance.rs` scans both files and
+//! fails on any drift in the `KIND_*`/`EVENT_KIND_*` values or in
+//! [`pack_value_changed`]/[`unpack_value_changed`]'s mask/shift contract.
 //!
 //! # Slider values are platform-space until they leave this module
 //!
