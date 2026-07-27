@@ -348,6 +348,34 @@ pub(crate) mod platform {
     //! `onTintColor` as the closest available analogue, and an app that tints
     //! the track sees it on the on-state only. That is a UIKit surface limit,
     //! not a mapping choice this module could make differently.
+    //!
+    //! # `thumbTintColor` is silently ignored on iOS 26 — a platform bug
+    //!
+    //! Found by the p2-05 device gate on iOS 26.5.2: the `UISwitch` thumb
+    //! renders the system white **whatever** `Setter::ThumbTint` assigns,
+    //! while the `onTintColor` set on the very next line still works. The
+    //! theme's `accent_ink` therefore does not reach the thumb on that OS, and
+    //! the control carries its theme through the track alone.
+    //!
+    //! **Not our bug, and the evidence is on-device rather than inferred**:
+    //! `Slider`'s Apple arm sets the *same* `thumbTintColor` property, through
+    //! the *same* `apply` path, under the *same* `overrideUserInterfaceStyle`
+    //! pin — and its thumb tints correctly (brown in light, amber in dark,
+    //! tracking `accent_ink` exactly). Same code, same property, different
+    //! UIKit class ⇒ the difference belongs to `UISwitch`. That also rules out
+    //! the tempting explanation that pinning the interface style wipes the
+    //! tint; it would have wiped the slider's too. Corroborated externally by
+    //! several independent reproductions against iOS 18.6, where the same
+    //! assignment works; Apple's docs carry no deprecation and no release
+    //! note, so it reads as an unacknowledged iOS 26 "Liquid Glass" rendering
+    //! regression.
+    //!
+    //! **The assignment below is deliberately KEPT.** It is correct on every
+    //! OS that honours it and starts working again for free if Apple fixes
+    //! it; deleting it would code around someone else's bug while silently
+    //! dropping the theme on the OSes where it does work. Do not "fix" the
+    //! white thumb here — the only workaround found is a non-native custom
+    //! thumb, which forfeits the point of this plugin.
 
     use objc2::MainThreadMarker;
     use objc2::rc::Retained;
