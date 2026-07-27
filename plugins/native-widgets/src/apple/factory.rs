@@ -162,7 +162,7 @@ use objc2_ui_kit::UIView;
 use crate::NativeWidgetError;
 use crate::apple::NativeCtx;
 use crate::apple::theme;
-use crate::runtime::{self, UpdateOutcome};
+use crate::runtime::{self, Params, UpdateOutcome};
 
 /// The Objective-C runtime name this crate's factory class registers under.
 ///
@@ -424,10 +424,27 @@ fn create_control(mtm: MainThreadMarker, params: &str) -> Option<Retained<UIView
 
 /// The typed half of `updateParams:paramsJson:`.
 fn update_control(mtm: MainThreadMarker, params: &str) {
+    let dark = theme::brightness_is_dark(params);
     runtime::with_runtime(|runtime| {
         let mut ctx = NativeCtx::new(mtm);
         match runtime.update_params(&mut ctx, params) {
-            Ok(UpdateOutcome::Applied | UpdateOutcome::Unchanged) => {}
+            Ok(UpdateOutcome::Applied | UpdateOutcome::Unchanged) => {
+                // L1 is re-pinned on EVERY update, not only at create
+                // (p2-05 gate finding). `overrideUserInterfaceStyle` is a
+                // plain mutable `UIView` property, so unlike Android's
+                // `Context` there is nothing forcing this to be baked —
+                // see `crate::apple::theme`'s module doc. Re-pinning here is
+                // what keeps a control that was culled and RECREATED under a
+                // different brightness from diverging from its never-culled
+                // siblings. `Unchanged` re-pins too: the brightness lives on
+                // the wire, not in the diffed `Props`, so a props-equal
+                // update can still carry a new brightness.
+                if let Ok((_, slot)) = Params::new(params).identity() {
+                    if let Some(instance) = runtime.instance(slot) {
+                        theme::apply_user_interface_style(instance.view().view(mtm), dark);
+                    }
+                }
+            }
             Ok(UpdateOutcome::UnknownSlot) => {
                 log::debug!("frust-native-widgets: updateParams for a slot with no instance");
             }

@@ -39,17 +39,35 @@
 //! dynamic colours against the override without needing the property set
 //! again.
 //!
-//! # Baked at construction, not live — the same documented limitation
+//! # LIVE on this arm — iOS does not share Android's L1 limitation
 //!
-//! Exactly like Android's L1 (`crate::android::theme`'s own "Baked at
-//! construction, not live" section): [`apply_user_interface_style`] is
-//! called only from `create_control`, never from `update_control`. A live
-//! in-place brightness toggle does not recreate the control, so the
-//! override — and therefore how the *platform's own* chrome (nothing this
-//! crate's L2 setters explicitly colour) resolves — stays pinned to
-//! whichever brightness the control was first created under. Mirroring the
-//! *contract*, not inventing a stronger one: PLAN.md's Theme-mismatch risk
-//! row records this the same way for both platforms.
+//! Android's L1 genuinely must bake: `createConfigurationContext` yields a
+//! `Context` consumed *at View construction*, so a live brightness toggle
+//! cannot re-resolve a control's platform chrome without recreating it
+//! (`crate::android::theme`'s "Baked at construction, not live").
+//!
+//! **`overrideUserInterfaceStyle` has no such constraint** — it is a plain
+//! mutable `UIView` property, settable at any time, and setting it
+//! re-resolves the whole subtree. So [`apply_user_interface_style`] is called
+//! from **both** `create_control` and `update_control`.
+//!
+//! This module was originally written the Android way, mirroring that
+//! contract rather than the platform, and **the p2-05 device gate found the
+//! bug that caused**: a control culled off-screen and later RECREATED adopts
+//! whatever brightness is current at recreate time, while its never-culled
+//! siblings keep the one they were born under — so the two diverge. On the
+//! reported repro (launch dark, switch to light, run the 50-slot scroll
+//! stress, scroll back) the recreated `UISwitch` returned Light-pinned among
+//! Dark-pinned peers; toggling back to dark then drew its default thumb
+//! accent-on-accent, i.e. invisible.
+//!
+//! Re-pinning on update fixes that by making "which brightness is this
+//! control pinned to" a function of the CURRENT theme rather than of when the
+//! control happened to be constructed. It also makes an in-place brightness
+//! toggle re-theme platform chrome live on iOS — strictly better than the
+//! Android arm, which is why PLAN.md's Theme-mismatch risk row no longer
+//! applies symmetrically. **Do not "restore symmetry" by reverting this**;
+//! the asymmetry belongs to the platforms, not to a defect.
 
 use objc2_ui_kit::{UIUserInterfaceStyle, UIView};
 
@@ -69,8 +87,9 @@ pub(crate) fn brightness_is_dark(params_json: &str) -> bool {
 
 /// L1: pin `view`'s (and its whole subtree's) resolved brightness via
 /// `overrideUserInterfaceStyle` — see the module doc for why this is a
-/// per-view property set after construction rather than a Context supplied
-/// to one, and why it is called exactly once, from `create_control` only.
+/// per-view property set after construction rather than a `Context` supplied
+/// to one, and why it is called from **both** `create_control` and
+/// `update_control` on this arm (the p2-05 recreate-divergence fix).
 pub(crate) fn apply_user_interface_style(view: &UIView, dark: bool) {
     let style = if dark {
         UIUserInterfaceStyle::Dark
