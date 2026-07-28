@@ -71,6 +71,38 @@
 //! `rebuild` re-applies the app value), while the native ones have to be
 //! driven back across the wire a frame later.
 //!
+//! ## R0-15: `content_description` is a deliberate, LABELED test-only affordance
+//!
+//! `content_description` is Android's accessibility label — TalkBack would
+//! announce "…refused 4 times" — so this needed an actual investigation, not
+//! an assumption. Enumerating `SwitchProps`'s and `SliderProps`'s fields
+//! (`plugins/native-widgets/src/controls/switch.rs` / `slider.rs`) against
+//! the three constraints (moves the wire when changed, observable on-device,
+//! not an accessibility surface) rules out every other candidate common to
+//! both controls:
+//!
+//! - **`checked`/`value`** is the value under test — writing a decoy into it
+//!   would BE the bug this affordance exists to reproduce.
+//! - **`enabled`** moves the wire and is observable, but flipping it disables
+//!   the control mid-interaction, breaking the very round trip a person is
+//!   trying to exercise.
+//! - **`thumb_tint`/`track_tint`/`progress_tint`** move the wire and are
+//!   observable, but [`theme_toggle_demo`] already drives these SAME props on
+//!   this SAME page to demonstrate live re-theming (module doc's *Theme
+//!   ladder*) — reusing them for a refusal count would visually conflate two
+//!   unrelated demonstrations fighting over the same pixels.
+//! - **Slider's `min`/`max`** move the wire, but rescaling the range visibly
+//!   relocates the thumb — a worse side effect than the tints above.
+//!
+//! No candidate clears all three constraints for both controls. `enabled` and
+//! the tints are effectively worse hacks, not better ones —
+//! `content_description` is the only field whose abuse doesn't visibly
+//! corrupt some OTHER thing this page is also trying to show, which is why it
+//! was chosen. That does not make it a pattern to copy: this label is now
+//! marked, on-screen ([`page`]'s write-back block) and here, as a **test-only
+//! affordance** — a real app must never carry test telemetry in its
+//! accessibility label, since a screen reader user hears every word of it.
+//!
 //! # The composite lives in the plugin, and mounts behind a toggle (p3-08)
 //!
 //! p3-02 shipped native-subtree support and the generic
@@ -715,6 +747,13 @@ fn composite_demo(title: String, background: Color, ink: Color) -> AnyView<Catal
 /// the page's resting slot count is unchanged. The copy states the expected
 /// `Total live:` reading in both positions, so a person holding the phone can
 /// check the one number that proves the design (7, not 9).
+///
+/// **Always returns exactly two elements (R0-7).** [`page`]'s `children` is an
+/// unkeyed [`FlexView`], reconciled positionally, and this fn's output sits
+/// BEFORE [`gate_harness_block`]'s several elements — a 1-vs-2 return shape
+/// would shift every later child's position on every toggle, diffing each
+/// against a different widget type. The hidden branch returns a zero-height
+/// placeholder instead of nothing, closing that cascade at negligible cost.
 fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogState>> {
     let intro = block(vec![
         inflexible(label(
@@ -734,6 +773,18 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogSta
              That number is the proof frust sees one opaque slot. The title tracks the slider \
              above, so its `update` path runs live; light/dark re-themes it through the same \
              UpdateParams diff as the six controls.",
+        )),
+        gap(6.0),
+        // R0-14/R1-e: the card's own copy explains the architecture but never
+        // told a device tester the buttons do nothing when tapped — confirmed
+        // on a real OnePlus 9 (press feedback, no effect). Wording matches
+        // `plugins/native-widgets/src/demo.rs`'s "No event wiring, and why"
+        // section, the canonical phrasing for this fact.
+        inflexible(caption(
+            "The Primary and Dismiss buttons below are DISPLAY-ONLY: you'll see the platform's \
+             own press feedback, and nothing else happens. No `NativeComponent` can receive \
+             events in this build \u{2014} that's not a bug in this card, it's a deferred Phase \
+             4 gap (`plugins/native-widgets/src/demo.rs`'s \u{201c}No event wiring, and why\u{201d}).",
         )),
         gap(6.0),
         inflexible(any(button(
@@ -758,8 +809,15 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogSta
         )),
     ]);
 
-    let mut sections = vec![intro];
-    if visible {
+    // R0-7: always return exactly two elements, visible or not — a
+    // stable-length shape, not a 1-vs-2 one. `page`'s `children` list is
+    // unkeyed (`FlexView` reconciles by position), and this fn sits BEFORE
+    // `gate_harness_block`'s several blocks, so a 1-vs-2 shape shifted every
+    // later child's position on every toggle, forcing each into a fresh diff
+    // against a different widget type. Judged worth the small fix: the
+    // placeholder is a zero-height `SizedBox` (`gap(0.0)`, this file's own
+    // helper), so it costs nothing at rest and does not restructure the page.
+    let second = if visible {
         // Registered lazily rather than at app init: nothing else on this page
         // needs the component, and registration is idempotent-by-latch.
         ensure_demo_registered();
@@ -767,13 +825,15 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogSta
         // nothing, which is the whole point of the default-off toggle.
         let theme = use_context::<Theme>().unwrap_or_else(Theme::glyph_baseline);
         let scheme = theme.scheme();
-        sections.push(block(vec![inflexible(composite_demo(
+        block(vec![inflexible(composite_demo(
             format!("Composite \u{2014} slider {slider_value}"),
             scheme.surface_container,
             scheme.on_surface,
-        ))]));
-    }
-    sections
+        ))])
+    } else {
+        gap(0.0)
+    };
+    vec![intro, second]
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,6 +1218,16 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
              slider",
             if rejecting { "REJECT" } else { "ACCEPT" }
         ))),
+        gap(4.0),
+        // R0-15: labeled plainly so nobody copies this into a real app — see
+        // the module doc's "R0-15" section for the investigation that ruled
+        // out every non-a11y alternative.
+        inflexible(caption(
+            "TEST-ONLY: while REJECT is on, the refusal count above also rides each control's \
+             accessibility label (`content_description`), the only prop that moves the wire \
+             without disturbing something else this page also demonstrates. A screen reader \
+             would announce it \u{2014} never do this in a real app.",
+        )),
     ]);
 
     let button_block = pair_row(
