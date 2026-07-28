@@ -202,14 +202,14 @@ record "huddle/clean-signals-frust gate not run — no clean-signals-rs sibling 
 instead, and do not touch either directory without the sibling in place. This gate is
 separate from `frust build apk`/`run`'s pipeline gate (*Run*).
 
-The `cpu-tier` feature (experimental `vello_cpu` render backend, non-default — see
-*Version-Pin Policy*) is headless and needs no GPU, but isn't compiled by the standard
-chain above since the feature is off by default; run it directly when touching
-`frust-render`:
-
-```bash
-cargo test -p frust-render --features cpu-tier
-```
+**Non-default features are not compiled by the chain above.** `frust-render`'s
+`cpu-tier` (experimental `vello_cpu` render backend — see *Version-Pin Policy*) is
+headless and needs no GPU: run `cargo test -p frust-render --features cpu-tier` when
+touching `frust-render`. `frust-native-widgets`' `demo-components` is a composite
+`NativeComponent` demo of real JNI/UIKit view construction, shipped inside the plugin
+rather than in `examples/glyph-catalog` (which merely switches it on) because an app
+crate cannot implement that trait without raw `jni`/`objc2-ui-kit` deps the plugin does
+not re-export; the mobile compile gates below are the only thing that builds it.
 
 **Manual/gated tests** (not part of the default `cargo test --workspace` run — each
 requires local hardware or is slow, and is marked `#[ignore]` with a reason):
@@ -232,25 +232,25 @@ cargo test -p frust-cli --test create_ios -- --ignored
 # real Gradle build — needs Android SDK/NDK; ~1 minute.
 cargo test -p frust-cli --test build_e2e -- --ignored
 
-# Android compile gate (no device needed): the whole facade graph must
-# compile for the Android target.
+# Android compile gate (no device needed): the whole facade graph must compile for Android.
 cargo check --target aarch64-linux-android -p frust
 cargo check --target aarch64-linux-android -p frust-plugin
 cargo check --target aarch64-linux-android -p frust-shared-preferences
 cargo check --target aarch64-linux-android -p frust-secure-storage
 cargo check --target aarch64-linux-android -p frust-camera
 cargo check --target aarch64-linux-android -p frust-native-widgets
+cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
-# iOS compile gate (no device/Xcode needed — a type-check, runs on Linux
-# too; only building/running an iOS app needs macOS, see Prerequisites):
-# the whole facade graph must compile for the iOS Simulator target
-# (frust-secure-storage also gates the real device target).
+# iOS compile gate (a type-check, no device/Xcode needed — runs on Linux too; only
+# building/running an iOS app needs macOS, see Prerequisites): the whole facade graph
+# must compile for the Simulator target (frust-secure-storage also gates the device target).
 cargo check --target aarch64-apple-ios-sim -p frust
 cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences
 cargo check --target aarch64-apple-ios-sim -p frust-secure-storage
 cargo check --target aarch64-apple-ios -p frust-secure-storage
 cargo check --target aarch64-apple-ios-sim -p frust-camera
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets
+cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
 ```
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
