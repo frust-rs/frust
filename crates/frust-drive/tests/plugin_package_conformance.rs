@@ -108,9 +108,14 @@ fn rel(path: &Path) -> String {
 }
 
 fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
+    // Loud, not silent (task f1-02): a swallowed `read_dir` error here used to
+    // make `all_plugin_files()` return an empty `Vec` if `plugins/` (or any
+    // subdirectory reached during the recursion) were missing, renamed, or
+    // unreadable — and an empty scan made every assertion below pass
+    // vacuously. Precedent: `print_free_cores.rs`'s own `walk` panics the same
+    // way.
+    let entries =
+        fs::read_dir(dir).unwrap_or_else(|e| panic!("reading directory {}: {e}", dir.display()));
     for entry in entries {
         let path = entry
             .unwrap_or_else(|e| panic!("dir entry under {}: {e}", dir.display()))
@@ -156,21 +161,48 @@ fn declares_bare_dev_frust(contents: &str) -> bool {
 
 #[test]
 fn no_plugin_kotlin_uses_the_bare_dev_frust_package() {
-    let mut found_bare: Vec<String> = Vec::new();
-
-    for path in all_plugin_files() {
+    let all_files = all_plugin_files();
+    let kotlin_files: Vec<&PathBuf> = all_files
+        .iter()
         // Kotlin-only, deliberately: the bare-`dev.frust`-package exception
         // this test pins is a JNI-export-symbol-naming concept with no Swift
         // equivalent (see this file's module doc, "Scope: Kotlin only, by
         // design"). Every non-`.kt` file under `plugins/**` — Swift included
         // — is walked above and skipped here on purpose, not silently missed.
-        if path.extension().is_none_or(|ext| ext != "kt") {
-            continue;
-        }
+        .filter(|path| path.extension().is_some_and(|ext| ext == "kt"))
+        .collect();
+
+    // Liveness guard (task f1-02): the two assertions below are satisfied
+    // vacuously by an empty set, so a scan that silently walked nothing would
+    // make this test pass while proving nothing — the same defect class p3-04
+    // was written to eliminate, reintroduced when the allowlist below went
+    // empty (p3-03 closed the one legitimate exception; see the module doc).
+    // This has to hold for the scan's current, real shape: as of this writing
+    // `plugins/secure-storage`, `plugins/camera`, and
+    // `plugins/native-widgets` each ship real `.kt` files under `plugins/**`,
+    // so "zero `.kt` files scanned" is never legitimate — it means either
+    // `plugins/` was walked from the wrong root, or a plugin's Android Kotlin
+    // moved somewhere `all_plugin_files()` no longer reaches. If a future
+    // change legitimately drops every plugin's Kotlin (all platform plugins
+    // going Swift/iOS-only, say), this guard must be revisited deliberately,
+    // not silently satisfied.
+    assert!(
+        !kotlin_files.is_empty(),
+        "scanned {} file(s) under plugins/** but found zero `.kt` files among them — this test \
+         cannot prove anything about the bare `dev.frust` package rule without seeing real \
+         Kotlin. Either `plugins/` was walked from the wrong root, or a plugin's Android Kotlin \
+         moved somewhere all_plugin_files() no longer reaches; this is a liveness guard for the \
+         scan itself, separate from (and prior to) the bare-package check below",
+        all_files.len(),
+    );
+
+    let mut found_bare: Vec<String> = Vec::new();
+
+    for path in kotlin_files {
         let contents =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         if declares_bare_dev_frust(&contents) {
-            found_bare.push(rel(&path));
+            found_bare.push(rel(path));
         }
     }
 
