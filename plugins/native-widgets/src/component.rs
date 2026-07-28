@@ -78,17 +78,25 @@
 //!    A listener that fires while the runtime is already borrowed — the
 //!    classic case is a setter provoking its own listener synchronously from
 //!    inside `update` — is **dropped with a warning**, not delivered
-//!    re-entrantly. The `&self` it runs against is re-read from the staging
-//!    table on **every** dispatch, not only when props changed (`dispose` too;
-//!    `BridgeState::refresh_component`) — the props diff gate skips `update`
+//!    re-entrantly. Those ordering and re-entrancy guarantees are the
+//!    runtime's own, true of the internal `NativeWidget` path the six built-in
+//!    controls take — and **not observable through this trait yet**: no
+//!    production path attaches a listener to a view a component built, so this
+//!    step of the lifecycle currently never runs for a [`NativeComponent`].
+//!    See [`NativeComponent::on_event`], which owns the detail and names the
+//!    deferred Phase 4 gap.
+//!
+//!    **The staged-`&self` re-read is a separate guarantee, it is
+//!    component-only, and its `dispose` half is live today.** The `&self`
+//!    carried into [`on_event`](NativeComponent::on_event) and
+//!    [`dispose`](NativeComponent::dispose) is re-read from the staging table
+//!    on **every** dispatch, not only when props changed
+//!    (`BridgeState::refresh_component`) — the props diff gate skips `update`
 //!    on an equal-props rebuild, so anything less would run a stale rebuild's
-//!    closures. Every one of those ordering and re-entrancy guarantees is the
-//!    runtime's own and is true of the internal `NativeWidget` path the six
-//!    built-in controls take. **They are not observable through this trait
-//!    yet**: no production path attaches a listener to a view a component
-//!    built, so this step of the lifecycle currently never runs for a
-//!    [`NativeComponent`] — see [`NativeComponent::on_event`], which owns the
-//!    detail and names the deferred Phase 4 gap.
+//!    closures. This has no counterpart on the six controls' path, which
+//!    decodes `params_json` and never reads the staging table. Unlike
+//!    `on_event`, `dispose` **does** reach a component in this build, so the
+//!    re-read is load-bearing now — see [`NativeComponent::dispose`].
 //! 5. **`dispose` is best-effort-prompt, and may be late.** See *Disposal
 //!    promptness* below.
 //!
@@ -330,7 +338,8 @@ pub trait NativeComponent: 'static {
         new: &Self::Props,
     );
 
-    /// A platform listener fired for this slot (main thread).
+    /// What a platform listener *would* deliver for this slot — but nothing
+    /// attaches one in this build, so it never fires. See below.
     ///
     /// # Nothing reaches this in the current build
     ///
@@ -373,6 +382,25 @@ pub trait NativeComponent: 'static {
     /// Defaults to doing nothing, which is correct whenever dropping `State`
     /// already releases everything (the iOS arm's `Retained` fields, an
     /// Android state whose only refs are its own `Global`s).
+    ///
+    /// # Which `&self` this runs against
+    ///
+    /// The most recently published one — re-read from the staging table on
+    /// dispatch, not the value whose `create` produced `state`. Those differ
+    /// whenever a rebuild republished an equal `Props` with a different
+    /// component value (new closures, a different `Rc`): the props diff gate
+    /// skips `update` entirely on an equal-props rebuild, so without the
+    /// re-read this would run a stale rebuild's closures.
+    ///
+    /// One exception, and it is the *common* teardown path: when the mounting
+    /// widget's `on_cleanup` has already reaped the staging entry, the
+    /// retained value is kept instead. That is correct — a torn-down widget
+    /// published nothing newer. The re-read matters for a `dispose` that
+    /// reaches a **still-mounted** slot: the differ's missing-frame-streak
+    /// culling backstop, and `suspend_all` on surface teardown.
+    ///
+    /// Unlike [`on_event`](Self::on_event), this method **does** run in the
+    /// current build.
     fn dispose(&self, ctx: &mut ComponentCtx<'_, '_, '_>, state: Self::State) {
         let _ = (ctx, state);
     }
