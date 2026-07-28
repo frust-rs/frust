@@ -58,6 +58,22 @@
 //! Both parity checks above survive untouched: they guard a genuinely
 //! independent duplication (Kotlin arithmetic vs Rust arithmetic) that
 //! packaging does not remove.
+//!
+//! # Package/class-name ↔ JNI-export-symbol parity (task m-03/R1-d)
+//!
+//! p3-03 renamed the package to `dev.frust.nativewidgets` and the exports to
+//! `Java_dev_frust_nativewidgets_*`. `android/ctx.rs`'s `LISTENER_CLASS`, the
+//! Android-cfg'd `VIEW_TYPE` in `api/builders.rs`, and every `Java_*` export
+//! name in `android/mod.rs` are matched to the two Kotlin files' `package`/
+//! `class` declarations **by hand only** — `android/ctx.rs`'s own doc names
+//! the failure mode: a mismatch surfaces only at runtime, as a failed class
+//! lookup the first time an interactive control is created, and no cargo gate
+//! compiles Kotlin (see this file's opening paragraph). [`factory_class_name_matches_between_kotlin_and_rust`],
+//! [`listener_class_name_matches_between_kotlin_and_rust`], and
+//! [`java_export_symbols_match_reconstructed_package_and_class_names`]
+//! reconstruct the expected class/symbol names from the two Kotlin files'
+//! `package`/`class` lines and pin the Rust side against that reconstruction,
+//! the same shape as [`kind_constants_match_between_kotlin_and_rust`] above.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -84,6 +100,20 @@ const RUST_EVENTS_PATH: &str = "plugins/native-widgets/src/events.rs";
 /// byte-identity section).
 const KOTLIN_LISTENER_PATH: &str = "plugins/native-widgets/platform/android/src/main/kotlin/\
                                     dev/frust/nativewidgets/FrustNativeListener.kt";
+/// The factory class beside [`KOTLIN_LISTENER_PATH`], same module.
+const KOTLIN_FACTORY_PATH: &str = "plugins/native-widgets/platform/android/src/main/kotlin/\
+                                   dev/frust/nativewidgets/FrustNativeControlFactory.kt";
+/// `plugins/native-widgets/src/android/ctx.rs`, home of `LISTENER_CLASS`.
+const RUST_CTX_PATH: &str = "plugins/native-widgets/src/android/ctx.rs";
+/// `plugins/native-widgets/src/api/builders.rs`, home of the Android-cfg'd
+/// `VIEW_TYPE` — this file's task doc calls the concept it holds
+/// "`FACTORY_CLASS`" for symmetry with `LISTENER_CLASS`, though no Rust
+/// identifier of that exact name exists (`crate::apple::factory::
+/// FACTORY_CLASS_NAME` is the separate, iOS-side constant).
+const RUST_BUILDERS_PATH: &str = "plugins/native-widgets/src/api/builders.rs";
+/// `plugins/native-widgets/src/android/mod.rs`, home of the four `Java_*`
+/// JNI export symbols.
+const RUST_ANDROID_MOD_PATH: &str = "plugins/native-widgets/src/android/mod.rs";
 
 /// Parse every `const val KIND_<NAME> = <value>` line out of the Kotlin
 /// listener's companion object, keyed by `<NAME>` (the `KIND_` prefix
@@ -295,4 +325,205 @@ fn value_changed_bit_packing_matches_between_kotlin_and_rust() {
             u64::from(rust_unpack_shift),
         );
     }
+}
+
+/// The dotted package `contents` declares, from its `package <name>` line —
+/// Kotlin has no trailing semicolon, unlike Java, so the rest of the trimmed
+/// line is the whole name.
+fn parse_kotlin_package(contents: &str, source_path: &str) -> String {
+    contents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("package "))
+        .unwrap_or_else(|| panic!("no `package <name>` line found in {source_path}"))
+        .trim()
+        .to_string()
+}
+
+/// The name after the first top-level `class <Name>` declaration in
+/// `contents` — good enough for these two files' one-class shape (mirrors
+/// this file's "not a full parser" scope note above). A commented-out
+/// mention (`// ... class ...`) never matches: its trimmed line starts with
+/// `//`, not the bare `class ` keyword.
+fn parse_kotlin_class_name(contents: &str, source_path: &str) -> String {
+    let line = contents
+        .lines()
+        .find(|line| line.trim_start().starts_with("class "))
+        .unwrap_or_else(|| panic!("no top-level `class <Name>` line found in {source_path}"));
+    let after = line
+        .trim_start()
+        .strip_prefix("class ")
+        .expect("line matched by starts_with(\"class \") above");
+    let name: String = after
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    assert!(
+        !name.is_empty(),
+        "found a `class ` line in {source_path} with no identifier following it: {line:?}"
+    );
+    name
+}
+
+/// The quoted string value on the first line of `contents` starting with
+/// `needle` (e.g. `needle = "pub(crate) const LISTENER_CLASS: &str = "`,
+/// matching a value declared `= "dev.frust...";`) — used for both
+/// `LISTENER_CLASS` and the Android-cfg'd `VIEW_TYPE`, whose declarations
+/// share this shape.
+fn quoted_value_after(contents: &str, needle: &str, source_path: &str) -> String {
+    let idx = contents
+        .find(needle)
+        .unwrap_or_else(|| panic!("no `{needle}` found in {source_path}"));
+    let after = &contents[idx + needle.len()..];
+    let start = after
+        .find('"')
+        .unwrap_or_else(|| panic!("no opening `\"` after `{needle}` in {source_path}"));
+    let rest = &after[start + 1..];
+    let end = rest
+        .find('"')
+        .unwrap_or_else(|| panic!("no closing `\"` after `{needle}` in {source_path}"));
+    rest[..end].to_string()
+}
+
+/// `android/ctx.rs`'s `LISTENER_CLASS` value.
+fn rust_listener_class(contents: &str) -> String {
+    quoted_value_after(
+        contents,
+        "pub(crate) const LISTENER_CLASS: &str = ",
+        RUST_CTX_PATH,
+    )
+}
+
+/// `api/builders.rs`'s **Android-cfg'd** `VIEW_TYPE` value — the file declares
+/// three cfg-gated copies of this constant (Android/iOS/neither); this parses
+/// only the one immediately following the Android `#[cfg(...)]` attribute,
+/// the half this parity check is about.
+fn rust_android_view_type(contents: &str) -> String {
+    let cfg_needle = "#[cfg(target_os = \"android\")]";
+    let cfg_idx = contents
+        .find(cfg_needle)
+        .unwrap_or_else(|| panic!("no `{cfg_needle}` found in {RUST_BUILDERS_PATH}"));
+    quoted_value_after(
+        &contents[cfg_idx..],
+        "pub(super) const VIEW_TYPE: &str = ",
+        RUST_BUILDERS_PATH,
+    )
+}
+
+/// Every `Java_*` JNI export symbol name declared in `contents` (`pub extern
+/// "system" fn Java_...`), in file order.
+fn parse_java_export_names(contents: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in contents.lines() {
+        let Some(after) = line
+            .trim_start()
+            .strip_prefix("pub extern \"system\" fn Java_")
+        else {
+            continue;
+        };
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        out.push(format!("Java_{name}"));
+    }
+    assert!(
+        !out.is_empty(),
+        "found no `pub extern \"system\" fn Java_*` export lines in {RUST_ANDROID_MOD_PATH} — \
+         the scan's own parser is broken, or the file was restructured"
+    );
+    out
+}
+
+#[test]
+fn factory_class_name_matches_between_kotlin_and_rust() {
+    let kotlin_contents = read(KOTLIN_FACTORY_PATH);
+    let package = parse_kotlin_package(&kotlin_contents, KOTLIN_FACTORY_PATH);
+    let class_name = parse_kotlin_class_name(&kotlin_contents, KOTLIN_FACTORY_PATH);
+    let reconstructed = format!("{package}.{class_name}");
+
+    let rust_contents = read(RUST_BUILDERS_PATH);
+    let rust_view_type = rust_android_view_type(&rust_contents);
+
+    assert_eq!(
+        reconstructed, rust_view_type,
+        "{KOTLIN_FACTORY_PATH}'s `package {package}` + `class {class_name}` reconstructs to \
+         `{reconstructed}`, but {RUST_BUILDERS_PATH}'s Android `VIEW_TYPE` is `{rust_view_type}` \
+         — these must be edited together, or the embedding's `FrustViewHost` fails to resolve \
+         the platform-view factory and every native control on Android renders nothing"
+    );
+}
+
+#[test]
+fn listener_class_name_matches_between_kotlin_and_rust() {
+    let kotlin_contents = read(KOTLIN_LISTENER_PATH);
+    let package = parse_kotlin_package(&kotlin_contents, KOTLIN_LISTENER_PATH);
+    let class_name = parse_kotlin_class_name(&kotlin_contents, KOTLIN_LISTENER_PATH);
+    let reconstructed = format!("{package}.{class_name}");
+
+    let rust_contents = read(RUST_CTX_PATH);
+    let rust_listener_class = rust_listener_class(&rust_contents);
+
+    assert_eq!(
+        reconstructed, rust_listener_class,
+        "{KOTLIN_LISTENER_PATH}'s `package {package}` + `class {class_name}` reconstructs to \
+         `{reconstructed}`, but {RUST_CTX_PATH}'s `LISTENER_CLASS` is `{rust_listener_class}` — \
+         these must be edited together, or the first interactive control created fails a JNI \
+         class lookup at runtime (`android/ctx.rs`'s own doc names this exact failure mode)"
+    );
+}
+
+#[test]
+fn java_export_symbols_match_reconstructed_package_and_class_names() {
+    let factory_contents = read(KOTLIN_FACTORY_PATH);
+    let package = parse_kotlin_package(&factory_contents, KOTLIN_FACTORY_PATH);
+    let factory_class = parse_kotlin_class_name(&factory_contents, KOTLIN_FACTORY_PATH);
+
+    let listener_contents = read(KOTLIN_LISTENER_PATH);
+    let listener_package = parse_kotlin_package(&listener_contents, KOTLIN_LISTENER_PATH);
+    let listener_class = parse_kotlin_class_name(&listener_contents, KOTLIN_LISTENER_PATH);
+    assert_eq!(
+        package, listener_package,
+        "{KOTLIN_FACTORY_PATH} declares package `{package}` but {KOTLIN_LISTENER_PATH} declares \
+         `{listener_package}` — both classes are documented as living in the same package \
+         (`android/mod.rs`'s module doc); this scan's own two-Kotlin-files assumption is broken \
+         if they ever diverge"
+    );
+
+    let mangled_package = package.replace('.', "_");
+    let factory_prefix = format!("Java_{mangled_package}_{factory_class}_");
+    let listener_prefix = format!("Java_{mangled_package}_{listener_class}_");
+
+    let android_mod_contents = read(RUST_ANDROID_MOD_PATH);
+    let exports = parse_java_export_names(&android_mod_contents);
+
+    let mut saw_factory_export = false;
+    let mut saw_listener_export = false;
+    for export in &exports {
+        if export.starts_with(&factory_prefix) {
+            saw_factory_export = true;
+        } else if export.starts_with(&listener_prefix) {
+            saw_listener_export = true;
+        } else {
+            panic!(
+                "{RUST_ANDROID_MOD_PATH} declares export `{export}`, which matches neither the \
+                 factory prefix `{factory_prefix}` (reconstructed from {KOTLIN_FACTORY_PATH}'s \
+                 package + class) nor the listener prefix `{listener_prefix}` (reconstructed \
+                 from {KOTLIN_LISTENER_PATH}'s) — a mismatched export is a silent runtime symbol \
+                 lookup failure (`UnsatisfiedLinkError`), since the JVM resolves `native`/\
+                 `external` methods by mangled name alone"
+            );
+        }
+    }
+    assert!(
+        saw_factory_export,
+        "found no `{RUST_ANDROID_MOD_PATH}` export starting with the reconstructed factory \
+         prefix `{factory_prefix}` — either the scan's own parser is broken, or every factory \
+         export drifted from {KOTLIN_FACTORY_PATH}'s package/class declaration"
+    );
+    assert!(
+        saw_listener_export,
+        "found no `{RUST_ANDROID_MOD_PATH}` export starting with the reconstructed listener \
+         prefix `{listener_prefix}` — either the scan's own parser is broken, or every listener \
+         export drifted from {KOTLIN_LISTENER_PATH}'s package/class declaration"
+    );
 }

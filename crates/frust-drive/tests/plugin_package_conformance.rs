@@ -107,21 +107,69 @@ fn rel(path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// Directory names excluded from the walk wholesale — build outputs, never
+/// source (task m-03/R1-b). `plugins/native-widgets/platform/android` is a
+/// real `com.android.library` module as of p3-03: a direct Gradle invocation
+/// there populates `build/`/`.gradle/` with **generated** Kotlin, which would
+/// otherwise be judged by the bare-package rule below (wrongly — generated
+/// code is not a plugin author's hand-written package declaration) and would
+/// inflate the liveness guard's count, silently measuring the wrong thing. A
+/// bare Cargo `target/` sits beside plugin crates for the same reason. This
+/// list is a name match at any depth, not a path — `plugins/**/build/**` and
+/// `plugins/**/.gradle/**` both get skipped, wherever they occur.
+const EXCLUDED_DIR_NAMES: &[&str] = &["build", ".gradle", "target"];
+
+/// True if `name` names one of [`EXCLUDED_DIR_NAMES`].
+fn is_excluded_dir_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| EXCLUDED_DIR_NAMES.contains(&name))
+}
+
+/// The walk's single root-level entry point — **loud, not silent** (task
+/// f1-02): a swallowed `read_dir` error here used to make `all_plugin_files()`
+/// return an empty `Vec` if `plugins/` itself were missing, renamed, or
+/// unreadable, and an empty scan made every assertion below pass vacuously.
+/// Precedent: `print_free_cores.rs`'s own `walk` panics the same way. Every
+/// deeper directory reached during recursion goes through [`walk_dir`]
+/// instead, which is deliberately more lenient — see its own doc.
 fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    // Loud, not silent (task f1-02): a swallowed `read_dir` error here used to
-    // make `all_plugin_files()` return an empty `Vec` if `plugins/` (or any
-    // subdirectory reached during the recursion) were missing, renamed, or
-    // unreadable — and an empty scan made every assertion below pass
-    // vacuously. Precedent: `print_free_cores.rs`'s own `walk` panics the same
-    // way.
     let entries =
         fs::read_dir(dir).unwrap_or_else(|e| panic!("reading directory {}: {e}", dir.display()));
+    walk_entries(dir, entries, out);
+}
+
+/// Recurse into `dir`, tolerating a `read_dir` failure as "already gone,
+/// nothing to scan" rather than panicking (task m-03/R1-b) — unlike
+/// [`walk_files`]'s root-level call, a subdirectory reached during recursion
+/// can legitimately vanish between the parent listing it and this call
+/// visiting it (a concurrent or incremental Gradle run under one of
+/// `EXCLUDED_DIR_NAMES`), and that race is not a conformance defect this test
+/// exists to catch.
+fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        walk_entries(dir, entries, out);
+    }
+}
+
+fn walk_entries(dir: &Path, entries: fs::ReadDir, out: &mut Vec<PathBuf>) {
     for entry in entries {
         let path = entry
             .unwrap_or_else(|e| panic!("dir entry under {}: {e}", dir.display()))
             .path();
-        if path.is_dir() {
-            walk_files(&path, out);
+        // `Path::metadata` follows symlinks and, unlike `Path::is_dir`
+        // (which silently reports `false` on any error, broken symlink
+        // included), surfaces a broken symlink as `Err` — skipped outright
+        // here instead of falling into the `else` arm below, getting pushed
+        // onto `out`, and panicking `read_to_string` later (task m-03/R1-b).
+        let Ok(meta) = path.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            let excluded = path.file_name().is_some_and(is_excluded_dir_name);
+            if excluded {
+                continue;
+            }
+            walk_dir(&path, out);
         } else {
             out.push(path);
         }
@@ -225,10 +273,11 @@ fn no_plugin_kotlin_uses_the_bare_dev_frust_package() {
         unexpected,
     );
 
-    // No stale-allowlist check: the allowlist is empty by design (its own doc
-    // comment), so there is nothing that could go stale. Re-adding one means
-    // re-adding this check too — an entry nothing verifies is exactly the
-    // drift the p3-04 version of this test was built to catch.
+    // Stale-allowlist check: the allowlist is empty by design (its own doc
+    // comment) and has nothing to go stale today, but the check itself stays
+    // live — the moment a future entry is added without a matching bare-`dev.
+    // frust` file to justify it, this is what catches the drift, exactly the
+    // defect class the p3-04 version of this test was built to catch.
     let mut missing: Vec<&str> = BARE_DEV_FRUST_ALLOWLIST
         .iter()
         .filter(|p| !found_bare.contains(&p.to_string()))
