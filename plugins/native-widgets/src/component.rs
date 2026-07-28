@@ -1,8 +1,21 @@
-//! [`NativeComponent`] — the **public** trait an app or plugin author writes a
-//! native component against, from pure Rust, with no per-component Kotlin or
-//! Swift (native-widgets Phase 3, p3-01;
+//! [`NativeComponent`] — the **public** trait a plugin author writes a native
+//! component against, from pure Rust, with no per-component Kotlin or Swift
+//! (native-widgets Phase 3, p3-01;
 //! `workflow/plans/features/frust-native-widgets/research/RESEARCH-NATIVE-COMPONENT.md`
 //! is the verified design this productizes).
+//!
+//! **An app crate cannot implement this trait today** — which is why the line
+//! above says *plugin* author. `create` has to construct real native views,
+//! which means naming `jni::objects::JObject` on Android and `objc2-ui-kit`'s
+//! classes on iOS *in the implementing crate*; this plugin re-exports neither
+//! FFI crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions
+//! sanction only a `frust-core`/`kurbo`/`peniko` escape hatch, and only for an
+//! `examples/*` app. So the practical audience today is plugin authors, not
+//! app authors, and the only implementor in this repo is this crate's own
+//! non-default `demo-components` composite (`crate::demo`, which spells the
+//! same wall out at length). Closing the gap — re-exporting a curated
+//! view-construction surface, or the FFI crates themselves — is a separate,
+//! unscheduled decision.
 //!
 //! Where `crate::runtime`'s `NativeWidget` is the plugin's **internal** dispatch
 //! contract — associated functions, `Result` returns, a `decode_props` step
@@ -58,7 +71,8 @@
 //!    unchanged rebuild costs zero FFI crossings. Field-level diffing inside a
 //!    changed props value is the component's own job — only it knows which
 //!    setter is cheap and which forces a re-layout.
-//! 4. **`on_event` fires between frames.** A native interaction bypasses
+//! 4. **`on_event` fires between frames — except that for a public component
+//!    it never fires at all in this build.** A native interaction bypasses
 //!    `RenderRoot::event` entirely (see the crate doc): no `EventCtx`, no
 //!    capture/focus, none of `docs/CODE_STANDARDS.md`'s Interaction Semantics.
 //!    A listener that fires while the runtime is already borrowed — the
@@ -68,7 +82,13 @@
 //!    table on **every** dispatch, not only when props changed (`dispose` too;
 //!    `BridgeState::refresh_component`) — the props diff gate skips `update`
 //!    on an equal-props rebuild, so anything less would run a stale rebuild's
-//!    closures.
+//!    closures. Every one of those ordering and re-entrancy guarantees is the
+//!    runtime's own and is true of the internal `NativeWidget` path the six
+//!    built-in controls take. **They are not observable through this trait
+//!    yet**: no production path attaches a listener to a view a component
+//!    built, so this step of the lifecycle currently never runs for a
+//!    [`NativeComponent`] — see [`NativeComponent::on_event`], which owns the
+//!    detail and names the deferred Phase 4 gap.
 //! 5. **`dispose` is best-effort-prompt, and may be late.** See *Disposal
 //!    promptness* below.
 //!
@@ -241,7 +261,9 @@ const PROPS_GENERATION_KEY: &str = "__frustProps";
 /// - `create` runs at the host's post-frame poll, a frame or more after the
 ///   mounting widget appeared;
 /// - `update` runs only when [`Props`](Self::Props) compare unequal;
-/// - `on_event` runs from a platform listener, between frames;
+/// - `on_event` would run from a platform listener between frames, but no
+///   production path attaches one to a component's view, so it never runs at
+///   all in this build (a deferred Phase 4 gap — [`on_event`](Self::on_event));
 /// - `dispose` is prompt on teardown but may be late, and at process exit may
 ///   not run at all.
 ///
@@ -310,14 +332,36 @@ pub trait NativeComponent: 'static {
 
     /// A platform listener fired for this slot (main thread).
     ///
-    /// This is where an app callback is invoked or a signal written — a
-    /// component's `&self` is the value the app published this rebuild, so it
-    /// can carry the closures the event should reach. The pair is the generic
-    /// listener glue's raw wire ([`NativeEvent::kind`]/[`NativeEvent::detail`]);
-    /// this crate's own typed event vocabulary stays internal in v1, so a
-    /// component that attaches the shared listener decodes the pair itself.
+    /// # Nothing reaches this in the current build
     ///
-    /// Defaults to doing nothing: a display-only component never overrides it.
+    /// **No production path attaches a listener to a view a component built —
+    /// its root as much as its children — so overriding this method has no
+    /// effect today, and every public component is display-only.** The two
+    /// listener objects that exist are constructed from a slot id (Android's
+    /// shared `FrustNativeListener`, iOS's target-action object), and the only
+    /// callers of either constructor are the six built-in controls;
+    /// [`ComponentCtx`] exposes neither a slot id nor a way to build one, and
+    /// the generic mounting builder registers no callback either
+    /// (`crate::api::mount`'s `init`, whose comment says so, and
+    /// `Bridge::on_event` answers `None` unconditionally).
+    ///
+    /// This is a **deliberately deferred Phase 4 gap**, not an oversight: the
+    /// dispatch half — runtime → bridge → this method — is wired and
+    /// unit-tested, and only the attach half is missing. The method stays on
+    /// the trait so the contract it will be given is already stated.
+    ///
+    /// # The shape the channel carries when it opens
+    ///
+    /// The pair is the generic listener glue's raw wire
+    /// ([`NativeEvent::kind`]/[`NativeEvent::detail`]); this crate's own typed
+    /// event vocabulary stays internal in v1, so a component would decode the
+    /// pair itself. The `&self` a dispatch runs against is the value the app
+    /// published this rebuild — re-read from the staging table on every
+    /// dispatch (the module doc's point 4) — so it can carry the closures such
+    /// an event should reach.
+    ///
+    /// Defaults to doing nothing, which is also the only behaviour v1 can
+    /// observe.
     fn on_event(&self, state: &mut Self::State, event: NativeEvent) {
         let _ = (state, event);
     }
@@ -1126,9 +1170,13 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
         }
     }
 
-    /// Always `None`: a public component handles its own events (its `&self`
-    /// is the value the app published, closures and all), so nothing rides the
-    /// six built-in controls' `EventPayload` callback channel.
+    /// Always `None`: a public component is meant to handle its own events
+    /// (its `&self` is the value the app published, closures and all), so
+    /// nothing rides the six built-in controls' `EventPayload` callback
+    /// channel. Unconditional, which is also why nothing in production reaches
+    /// this method at all — the attach half a component would need does not
+    /// exist yet ([`NativeComponent::on_event`]); the only callers today are
+    /// this module's own tests, driving the runtime directly.
     ///
     /// The staged value is re-read first — an event can arrive after any
     /// number of rebuilds that changed the component but not its props, and

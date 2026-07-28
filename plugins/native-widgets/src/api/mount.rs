@@ -15,8 +15,19 @@
 //! define (impl NativeComponent) → register_component::<C>(KIND) → native_component(KIND, c, props)
 //! ```
 //!
-//! a complete path from pure Rust to a real platform view, with no
-//! per-component Kotlin or Swift anywhere in it.
+//! a path from pure Rust to a real platform view, with no per-component
+//! Kotlin or Swift anywhere in it.
+//!
+//! **Who can walk it, and how far.** Not an app crate: `create` has to name
+//! `jni::objects::JObject` on Android and `objc2-ui-kit`'s classes on iOS *in
+//! the implementing crate*, and this plugin re-exports neither FFI crate, so
+//! the practical audience today is plugin authors, not app authors (the only
+//! implementor in this repo is this crate's own non-default
+//! `demo-components` composite). And the view it mounts is **display-only**:
+//! no production path attaches a platform listener to a component-built view,
+//! so `NativeComponent::on_event` never fires for it — see that method's own
+//! doc for the deferred Phase 4 gap. `crate::component`'s module doc states
+//! both limits in full.
 //!
 //! # It reuses the six's plumbing rather than re-deriving it
 //!
@@ -44,10 +55,12 @@
 //! No theme folding (`crate::api::theme`'s ladder L2 is the six controls'
 //! wire-side mechanism; a component's props are typed, so an app reads
 //! `use_context::<Theme>()` itself and puts whatever it wants in them), and no
-//! event-callback registration (`crate::api::signals`' three wrappers ride
-//! the internal `EventPayload` channel; a public component handles
-//! `on_event` itself, with `&self` carrying whatever closures it needs — see
-//! `crate::component`'s bridge doc).
+//! event-callback registration (`crate::api::signals`' three wrappers ride the
+//! internal `EventPayload` channel, which a public component was meant to
+//! bypass by handling `on_event` itself — see `crate::component`'s bridge
+//! doc). The second omission is currently a **dead end rather than a
+//! delegation**: nothing attaches a listener to a component-built view either,
+//! so no event reaches `on_event` to be handled (above).
 
 use std::rc::Rc;
 
@@ -71,7 +84,8 @@ use super::builders::{VIEW_TYPE, next_local_slot, placeholder, resolve_size};
 /// ([`register_component`](crate::component::register_component)); a slot
 /// naming a kind nothing registered is reported dead by the runtime rather
 /// than rendering. `component` is the value the app constructs fresh every
-/// rebuild — it carries the closures [`NativeComponent::on_event`] reaches —
+/// rebuild — the value [`NativeComponent::on_event`] would run against, though
+/// nothing dispatches to it in this build (the module doc's *display-only*) —
 /// and `props` is the typed create/update payload the runtime diffs with
 /// `PartialEq` before any FFI crossing.
 ///
@@ -145,8 +159,12 @@ impl<C: NativeComponent> NativeComponentView<C> {
     ///
     /// **A `platform_view` slot never receives `Widget::event`**
     /// (`docs/CODE_STANDARDS.md`'s Platform-View Conventions) — the platform
-    /// owns this input end to end, and it surfaces through
-    /// [`NativeComponent::on_event`], never `EventCtx`.
+    /// owns this input end to end, and it would surface through
+    /// [`NativeComponent::on_event`], never `EventCtx`. In this build it
+    /// surfaces nowhere in Rust: the touch reaches the native view (a button
+    /// highlights, a scroll view scrolls) but no listener is attached to
+    /// report it back, so marking a component interactive buys platform-side
+    /// behaviour only (the module doc's *display-only*).
     pub fn interactive(mut self) -> Self {
         self.interactive = true;
         self

@@ -31,11 +31,23 @@
 //!
 //! Adding a control never adds Kotlin or Swift — and since Phase 3 (p3-01)
 //! that holds for **your** components too: `NativeComponent` is the public
-//! trait an app or plugin author implements to drive a native view (or view
+//! trait a plugin author implements to drive a native view (or view
 //! hierarchy) from pure Rust, registered with `register_component` and served
 //! by the very same runtime, factory and listener as the six built-in
 //! controls (see the `component` module's own doc for the lifecycle contract;
 //! it ships with the `frust-api` feature, like the builders above).
+//!
+//! Two limits that doc states in full, repeated here because they decide
+//! whether the trait is for you at all. **An app crate cannot implement it
+//! today**: `create` has to name `jni::objects::JObject` on Android and
+//! `objc2-ui-kit`'s classes on iOS *in the implementing crate*, and this
+//! plugin re-exports neither FFI crate, so the practical audience today is
+//! plugin authors, not app authors (the only implementor here is this crate's
+//! own non-default `demo-components` composite). And **a component is
+//! display-only**: no production path attaches a listener to a view a
+//! component built, so `NativeComponent::on_event` never fires — for its root
+//! as much as for its children — a deliberately deferred Phase 4 gap.
+//!
 //! Every control is a Rust
 //! `NativeWidget` impl registered under a kind string in the plugin-internal
 //! `runtime`, and the platform side is fixed forever at ONE generic factory

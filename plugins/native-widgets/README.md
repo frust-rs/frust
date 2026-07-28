@@ -44,6 +44,13 @@ through the same one factory and the same runtime the six builders use, with
 no per-component Kotlin or Swift anywhere in it. See the `api::mount` module
 docs.
 
+> **Two limits on that seam — read them before you plan around it.** You
+> cannot implement `NativeComponent` from an app crate today (it needs raw
+> `jni`/`objc2-ui-kit` dependencies this crate does not re-export), and a
+> component's native view is **display-only** — no event ever reaches your
+> `on_event`. Both are spelled out in §5, and neither applies to the six
+> builders above.
+
 Every control follows frust's **controlled-component** convention where the
 platform allows it: a switch/slider reports the *requested* value through its
 `on_...` callback, and the value you pass back down on the next rebuild is
@@ -180,6 +187,29 @@ control added since.
   reachable by frust's pointer capture/focus machinery, and a frust widget
   drawn over an interactive slot needs an explicit input `shield(...)`
   (`docs/ARCHITECTURE.md`'s Platform-view flow).
+- **You cannot implement `NativeComponent` from an app crate today** (§1's
+  `native_component` seam only). `create` has to construct real native views,
+  which means naming `jni::objects::JObject` on Android and `objc2-ui-kit`'s
+  classes on iOS *in your own crate*; this plugin re-exports neither FFI
+  crate, and `docs/CODE_STANDARDS.md` sanctions a
+  `frust-core`/`kurbo`/`peniko` escape hatch only for an `examples/*` app. So
+  the practical audience today is **plugin authors, not app authors** — the
+  only implementor in this repo is this crate's own non-default
+  `demo-components` composite. Closing the gap (re-exporting a curated
+  view-construction surface, or the FFI crates themselves) is a separate,
+  unscheduled decision. The six builders in §1 are unaffected: they are
+  ordinary Rust calls needing no FFI dependency of yours.
+- **A `NativeComponent` is display-only — its `on_event` never fires.** The
+  dispatch half is wired and unit-tested (runtime → bridge → trait method),
+  but nothing in production ever attaches a platform listener to a view a
+  component built — its root as much as its children — because both listener
+  objects are constructed from a slot id `ComponentCtx` never exposes, and
+  the mounting builder registers no callback. Overriding `on_event` therefore
+  has no effect in this build; it is a deliberately deferred **Phase 4** gap.
+  Marking a component `.interactive()` still routes touches to the native
+  view, so it behaves natively (a button highlights) — it just reports
+  nothing back to Rust. The six built-in controls are unaffected: their
+  `on_press`/`on_change` callbacks fire normally (§1).
 
 ---
 
