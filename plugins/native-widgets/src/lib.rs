@@ -45,8 +45,12 @@
 //! plugin authors, not app authors (the only implementor here is this crate's
 //! own non-default `demo-components` composite). And **a component is
 //! display-only**: no production path attaches a listener to a view a
-//! component built, so `NativeComponent::on_event` never fires — for its root
-//! as much as for its children — a deliberately deferred Phase 4 gap.
+//! component built — its root as much as its children — so overriding
+//! `NativeComponent::on_event` has no effect in this build, a deliberately
+//! deferred Phase 4 gap. Deliberately *not* "can never fire": the dispatch
+//! half is real and routes on the slot id alone, so a listener built with a
+//! **fabricated** id that happens to name a live component's slot still lands
+//! in the trait method — a misroute, not a route (see that method's own doc).
 //!
 //! Every control is a Rust
 //! `NativeWidget` impl registered under a kind string in the plugin-internal

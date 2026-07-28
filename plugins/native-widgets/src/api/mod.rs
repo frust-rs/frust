@@ -35,8 +35,8 @@
 //! The six built-in controls above are one family; [`native_component`] is
 //! the **generic** one, mounting any registered
 //! [`NativeComponent`](crate::component::NativeComponent) (another plugin's
-//! included — an app crate cannot write one; see that trait's own doc) into
-//! the same single `platform_view` slot, reusing the six's
+//! included — an app crate cannot implement one; see that trait's own doc)
+//! into the same single `platform_view` slot, reusing the six's
 //! own factory constant, slot counter, sizing rule and refusal placeholder.
 //! It is what closes *define → register → mount*; the six are deliberately
 //! not rewritten to route through it (see `src/api/mount.rs`'s module doc).

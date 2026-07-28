@@ -17,8 +17,8 @@
 //! - the **six built-in controls** (`crate::controls`), whose props arrive
 //!   decoded from the slot's `params_json`; and
 //! - every **public [`NativeComponent`](crate::component::NativeComponent)** a
-//!   plugin author writes (p3-01; not an app author — see that trait's own doc
-//!   for the FFI wall), reaching this trait through the one
+//!   plugin author writes (p3-01; an app crate cannot implement one — see that
+//!   trait's own doc for the FFI wall), reaching this trait through the one
 //!   `crate::component::Bridge<C>` impl, whose props arrive as already-typed
 //!   Rust values staged beside the wire.
 //!
@@ -26,9 +26,13 @@
 //! contract below are therefore the *same* guarantees for both — which is the
 //! whole point of bridging rather than growing a second runtime. (The event
 //! half of that is unobservable through the public trait today: this layer
-//! would route a component's event identically, but nothing ever attaches a
-//! listener to a component-built view for it to route —
-//! `crate::component::NativeComponent::on_event`.)
+//! would route a component's event identically, but no production path
+//! attaches a listener to a component-built view for it to route —
+//! `crate::component::NativeComponent::on_event`. *Unobservable*, not
+//! unreachable: [`NativeRuntime::on_event`] keys on the slot id alone and asks
+//! nothing about which listener produced the event, so a fabricated id naming
+//! a live component's slot is delivered like any other — see that method's
+//! doc.)
 //!
 //! # The generic-factory contract
 //!
@@ -1017,6 +1021,18 @@ impl NativeRuntime {
     /// an echo never reaches this method, because it re-enters
     /// [`with_runtime`] mid-borrow and is dropped there. See
     /// [`NativeWidget::on_event`]'s doc and `crate::controls`'s module doc.
+    ///
+    /// **Routing is by slot id alone.** This method asks nothing about which
+    /// view or listener produced the event, so an id that *names* a live slot
+    /// is delivered whether or not the listener carrying it was ever attached
+    /// to that slot's view; Android's `nativeOnEvent` export validates only
+    /// that the incoming `jlong` is non-negative before it gets here
+    /// (`crate::android`'s `validate_event_slot_id` → `SlotId::try_from`).
+    /// That is why the *display-only* claim about a public component
+    /// (`crate::component::NativeComponent::on_event`) is scoped to "no
+    /// production path attaches a listener" rather than "can never fire": a
+    /// fabricated id lands here indistinguishably from a real one, which is a
+    /// misroute (`crate::demo`'s own warning), not a supported route.
     ///
     /// **Bypasses `RenderRoot::event` entirely** (crate doc): this is a
     /// platform interaction surfacing as a callback, never a frust pointer

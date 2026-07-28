@@ -44,12 +44,12 @@ through the same one factory and the same runtime the six builders use, with
 no per-component Kotlin or Swift anywhere in it. See the `api::mount` module
 docs.
 
-> **Two limits on that seam — read them before you plan around it.** You
-> cannot implement `NativeComponent` from an app crate today (it needs raw
+> **Two limits on that seam — read them before you plan around it.** An app
+> crate cannot implement `NativeComponent` today (it needs raw
 > `jni`/`objc2-ui-kit` dependencies this crate does not re-export), and a
-> component's native view is **display-only** — no event ever reaches your
-> `on_event`. Both are spelled out in §5, and neither applies to the six
-> builders above.
+> component's native view is **display-only** — no production path attaches a
+> listener to it, so overriding `on_event` has no effect. Both are spelled out
+> in §5, and neither applies to the six builders above.
 
 Every control follows frust's **controlled-component** convention where the
 platform allows it: a switch/slider reports the *requested* value through its
@@ -147,6 +147,9 @@ baked into this plugin's four JNI export symbols
 (`Java_dev_frust_nativewidgets_*`). If the module isn't wired in, the host
 cannot resolve the factory and every native control renders as an empty slot.
 
+**Integrated this plugin before the module existed?** Both class names and all
+four export symbols changed — see §7 before you rebuild.
+
 ---
 
 ## 4. iOS setup — nothing. Zero Swift, by design.
@@ -175,7 +178,8 @@ control added since.
 - **A wrong or missing module wiring fails at runtime, not at build time.**
   Nothing in the Rust build references the Kotlin classes, so a missing
   `include(...)` compiles cleanly and surfaces on device as a blank slot
-  where the control should be (the host logs an unresolvable factory).
+  where the control should be (the host logs an unresolvable factory). A stale
+  pre-module hand copy produces the same blank slot — see §7.
 - **No cargo gate compiles Kotlin.** `cargo check --target
   aarch64-linux-android -p frust-native-widgets` type-checks the Rust half
   only; a typo in the module's `.kt` files surfaces solely in a real Gradle
@@ -187,7 +191,7 @@ control added since.
   reachable by frust's pointer capture/focus machinery, and a frust widget
   drawn over an interactive slot needs an explicit input `shield(...)`
   (`docs/ARCHITECTURE.md`'s Platform-view flow).
-- **You cannot implement `NativeComponent` from an app crate today** (§1's
+- **An app crate cannot implement `NativeComponent` today** (§1's
   `native_component` seam only). `create` has to construct real native views,
   which means naming `jni::objects::JObject` on Android and `objc2-ui-kit`'s
   classes on iOS *in your own crate*; this plugin re-exports neither FFI
@@ -199,17 +203,25 @@ control added since.
   view-construction surface, or the FFI crates themselves) is a separate,
   unscheduled decision. The six builders in §1 are unaffected: they are
   ordinary Rust calls needing no FFI dependency of yours.
-- **A `NativeComponent` is display-only — its `on_event` never fires.** The
-  dispatch half is wired and unit-tested (runtime → bridge → trait method),
-  but nothing in production ever attaches a platform listener to a view a
-  component built — its root as much as its children — because both listener
-  objects are constructed from a slot id `ComponentCtx` never exposes, and
-  the mounting builder registers no callback. Overriding `on_event` therefore
-  has no effect in this build; it is a deliberately deferred **Phase 4** gap.
-  Marking a component `.interactive()` still routes touches to the native
-  view, so it behaves natively (a button highlights) — it just reports
-  nothing back to Rust. The six built-in controls are unaffected: their
-  `on_press`/`on_change` callbacks fire normally (§1).
+- **A `NativeComponent` is display-only — overriding `on_event` has no effect
+  in this build.** The dispatch half is wired and unit-tested (runtime →
+  bridge → trait method), but no production path attaches a platform listener
+  to a view a component built — its root as much as its children — because
+  both listener objects are constructed from a slot id `ComponentCtx` never
+  exposes, and the mounting builder registers no callback. It is a
+  deliberately deferred **Phase 4** gap. Deliberately *not* phrased as "can
+  never fire", and the difference matters if you go looking for a workaround:
+  the runtime routes an event on the slot id alone, and Android's
+  `nativeOnEvent` export rejects only a *negative* id, so a listener you
+  construct yourself with a fabricated non-negative id that happens to name a
+  live component's slot **is** delivered — into whichever slot that number
+  currently means, which is a misroute rather than a route, since a component
+  is never told its own id. iOS leaves no such opening at all: the target
+  class is crate-private and this plugin exports no C symbol. Marking a
+  component `.interactive()` still routes touches to the native view, so it
+  behaves natively (a button highlights) — it just reports nothing back to
+  Rust. The six built-in controls are unaffected: their `on_press`/`on_change`
+  callbacks fire normally (§1).
 
 ---
 
@@ -220,3 +232,70 @@ Everything in §2 and §3 — the Cargo.toml dependency and the
 applied for you, idempotently, by the frust TUI's **Add Plugin** dialog
 (select `native-widgets`). This README is the manual contract that dialog
 encodes.
+
+---
+
+## 7. Migrating from the v1 hand copy (breaking, one time)
+
+Before this plugin shipped its own Gradle module, its two generic Kotlin
+classes lived in the **bare `dev.frust` package** and the documented
+integration was to **hand-copy** `FrustNativeControlFactory.kt` and
+`FrustNativeListener.kt` into your own app module, under
+`app/src/main/kotlin/dev/frust/`. That shape is gone, and the rename it
+required is breaking:
+
+| | v1 (hand copy) | now |
+|---|---|---|
+| Kotlin package | `dev.frust` | `dev.frust.nativewidgets` |
+| factory `viewType` | `dev.frust.FrustNativeControlFactory` | `dev.frust.nativewidgets.FrustNativeControlFactory` |
+| JNI export symbols | `Java_dev_frust_FrustNative*` | `Java_dev_frust_nativewidgets_FrustNative*` |
+| how the Kotlin ships | copied into your app module | this plugin's own Gradle library module (§3) |
+
+**Why.** The bare `dev.frust` package belongs exclusively to the embedding
+module (`docs/CODE_STANDARDS.md`'s Plugin Conventions); this plugin held a
+time-boxed exception only because a Kotlin package is baked verbatim into a
+JNI export's mangled symbol name. Shipping a real Gradle library module — the
+shape every other plugin already uses — ended the exception, and moving the
+package *had* to move all four export symbols with it.
+
+**What to do**, in this order:
+
+1. **Delete your copies** of `FrustNativeControlFactory.kt` and
+   `FrustNativeListener.kt` (plus the `dev/frust/` directory they sat in, if
+   nothing else of yours lives there). They are dead weight now, and worse
+   than dead — see the symptom below.
+2. **Apply §3's module wiring**: the `include(":frust-native-widgets")` +
+   `projectDir` lines in `android/settings.gradle.kts` and the
+   `implementation(project(":frust-native-widgets"))` line in
+   `android/app/build.gradle.kts`. The TUI's Add Plugin dialog makes both edits
+   idempotently.
+3. Rebuild. Nothing of yours ever referenced either class by name, so there is
+   nothing else to change — no manifest edit, and no keep rule to add (the
+   module ships its own `consumer-rules.pro` for the new names). A keep rule
+   *you* added for the old `dev.frust.FrustNative*` classes can go too; it
+   matches nothing once the copies are deleted.
+
+iOS is unaffected: there was never anything to copy there (§4).
+
+**The symptom if you skip this.** Nothing fails at build time — Kotlin happily
+compiles an `external fun` whose native symbol does not exist, and no cargo
+gate compiles Kotlin at all (§5) — so it lands on device the first time a
+native control is created, and it looks like **a blank slot with no obvious
+cause**:
+
+- **Copies kept, module not wired:** the host resolves the factory by the new
+  FQCN, your app only has the old `dev.frust.` one, so `Class.forName` fails —
+  `logcat` (tag `frust`) shows `platform-view factory
+  'dev.frust.nativewidgets.FrustNativeControlFactory' failed to resolve` and
+  the slot is marked dead. Every native control is an empty hole.
+- **Anything that still reaches a stale copy** dies with `UnsatisfiedLinkError:
+  No implementation found for … Java_dev_frust_FrustNativeControlFactory_nativeCreateControl`:
+  the JVM resolves a `native`/`external` method by mangled name alone, and that
+  name is no longer in the `.so`. The host wraps every factory call in `catch
+  (Throwable)`, so this too becomes a dead slot plus one `logcat` warning
+  rather than a crash — which is exactly why the cause is not obvious from the
+  screen.
+
+Both failures are silent by design (a misbehaving platform-view factory must
+never take down the frame loop), so `adb logcat -s frust` is the place to
+confirm which one you have.
