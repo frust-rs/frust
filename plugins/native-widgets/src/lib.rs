@@ -111,6 +111,21 @@ pub use component::{
     ComponentCtx, NativeChild, NativeComponent, NativeEvent, NativeRoot, register_component,
 };
 
+// The demo composite (Phase 3, p3-08) — ONE `NativeComponent` owning a real
+// native subtree, behind the NON-default `demo-components` feature (which
+// enables `frust-api` above, since a component is only mountable through that
+// facade glue). It lives in this crate rather than in an example app because an
+// app crate cannot implement the trait without raw `jni`/`objc2-ui-kit` deps of
+// its own; see the module's own doc for what that does and does not prove.
+#[cfg(feature = "demo-components")]
+pub mod demo;
+// Flat re-export, same convention as `api`/`component` above.
+#[cfg(feature = "demo-components")]
+pub use demo::{
+    DEMO_CARD_CHILDREN, DEMO_CARD_HEIGHT, DEMO_CARD_KIND, DEMO_CARD_WIDTH, DemoCard, DemoCardProps,
+    DemoCardState, register_demo_components,
+};
+
 #[cfg(target_os = "android")]
 mod android;
 // The Apple arm (p2-01): ONE Rust `define_class!` factory class conforming to

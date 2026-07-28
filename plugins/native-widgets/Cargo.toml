@@ -250,3 +250,17 @@ frust-api = ["dep:frust", "dep:frust-core", "dep:frust-theme", "dep:kurbo"]
 # both together, preserving this crate's platform-plugin charter line
 # (`cargo tree -p frust-native-widgets --no-default-features -e normal`).
 glyph-fonts = ["frust-theme/glyph-fonts"]
+# The demo composite (`src/demo.rs`, p3-08): ONE `NativeComponent` owning a real
+# native subtree, so p3-02's `add_child`/`addSubview` have a caller outside a
+# host test and the whole define → register → mount path gets device coverage.
+#
+# **Non-default, deliberately.** It ships inside this plugin only because an app
+# crate cannot implement `NativeComponent` without raw `jni`/`objc2-ui-kit`
+# dependencies of its own (see `src/demo.rs`'s module doc) — it is a
+# demonstration, not part of this crate's product surface, so nothing gets it by
+# merely adding the crate. It adds **no dependency**: it needs the same
+# `frust`/`frust-core`/`frust-theme`/`kurbo` set `frust-api` already gates (a
+# component is only mountable through that facade glue), which is why it enables
+# `frust-api` rather than standing beside it. Off by default, it therefore never
+# reaches the `--no-default-features` tree and the charter line above is intact.
+demo-components = ["frust-api"]

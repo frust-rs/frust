@@ -71,32 +71,46 @@
 //! `rebuild` re-applies the app value), while the native ones have to be
 //! driven back across the wire a frame later.
 //!
-//! # No composite component on this page (p3-05)
+//! # The composite lives in the plugin, and mounts behind a toggle (p3-08)
 //!
 //! p3-02 shipped native-subtree support and the generic
 //! `native_component(kind, component, props)` mounting builder, and this page
-//! is where a reader *should* meet a composite — one component owning a whole
-//! native hierarchy frust does not lay out. It is deliberately **not** here:
-//! implementing `frust_native_widgets::NativeComponent` means writing
-//! per-platform view construction (`ComponentCtx::new_view`/`env` against
-//! `jni::objects::JObject` on Android, `objc2-ui-kit` constructors off
-//! `ComponentCtx::mtm` on iOS), and this crate's `Cargo.toml` carries neither
-//! FFI crate — `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions
-//! sanction only a `frust-core`/`kurbo`/`peniko` escape hatch for an
-//! `examples/*` app, and `docs/DEVELOPMENT.md`'s Version-Pin Policy notes
-//! `objc2-ui-kit` is already resolving at two versions in this workspace.
-//! Admitting raw `jni`/`objc2-ui-kit` into an example app is a charter
-//! decision, not a page-fill decision; see this task's completion summary for
-//! the two options handed back.
+//! is where a reader meets a composite — one component owning a whole native
+//! hierarchy frust does not lay out. [`composite_block`] mounts
+//! `frust_native_widgets::DemoCard`: a parent view with a title label and two
+//! buttons under it, published as **one** `platform_view` slot.
 //!
-//! # Exactly six native slots at rest
+//! The card itself ships inside the plugin (behind its non-default
+//! `demo-components` feature), **not here**: implementing
+//! `frust_native_widgets::NativeComponent` means writing per-platform view
+//! construction (`ComponentCtx::new_view`/`env` against `jni::objects::JObject`
+//! on Android, `objc2-ui-kit` constructors off `ComponentCtx::mtm` on iOS), and
+//! this crate's `Cargo.toml` carries neither FFI crate —
+//! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions sanction only a
+//! `frust-core`/`kurbo`/`peniko` escape hatch for an `examples/*` app, and
+//! `docs/DEVELOPMENT.md`'s Version-Pin Policy notes `objc2-ui-kit` is already
+//! resolving at two versions in this workspace. So this page does what an app
+//! actually can do with the public surface: enable the feature, register the
+//! component once, and mount it. **That still does not prove a third-party
+//! author could write one** — see `plugins/native-widgets/src/demo.rs`'s module
+//! doc, which is honest about exactly that.
+//!
+//! # Exactly six native slots at rest — and seven with the composite on
 //!
 //! The comparison section mounts **six** `platform_view` slots and no more —
 //! the number [`gate_harness_block`]'s `Total live:` readout settles back to
 //! after a cycler run, which every device gate so far has keyed on. Adding a
 //! seventh native slot to the always-mounted part of this page (a composite,
-//! a second sample control) changes that gate constant; add it inside the
+//! a second sample control) would change that gate constant; add it inside the
 //! cycler's own group or behind a toggle instead.
+//!
+//! [`composite_block`]'s toggle is exactly that, and is **OFF by default** (the
+//! same shape as the 50-slot stress toggle below it), so at rest this page is
+//! byte-for-byte the six-slot page every prior gate measured. Turned ON,
+//! `Total live:` must read **7** — ONE slot for the whole card, regardless of
+//! how many native children it has. A reading of 8 or 9 would mean the card's
+//! children had leaked into frust's slot space, which is the design failing;
+//! the number *is* the proof that frust sees one opaque slot.
 //!
 //! # Desktop safety / the translucency-refused fallback
 //!
@@ -166,8 +180,9 @@ use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
 };
 use frust_native_widgets::{
-    NativeImageFit, live_slot_count, native_button, native_image, native_label, native_progress,
-    native_slider, native_switch,
+    DEMO_CARD_HEIGHT, DEMO_CARD_KIND, DEMO_CARD_WIDTH, DemoCard, DemoCardProps, NativeImageFit,
+    live_slot_count, native_button, native_component, native_image, native_label, native_progress,
+    native_slider, native_switch, register_demo_components,
 };
 use kurbo::Size;
 
@@ -244,6 +259,11 @@ local_sig!(glyph_tap_count_sig, u32, 0);
 local_sig!(reject_writeback_sig, bool, false);
 local_sig!(switch_refused_sig, u32, 0);
 local_sig!(slider_refused_sig, u32, 0);
+// The composite toggle (p3-08), OFF by default — see [`composite_block`]. This
+// default is load-bearing, not a preference: ON makes the page mount a SEVENTH
+// native slot, and `Total live: 6` is a gate constant every device gate since
+// Phase 1 has keyed on (module doc's *Exactly six native slots at rest*).
+local_sig!(composite_visible_sig, bool, false);
 // GATE HARNESS state (task p1-11) — see [`gate_harness_block`]'s doc comment.
 local_sig!(cycle_target_sig, u32, 0); // 0 == no cycler run started yet
 local_sig!(stress_visible_sig, bool, false); // 50-slot stress toggle, off by default
@@ -626,6 +646,137 @@ fn theme_toggle_demo(brightness: Brightness) -> AnyView<CatalogState> {
 }
 
 // ---------------------------------------------------------------------------
+// The native composite (p3-08) — see the [module docs](self)'s "The composite
+// lives in the plugin" section. Unlike the GATE HARNESS region below, this is a
+// real feature demo and outlives the device gate.
+// ---------------------------------------------------------------------------
+
+/// Pack a [`Color`] as the ARGB `int` every native colour setter takes — the
+/// same `[a, r, g, b]` big-endian packing `frust-native-widgets`' own wire uses
+/// (`plugins/native-widgets/src/api/theme.rs`'s `argb_u32`).
+///
+/// A component's props are typed Rust values, so folding the theme into them is
+/// the **app's** job, not the builder's (`native_component`'s own doc) — this
+/// is that fold, and it is why the card below re-themes live off the same
+/// light/dark toggle the six controls above use.
+fn argb(color: Color) -> i32 {
+    let [r, g, b, a] = color.to_rgba8().to_u8_array();
+    i32::from_be_bytes([a, r, g, b])
+}
+
+/// Register `DemoCard` with this thread's native-widgets runtime, once.
+///
+/// `register_demo_components` is first-wins and logs a warning when refused, so
+/// calling it from `page` every rebuild would spam the log; the thread-local
+/// latch keeps it to the one call that matters. Registration must happen on the
+/// platform main thread, which a rebuild always is.
+fn ensure_demo_registered() {
+    thread_local! {
+        static REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    REGISTERED.with(|done| {
+        if !done.get() {
+            register_demo_components();
+            done.set(true);
+        }
+    });
+}
+
+/// The composite itself: ONE `platform_view` slot hosting a native parent view
+/// with a label and two buttons under it.
+///
+/// `title` is bound to live page state (the slider value) on purpose — it makes
+/// the card's `update` path, and therefore its retained child handles, run on
+/// device rather than only at create time. The two colours come from the active
+/// [`Theme`], so the header/page brightness toggle re-themes the card through
+/// the same `UpdateParams` diff as every other control here.
+fn composite_demo(title: String, background: Color, ink: Color) -> AnyView<CatalogState> {
+    any(native_component(
+        DEMO_CARD_KIND,
+        DemoCard,
+        DemoCardProps {
+            title,
+            primary: "Primary".to_string(),
+            secondary: "Dismiss".to_string(),
+            background_argb: argb(background),
+            title_argb: argb(ink),
+        },
+    )
+    .size(DEMO_CARD_WIDTH, DEMO_CARD_HEIGHT)
+    .interactive()
+    .semantics_label("Native composite card"))
+}
+
+/// The composite's toggle + (when on) the card itself — the module doc's
+/// *Exactly six native slots at rest*.
+///
+/// Mirrors [`gate_harness_block`]'s 50-slot stress toggle exactly: a labelled
+/// `Secondary` chip flipping a page-local signal that is **off by default**, so
+/// the page's resting slot count is unchanged. The copy states the expected
+/// `Total live:` reading in both positions, so a person holding the phone can
+/// check the one number that proves the design (7, not 9).
+fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogState>> {
+    let intro = block(vec![
+        inflexible(label(
+            "Native composite \u{2014} one component, one slot, three native children",
+        )),
+        gap(6.0),
+        inflexible(caption(
+            "Everything above is ONE native control per slot. This is the other shape: a single \
+             `NativeComponent` that builds its own native view hierarchy (a parent with a label \
+             and two buttons) and ships it as ONE `platform_view` slot \u{2014} the platform lays \
+             the children out, and frust never learns they exist.",
+        )),
+        gap(6.0),
+        inflexible(caption(
+            "OFF by default because it adds a SEVENTH slot. Turn it on and \u{201c}Total live\u{201d} \
+             below must read 7, not 9: one slot for the whole card however many children it has. \
+             That number is the proof frust sees one opaque slot. The title tracks the slider \
+             above, so its `update` path runs live; light/dark re-themes it through the same \
+             UpdateParams diff as the six controls.",
+        )),
+        gap(6.0),
+        inflexible(any(button(
+            if visible {
+                "Hide native composite (back to 6 slots)"
+            } else {
+                "Show native composite (makes it 7 slots)"
+            },
+            |_: &mut CatalogState| {
+                let sig = composite_visible_sig();
+                sig.set(!sig.get_untracked());
+            },
+        )
+        .style(ButtonStyle::Secondary)
+        .small())),
+        gap(6.0),
+        inflexible(caption(
+            "The card is defined inside the plugin, behind its non-default `demo-components` \
+             feature \u{2014} an app crate cannot implement `NativeComponent` without raw \
+             jni/objc2-ui-kit dependencies of its own. This page does the part an app really can \
+             do: enable the feature, register the component, mount it.",
+        )),
+    ]);
+
+    let mut sections = vec![intro];
+    if visible {
+        // Registered lazily rather than at app init: nothing else on this page
+        // needs the component, and registration is idempotent-by-latch.
+        ensure_demo_registered();
+        // Read only on the mounted path — a hidden card costs this page
+        // nothing, which is the whole point of the default-off toggle.
+        let theme = use_context::<Theme>().unwrap_or_else(Theme::glyph_baseline);
+        let scheme = theme.scheme();
+        sections.push(block(vec![inflexible(composite_demo(
+            format!("Composite \u{2014} slider {slider_value}"),
+            scheme.surface_container,
+            scheme.on_surface,
+        ))]));
+    }
+    sections
+}
+
+// ---------------------------------------------------------------------------
 // GATE HARNESS (task p1-11) — a measurement rig, not a demo. See the
 // [module docs](self)'s "GATE HARNESS" section. Phase 3 may delete this
 // whole region outright once `tasks/p1-10-android-device-gate.md`'s bars 5/6
@@ -932,6 +1083,10 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     let switch_refused = switch_refused_sig().get();
     let slider_refused = slider_refused_sig().get();
 
+    // The composite toggle (p3-08) — tracked for the same reason as the gate
+    // harness's own reads below.
+    let composite_visible = composite_visible_sig().get();
+
     // GATE HARNESS (task p1-11) — tracked `.get()`s so a button tap (a
     // signal write) wakes the page even while it's otherwise idle (0fps at
     // rest), per `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions:
@@ -1099,6 +1254,11 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
         image_block,
         readout_block,
     ];
+    // The composite goes BEFORE the gate harness: it is a feature demo that
+    // outlives the harness (which Phase 3 may delete), and a person turning it
+    // on scrolls straight down into the `Total live:` readout that proves it
+    // cost exactly one slot.
+    children.extend(composite_block(composite_visible, slider_value));
     children.extend(gate_harness_block(
         live_count,
         cycle_target,
