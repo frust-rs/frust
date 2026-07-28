@@ -74,14 +74,23 @@
 //! # No event wiring, and why
 //!
 //! The two buttons are **display-only**: they show the platform's own press
-//! feedback and report nothing back. Attaching this crate's shared
-//! `FrustNativeListener`/`FrustNativeControlTarget` needs the slot's id, and a
-//! [`NativeComponent`] is never handed one (`create` receives `&self`, a
-//! [`ComponentCtx`] and its props — see `crate::component`'s lifecycle
-//! contract). That is a real gap in the public surface, recorded here rather
-//! than worked around: a component needing its own events must build its own
-//! listener through the platform escape hatch (`ComponentCtx::env` on Android,
-//! `ComponentCtx::mtm` on iOS) today.
+//! feedback and report nothing back. That is not a choice this card made —
+//! **no [`NativeComponent`] can receive events in this build**, its root as
+//! much as its children, and there is no supported way to arrange one.
+//! [`NativeComponent::on_event`] owns the full reasoning and names the
+//! deferred Phase 4 gap; the short version is that attaching this crate's
+//! shared `FrustNativeListener`/`FrustNativeControlTarget` needs the slot's
+//! id, and a component is never handed one (`create` receives `&self`, a
+//! [`ComponentCtx`] and its props).
+//!
+//! **The platform escape hatch is not a way around that.**
+//! `ComponentCtx::env` and `ComponentCtx::mtm` hand out the raw platform, but
+//! neither yields an event route: on Android the only listener class is that
+//! same `FrustNativeListener`, so a component could only feed its constructor
+//! a *fabricated* slot id — which would deliver the event to a **different
+//! slot**, a correctness bug rather than a workaround — and on iOS the target
+//! type is crate-private, so there is nothing to attach at all. Write a
+//! component as display-only until the attach half ships.
 //!
 //! # The feature gate
 //!
