@@ -73,8 +73,9 @@
 //!    setter is cheap and which forces a re-layout. A **failed** `update` is
 //!    retried — see *A failed `update` is retried on the next rebuild* below
 //!    for the exact mechanism, which is not the obvious one.
-//! 4. **`on_event` fires between frames — except that for a public component
-//!    it never fires at all in this build.** A native interaction bypasses
+//! 4. **`on_event` fires between frames — except that no production path
+//!    attaches a listener to a public component's view, so overriding it has
+//!    no effect in this build.** A native interaction bypasses
 //!    `RenderRoot::event` entirely (see the crate doc): no `EventCtx`, no
 //!    capture/focus, none of `docs/CODE_STANDARDS.md`'s Interaction Semantics.
 //!    A listener that fires while the runtime is already borrowed — the
@@ -287,8 +288,10 @@
 //!
 //! `on_event` is the one dispatch with no guard, because it is handed no
 //! context and therefore no `Env`: a component reaching JNI from there attached
-//! its own thread and owns its own check-and-clear. (It also never fires in
-//! this build — [`NativeComponent::on_event`].) `env` itself stays a **safe**
+//! its own thread and owns its own check-and-clear. (No production path
+//! attaches a listener to a component's view either, so nothing reaches it
+//! outside a deliberate misroute — [`NativeComponent::on_event`].) `env`
+//! itself stays a **safe**
 //! fn: making it `unsafe` would tax the one audience that can use this trait at
 //! all, for a hazard the boundary guard already contains.
 
@@ -416,8 +419,9 @@ pub trait NativeComponent: 'static {
         new: &Self::Props,
     );
 
-    /// What a platform listener *would* deliver for this slot — but nothing
-    /// attaches one in this build, so it never fires. See below.
+    /// What a platform listener *would* deliver for this slot — but no
+    /// production path attaches one, so overriding this has no effect. See
+    /// below.
     ///
     /// # Nothing reaches this in the current build
     ///
