@@ -70,7 +70,9 @@
 //!    the typed props with `PartialEq` **before** any platform call, so an
 //!    unchanged rebuild costs zero FFI crossings. Field-level diffing inside a
 //!    changed props value is the component's own job — only it knows which
-//!    setter is cheap and which forces a re-layout.
+//!    setter is cheap and which forces a re-layout. A **failed** `update` is
+//!    retried — see *A failed `update` is retried on the next rebuild* below
+//!    for the exact mechanism, which is not the obvious one.
 //! 4. **`on_event` fires between frames — except that for a public component
 //!    it never fires at all in this build.** A native interaction bypasses
 //!    `RenderRoot::event` entirely (see the crate doc): no `EventCtx`, no
@@ -219,6 +221,76 @@
 //! teardown), never by disposal alone — the c1-01 leak shape
 //! (`crate::runtime`'s `forget_pending_callback`) applies here verbatim: a
 //! culled slot's dispose resolves by view identity and never sees this table.
+//!
+//! # A failed `update` is retried on the next rebuild
+//!
+//! The retry trigger is a **generation bump**, not `instance.props` differing,
+//! and that distinction is load-bearing. When `update` reports a failure the
+//! runtime keeps `old` as its diff baseline, so the change *would* be re-applied
+//! by the next `UpdateParams` command — but the differ only emits one when the
+//! slot's `params_json` changes, and `publish` moves the generation only when
+//! the app's props actually change. An app that republishes the same (already
+//! failed) props forever would therefore emit no `UpdateParams` at all, and the
+//! failed change would never be retried: the view would stay stale, silently,
+//! for the process lifetime.
+//!
+//! So the staging table carries the retry itself. A failed dispatch marks the
+//! slot (`request_update_retry`, this module's crate-private half), and the
+//! **next `publish` for that slot bumps the generation even for identical
+//! props** — one wire change, one `UpdateParams`, one retry, whether or not the
+//! app's props moved. Two consequences worth stating plainly:
+//!
+//! - **A retry needs a rebuild.** Nothing here schedules one; the mark is
+//!   consumed by the next rebuild that publishes this slot. On a screen that
+//!   never rebuilds again, the failed change stays unapplied — the same bound
+//!   every other props change lives under.
+//! - **A permanently failing `update` is retried on every subsequent rebuild**
+//!   (each retry fails and re-marks the slot). That is the deliberate trade: a
+//!   repeated, logged FFI attempt beats a silently stale native view.
+//!
+//! # Kind and type must agree, and a mismatch fails closed four different ways
+//!
+//! `kind` is passed twice — once to [`register_component`], once to the
+//! mounting builder — and nothing mechanically ties the two, so the mismatch
+//! cases are worth naming with their *actual* errors (m-01 item 4 corrects an
+//! earlier claim that all of them surface as the runtime's `UnknownControl`;
+//! only the first does):
+//!
+//! | case | what surfaces | logged | slot |
+//! |---|---|---|---|
+//! | kind never registered | `NativeWidgetError::UnknownControl(kind)` from the runtime's own dispatch, before any decode | yes, by the platform export | dead |
+//! | registered to `C`, mounted with `C` | nothing — the ordinary path | — | live |
+//! | registered to `C`, mounted with `D` | `NativeWidgetError::Params`, from `Bridge::<C>::decode_props` failing to downcast the staged props to `C::Props` | yes, by the platform export | dead |
+//! | registered to `C`, mounted with `D` where `D::Props == C::Props` | `NativeWidgetError::Params`, one step later — the props downcast *succeeds* and `Bridge::<C>::create` fails to downcast the staged component to `C` | yes, by the platform export | dead |
+//!
+//! A fifth shape reduces to the third: **two components registered under one
+//! kind**. Registration is first-wins, so the second `register_component`
+//! answers `false` with a warning and the incumbent keeps the kind; mounting
+//! the loser under it is then exactly the third row.
+//!
+//! Every one of them **fails closed** — no half-created slot, no instance
+//! retained, no silent no-op — and both mismatch rows say so in their message
+//! rather than reporting the reaped-entry wording they used to share with an
+//! ordinary "nothing staged here any more".
+//!
+//! # Dispatch-boundary exception guard (Android)
+//!
+//! `ComponentCtx::env` (Android-only, so a host docs build does not render it)
+//! hands a component the live `jni::Env`, and a component is free to leave a
+//! Java exception pending on it — which is undefined behaviour for the *next*
+//! JNI call, not for the one that threw. So every
+//! dispatch through this module that carries a context (`create`, `update`,
+//! `dispose`) checks and clears one on the way out, reusing the crate's own
+//! `run_jni` helper so the report names the throwable's class and message. A
+//! pending exception is folded into the same error channel as a latched one:
+//! the first failure stays the headline, the later one is logged.
+//!
+//! `on_event` is the one dispatch with no guard, because it is handed no
+//! context and therefore no `Env`: a component reaching JNI from there attached
+//! its own thread and owns its own check-and-clear. (It also never fires in
+//! this build — [`NativeComponent::on_event`].) `env` itself stays a **safe**
+//! fn: making it `unsafe` would tax the one audience that can use this trait at
+//! all, for a hazard the boundary guard already contains.
 
 // The publication half of this module (`publish`/`forget`/`component_params`)
 // got its production caller in p3-02: `crate::api::mount`'s generic builder
@@ -327,9 +399,15 @@ pub trait NativeComponent: 'static {
     /// handles [`State`](Self::State) retained.
     ///
     /// Called only when `old != new` (the module doc's props diff gate), on
-    /// the main thread, ordered with this slot's create/dispose. A failure
-    /// latched on `ctx` leaves the runtime's diff baseline at `old`, so the
-    /// change is retried the next time the props differ.
+    /// the main thread, ordered with this slot's create/dispose.
+    ///
+    /// A failure latched on `ctx` leaves the runtime's diff baseline at `old`
+    /// **and marks the slot for retry**, so the next rebuild that publishes
+    /// this slot re-applies the change — even if the app's props never differ
+    /// again. The trigger is a props-generation bump, not the app's props
+    /// moving; the module doc's *A failed `update` is retried on the next
+    /// rebuild* has the mechanism and its two limits (a retry needs a rebuild;
+    /// a permanently failing update retries on every one).
     fn update(
         &self,
         ctx: &mut ComponentCtx<'_, '_, '_>,
@@ -423,9 +501,18 @@ pub trait NativeComponent: 'static {
 /// [`report_error`](Self::report_error) lets a component latch one of its own.
 /// The runtime reads the latch when the method returns: on `create` a latched
 /// error is fatal only if the component also answered `None`; on `update` it
-/// keeps the diff baseline unchanged so the change is retried; on `dispose` it
-/// is logged. **The first error wins** — later ones are dropped, so the log
-/// names the failure that started the cascade rather than its last symptom.
+/// keeps the diff baseline unchanged and marks the slot for retry (the module
+/// doc's *A failed `update` is retried on the next rebuild*); on `dispose` it
+/// is logged.
+///
+/// **The first error wins, and every later one is logged rather than
+/// dropped.** Reporting keeps the failure that *started* the cascade, not its
+/// last symptom — but a symptom is still evidence, so a latch that refuses a
+/// later error says so in the log (`log::warn!`), naming both. That holds
+/// across [`with_local_frame`](Self::with_local_frame) too, which is the one
+/// place a second context exists to lose an error in: the latch travels into
+/// the frame and back out, so `failed()` answers the same inside it as
+/// outside, on every platform arm.
 pub struct ComponentCtx<'ctx, 'local, 'env> {
     inner: &'ctx mut PlatformCtx<'local, 'env>,
     error: Option<NativeWidgetError>,
@@ -443,9 +530,19 @@ impl<'ctx, 'local, 'env> ComponentCtx<'ctx, 'local, 'env> {
     }
 
     /// Record the first failure and keep it (see this type's *error latch*).
+    ///
+    /// A later error cannot replace it — that is the whole point of the latch
+    /// — but it is **logged rather than swallowed**: on a device the cascade's
+    /// symptoms are what let a reader judge the root failure's blast radius,
+    /// and a second platform failure that vanished without trace is exactly
+    /// the defect m-01 item 1 names.
     fn latch(&mut self, error: NativeWidgetError) {
-        if self.error.is_none() {
-            self.error = Some(error);
+        match &self.error {
+            Some(first) => log::warn!(
+                "frust-native-widgets: component context already failed ({first}) — keeping that \
+                 error and reporting this later one here only: {error}"
+            ),
+            None => self.error = Some(error),
         }
     }
 }
@@ -521,24 +618,38 @@ impl ComponentCtx<'_, '_, '_> {
     /// [`Self::retain_child`] is for, and its [`NativeChild`] outlives the
     /// frame.
     ///
-    /// An error the closure latched propagates to this context, and a frame
-    /// that cannot be pushed at all latches too; either way the answer is
-    /// `None`.
+    /// **The latch travels with you.** The closure runs against a context that
+    /// already carries whatever this one latched — so `failed()` answers the
+    /// same inside the frame as outside it, exactly as on the iOS and host
+    /// arms, which hand the closure this very context — and whatever survives
+    /// comes back out. A frame that cannot be pushed at all latches too, and
+    /// leaves an already-latched error untouched; either way the answer is
+    /// `None`. Per the latch's first-wins rule, an error raised inside the
+    /// frame behind an already-latched one is logged rather than reported.
     pub fn with_local_frame<T>(
         &mut self,
         capacity: usize,
         f: impl FnOnce(&mut ComponentCtx<'_, '_, '_>) -> Option<T>,
     ) -> Option<T> {
-        let mut inner_error = None;
+        // A *fresh* inner context is structurally forced here — the pushed
+        // frame's references carry different lifetimes than this context's —
+        // but a fresh *latch* is not, and was the whole divergence (m-01 item
+        // 1): it made `failed()` read `false` inside a frame where the other
+        // two arms read `true`, and it re-latched the inner error on return,
+        // which silently dropped it whenever this context already held one.
+        let mut latched = self.error.take();
         let outcome = self.inner.with_frame(capacity, |inner| {
-            let mut cx = ComponentCtx::new(inner);
+            let mut cx = ComponentCtx {
+                inner,
+                error: latched.take(),
+            };
             let value = f(&mut cx);
-            inner_error = cx.into_error();
+            latched = cx.into_error();
             Ok::<Option<T>, NativeWidgetError>(value)
         });
-        if let Some(error) = inner_error {
-            self.latch(error);
-        }
+        // A frame that could not be pushed never ran the closure, so this puts
+        // the carried-in error back rather than erasing it.
+        self.error = latched;
         match outcome {
             Ok(value) => value,
             Err(error) => {
@@ -556,8 +667,19 @@ impl<'local, 'env> ComponentCtx<'_, 'local, 'env> {
     /// `call_method_unchecked` hot path, any class this crate never names).
     ///
     /// A pending Java exception is undefined behaviour for the next JNI call,
-    /// so a component using this directly must check and clear its own —
+    /// so a component using this directly should check and clear its own —
     /// [`Self::new_view`] and [`Self::root`] do that for the calls they make.
+    /// **The runtime no longer takes that on trust:** every dispatch through
+    /// this context (`create`, `update`, `dispose`) checks and clears a
+    /// leftover exception on the way out and reports it (the module doc's
+    /// *Dispatch-boundary exception guard*). Clearing your own is still the
+    /// right discipline — it keeps the *rest of your own call* on defined
+    /// ground, which the boundary guard cannot do for you — but forgetting it
+    /// can no longer poison the next unrelated JNI call.
+    ///
+    /// This stays a **safe** fn on purpose: the hazard is bounded by the guard
+    /// above, and an `unsafe` escape hatch would tax the small audience that
+    /// can implement this trait at all for no further protection.
     pub fn env(&mut self) -> &mut jni::Env<'local> {
         self.inner.env()
     }
@@ -666,6 +788,11 @@ impl ComponentCtx<'_, '_, '_> {
     /// is the release (`crate::apple::ctx`'s module doc) — so `capacity` is
     /// accepted and ignored. The method exists on this arm so a component's
     /// `create` is written once and compiles on both.
+    ///
+    /// Handing the closure this very context is also what makes the error
+    /// latch shared, which the Android arm now matches deliberately rather
+    /// than by accident: `failed()` reads the same inside the frame as outside
+    /// it on every arm.
     pub fn with_local_frame<T>(
         &mut self,
         _capacity: usize,
@@ -718,6 +845,12 @@ impl ComponentCtx<'_, '_, '_> {
     /// Record a would-be `PushLocalFrame`/`PopLocalFrame` pair around `f` —
     /// the host mirror of Android's real local frame, so a test can assert a
     /// subtree build actually ran inside one.
+    ///
+    /// Like the iOS arm, this hands the closure the caller's own context, so
+    /// the error latch is shared: `failed()` reads the same inside the frame
+    /// as outside it, and a second error raised inside it is logged by the
+    /// latch rather than dropped. Android reproduces both properties over a
+    /// context it is forced to build fresh.
     pub fn with_local_frame<T>(
         &mut self,
         capacity: usize,
@@ -879,23 +1012,116 @@ impl NativeEvent {
 /// Register `C` under `kind`, so a slot whose params name that kind is served
 /// by this component — the module doc's decision **2**.
 ///
-/// Call it once, from app or plugin init, on the platform main thread (a call
-/// from any other thread registers into that thread's runtime, which nothing
-/// will ever dispatch through, and is a no-op in practice). Returns whether
-/// the registration was accepted: **first-wins**, so a `kind` already taken —
-/// including the six built-in control kinds this build's backend registers
-/// itself — is refused with a warning rather than replaced.
+/// Call it once, from app or plugin init, **on the platform main thread**.
+/// Returns whether the registration was accepted: **first-wins**, so a `kind`
+/// already taken — including the six built-in control kinds this build's
+/// backend registers itself — is refused with a warning rather than replaced.
+///
+/// # A wrong-thread call is refused, not silently accepted
+///
+/// The runtime is a `thread_local!`, and only the platform main thread's copy
+/// is ever dispatched through: a registration made anywhere else lands in a
+/// runtime nothing will ever consult, and the symptom arrives much later, as a
+/// component that simply never appears. So this asks the platform first —
+/// `Looper.myLooper() == Looper.getMainLooper()` on Android (through the
+/// plugin substrate's scoped attach), `MainThreadMarker` on iOS — and a
+/// definitive *no* is refused outright: nothing is registered, `false` comes
+/// back, and the reason is logged at error level.
+///
+/// A platform that cannot answer proceeds as before. On Android that means
+/// before the shell installs the plugin handles (`NotInitialized`) or if the
+/// probe itself fails; on a desktop/CI host there is no platform main thread
+/// to be wrong about at all, and nothing dispatches there in any case. Guessing
+/// "wrong thread" from an unknown answer would turn a legitimate registration
+/// into a silent no-show, which is the exact failure this is meant to prevent.
 ///
 /// Registration is explicit on purpose: `inventory`-style link-time discovery
 /// is banned in this crate, because a stripped, LTO'd device build is exactly
 /// where it fails silently (RESEARCH-NATIVE-COMPONENT §Open questions).
 pub fn register_component<C: NativeComponent>(kind: &'static str) -> bool {
+    if on_platform_main_thread() == Some(false) {
+        log::error!(
+            "frust-native-widgets: register_component('{kind}') was called off the platform main \
+             thread — the runtime is thread-local, so this registration would land in a runtime \
+             nothing ever dispatches through and the component would never appear. Refused; \
+             register from app or plugin init on the main thread."
+        );
+        return false;
+    }
     // Also the moment the iOS factory class must exist by, if an app registers
     // long before it mounts anything: `crate::runtime`'s own encode path forces
     // this too, and it is idempotent (a `Once`), so paying it here as well only
     // moves the cost earlier.
     crate::runtime::ensure_platform_factory();
     with_runtime(|runtime| runtime.register_if_free::<Bridge<C>>(kind)).unwrap_or(false)
+}
+
+/// Whether this is the platform main thread — the one thread whose
+/// thread-local runtime the host actually dispatches through.
+///
+/// `None` is *unknown*, and every unknown answer means "proceed" at the one
+/// call site ([`register_component`]): refusing a legitimate main-thread
+/// registration would be far worse than missing a wrong-thread one.
+///
+/// `Looper.myLooper()` answers null on a thread with no looper and
+/// `getMainLooper()` never does, so the pair is never both-null — the trap
+/// `IsSameObject` sets for two nulls, which `frust-camera`'s own
+/// `ensure_off_ui_thread` names in the same words. The scoped attach is
+/// `frust_plugin`'s (`docs/CODE_STANDARDS.md`'s never-`attach_permanently`
+/// rule), and any JNI failure — including the pre-init `NotInitialized` — maps
+/// to *unknown* rather than to a refusal.
+#[cfg(target_os = "android")]
+fn on_platform_main_thread() -> Option<bool> {
+    use jni::{Env, jni_sig, jni_str};
+
+    fn on_main_looper(env: &mut Env<'_>) -> Result<bool, jni::errors::Error> {
+        let looper = env.find_class(jni_str!("android/os/Looper"))?;
+        let mine = env
+            .call_static_method(
+                &looper,
+                jni_str!("myLooper"),
+                jni_sig!("()Landroid/os/Looper;"),
+                &[],
+            )?
+            .l()?;
+        let main = env
+            .call_static_method(
+                &looper,
+                jni_str!("getMainLooper"),
+                jni_sig!("()Landroid/os/Looper;"),
+                &[],
+            )?
+            .l()?;
+        env.is_same_object(&mine, &main)
+    }
+
+    frust_plugin::android::with_jni_env(|env, _context| {
+        let probe = on_main_looper(env);
+        // Never leave a pending exception behind for the next JNI call, even
+        // on a path whose whole answer is "I don't know".
+        if env.exception_check() {
+            env.exception_clear();
+            return None;
+        }
+        probe.ok()
+    })
+    .ok()
+    .flatten()
+}
+
+/// See the Android arm: `MainThreadMarker::new()` is `NSThread.isMainThread`,
+/// so this arm always has a definitive answer.
+#[cfg(target_os = "ios")]
+fn on_platform_main_thread() -> Option<bool> {
+    Some(objc2::MainThreadMarker::new().is_some())
+}
+
+/// See the Android arm: a desktop/CI host has no platform main thread to be
+/// wrong about — and no platform dispatch either — so the answer is always
+/// *unknown*.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn on_platform_main_thread() -> Option<bool> {
+    None
 }
 
 // --- the typed props channel -------------------------------------------------
@@ -909,8 +1135,17 @@ struct Staged {
     props: Box<dyn Any>,
     /// Bumped by [`publish`] only when the incoming props differ from these —
     /// the wire-visible change signal (module doc's *Props travel beside the
-    /// wire*).
+    /// wire*) — or when [`Self::retry_update`] asks for one.
     generation: u64,
+    /// Set by [`request_update_retry`] when a dispatch for this slot failed,
+    /// and consumed by the next [`publish`], which then bumps the generation
+    /// even for identical props.
+    ///
+    /// This is the whole retry mechanism (module doc's *A failed `update` is
+    /// retried on the next rebuild*): the runtime keeps its diff baseline on a
+    /// failure, but only a wire change makes the differ hand it a second
+    /// chance, and only this makes the wire change when the app's props do not.
+    retry_update: bool,
 }
 
 thread_local! {
@@ -943,9 +1178,11 @@ fn with_staged<T>(f: impl FnOnce(&mut HashMap<SlotId, Staged>) -> T) -> Option<T
 /// ([`component_params`]).
 ///
 /// The generation changes if and only if `props` differ from what is already
-/// staged, which is what makes the platform-view differ emit an `UpdateParams`
-/// exactly when a component's props actually changed — and nothing at all when
-/// they did not.
+/// staged — or a failed dispatch marked the slot for retry
+/// ([`request_update_retry`]) — which is what makes the platform-view differ
+/// emit an `UpdateParams` exactly when a component's props actually changed, or
+/// when a change it already reported failed to apply, and nothing at all
+/// otherwise.
 ///
 /// Publishing is idempotent and replaces outright: props are whole state, never
 /// a delta (module doc's lifecycle contract, point 2).
@@ -964,7 +1201,10 @@ pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: Rc<C>, props:
                     .props
                     .downcast_ref::<C::Props>()
                     .is_some_and(|staged| *staged == props);
-                if unchanged {
+                // The retry mark forces the bump an unchanged republish would
+                // not otherwise make — and is consumed by making it, so one
+                // failure buys exactly one retry.
+                if unchanged && !previous.retry_update {
                     previous.generation
                 } else {
                     previous.generation.wrapping_add(1)
@@ -978,11 +1218,31 @@ pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: Rc<C>, props:
                 component,
                 props: Box::new(props),
                 generation,
+                retry_update: false,
             },
         );
         generation
     })
     .unwrap_or(0)
+}
+
+/// Mark `slot` so the next [`publish`] bumps its props generation whatever the
+/// app publishes — the retry half of the module doc's *A failed `update` is
+/// retried on the next rebuild*.
+///
+/// Called from [`Bridge`]'s dispatch when a component reports a failure, which
+/// leaves the runtime's diff baseline behind the app's intent; without the
+/// forced bump, an app that republishes the same props forever would emit no
+/// further `UpdateParams` and the runtime would never get to try again.
+///
+/// A slot with nothing staged (its reaper already ran, or it was never a
+/// component slot) is a silent no-op: there is no rebuild left to retry from.
+fn request_update_retry(slot: SlotId) {
+    with_staged(|staged| {
+        if let Some(entry) = staged.get_mut(&slot) {
+            entry.retry_update = true;
+        }
+    });
 }
 
 /// Drop `slot`'s staged component and props — the teardown reaper, registered
@@ -1016,25 +1276,70 @@ pub(crate) fn staged_count() -> usize {
     with_staged(|staged| staged.len()).unwrap_or(0)
 }
 
-/// `slot`'s staged props, cloned for the runtime's own baseline copy.
-fn staged_props<C: NativeComponent>(slot: SlotId) -> Option<C::Props> {
-    with_staged(|staged| {
-        staged
-            .get(&slot)
-            .and_then(|entry| entry.props.downcast_ref::<C::Props>())
-            .cloned()
-    })
-    .flatten()
+/// Why a staged lookup missed — two answers a caller must never conflate
+/// (module doc's *Kind and type must agree*).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StagedMiss {
+    /// Nothing at all is staged for the slot: the ordinary shape of a replay
+    /// or a dispatch arriving after the mounting widget's reaper ran.
+    Unstaged,
+    /// Something *is* staged, but it belongs to a different component than the
+    /// one this kind is registered to — a kind/type mismatch, which used to be
+    /// reported in the "nothing staged" wording and read as a lifecycle race
+    /// rather than the wiring bug it is.
+    OtherComponent,
 }
 
-/// `slot`'s staged component value.
-fn staged_component<C: NativeComponent>(slot: SlotId) -> Option<Rc<C>> {
-    with_staged(|staged| {
-        staged
-            .get(&slot)
-            .and_then(|entry| Rc::clone(&entry.component).downcast::<C>().ok())
+impl StagedMiss {
+    /// The error this miss surfaces as, naming `what` was looked for (`props`
+    /// or `component`) and, where the caller knows it, the `kind` the slot was
+    /// mounted under.
+    fn describe(self, slot: SlotId, what: &str, kind: Option<&str>) -> NativeWidgetError {
+        match self {
+            Self::Unstaged => NativeWidgetError::Params(format!(
+                "native component slot {slot} has no published {what}"
+            )),
+            Self::OtherComponent => {
+                let named = kind
+                    .map(|kind| format!(" (kind '{kind}')"))
+                    .unwrap_or_default();
+                NativeWidgetError::Params(format!(
+                    "native component slot {slot}{named} staged a different component's {what} — \
+                     the kind a slot is mounted under must be the one that component was \
+                     registered under"
+                ))
+            }
+        }
+    }
+}
+
+/// `slot`'s staged props, cloned for the runtime's own baseline copy.
+///
+/// A staging table already borrowed on this thread (the re-entrant publish
+/// `with_staged` warns about) reads as [`StagedMiss::Unstaged`] — there is
+/// nothing this can answer with, and the borrow itself is logged where it is
+/// detected.
+fn staged_props<C: NativeComponent>(slot: SlotId) -> Result<C::Props, StagedMiss> {
+    with_staged(|staged| match staged.get(&slot) {
+        None => Err(StagedMiss::Unstaged),
+        Some(entry) => entry
+            .props
+            .downcast_ref::<C::Props>()
+            .cloned()
+            .ok_or(StagedMiss::OtherComponent),
     })
-    .flatten()
+    .unwrap_or(Err(StagedMiss::Unstaged))
+}
+
+/// `slot`'s staged component value; see [`staged_props`] for the miss rules.
+fn staged_component<C: NativeComponent>(slot: SlotId) -> Result<Rc<C>, StagedMiss> {
+    with_staged(|staged| match staged.get(&slot) {
+        None => Err(StagedMiss::Unstaged),
+        Some(entry) => Rc::clone(&entry.component)
+            .downcast::<C>()
+            .map_err(|_| StagedMiss::OtherComponent),
+    })
+    .unwrap_or(Err(StagedMiss::Unstaged))
 }
 
 // --- the bridge to the internal runtime --------------------------------------
@@ -1112,9 +1417,81 @@ impl<C: NativeComponent> BridgeState<C> {
     /// retained value: there is no newer value to be had, and nothing here
     /// resurrects a reaped entry or panics on its absence.
     fn refresh_component(&mut self) {
-        if let Some(component) = staged_component::<C>(self.slot) {
+        if let Ok(component) = staged_component::<C>(self.slot) {
             self.component = component;
         }
+    }
+}
+
+/// Check for — and clear — a Java exception a component left pending at a
+/// dispatch boundary (module doc's *Dispatch-boundary exception guard*).
+///
+/// `ComponentCtx::env` is a safe fn handing a third party the live `Env`, and
+/// "clear your own pending exception" is prose, not a type: a component that
+/// forgets leaves the *next* JNI call — anyone's — on undefined ground. So the
+/// runtime checks after every dispatch that carried a context. The crate's own
+/// `run_jni` helper is the check: it extracts the throwable's class and message
+/// before clearing, so the report names what was thrown. Nothing is called
+/// inside it — whatever it finds was raised before we got here.
+#[cfg(target_os = "android")]
+fn guard_pending_exception(ctx: &mut PlatformCtx<'_, '_>, op: &str) -> Option<NativeWidgetError> {
+    ctx.run_jni(op, |_env| Ok::<(), jni::errors::Error>(()))
+        .err()
+}
+
+/// The Apple arm has nothing to guard: there is no pending-exception channel
+/// between a component and the runtime here (an ObjC exception is not a return
+/// path — `crate::apple::factory`'s own contract answers a failed create with a
+/// placeholder view instead), and no `Env` whose next call could be poisoned.
+#[cfg(target_os = "ios")]
+fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<NativeWidgetError> {
+    None
+}
+
+/// The host arm has no JNI to check, so it counts instead — see
+/// `dispatch_guard_count`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<NativeWidgetError> {
+    DISPATCH_GUARDS.with(|guards| guards.set(guards.get() + 1));
+    None
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+thread_local! {
+    /// How many times the dispatch-boundary guard ran on this thread — the
+    /// host arm's stand-in for a check it cannot make, the same shape
+    /// [`LIVE_CHILDREN`] uses for the leak bar. What a host test can prove is
+    /// that every context-carrying dispatch is *wired* to the guard; whether
+    /// the JNI check itself finds a pending exception is Android-only, and
+    /// this repo has no embedded-JVM harness to run it (`crate::android`'s own
+    /// `create_failure_message` note).
+    static DISPATCH_GUARDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times the dispatch-boundary exception guard has run on this
+/// thread.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[allow(dead_code)] // the guard's wiring bar: tests only, by design
+pub(crate) fn dispatch_guard_count() -> usize {
+    DISPATCH_GUARDS.with(|guards| guards.get())
+}
+
+/// Keep the first failure and log the second — [`ComponentCtx::latch`]'s rule
+/// one level up, where a component's own latched error meets whatever the
+/// dispatch-boundary guard found behind it.
+fn fold_error(
+    first: Option<NativeWidgetError>,
+    later: Option<NativeWidgetError>,
+) -> Option<NativeWidgetError> {
+    match (first, later) {
+        (Some(first), Some(later)) => {
+            log::warn!(
+                "frust-native-widgets: component dispatch reported '{first}' and also left \
+                 '{later}' behind it — reporting the first"
+            );
+            Some(first)
+        }
+        (first, later) => first.or(later),
     }
 }
 
@@ -1126,12 +1503,12 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
     /// component's props means taking the typed value the app staged for this
     /// slot (module doc's *Props travel beside the wire*).
     fn decode_props(params: &Params<'_>) -> Result<Self::Props, NativeWidgetError> {
-        let (_, slot) = params.identity()?;
-        let props = staged_props::<C>(slot).ok_or_else(|| {
-            NativeWidgetError::Params(format!(
-                "native component slot {slot} has no published props"
-            ))
-        })?;
+        let (kind, slot) = params.identity()?;
+        // A miss here is one of two very different things — a reaped entry, or
+        // a slot mounted under a kind registered to another component — and
+        // the message says which (module doc's *Kind and type must agree*).
+        let props =
+            staged_props::<C>(slot).map_err(|miss| miss.describe(slot, "props", Some(&kind)))?;
         Ok(BridgeProps { slot, props })
     }
 
@@ -1139,16 +1516,19 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
         ctx: &mut PlatformCtx<'_, '_>,
         props: &Self::Props,
     ) -> Result<(NativeView, Self::State), NativeWidgetError> {
-        let component = staged_component::<C>(props.slot).ok_or_else(|| {
-            NativeWidgetError::Params(format!(
-                "native component slot {} has no published component",
-                props.slot
-            ))
-        })?;
+        // The kind is not carried this far (the runtime holds it, the props do
+        // not), so the mismatch message names the slot alone — reachable here
+        // rather than in `decode_props` only when the two components happen to
+        // share one `Props` type (module doc's fourth row).
+        let component = staged_component::<C>(props.slot)
+            .map_err(|miss| miss.describe(props.slot, "component", None))?;
 
         let mut cx = ComponentCtx::new(ctx);
         let built = component.create(&mut cx, &props.props);
-        let latched = cx.into_error();
+        let latched = fold_error(
+            cx.into_error(),
+            guard_pending_exception(ctx, "NativeComponent::create"),
+        );
         match built {
             Some((root, state)) => {
                 // The impl had the final say (the trait's `create` doc): a
@@ -1190,10 +1570,20 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
         let component = Rc::clone(&state.component);
         let mut cx = ComponentCtx::new(ctx);
         component.update(&mut cx, &mut state.state, &old.props, &new.props);
-        match cx.into_error() {
-            // Reported, so the runtime keeps `old` as the diff baseline and
-            // the change is retried on the next differing props.
-            Some(error) => Err(error),
+        let error = fold_error(
+            cx.into_error(),
+            guard_pending_exception(ctx, "NativeComponent::update"),
+        );
+        match error {
+            Some(error) => {
+                // Reported, so the runtime keeps `old` as the diff baseline —
+                // and marked, so the next rebuild's `publish` bumps the wire
+                // even if the app republishes identical props, which is the
+                // only thing that gets the runtime a second attempt (module
+                // doc's *A failed `update` is retried on the next rebuild*).
+                request_update_retry(new.slot);
+                Err(error)
+            }
             None => Ok(()),
         }
     }
@@ -1210,6 +1600,12 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
     /// number of rebuilds that changed the component but not its props, and
     /// the props diff gate skips `update` on every one of them
     /// ([`BridgeState::refresh_component`]).
+    ///
+    /// The one dispatch with no boundary exception guard, because it carries
+    /// no context and hands the component no `Env` of ours: a component
+    /// reaching JNI from here attached its own thread and owns the
+    /// check-and-clear on it (module doc's *Dispatch-boundary exception
+    /// guard*).
     fn on_event(state: &mut Self::State, event: WireEvent) -> Option<EventPayload> {
         state.refresh_component();
         let component = Rc::clone(&state.component);
@@ -1234,7 +1630,10 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
         } = state;
         let mut cx = ComponentCtx::new(ctx);
         component.dispose(&mut cx, state);
-        match cx.into_error() {
+        match fold_error(
+            cx.into_error(),
+            guard_pending_exception(ctx, "NativeComponent::dispose"),
+        ) {
             Some(error) => Err(error),
             None => Ok(()),
         }
@@ -1247,10 +1646,62 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
 // device-only types.
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::sync::{Mutex, Once};
 
     use super::*;
     use crate::runtime::{DisposeOutcome, UpdateOutcome};
+
+    // --- the log sink -------------------------------------------------------
+
+    /// Everything logged since the sink was installed.
+    static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// A process-wide `log` sink, so a test can prove a failure was *logged*
+    /// rather than merely dropped.
+    ///
+    /// The latch keeps the first error and reports nothing else — by design —
+    /// so "a later error is not silently swallowed" has exactly one observable
+    /// channel, and this is it (m-01 item 1). Shared across test threads and
+    /// never cleared: assertions match on a marker string unique to their own
+    /// test rather than on the sink's contents as a whole.
+    struct CapturedLog;
+
+    impl log::Log for CapturedLog {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if let Ok(mut captured) = CAPTURED.lock() {
+                captured.push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static CAPTURE: CapturedLog = CapturedLog;
+
+    /// Install the sink, once per process. `log`'s runtime max level defaults
+    /// to `Off`, so it is raised here too or `log::warn!` would compile to
+    /// nothing observable.
+    fn install_log_capture() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            if log::set_logger(&CAPTURE).is_ok() {
+                log::set_max_level(log::LevelFilter::Warn);
+            }
+        });
+    }
+
+    /// Whether any captured line contains `needle`.
+    fn logged(needle: &str) -> bool {
+        CAPTURED
+            .lock()
+            .map(|captured| captured.iter().any(|line| line.contains(needle)))
+            .unwrap_or(false)
+    }
 
     /// A component defined **outside the six** — the whole point of the
     /// acceptance bar: it implements nothing but the public
@@ -1290,6 +1741,18 @@ mod tests {
 
     /// The [`GaugeProps::label`] that makes `update` latch an error.
     const FAIL_UPDATE: &str = "FAIL_UPDATE";
+
+    /// The [`GaugeProps::label`] that makes `update` latch an error on its
+    /// **first** attempt only — the retry test's opt-in, so a retry can be
+    /// observed succeeding rather than merely being attempted again.
+    const FAIL_UPDATE_ONCE: &str = "FAIL_UPDATE_ONCE";
+
+    thread_local! {
+        /// Whether [`FAIL_UPDATE_ONCE`]'s single failure has been spent. Per
+        /// test thread, like every other thread-local this module's tests
+        /// lean on (the staging table, the runtime itself).
+        static UPDATE_FAILED_ONCE: Cell<bool> = const { Cell::new(false) };
+    }
 
     impl Gauge {
         fn new(log: &Rc<RefCell<Vec<String>>>, tag: &'static str) -> Self {
@@ -1339,6 +1802,11 @@ mod tests {
         ) {
             if new.label == FAIL_UPDATE {
                 ctx.report_error("gauge: setter threw");
+                return;
+            }
+            if new.label == FAIL_UPDATE_ONCE && !UPDATE_FAILED_ONCE.replace(true) {
+                self.note(format!("{} update failed", self.tag));
+                ctx.report_error("gauge: setter threw once");
                 return;
             }
             ctx.record(format!(
@@ -1804,6 +2272,323 @@ mod tests {
             "the failed update applied nothing and left the baseline at create's props"
         );
         forget(6);
+    }
+
+    #[test]
+    fn a_failed_update_retries_even_when_the_app_republishes_identical_props() {
+        // m-01 item 2. Keeping the diff baseline (the test above) is only half
+        // a retry: the runtime cannot re-apply anything it is never handed
+        // again, and it is handed props only when the differ emits an
+        // `UpdateParams`, which it does only when the wire changes. An app
+        // whose props settled — the ordinary shape of a value that failed to
+        // apply once and is simply still true — would republish a
+        // byte-identical wire forever and the failed change would never be
+        // retried at all.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        register_component::<Gauge>(GAUGE_KIND);
+        let created = mount(60, Gauge::new(&log, "g"), props("Net", 1));
+
+        let mut calls = Vec::new();
+        {
+            let mut ctx = PlatformCtx::new(&mut calls);
+            with_runtime(|runtime| {
+                runtime.create(&mut ctx, &created).unwrap();
+
+                // The change the platform refuses on its first attempt.
+                let failing = mount(60, Gauge::new(&log, "g"), props(FAIL_UPDATE_ONCE, 2));
+                assert_ne!(failing, created, "changed props changed the wire");
+                assert!(runtime.update_params(&mut ctx, &failing).is_err());
+
+                // The next rebuild publishes *exactly the same props again* —
+                // and must still move the wire, or nothing will ever ask the
+                // runtime to try again.
+                let republished = mount(60, Gauge::new(&log, "g"), props(FAIL_UPDATE_ONCE, 2));
+                assert_ne!(
+                    republished, failing,
+                    "a failed update must force the next publish to bump the props \
+                     generation, identical props or not — otherwise the differ emits \
+                     nothing and the change is lost for the process lifetime"
+                );
+                assert_eq!(
+                    runtime.update_params(&mut ctx, &republished).unwrap(),
+                    UpdateOutcome::Applied,
+                    "the retry reached the component and applied"
+                );
+
+                // One failure buys exactly one retry: with the change applied,
+                // an unchanged rebuild is back to costing nothing.
+                let settled = mount(60, Gauge::new(&log, "g"), props(FAIL_UPDATE_ONCE, 2));
+                assert_eq!(
+                    settled, republished,
+                    "the retry mark is consumed by the bump it forced"
+                );
+                assert_eq!(
+                    runtime.update_params(&mut ctx, &settled).unwrap(),
+                    UpdateOutcome::Unchanged
+                );
+
+                assert_eq!(runtime.dispose_slot(&mut ctx, 60), DisposeOutcome::Disposed);
+            })
+            .expect("the thread's runtime");
+        }
+        forget(60);
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "g create 'Net'".to_string(),
+                "g update failed".to_string(),
+                "g update 1 -> 2".to_string(),
+                "g dispose".to_string(),
+            ],
+            "the change was attempted, failed, retried against the ORIGINAL baseline \
+             (1, not 2 — the failed attempt advanced nothing), and applied"
+        );
+    }
+
+    #[test]
+    fn a_later_error_inside_a_local_frame_is_logged_rather_than_swallowed() {
+        // m-01 item 1, both halves at once.
+        //
+        // The latch is first-wins, so the frame's error cannot *replace* the
+        // root failure — but before this fix it vanished without a trace, and
+        // on Android it vanished twice over: that arm handed the closure a
+        // FRESH context, so `failed()` also read `false` inside a frame where
+        // this arm (and iOS) read `true`, and the merge back was a second,
+        // silent first-wins drop on top of the latch's own.
+        //
+        // Android's fresh context is structurally forced (a pushed frame's
+        // references carry other lifetimes); what it now carries is this
+        // arm's semantics, which is what this test pins.
+        const ROOT: &str = "m-01 root failure";
+        const INSIDE_FRAME: &str = "m-01 failure raised inside the frame";
+        install_log_capture();
+
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        let mut cx = ComponentCtx::new(&mut ctx);
+
+        cx.report_error(ROOT);
+        assert!(cx.failed());
+
+        let value = cx.with_local_frame(4, |inner| {
+            assert!(
+                inner.failed(),
+                "a frame carries its caller's latch — the property Android used to \
+                 answer `false` to"
+            );
+            inner.report_error(INSIDE_FRAME);
+            None::<u64>
+        });
+
+        assert!(value.is_none());
+        let error = cx.into_error().expect("the root failure still reports");
+        assert!(
+            matches!(&error, NativeWidgetError::Platform(message) if message == ROOT),
+            "the first error stays the reported one: {error:?}"
+        );
+        assert!(
+            logged(INSIDE_FRAME),
+            "the frame's error must still reach the log — a swallowed platform \
+             failure is the defect, not the first-wins report"
+        );
+    }
+
+    #[test]
+    fn every_context_carrying_dispatch_runs_the_boundary_exception_guard() {
+        // m-01 item 5. What a host can prove is the wiring: `create`, `update`
+        // and `dispose` each run the guard, and `on_event` — which carries no
+        // context and hands the component no `Env` — does not. Whether the
+        // guard's JNI check actually finds a pending exception is Android-only
+        // and unrunnable here (no embedded-JVM harness in this repo).
+        let log = Rc::new(RefCell::new(Vec::new()));
+        register_component::<Gauge>(GAUGE_KIND);
+        let before = dispatch_guard_count();
+
+        let params = mount(61, Gauge::new(&log, "g"), props("Net", 1));
+        let mut calls = Vec::new();
+        {
+            let mut ctx = PlatformCtx::new(&mut calls);
+            with_runtime(|runtime| {
+                runtime.create(&mut ctx, &params).unwrap();
+                let changed = mount(61, Gauge::new(&log, "g"), props("Net", 2));
+                assert_eq!(
+                    runtime.update_params(&mut ctx, &changed).unwrap(),
+                    UpdateOutcome::Applied
+                );
+                runtime.on_event(61, WireEvent { kind: 1, detail: 0 });
+                assert_eq!(runtime.dispose_slot(&mut ctx, 61), DisposeOutcome::Disposed);
+            })
+            .expect("the thread's runtime");
+        }
+        forget(61);
+
+        assert_eq!(
+            dispatch_guard_count() - before,
+            3,
+            "create, update and dispose are guarded; on_event has no context to \
+             guard through"
+        );
+    }
+
+    // --- m-01 item 4: the four kind/type mismatch cases ---------------------
+
+    /// A component that shares [`Gauge`]'s `Props` type but not its identity —
+    /// the case where the props downcast *succeeds* and the mismatch surfaces
+    /// one step later, at the component downcast.
+    struct Twin;
+
+    impl NativeComponent for Twin {
+        type Props = GaugeProps;
+        type State = u64;
+
+        fn create(
+            &self,
+            ctx: &mut ComponentCtx<'_, '_, '_>,
+            _props: &Self::Props,
+        ) -> Option<(NativeRoot, Self::State)> {
+            let identity = next_identity();
+            Some((ctx.root(identity)?, identity))
+        }
+
+        fn update(
+            &self,
+            _ctx: &mut ComponentCtx<'_, '_, '_>,
+            _state: &mut Self::State,
+            _old: &Self::Props,
+            _new: &Self::Props,
+        ) {
+        }
+    }
+
+    #[test]
+    fn case_a_a_kind_nothing_registered_fails_with_unknown_control() {
+        // The only one of the four that surfaces as `UnknownControl`, raised by
+        // the runtime's own dispatch before any decode runs.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let generation = publish(70, Rc::new(Gauge::new(&log, "g")), props("CPU", 1));
+        let params = component_params("test-never-registered", 70, generation);
+
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        let error = with_runtime(|runtime| {
+            let outcome = runtime.create(&mut ctx, &params);
+            assert_eq!(runtime.live_count(), 0, "fails closed: no instance");
+            outcome
+        })
+        .expect("the thread's runtime")
+        .expect_err("nothing is registered under that kind");
+
+        assert!(
+            matches!(&error, NativeWidgetError::UnknownControl(kind)
+                if kind == "test-never-registered"),
+            "{error:?}"
+        );
+        assert!(calls.is_empty(), "nothing crossed the boundary");
+        forget(70);
+    }
+
+    #[test]
+    fn case_c_a_kind_registered_to_another_component_fails_at_decode() {
+        // Registered to `Gauge`, mounted with `Card`: the staged props are
+        // `CardProps`, so `Bridge::<Gauge>::decode_props` cannot downcast them.
+        // This is the case the p3-02 summary mis-described as `UnknownControl`
+        // — it is a `Params` error, and (before this task) one whose message
+        // read exactly like an ordinary reaped entry.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        register_component::<Gauge>(GAUGE_KIND);
+        // A `Card` staged under the `Gauge` kind — the typo a `kind` string
+        // passed twice invites, and one nothing type-checks.
+        let generation = publish(
+            71,
+            Rc::new(Card {
+                children: 1,
+                fail_after: None,
+                log: Rc::clone(&log),
+            }),
+            CardProps {
+                title: "wrong kind".to_string(),
+            },
+        );
+        let params = component_params(GAUGE_KIND, 71, generation);
+
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        let error = with_runtime(|runtime| {
+            let outcome = runtime.create(&mut ctx, &params);
+            assert_eq!(runtime.live_count(), 0, "fails closed: no instance");
+            outcome
+        })
+        .expect("the thread's runtime")
+        .expect_err("the staged props are another component's");
+
+        assert!(
+            matches!(&error, NativeWidgetError::Params(message)
+                if message.contains("staged a different component's props")
+                    && message.contains(GAUGE_KIND)),
+            "the message must name the wiring bug, not read as a reaped entry: {error:?}"
+        );
+        assert!(calls.is_empty(), "nothing crossed the boundary");
+        forget(71);
+    }
+
+    #[test]
+    fn case_c_two_components_sharing_a_props_type_fail_one_step_later() {
+        // Registered to `Gauge`, mounted with `Twin`, whose `Props` type IS
+        // `GaugeProps`: the props downcast succeeds, so the mismatch surfaces
+        // in `create` instead — still a `Params` error, still fail-closed, but
+        // a different message and a different call.
+        register_component::<Gauge>(GAUGE_KIND);
+        let generation = publish(72, Rc::new(Twin), props("CPU", 1));
+        let params = component_params(GAUGE_KIND, 72, generation);
+
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        let error = with_runtime(|runtime| {
+            let outcome = runtime.create(&mut ctx, &params);
+            assert_eq!(runtime.live_count(), 0, "fails closed: no instance");
+            outcome
+        })
+        .expect("the thread's runtime")
+        .expect_err("the staged component is a `Twin`, not a `Gauge`");
+
+        assert!(
+            matches!(&error, NativeWidgetError::Params(message)
+                if message.contains("staged a different component's component")),
+            "{error:?}"
+        );
+        assert!(calls.is_empty(), "nothing crossed the boundary");
+        forget(72);
+    }
+
+    #[test]
+    fn case_d_a_second_component_under_one_kind_is_refused_and_never_shadows() {
+        // Two components, one kind: registration is first-wins, so the second
+        // is refused with a warning and the incumbent keeps serving the kind.
+        // Mounting the loser under it then reduces to case (c) — proven here
+        // rather than assumed, since "refused" would be worth little if the
+        // loser's slots quietly ran the winner's code.
+        install_log_capture();
+        assert!(register_component::<Gauge>(GAUGE_KIND));
+        assert!(
+            !register_component::<Twin>(GAUGE_KIND),
+            "the second component under one kind is refused"
+        );
+        assert!(
+            logged("is already registered"),
+            "and says so — a silent refusal is how a component 'never appears'"
+        );
+
+        let generation = publish(73, Rc::new(Twin), props("CPU", 1));
+        let params = component_params(GAUGE_KIND, 73, generation);
+        let mut calls = Vec::new();
+        let mut ctx = PlatformCtx::new(&mut calls);
+        let error = with_runtime(|runtime| runtime.create(&mut ctx, &params))
+            .expect("the thread's runtime")
+            .expect_err("the loser's slot must not run the incumbent's code");
+
+        assert!(matches!(&error, NativeWidgetError::Params(_)), "{error:?}");
+        forget(73);
     }
 
     // --- p3-02: a component owns its own native subtree ---------------------
