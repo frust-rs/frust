@@ -64,7 +64,11 @@
 //!    A listener that fires while the runtime is already borrowed — the
 //!    classic case is a setter provoking its own listener synchronously from
 //!    inside `update` — is **dropped with a warning**, not delivered
-//!    re-entrantly.
+//!    re-entrantly. The `&self` it runs against is re-read from the staging
+//!    table on **every** dispatch, not only when props changed (`dispose` too;
+//!    `BridgeState::refresh_component`) — the props diff gate skips `update`
+//!    on an equal-props rebuild, so anything less would run a stale rebuild's
+//!    closures.
 //! 5. **`dispose` is best-effort-prompt, and may be late.** See *Disposal
 //!    promptness* below.
 //!
@@ -997,16 +1001,49 @@ impl<C: NativeComponent> PartialEq for BridgeProps<C> {
     }
 }
 
-/// [`Bridge`]'s state: the component value the last create/update saw, beside
-/// the component's own state.
+/// [`Bridge`]'s state: the newest component value this slot has resolved,
+/// beside the component's own state and the slot id both are keyed by.
 ///
-/// The value is retained (rather than looked up again) because `on_event` and
-/// `dispose` both run with no rebuild in sight — a native tap produces no
-/// frust frame at all, and a dispose can arrive long after the widget went
-/// away and its staged entry was reaped.
+/// The value is **retained as a fallback, not as the source of truth**: every
+/// dispatch that carries a `&self` into the public trait re-reads the staging
+/// table first ([`Self::refresh_component`]), because the app constructs its
+/// component value fresh on every rebuild and only the staging table sees all
+/// of them. The retained copy answers the calls that arrive with no staged
+/// entry left to read — a dispose landing after the mounting widget's
+/// `forget` reaper already ran (`crate::api::mount`'s `on_cleanup`), which on
+/// the primary teardown path is the *usual* order, since `retire`'s `Dispose`
+/// is drained a frame or more later.
 pub(crate) struct BridgeState<C: NativeComponent> {
+    /// The slot whose staged entry [`Self::refresh_component`] re-reads. Slot
+    /// ids are handed out by a process-wide monotonic counter
+    /// (`crate::api::builders`' `next_local_slot`) and never recycled, so this
+    /// can only ever name this slot's own staged entry.
+    slot: SlotId,
     component: Rc<C>,
     state: C::State,
+}
+
+impl<C: NativeComponent> BridgeState<C> {
+    /// Re-read this slot's staged component value, so the call about to run
+    /// sees the value the app published on its **most recent rebuild** — the
+    /// guarantee [`NativeComponent::on_event`] states.
+    ///
+    /// This cannot be left to [`Bridge::update`] alone: the runtime's props
+    /// diff gate (`crate::runtime`'s `update_params`) returns `Unchanged`
+    /// before touching the vtable's `update` at all, so a rebuild that
+    /// republishes equal props with a functionally different component value —
+    /// new closures capturing a loop index, a different `Rc` — would otherwise
+    /// leave the retained value stale and run the *old* closures on the next
+    /// event or dispose (review p3 M1).
+    ///
+    /// A slot with nothing staged (its `forget` reaper already ran) keeps the
+    /// retained value: there is no newer value to be had, and nothing here
+    /// resurrects a reaped entry or panics on its absence.
+    fn refresh_component(&mut self) {
+        if let Some(component) = staged_component::<C>(self.slot) {
+            self.component = component;
+        }
+    }
 }
 
 impl<C: NativeComponent> NativeWidget for Bridge<C> {
@@ -1050,7 +1087,14 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
                         props.slot
                     );
                 }
-                Ok((root.into_inner(), BridgeState { component, state }))
+                Ok((
+                    root.into_inner(),
+                    BridgeState {
+                        slot: props.slot,
+                        component,
+                        state,
+                    },
+                ))
             }
             None => Err(latched.unwrap_or_else(|| {
                 NativeWidgetError::Platform(format!(
@@ -1070,9 +1114,7 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
         // The app constructs its component value fresh every rebuild, so the
         // newest staged one wins here; a slot whose entry was already reaped
         // keeps the one it was created with.
-        if let Some(component) = staged_component::<C>(new.slot) {
-            state.component = component;
-        }
+        state.refresh_component();
         let component = Rc::clone(&state.component);
         let mut cx = ComponentCtx::new(ctx);
         component.update(&mut cx, &mut state.state, &old.props, &new.props);
@@ -1087,14 +1129,33 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
     /// Always `None`: a public component handles its own events (its `&self`
     /// is the value the app published, closures and all), so nothing rides the
     /// six built-in controls' `EventPayload` callback channel.
+    ///
+    /// The staged value is re-read first — an event can arrive after any
+    /// number of rebuilds that changed the component but not its props, and
+    /// the props diff gate skips `update` on every one of them
+    /// ([`BridgeState::refresh_component`]).
     fn on_event(state: &mut Self::State, event: WireEvent) -> Option<EventPayload> {
+        state.refresh_component();
         let component = Rc::clone(&state.component);
         component.on_event(&mut state.state, NativeEvent::from_wire(event));
         None
     }
 
-    fn dispose(ctx: &mut PlatformCtx<'_, '_>, state: Self::State) -> Result<(), NativeWidgetError> {
-        let BridgeState { component, state } = state;
+    /// The staged value is re-read first, for the same reason `on_event` does
+    /// it: a dispose reaching a still-mounted slot (the differ's culling
+    /// backstop, a `suspend_all` on surface teardown) must run the component
+    /// the app last published, not whatever the last props change left behind
+    /// ([`BridgeState::refresh_component`]).
+    fn dispose(
+        ctx: &mut PlatformCtx<'_, '_>,
+        mut state: Self::State,
+    ) -> Result<(), NativeWidgetError> {
+        state.refresh_component();
+        let BridgeState {
+            slot: _,
+            component,
+            state,
+        } = state;
         let mut cx = ComponentCtx::new(ctx);
         component.dispose(&mut cx, state);
         match cx.into_error() {
@@ -1305,6 +1366,107 @@ mod tests {
         assert!(calls[0].starts_with("gauge create"));
         assert!(calls[1].contains("10 -> 42"));
         assert!(calls[2].starts_with("gauge dispose"));
+    }
+
+    #[test]
+    fn an_unchanged_props_republish_still_reaches_the_newest_component_value() {
+        // Review p3 M1, the regression this test exists for: the props diff
+        // gate (`crate::runtime`'s `update_params`) returns `Unchanged` before
+        // touching the vtable, and `update` used to be the ONLY thing that
+        // refreshed the bridge's retained component value — so a rebuild that
+        // republished equal props with functionally different closures left
+        // `on_event`/`dispose` running the value `create` ran with.
+        //
+        // Two distinct log sinks stand in for those closures: each rebuild's
+        // component captures its own `Rc`, exactly as an app's `move |v|
+        // sig.set(v)` captures this rebuild's signal.
+        let first = Rc::new(RefCell::new(Vec::new()));
+        let second = Rc::new(RefCell::new(Vec::new()));
+        register_component::<Gauge>(GAUGE_KIND);
+
+        let params = mount(20, Gauge::new(&first, "first"), props("CPU", 10));
+        let mut calls = Vec::new();
+        {
+            let mut ctx = PlatformCtx::new(&mut calls);
+            with_runtime(|runtime| {
+                runtime.create(&mut ctx, &params).unwrap();
+
+                // The rebuild the defect hid behind: same props, a different
+                // component value. The wire is byte-identical, so the differ
+                // emits no `UpdateParams` at all — nothing calls `update`, and
+                // this republish is the whole of what the runtime is told.
+                let republished = mount(20, Gauge::new(&second, "second"), props("CPU", 10));
+                assert_eq!(
+                    republished, params,
+                    "an equal-props rebuild leaves the wire untouched, which is \
+                     exactly why `update` never runs to refresh anything"
+                );
+
+                runtime.on_event(20, WireEvent { kind: 3, detail: 9 });
+                assert_eq!(runtime.dispose_slot(&mut ctx, 20), DisposeOutcome::Disposed);
+                assert_eq!(runtime.live_count(), 0);
+            })
+            .expect("the thread's runtime");
+        }
+        forget(20);
+
+        assert_eq!(
+            *first.borrow(),
+            vec!["first create 'CPU'".to_string()],
+            "the value `create` ran with must not keep serving a later \
+             rebuild's events and disposal"
+        );
+        assert_eq!(
+            *second.borrow(),
+            vec!["second event 3/9".to_string(), "second dispose".to_string(),],
+            "both later calls ran on the component value the app published \
+             most recently — the trait's `on_event` guarantee, literally"
+        );
+    }
+
+    #[test]
+    fn a_dispose_after_the_staging_reaper_keeps_the_retained_component() {
+        // The ordering seam of the fix above: on the PRIMARY teardown path the
+        // mounting widget's `forget` reaper (`crate::api::mount`'s
+        // `on_cleanup`) runs a frame or more BEFORE `retire`'s `Dispose` is
+        // drained, so the staging lookup finds nothing by then. The retained
+        // value answers, nothing resurrects the reaped entry, nothing panics —
+        // and there is no newer value to be had, because a torn-down widget
+        // published none.
+        let first = Rc::new(RefCell::new(Vec::new()));
+        let second = Rc::new(RefCell::new(Vec::new()));
+        register_component::<Gauge>(GAUGE_KIND);
+
+        let params = mount(21, Gauge::new(&first, "first"), props("Mem", 1));
+        let mut calls = Vec::new();
+        {
+            let mut ctx = PlatformCtx::new(&mut calls);
+            with_runtime(|runtime| {
+                runtime.create(&mut ctx, &params).unwrap();
+                mount(21, Gauge::new(&second, "second"), props("Mem", 1));
+
+                // Teardown order: the reaper first, the native dispose after.
+                forget(21);
+                assert_eq!(staged_count(), 0);
+                assert_eq!(runtime.dispose_slot(&mut ctx, 21), DisposeOutcome::Disposed);
+                assert_eq!(runtime.live_count(), 0);
+            })
+            .expect("the thread's runtime");
+        }
+
+        assert_eq!(
+            *first.borrow(),
+            vec![
+                "first create 'Mem'".to_string(),
+                "first dispose".to_string()
+            ],
+            "with the staged entry gone the retained value runs the dispose"
+        );
+        assert!(
+            second.borrow().is_empty(),
+            "a reaped entry is never resurrected: {:?}",
+            second.borrow()
+        );
     }
 
     /// A control shaped exactly like the six built-ins: an **internal**
