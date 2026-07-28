@@ -42,7 +42,13 @@
     `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule, with a `# Safety`
     note at each call site pairing the cached id to its exact class and JNI signature. Cold
     setters (tints, scale type, text size, background, content description) stay on the
-    checked, `jni_sig!`-typed `NativeCtx::call_void` path.
+    checked, `jni_sig!`-typed `NativeCtx::call_void` path. Its Apple backend has its own
+    zone: objc2 marks a generated setter `unsafe` whenever the ObjC header leaves an
+    argument's nullability unannotated (not a memory-safety claim — "the header didn't
+    say"), so each of this arm's property wrappers is a **safe** function closing that
+    question by construction, with a `// SAFETY:` note at its one call site; the same arm's
+    `define_class!`/`extern_protocol!` factory and event-target registration, and the
+    `addTarget:action:` attach/detach pair, are the other confined `unsafe` sites.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s
   `guard` helper (`catch_unwind` + log, returning a benign default) rather than unwinding
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
@@ -167,12 +173,25 @@ these conventions:
   per module (a plugin's namespace must differ from `dev.frust`), and Kotlin's `internal` is
   module-scoped (an `internal` embedding type stays invisible to a plugin module even under
   the same source package) — two confirmed side-constraints this rule is built around.
-  **Known, time-boxed exception:** `frust-native-widgets` currently violates both halves
-  deliberately — its two generic classes (`FrustNativeControlFactory`,
-  `FrustNativeListener`) sit in the `dev.frust` package itself, because the package is baked
-  into the JNI export symbol names, and are hand-copied into the consuming app's module
-  today, exactly as the camera plugin's testbed wiring was — not an approved general
-  pattern, with proper Gradle-module packaging deferred to a later phase.
+- **A plugin's theme-token folding pins a representative subset, never chases full
+  design-token fidelity.** `frust-native-widgets`' theme ladder resolves a fixed, documented
+  mapping of `Theme` roles into each control's props — no elevation, motion, glass, or
+  per-state (hover/pressed/disabled) variants, which the platform's own drawables already
+  provide for free; widening the mapping is additive, never a breaking republish.
+- **A platform capability gap is recorded per-platform, never "corrected" onto the platform
+  that doesn't have it.** `frust-native-widgets`' theme-ladder L1 (brightness) is
+  deliberately asymmetric: Android bakes it at control-construction time
+  (`createConfigurationContext` yields a `Context` consumed once, so a live brightness
+  toggle needs a rebuilt view), while iOS re-pins `overrideUserInterfaceStyle` on every
+  `update` and re-themes live. Mirroring one platform's constraint onto the other is the
+  exact defect a p2-05 gate caught — match each platform's own capability, not its sibling's.
+- **A native listener callback is wrapped into a plain signal-writing closure, not routed
+  through frust's event machinery.** `frust-native-widgets`' events-as-signals convention
+  (`crate::api::signals`) decodes each control's raw platform callback (Android JNI, iOS
+  target-action) into the closure shape a builder's `.on_press`/`.on_toggle`/`.on_change`
+  takes; since that callback runs on the platform main thread — the same thread the rest of
+  frust runs on — an app closure just writes an `RwSignal` (`move |v| sig.set(v)`) and wakes
+  the next frame normally, with no `TrackedScope`/`EventCtx` involved.
 - **A generated-project mutation is idempotent, never a blind overwrite.** Adding an OS-side
   contribution (a Cargo dependency, a manifest permission, an Info.plist key, or a Gradle
   module include) checks first and no-ops if already present — the contract
