@@ -20,12 +20,19 @@
 //!    [`LIMITATIONS`] below (delete the whole file once both are gone —
 //!    a list of zero claims proves nothing).
 //! 3. Update the one surface this scan deliberately cannot see, by hand:
-//!    `examples/glyph-catalog/src/pages/native_widgets.rs`'s composite-card
-//!    caption restates the **FFI wall** (it does not state the display-only
-//!    claim, as of m-04), and this crate's tests do not reach into
-//!    `examples/**` — the boundary p3-03 established, see
-//!    `tests/kotlin_conformance.rs`'s own module doc. It is named here
-//!    precisely because nothing enforces it.
+//!    `examples/glyph-catalog/src/pages/native_widgets.rs`. This crate's tests
+//!    do not reach into `examples/**` — the boundary p3-03 established, see
+//!    `tests/kotlin_conformance.rs`'s own module doc — so nothing enforces
+//!    that page, which is exactly why it is named here. **Search it for both
+//!    claims and rewrite whatever states the one you just made false**, rather
+//!    than trusting a description of what it says: the previous version of
+//!    this step described that file instead, and was stale one commit later.
+//!    Search *short* fragments (`production path`, `app crate cannot`), never
+//!    a whole marker from [`LIMITATIONS`] — those captions are Rust string
+//!    literals whose `\` line continuations can split a marker mid-phrase,
+//!    which neither `grep` nor [`normalized`] sees through; that is the shape
+//!    the display-only caption has today. It states **both** claims, in two
+//!    adjacent `composite_block` captions.
 //!
 //! Do **not** narrow the marker set or shorten the site list to make this
 //! green. A list that no longer matches the tree is the failure mode this test
