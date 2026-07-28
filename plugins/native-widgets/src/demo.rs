@@ -88,8 +88,14 @@
 //! neither yields an event route: on Android the only listener class is that
 //! same `FrustNativeListener`, so a component could only feed its constructor
 //! a *fabricated* slot id — which would deliver the event to a **different
-//! slot**, a correctness bug rather than a workaround — and on iOS the target
-//! type is crate-private, so there is nothing to attach at all. Write a
+//! slot**, a correctness bug rather than a workaround. On iOS the target type
+//! (`FrustNativeControlTarget`) is crate-private, but that alone does not
+//! block attaching *something*: a plugin author who already depends on
+//! `objc2-ui-kit` — the audience these very docs name — could `define_class!`
+//! their own target and call `addTarget:action:`. What they cannot do is
+//! route it back through [`NativeComponent::on_event`], because a component
+//! is never handed its own slot id (`create` receives `&self`, a
+//! [`ComponentCtx`] and its props, nothing that identifies the slot). Write a
 //! component as display-only until the attach half ships.
 //!
 //! # The feature gate
@@ -174,7 +180,9 @@ const FRAME_CAPACITY: usize = 16;
 ///
 /// A unit struct because this card carries no app callbacks — see the module
 /// doc's *No event wiring*. A component that did would hold its closures here,
-/// on `&self`, and reach them from [`NativeComponent::on_event`].
+/// on `&self`, and reach them from [`NativeComponent::on_event`] — which
+/// cannot fire in this build (see that method's own doc and the module doc's
+/// *No event wiring* for why).
 pub struct DemoCard;
 
 /// Everything [`DemoCard`] is told, as one Rust-diffed value.
@@ -249,13 +257,16 @@ mod platform {
     //! The Android arm: a vertical `LinearLayout` with a `TextView` and two
     //! `Button`s under it.
     //!
-    //! Every JNI call here goes through this module's own [`guard_jni`] —
-    //! deliberately, rather than through `crate::android::ctx`'s internal
-    //! helpers, because [`ComponentCtx`]'s `env()` escape hatch is what a
-    //! component author actually has, and its doc is explicit that such a
-    //! caller must check and clear its own pending Java exception (leaving one
-    //! pending is undefined behaviour for the next JNI call). This is that
-    //! check, written once.
+    //! Every JNI call here goes through this module's own [`guard_jni`],
+    //! because [`ComponentCtx`]'s `env()` escape hatch is what a component
+    //! author actually has, and its doc is explicit that such a caller must
+    //! check and clear its own pending Java exception (leaving one pending is
+    //! undefined behaviour for the next JNI call). `guard_jni` itself
+    //! delegates to the crate's own `crate::android::run_jni`
+    //! (`android/ctx.rs`) rather than re-implementing a bare check-and-clear:
+    //! that helper extracts the pending exception's **class and message**
+    //! before clearing it, so a demo failure names *what* threw, not just
+    //! *that* something did.
 
     use jni::objects::{JObject, JValue};
     use jni::strings::JNIStr;
@@ -325,6 +336,21 @@ mod platform {
                 }
                 let [primary, secondary] = <[_; 2]>::try_from(buttons).ok()?;
 
+                // Deliberate double retain (R0-5): `retain_child(&parent)`
+                // below and `ctx.root(&parent)` two lines down each allocate
+                // their own JNI global ref to the SAME Java object, so this
+                // one Java view ends up with two live global refs. Not a
+                // leak — `live_child_count() == 0` after teardown (this
+                // module's own host test) proves both are released. Avoiding
+                // it would mean either widening `NativeComponent::update`'s
+                // signature to hand it the `NativeRoot` the runtime already
+                // owns (a trait change), or giving `state.root` shared
+                // ownership of the SAME global ref the runtime pair-deletes
+                // on dispose — which breaks the one-owner, paired-delete
+                // discipline every other retained handle in this crate
+                // follows. Two extra refs per composite against ART's 51,200
+                // live-global-ref cap is not a constraint worth either
+                // tradeoff.
                 let root = ctx.retain_child(&parent)?;
                 let label = ctx.retain_child(&label)?;
                 Some((
@@ -443,25 +469,27 @@ mod platform {
     /// Run `f` against the live `Env` and settle its outcome: a thrown Java
     /// exception is **checked and cleared here** and latched on `ctx`, so the
     /// runtime fails the slot rather than building on a half-made view.
+    ///
+    /// Delegates to `crate::android::run_jni` (a re-export of
+    /// `android/ctx.rs`'s already-`pub(crate)` helper of the same name,
+    /// added this wave so a module outside `android`'s private `ctx`
+    /// submodule can reach it) rather than a hand-rolled check-and-clear
+    /// (R0-8's fix): that helper's `take_pending_exception`
+    /// extracts the throwable's class name and message before clearing it,
+    /// so `ctx.report_error` now reports e.g. `"native-widgets platform
+    /// error: android native-widgets: setPadding:
+    /// java.lang.NullPointerException: <message>"` instead of the old,
+    /// silent `"frust-native-widgets demo: setPadding threw (exception
+    /// cleared)"`.
     fn guard_jni<T>(
         ctx: &mut ComponentCtx<'_, '_, '_>,
         op: &str,
         f: impl FnOnce(&mut jni::Env<'_>) -> Result<T, jni::errors::Error>,
     ) -> Option<T> {
-        let env = ctx.env();
-        let outcome = f(&mut *env);
-        let threw = env.exception_check();
-        if threw {
-            env.exception_clear();
-            ctx.report_error(format!(
-                "frust-native-widgets demo: {op} threw (exception cleared)"
-            ));
-            return None;
-        }
-        match outcome {
+        match crate::android::run_jni(ctx.env(), op, f) {
             Ok(value) => Some(value),
             Err(error) => {
-                ctx.report_error(format!("frust-native-widgets demo: {op}: {error}"));
+                ctx.report_error(format!("frust-native-widgets demo: {error}"));
                 None
             }
         }

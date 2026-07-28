@@ -106,6 +106,14 @@ use jni::sys::{jint, jlong, jobject};
 use jni::{Env, EnvUnowned, jni_str};
 
 pub(crate) use ctx::NativeCtx;
+// Re-exported so `crate::demo`'s `guard_jni` (the `ComponentCtx::env()`
+// escape hatch's own check-and-clear, `docs/CODE_STANDARDS.md`-sanctioned)
+// can reuse the crate's own exception-extracting helper instead of
+// re-implementing a weaker bare check-and-clear (R0-8) — `ctx` itself stays
+// private to this module, only this one function widens. `demo` is the only
+// consumer, so this is unused with `demo-components` off.
+#[cfg(feature = "demo-components")]
+pub(crate) use ctx::run_jni;
 
 use crate::NativeWidgetError;
 use crate::controls::{button, image, label, progress, slider, switch};
@@ -454,7 +462,13 @@ pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativeListener_nativeOn
 ) {
     env.with_env(|env| -> Result<(), jni::errors::Error> {
         debug_assert_main_thread(env, "nativeOnEvent");
-        let slot_id = slot_id as SlotId;
+        let slot_id = match validate_event_slot_id(slot_id) {
+            Ok(slot_id) => slot_id,
+            Err(message) => {
+                log::warn!("{message}");
+                return Ok(());
+            }
+        };
         let event = NativeEvent { kind, detail };
         let delivered = runtime::with_runtime(|runtime| runtime.on_event(slot_id, event));
         if delivered.is_none() {
@@ -463,6 +477,44 @@ pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativeListener_nativeOn
         Ok(())
     })
     .resolve::<LogErrorAndDefault>();
+}
+
+/// Validates the raw `slot_id` Kotlin passes into `nativeOnEvent` as a
+/// `jlong` (`i64`) before it dispatches — the same [`SlotId::try_from`]
+/// discipline [`crate::runtime::Params::identity`] applies to the very same
+/// field arriving over `params_json`'s `__frustSlot` key. This export used to
+/// do a bare `slot_id as SlotId`, which silently wraps a negative id into a
+/// huge, wrong `u64` instead of rejecting it (R0-20) — an internal
+/// inconsistency with the params path, not just a theoretical gap. Reachable
+/// only from the app's own process, so this buys a clear failure instead of a
+/// silent misroute, not a security boundary.
+///
+/// Factored out as a pure function, mirroring [`create_failure_message`]
+/// above, so the rejection path is host-testable without a JVM.
+fn validate_event_slot_id(raw: jlong) -> Result<SlotId, String> {
+    SlotId::try_from(raw).map_err(|_| {
+        format!("frust-native-widgets: nativeOnEvent got a negative slot id {raw} — dropped")
+    })
+}
+
+#[cfg(test)]
+mod validate_event_slot_id_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_a_non_negative_id() {
+        assert_eq!(validate_event_slot_id(42), Ok(42));
+    }
+
+    #[test]
+    fn rejects_a_negative_id() {
+        let Err(message) = validate_event_slot_id(-1) else {
+            panic!("validate_event_slot_id(-1) must return Err");
+        };
+        assert!(message.contains("nativeOnEvent"));
+        assert!(message.contains("-1"));
+        assert!(message.contains("dropped"));
+    }
 }
 
 // --- main-thread guard ------------------------------------------------------
