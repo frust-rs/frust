@@ -75,8 +75,9 @@
 //!
 //! The two buttons are **display-only**: they show the platform's own press
 //! feedback and report nothing back. That is not a choice this card made —
-//! **no [`NativeComponent`] can receive events in this build**, its root as
-//! much as its children, and there is no supported way to arrange one.
+//! **no production path attaches a listener** to a [`NativeComponent`] in this
+//! build, its root as much as its children, so **no [`NativeComponent`] can
+//! receive events in this build**, and there is no supported way to arrange one.
 //! [`NativeComponent::on_event`] owns the full reasoning and names the
 //! deferred Phase 4 gap; the short version is that attaching this crate's
 //! shared `FrustNativeListener`/`FrustNativeControlTarget` needs the slot's
@@ -181,8 +182,8 @@ const FRAME_CAPACITY: usize = 16;
 /// A unit struct because this card carries no app callbacks — see the module
 /// doc's *No event wiring*. A component that did would hold its closures here,
 /// on `&self`, and reach them from [`NativeComponent::on_event`] — which
-/// cannot fire in this build (see that method's own doc and the module doc's
-/// *No event wiring* for why).
+/// receives no events in this build (no production path attaches a listener; see
+/// that method's own doc and the module doc's *No event wiring* for why).
 pub struct DemoCard;
 
 /// Everything [`DemoCard`] is told, as one Rust-diffed value.

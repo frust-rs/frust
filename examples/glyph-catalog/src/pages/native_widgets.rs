@@ -782,9 +782,9 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogSta
         // section, the canonical phrasing for this fact.
         inflexible(caption(
             "The Primary and Dismiss buttons below are DISPLAY-ONLY: you'll see the platform's \
-             own press feedback, and nothing else happens. No `NativeComponent` can receive \
-             events in this build \u{2014} that's not a bug in this card, it's a deferred Phase \
-             4 gap (`plugins/native-widgets/src/demo.rs`'s \u{201c}No event wiring, and why\u{201d}).",
+             own press feedback, and nothing else happens. In this build, no production path \
+             attaches a listener to a `NativeComponent`, so they cannot receive events \u{2014} \
+             that's not a bug in this card, it's a deferred Phase 4 gap (`plugins/native-widgets/src/demo.rs`'s \u{201c}No event wiring, and why\u{201d}).",
         )),
         gap(6.0),
         inflexible(any(button(
