@@ -68,11 +68,16 @@
 //!    compaction) lands in the same place.
 //! 3. **`update` runs only when props actually differ.** The runtime compares
 //!    the typed props with `PartialEq` **before** any platform call, so an
-//!    unchanged rebuild costs zero FFI crossings. Field-level diffing inside a
-//!    changed props value is the component's own job — only it knows which
-//!    setter is cheap and which forces a re-layout. A **failed** `update` is
-//!    retried — see *A failed `update` is retried on the next rebuild* below
-//!    for the exact mechanism, which is not the obvious one.
+//!    unchanged rebuild costs zero FFI crossings — *except* on the bounded
+//!    retry window a slot opens when its own `update` fails, during which the
+//!    next **two** rebuilds each cost one dispatch for byte-identical props,
+//!    after which the slot stops asking and the zero-crossing property holds
+//!    again for the rest of the process. That exception is deliberate, it is
+//!    the *only* one, and it is bounded on purpose; see *A failed `update` is
+//!    retried, up to a cap* below for the mechanism, which is not the obvious
+//!    one. Field-level diffing inside a changed props value is the component's
+//!    own job — only it knows which setter is cheap and which forces a
+//!    re-layout.
 //! 4. **`on_event` fires between frames — except that no production path
 //!    attaches a listener to a public component's view, so overriding it has
 //!    no effect in this build.** A native interaction bypasses
@@ -84,9 +89,13 @@
 //!    re-entrantly. Those ordering and re-entrancy guarantees are the
 //!    runtime's own, true of the internal `NativeWidget` path the six built-in
 //!    controls take — and **not observable through this trait yet**: no
-//!    production path attaches a listener to a view a component built, so this
-//!    step of the lifecycle currently never runs for a [`NativeComponent`].
-//!    See [`NativeComponent::on_event`], which owns the detail and names the
+//!    production path attaches a listener to a view a component built, so
+//!    nothing an app can arrange makes this step of the lifecycle run for a
+//!    [`NativeComponent`]. Nothing an app can arrange — *not* nothing at all: a
+//!    listener carrying a fabricated slot id that names a live component's slot
+//!    still lands here, which is a misroute rather than a route, and is why
+//!    this dispatch is guarded like the other three. See
+//!    [`NativeComponent::on_event`], which owns the detail and names the
 //!    deferred Phase 4 gap.
 //!
 //!    **The staged-`&self` re-read is a separate guarantee, it is
@@ -223,7 +232,7 @@
 //! (`crate::runtime`'s `forget_pending_callback`) applies here verbatim: a
 //! culled slot's dispose resolves by view identity and never sees this table.
 //!
-//! # A failed `update` is retried on the next rebuild
+//! # A failed `update` is retried, up to a cap
 //!
 //! The retry trigger is a **generation bump**, not `instance.props` differing,
 //! and that distinction is load-bearing. When `update` reports a failure the
@@ -239,15 +248,32 @@
 //! slot (`request_update_retry`, this module's crate-private half), and the
 //! **next `publish` for that slot bumps the generation even for identical
 //! props** — one wire change, one `UpdateParams`, one retry, whether or not the
-//! app's props moved. Two consequences worth stating plainly:
+//! app's props moved. Three consequences worth stating plainly:
 //!
 //! - **A retry needs a rebuild.** Nothing here schedules one; the mark is
 //!   consumed by the next rebuild that publishes this slot. On a screen that
 //!   never rebuilds again, the failed change stays unapplied — the same bound
 //!   every other props change lives under.
-//! - **A permanently failing `update` is retried on every subsequent rebuild**
-//!   (each retry fails and re-marks the slot). That is the deliberate trade: a
-//!   repeated, logged FFI attempt beats a silently stale native view.
+//! - **The retry is capped at three consecutive failed dispatches, and then
+//!   the slot goes inert.** Failure one and failure two each re-mark the slot,
+//!   so a transient refusal gets two more attempts; failure three reports once
+//!   at `warn` and marks nothing further, so an unchanged rebuild is back to
+//!   costing zero FFI crossings and zero log lines. Unbounded re-marking was
+//!   the alternative, and it is worse than it sounds: a permanently failing
+//!   slot would cost one dispatch **plus** a `log::warn!` on *every* rebuild
+//!   forever, on the platform main thread, and a component that keeps calling
+//!   a ctx helper after its first failure adds one refused-error warning per
+//!   call per rebuild on top ([`ComponentCtx`]'s error latch logs those). A
+//!   screen that rebuilds every frame — a ticking counter, an animation — turns
+//!   that into per-frame JNI traffic and per-frame log volume. Degrading a
+//!   broken component to inert is the trade taken instead; retrying cleverly
+//!   (backoff, a schedule of its own) is explicitly not a goal.
+//! - **The cap counts *consecutive* failures and a success clears it.** A slot
+//!   that fails twice and then applies is back to a full budget, so a flaky
+//!   platform never accumulates its way to inert. Only the framework's own
+//!   synthetic retry is capped: a genuine props change bumps the generation on
+//!   its own and is always dispatched, capped or not, because that is the
+//!   app's intent rather than ours.
 //!
 //! # Kind and type must agree, and a mismatch fails closed four different ways
 //!
@@ -279,21 +305,38 @@
 //! `ComponentCtx::env` (Android-only, so a host docs build does not render it)
 //! hands a component the live `jni::Env`, and a component is free to leave a
 //! Java exception pending on it — which is undefined behaviour for the *next*
-//! JNI call, not for the one that threw. So every
-//! dispatch through this module that carries a context (`create`, `update`,
-//! `dispose`) checks and clears one on the way out, reusing the crate's own
-//! `run_jni` helper so the report names the throwable's class and message. A
-//! pending exception is folded into the same error channel as a latched one:
-//! the first failure stays the headline, the later one is logged.
+//! JNI call, not for the one that threw. So **all four** dispatches through
+//! this module — `create`, `update`, `dispose` and `on_event` — check and clear
+//! one on the way out, reusing the crate's own `run_jni` helper so the report
+//! names the throwable's class and message. On the three that carry a context a
+//! pending exception is folded into the same error channel as a latched one
+//! (the first failure stays the headline, the later one is logged); `on_event`
+//! has no error channel at all, so it logs at `warn` and returns.
 //!
-//! `on_event` is the one dispatch with no guard, because it is handed no
-//! context and therefore no `Env`: a component reaching JNI from there attached
-//! its own thread and owns its own check-and-clear. (No production path
-//! attaches a listener to a component's view either, so nothing reaches it
-//! outside a deliberate misroute — [`NativeComponent::on_event`].) `env`
-//! itself stays a **safe**
-//! fn: making it `unsafe` would tax the one audience that can use this trait at
-//! all, for a hazard the boundary guard already contains.
+//! **`on_event` is guarded through the VM, not through a context**, because it
+//! is handed neither: the runtime's `NativeWidget::on_event` takes only
+//! `(state, event)`. The `Env` comes from
+//! `JavaVM::with_top_local_frame` on the process VM
+//! (`frust_plugin::android::vm`), which borrows the *existing* top JNI frame
+//! rather than pushing one, so the whole guard is a `GetEnv` plus an
+//! `ExceptionCheck` on the clean path and the few local references a report
+//! costs die with the export's own frame when `nativeOnEvent` returns.
+//!
+//! It is deliberately **not** `frust_plugin::android::with_jni_env`, which
+//! cannot see what this needs to see: jni 0.22's scoped attach defaults to
+//! `AttachmentExceptionPolicy::PreReThrowPostCatch`, which stashes any
+//! already-pending exception before running the closure and re-throws it
+//! afterwards. A check inside that closure would read *clean* every time and
+//! clear nothing — a guard that reports coverage it does not have. (The same
+//! policy is why a component that reaches JNI through `with_jni_env` is
+//! already caught on its own way out: the post-catch half turns whatever the
+//! closure left pending into `Error::CaughtJavaException`. This guard is for
+//! everything that does not go through that door — a raw `jni-sys` call, an
+//! attach configured with `Ignore`, an `Env` recovered by hand.)
+//!
+//! `env` itself stays a **safe** fn: making it `unsafe` would tax the one
+//! audience that can use this trait at all, for a hazard the boundary guard
+//! already contains.
 
 // The publication half of this module (`publish`/`forget`/`component_params`)
 // got its production caller in p3-02: `crate::api::mount`'s generic builder
@@ -343,10 +386,12 @@ const PROPS_GENERATION_KEY: &str = "__frustProps";
 /// - every method runs on the **platform main thread**;
 /// - `create` runs at the host's post-frame poll, a frame or more after the
 ///   mounting widget appeared;
-/// - `update` runs only when [`Props`](Self::Props) compare unequal;
+/// - `update` runs only when [`Props`](Self::Props) compare unequal (plus the
+///   bounded retry window a failed one opens);
 /// - `on_event` would run from a platform listener between frames, but no
-///   production path attaches one to a component's view, so it never runs at
-///   all in this build (a deferred Phase 4 gap — [`on_event`](Self::on_event));
+///   production path attaches one to a component's view, so overriding it has
+///   no effect in this build — a misroute can still reach it, an app-arranged
+///   route cannot (a deferred Phase 4 gap — [`on_event`](Self::on_event));
 /// - `dispose` is prompt on teardown but may be late, and at process exit may
 ///   not run at all.
 ///
@@ -408,9 +453,10 @@ pub trait NativeComponent: 'static {
     /// **and marks the slot for retry**, so the next rebuild that publishes
     /// this slot re-applies the change — even if the app's props never differ
     /// again. The trigger is a props-generation bump, not the app's props
-    /// moving; the module doc's *A failed `update` is retried on the next
-    /// rebuild* has the mechanism and its two limits (a retry needs a rebuild;
-    /// a permanently failing update retries on every one).
+    /// moving; the module doc's *A failed `update` is retried, up to a cap* has
+    /// the mechanism and its limits (a retry needs a rebuild; three consecutive
+    /// failures spend the budget and the slot then stops asking, so a broken
+    /// component degrades to inert rather than to per-frame FFI traffic).
     fn update(
         &self,
         ctx: &mut ComponentCtx<'_, '_, '_>,
@@ -423,7 +469,7 @@ pub trait NativeComponent: 'static {
     /// production path attaches one, so overriding this has no effect. See
     /// below.
     ///
-    /// # Nothing reaches this in the current build
+    /// # No production path reaches this in the current build
     ///
     /// **No production path attaches a listener to a view a component built —
     /// its root as much as its children — so overriding this method has no
@@ -435,6 +481,17 @@ pub trait NativeComponent: 'static {
     /// the generic mounting builder registers no callback either
     /// (`crate::api::mount`'s `init`, whose comment says so, and
     /// `Bridge::on_event` answers `None` unconditionally).
+    ///
+    /// **A misroute is possible; a route is not.** The scope above is the
+    /// whole claim and it is not "can never fire": `NativeRuntime::on_event`
+    /// keys on the slot id alone, and Android's `nativeOnEvent` export checks
+    /// only that the incoming `jlong` is non-negative (`SlotId::try_from`), so
+    /// a listener carrying a *fabricated* id that happens to name a live
+    /// component's slot is delivered here indistinguishably from a real one.
+    /// Nothing in production fabricates one — but the dispatch is real code on
+    /// a real path, which is why it is guarded at the boundary like the other
+    /// three (the module doc's *Dispatch-boundary exception guard*) rather than
+    /// treated as unreachable.
     ///
     /// This is a **deliberately deferred Phase 4 gap**, not an oversight: the
     /// dispatch half — runtime → bridge → this method — is wired and
@@ -451,8 +508,11 @@ pub trait NativeComponent: 'static {
     /// dispatch (the module doc's point 4) — so it can carry the closures such
     /// an event should reach.
     ///
-    /// Defaults to doing nothing, which is also the only behaviour v1 can
-    /// observe.
+    /// Defaults to doing nothing — and since no production path attaches a
+    /// listener, overriding it changes nothing a v1 app can arrange to see. A
+    /// misroute is possible, a route is not, so an override is not *dead* code
+    /// so much as unreachable-by-design code: write it for the contract above
+    /// if you like, but do not ship a build that depends on it firing.
     fn on_event(&self, state: &mut Self::State, event: NativeEvent) {
         let _ = (state, event);
     }
@@ -674,9 +734,10 @@ impl<'local, 'env> ComponentCtx<'_, 'local, 'env> {
     /// so a component using this directly should check and clear its own —
     /// [`Self::new_view`] and [`Self::root`] do that for the calls they make.
     /// **The runtime no longer takes that on trust:** every dispatch through
-    /// this context (`create`, `update`, `dispose`) checks and clears a
-    /// leftover exception on the way out and reports it (the module doc's
-    /// *Dispatch-boundary exception guard*). Clearing your own is still the
+    /// this module — the three that carry this context (`create`, `update`,
+    /// `dispose`) and `on_event`, which reaches the VM instead — checks and
+    /// clears a leftover exception on the way out and reports it (the module
+    /// doc's *Dispatch-boundary exception guard*). Clearing your own is still the
     /// right discipline — it keeps the *rest of your own call* on defined
     /// ground, which the boundary guard cannot do for you — but forgetting it
     /// can no longer poison the next unrelated JNI call.
@@ -1130,6 +1191,25 @@ fn on_platform_main_thread() -> Option<bool> {
 
 // --- the typed props channel -------------------------------------------------
 
+/// How many **consecutive** failed `update` dispatches a slot may cost before
+/// the runtime stops asking for another one (module doc's *A failed `update` is
+/// retried, up to a cap*).
+///
+/// Three, and the number is a judgement rather than a measurement — nothing in
+/// this repo has ever measured a native-widgets retry on device, and the
+/// Android arm is compile-gated only. The reasoning it encodes: one attempt is
+/// the app's own change and buys nothing extra; a second covers the transient
+/// refusal this mechanism exists for (a setter that threw because a sibling
+/// view had not been laid out yet, a resource that arrived one frame late); a
+/// third is the cheap benefit of the doubt. Beyond that the evidence says the
+/// component is broken, not unlucky, and every further attempt is a dispatch
+/// and a `log::warn!` per rebuild on the platform main thread — which on a
+/// screen that rebuilds every frame is per-frame JNI traffic and per-frame log
+/// volume, and would falsify the crate's headline zero-crossing invariant for
+/// the process lifetime. Small enough to bound the damage, large enough that a
+/// component has to fail three times in a row to be given up on.
+const RETRY_UPDATE_BUDGET: u32 = 3;
+
 /// One slot's staged component value and props, as [`publish`] left them.
 struct Staged {
     /// `Rc<C>` for the registered `C`, erased — cloned into the instance at
@@ -1146,10 +1226,21 @@ struct Staged {
     /// even for identical props.
     ///
     /// This is the whole retry mechanism (module doc's *A failed `update` is
-    /// retried on the next rebuild*): the runtime keeps its diff baseline on a
+    /// retried, up to a cap*): the runtime keeps its diff baseline on a
     /// failure, but only a wire change makes the differ hand it a second
     /// chance, and only this makes the wire change when the app's props do not.
     retry_update: bool,
+    /// How many `update` dispatches for this slot have failed in a row, reset
+    /// by [`clear_update_retry_budget`] on the first one that succeeds.
+    ///
+    /// The bound on the field above: once it reaches [`RETRY_UPDATE_BUDGET`],
+    /// [`request_update_retry`] reports once and stops re-marking, so an
+    /// unchanged rebuild costs nothing again. It survives a [`publish`]
+    /// deliberately — the whole point is to count across the rebuilds that
+    /// carry the retries — and dies with the entry when the mounting widget's
+    /// [`forget`] reaper runs, which is the same slot-lifetime bound
+    /// everything else in this table lives under.
+    consecutive_update_failures: u32,
 }
 
 thread_local! {
@@ -1197,7 +1288,7 @@ fn with_staged<T>(f: impl FnOnce(&mut HashMap<SlotId, Staged>) -> T) -> Option<T
 /// the public trait needs no `Clone` bound as a result.
 pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: Rc<C>, props: C::Props) -> u64 {
     with_staged(|staged| {
-        let generation = match staged.get(&slot) {
+        let (generation, failures) = match staged.get(&slot) {
             // A slot whose staged props are a *different* component's (a kind
             // swap on a re-used slot id) counts as changed, not as equal.
             Some(previous) => {
@@ -1208,13 +1299,17 @@ pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: Rc<C>, props:
                 // The retry mark forces the bump an unchanged republish would
                 // not otherwise make — and is consumed by making it, so one
                 // failure buys exactly one retry.
-                if unchanged && !previous.retry_update {
+                let generation = if unchanged && !previous.retry_update {
                     previous.generation
                 } else {
                     previous.generation.wrapping_add(1)
-                }
+                };
+                // Carried across the republish on purpose: the budget counts
+                // failures across the very rebuilds that carry the retries, so
+                // resetting it here would restore the unbounded loop exactly.
+                (generation, previous.consecutive_update_failures)
             }
-            None => 0,
+            None => (0, 0),
         };
         staged.insert(
             slot,
@@ -1223,6 +1318,7 @@ pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: Rc<C>, props:
                 props: Box::new(props),
                 generation,
                 retry_update: false,
+                consecutive_update_failures: failures,
             },
         );
         generation
@@ -1232,19 +1328,60 @@ pub(crate) fn publish<C: NativeComponent>(slot: SlotId, component: Rc<C>, props:
 
 /// Mark `slot` so the next [`publish`] bumps its props generation whatever the
 /// app publishes — the retry half of the module doc's *A failed `update` is
-/// retried on the next rebuild*.
+/// retried, up to a cap* — **unless this slot has spent its budget.**
 ///
 /// Called from [`Bridge`]'s dispatch when a component reports a failure, which
 /// leaves the runtime's diff baseline behind the app's intent; without the
 /// forced bump, an app that republishes the same props forever would emit no
 /// further `UpdateParams` and the runtime would never get to try again.
 ///
+/// The bound is [`RETRY_UPDATE_BUDGET`] **consecutive** failures. Reaching it
+/// reports once at `warn` and leaves the mark unset, so a permanently failing
+/// slot settles into inert rather than costing a dispatch and a log line on
+/// every rebuild for the process lifetime; later calls for the same slot are
+/// silent, since the one report is the point and repeating it would be the very
+/// log volume the cap exists to stop. A success in between clears the count
+/// ([`clear_update_retry_budget`]), so the cap never accumulates across
+/// unrelated flakes.
+///
 /// A slot with nothing staged (its reaper already ran, or it was never a
 /// component slot) is a silent no-op: there is no rebuild left to retry from.
 fn request_update_retry(slot: SlotId) {
     with_staged(|staged| {
-        if let Some(entry) = staged.get_mut(&slot) {
-            entry.retry_update = true;
+        let Some(entry) = staged.get_mut(&slot) else {
+            return;
+        };
+        if entry.consecutive_update_failures >= RETRY_UPDATE_BUDGET {
+            // Already given up on and already reported: stay inert and quiet.
+            return;
+        }
+        entry.consecutive_update_failures += 1;
+        if entry.consecutive_update_failures >= RETRY_UPDATE_BUDGET {
+            log::warn!(
+                "frust-native-widgets: native component slot {slot} failed \
+                 {RETRY_UPDATE_BUDGET} consecutive updates — no further retries will be \
+                 scheduled for it. Its native view keeps whatever state the last successful \
+                 update left; a later props change is still dispatched (only the runtime's own \
+                 retry is capped), and one that succeeds restores the full budget."
+            );
+            return;
+        }
+        entry.retry_update = true;
+    });
+}
+
+/// Clear `slot`'s consecutive-failure count — called from [`Bridge::update`]
+/// the moment a dispatch succeeds, which is what makes [`RETRY_UPDATE_BUDGET`]
+/// a bound on a *run* of failures rather than on a slot's lifetime total.
+///
+/// A slot already at zero (the overwhelmingly common case) is left untouched,
+/// so the ordinary success path costs one hash lookup and no write.
+fn clear_update_retry_budget(slot: SlotId) {
+    with_staged(|staged| {
+        if let Some(entry) = staged.get_mut(&slot)
+            && entry.consecutive_update_failures != 0
+        {
+            entry.consecutive_update_failures = 0;
         }
     });
 }
@@ -1443,12 +1580,59 @@ fn guard_pending_exception(ctx: &mut PlatformCtx<'_, '_>, op: &str) -> Option<Na
         .err()
 }
 
+/// The same guard, for the one dispatch that is handed **no context** —
+/// [`NativeWidget::on_event`] takes `(state, event)` and nothing else.
+///
+/// The `Env` comes from the process VM instead: `with_top_local_frame` borrows
+/// the JNI stack frame the `nativeOnEvent` export is already running in rather
+/// than pushing a new one, so the clean path is a `GetEnv` plus an
+/// `ExceptionCheck`, and the handful of local references a *report* costs are
+/// released when that export returns.
+///
+/// **Not `frust_plugin::android::with_jni_env`, deliberately.** That helper
+/// attaches with jni 0.22's default `PreReThrowPostCatch` policy, which stashes
+/// an already-pending exception before running the closure and re-throws it
+/// after: a check inside it would read clean every time and clear nothing. (The
+/// same policy also means a component that reaches JNI *through* that helper is
+/// already caught on its own way out — this guard is for everything that does
+/// not, from a raw `jni-sys` call to an attachment configured with `Ignore`.)
+///
+/// Answers `None` — *unknown*, never *clean* — when the platform handles are
+/// not installed yet or the thread is not attached, both of which mean nothing
+/// dispatched through here in the first place.
+#[cfg(target_os = "android")]
+fn guard_pending_exception_off_context(op: &str) -> Option<NativeWidgetError> {
+    let vm = match frust_plugin::android::vm() {
+        Ok(vm) => vm,
+        Err(error) => {
+            log::debug!(
+                "frust-native-widgets: {op} boundary guard skipped — no platform handles: {error}"
+            );
+            return None;
+        }
+    };
+    vm.with_top_local_frame(|env| {
+        let mut ctx = PlatformCtx::detached(env);
+        Ok::<Option<NativeWidgetError>, jni::errors::Error>(guard_pending_exception(&mut ctx, op))
+    })
+    .unwrap_or_else(|error: jni::errors::Error| {
+        log::warn!("frust-native-widgets: {op} boundary guard could not reach a JNI env: {error}");
+        None
+    })
+}
+
 /// The Apple arm has nothing to guard: there is no pending-exception channel
 /// between a component and the runtime here (an ObjC exception is not a return
 /// path — `crate::apple::factory`'s own contract answers a failed create with a
 /// placeholder view instead), and no `Env` whose next call could be poisoned.
 #[cfg(target_os = "ios")]
 fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<NativeWidgetError> {
+    None
+}
+
+/// See the context-carrying arm above: this platform has nothing to guard.
+#[cfg(target_os = "ios")]
+fn guard_pending_exception_off_context(_op: &str) -> Option<NativeWidgetError> {
     None
 }
 
@@ -1460,14 +1644,24 @@ fn guard_pending_exception(_ctx: &mut PlatformCtx<'_, '_>, _op: &str) -> Option<
     None
 }
 
+/// The host arm of the context-free guard: it counts through the same tally, so
+/// the wiring bar covers all four dispatches and not just the three that carry
+/// a context.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn guard_pending_exception_off_context(_op: &str) -> Option<NativeWidgetError> {
+    DISPATCH_GUARDS.with(|guards| guards.set(guards.get() + 1));
+    None
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 thread_local! {
     /// How many times the dispatch-boundary guard ran on this thread — the
     /// host arm's stand-in for a check it cannot make, the same shape
     /// [`LIVE_CHILDREN`] uses for the leak bar. What a host test can prove is
-    /// that every context-carrying dispatch is *wired* to the guard; whether
-    /// the JNI check itself finds a pending exception is Android-only, and
-    /// this repo has no embedded-JVM harness to run it (`crate::android`'s own
+    /// that **every** dispatch is *wired* to the guard — the three that carry a
+    /// context and `on_event`, which reaches the VM instead; whether the JNI
+    /// check itself finds a pending exception is Android-only, and this repo
+    /// has no embedded-JVM harness to run it (`crate::android`'s own
     /// `create_failure_message` note).
     static DISPATCH_GUARDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -1583,37 +1777,55 @@ impl<C: NativeComponent> NativeWidget for Bridge<C> {
                 // Reported, so the runtime keeps `old` as the diff baseline —
                 // and marked, so the next rebuild's `publish` bumps the wire
                 // even if the app republishes identical props, which is the
-                // only thing that gets the runtime a second attempt (module
-                // doc's *A failed `update` is retried on the next rebuild*).
+                // only thing that gets the runtime a second attempt. The mark
+                // is refused once this slot has spent its consecutive-failure
+                // budget, which is what keeps a permanently failing component
+                // from costing a dispatch per rebuild forever (module doc's
+                // *A failed `update` is retried, up to a cap*).
                 request_update_retry(new.slot);
                 Err(error)
             }
-            None => Ok(()),
+            None => {
+                // A success ends the run of failures, so a flaky platform never
+                // accumulates its way to the cap.
+                clear_update_retry_budget(new.slot);
+                Ok(())
+            }
         }
     }
 
     /// Always `None`: a public component is meant to handle its own events
     /// (its `&self` is the value the app published, closures and all), so
     /// nothing rides the six built-in controls' `EventPayload` callback
-    /// channel. Unconditional, which is also why nothing in production reaches
-    /// this method at all — the attach half a component would need does not
-    /// exist yet ([`NativeComponent::on_event`]); the only callers today are
-    /// this module's own tests, driving the runtime directly.
+    /// channel. Unconditional, which is also why no production path reaches
+    /// this method — the attach half a component would need does not exist yet
+    /// ([`NativeComponent::on_event`]); a fabricated slot id naming a live
+    /// component's slot still lands here, and this module's own tests drive it
+    /// directly.
     ///
     /// The staged value is re-read first — an event can arrive after any
     /// number of rebuilds that changed the component but not its props, and
     /// the props diff gate skips `update` on every one of them
     /// ([`BridgeState::refresh_component`]).
     ///
-    /// The one dispatch with no boundary exception guard, because it carries
-    /// no context and hands the component no `Env` of ours: a component
-    /// reaching JNI from here attached its own thread and owns the
-    /// check-and-clear on it (module doc's *Dispatch-boundary exception
-    /// guard*).
+    /// **Guarded like the other three, through the VM rather than a context**,
+    /// because this signature carries neither a context nor an `Env`: the
+    /// leftover-exception hazard is the dispatch's, not the context's, and the
+    /// only error channel here is the log (this returns `Option`, not
+    /// `Result`). See `guard_pending_exception_off_context` and the module
+    /// doc's *Dispatch-boundary exception guard*.
     fn on_event(state: &mut Self::State, event: WireEvent) -> Option<EventPayload> {
         state.refresh_component();
         let component = Rc::clone(&state.component);
         component.on_event(&mut state.state, NativeEvent::from_wire(event));
+        if let Some(error) = guard_pending_exception_off_context("NativeComponent::on_event") {
+            log::warn!(
+                "frust-native-widgets: component slot {} left a Java exception pending after \
+                 on_event — cleared here, but the rest of that dispatch ran on undefined \
+                 ground: {error}",
+                state.slot
+            );
+        }
         None
     }
 
@@ -1751,6 +1963,13 @@ mod tests {
     /// observed succeeding rather than merely being attempted again.
     const FAIL_UPDATE_ONCE: &str = "FAIL_UPDATE_ONCE";
 
+    /// The [`GaugeProps::label`] that makes `update` latch an error on **every**
+    /// attempt *and record each one* — the retry-cap test's opt-in. It is a
+    /// separate sentinel from [`FAIL_UPDATE`] only because that one records
+    /// nothing, and the cap is a statement about *how many times* the component
+    /// was asked.
+    const FAIL_UPDATE_ALWAYS: &str = "FAIL_UPDATE_ALWAYS";
+
     thread_local! {
         /// Whether [`FAIL_UPDATE_ONCE`]'s single failure has been spent. Per
         /// test thread, like every other thread-local this module's tests
@@ -1806,6 +2025,11 @@ mod tests {
         ) {
             if new.label == FAIL_UPDATE {
                 ctx.report_error("gauge: setter threw");
+                return;
+            }
+            if new.label == FAIL_UPDATE_ALWAYS {
+                self.note(format!("{} update refused", self.tag));
+                ctx.report_error("gauge: setter always throws");
                 return;
             }
             if new.label == FAIL_UPDATE_ONCE && !UPDATE_FAILED_ONCE.replace(true) {
@@ -2350,6 +2574,166 @@ mod tests {
         );
     }
 
+    /// Drive `rebuilds` rebuilds that republish **byte-identical** props for
+    /// `slot`, dispatching one `update_params` per rebuild whose wire actually
+    /// moved — which is exactly what the platform-view differ does — and return
+    /// the `params_json` each rebuild produced.
+    ///
+    /// The wire check is the whole point: the differ emits an `UpdateParams`
+    /// only when a slot's `params_json` changes, so a rebuild whose params come
+    /// back identical costs the runtime nothing at all. Calling
+    /// `update_params` unconditionally would model a differ this repo does not
+    /// have and would make the cap look ineffective (the runtime compares props
+    /// against its own baseline, which a failed update never advances).
+    fn republish_identical(
+        runtime: &mut crate::runtime::NativeRuntime,
+        ctx: &mut PlatformCtx<'_, '_>,
+        slot: SlotId,
+        log: &Rc<RefCell<Vec<String>>>,
+        label: &str,
+        value: i32,
+        rebuilds: usize,
+    ) -> Vec<String> {
+        let mut wire = Vec::with_capacity(rebuilds);
+        let mut previous: Option<String> = None;
+        for _ in 0..rebuilds {
+            let params = mount(slot, Gauge::new(log, "g"), props(label, value));
+            if previous.as_deref() != Some(params.as_str()) {
+                let _ = runtime.update_params(ctx, &params);
+            }
+            previous = Some(params.clone());
+            wire.push(params);
+        }
+        wire
+    }
+
+    #[test]
+    fn a_permanently_failing_update_stops_retrying_at_the_cap() {
+        // Batch-review M4. The retry mechanism above is unbounded on its own:
+        // every failed dispatch re-marks the slot, the next rebuild's `publish`
+        // bumps the generation for byte-identical props, the differ emits an
+        // `UpdateParams`, the retry fails and re-marks — one FFI dispatch plus
+        // one `log::warn!` per rebuild, forever, on the platform main thread.
+        // On a screen that rebuilds every frame that is per-frame JNI traffic
+        // and per-frame log volume, and it falsifies the crate's headline
+        // "an unchanged rebuild costs zero FFI crossings" for the process
+        // lifetime.
+        //
+        // So the budget caps it. What is asserted here is the *observable*
+        // consequence: the wire stops moving, so the differ stops asking, so
+        // the component stops being called.
+        install_log_capture();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        register_component::<Gauge>(GAUGE_KIND);
+        let created = mount(62, Gauge::new(&log, "g"), props("Net", 1));
+
+        let mut calls = Vec::new();
+        {
+            let mut ctx = PlatformCtx::new(&mut calls);
+            with_runtime(|runtime| {
+                runtime.create(&mut ctx, &created).unwrap();
+
+                // Ten rebuilds of a screen whose props settled on a value the
+                // platform refuses. Pre-cap, all ten would have dispatched.
+                let wire =
+                    republish_identical(runtime, &mut ctx, 62, &log, FAIL_UPDATE_ALWAYS, 2, 10);
+
+                // The first rebuild moved the wire because the props really
+                // changed; the next two moved it because a failure re-marked
+                // the slot. From the fourth on the budget is spent and the wire
+                // is frozen — no `UpdateParams`, nothing dispatched, nothing
+                // logged.
+                assert_ne!(wire[0], created, "changed props changed the wire");
+                assert_ne!(wire[1], wire[0], "failure 1 forced a retry bump");
+                assert_ne!(wire[2], wire[1], "failure 2 forced a retry bump");
+                for (index, params) in wire.iter().enumerate().skip(3) {
+                    assert_eq!(
+                        *params, wire[2],
+                        "rebuild {index} must leave the wire untouched: three consecutive \
+                         failures spend the budget, and an unchanged rebuild is back to \
+                         costing zero FFI crossings"
+                    );
+                }
+
+                assert_eq!(runtime.dispose_slot(&mut ctx, 62), DisposeOutcome::Disposed);
+            })
+            .expect("the thread's runtime");
+        }
+        forget(62);
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "g create 'Net'".to_string(),
+                "g update refused".to_string(),
+                "g update refused".to_string(),
+                "g update refused".to_string(),
+                "g dispose".to_string(),
+            ],
+            "the component was asked exactly RETRY_UPDATE_BUDGET (3) times across ten \
+             rebuilds, then never again — the observed behaviour at the cap is *inert*, \
+             not slower retries"
+        );
+        assert!(
+            logged("no further retries will be scheduled"),
+            "giving up is reported once, at warn — a slot that silently stops trying is \
+             the other way to lose a native view"
+        );
+    }
+
+    #[test]
+    fn a_successful_update_restores_the_whole_retry_budget() {
+        // The cap counts *consecutive* failures, which is what keeps a flaky
+        // platform from accumulating its way to inert over a long session: two
+        // refusals, one success, and the next bad patch gets the full three
+        // attempts again rather than the one it would have left.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        register_component::<Gauge>(GAUGE_KIND);
+        let created = mount(63, Gauge::new(&log, "g"), props("Net", 1));
+
+        let mut calls = Vec::new();
+        {
+            let mut ctx = PlatformCtx::new(&mut calls);
+            with_runtime(|runtime| {
+                runtime.create(&mut ctx, &created).unwrap();
+
+                // Two failures — one short of the cap.
+                republish_identical(runtime, &mut ctx, 63, &log, FAIL_UPDATE_ALWAYS, 2, 2);
+
+                // A props change the component accepts. This is what clears the
+                // count; the retry mark plays no part (changed props bump the
+                // generation on their own).
+                let recovered = mount(63, Gauge::new(&log, "g"), props("Net", 3));
+                assert_eq!(
+                    runtime.update_params(&mut ctx, &recovered).unwrap(),
+                    UpdateOutcome::Applied
+                );
+
+                // A fresh bad patch now gets three attempts, not one.
+                republish_identical(runtime, &mut ctx, 63, &log, FAIL_UPDATE_ALWAYS, 6, 10);
+
+                assert_eq!(runtime.dispose_slot(&mut ctx, 63), DisposeOutcome::Disposed);
+            })
+            .expect("the thread's runtime");
+        }
+        forget(63);
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "g create 'Net'".to_string(),
+                "g update refused".to_string(),
+                "g update refused".to_string(),
+                "g update 1 -> 3".to_string(),
+                "g update refused".to_string(),
+                "g update refused".to_string(),
+                "g update refused".to_string(),
+                "g dispose".to_string(),
+            ],
+            "two refusals, a success that cleared the count, then a full budget of three"
+        );
+    }
+
     #[test]
     fn a_later_error_inside_a_local_frame_is_logged_rather_than_swallowed() {
         // m-01 item 1, both halves at once.
@@ -2399,12 +2783,27 @@ mod tests {
     }
 
     #[test]
-    fn every_context_carrying_dispatch_runs_the_boundary_exception_guard() {
-        // m-01 item 5. What a host can prove is the wiring: `create`, `update`
-        // and `dispose` each run the guard, and `on_event` — which carries no
-        // context and hands the component no `Env` — does not. Whether the
-        // guard's JNI check actually finds a pending exception is Android-only
-        // and unrunnable here (no embedded-JVM harness in this repo).
+    fn every_dispatch_runs_the_boundary_exception_guard() {
+        // m-01 item 5, widened by batch-review M1. What a host can prove is the
+        // wiring: ALL FOUR dispatches run the guard. `create`, `update` and
+        // `dispose` reach it through their context; `on_event` carries none —
+        // `NativeWidget::on_event` takes `(state, event)` and nothing else — so
+        // it reaches a JNI env through the process VM instead
+        // (`guard_pending_exception_off_context`).
+        //
+        // This assertion used to read `3`, with "on_event has no context to
+        // guard through" as the reason, which encoded the gap as intent for the
+        // Phase 4 author. It was wrong twice over: the export runs
+        // `debug_assert_main_thread` and further JNI after `runtime.on_event`
+        // returns, so a leftover exception is *ours* to trip over, and
+        // `NativeRuntime::on_event` routes on the slot id alone, so a
+        // fabricated id naming a live component's slot reaches the trait method
+        // today (`crate::runtime`'s own note). A reachable UB path guarded on
+        // three of four dispatches is not a resting place.
+        //
+        // Whether the guard's JNI check actually *finds* a pending exception is
+        // Android-only and unrunnable here (no embedded-JVM harness in this
+        // repo); the host arm counts instead.
         let log = Rc::new(RefCell::new(Vec::new()));
         register_component::<Gauge>(GAUGE_KIND);
         let before = dispatch_guard_count();
@@ -2429,9 +2828,9 @@ mod tests {
 
         assert_eq!(
             dispatch_guard_count() - before,
-            3,
-            "create, update and dispose are guarded; on_event has no context to \
-             guard through"
+            4,
+            "create, update, dispose AND on_event are guarded — the fourth is \
+             the one this test used to license the absence of"
         );
     }
 
