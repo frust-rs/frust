@@ -991,7 +991,7 @@ pub(crate) mod platform {
     //! - the one-time warnings for the setters this arm cannot honour yet.
     //!
     //! Keeping the typed views is not incidental: it is what makes "every
-    //! UIKit call main-thread-typed" (PLAN 2.1) a compile-time property
+    //! UIKit call main-thread-typed" a compile-time property
     //! rather than a review promise — every class here is
     //! `#[thread_kind = MainThreadOnly]`, so a call without a
     //! [`MainThreadMarker`] in hand does not compile.

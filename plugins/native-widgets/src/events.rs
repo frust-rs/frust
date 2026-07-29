@@ -67,12 +67,12 @@ pub(crate) const EVENT_KIND_DRAG_START: i32 = 4;
 /// `SeekBar.OnSeekBarChangeListener.onStopTrackingTouch` — `detail` unused.
 pub(crate) const EVENT_KIND_DRAG_END: i32 = 5;
 
-// --- the typed vocabulary the app-facing api (p1-06) wraps into a signal ---
+// --- the typed vocabulary the app-facing api wraps into a signal -----------
 
 /// One decoded native-widget event, past the raw `(kind, detail)` wire —
 /// [`crate::runtime::NativeRuntime::on_event`] hands this to a slot's
-/// registered `Arc<dyn Fn(EventPayload) + Send + Sync>` callback (PLAN
-/// 1.3), invoked on the platform main thread.
+/// registered `Arc<dyn Fn(EventPayload) + Send + Sync>` callback, invoked on
+/// the platform main thread.
 ///
 /// **Bypasses `RenderRoot::event` entirely** — see the module doc.
 #[derive(Clone, Copy, Debug, PartialEq)]

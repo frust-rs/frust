@@ -1,4 +1,4 @@
-//! Theme ladder L1's Apple half (native-widgets Phase 2, p2-04): mirrors
+//! Theme ladder L1's Apple half: mirrors
 //! `crate::android::theme`'s L1 (that module's own doc — "why a wrapped
 //! Context" — is the reference account of the *problem* L1 solves; this
 //! module is the same fix through UIKit's own, genuinely different

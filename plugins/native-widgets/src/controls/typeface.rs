@@ -1,4 +1,4 @@
-//! Theme ladder L3's platform-neutral half (native-widgets Phase 1, p1-08):
+//! Theme ladder L3's platform-neutral half:
 //! the [`Typeface`] a text-bearing control's `Props` carries, its wire codec,
 //! and the pure cache-key/registration-plan/degrade-path logic
 //! [`crate::android::fonts`] (the JNI-only half) builds its actual
@@ -35,7 +35,7 @@ use crate::runtime::Params;
 // --- the `Typeface` field and its wire codec --------------------------------
 
 /// Which Glyph face (or the platform's own default) a text-bearing control's
-/// `Typeface` should be set to — theme ladder L3 (p1-08). [`Self::System`] is
+/// `Typeface` should be set to — theme ladder L3. [`Self::System`] is
 /// both the platform's own default AND the target of
 /// [`crate::android::fonts`]'s registration-failure degrade path — never a
 /// distinct third case a caller has to handle separately.

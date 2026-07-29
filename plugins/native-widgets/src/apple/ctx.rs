@@ -19,8 +19,8 @@
 //! | a `Context` to construct a view against | `UIView::new(mtm)` needs only main-thread proof |
 //!
 //! So the one thing a UIKit call genuinely cannot do without is **proof that
-//! it is on the main thread**, and that is exactly what this type carries
-//! (PLAN 2.1's "compile-time main-thread proof"). A control's `create`/
+//! it is on the main thread**, and that is exactly what this type carries: a
+//! compile-time main-thread proof. A control's `create`/
 //! `update`/`dispose` takes `&mut NativeCtx<'_, '_>`, gets a
 //! [`MainThreadMarker`] out of it, and every `objc2-ui-kit` constructor that
 //! demands one is then callable — with the check done once, by the type
@@ -29,8 +29,8 @@
 //!
 //! # No `CATransaction` batch helper here — the host already opened one
 //!
-//! PLAN 2.2 asks for a `CATransaction` batch (implicit animations disabled)
-//! around multi-view updates. That batch **already exists, one layer up**:
+//! A `CATransaction` batch (implicit animations disabled) around multi-view
+//! updates is what this arm would otherwise need. That batch **already exists, one layer up**:
 //! `FrustViewHost.applyCommands` (`platform/ios/FrustEmbedding/Sources/
 //! FrustEmbedding/FrustViewHost.swift`) wraps its whole per-poll command loop
 //! in `CATransaction.begin()` / `CATransaction.setDisableActions(true)` /

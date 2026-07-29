@@ -223,7 +223,7 @@ define_class!(
     // `FrustViewHost`'s own `CADisplayLink`-driven poll), and every UIKit type
     // a control touches is main-thread-only — so is this class. That is what
     // lets `MainThreadMarker::from(self)` below be a free, compile-time proof
-    // rather than a runtime check (PLAN 2.1).
+    // rather than a runtime check.
     #[thread_kind = MainThreadOnly]
     // See `FACTORY_CLASS_NAME`'s doc: this literal must equal that constant,
     // and both must equal `api::builders`' iOS `VIEW_TYPE`.

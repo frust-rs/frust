@@ -53,9 +53,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * | [stopImageStream] | `(int session) -> void` | unbinds the analyzer only |
  *
  * Kotlin → Rust ([nativeOnPermissionResult], [nativeOnCameraState],
- * [nativeOnPictureTaken], [nativeOnImageFrame] — the last one is task 09's
- * single contract addition; [nativeOnPictureTaken]'s `requestId` is round-1 fix
- * f1's, the one widening since the contract was frozen — see *Correlating a
+ * [nativeOnPictureTaken], [nativeOnImageFrame] — the last one was added
+ * after this contract was originally frozen; [nativeOnPictureTaken]'s
+ * `requestId` is the one field widening since then — see *Correlating a
  * capture completion* below). The package is
  * baked into those symbols' mangled names
  * (`Java_dev_frust_camera_FrustCameraHost_native*`), so **this class may never
@@ -309,7 +309,7 @@ object FrustCameraHost {
      *
      * The callbacks path exists because the factory seam alone deadlocks: it
      * cannot fire until a preview slot mounts, and a host page will not mount
-     * one until permission is granted (task-14 device gate).
+     * one until permission is granted.
      */
     @Volatile
     private var activity: Activity? = null
@@ -608,8 +608,9 @@ object FrustCameraHost {
      * Register the process-wide [Application.ActivityLifecycleCallbacks] once.
      *
      * These callbacks do three jobs: drive session pause/resume, relay a
-     * pending permission answer on the next resume, and — since the task-14
-     * device gate — **discover the foreground Activity in the first place**.
+     * pending permission answer on the next resume, and — since a
+     * device-gate run surfaced the permission deadlock below —
+     * **discover the foreground Activity in the first place**.
      *
      * Registering them at process start (from [installApplicationContext],
      * i.e. [FrustCameraInitProvider.onCreate]) rather than from
@@ -916,7 +917,7 @@ object FrustCameraHost {
         /**
          * Adopt `activity` as the host if none is cached yet.
          *
-         * This is the task-14 fix for the permission deadlock: the module used
+         * This closes the permission deadlock: the module used
          * to learn its Activity only from the platform-view factory seam, which
          * cannot fire before permission is granted (see
          * [ensureLifecycleCallbacks]). Adoption is deliberately

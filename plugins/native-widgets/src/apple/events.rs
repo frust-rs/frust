@@ -1,6 +1,6 @@
 //! iOS target-action: ONE Rust `define_class!` target object **per slot**,
 //! wired straight into the SAME `(kind, detail)` runtime dispatch Android's
-//! `FrustNativeListener` feeds — task p2-03 (PLAN 2.2's event half).
+//! `FrustNativeListener` feeds.
 //!
 //! # One class, five actions — the Android mirror
 //!
@@ -33,8 +33,8 @@
 //! # Target retention: explicit, per slot, in the control's own `State`
 //!
 //! `UIControl` holds its targets **weakly** (`addTarget:action:forControlEvents:`
-//! does not retain `target` — Apple's own documented contract). The Phase 0
-//! spike leaned on its own factory-level cache to keep a target alive, which
+//! does not retain `target` — Apple's own documented contract). An earlier
+//! prototype leaned on a factory-level cache to keep a target alive, which
 //! does not generalize to N independently-created-and-disposed slots;
 //! production must retain the target explicitly, for exactly the slot's own
 //! lifetime.
@@ -319,7 +319,7 @@ impl FrustNativeControlTarget {
 
     /// Build a target for `slot` and wire it as `view`'s `ValueChanged`,
     /// `TouchDown`, and `TouchUpInside|TouchUpOutside` actions — `Slider`'s
-    /// whole value/drag-attach (PLAN 2.2).
+    /// whole value/drag-attach.
     pub(crate) fn attach_slider(
         mtm: MainThreadMarker,
         slot: SlotId,

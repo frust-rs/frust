@@ -15,12 +15,12 @@ import UIKit
 // counterpart.
 //
 // Unlike a typical `platform_view` consumer, this factory does no camera
-// work of its own: `plugins/camera/src/apple.rs` (task 07) drives the
+// work of its own: `plugins/camera/src/apple.rs` drives the
 // `AVCaptureSession` entirely from Rust via `objc2-av-foundation` — there is
 // no Swift-side capture/permission code anywhere in this package. This type
 // only bridges the already-open session's native pointer
-// (`frust_camera_session_handle`, `CFrustCamera`'s C export — task 08's
-// two-package spike) into an `AVCaptureVideoPreviewLayer`.
+// (`frust_camera_session_handle`, `CFrustCamera`'s C export) into an
+// `AVCaptureVideoPreviewLayer`.
 @objc(CameraPreviewFactory)
 public final class CameraPreviewFactory: NSObject, FrustPlatformViewFactory {
     public override init() {

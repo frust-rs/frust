@@ -1,4 +1,4 @@
-//! Theme ladder L3's Android-only half (native-widgets Phase 1, p1-08): the
+//! Theme ladder L3's Android-only half: the
 //! actual JNI mechanics behind [`crate::controls::typeface`]'s
 //! platform-neutral plan — get the app's private cache directory, write a
 //! Glyph face's bytes there under a content-hash-keyed name (skipping the
