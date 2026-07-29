@@ -65,7 +65,7 @@ use peniko::{Brush, Color};
 use crate::nav::transition::{TransitionDriver, make_driver};
 use crate::text;
 use crate::text::ThemeTextColor;
-use crate::{Timing, material::state_layer::PRESSED_OPACITY};
+use crate::{Timing, authoring::PRESSED_OPACITY};
 
 /// Corner radius of the button's rounded-rect background, in logical px (the
 /// unthemed fallback; a theme resolves this from `shape.small`).
