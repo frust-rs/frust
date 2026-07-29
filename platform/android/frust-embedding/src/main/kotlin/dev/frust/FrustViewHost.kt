@@ -66,7 +66,7 @@ class FrustViewHost(
 
     /**
      * Whether any native sibling is currently hosted. Read once per frame by
-     * `FrustSurfaceView.sampleFrameTimeline` (camera task 12) to scope the
+     * `FrustSurfaceView.sampleFrameTimeline` to scope the
      * scroll-sync tail's Choreographer frame-timeline sampling to the frames
      * where a hosted view's geometry can actually be out of step — an app with
      * no platform view posts no vsync callback at all.
@@ -92,7 +92,7 @@ class FrustViewHost(
         val factory: FrustPlatformViewFactory,
         val layoutParams: FrameLayout.LayoutParams,
         val clipRect: Rect,
-        /** Mode B input forwarding (native-widgets spike 3): whether a
+        /** Mode B input forwarding: whether a
          * touch-DOWN inside this slot's rect hands the gesture to [view]. */
         val interactive: Boolean,
         /** The z-shield list (physical px, absolute window space): regions
@@ -101,7 +101,7 @@ class FrustViewHost(
     )
 
     /**
-     * Mode B input forwarding (native-widgets spike 3): the view that should
+     * Mode B input forwarding: the view that should
      * own a gesture starting at physical-px window point `(x, y)`, or null
      * when the frust surface keeps it. A slot wins when it is interactive,
      * visible, contains the point, and no z-shield rect covers it.
@@ -175,8 +175,7 @@ class FrustViewHost(
         // `view.visibility`/`root.addView` live INSIDE this try, not just
         // `createView` itself: a null return with no thrown exception (a
         // future/misbehaving factory, or today's re-entrant-runtime edge
-        // case) would otherwise NPE on `view.visibility` unguarded — the
-        // defect this whole block fixes (f2-05-null-create-npe.md). Catching
+        // case) would otherwise NPE on `view.visibility` unguarded. Catching
         // here means ANY factory's null-or-throw failure, present or future,
         // lands in the same guarded path.
         val view = try {
@@ -325,7 +324,7 @@ class FrustViewHost(
 /**
  * A template-shipped, debug-only factory that hosts a [TextView] showing its
  * own `paramsJson` plus a self-incrementing counter. It exists to prove the
- * zero-Frust-frame self-update property (task 11's trace check): the counter
+ * zero-Frust-frame self-update property (a device trace check): the counter
  * advances on its own `Choreographer` loop — driven by the display's vsync,
  * independent of Frust's render loop — so a device trace can confirm a hosted
  * native view animates without waking the Frust frame path.

@@ -12,7 +12,7 @@ import PackageDescription
 // `frust_*` C symbols `CFrustFFI` declares stay UNDEFINED in this package's
 // object files — they resolve at the app's final link. That split mirrors
 // Flutter's (`flutter_embedding` is Java/Kotlin-only; the engine ships
-// separately) and is what the s1 spike proved on both the device
+// separately); this split compiles/links on both the device
 // (`arm64-apple-ios15.0`) and simulator triples, Debug and Release.
 //
 // `platforms:` must stay **at or below** every consumer's
