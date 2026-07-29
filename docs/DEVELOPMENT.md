@@ -59,7 +59,7 @@ via `frust = { ..., default-features = false }`, which removes the fonts from th
 graph (confirmed via `cargo tree -e features`).
 
 **Widget-authoring test fixtures.** `frust-widgets`' non-default `test-support` feature
-compiles in the crate's GPU-free container-widget fixtures (`authoring::test_support`),
+compiles in the crate's GPU-free container-widget fixtures (`frust_widgets::test_support`),
 so a design system built outside this crate can test its own containers the same way;
 off by default in a normal app build.
 

@@ -476,8 +476,8 @@ Conventions for `Widget::semantics` (see `docs/ARCHITECTURE.md`'s Semantics pass
   (`docs/ARCHITECTURE.md`'s `frust-widgets` row); `PRESSED_OPACITY`'s `material::state_layer`
   re-export is compatibility-only. `PageTransition::Custom` carries two contracts: pair it
   with an explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to
-  the M3 default, 300ms + `Curve::Emphasized`), and `reduce_motion` still collapses it to
-  `ReducedCrossfade` unconditionally — a custom transition cannot opt out.
+  the M3 default, 300ms + `Curve::Emphasized`), and `reduce_motion` collapses it only
+  programmatically; an interactive edge-swipe pop calls it, like every preset.
 
 ## Testing Patterns
 
