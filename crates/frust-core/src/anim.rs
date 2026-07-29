@@ -6,7 +6,7 @@
 //! # Contract: this module is plain data + math, never a scheduler
 //!
 //! Nothing here reads a clock, spawns a task, or registers a callback.
-//! [`FrameTime`] *enters from the shell* (spec §8: no `Instant::now()` inside
+//! [`FrameTime`] *enters from the shell* (no `Instant::now()` inside
 //! `frust-core`) and is threaded to widgets during paint as
 //! [`crate::widget::PaintCtx::frame_time`]. A widget that animates does so
 //! **during its own paint**: it calls [`AnimationController::advance`] with the

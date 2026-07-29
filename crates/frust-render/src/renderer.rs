@@ -64,9 +64,9 @@ pub enum SurfaceAlphaRequest {
     /// **This is a request, not an outcome.** Never key a paint contract off
     /// it: read
     /// [`SurfaceRenderer::surface_resolved_translucent`](SurfaceRenderer::surface_resolved_translucent)
-    /// after the surface is installed instead (review finding M1 — a fallback
+    /// after the surface is installed instead — a fallback
     /// must degrade to the opaque Mode A contract, or the hole punch presents
-    /// black rectangles on an opaque swapchain).
+    /// black rectangles on an opaque swapchain.
     TranslucentPreferred,
 }
 
@@ -210,7 +210,7 @@ pub struct SurfaceRenderer {
     /// `PIPELINE_CACHE` (Vulkan/Android); validated and discarded elsewhere.
     initial_cache_data: Option<Vec<u8>>,
     /// The swapchain texture [`Self::acquire`] acquired and stashed for
-    /// [`Self::submit`] to blit into and present (Phase 11.A present-span split).
+    /// [`Self::submit`] to blit into and present (the acquire/submit span split).
     /// `None` outside an in-flight `acquire`→`submit` pair — set only on an
     /// [`AcquireOutcome::Acquired`] result, taken by the next [`Self::submit`].
     /// A `wgpu::SurfaceTexture` is owned (it does not borrow the surface), so
@@ -289,8 +289,7 @@ impl SurfaceRenderer {
 
     /// Whether the **live** surface actually resolved to a translucent
     /// (alpha-compositing) mode — the truth a shell's Mode B paint contract
-    /// must key off, replacing the `SurfaceAlphaRequest` it *asked* for
-    /// (review finding M1).
+    /// must key off, replacing the `SurfaceAlphaRequest` it *asked* for.
     ///
     /// [`SurfaceAlphaRequest::TranslucentPreferred`] is a *preference*: the
     /// configure step resolves it against the platform's advertised alpha modes
@@ -497,7 +496,7 @@ impl SurfaceRenderer {
         // `pipeline_cache_data()` still has the handle).
         let pipeline_cache = ctx.create_pipeline_cache(self.initial_cache_data.as_deref());
 
-        // Pick the tier backend the context's probe selected (task 02 / task 06).
+        // Pick the tier backend the context's probe selected.
         // Only `Gpu` is reachable without the `cpu-tier` feature (the probe
         // never returns `Cpu` there, and `ensure_device` guards it), so the
         // default build creates a `vello::Renderer` exactly as before.
@@ -510,8 +509,9 @@ impl SurfaceRenderer {
                 // below): `RendererOptions::default()` compiles shader
                 // permutations for every `AaConfig` (`AaSupport::all()`), ~3x
                 // unnecessary pipeline compiles at init that contribute to the
-                // slow, synchronous, main-thread launch-time shader compile
-                // behind 6e Finding 5's iOS SIGKILL (6e-fix-1 task 03).
+                // slow, synchronous, main-thread launch-time shader compile that
+                // can trip the iOS launch watchdog (`docs/DEVELOPMENT.md`'s
+                // dev-profile shader-stack override note).
                 // Verified against the vello 0.9.0 source
                 // (`RendererOptions::antialiasing_support: AaSupport`,
                 // `AaSupport::area_only()` — both public, non-`non_exhaustive`).
@@ -720,7 +720,7 @@ impl SurfaceRenderer {
                     crate::context::shader_effects_disabled(),
                 );
                 match &ready.surface.path {
-                    // Direct-to-surface (deliverable 1): the vello render targets the
+                    // Direct-to-surface: the vello render targets the
                     // acquired swapchain texture, which does not exist until
                     // `acquire`. So `encode` does ONLY the CPU-side scene build here;
                     // the GPU `render_to_texture` moves to `submit`. See `submit`'s
@@ -736,8 +736,8 @@ impl SurfaceRenderer {
                         // Carry `base_color` to `submit`, where the render runs.
                         *pending_base_color = Some(base_color);
                     }
-                    // Direct-premultiplied (translucent, premultiplied-expecting —
-                    // defect D3): unlike the plain direct arm, the intermediate
+                    // Direct-premultiplied (translucent, premultiplied-expecting):
+                    // unlike the plain direct arm, the intermediate
                     // already exists at encode time, so vello renders into it now
                     // (like the blit arm); `submit`'s premultiply compute pass then
                     // writes `(rgb*a, a)` into the acquired swapchain texture.
@@ -845,8 +845,8 @@ impl SurfaceRenderer {
     /// wait) and, on success, blits/submits/presents it.
     ///
     /// A caller wanting the finer **acquire** (blocking vsync wait) vs
-    /// **submit** (blit + queue-submit + present) attribution — the S5
-    /// GPU-saturation-vs-blit-cost question (Phase 11.A) — calls
+    /// **submit** (blit + queue-submit + present) attribution — to separate
+    /// GPU saturation from blit cost — calls
     /// [`Self::acquire`] and [`Self::submit`] directly, timing each with its own
     /// clock (timing stays shell-owned; this crate reads no clock — see
     /// `frust-shell-common::perf`'s layering note). `present`'s combined span
@@ -967,15 +967,15 @@ impl SurfaceRenderer {
     /// Phase 2b of the frame — the **submit** sub-span: turn the swapchain
     /// texture [`Self::acquire`] stashed into a presented frame, then present it.
     /// Timing this call in isolation attributes the submit work separately from
-    /// [`Self::acquire`]'s blocking vsync wait (Phase 11.A).
+    /// [`Self::acquire`]'s blocking vsync wait.
     ///
-    /// What the submit span contains depends on the render path (deliverable 5,
-    /// the v3 span mapping):
+    /// What the submit span contains depends on the render path (the v3 span
+    /// mapping):
     ///
     /// - **Blit arm** (`Bgra8`-only/probe-refused/`cpu-tier`): the intermediate
     ///   target was already filled in [`Self::encode`], so `submit` = create the
     ///   swapchain view + `TextureBlitter::copy` + queue-submit + present. This is
-    ///   the pre-11.C behavior, unchanged.
+    ///   the pre-direct-to-surface behavior, unchanged.
     /// - **Direct arm** (`Rgba8Unorm` + `STORAGE_BINDING`): the vello
     ///   `render_to_texture` runs HERE, targeting the acquired swapchain texture
     ///   directly (it does not exist until [`Self::acquire`]), then present — no
@@ -1096,7 +1096,7 @@ impl SurfaceRenderer {
                     ));
                 }
             },
-            // Direct-premultiplied (defect D3): vello already rendered the
+            // Direct-premultiplied: vello already rendered the
             // straight-alpha frame into the intermediate in `encode`; premultiply
             // it into the acquired swapchain texture so a premultiplied-expecting
             // compositor (Android `Inherit`) blends it correctly. No blit, no
@@ -1303,7 +1303,7 @@ mod tests {
 
     #[test]
     fn resolved_translucent_is_false_without_a_live_surface() {
-        // The Mode A default (review finding M1): with no surface installed
+        // The Mode A default: with no surface installed
         // there is nothing proven translucent, so a shell reading this before
         // its first install keeps the opaque paint contract rather than
         // punching holes it can't back.
@@ -1408,8 +1408,8 @@ mod tests {
     /// kill switch's full-no-op contract: `run_shader_prepass(.., disabled:
     /// true)` returns zero map entries AND never calls `ensure_pipeline` — the
     /// actual compiled-pipeline cache stays empty, not just "the caller
-    /// ignored the result" — matching this task's "zero GPU work" acceptance
-    /// criterion. `disabled` is passed directly rather than going through
+    /// ignored the result" — confirming the kill switch is a true "zero GPU
+    /// work" no-op. `disabled` is passed directly rather than going through
     /// `context::shader_effects_disabled()`'s process-cached `OnceLock`, so
     /// this test needs no env-var mutation (the flag-parsing itself is
     /// covered by `context::tests`' `env_flag_*` cases). The resulting empty

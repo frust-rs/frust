@@ -86,7 +86,7 @@
 //! - The kit's `Labels - Liquid Glass/Light|Dark/*` swatch group (4 label
 //!   tones tuned for legibility over a glass material) is **not** mapped
 //!   into `ColorScheme` here, nor are the `Fills - Vibrant`/`Fills` groups —
-//!   those are glass-token territory owned by phase 6f task 01's
+//!   those are glass-token territory owned by
 //!   `GlassScale`, not a `ColorScheme` role; `ColorScheme` stays a flat,
 //!   opaque-surface role set as documented above.
 //! - M3-only concepts with **no iOS equivalent at all** — the `*_container`
@@ -202,7 +202,7 @@ impl ColorScheme {
     /// is below 0.5 (midpoint), white is preferred; otherwise, dark ink is
     /// preferred. This simple threshold provides acceptable contrast for most
     /// colors and avoids the overhead of computing the full contrast ratio
-    /// (though task 15 may optimize this).
+    /// (though a more precise contrast-ratio calculation could replace this later).
     ///
     /// ## Works with Any Scheme
     ///
@@ -424,7 +424,7 @@ impl ColorScheme {
             // unchanged, opaque white).
             surface: Color::from_rgb8(0xFF, 0xFF, 0xFF),
             on_surface: LABEL_LIGHT,
-            // secondaryLabel — translucent per its real iOS token (R22),
+            // secondaryLabel — translucent per its real iOS token,
             // confirmed unchanged by `Labels/Light/2 Secondary`, 2026-07-18.
             on_surface_variant: Color::from_rgba8(0x3C, 0x3C, 0x43, 153),
             // secondarySystemBackground — iOS 27 UI Kit
@@ -517,8 +517,8 @@ impl ColorScheme {
             // unchanged, opaque black).
             surface: Color::from_rgb8(0x00, 0x00, 0x00),
             on_surface: LABEL_DARK,
-            // secondaryLabel, dark — translucent per its real iOS token
-            // (R22); iOS 27 UI Kit `Labels/Dark/2 Secondary`, 2026-07-18.
+            // secondaryLabel, dark — translucent per its real iOS token;
+            // iOS 27 UI Kit `Labels/Dark/2 Secondary`, 2026-07-18.
             on_surface_variant: Color::from_rgba8(0xEA, 0xEA, 0xF4, 153),
             // secondarySystemBackground, dark — iOS 27 UI Kit
             // `Backgrounds/Dark - Base/Secondary`, 2026-07-18.
@@ -722,8 +722,8 @@ mod tests {
 
     #[test]
     fn cupertino_translucent_roles_carry_real_alpha() {
-        // secondaryLabel/separator are genuinely translucent iOS tokens
-        // (R22 correction) — unlike every M3 role, these two Cupertino
+        // secondaryLabel/separator are genuinely translucent iOS tokens —
+        // unlike every M3 role, these two Cupertino
         // fields intentionally carry a non-1.0 alpha (see module docs). The
         // separator (outline_variant) alpha itself changed in the
         // 2026-07-18 kit refresh (`Separators/Light|Dark/Non-Opaque`:

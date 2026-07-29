@@ -40,8 +40,8 @@ pub mod scales;
 
 pub use color::GlyphInk;
 
-/// Every bundled Glyph font face's raw bytes (task 27's shell auto-registration
-/// seam), or an empty slice when the `glyph-fonts` feature is off.
+/// Every bundled Glyph font face's raw bytes (consumed by each shell's
+/// auto-registration seam), or an empty slice when the `glyph-fonts` feature is off.
 ///
 /// A `#[cfg(feature = "glyph-fonts")]`-gated item can't be gated *from another
 /// crate* (a shell can't write `#[cfg(feature = "frust-theme/glyph-fonts")]`),

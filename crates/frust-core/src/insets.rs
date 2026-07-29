@@ -1,7 +1,5 @@
 //! Window insets: Flutter's `ViewportMetrics` inset model ported into the
-//! framework core (spec device-parity #3, see
-//! `workflow/plans/features/device-parity/research/RESEARCH.md`, "Insets /
-//! SafeArea / SystemChrome").
+//! framework core.
 //!
 //! A [`WindowInsets`] value flows shell → [`RenderRoot`](crate::app::RenderRoot)
 //! → layout/paint contexts, delivered exactly like the theme: the shell reads

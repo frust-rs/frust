@@ -1,6 +1,5 @@
 //! Layer 1+2 of Frust: the declarative view API, the retained widget tree,
-//! box-constraint layout, and the rebuild/layout/paint pass skeleton (spec §5,
-//! §6).
+//! box-constraint layout, and the rebuild/layout/paint pass skeleton.
 //!
 //! The design mirrors `xilem_core`'s proven `View` lifecycle and Masonry's
 //! `tree_arena`-backed widget tree, but owns its implementation — there is **no
@@ -24,7 +23,7 @@
 //! * [`tree`] — the [`WidgetTree`](tree::WidgetTree) arena wrapper and
 //!   [`WidgetPod`](tree::WidgetPod).
 //! * [`app`] — the [`RenderRoot`](app::RenderRoot) that drives rebuild → layout
-//!   → paint. This is what the desktop shell (task 08) owns.
+//!   → paint. This is what each platform shell owns.
 //! * [`component`] — [`Component`](component::Component), Flutter's
 //!   `StatefulWidget` analog: a subtree with retained local state, a
 //!   per-component reactive `Owner`, and a state boundary the outer view tree
@@ -46,8 +45,8 @@ pub mod widget;
 /// builders, toggle/value state) widgets use to populate a
 /// [`semantics::SemanticsCtx`]. Re-exported here — the sole crate that depends
 /// on accesskit — so `frust-widgets` (and app code) name the vocabulary
-/// through `frust_core::accesskit::*` without a direct dependency; platform
-/// `accesskit_*` adapter crates are phase 6d and live in the shells.
+/// through `frust_core::accesskit::*` without a direct dependency; the
+/// platform `accesskit_*` adapter crates live in the shells, not here.
 pub use accesskit;
 pub use anim::{
     AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,

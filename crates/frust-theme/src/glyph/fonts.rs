@@ -16,8 +16,9 @@
 //! This crate stays pure-data: [`font_data`] only returns bytes. Registering
 //! them into a live [`frust_text::TextContext`] (and forcing the
 //! `ChangeFlags::LAYOUT | PAINT` relayout `TextContext::register_fonts`'s
-//! contract requires) is a shell's job — see task 27 (shell default flip),
-//! which drives this accessor through the task 08 pending-font registry.
+//! contract requires) is a shell's job — each shell seeds this accessor's
+//! bytes through `frust-shell-common`'s font-registry pending-font queue at
+//! construction, applying them via `TextContext::register_fonts`.
 
 /// Space Mono Regular (Google Fonts, OFL-1.1). See `fonts/space-mono/OFL.txt`.
 const SPACE_MONO_REGULAR: &[u8] = include_bytes!("../../fonts/space-mono/SpaceMono-Regular.ttf");

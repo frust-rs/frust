@@ -93,7 +93,7 @@ pub struct TierSelection {
 ///   [`GPU_REQUIRED_DOWNLEVEL_FLAGS`]. A `Gpu` override onto an incapable
 ///   adapter is **refused** — [`TierOutcome::Unavailable`] naming `Gpu` — since
 ///   an override cannot conjure a missing GPU capability; the caller then keeps
-///   the same fail-fast behavior a failed probe produces (PLAN.md D4's override
+///   the same fail-fast behavior a failed probe produces (the override
 ///   plumbing: `FRUST_RENDER_TIER` / `frust run --render-tier`).
 /// - Without an override: `caps` supporting [`GPU_REQUIRED_DOWNLEVEL_FLAGS`]
 ///   selects [`RenderTier::Gpu`]. Otherwise, if the `cpu-tier` feature is
@@ -179,7 +179,7 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
     }
 }
 
-/// The env var [`render_tier_override_from_env`] reads (PLAN.md D4's
+/// The env var [`render_tier_override_from_env`] reads (the
 /// override plumbing) — set directly, or by `frust run --render-tier
 /// gpu|cpu` for the spawned desktop process (mobile: not plumbed in v1, see
 /// `frust-cli`'s `--render-tier` flag help text).

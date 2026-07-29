@@ -1,4 +1,4 @@
-//! Parley 0.11 text pipeline for Frust (spec §4, §9).
+//! Parley 0.11 text pipeline for Frust.
 //!
 //! Wraps parley's font matching and layout into a small, renderer-agnostic
 //! surface: [`TextContext`] owns the heavyweight font/layout state,
@@ -6,8 +6,8 @@
 //! letter-spacing/line-height — the M3 type-scale surface), and [`TextLayout`]
 //! is a finished, measurable block of text that converts into
 //! [`frust_scene::GlyphRun`]s. Only `kurbo`/`peniko`/`frust-scene` types
-//! appear in the public API — no vello, wgpu, or parley types leak through
-//! (spec §7). The parley -> vello glyph coordinate contract lives in
+//! appear in the public API — no vello, wgpu, or parley types leak through.
+//! The parley -> vello glyph coordinate contract lives in
 //! [`convert`].
 
 mod context;

@@ -1,9 +1,9 @@
 //! Pure input/gesture helpers: slop/wheel constants, a trailing-window
-//! [`VelocityTracker`], and the fling-decay math (spec §9; masonry-verified
-//! numbers in `research/RESEARCH.md`).
+//! [`VelocityTracker`], and the fling-decay math (numbers cross-checked
+//! against masonry's implementation).
 //!
 //! Everything here is deterministic and dependency-free so it is exercised
-//! entirely by unit tests — the interactive widgets (task 44) layer their
+//! entirely by unit tests — the interactive widgets layer their
 //! event/paint behaviour on top of these primitives. Times are **logical
 //! milliseconds** and positions/velocities are **logical pixels** (px, px/s) to
 //! match the density-independent coordinate space events arrive in.

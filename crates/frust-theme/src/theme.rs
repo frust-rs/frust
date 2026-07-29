@@ -1,5 +1,5 @@
 //! [`Theme`]: the aggregate design-token bundle an app wires through to its
-//! widget tree. The value is delivered two ways (task 05): to app code through
+//! widget tree. The value is delivered two ways: to app code through
 //! the reactive context (`use_context::<Theme>()` via the facade), and to
 //! widgets through the type-erased `PaintCtx`/`LayoutCtx` theme slot — the
 //! [`Theme::from_paint_ctx`]/[`Theme::from_layout_ctx`] wrappers below recover
@@ -136,8 +136,8 @@ impl Theme {
     /// (both of which hardcode `Brightness::Light`) before handing the result to
     /// `set_app_theme`.
     ///
-    /// Framework footgun this closes (6e Finding 6, bug 2): `set_app_theme`
-    /// stores its argument as the override-wins theme (spec's override-wins
+    /// Framework footgun this closes: `set_app_theme`
+    /// stores its argument as the override-wins theme (the override-wins
     /// rule — an app-set theme always beats further OS appearance reports,
     /// intentionally). A caller that forces a design language via
     /// `set_app_theme(Theme::m3_baseline())` therefore also silently pins
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn with_brightness_forces_design_language_without_discarding_brightness() {
-        // Regression for 6e Finding 6, bug 2: forcing a design language via a
+        // Regression: forcing a design language via a
         // baseline constructor used to silently reset brightness to `Light`
         // even when the caller's live brightness was `Dark`.
         let theme = Theme::m3_baseline().with_brightness(Brightness::Dark);
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn both_baselines_carry_a_status_palette_extension() {
-        // Acceptance criterion 1: `extension::<StatusPalette>()` is `Some`
+        // `extension::<StatusPalette>()` is `Some`
         // for both built-in baselines.
         use crate::status::StatusPalette;
 
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn custom_extension_type_round_trips() {
-        // Acceptance criterion 1: a custom user type round-trips
+        // A custom user type round-trips
         // insert -> get, alongside the pre-attached `StatusPalette`.
         #[derive(Debug, PartialEq)]
         struct AppTokens {

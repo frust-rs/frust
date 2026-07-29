@@ -13,7 +13,7 @@
 //!   replaces its target.
 //! - **Fullscreen-triangle pass encoding** ([`ShaderEffects::encode_pass`]).
 //! - **Size-clamp policy** ([`clamp_size`]) against vello's 8192² atlas cap
-//!   (RESEARCH.md §Q1: an over-cap image is a *silent* non-render, so we must
+//!   (an over-cap image is a *silent* non-render, so we must
 //!   clamp proactively rather than rely on any error surfacing).
 //! - **Age-based whole-id reap** ([`ShaderEffects::mark_seen`]/[`ShaderEffects::reap`]):
 //!   a program id absent from every frame's live key set for
@@ -58,15 +58,15 @@
 use peniko::ImageData;
 use std::collections::{HashMap, HashSet};
 
-/// vello's image atlas grows to a hard 8192×8192 ceiling (RESEARCH.md §Q1,
-/// `vello_encoding/src/image_cache.rs`). A target larger than this cannot be
+/// vello's image atlas grows to a hard 8192×8192 ceiling
+/// (`vello_encoding/src/image_cache.rs`). A target larger than this cannot be
 /// packed and would *silently* fail to render, so every requested size is
 /// clamped to this cap (and further to the adapter's own `max_texture_dimension_2d`).
 const MAX_TEXTURE_DIM: u32 = 8192;
 
 /// Byte size of the uniform buffer: `vec2<f32> resolution` (8) + `f32 time`
-/// (4) + `f32 _pad` (4). The WGSL struct rounds its 12-byte payload up to 16
-/// (RESEARCH.md §Q5), so the buffer and the Rust-side packing both use 16.
+/// (4) + `f32 _pad` (4). The WGSL struct rounds its 12-byte payload up to a
+/// 16-byte alignment boundary, so the buffer and the Rust-side packing both use 16.
 const UNIFORM_SIZE: u64 = 16;
 
 /// How many distinct shader-compile failures are logged at warn level before
@@ -114,7 +114,7 @@ const MAX_CHURN_WARNINGS: u32 = 8;
 
 /// The fixed WGSL prelude prepended to every fragment source: the 16-byte
 /// uniform block at `@group(0) @binding(0)` and the vertex-buffer-free
-/// fullscreen-triangle vertex stage (RESEARCH.md §Q5).
+/// fullscreen-triangle vertex stage.
 ///
 /// The fragment source appended after this must define `fs_main` and read
 /// `frust_u.resolution` / `frust_u.time` (see the module-level shader contract).
@@ -154,7 +154,7 @@ struct PipelineEntry {
 
 /// The per-`(program, size)` GPU state a shader effect renders into: an
 /// offscreen `Rgba8Unorm` texture (`RENDER_ATTACHMENT | COPY_SRC` — the copy
-/// source vello's override atlas reads, RESEARCH.md §Q1), its view, the 16-byte
+/// source vello's override atlas reads), its view, the 16-byte
 /// uniform buffer, and the bind group wiring the buffer to `@binding(0)`.
 struct TargetEntry {
     texture: wgpu::Texture,
@@ -208,7 +208,7 @@ pub(crate) struct ShaderEffects {
 /// `max_texture_dimension_2d`, and at least 1 per axis (a zero-sized texture is
 /// invalid). Pure — no GPU state touched, so the policy is unit-testable.
 ///
-/// vello's atlas overflow is a *silent* non-render (RESEARCH.md §Q1), so this
+/// vello's atlas overflow is a *silent* non-render, so this
 /// clamp is the sole guard against an over-large quad simply vanishing; the
 /// caller warns once when a clamp actually changes the size.
 pub(crate) fn clamp_size(requested: (u32, u32), adapter_max: u32) -> (u32, u32) {
@@ -394,7 +394,7 @@ impl ShaderEffects {
                 module: &module,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                // Opaque v1 contract (RESEARCH.md §Q1): no blending, so a
+                // Opaque v1 contract: no blending, so a
                 // shader's premultiplied output at alpha=1.0 is written straight.
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba8Unorm,

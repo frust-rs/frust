@@ -49,8 +49,8 @@ fn env_flag_enabled(name_compile_time: Option<&str>, name_runtime: Option<String
 /// `FRUST_TRACE` flag — mirroring the check in `frust-shell-common::perf`.
 /// Cached to avoid repeated environment lookups.
 ///
-/// Only compiled under the `perf-trace` feature (release-lean plan, task
-/// 02) — the sole callers, [`probe_direct_to_surface_capability`]/
+/// Only compiled under the `perf-trace` feature — the sole callers,
+/// [`probe_direct_to_surface_capability`]/
 /// [`log_render_path`], are themselves feature-gated with an inert
 /// `#[cfg(not(feature = "perf-trace"))]` counterpart that skips this check
 /// entirely, so a build without the feature contains neither this env read
@@ -68,7 +68,7 @@ fn perf_tracing_enabled() -> bool {
 
 /// Whether the direct-to-surface render path is force-disabled via the
 /// process-wide `FRUST_NO_DIRECT_SURFACE` flag — the fallback-proof safety valve
-/// (deliverable 4) that pins a capable device onto the blit arm so the two arms
+/// that pins a capable device onto the blit arm so the two arms
 /// can be A/B'd on the same hardware. Same compile-time-or-runtime parsing as
 /// `FRUST_TRACE`/`FRUST_NO_RENDER_THREAD` (see `docs/DEVELOPMENT.md`'s
 /// Instrumentation table). Cached: read once per process.
@@ -97,7 +97,7 @@ pub(crate) enum RenderPathKind {
     Blit,
 }
 
-/// Pure direct-to-surface path policy (deliverable 2/4): choose [`Direct`] only
+/// Pure direct-to-surface path policy: choose [`Direct`] only
 /// when the surface advertises **both** `Rgba8Unorm` and `STORAGE_BINDING` (the
 /// exact requirements of vello 0.9's `render_to_texture` target) **and** the
 /// blit arm is not force-selected; otherwise [`Blit`].
@@ -127,8 +127,7 @@ pub(crate) fn choose_render_path(
 /// unproven-render-path safety valve shape as
 /// [`direct_surface_force_blit`]: the pre-pass drives real GPU work
 /// (pipeline compiles, offscreen targets, a vello image-override
-/// registration) that per the shader-showcase feature's own task notes is
-/// unproven on device, so this flag is the fallback-proof escape hatch that
+/// registration) that is unproven on device, so this flag is the fallback-proof escape hatch that
 /// reverts every `Command::ShaderQuad` to the existing placeholder-fill
 /// lowering (`convert::encode_scene_with_shaders`'s miss path) with zero
 /// pre-pass GPU work. Same compile-time-or-runtime parsing as
@@ -146,8 +145,7 @@ pub(crate) fn shader_effects_disabled() -> bool {
 
 /// The two direct-to-surface capability bits, read once from a surface's
 /// [`wgpu::SurfaceCapabilities`]. Shared by the capability probe log and the
-/// [`choose_render_path`] decision so the query is not duplicated (the probe
-/// from task 05 is the source of this logic).
+/// [`choose_render_path`] decision so the query is not duplicated.
 fn direct_surface_caps(capabilities: &wgpu::SurfaceCapabilities) -> (bool, bool) {
     let has_rgba8unorm = capabilities
         .formats
@@ -165,8 +163,8 @@ fn direct_surface_caps(capabilities: &wgpu::SurfaceCapabilities) -> (bool, bool)
 /// - Rgba8Unorm format in the surface's supported formats
 /// - STORAGE_BINDING usage in the surface's supported usages
 ///
-/// Only compiled under the `perf-trace` feature (release-lean plan, task
-/// 02); see the inert `#[cfg(not(feature = "perf-trace"))]` counterpart
+/// Only compiled under the `perf-trace` feature; see the inert
+/// `#[cfg(not(feature = "perf-trace"))]` counterpart
 /// below.
 #[cfg(feature = "perf-trace")]
 fn probe_direct_to_surface_capability(capabilities: &wgpu::SurfaceCapabilities) {
@@ -236,11 +234,11 @@ fn probe_direct_to_surface_capability(capabilities: &wgpu::SurfaceCapabilities) 
 fn probe_direct_to_surface_capability(_capabilities: &wgpu::SurfaceCapabilities) {}
 
 /// Emits the one-per-process startup line naming the chosen render path and the
-/// reason (deliverable 3), mirroring the surface-caps probe line style and its
+/// reason, mirroring the surface-caps probe line style and its
 /// `FRUST_TRACE` gating. Logged once regardless of surface recreation.
 ///
-/// Only compiled under the `perf-trace` feature (release-lean plan, task
-/// 02); see the inert `#[cfg(not(feature = "perf-trace"))]` counterpart
+/// Only compiled under the `perf-trace` feature; see the inert
+/// `#[cfg(not(feature = "perf-trace"))]` counterpart
 /// below.
 #[cfg(feature = "perf-trace")]
 fn log_render_path(
@@ -294,7 +292,7 @@ fn log_render_path(
 
 /// Resolves a caller's [`SurfaceAlphaRequest`] against the live surface's
 /// reported `alpha_modes`, choosing the actual `wgpu::CompositeAlphaMode` to
-/// configure with (platform-views task 04). Kept crate-private and
+/// configure with. Kept crate-private and
 /// `wgpu`-typed: `SurfaceAlphaRequest` is the public, `wgpu`-free seam; the
 /// resolved mode itself never crosses `frust-render`'s boundary (the
 /// `DetachedSurface` opacity precedent — `docs/CODE_STANDARDS.md`'s
@@ -302,7 +300,7 @@ fn log_render_path(
 ///
 /// `Opaque` reproduces today's behavior bit-for-bit (`Auto`, unchanged for
 /// every existing caller). `TranslucentPreferred` tries, in order, `Inherit`
-/// (Android's only reported translucent mode per the spike), `PostMultiplied`
+/// (Android's only reported translucent mode), `PostMultiplied`
 /// (iOS's translucent mode), then `PreMultiplied` — falling back to `Auto`
 /// with a `log::warn!` when none of the three is in `capabilities.alpha_modes`
 /// (translucency silently unavailable on that surface).
@@ -345,7 +343,7 @@ fn resolve_alpha_mode(
 /// advertises no translucent mode, and a shell that kept keying its paint
 /// contract off the *request* would then clear to `TRANSPARENT` and punch its
 /// platform-view slots via `DestOut` against an OPAQUE swapchain — presenting
-/// black rectangles (review finding M1). Keying off this instead degrades to
+/// black rectangles. Keying off this instead degrades to
 /// the Mode A contract (opaque base, no punch).
 ///
 /// The three translucent modes are exactly [`resolve_alpha_mode`]'s preference
@@ -499,7 +497,7 @@ impl Default for RenderContext {
 
 /// A cheap, cloneable handle to a [`RenderContext`]'s wgpu `Instance`, used to
 /// create a surface on a *different* thread than the one that owns the context
-/// (plan phase 11.B, the render-thread split).
+/// (the render-thread split).
 ///
 /// # Why this exists
 ///
@@ -548,8 +546,8 @@ impl SurfaceFactory {
 /// A created-but-not-yet-installed wgpu `Surface`, produced by
 /// [`SurfaceFactory::create_detached_surface`] on the windowing thread and
 /// installed on the render thread via
-/// [`SurfaceRenderer::on_surface_installed`](crate::SurfaceRenderer::on_surface_installed)
-/// (plan phase 11.B). Opaque so the `wgpu` type stays confined to this crate; a
+/// [`SurfaceRenderer::on_surface_installed`](crate::SurfaceRenderer::on_surface_installed).
+/// Opaque so the `wgpu` type stays confined to this crate; a
 /// shell only moves it across a thread boundary. `Send` (a `wgpu::Surface` is
 /// `Send + Sync`), which is the whole point.
 pub struct DetachedSurface {
@@ -709,12 +707,12 @@ impl PremultiplyPass {
 pub(crate) enum RenderPath {
     /// Direct-to-surface: the swapchain is configured `Rgba8Unorm` +
     /// `STORAGE_BINDING` and vello's `render_to_texture` targets its acquired
-    /// texture directly (deliverable 1). Eliminates the intermediate texture and
+    /// texture directly. Eliminates the intermediate texture and
     /// the per-frame blit pass.
     Direct,
     /// Direct-to-surface for a **premultiplied-expecting translucent** swapchain
     /// (`Inherit`/`PreMultiplied` alpha mode — see
-    /// [`alpha_mode_needs_premultiply`], platform-views defect D3). vello's
+    /// [`alpha_mode_needs_premultiply`]). vello's
     /// output is straight-alpha, but such a compositor blends premultiplied, so
     /// the frame cannot be presented straight from `render_to_texture`. vello
     /// instead renders into `intermediate_view` (in `encode`, where it already
@@ -757,7 +755,7 @@ pub(crate) struct ConfiguredSurface {
     /// projection of `config.alpha_mode` through [`alpha_mode_is_translucent`],
     /// computed once at configure time (the mode never changes for a live
     /// surface; a resize reconfigures with the same `config`), *except* when
-    /// [`blit_translucency_refused`] forces it to `false` (review finding M2:
+    /// [`blit_translucency_refused`] forces it to `false`:
     /// a GPU-tier blit-fallback surface cannot deliver the premultiplied
     /// output such an alpha mode expects — `cpu-tier` is exempt).
     ///
@@ -966,7 +964,7 @@ impl RenderContext {
 
     /// A cloneable [`SurfaceFactory`] sharing this context's wgpu `Instance`,
     /// for creating a [`DetachedSurface`] on the windowing/main thread when the
-    /// context itself lives on the render thread (plan phase 11.B, the
+    /// context itself lives on the render thread (the
     /// render-thread split). The surface a clone produces stays compatible with
     /// the device this context creates, since both share one Arc-backed
     /// instance.
@@ -1083,8 +1081,8 @@ impl RenderContext {
         self.create_device(Some(surface)).await
     }
 
-    /// Create the logical device **before any surface exists** (task 19, spec
-    /// §14 phase 7.E), so the wgpu instance/adapter/device bring-up can run on a
+    /// Create the logical device **before any surface exists**, so the wgpu
+    /// instance/adapter/device bring-up can run on a
     /// background thread kicked at native-library load (`JNI_OnLoad`) and be
     /// joined by `nativeInit` instead of running serially after `surfaceCreated`.
     /// Idempotent: a no-op when a device already exists.
@@ -1244,7 +1242,7 @@ impl RenderContext {
         alpha: SurfaceAlphaRequest,
     ) -> Result<ConfiguredSurface> {
         self.ensure_device(&surface).await?;
-        // The tier probe (task 06) already ran in `ensure_device`, so
+        // The tier probe already ran in `ensure_device`, so
         // `selected_tier()` is authoritative here: the `cpu-tier` path uploads
         // its pixmap into the intermediate target, so it is blit-only and forces
         // the blit arm alongside the `FRUST_NO_DIRECT_SURFACE` safety valve.
@@ -1303,7 +1301,7 @@ impl RenderContext {
         let path = match path_kind {
             // A premultiplied-expecting translucent swapchain (`Inherit`/
             // `PreMultiplied`) cannot take vello's straight output directly —
-            // it needs a premultiply pass (defect D3). Such surfaces get an
+            // it needs a premultiply pass. Such surfaces get an
             // intermediate vello renders into plus the compute pass that
             // premultiplies it into the swapchain. Opaque/`PostMultiplied`
             // surfaces skip all of this and stay byte-identical on `Direct`.
@@ -1337,7 +1335,7 @@ impl RenderContext {
                 // The RESOLVED translucency, not the request: a
                 // `TranslucentPreferred` that fell back to `Auto` above lands here
                 // as `false`, which is what the shells' paint contract keys off
-                // (review finding M1 — see `alpha_mode_is_translucent`).
+                // (see `alpha_mode_is_translucent`).
                 alpha_mode_is_translucent(alpha_mode)
             };
         let configured = ConfiguredSurface {
@@ -1628,7 +1626,7 @@ mod tests {
 
     #[test]
     fn translucent_preferred_picks_inherit_first() {
-        // Android's shape (spike): `Inherit` is the only reported mode.
+        // Android's observed shape: `Inherit` is the only reported mode.
         let caps = caps_with_alpha_modes(&[wgpu::CompositeAlphaMode::Inherit]);
         assert_eq!(
             resolve_alpha_mode(SurfaceAlphaRequest::TranslucentPreferred, &caps),
@@ -1638,7 +1636,7 @@ mod tests {
 
     #[test]
     fn translucent_preferred_picks_post_multiplied_when_inherit_absent() {
-        // iOS's shape (spike): `[Opaque, PostMultiplied]` — no `Inherit`.
+        // iOS's observed shape: `[Opaque, PostMultiplied]` — no `Inherit`.
         let caps = caps_with_alpha_modes(&[
             wgpu::CompositeAlphaMode::Opaque,
             wgpu::CompositeAlphaMode::PostMultiplied,
@@ -1677,8 +1675,8 @@ mod tests {
 
     #[test]
     fn resolved_translucency_is_true_only_for_the_three_translucent_modes() {
-        // The wgpu-free projection the shells' paint contract keys off
-        // (review finding M1): exactly `resolve_alpha_mode`'s preference list.
+        // The wgpu-free projection the shells' paint contract keys off:
+        // exactly `resolve_alpha_mode`'s preference list.
         for mode in [
             wgpu::CompositeAlphaMode::Inherit,
             wgpu::CompositeAlphaMode::PostMultiplied,
@@ -1698,7 +1696,7 @@ mod tests {
 
     #[test]
     fn forced_mismatch_translucent_request_resolves_not_translucent() {
-        // The review's mandatory forced-mismatch bar (M1): a surface whose
+        // A surface whose
         // advertised capabilities carry NO translucent mode, asked for
         // translucency. The request is honored as far as it can be (`Auto`),
         // but the RESOLVED translucency — the value
@@ -1750,7 +1748,7 @@ mod tests {
 
     #[test]
     fn premultiply_gated_on_premultiplied_expecting_modes() {
-        // The two premultiplied-expecting modes need the pass (defect D3):
+        // The two premultiplied-expecting modes need the pass:
         // `Inherit` is Android's translucent mode (SurfaceFlinger blends
         // premultiplied); `PreMultiplied` is explicit.
         assert!(alpha_mode_needs_premultiply(
@@ -1776,12 +1774,12 @@ mod tests {
 
     #[test]
     fn gpu_tier_blit_refuses_premultiplied_expecting_translucency() {
-        // Review finding M2 (AI-2): a GPU-tier surface forced onto the blit
+        // A GPU-tier surface forced onto the blit
         // arm (no Rgba8Unorm+STORAGE_BINDING) that resolves a
         // premultiplied-expecting alpha mode (Android's `Inherit`) must
         // refuse translucency — the blit arm's plain `TextureBlitter::copy`
         // has no premultiply stage, so presenting it straight would
-        // reproduce defect D3.
+        // reproduce the over-bright-fringing defect.
         assert!(blit_translucency_refused(
             RenderPathKind::Blit,
             wgpu::CompositeAlphaMode::Inherit,
@@ -1860,18 +1858,18 @@ mod tests {
             ((u32::from(c) * u32::from(a) + 127) / 255) as u8
         }
 
-        // 50%-alpha #FFF176 (the spike's ghost button). a=128 ≈ 0.502.
+        // 50%-alpha #FFF176 (a translucent ghost-button fill color). a=128 ≈ 0.502.
         let (r, g, b, a) = (0xFF, 0xF1, 0x76, 128);
         let premul = [premul8(r, a), premul8(g, a), premul8(b, a), a];
         // Straight (the WRONG, over-bright value) keeps rgb at full intensity.
         assert_eq!([r, g, b, a], [0xFF, 0xF1, 0x76, 128]);
         // Premultiplied is materially darker per channel — this is the fix.
         assert_eq!(premul, [0x80, 0x79, 0x3B, 128]);
-        // Within a couple of LSB of VERIFY D3's stated `~#807B3B@128`.
+        // Within a couple of LSB of the predicted `~#807B3B@128`.
         assert!((i16::from(premul[1]) - 0x7B).abs() <= 2);
 
         // A second point on the curve: 25%-alpha opaque-magenta debris fill
-        // (D3's `#E4..FF`-class over-bright). a=64 ≈ 0.251.
+        // (an `#E4..FF`-class over-bright color). a=64 ≈ 0.251.
         let a = 64;
         assert_eq!(
             [premul8(0xFF, a), premul8(0x00, a), premul8(0xFF, a), a],
@@ -1879,14 +1877,14 @@ mod tests {
         );
         // Fully-opaque pixels are premultiply-invariant — this is why the
         // opaque path stays byte-identical and in-scene blends over opaque
-        // content already composite correctly (VERIFY D3).
+        // content already composite correctly.
         assert_eq!(
             [premul8(0xFF, 255), premul8(0xF1, 255), premul8(0x76, 255)],
             [0xFF, 0xF1, 0x76]
         );
     }
 
-    /// Real-GPU end-to-end confirmation of the defect-D3 fix on this host's
+    /// Real-GPU end-to-end confirmation of the premultiply fix on this host's
     /// Vulkan adapter: vello's `render_to_texture` emits **straight** alpha, and
     /// [`PremultiplyPass`] converts it to premultiplied — the exact operation
     /// [`RenderPath::DirectPremultiplied`] inserts before presenting a
@@ -1895,7 +1893,7 @@ mod tests {
     /// (vello output + the compute pass) directly against owned textures rather
     /// than through `submit`.
     ///
-    /// Encodes VERIFY D3's `#FFF176@128` prediction: asserts (a) vello stores
+    /// Encodes the predicted `#FFF176@128` behavior: asserts (a) vello stores
     /// the fill STRAIGHT (`r≈255`, proving the diagnosis — the output really is
     /// non-premultiplied), then (b) the pass stores it PREMULTIPLIED
     /// (`r≈128 = round(255 * 128/255)`, proving the fix), each within a couple
@@ -1951,8 +1949,8 @@ mod tests {
             let premul_tex = make_tex("premultiplied (out)", wgpu::TextureUsages::empty());
             let premul_view = premul_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-            // A 50%-alpha #FFF176 fill over a fully-transparent base — the
-            // spike's ghost button over a Mode B hole (alpha-0 behind).
+            // A 50%-alpha #FFF176 fill over a fully-transparent base — a
+            // translucent ghost button over a Mode B hole (alpha-0 behind).
             let mut fk_scene = frust_scene::Scene::new();
             {
                 let mut builder = frust_scene::SceneBuilder::new(&mut fk_scene);

@@ -36,7 +36,7 @@
 //! [`Elevation::m3`]/[`Elevation::cupertino`] duplicate the same v1 mapping
 //! into both slots — behavior-preserving, byte-identical rendered output on
 //! either brightness. A design language whose shadow recipe actually differs
-//! by brightness (e.g. Glyph, task 15) fills the two slots independently.
+//! by brightness (e.g. Glyph) fills the two slots independently.
 
 use crate::color::Brightness;
 
