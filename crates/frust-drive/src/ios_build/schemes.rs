@@ -1,7 +1,7 @@
 //! Scheme/configuration resolution and `xcodebuild -list -json` verification
-//! for `frust build ios|ipa` (spec §12.6). No flavor → scheme `Runner`,
-//! configuration `Debug|Profile|Release`; `--flavor <f>` → scheme
-//! `<Capitalized f>`, configuration `<Mode>-<Scheme>` (e.g. `Release-Paid`).
+//! for `frust build ios|ipa`. No flavor → scheme `Runner`, configuration
+//! `Debug|Profile|Release`; `--flavor <f>` → scheme `<Capitalized f>`,
+//! configuration `<Mode>-<Scheme>` (e.g. `Release-Paid`).
 
 use std::path::Path;
 
@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::build_info::BuildInfo;
 use crate::process::ProcessRunner;
 
-/// The Xcode scheme + `-configuration` a [`BuildInfo`] maps to (spec §12.6).
+/// The Xcode scheme + `-configuration` a [`BuildInfo`] maps to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemeConfig {
     pub scheme: String,
@@ -37,7 +37,7 @@ struct ListJson {
     project: ProjectList,
 }
 
-/// Maps `(mode, flavor)` to `(scheme, configuration)` (spec §12.6).
+/// Maps `(mode, flavor)` to `(scheme, configuration)`.
 pub fn resolve(info: &BuildInfo) -> SchemeConfig {
     let mode_config = info.mode.xcode_configuration();
     match &info.flavor {

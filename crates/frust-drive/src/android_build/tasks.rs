@@ -1,7 +1,7 @@
-//! Gradle task-name computation and `-P` property assembly (spec §12.5,
-//! PLAN.md decision 2): `assemble<Flavor><Mode>`/`bundle<Flavor><Mode>` task
-//! selection, plus the `-Pfrust.*` properties template 62's
-//! `build.gradle.kts.tmpl` consumes.
+//! Gradle task-name computation and `-P` property assembly:
+//! `assemble<Flavor><Mode>`/`bundle<Flavor><Mode>` task selection, plus the
+//! `-Pfrust.*` properties the Gradle template's `build.gradle.kts.tmpl`
+//! consumes.
 
 use std::collections::HashMap;
 
@@ -13,7 +13,7 @@ use crate::build_info::BuildMode;
 /// what `build appbundle` always requests (an `.aab` packages every ABI).
 pub const ALL_ABIS: &[&str] = &["arm64-v8a", "armeabi-v7a", "x86_64"];
 
-/// Computes the Gradle task name for `target`/`mode`/`flavor` (spec §12.5):
+/// Computes the Gradle task name for `target`/`mode`/`flavor`:
 /// `assemble<Flavor><Mode>` for an APK, `bundle<Flavor><Mode>` for an App
 /// Bundle. `flavor` is capitalized (first char upper, rest as given) and
 /// omitted entirely when `None`.
@@ -34,14 +34,14 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Assembles the `-P` properties template 62's `build.gradle.kts.tmpl`
+/// Assembles the `-P` properties the Gradle template's `build.gradle.kts.tmpl`
 /// consumes: `-Pfrust.targetPlatforms=<abi,csv>` (always),
 /// `-Pfrust.splitPerAbi=true|false` (APK only),
 /// `-Pfrust.defines=<base64("K=V;K=V")>` when `defines` is non-empty, and
 /// `-Pfrust.cargoFeatures=<base64("feat,feat")>` for the resolved cargo
-/// `features` (release-lean plan, task 04) — the exact seam `-Pfrust.defines`
-/// rides, so a feature flag can never fall foul of the Android release
-/// env-drop Known Issue (it's a build arg, not an environment variable).
+/// `features` — the exact seam `-Pfrust.defines` rides, so a feature flag
+/// can never fall foul of the Android release env-drop Known Issue (it's a
+/// build arg, not an environment variable).
 ///
 /// `features` is the release-lean-preflight-resolved list
 /// (`cargo_manifest::resolve_release_features`), not the raw
@@ -82,7 +82,7 @@ pub fn gradle_properties(
 
 /// Encodes `defines` as `base64("K=V;K=V")`, sorted by key for a
 /// deterministic, testable output (a `HashMap`'s natural iteration order is
-/// not stable) — the exact value template 62's `build.gradle.kts.tmpl`
+/// not stable) — the exact value the Gradle template's `build.gradle.kts.tmpl`
 /// decodes with `Base64.getDecoder()`.
 fn encode_defines(defines: &HashMap<String, String>) -> String {
     let mut keys: Vec<&String> = defines.keys().collect();
@@ -96,7 +96,7 @@ fn encode_defines(defines: &HashMap<String, String>) -> String {
 }
 
 /// Encodes the resolved cargo `features` as `base64("feat,feat")` — the exact
-/// value template 62's `build.gradle.kts.tmpl` decodes with
+/// value the Gradle template's `build.gradle.kts.tmpl` decodes with
 /// `Base64.getDecoder()` and appends to the cargo-ndk invocation as
 /// `--features <csv>`. `None` when there are no features to pass (the
 /// release-lean preflight can legitimately produce an empty list for a legacy

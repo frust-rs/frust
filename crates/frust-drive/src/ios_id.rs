@@ -13,9 +13,9 @@
 //!
 //! [`validate`] is called at two points: at scaffold time (fail-fast — a
 //! `frust create` whose `org`/`project_name` derive an invalid bundle id
-//! errors out before writing any files) and later at run time (task 35's
-//! `ios_run`, where the resolved id flows into `simctl launch <id>` and must
-//! already be a safe, grammatically valid identifier).
+//! errors out before writing any files) and later at run time (`ios_run`,
+//! where the resolved id flows into `simctl launch <id>` and must already
+//! be a safe, grammatically valid identifier).
 
 use thiserror::Error;
 

@@ -3,8 +3,7 @@
 //! streamed) and [`run_physical`] drives a signed physical device (iOS 17+
 //! gate → `ios_build`'s signed device build → `devicectl device install app`
 //! → `devicectl device process launch --console --terminate-existing`,
-//! streamed — task 67). Both mirror `android_run`'s structure and testing
-//! style.
+//! streamed). Both mirror `android_run`'s structure and testing style.
 
 pub mod devicectl;
 pub mod preflight;
@@ -26,8 +25,8 @@ use crate::process::{ProcessRunner, RealProcessRunner, StreamHandle, tail_lines}
 /// Drives the full iOS simulator pipeline (preflight → xcodebuild →
 /// `simctl install` → `simctl launch`) on `device`, an already-discovered
 /// (and therefore already-booted) `Platform::Ios`/`Kind::Simulator` device,
-/// against the Frust project rooted at `root`. `info.mode` (task 66)
-/// selects the `-configuration` xcodebuild builds and the matching
+/// against the Frust project rooted at `root`. `info.mode` selects the
+/// `-configuration` xcodebuild builds and the matching
 /// `<config>-iphonesimulator` products directory the app bundle is installed
 /// from; flavor/defines/version aren't threaded here (unlike the Android
 /// pipeline) — the iOS simulator run path stays scheme-fixed (`Runner`).
@@ -120,11 +119,11 @@ fn prepare_simulator_session(
     }
 
     let configuration = info.mode.xcode_configuration();
-    // Release-lean preflight (followup F2): drop an undeclared `lean` for a
-    // legacy app, warning once through this session's `on_line` sink, so the
-    // simulator build never threads `--features lean` down to `cargo`. This
-    // path calls `encode_features` directly (bypassing `ios_build::build`), so
-    // it needs its own resolve.
+    // Release-lean preflight: drop an undeclared `lean` for a legacy app,
+    // warning once through this session's `on_line` sink, so the simulator
+    // build never threads `--features lean` down to `cargo`. This path
+    // calls `encode_features` directly (bypassing `ios_build::build`), so it
+    // needs its own resolve.
     let (features, warning) =
         crate::cargo_manifest::resolve_release_features(&project.root, info.mode);
     if let Some(warning) = warning {
@@ -222,18 +221,17 @@ pub fn spawn_session(
     Ok(Some(handle))
 }
 
-/// Minimum `devicectl`-drivable iOS major version (spec/RESEARCH.md §C):
-/// devicectl only drives iOS 17+ devices; ios-deploy (the iOS 15-16
-/// alternative) is dead.
+/// Minimum `devicectl`-drivable iOS major version: devicectl only drives
+/// iOS 17+ devices; ios-deploy (the iOS 15-16 alternative) is dead.
 const MIN_DEVICECTL_IOS_MAJOR: u32 = 17;
 
-/// Drives the full physical-iOS-device pipeline (task 67): an iOS-17+ gate
+/// Drives the full physical-iOS-device pipeline: an iOS-17+ gate
 /// (devicectl's minimum), a signed device build via `ios_build::build`, then
 /// `devicectl device install app` → `devicectl device process launch
 /// --console --terminate-existing` (streamed) on `device`, an
 /// already-discovered `Platform::Ios`/`Kind::PhysicalDevice` device, against
-/// the Frust project rooted at `root`. `info.mode` (task 66) selects the
-/// build configuration exactly like the simulator path; signing is always
+/// the Frust project rooted at `root`. `info.mode` selects the build
+/// configuration exactly like the simulator path; signing is always
 /// requested (`codesign: true`) regardless of mode — `run` never skips
 /// signing for a physical device.
 pub fn run_physical(
@@ -397,8 +395,8 @@ fn os_version_major(version: Option<&str>) -> Option<u32> {
 }
 
 /// Appends the physical-device hardware hint `devicectl install`/`launch`
-/// failures need (task 67): these commands fail opaquely when the device is
-/// locked, not paired/trusted, or lacks Developer Mode, none of which
+/// failures need: these commands fail opaquely when the device is locked,
+/// not paired/trusted, or lacks Developer Mode, none of which
 /// `xcodebuild`'s own signing errors cover.
 fn with_developer_mode_hint(message: String) -> String {
     format!(
@@ -411,7 +409,7 @@ fn with_developer_mode_hint(message: String) -> String {
 /// Builds the `xcodebuild` failure message, surfacing the last 50 non-empty
 /// lines of both stdout AND stderr — xcodebuild reports most errors on
 /// stdout, unlike `gradlew`, which is why this extends (rather than
-/// verbatim-copies) the phase-2 `tail_lines` approach.
+/// verbatim-copies) the Android pipeline's `tail_lines` approach.
 fn xcodebuild_failure_message(build_out: &crate::process::Output) -> String {
     let stdout_tail = tail_lines(&build_out.stdout, 50);
     let stderr_tail = tail_lines(&build_out.stderr, 50);
@@ -558,8 +556,8 @@ mod tests {
     /// fixture matched only on the *exact* Profile-configuration app path),
     /// before `ctrlc::set_handler` (which can only be installed once per
     /// test process) — proving `--profile` selects `-configuration Profile`
-    /// and the matching `Profile-iphonesimulator` products directory (task
-    /// 66), rather than the hardcoded `Debug` this pipeline used before.
+    /// and the matching `Profile-iphonesimulator` products directory,
+    /// rather than the hardcoded `Debug` this pipeline used before.
     #[test]
     fn profile_mode_uses_profile_configuration_and_products_dir() {
         let dir = unique_project_dir("profile-mode");
@@ -610,10 +608,10 @@ mod tests {
         .unwrap()
     }
 
-    /// Followup F2, legacy direction: a `--release` simulator run against an
-    /// app whose Cargo.toml declares no `lean` feature drops it and warns once
-    /// through this session's `on_line` sink; the xcodebuild invocation carries
-    /// no `FRUST_FEATURES=` setting (the fixture omits it), so a regression that
+    /// Legacy direction: a `--release` simulator run against an app whose
+    /// Cargo.toml declares no `lean` feature drops it and warns once through
+    /// this session's `on_line` sink; the xcodebuild invocation carries no
+    /// `FRUST_FEATURES=` setting (the fixture omits it), so a regression that
     /// kept `lean` would surface via the absent warning. Drives
     /// `prepare_simulator_session` directly to observe the sink, stopping at
     /// `simctl install` like the sibling profile-mode test.
@@ -672,7 +670,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Followup F2, declaring direction: an app that declares `lean` keeps it —
+    /// Declaring direction: an app that declares `lean` keeps it —
     /// `FRUST_FEATURES=bGVhbg==` (base64 "lean"), registered exactly, so a
     /// regression that dropped it would produce a shorter, non-matching argv
     /// and error early — and warns nothing.
@@ -756,7 +754,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // --- `run_physical` (task 67) ---
+    // --- `run_physical` ---
 
     const PHYSICAL_LIST_JSON: &str = r#"{"project":{"name":"Runner","schemes":["Runner"],"configurations":["Debug","Profile","Release"]}}"#;
 

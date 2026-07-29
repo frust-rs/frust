@@ -1,5 +1,5 @@
-//! `frust-drive`: the shared drive logic behind the `frust` CLI (spec §12) —
-//! project scaffolding, environment doctor, device discovery, and the
+//! `frust-drive`: the shared drive logic behind the `frust` CLI — project
+//! scaffolding, environment doctor, device discovery, and the
 //! `run`/`build`/`clean` drive pipelines for Android and iOS.
 //!
 //! Extracted from `frust-cli` so a second front-end (the `frust-tui`

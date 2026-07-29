@@ -1,8 +1,8 @@
 //! `devicectl` install/launch command construction and execution for the
-//! physical-iOS-device run pipeline (task 67). Mirrors `ios_run::simctl`'s
-//! shape, but `devicectl`'s argv differs from `simctl`'s (`--device` is
-//! named, not positional, and launch takes `--console
-//! --terminate-existing`) — see RESEARCH.md §C for the verified argv this
+//! physical-iOS-device run pipeline. Mirrors `ios_run::simctl`'s shape, but
+//! `devicectl`'s argv differs from `simctl`'s (`--device` is named, not
+//! positional, and launch takes `--console --terminate-existing`) — an
+//! externally verified invocation shape (Xcode 15+'s `devicectl` CLI) this
 //! module must not drift from.
 
 use anyhow::Result;

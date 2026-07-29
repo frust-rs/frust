@@ -1,5 +1,5 @@
-//! Process execution abstraction (spec §12.1). All external tool invocations
-//! (`rustc`, `adb`, `xcrun`, `cargo ndk`, …) go through [`ProcessRunner`] so that
+//! Process execution abstraction. All external tool invocations (`rustc`,
+//! `adb`, `xcrun`, `cargo ndk`, …) go through [`ProcessRunner`] so that
 //! `doctor`/`devices` (and later `run`/`build`) stay unit-testable without ever
 //! shelling out during `cargo test`.
 

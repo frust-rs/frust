@@ -1,8 +1,8 @@
-//! Artifact output-path computation and existence verification (spec
-//! §12.5): AGP's exact output *file* naming varies across versions/flavors,
-//! so this module only computes the *directory* Gradle writes a variant's
-//! artifact(s) into, then glob-verifies what's actually there rather than
-//! trusting a guessed filename.
+//! Artifact output-path computation and existence verification: AGP's exact
+//! output *file* naming varies across versions/flavors, so this module only
+//! computes the *directory* Gradle writes a variant's artifact(s) into, then
+//! glob-verifies what's actually there rather than trusting a guessed
+//! filename.
 
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,7 @@ use crate::android_build::AndroidArtifact;
 use crate::build_info::BuildMode;
 
 /// The directory Gradle writes `target`'s artifact(s) into, under
-/// `android_dir` (spec §12.5):
+/// `android_dir`:
 /// - APK: `app/build/outputs/apk/<flavor?>/<mode>/`
 /// - App Bundle: `app/build/outputs/bundle/<variant>/`, where `<variant>` is
 ///   `<flavor><Mode>` (or just `<mode>` with no flavor).
@@ -60,7 +60,7 @@ fn variant_dir_name(mode: BuildMode, flavor: Option<&str>) -> String {
 /// glob result against this count so a leftover artifact from a *different*
 /// build shape sitting in the (shared, non-split-aware) AGP output directory
 /// — e.g. a stale split APK next to a freshly built fat one — is caught as
-/// an error instead of silently reported as "Built" (followup F2).
+/// an error instead of silently reported as "Built".
 fn expected_count(target: &AndroidArtifact) -> Result<usize> {
     match target {
         AndroidArtifact::Apk {

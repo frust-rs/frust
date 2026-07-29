@@ -31,9 +31,9 @@ pub struct Invocation<'a> {
     pub current_project_version: Option<u32>,
     /// base64(`K=V;K=V`) `--define`s → `FRUST_DEFINES` (only when non-empty).
     pub defines_b64: Option<&'a str>,
-    /// base64(`feat,feat`) cargo features → `FRUST_FEATURES` (release-lean
-    /// plan, task 04); the pbxproj run-script decodes it and appends
-    /// `--features <csv>` to its `cargo build` (only when non-empty).
+    /// base64(`feat,feat`) cargo features → `FRUST_FEATURES`; the pbxproj
+    /// run-script decodes it and appends `--features <csv>` to its
+    /// `cargo build` (only when non-empty).
     pub features_b64: Option<&'a str>,
 }
 

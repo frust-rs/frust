@@ -1,5 +1,5 @@
-//! Android drive pipeline for `frust run` (spec §12.4): preflight →
-//! gradle build → adb install → launch → pid-scoped logcat streaming.
+//! Android drive pipeline for `frust run`: preflight → gradle build → adb
+//! install → launch → pid-scoped logcat streaming.
 //! Device selection (this module's top level) is decoupled from clap/stdin
 //! so it's unit-testable without a terminal.
 
@@ -21,8 +21,7 @@ use crate::devices::{Device, Platform};
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::process::{ProcessRunner, StreamHandle, tail_lines};
 
-/// Outcome of matching discovered devices against `-d`/no-flag selection
-/// (spec §12.4 step 2).
+/// Outcome of matching discovered devices against `-d`/no-flag selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceSelection {
     /// A single device to run on: either `-d` matched exactly one Android
@@ -49,8 +48,8 @@ pub fn select_device(devices: &[Device], pattern: Option<&str>) -> DeviceSelecti
         return match matches.as_slice() {
             [] => DeviceSelection::Error(format!("no device matching `{pattern}`")),
             // Platform/kind-specific handling (Android drive pipeline, iOS
-            // simulator drive pipeline, or a Phase 5 sentinel for physical
-            // iOS devices) is the caller's job — `commands::run::run_on_device`
+            // simulator drive pipeline, or a sentinel for physical iOS
+            // devices) is the caller's job — `commands::run::run_on_device`
             // dispatches on `Device::platform`/`Device::kind`.
             [device] => DeviceSelection::Auto((*device).clone()),
             many => DeviceSelection::Error(format!(
@@ -101,10 +100,10 @@ pub fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
-/// Drives the full, mode/flavor-aware Android pipeline (spec §12.4 steps
-/// 3-7, task 66): preflight → local.properties version write → (release
-/// only) signing gate → variant-aware `./gradlew assemble<Flavor><Mode>` →
-/// variant-aware APK install → launch → pid-scoped logcat streaming.
+/// Drives the full, mode/flavor-aware Android pipeline: preflight →
+/// local.properties version write → (release only) signing gate →
+/// variant-aware `./gradlew assemble<Flavor><Mode>` → variant-aware APK
+/// install → launch → pid-scoped logcat streaming.
 /// Mirrors `ios_run::run`'s `(runner, root, device)` shape, plus `info` for
 /// the mode/flavor/defines/version funnel.
 pub fn run(
@@ -141,9 +140,9 @@ fn run_with_env(
     let pid = prepared.pid;
 
     println!("Streaming logs (pid {pid}); press Ctrl-C to stop.");
-    // Default SIGINT disposition would exit 130; spec §12.4 wants Ctrl-C to
-    // stop the (already-SIGINT'd, same-process-group) `adb logcat` child
-    // and exit 0.
+    // Default SIGINT disposition would exit 130; a streamed run wants
+    // Ctrl-C to stop the (already-SIGINT'd, same-process-group) `adb
+    // logcat` child and exit 0.
     ctrlc::set_handler(|| {
         std::process::exit(0);
     })
@@ -217,9 +216,9 @@ fn prepare_session(
         split_per_abi: false,
         abis: vec![abi],
     };
-    // Release-lean preflight (followup F2): drop an undeclared `lean` for a
-    // legacy app, warning once through this session's `on_line` sink, so
-    // `cargo ndk` never sees `--features lean` it can't resolve.
+    // Release-lean preflight: drop an undeclared `lean` for a legacy app,
+    // warning once through this session's `on_line` sink, so `cargo ndk`
+    // never sees `--features lean` it can't resolve.
     let (features, warning) =
         crate::cargo_manifest::resolve_release_features(&project.root, info.mode);
     if let Some(warning) = warning {
@@ -447,8 +446,8 @@ mod tests {
     #[test]
     fn dash_d_matching_ios_device_is_auto_selected() {
         // `select_device` no longer special-cases iOS: platform/kind
-        // dispatch (iOS simulator drive pipeline vs. a Phase 5 sentinel for
-        // physical devices) is `commands::run::run_on_device`'s job.
+        // dispatch (iOS simulator drive pipeline vs. a sentinel for physical
+        // devices) is `commands::run::run_on_device`'s job.
         let devices = vec![ios("sim1", "iPhone 15")];
         assert_eq!(
             select_device(&devices, Some("sim1")),
@@ -631,8 +630,8 @@ mod tests {
             let _ = fs::remove_dir_all(&dir);
         }
 
-        /// Followup F2, legacy direction: a `--release` run against an app
-        /// whose Cargo.toml declares no `lean` feature drops it and warns once
+        /// Legacy direction: a `--release` run against an app whose
+        /// Cargo.toml declares no `lean` feature drops it and warns once
         /// through this session's `on_line` sink; the Gradle invocation carries
         /// no `-Pfrust.cargoFeatures` prop (the fixture is registered without
         /// it), so a regression that kept `lean` would surface via the absent
@@ -682,9 +681,9 @@ mod tests {
             let _ = fs::remove_dir_all(&dir);
         }
 
-        /// Followup F2, declaring direction: an app that declares `lean` keeps
-        /// it — the Gradle invocation carries `-Pfrust.cargoFeatures=bGVhbg==`
-        /// (base64 "lean"), registered exactly, so a regression that dropped it
+        /// Declaring direction: an app that declares `lean` keeps it — the
+        /// Gradle invocation carries `-Pfrust.cargoFeatures=bGVhbg==` (base64
+        /// "lean"), registered exactly, so a regression that dropped it
         /// would produce a shorter, non-matching argv and error early — and
         /// warns nothing.
         #[test]

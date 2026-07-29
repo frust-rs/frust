@@ -1,4 +1,4 @@
-//! `DEVELOPMENT_TEAM` resolution for signed iOS builds (spec §12.6, §16).
+//! `DEVELOPMENT_TEAM` resolution for signed iOS builds.
 //!
 //! Precedence: `FRUST_IOS_TEAM` env → `[ios] team` in `frust.toml` →
 //! auto-detect from `security find-identity -v -p codesigning`. Zero detected

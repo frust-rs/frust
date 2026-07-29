@@ -6,11 +6,11 @@
 //! checkout), `camera` (dependency, an app-side plist key, the plugin's
 //! own Android library module, its own iOS Swift package — the first
 //! registry entry to use [`Contribution::SwiftPackageRef`] — and an app-crate
-//! export shim the task-14 device gate proved necessary; `workflow/plans/
-//! features/frust-camera/PLAN.md`'s Affected Modules final accounting), and
-//! `native-widgets` (dependency plus the plugin's own Android library module
-//! — and **nothing** on iOS, which is not an omission: that arm ships zero
-//! Swift by design).
+//! export shim a device gate proved necessary, see this module's `CAMERA_BASE`
+//! constant's doc comment for the full rationale), and `native-widgets`
+//! (dependency plus the plugin's own Android library
+//! module — and **nothing** on iOS, which is not an omission: that arm ships
+//! zero Swift by design).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -86,9 +86,8 @@ const CLEAN_SIGNALS_FRUST: PluginSpec = PluginSpec {
     requires_sibling: Some("../clean-signals-rs"),
 };
 
-/// `camera`'s base contributions — PLAN.md's Affected Modules final
-/// accounting, unwidened since (`workflow/plans/features/frust-camera/
-/// PLAN.md`, task 10's own table). No optional features in v1, and no
+/// `camera`'s base contributions, unwidened since first landing. No optional
+/// features in v1, and no
 /// `ManifestPermission`: `android.permission.CAMERA` rides the plugin's own
 /// `AndroidManifest.xml`, manifest-merged like secure-storage's
 /// `USE_BIOMETRIC` above — only the plist key stays app-side, since Apple
@@ -109,9 +108,10 @@ const CAMERA_BASE: &[Contribution] = &[
         gradle_name: ":frust-camera",
         rel_path: "plugins/camera/platform/android",
     },
-    // The first registry use of this variant (embedding Phase 3 defined the
-    // shape without building it — `plugins/camera/platform/ios`'s own
-    // `Package.swift` doc comment). `rel_path` points at the package
+    // The first registry use of this variant (the embedding work defined the
+    // multi-package shape without building it — see
+    // `plugins/camera/platform/ios`'s own `Package.swift` doc comment).
+    // `rel_path` points at the package
     // directory itself (no nested `FrustCamera/` subdirectory — that is
     // just the package/product *name*), mirroring `GradleModule`'s
     // `rel_path` convention above.
@@ -119,8 +119,8 @@ const CAMERA_BASE: &[Contribution] = &[
         package_name: "FrustCamera",
         rel_path: "plugins/camera/platform/ios",
     },
-    // Added by the task-14 device gate, which measured the failure this
-    // prevents: without it a freshly scaffolded app that added the camera
+    // Added after a device gate measured the failure this prevents: without
+    // it a freshly scaffolded app that added the camera
     // plugin does **not link on iOS** —
     // `Undefined symbols: _frust_camera_session_handle`.
     //
@@ -165,7 +165,8 @@ const CAMERA: PluginSpec = PluginSpec {
 /// [`Contribution::SwiftPackageRef`] and no `.swift` file anywhere in this
 /// plugin: its platform-view factory is a Rust `objc2` `define_class!` type
 /// registered straight into the Objective-C runtime and resolved by
-/// `NSClassFromString`, proven out in Phase 2. And there is no
+/// `NSClassFromString`, already proven out by the plugin's own iOS runtime
+/// factory. And there is no
 /// [`Contribution::PlistEntry`] because nothing here touches a
 /// privacy-gated API. So an iOS app needs exactly the Cargo dependency.
 const NATIVE_WIDGETS_BASE: &[Contribution] = &[
@@ -269,9 +270,9 @@ mod tests {
         );
     }
 
-    /// The `camera` entry's base contributions, exactly PLAN.md's Affected
-    /// Modules final accounting (task 10's own table) — no more, no fewer, in
-    /// application order, and no optional features / sibling requirement.
+    /// The `camera` entry's base contributions, exactly [`CAMERA_BASE`]'s own
+    /// list — no more, no fewer, in application order, and no optional
+    /// features / sibling requirement.
     #[test]
     fn camera_base_contributions_match_the_final_accounting() {
         let spec = find_plugin("camera").unwrap();
@@ -307,8 +308,9 @@ mod tests {
                 rel_path: "plugins/camera/platform/ios",
             }
         ));
-        // The task-14 addition. Pinned by exact invocation because this string
-        // IS the idempotence key, and because it is what keeps a fresh
+        // The device-gate addition (see `CAMERA_BASE`'s doc comment). Pinned
+        // by exact invocation because this string IS the idempotence key,
+        // and because it is what keeps a fresh
         // scaffold's iOS link from failing on `_frust_camera_session_handle`.
         assert!(matches!(
             spec.base[4],
@@ -410,8 +412,8 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // End-to-end idempotence, driven through the real registry entry (task
-    // 10) — a fresh scaffold, `add_plugin(.., "camera", ..)`, applied twice.
+    // End-to-end idempotence, driven through the real registry entry — a
+    // fresh scaffold, `add_plugin(.., "camera", ..)`, applied twice.
     // `apply.rs` itself owns per-contribution unit tests against a
     // stand-in `PKG_REL` (its `SwiftPackageRef` section's own comment);
     // these instead exercise the *actual* `camera` registry entry end to
@@ -567,9 +569,9 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// The `native-widgets` counterpart of the camera end-to-end case above
-    /// (task p3-03): a fresh scaffold, `add_plugin(.., "native-widgets", ..)`
-    /// applied twice. The second apply must report `AlreadyPresent` for both
+    /// The `native-widgets` counterpart of the camera end-to-end case above:
+    /// a fresh scaffold, `add_plugin(.., "native-widgets", ..)` applied
+    /// twice. The second apply must report `AlreadyPresent` for both
     /// contributions and leave a byte-identical tree — the idempotence
     /// contract `docs/CODE_STANDARDS.md`'s Plugin Conventions requires of
     /// every generated-project mutation.
@@ -632,8 +634,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// The half-applied completion case for `camera` specifically (task 10):
-    /// delete the Gradle include this entry's `GradleModule` contribution
+    /// The half-applied completion case for `camera` specifically: delete
+    /// the Gradle include this entry's `GradleModule` contribution
     /// added, then re-apply — the missing half must complete (report
     /// `Applied`), not skip on the app-side dependency line it still finds
     /// present, and the surviving half must not be duplicated.

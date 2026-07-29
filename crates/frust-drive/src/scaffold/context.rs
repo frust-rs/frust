@@ -1,4 +1,4 @@
-//! Template context construction and project-name validation (spec §12.3).
+//! Template context construction and project-name validation.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -16,8 +16,8 @@ use thiserror::Error;
 /// `frust.embedding.dir` / a plugin module's `projectDir` against
 /// `<project>/android/`, and Xcode resolves an
 /// `XCLocalSwiftPackageReference`'s `relativePath` against `<project>/ios/`
-/// (the directory *containing* `Runner.xcodeproj`, not the bundle —
-/// `research/SPIKE_IOS.md` §7). Both are one level down, so a relative path
+/// (the directory *containing* `Runner.xcodeproj`, not the bundle). Both are
+/// one level down, so a relative path
 /// needs one extra `../` to climb back out; an **absolute** path is base-
 /// independent and is returned byte-identical.
 ///
@@ -47,7 +47,7 @@ pub struct TemplateContext {
     pub description: String,
     pub frust_version: String,
     pub frust_path: String,
-    /// `--deeplink-scheme` (task 07): the URL scheme (e.g. `myapp`, no
+    /// `--deeplink-scheme`: the URL scheme (e.g. `myapp`, no
     /// `://`) the generated Android manifest/iOS Info.plist register for
     /// deep links, and the value written into the generated `frust.toml`
     /// `[deeplink]` section. `None` renders byte-identical
@@ -55,7 +55,7 @@ pub struct TemplateContext {
     /// intent-filter, no `CFBundleURLTypes`) — see
     /// [`validate_deeplink_scheme`] for the accepted grammar.
     pub deeplink_scheme: Option<String>,
-    /// `--deeplink-host` (task 07): an optional host restricting the
+    /// `--deeplink-host`: an optional host restricting the
     /// Android intent-filter's `<data>` element (`android:host`); iOS's
     /// `CFBundleURLTypes` has no host concept, so this is Android-only and
     /// silently unused by the iOS template. Meaningless without
@@ -92,11 +92,11 @@ impl TemplateContext {
         ])
     }
 
-    /// Placeholder values usable as *literal path segments* (spec §12.3's
+    /// Placeholder values usable as *literal path segments* (the
     /// `androidIdentifier` model: a directory literally named after a key
     /// renders to that key's value, with dotted values expanding into
     /// nested directories — see [`crate::scaffold::renderer::expand_path`]).
-    /// The Android template (spec Phase 2 task 22) is the first consumer:
+    /// The Android template is the first consumer:
     /// `android/app/src/main/kotlin/androidIdentifier/` expands to the
     /// nested package directories for the generated `MainActivity.kt`.
     pub fn path_vars(&self) -> BTreeMap<&'static str, String> {
@@ -108,8 +108,8 @@ impl TemplateContext {
     }
 
     /// Derives the Android application id / Kotlin package name from
-    /// `org` + `project_name` (spec Phase 2 task 22) via
-    /// `crate::android_id::derive` — the single source of truth shared with
+    /// `org` + `project_name` via `crate::android_id::derive` — the single
+    /// source of truth shared with
     /// `android_run::project::derive_app_id`, which re-derives the same id
     /// as `frust run`'s fallback when a generated project's
     /// `frust.toml` has no explicit `[android] identifier`; both must
@@ -118,10 +118,10 @@ impl TemplateContext {
         crate::android_id::derive(&self.org, &self.project_name)
     }
 
-    /// Derives the iOS bundle identifier from `org` + `project_name` (spec
-    /// Phase 3 task 34) via `crate::ios_id::derive` — the single source of
-    /// truth shared with `ios_run` (task 35), which re-derives the same id
-    /// as `frust run`'s fallback when a generated project's
+    /// Derives the iOS bundle identifier from `org` + `project_name` via
+    /// `crate::ios_id::derive` — the single source of truth shared with
+    /// `ios_run`, which re-derives the same id as `frust run`'s fallback
+    /// when a generated project's
     /// `frust.toml` has no explicit `[ios] identifier`. Exposed to
     /// templates as the `iosIdentifier` render var; unlike
     /// `androidIdentifier` it is *not* a path-segment placeholder because
@@ -130,8 +130,8 @@ impl TemplateContext {
         crate::ios_id::derive(&self.org, &self.project_name)
     }
 
-    /// Validates the derived iOS bundle identifier (spec Phase 3 task 34's
-    /// scaffold-time fail-fast). Called by [`crate::scaffold::generate`]
+    /// Validates the derived iOS bundle identifier (a scaffold-time
+    /// fail-fast). Called by [`crate::scaffold::generate`]
     /// before any file is written so a `frust create` whose
     /// `org`/`project_name` produce a grammatically invalid bundle id errors
     /// out with an actionable message instead of emitting a project Xcode
@@ -162,9 +162,8 @@ impl TemplateContext {
     /// *sync* — the project cannot be opened or configured at all, not just
     /// linked. That is a deliberate trade-off, taken because the value is a
     /// placeholder for a published Maven coordinate once the embedding module
-    /// ships to a registry post-crates.io (the mitigation in this feature's
-    /// `design/PUBLICATION_SEAM.md` §5) and because `gradle.properties` keeps
-    /// it to one line to edit when a project moves machines.
+    /// ships to a registry post-crates.io, and because `gradle.properties`
+    /// keeps it to one line to edit when a project moves machines.
     pub fn frust_embedding_android_dir(&self) -> String {
         format!(
             "{}/../../platform/android/frust-embedding",
@@ -177,8 +176,7 @@ impl TemplateContext {
     /// re-based by the same [`frust_path_from_project_subdir`]: the value
     /// becomes an `XCLocalSwiftPackageReference`'s `relativePath` in
     /// `ios/Runner.xcodeproj`, which Xcode resolves against `<project>/ios/`
-    /// — the directory containing the `.xcodeproj`, not the bundle itself
-    /// (`research/SPIKE_IOS.md` §7).
+    /// — the directory containing the `.xcodeproj`, not the bundle itself.
     ///
     /// It widens the developer-checkout blast radius exactly as the Android
     /// accessor above describes — a missing checkout fails Xcode's *package
@@ -194,7 +192,7 @@ impl TemplateContext {
     }
 }
 
-/// Why a `--deeplink-scheme` value was rejected (task 07). Follows the
+/// Why a `--deeplink-scheme` value was rejected. Follows the
 /// `[ios] team`-style frust.toml precedent (`ios_build::team`) for what
 /// gets validated here versus left to the platform build tools: this is a
 /// scaffold-time, actionable check, not a full RFC 3986 scheme grammar
@@ -210,7 +208,7 @@ pub enum DeepLinkError {
     ContainsSchemeSeparator(String),
 }
 
-/// Validates a `--deeplink-scheme` value (task 07): non-empty, and not a
+/// Validates a `--deeplink-scheme` value: non-empty, and not a
 /// full URL (no `://` — a common mistake, e.g. passing `myapp://` instead of
 /// `myapp`). Deliberately narrow: RFC 3986 scheme-grammar policing (alnum +
 /// `+`/`-`/`.`) is left to the platform build tools (Gradle/`xcodebuild`),
@@ -238,8 +236,7 @@ const RUST_KEYWORDS: &[&str] = &[
 ];
 
 /// Why a project name was rejected. Every variant carries an actionable
-/// message (spec §12.3 acceptance criteria: reject `1app`, `my-app`
-/// suggesting `my_app`, and keywords).
+/// message (reject `1app`, `my-app` suggesting `my_app`, and keywords).
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum NameError {
     #[error("project name cannot be empty")]
