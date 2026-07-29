@@ -77,7 +77,7 @@ pub use system_ui::{
     SystemUiMode, SystemUiOverlay, SystemUiWatcher, current_system_ui_mode, encoded_state,
     set_system_ui_mode,
 };
-pub use theme_default::{default_theme, default_theme_generation, set_default_theme};
+pub use theme_default::{default_theme, set_default_theme};
 pub use theme_override::{
     ThemeOverrideWatcher, clear_app_theme, effective_brightness_for_platform_change, set_app_theme,
     theme_override_active,
