@@ -1,4 +1,4 @@
-//! Top-level clap parser (spec §12.1), modeled on `flutter_tools`' command surface.
+//! Top-level clap parser, modeled on `flutter_tools`' command surface.
 
 use clap::{Parser, Subcommand};
 
@@ -21,9 +21,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Scaffold a new app (spec §12.3 — v1 generates a desktop-preview
-    /// Rust crate; `android/`/`ios/` platform projects land in spec Phase
-    /// 2/3).
+    /// Scaffold a new app (v1 generates a desktop-preview
+    /// Rust crate; `android/`/`ios/` platform projects land alongside it).
     Create {
         /// Target directory for the new project (may be `.`).
         dir: String,
@@ -49,14 +48,14 @@ pub enum Command {
         template_dir: Option<String>,
 
         /// Override the computed path to the `frust` facade crate
-        /// (development only; spec §12.3's temporary `frust_path`
+        /// (development only; a temporary `frust_path`
         /// mechanism).
         #[arg(long = "frust-path", value_name = "PATH", hide = true)]
         frust_path: Option<String>,
 
         /// URL scheme to register for deep links (e.g. `myapp`, no `://`) —
         /// generates a Android `<intent-filter>` (VIEW/BROWSABLE/DEFAULT)
-        /// and an iOS `CFBundleURLTypes` entry (task 07). Omit to generate a
+        /// and an iOS `CFBundleURLTypes` entry. Omit to generate a
         /// project with no deep-link config (the default).
         #[arg(long = "deeplink-scheme", value_name = "SCHEME")]
         deeplink_scheme: Option<String>,
@@ -69,8 +68,8 @@ pub enum Command {
 
         /// Opt-in clean-architecture variant: scaffolds a controller +
         /// use-case + `async_view` screen wired to `clean-signals-frust`
-        /// instead of the default notes-app demo (plugin-system spec, task
-        /// 09). **Dev-machine-only while `clean-signals` is unpublished**:
+        /// instead of the default notes-app demo.
+        /// **Dev-machine-only while `clean-signals` is unpublished**:
         /// the generated `Cargo.toml` path-deps into this Frust checkout
         /// plus a sibling `clean-signals-rs` checkout (see
         /// `docs/DEVELOPMENT.md`'s Prerequisites/Version-Pin Policy) — the
@@ -87,8 +86,8 @@ pub enum Command {
     /// Launch the TUI workbench: an advanced interactive interface for
     /// managing Frust projects.
     Tui,
-    /// Build → install → launch → stream logs on a connected device
-    /// (spec §12.4); no Android device selected → `cargo run` passthrough.
+    /// Build → install → launch → stream logs on a connected device;
+    /// no Android device selected → `cargo run` passthrough.
     Run {
         #[command(flatten)]
         build: BuildArgs,
@@ -104,8 +103,8 @@ pub enum Command {
         #[arg(long = "render-tier", value_name = "TIER")]
         render_tier: Option<RenderTierArg>,
 
-        /// Desktop-only rebuild-relaunch dev loop (PLAN.md Phase 9.D step
-        /// 2): watches the project's `src/` tree and `Cargo.toml`, and on
+        /// Desktop-only rebuild-relaunch dev loop:
+        /// watches the project's `src/` tree and `Cargo.toml`, and on
         /// any change kills the running `cargo run` child and relaunches a
         /// fresh one, streaming its output the whole time. This is
         /// explicitly a relaunch loop, not state-preserving hot reload —
@@ -115,7 +114,7 @@ pub enum Command {
         #[arg(long)]
         watch: bool,
     },
-    /// Produce a distributable artifact (spec §12.5/12.6) — release-signed
+    /// Produce a distributable artifact — release-signed
     /// APK/AAB via Gradle, or an iOS app/IPA via `xcodebuild`. Defaults to
     /// release mode (unlike `run`, which defaults to debug).
     Build {
@@ -124,7 +123,7 @@ pub enum Command {
     },
 }
 
-/// The artifact `frust build` produces (spec §12.5/12.6). Kept off
+/// The artifact `frust build` produces. Kept off
 /// [`crate::build_info::BuildInfo`] — artifact selection is orthogonal to
 /// the mode/flavor/defines/version funnel `run` and `build` share.
 #[derive(Subcommand, Debug)]
@@ -339,7 +338,7 @@ mod tests {
         }
     }
 
-    /// Task 09: `--arch clean-signals` parses to `ArchArg::CleanSignals`.
+    /// `--arch clean-signals` parses to `ArchArg::CleanSignals`.
     #[test]
     fn parses_create_with_arch_clean_signals() {
         let cli = Cli::parse_from(["frust", "create", "myapp", "--arch", "clean-signals"]);
@@ -351,7 +350,7 @@ mod tests {
         }
     }
 
-    /// Task 09: omitting `--arch` defaults to `None` (the default template).
+    /// Omitting `--arch` defaults to `None` (the default template).
     #[test]
     fn parses_create_without_arch_defaults_to_none() {
         let cli = Cli::parse_from(["frust", "create", "myapp"]);
@@ -361,7 +360,7 @@ mod tests {
         }
     }
 
-    /// Task 09: an unrecognized `--arch` value is rejected by clap itself
+    /// An unrecognized `--arch` value is rejected by clap itself
     /// (only `clean-signals` is a valid `ArchArg` variant today).
     #[test]
     fn rejects_invalid_arch_value() {

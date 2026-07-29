@@ -1,4 +1,4 @@
-//! Android platform shell: the Rust half of the JNI bridge (spec §10.1).
+//! Android platform shell: the Rust half of the JNI bridge.
 //!
 //! This crate is the Android counterpart to `frust-shell-desktop`. Where the
 //! desktop shell owns a `winit` event loop, the Android shell is *driven* by the
@@ -23,7 +23,7 @@
 //!
 //! # Unsafe
 //!
-//! This crate is a sanctioned `unsafe` zone (spec §10.1): the framework crates
+//! This crate is a sanctioned `unsafe` zone: the framework crates
 //! stay `unsafe`-free, but a platform shell must cross the FFI boundary. The
 //! crate's `unsafe` surface is [`jni_glue`]'s `unsafe` code — the
 //! `ANativeWindow_fromSurface` call, `Box::into_raw`/`from_raw` for the opaque
@@ -84,19 +84,19 @@ pub mod __jni {
 }
 
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
-/// (spec §10.1, Makepad `app_main!` precedent).
+/// (a Makepad `app_main!` precedent).
 ///
 /// Stamps out the twenty `Java_dev_frust_FrustSurfaceView_native*` symbols
 /// the Kotlin `FrustSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
 /// opaque `jlong` handle. The three IME exports (`nativeImeApply`,
-/// `nativeImeState`, `nativeImeAction`) carry the Phase 4B soft-keyboard
-/// state-sync contract (spec §14 Phase 4): Kotlin pushes a whole editing state in
+/// `nativeImeState`, `nativeImeAction`) carry the soft-keyboard
+/// state-sync contract: Kotlin pushes a whole editing state in
 /// (`nativeImeApply`), pulls the reconciled state back out (`nativeImeState`), and
 /// forwards an editor action (Enter) via `nativeImeAction`. `nativeSetAppearance`
-/// (task 08) flips the app's theme brightness from the platform's dark-mode
-/// preference. `nativeOnDeepLink` (task 07) delivers a cold-start/running
+/// flips the app's theme brightness from the platform's dark-mode
+/// preference. `nativeOnDeepLink` delivers a cold-start/running
 /// platform deep link into the process-wide deep-link source.
 /// `nativeInitAccessibility` (phase 6d, task 04) attaches the accesskit Android
 /// adapter to the host view. The two device-parity exports (task 06):
@@ -219,7 +219,7 @@ macro_rules! android_app {
             $crate::jni_glue::native_on_frame(handle, frame_time_nanos)
         }
 
-        /// JNI `nativeOnTouch`: deliver one touch contact (spec §9).
+        /// JNI `nativeOnTouch`: deliver one touch contact.
         ///
         /// `action` is the normalised phase code (`0`=down, `1`=move, `2`=up,
         /// `3`=cancel — an ABI shared with the Kotlin `FrustSurfaceView`);
@@ -267,7 +267,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeImeApply`: push a whole platform editing state into the
-        /// focused widget (the mobile IME state-sync path, spec §14 Phase 4).
+        /// focused widget (the mobile IME state-sync path).
         ///
         /// `text` is the Kotlin mirror `Editable`'s content; the four indices are
         /// **UTF-16 code units** (Java-native) and cross the seam unchanged — the
@@ -342,7 +342,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeInitAccessibility`: attach the accesskit Android adapter to
-        /// the host `FrustSurfaceView` (spec §9, phase 6d — task 04).
+        /// the host `FrustSurfaceView`.
         ///
         /// `view` is the host `View` (`this`); called once by Kotlin's
         /// `surfaceCreated` right after `nativeInit`. Best-effort and isolated in
@@ -358,7 +358,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeOnInsetsChanged`: deliver the platform window insets
-        /// (device px, task 06 — RESEARCH.md "Insets / SafeArea").
+        /// (device px).
         ///
         /// The eight `jfloat`s are `view_padding` (`vp_*`: system-bar/cutout
         /// occlusion) then `view_insets` (`vi_*`: the IME area), each l/t/r/b.
@@ -384,8 +384,8 @@ macro_rules! android_app {
             )
         }
 
-        /// JNI `nativeOnBackPress`: the Android back contract (task 06 —
-        /// RESEARCH.md "Android back"). Returns `JNI_TRUE` when the framework
+        /// JNI `nativeOnBackPress`: the Android back contract. Returns
+        /// `JNI_TRUE` when the framework
         /// consumed the press (it will pop on the next rebuild — Kotlin must not
         /// finish the activity), `JNI_FALSE` when it should fall through to the
         /// default `OnBackPressedDispatcher` (activity finish). The generated

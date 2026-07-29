@@ -1,4 +1,4 @@
-//! Glyph toast + host/queue (task 21, glyph-design-system): a status-dot +
+//! Glyph toast + host/queue: a status-dot +
 //! message bubble ([`Toast`]), and [`ToastHost`] — the retained overlay
 //! widget that plays a queue of toast requests one at a time with authored
 //! enter/hold/exit motion and a 2.4s auto-dismiss.
@@ -7,16 +7,16 @@
 //!
 //! [`ToastView`]/[`ToastWidget`]: a status dot + message row painted on the
 //! Glyph "overlay" surface role (`colors.surface_container_highest` — the
-//! same `bg-overlay` token [`super::progress`]'s track uses; RESEARCH §1.1
+//! same `bg-overlay` token [`super::progress`]'s track uses; the Glyph source
 //! doesn't name toast explicitly, but it *is* an overlay surface, so this
 //! reuses the role rather than inventing a new one), `shape.medium` corner
-//! radius (Glyph's canonical `--radius-md` = 10px — this task's own literal
-//! "radius-md"), and the Glyph toast elevation recipe
+//! radius (Glyph's canonical `--radius-md` = 10px), and the Glyph toast
+//! elevation recipe
 //! (`elevation.level4.shadow(brightness)` — exactly `0 12px 32px` dark /
-//! `rgba(...,.12)` light, RESEARCH §1.1b/§1.3's cited toast shadow). The dot
+//! `rgba(...,.12)` light, the cited toast shadow). The dot
 //! color follows [`ToastVariant`]: `Plain` (default) is the accent
 //! (`colors.primary`); `Info`/`Success`/`Warning` resolve `StatusPalette`
-//! (Glyph's success/warning/info extension, task 15); `Error` resolves
+//! (Glyph's success/warning/info extension); `Error` resolves
 //! `colors.error` (a first-class `ColorScheme` role). Message color is
 //! `colors.on_surface` — the same label-color simplification
 //! `material::chips` documents (not the more precise
@@ -69,7 +69,7 @@
 //! easing (`Cubic(0.34, 1.35, 0.64, 1.0)` — an authored overshoot); a
 //! vertical slide from [`ENTER_OFFSET_FRACTION`] (140%) of the toast's own
 //! height above its resting position, plus a fade. Hold: exactly
-//! [`HOLD_DURATION`] (2.4s — RESEARCH §1.4 pattern 08's authored
+//! [`HOLD_DURATION`] (2.4s — the Glyph source's authored
 //! auto-dismiss value), advanced via **`FrameTime` differencing, never
 //! `Instant::now()`** (`docs/CODE_STANDARDS.md`'s No-`Instant::now()` rule).
 //! Exit: 150ms (`durations.fast`) with the Glyph exit easing
@@ -78,9 +78,9 @@
 //! (no slide) — the Details' "toast becomes fast crossfade" rule, mirroring
 //! `nav::transition::resolve_spec`'s reduce-motion collapse.
 //!
-//! All three durations/easings are **exact source values** (`MotionScheme::glyph`'s
-//! doc comment; RESEARCH §1.4), not approximations — only
-//! [`ENTER_OFFSET_FRACTION`] (the slide distance) is this task's own choice.
+//! All three durations/easings are **exact source values** (see
+//! `MotionScheme::glyph`'s doc comment), not approximations — only
+//! [`ENTER_OFFSET_FRACTION`] (the slide distance) is this widget's own choice.
 
 use std::time::Duration;
 
@@ -122,7 +122,7 @@ const PAD_X: f64 = 14.0;
 const PAD_Y: f64 = 10.0;
 /// Gap between the status dot and the message text. This task's own choice.
 const DOT_GAP: f64 = 10.0;
-/// Status-dot diameter. This task's own choice.
+/// Status-dot diameter. This widget's own choice.
 const DOT_DIAMETER: f64 = 8.0;
 
 /// Unthemed corner-radius fallback — Glyph's canonical `--radius-md` (10px).
@@ -131,14 +131,14 @@ const FALLBACK_RADIUS: f64 = 10.0;
 /// same role [`super::progress`]'s track uses.
 const FALLBACK_SURFACE: Color = Color::from_rgb8(0x27, 0x2d, 0x3d);
 /// Unthemed dot fallbacks, one per [`ToastVariant`] — Glyph dark's amber
-/// accent / cyan info / success / warning / error tokens (RESEARCH §1.1).
+/// accent / cyan info / success / warning / error tokens.
 const FALLBACK_PLAIN: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
 const FALLBACK_INFO: Color = Color::from_rgb8(0x5e, 0xc8, 0xd8);
 const FALLBACK_SUCCESS: Color = Color::from_rgb8(0x5f, 0xd8, 0x8f);
 const FALLBACK_WARNING: Color = Color::from_rgb8(0xf5, 0xc8, 0x60);
 const FALLBACK_ERROR: Color = Color::from_rgb8(0xff, 0x6b, 0x6b);
 /// Unthemed shadow fallbacks — Glyph dark's exact toast recipe (`0 12px 32px
-/// rgba(0,0,0,.4)`, RESEARCH §1.3).
+/// rgba(0,0,0,.4)`).
 const FALLBACK_SHADOW_Y: f64 = 12.0;
 const FALLBACK_SHADOW_BLUR: f64 = 32.0;
 const FALLBACK_SHADOW_ALPHA: f32 = 0.40;
@@ -372,7 +372,7 @@ const ENTER_CURVE: Curve = Curve::Cubic(0.34, 1.35, 0.64, 1.0);
 const EXIT_DURATION: Duration = Duration::from_millis(150);
 /// Exit easing (Glyph's `exit` cubic-bezier, exact source value).
 const EXIT_CURVE: Curve = Curve::Cubic(0.4, 0.0, 1.0, 1.0);
-/// Hold duration: exactly 2.4s (RESEARCH §1.4 pattern 08's authored
+/// Hold duration: exactly 2.4s (the Glyph source's authored
 /// auto-dismiss value).
 const HOLD_DURATION: Duration = Duration::from_millis(2400);
 /// `reduce_motion`'s collapsed crossfade duration (mirrors

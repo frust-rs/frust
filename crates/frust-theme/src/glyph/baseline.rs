@@ -17,7 +17,7 @@ use crate::theme::{DesignLanguage, Theme};
 use crate::typography::TypeScale;
 
 impl Theme {
-    /// The Glyph baseline theme (PLAN.md Phase 3; RESEARCH §1): the Glyph
+    /// The Glyph baseline theme: the Glyph
     /// light/dark [`ColorScheme`]s, the Glyph [`TypeScale`]/[`ShapeScale`]/
     /// [`Elevation`]/[`MotionScheme`]/[`GlassScale`], tagged
     /// [`DesignLanguage::Glyph`], with **both** Glyph extensions attached
@@ -28,7 +28,7 @@ impl Theme {
     /// **Starts in [`Brightness::Dark`]** — a deliberate divergence from
     /// [`Theme::m3_baseline`]/[`Theme::cupertino_baseline`] (both
     /// [`Brightness::Light`]): Glyph is a **dark-first** system (its dark HTML
-    /// build is the canonical brightness, RESEARCH §1). Call
+    /// build is the canonical brightness). Call
     /// `.with_brightness(Brightness::Light)` to select the light scheme (e.g.
     /// to honor a live OS light-mode preference before handing the theme to
     /// `set_app_theme`).

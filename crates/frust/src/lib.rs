@@ -1,7 +1,7 @@
-//! Facade crate: the public `frust` framework API (spec §5).
+//! Facade crate: the public `frust` framework API.
 //!
 //! App authors depend on this single crate. It exposes [`run`], the canonical
-//! app entry point (phase 5.5), and curates the view/widget/reactive
+//! app entry point, and curates the view/widget/reactive
 //! vocabulary from the underlying framework crates so the declarative call
 //! shape reads exactly as the spec promises:
 //!
@@ -49,7 +49,7 @@
 //!     .unwrap();
 //! ```
 //!
-//! ## Layout containers (spec §6.2)
+//! ## Layout containers
 //!
 //! The primitive containers compose heterogeneous children through
 //! [`any`] (type erasure) into the declarative call shape:
@@ -155,7 +155,7 @@ pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 /// [`IconData::from_path`](crate::IconData::from_path).
 pub use frust_widgets::icons;
 
-/// The declarative router vocabulary (spec §19's go_router-subset layer),
+/// The declarative router vocabulary (a go_router-subset layer),
 /// flat-re-exported from `frust-widgets` so app code never names that
 /// crate directly: [`Router`] resolves a location against a [`Route`] table
 /// (built via [`RouteBuilder`]) into [`Resolution`]/[`ResolvedPage`]s driving
@@ -168,7 +168,7 @@ pub use frust_widgets::{
     ResolvedPage, Route, RouteBuilder, RouteParams, Router,
 };
 
-/// The Material 3 Expressive widget catalog (Phase 6c, PLAN.md D5): AppBar,
+/// The Material 3 Expressive widget catalog: AppBar,
 /// Card, Chips, Dialog, FAB, ListView/ListItem, NavigationBar, BottomSheet,
 /// Switch, and progress indicators — flat-re-exported from
 /// `frust-widgets` so app code (e.g. `examples/catalog`) never names that
@@ -191,7 +191,7 @@ pub use frust_widgets::{
     outlined_card, show_bottom_sheet, show_dialog, split_button, switch,
 };
 
-/// The Cupertino (iOS) widget catalog (Phase 6c, PLAN.md D5): the
+/// The Cupertino (iOS) widget catalog: the
 /// Flutter-parity counterparts to a subset of the Material catalog above —
 /// flat-re-exported from `frust-widgets` for the same reason.
 pub use frust_widgets::{
@@ -315,13 +315,13 @@ pub fn navigator<State: 'static>(
 /// deep-link source together; neither underlying crate depends on the other.
 pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 
-/// The design-token vocabulary (spec §11): the [`Theme`] bundle plus its
+/// The design-token vocabulary: the [`Theme`] bundle plus its
 /// component token tables, flat-re-exported from `frust-theme` so app code
 /// never names that crate directly. A root component reads the active theme via
 /// [`use_context`]`::<`[`Theme`]`>()`; a widget reads it during paint/layout via
 /// `PaintCtx::theme_as`/`LayoutCtx::theme_as` (or `Theme::from_paint_ctx`).
 ///
-/// Includes the glass material tokens (task 6f-01):
+/// Includes the glass material tokens:
 ///
 /// ```
 /// use frust::GlassScale;
@@ -355,7 +355,7 @@ pub use frust_theme::{
 /// `Color::components` (`[f32; 4]`, straight-alpha RGBA).
 pub use peniko::Color;
 
-/// App-facing theme override (PLAN.md D2 correction, task 6c-04):
+/// App-facing theme override:
 /// [`set_app_theme`] forces the app's active [`Theme`] end-to-end — both
 /// delivery paths a shell owned exclusively before this (widget paint/layout
 /// via `RenderRoot::set_theme`, and `use_context::<Theme>()` via
@@ -425,7 +425,7 @@ pub use frust_shell_common::font_registry::register_app_fonts;
 // configured the native window translucent, and is deliberately not
 // re-exported past that crate.
 
-/// App-facing **resolved** surface mode (native-widgets task p1-01) — the
+/// App-facing **resolved** surface mode — the
 /// read-only outward half of the Mode B seam whose setter is deliberately
 /// absent (see the comment above): what the platform actually gave this
 /// process, not what the host asked for.
@@ -464,7 +464,7 @@ pub use frust_shell_common::font_registry::register_app_fonts;
 /// ```
 pub use frust_shell_common::{ResolvedSurfaceMode, resolved_surface_mode};
 
-/// The animation vocabulary (spec §8): the shell-fed frame clock ([`FrameTime`])
+/// The animation vocabulary: the shell-fed frame clock ([`FrameTime`])
 /// plus the pure easing/interpolation/spring math a widget or app advances it
 /// through, flat-re-exported from `frust-core::anim`. Time enters from the
 /// shell during paint (`PaintCtx::frame_time`); nothing here reads a clock.
@@ -481,12 +481,12 @@ pub mod input {
     };
 }
 
-/// The reactive-programming vocabulary (spec §5.5) [`Component`] state is built
+/// The reactive-programming vocabulary [`Component`] state is built
 /// on: signals, memos, and context, flat-re-exported from `frust-reactive`/
 /// `reactive_graph` so app authors never name either crate directly.
 pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 
-/// The deep-link read surface (spec §19; `frust-reactive`'s `app_links`-
+/// The deep-link read surface (`frust-reactive`'s `app_links`-
 /// style process-wide source — see its module docs for the semantics): a
 /// mobile shell delivers a platform link via `frust-reactive`'s
 /// [`push_deep_link`], and app code reads it here —
@@ -582,20 +582,20 @@ mod image_async;
 pub use image_async::{ImageDecodeError, decode_image_async};
 
 // Re-export the Android JNI-bridge macro so generated apps write
-// `frust::android_app!(AppState, app_logic)` (spec §10.1). `pub use` of a
+// `frust::android_app!(AppState, app_logic)`. `pub use` of a
 // `#[macro_export]` macro re-exports it on edition 2021+; the macro only expands
 // to real code where its call site is `#[cfg(target_os = "android")]`, so this is
 // inert on desktop.
 pub use frust_shell_android::android_app;
 
 // Re-export the iOS C-ABI-bridge macro so generated apps write
-// `frust::ios_app!(AppState, app_logic)` (spec §10.2). Unlike `android_app!`,
+// `frust::ios_app!(AppState, app_logic)`. Unlike `android_app!`,
 // the invocation is unconditional — the macro's generated `frust_*` exports
 // are each `#[cfg(target_os = "ios")]`, so it is inert off-iOS.
 pub use frust_shell_ios::ios_app;
 
 /// A Frust application: the app state plus the `app_logic` function that maps
-/// it to a view tree (spec §5).
+/// it to a view tree.
 ///
 /// Construct with [`App::new`] and start the event loop with [`App::run`].
 ///
@@ -603,8 +603,8 @@ pub use frust_shell_ios::ios_app;
 /// free `fn app_logic(&mut State) -> impl View<State>`'s opaque return type into
 /// a stored type parameter defeats method resolution (the opaque type's trait
 /// bounds can't be re-proven on the already-typed value). Instead [`App::run`]
-/// infers the view type freshly at the call site, so the exact spec §5 shape —
-/// `App::new(state, app_logic).run()` — compiles for both `impl View` and
+/// infers the view type freshly at the call site, so
+/// `App::new(state, app_logic).run()` compiles for both `impl View` and
 /// concrete-typed `app_logic`.
 // On Android the fields are consumed only by the desktop-gated `run`, so they
 // read as dead there; the app is driven through `android_app!`/JNI instead.
@@ -626,7 +626,7 @@ impl<State, Logic> App<State, Logic> {
 
 #[cfg(not(target_os = "android"))]
 impl<State: 'static, Logic> App<State, Logic> {
-    /// Run the app in the desktop preview window until it is closed (spec §12.9).
+    /// Run the app in the desktop preview window until it is closed.
     ///
     /// Blocks the calling thread on the platform event loop. Returns once the
     /// window closes, or an error if the window/GPU surface could not be
@@ -644,7 +644,7 @@ impl<State: 'static, Logic> App<State, Logic> {
 }
 
 /// Run a root [`Component`] in the desktop preview shell until the window
-/// closes — the canonical `runApp` equivalent (spec §5.5's Component model).
+/// closes — the canonical `runApp` equivalent for the Component model.
 ///
 /// `root.init()` seeds the component's retained `State` once; the resulting
 /// `AnyView<C::State>` is then driven through the same desktop preview loop
@@ -673,7 +673,7 @@ pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
     App::new(state, move |state: &mut C::State| root.build(state)).run()
 }
 
-/// The canonical app entry point (spec §5.5): one line binds a root
+/// The canonical app entry point: one line binds a root
 /// [`Component`] to all three platforms.
 ///
 /// ```no_run

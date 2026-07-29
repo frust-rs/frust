@@ -20,7 +20,7 @@ use crate::status::StatusPalette;
 use crate::typography::TypeScale;
 
 /// Which design language a [`Theme`] was built from — a `Theme` itself stays
-/// a single, language-agnostic aggregate struct (spec §17.1); this is just a
+/// a single, language-agnostic aggregate struct; this is just a
 /// tag app/shell code can branch on (e.g. to pick per-platform interaction
 /// affordances), not a second `Theme` type. See `crate::color`'s "Cupertino
 /// (iOS) mapping" module docs for how [`ColorScheme::cupertino_light`]/
@@ -33,11 +33,9 @@ pub enum DesignLanguage {
     Material3,
     /// Cupertino (iOS).
     Cupertino,
-    /// Glyph — this crate's own design language (PLAN.md Phase 2). Not yet
-    /// the default and has no baseline constructor yet (no
-    /// `Theme::glyph_baseline` — that lands with the Glyph token module,
-    /// task 15); this variant exists so downstream exhaustive matches can be
-    /// patched ahead of the baseline landing.
+    /// Glyph — this crate's own design language. Not the derived-default
+    /// enum variant; [`Theme::glyph_baseline`] is what shells construct
+    /// explicitly to use it.
     Glyph,
 }
 
@@ -52,14 +50,14 @@ pub struct Theme {
     pub shape: ShapeScale,
     pub elevation: Elevation,
     pub motion: MotionScheme,
-    /// The glass material scale (task 6f-01): [`GlassScale::opaque_material`]
-    /// on the Material baseline, [`GlassScale::ios27`] on Cupertino. No widget
-    /// consumes it yet — a later wave paints from it.
+    /// The glass material scale: [`GlassScale::opaque_material`]
+    /// on the Material baseline, [`GlassScale::ios27`] on Cupertino.
+    /// Consumed by the Cupertino chrome widgets that paint from it.
     pub glass: GlassScale,
     pub brightness: Brightness,
     pub design_language: DesignLanguage,
-    /// The no-lock-in typed extension slot (PLAN.md Phase 2 step 2, spec's
-    /// Flutter `ThemeExtension` analog) — see `crate::extensions` and
+    /// The no-lock-in typed extension slot (a Flutter
+    /// `ThemeExtension` analog) — see `crate::extensions` and
     /// [`Theme::extension`]. `Arc`-backed internally, so cloning a `Theme`
     /// (required at both delivery paths — the process-global override slot
     /// and the reactive `provide_context` copy) stays cheap regardless of
@@ -179,7 +177,7 @@ impl Theme {
     }
 
     /// Start a [`crate::builder::ThemeBuilder`] over `self` as the baseline —
-    /// the `defineTheme`/`copyWith` analog (PLAN.md Phase 2 step 1). See
+    /// the `defineTheme`/`copyWith` analog. See
     /// `crate::builder`'s module docs for the full layered-precedence
     /// contract (baseline → whole-group swaps → per-token closure edits →
     /// extensions).

@@ -14,7 +14,7 @@
 //! which all accept a plain `wgpu::Device`.
 //!
 //! Surface creation lives on the lifecycle state machine in
-//! [`crate::SurfaceRenderer`] (spec §8.1): the shell mints an empty
+//! [`crate::SurfaceRenderer`]: the shell mints an empty
 //! `SurfaceRenderer` and drives it with `on_surface_created`/`on_surface_changed`/
 //! `on_surface_destroyed`, each of which reaches back into this context for the
 //! owning device.
@@ -374,9 +374,9 @@ fn alpha_mode_is_translucent(mode: wgpu::CompositeAlphaMode) -> bool {
 /// premultiplied-expecting modes are `PreMultiplied` and — the shipped Android
 /// translucent case — `Inherit`: on Android the only reported translucent
 /// mode is `Inherit`, under which SurfaceFlinger blends a `TRANSLUCENT`
-/// SurfaceView premultiplied (defect D3, `research/VERIFY.md`: a 50%-alpha
+/// SurfaceView premultiplied — measured on device: a 50%-alpha
 /// `#FFF176` reached SurfaceFlinger stored straight `#FFF176@128` instead of
-/// premultiplied `#807B3B@128`, compositing over-bright over a Mode B hole).
+/// premultiplied `#807B3B@128`, compositing over-bright over a Mode B hole.
 ///
 /// `PostMultiplied` (iOS's translucent mode) expects straight alpha — vello's
 /// output is already correct there — and `Opaque`/`Auto` ignore alpha
@@ -391,8 +391,7 @@ fn alpha_mode_needs_premultiply(mode: wgpu::CompositeAlphaMode) -> bool {
 
 /// Whether a configured surface must **refuse** translucency because its
 /// chosen render path cannot deliver the premultiplied output the resolved
-/// alpha mode expects (review finding M2 / AI-2, following on M1's
-/// resolved-translucency seam above).
+/// alpha mode expects (following on the resolved-translucency seam above).
 ///
 /// [`RenderPathKind::Blit`]'s `TextureBlitter::copy` is a plain texture copy
 /// — there is no shader stage to premultiply in, unlike the
@@ -402,8 +401,8 @@ fn alpha_mode_needs_premultiply(mode: wgpu::CompositeAlphaMode) -> bool {
 /// resolves a premultiplied-expecting alpha mode (`Inherit`/`PreMultiplied`,
 /// [`alpha_mode_needs_premultiply`]) would feed vello's straight-alpha blit
 /// output straight to a premultiplied-expecting compositor — the same
-/// over-bright fringing defect D3 fixed on the direct arm
-/// (`research/VERIFY.md`). Rather than build an unverifiable
+/// over-bright fringing defect fixed on the direct arm above. Rather than
+/// build an unverifiable
 /// premultiplying blitter (blit targets lack `STORAGE_BINDING`, so it would
 /// need new machinery), the adopted fix is refusal: such a surface resolves
 /// NOT translucent, degrading the app to Mode A (opaque base, no
@@ -429,11 +428,10 @@ fn blit_translucency_refused(
         && tier == crate::tier::RenderTier::Gpu
 }
 
-/// Permanent (non-spike) surface-caps + chosen-alpha-mode line, logged once
+/// Permanent surface-caps + chosen-alpha-mode line, logged once
 /// per surface configure (not once per process — a resize/recreate that picks
 /// a different mode is worth a fresh line, unlike the direct-to-surface probe
-/// above). Successor to the s0 spike's `frust-spike caps: ...` line
-/// (`research/SPIKE.md` §1), minus the spike prefix. Gated exactly like
+/// above). Gated exactly like
 /// [`log_render_path`] so a release build (no `perf-trace` feature) stays
 /// string-free.
 #[cfg(feature = "perf-trace")]
@@ -484,7 +482,7 @@ pub struct RenderContext {
     /// Lazily created on the first surface; `None` until then.
     pub(crate) device: Option<DeviceHandle>,
     /// The tier [`ensure_device`](Self::ensure_device) selected for the live
-    /// device (spec Phase 6 / PLAN.md D4). Defaults to [`RenderTier::Gpu`] and
+    /// device. Defaults to [`RenderTier::Gpu`] and
     /// is only ever [`RenderTier::Cpu`] in a `cpu-tier`-feature build whose
     /// probe (or override) chose the CPU fallback — the
     /// [`SurfaceRenderer`](crate::SurfaceRenderer) reads it to pick the encode
@@ -939,8 +937,8 @@ impl RenderContext {
     /// object-name labels via `vkSetDebugUtilsObjectNameEXT`, and the
     /// emulator's gfxstream Vulkan HAL (`vulkan.ranchu.so`) segfaults inside
     /// that entry point during adapter enumeration — the same class of
-    /// debug-utils fragility the RESEARCH.md MoltenVK caveat warns about
-    /// (see task 25's summary: `#00 vulkan.ranchu.so
+    /// debug-utils fragility a MoltenVK Vulkan backend is also known to have
+    /// (observed crash: `#00 vulkan.ranchu.so
     /// vk_common_SetDebugUtilsObjectNameEXT`). Debug object labels are only a
     /// developer convenience, so dropping them on the emulator is a safe way
     /// to keep GPU bring-up alive there while leaving physical devices'
@@ -1075,7 +1073,7 @@ impl RenderContext {
     /// surface loss/recreation (rotation, backgrounding) never rebuilds it — and
     /// so a device the [`ensure_device_headless`](Self::ensure_device_headless)
     /// pre-init created before any surface existed is adopted here rather than
-    /// rebuilt (task 19, spec §14 phase 7.E).
+    /// rebuilt.
     async fn ensure_device(&mut self, surface: &wgpu::Surface<'static>) -> Result<()> {
         if let Some(existing) = &self.device
             && existing.adapter.is_surface_supported(surface)
@@ -1130,7 +1128,7 @@ impl RenderContext {
                 .await
                 .map_err(|e| anyhow!("frust-render: no compatible GPU adapter: {e}"))?;
 
-        // Consult the tier probe (spec Phase 6, PLAN.md D4) instead of a
+        // Consult the tier probe instead of a
         // bespoke downlevel check, so a failed GPU probe surfaces through the
         // one diagnostic path `select_render_tier` owns (shared with its own
         // unit tests). An explicit override (`FRUST_RENDER_TIER`, or
@@ -1848,13 +1846,12 @@ mod tests {
         }
     }
 
-    /// The exact defect-D3 arithmetic the [`PremultiplyPass`] shader performs,
+    /// The exact premultiply arithmetic the [`PremultiplyPass`] shader performs,
     /// as an always-run reference (no GPU): a 50%-alpha `#FFF176` painted over
     /// a Mode B hole must reach a premultiplied-expecting compositor stored
     /// premultiplied (`~#807B3B@128`), NOT straight (`#FFF176@128` — the
-    /// over-bright value the device measured before this fix,
-    /// `research/VERIFY.md` D3). Encodes the predicted-correct pixel the device
-    /// re-check (task 04) must confirm.
+    /// over-bright value the device measured before this fix). Encodes the
+    /// predicted-correct pixel a device re-check must confirm.
     #[test]
     fn d3_premultiply_math_matches_verify_predictions() {
         // `premultiply` in PREMULTIPLY_WGSL is `rgb * a` in normalized [0,1];

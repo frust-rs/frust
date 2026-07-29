@@ -1,11 +1,11 @@
 //! The winit 0.30 [`ApplicationHandler`] that drives a Frust app in a desktop
-//! preview window (spec §12.9).
+//! preview window.
 //!
-//! Ownership mirrors the shared platform bootstrap (spec §10.3): the shell owns
+//! Ownership mirrors the shared platform bootstrap: the shell owns
 //! the shared [`TextContext`], the [`RenderRoot`], the application
 //! `State`/`app_logic`, and a [`FrameExecutor`](crate::render::FrameExecutor).
 //! The executor owns the render stack — either on this (the UI) thread (the
-//! single-thread fallback) or on a dedicated render thread (the plan phase 11.B
+//! single-thread fallback) or on a dedicated render thread (the
 //! split, chosen by the `FRUST_NO_RENDER_THREAD` kill switch — see
 //! [`crate::render`]). Each on-demand frame runs the UI passes in Masonry order
 //! (the v0 subset) on this thread — rebuild → layout → paint — then hands the
@@ -123,8 +123,7 @@ impl From<AccessibilityEvent> for ShellUserEvent {
 ///
 /// Blocks the calling thread on the winit event loop. The event loop is
 /// on-demand ([`ControlFlow::Wait`]): frames are produced only in response to a
-/// redraw request (state change on rebuild, or a resize), never free-running
-/// (spec §8).
+/// redraw request (state change on rebuild, or a resize), never free-running.
 pub fn run_desktop<State, Logic, V>(state: State, app_logic: Logic) -> Result<()>
 where
     State: 'static,
@@ -137,7 +136,7 @@ where
     crate::logger::init_once();
 
     // The shell-owned monotonic epoch every per-frame `FrameTime` is measured
-    // from (spec §8: time enters from the shell). Captured before any GPU/thread
+    // from (time enters from the shell). Captured before any GPU/thread
     // setup so the render thread's startup line and the UI thread's frame clock
     // share one origin.
     let epoch = Instant::now();
@@ -284,7 +283,7 @@ fn apply_control_flow(event_loop: &ActiveEventLoop, intent: ControlFlowIntent) {
 /// winit reports `CursorMoved`/`PixelDelta` in **physical** pixels (verified
 /// empirically on macOS — a HiDPI window reports positions at 2× the logical
 /// point value); the widget tree lays out and hit-tests in the same logical
-/// space the layout pass uses (spec §10.3), so every pointer coordinate is
+/// space the layout pass uses, so every pointer coordinate is
 /// divided by the scale factor at the shell boundary. Pulled out as a free
 /// function so the conversion is unit-testable without a live window.
 fn physical_to_logical(x: f64, y: f64, scale: f64) -> Point {
@@ -464,7 +463,7 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     executor: FrameExecutor,
     /// Reused across frames; `reset()` each frame rather than reallocated. In the
     /// split path a finished scene is moved out (replaced with a fresh one) to
-    /// cross the handoff channel; inline reuses it in place (spec §7).
+    /// cross the handoff channel; inline reuses it in place.
     scene: Scene,
     /// Last known cursor position in logical pixels, updated on every
     /// `CursorMoved`. `MouseInput` (button press/release) carries no position of
@@ -503,9 +502,9 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// here and re-raised by `run_desktop` once `run_app` returns.
     fatal: Option<anyhow::Error>,
     /// The shell-owned monotonic epoch the per-frame [`FrameTime`] is measured
-    /// from. `frust-core` never reads a clock itself (spec §8: time enters from
+    /// from. `frust-core` never reads a clock itself (time enters from
     /// the shell) — the desktop shell samples `epoch.elapsed()` at paint and hands
-    /// the nanosecond delta to [`RenderRoot::paint`]. Task 06 leaves this the
+    /// the nanosecond delta to [`RenderRoot::paint`]. This stays the
     /// desktop clock; only the mobile shells swap in a platform vsync timestamp.
     epoch: Instant,
     /// The app's active theme (M3 baseline). The shell owns the appearance
@@ -519,7 +518,7 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// yet — seeded once in the first `resumed`, before the first rebuild.
     theme_seeded: bool,
     /// Polls the process-wide app-facing theme override slot
-    /// (`frust::set_app_theme`/`clear_app_theme`, task 6c-04) once per
+    /// (`frust::set_app_theme`/`clear_app_theme`) once per
     /// frame, before rebuild in `RedrawRequested` — see
     /// `frust_shell_common::theme_override`'s module docs.
     theme_override: ThemeOverrideWatcher,
@@ -529,7 +528,7 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// `effective_brightness_for_platform_change`).
     theme_override_active: bool,
     /// Polls the process-wide app-facing pending-font registry
-    /// (`frust::register_app_fonts`, task 14) once per frame, before rebuild in
+    /// (`frust::register_app_fonts`) once per frame, before rebuild in
     /// `RedrawRequested` (beside `theme_override`) — draining any late
     /// registration into `text_ctx`. Also drained once at construction time (in
     /// `run_desktop`, before the first frame). See
@@ -559,7 +558,7 @@ where
     Logic: FnMut(&mut State) -> V + 'static,
 {
     /// Deliver one input event to the tree and schedule a frame if it dirtied
-    /// state. This is the dirty-driven half of the desktop model (spec §8): the
+    /// state. This is the dirty-driven half of the desktop model: the
     /// event pass never repaints, it only sets `needs_redraw`, which we turn into
     /// a single `request_redraw()` so the `Wait` loop wakes for exactly one frame.
     ///
@@ -804,7 +803,7 @@ where
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        // Drop the surface on suspend (spec §8.1): rare on macOS, but keeps the
+        // Drop the surface on suspend: rare on macOS, but keeps the
         // NoSurface path exercised on desktop and matches Android's lifecycle. In
         // the split path this is a barriered `SurfaceDestroyed` — the shell
         // blocks until the render thread has released its surface resources.
@@ -1022,7 +1021,7 @@ where
                 }
 
                 // Rebuild the view tree every frame (app_logic is cheap by
-                // construction, spec §5). A real dirty-tracking loop would skip
+                // construction). A real dirty-tracking loop would skip
                 // this when state is unchanged; the on-demand `Wait` control
                 // flow already keeps us from free-running.
                 //

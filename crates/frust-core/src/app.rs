@@ -362,7 +362,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// bit is pending, without clearing it.
     ///
     /// Complements [`take_change_flags`](RenderRoot::take_change_flags) for a
-    /// shell frame gate (spec §14 phase 7): the gate reads this as one of its
+    /// shell frame gate: the gate reads this as one of its
     /// "should this frame run" inputs *before* deciding, so a frame it chooses
     /// to skip leaves `pending` intact for the next non-skipped frame to drain
     /// and act on. Draining stays the job of `take_change_flags`, called only
@@ -385,7 +385,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Run `app_logic`, then build (first call) or rebuild (subsequent calls)
     /// the root widget, returning what changed.
     ///
-    /// `app_logic` is expected to be cheap and re-entrant (spec §5): it is
+    /// `app_logic` is expected to be cheap and re-entrant: it is
     /// re-run in full every rebuild.
     pub fn rebuild(
         &mut self,
@@ -454,7 +454,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// Lay out the root widget, threading a shared text-shaping context down to
-    /// text widgets (spec §10.3).
+    /// text widgets.
     ///
     /// `text_ctx` is the shell-owned `frust_text::TextContext`, passed
     /// type-erased so this crate needs no `frust-text` dependency. Text
@@ -510,8 +510,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// animation is in flight. It is also surfaced on the returned
     /// [`PaintOutcome::needs_layout`].
     ///
-    /// `frame_time` is the shell's shared monotonic clock for this frame (spec §8:
-    /// time enters `frust-core` from the shell, never `Instant::now()` here). It
+    /// `frame_time` is the shell's shared monotonic clock for this frame
+    /// (time enters `frust-core` from the shell, never `Instant::now()` here). It
     /// is seeded onto the root [`PaintCtx`] and threaded unchanged to every child
     /// ([`crate::widget::ChildPod::paint_child`]), so an animating widget advances
     /// against one consistent timestamp — see [`PaintCtx::frame_time`].
@@ -600,9 +600,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         }
     }
 
-    /// Collect the accessibility tree for the current frame (spec §9, phase-6c
-    /// D1), returning a [`SemanticsUpdate`] a platform adapter (`accesskit_*`,
-    /// phase 6d) can consume.
+    /// Collect the accessibility tree for the current frame,
+    /// returning a [`SemanticsUpdate`] a platform adapter (`accesskit_*`)
+    /// can consume.
     ///
     /// Pull-based and stateless: the shell calls this when a platform a11y client
     /// asks for the tree (or after a change), *never* per frame — this crate owns
@@ -692,7 +692,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ///
     /// Root capture bookkeeping mirrors the per-container `active`-child model: a
     /// `Down` whose dispatch requested capture marks a gesture in flight; `Up`
-    /// and `Cancel` release it (never a window-leave — see `research/RESEARCH.md`).
+    /// and `Cancel` release it (never a window-leave).
     ///
     /// # Reentrancy
     ///
@@ -1180,8 +1180,8 @@ mod tests {
 
     #[test]
     fn input_shields_arrive_in_order_and_clear_on_empty_pass() {
-        // The shield channel's half of the contract above (native-widgets
-        // p1-09): two shields reported in one pass both survive (the `Vec`
+        // The shield channel's half of the contract above:
+        // two shields reported in one pass both survive (the `Vec`
         // extend, not an `Option` overwrite), and a pass that reports none
         // replaces the collection rather than merging — a stale shield must
         // never keep stealing input from an interactive slot.
@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn retired_platform_views_drain_exactly_once() {
-        // The prompt-teardown channel (native-widgets p1-09): a reported slot
+        // The prompt-teardown channel: a reported slot
         // id is handed to the shell once and then gone, mirroring
         // `take_change_flags`. Serialized against the other test touching the
         // process-wide list (see `RETIRE_TEST_LOCK`).

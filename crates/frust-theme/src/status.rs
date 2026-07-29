@@ -1,5 +1,5 @@
 //! [`StatusPalette`]: success/warning/info color roles as a
-//! [`crate::extensions::ThemeExtensions`] consumer (PLAN.md Phase 2 step 3).
+//! [`crate::extensions::ThemeExtensions`] consumer.
 //!
 //! Material 3's baseline 46-role [`crate::color::ColorScheme`] has no
 //! `success`/`warning`/`info` roles at all — only `error`. Google's own

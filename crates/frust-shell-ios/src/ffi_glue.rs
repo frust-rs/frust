@@ -17,19 +17,19 @@
 //! `IosAppHandle::attach_accessibility`), `Box::into_raw`/`from_raw` for the
 //! opaque handle's lifetime, reconstituting the raw handle pointer as a `&mut`,
 //! the `unsafe impl Send` for [`SendableMetalLayer`] — the raw `CAMetalLayer*`
-//! that crosses the UI→render channel in the split (plan phase 11.B) — and the
+//! that crosses the UI→render channel in the split — and the
 //! render-thread QoS self-boost `libc::pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)`
-//! at the top of [`render_loop`] (phase-11 fix F6: a bare libc call operating on
+//! at the top of [`render_loop`] (a bare libc call operating on
 //! the calling thread only, best-effort and non-fatal).
 //!
-//! # Render-thread split (plan phase 11.B)
+//! # Render-thread split
 //!
 //! When [`render_thread_enabled`](frust_shell_common::render_thread_enabled) is
 //! set (the default; `FRUST_NO_RENDER_THREAD` opts out), [`create_handle`] spawns
 //! the dedicated [`render_loop`] thread that owns the `RenderContext`/
 //! `SurfaceRenderer` + surface and runs encode→acquire→submit; the UI thread
 //! (CADisplayLink ticks) keeps rebuild→layout→paint and hands finished scenes
-//! across the channel. Three iOS-specific contracts (RESEARCH Q9):
+//! across the channel. Three iOS-specific contracts:
 //!
 //! - **Drawable acquisition moves to the render thread** — `nextDrawable` now runs
 //!   off the UIKit main thread, so each frame's GPU work is wrapped in an
@@ -83,14 +83,14 @@ use crate::ffi_support::{CaretRect, publish_resolved_translucency};
 /// shell's `SPAN_FONT_PREINIT_STARTED`/`SPAN_FONT_PREINIT_JOINED` pair.
 const SPAN_FONT_PREINIT_STARTED: &str = "font_preinit_started";
 
-/// Startup-span name (phase 10.D): the background font-preload join returned —
+/// Startup-span name: the background font-preload join returned —
 /// the pre-built [`TextContext`] was adopted, or `create_handle` fell back to
 /// a synchronous [`TextContext::new`]. See [`SPAN_FONT_PREINIT_STARTED`].
 const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
 
 /// A minimal `log::Log` writing to stderr, installed once in [`init`].
 ///
-/// Rationale (RESEARCH.md): `simctl launch --console-pty` captures a simulator
+/// Rationale: `simctl launch --console-pty` captures a simulator
 /// process's stdout/stderr directly, so unified logging (`os_log`) is
 /// unnecessary — a stderr sink is enough and adds zero new dependencies.
 struct StderrLogger {
@@ -157,7 +157,7 @@ unsafe fn handle_mut<'a>(handle: *mut c_void) -> Option<&'a mut IosAppHandle> {
 }
 
 /// `frust_init`: build the native handle for the app's `CAMetalLayer` and
-/// return it to Swift as an opaque pointer (spec §10.2).
+/// return it to Swift as an opaque pointer.
 ///
 /// `make_app` is supplied by the macro and erases the app's `State`/`app_logic`;
 /// on any failure (null layer, GPU init error, panic) returns null, matching
@@ -503,7 +503,7 @@ pub(crate) fn render_loop(
                     ack.acknowledge();
                 }
                 RenderCommand::Pause { ack } => {
-                    // The iOS backgrounding barrier (plan Risks / RESEARCH Q9):
+                    // The iOS backgrounding barrier:
                     // `next_render_phase` has already moved us to `Paused`, so no
                     // scene handed off from here on is submitted. Acknowledge only
                     // now — so `frust_pause` returns (and the app may background)
@@ -618,7 +618,7 @@ fn create_handle(
     scale: f32,
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> Result<*mut c_void> {
-    // Startup-span recorder (spec §14 phase 7.A task 09): begins its epoch
+    // Startup-span recorder: begins its epoch
     // right here. Every call against it is a no-op when perf instrumentation
     // is disabled (see `perf::enabled`). There is no iOS-side hook for
     // `SPAN_NATIVE_LIB_LOAD` — by the time this function runs, the dylib is
@@ -1051,9 +1051,9 @@ pub fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
 /// `timestamp_ns` is the `CADisplayLink` tick's `timestamp` (`CFTimeInterval`
 /// seconds), converted to nanoseconds by the Swift caller
 /// (`UInt64(link.timestamp * 1_000_000_000)`) — the shell-owned monotonic
-/// frame clock threaded into [`frust_core::FrameTime`] (spec §8).
+/// frame clock threaded into [`frust_core::FrameTime`].
 ///
-/// Returns a `u8` (phase-11 fix F2): [`FRAME_FATAL`](crate::ffi_support::FRAME_FATAL)
+/// Returns a `u8`: [`FRAME_FATAL`](crate::ffi_support::FRAME_FATAL)
 /// (`0`) = a fatal render-thread failure (first-surface install could not
 /// succeed — see [`render_loop`]/[`IosAppHandle::render_fatal`]), on which Swift's
 /// `renderFrame` latches `initFailed` and invalidates its `CADisplayLink`;
@@ -1087,14 +1087,14 @@ pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) -> u8 {
             // render-side inside `render_scene` (the render thread is the single perf
             // emitter); in the inline path it is recorded there too, since both paths
             // share `render_scene`. So `frame` returns nothing — the liveness signal
-            // comes from the fatal flag the render thread sets (phase-11 fix F2).
+            // comes from the fatal flag the render thread sets.
             app.frame(timestamp_ns);
             crate::ffi_support::frame_liveness_signal(app.render_fatal())
         },
     )
 }
 
-/// `frust_dispatch_touch`: deliver one touch contact to the tree (spec §9).
+/// `frust_dispatch_touch`: deliver one touch contact to the tree.
 ///
 /// `phase` is the fixed code the Swift `FrustView` touch overrides send
 /// (`0`=began, `1`=moved, `2`=ended, `3`=cancelled — see
@@ -1115,8 +1115,8 @@ pub fn dispatch_touch(handle: *mut c_void, phase: u32, x: f32, y: f32) {
 }
 
 /// `frust_ime_apply`: push a whole editing state from the Swift `UITextInput`
-/// mirror into the focused widget (the mobile state-sync path — spec §9 / Phase
-/// 4B). Routed to the focused widget as an `ImeEvent::ApplyEditingState` via
+/// mirror into the focused widget (the mobile state-sync path). Routed to the
+/// focused widget as an `ImeEvent::ApplyEditingState` via
 /// [`AppTree::ime_apply`].
 ///
 /// `text` is the mirror's UTF-8 bytes; `sel_*`/`comp_*` are **UTF-16 code-unit**
@@ -1288,8 +1288,8 @@ pub fn set_appearance(handle: *mut c_void, dark: u8) {
     });
 }
 
-/// `frust_set_insets`: deliver the platform's window insets (device-parity
-/// task 06 — RESEARCH.md "Insets / SafeArea"). The eight `f32`s are two per-edge
+/// `frust_set_insets`: deliver the platform's window insets. The eight `f32`s
+/// are two per-edge
 /// sets in the order [`logical_insets`](frust_shell_common::logical_insets)
 /// expects — `view_padding` (`vp_*`: Swift assembles this from the view's
 /// `safeAreaInsets`) then `view_insets` (`vi_*`: the keyboard frame), each
@@ -1373,9 +1373,9 @@ pub fn on_deep_link(handle: *mut c_void, url: *const c_char) {
 /// no-argument export — a caller-side no-op branch on a live handle isn't
 /// needed either way since the read never touches it.
 ///
-/// # iOS semantic mapping (RESEARCH.md §6)
+/// # iOS semantic mapping
 ///
-/// `FrustViewController` (task 14) decodes the returned `u64` and, on a
+/// `FrustViewController` decodes the returned `u64` and, on a
 /// generation change, stores the decoded flags and calls
 /// `setNeedsStatusBarAppearanceUpdate()` / `setNeedsUpdateOfHomeIndicatorAutoHidden()`
 /// so UIKit re-queries `prefersStatusBarHidden`/`prefersHomeIndicatorAutoHidden`
@@ -1401,7 +1401,7 @@ pub fn system_ui_state(handle: *mut c_void) -> u64 {
 }
 
 /// `frust_set_surface_mode`: declare the process-wide translucent-surface
-/// latch (platform-views task 06) — see
+/// latch — see
 /// `frust_shell_common::surface_mode`'s module docs for the one-way,
 /// pre-surface-creation latch contract. `translucent` is `0`/`1` (no
 /// `<stdbool.h>` precedent in this crate's ABI — mirrors
@@ -1434,22 +1434,20 @@ pub fn set_surface_mode(translucent: u8) {
     });
 }
 
-/// The process-global present-sync latch (camera task 13), written by
+/// The process-global present-sync latch, written by
 /// [`set_present_sync`] and read once per handle in [`create_handle`].
 ///
 /// Deliberately **iOS-local** rather than a `frust-shell-common` module beside
 /// `surface_mode`: the two platforms need opposite corrections for the same
 /// defect — Android delays the *view* to meet the surface (the frame-id gate),
 /// iOS delays the *surface* to meet the view — so a shared "platform-view sync"
-/// knob would be structurally wrong (PLAN.md's no-shared-knob constraint,
-/// `research/SPIKE-SYNC.md` §3.4.1). Nothing outside this shell can observe or
+/// knob would be structurally wrong. Nothing outside this shell can observe or
 /// set it.
 static PRESENT_SYNC: AtomicBool = AtomicBool::new(false);
 
 /// `frust_set_present_sync`: declare that this host presents the frust surface
-/// inside the `CATransaction` that commits hosted platform-view geometry
-/// (camera task 13) — the iOS shipping form of `research/SPIKE-SYNC.md`'s rung
-/// 1, **with the render-thread split left on**.
+/// inside the `CATransaction` that commits hosted platform-view geometry,
+/// **with the render-thread split left on**.
 ///
 /// `enabled` is `0`/`1` (the same no-`<stdbool.h>` convention as
 /// [`set_surface_mode`]/[`set_appearance`]). Takes no handle: the slot is

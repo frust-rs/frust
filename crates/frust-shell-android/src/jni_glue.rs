@@ -195,11 +195,11 @@ fn surface_alpha_request() -> frust_render::SurfaceAlphaRequest {
 }
 
 /// `JNI_OnLoad`: the JVM calls this once when the native library is loaded, well
-/// before the first `nativeInit` (task 19, spec §14 phase 7.E). It captures the
-/// [`JavaVM`](jni::JavaVM) pointer for the plugin platform bridge (task 01 —
-/// stashed in [`JAVA_VM`] for [`native_init_platform`]) and kicks off the
+/// before the first `nativeInit`. It captures the
+/// [`JavaVM`](jni::JavaVM) pointer for the plugin platform bridge
+/// (stashed in [`JAVA_VM`] for [`native_init_platform`]) and kicks off the
 /// background GPU pre-init so wgpu adapter/device creation overlaps the JVM's
-/// own Activity/Surface bring-up, plus the font-preload pre-init (phase 10.D)
+/// own Activity/Surface bring-up, plus the font-preload pre-init
 /// so the `TextContext`/font-DB build overlaps the same window.
 ///
 /// Defined here in the shell crate (not in the [`crate::android_app!`] macro)
@@ -560,8 +560,8 @@ fn install_surface(
 
     // SAFETY: `window_ptr` is a valid, acquired `ANativeWindow*` the UI thread's
     // `NativeWindow` (in `AndroidAppHandle`) keeps alive until it receives this
-    // surface's `SurfaceDestroyed` ack — so it outlives the surface created here
-    // (spec §8.1). See `SendableWindowPtr`'s safety docs for the full contract.
+    // surface's `SurfaceDestroyed` ack — so it outlives the surface created here.
+    // See `SendableWindowPtr`'s safety docs for the full contract.
     pollster::block_on(unsafe {
         renderer.on_surface_created_from_android_window(
             render_cx,
@@ -830,13 +830,13 @@ unsafe fn handle_mut<'a>(handle: jlong) -> Option<&'a mut AndroidAppHandle> {
 }
 
 /// `nativeInit`: build the native handle for the first surface and return it to
-/// the JVM as an opaque `jlong` (spec §10.1).
+/// the JVM as an opaque `jlong`.
 ///
 /// `make_app` is supplied by the macro and erases the app's `State`/`app_logic`;
 /// on any failure (null window, GPU init error, panic) returns `0`, matching
 /// Kotlin's "no native side yet" sentinel.
 ///
-/// `cache_dir` is the app's `context.cacheDir.absolutePath` (task 13), read into
+/// `cache_dir` is the app's `context.cacheDir.absolutePath`, read into
 /// a Rust `String` up front — before the surface handle is touched below — so
 /// the `env` borrow is released early (mirrors [`native_ime_apply`]'s string
 /// read). It is used to persist the wgpu pipeline cache across launches; an
@@ -868,8 +868,8 @@ pub fn native_init(
 /// Fallible body of [`native_init`], separated so the happy path reads top-down.
 ///
 /// `cache_dir` (when `Some`) is the app cache directory the pipeline-cache blob
-/// is loaded from before GPU init and saved back to after renderer creation
-/// (task 13, spec §14 phase 7.B) — best-effort and Vulkan-only.
+/// is loaded from before GPU init and saved back to after renderer creation —
+/// best-effort and Vulkan-only.
 fn create_handle(
     env: &EnvUnowned,
     surface: &JObject,
@@ -877,13 +877,13 @@ fn create_handle(
     cache_dir: Option<String>,
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> Result<jlong> {
-    // Mark that a surface has begun being created in this process (task 05):
+    // Mark that a surface has begun being created in this process:
     // read by `native_set_surface_mode` to warn on a too-late latch call. Set
     // unconditionally here, before the fallible steps below, since the latch
     // contract only cares "was init attempted", not whether it succeeded.
     ANY_SURFACE_CREATED.store(true, Ordering::Release);
 
-    // Cold-start span recorder (task 08, spec §14 phase 7.A). `begin()` marks
+    // Cold-start span recorder. `begin()` marks
     // the epoch; every span below is a delta from here, closed out by the first
     // successful render. A no-op recorder (allocates nothing further) when
     // `perf::enabled()` is false.
@@ -986,8 +986,8 @@ fn create_handle(
 /// plus the joined [`TextContext`] the handle needs for layout.
 ///
 /// `cache_dir` (when `Some`) is the app cache directory the pipeline-cache blob
-/// is loaded from before GPU init and saved back to after renderer creation
-/// (task 13, spec §14 phase 7.B) — best-effort and Vulkan-only.
+/// is loaded from before GPU init and saved back to after renderer creation —
+/// best-effort and Vulkan-only.
 fn build_inline_executor(
     mut startup_spans: StartupSpans,
     window: &NativeWindow,
@@ -1033,7 +1033,7 @@ fn build_inline_executor(
 
     // SAFETY: `window_ptr` comes from `window`, which is moved into the returned
     // `AndroidAppHandle` and (by that struct's `executor`-before-`window`
-    // field-drop order) outlives the surface and all its textures (spec §8.1).
+    // field-drop order) outlives the surface and all its textures.
     pollster::block_on(unsafe {
         renderer.on_surface_created_from_android_window(
             &mut render_cx,
@@ -1292,7 +1292,7 @@ pub fn native_on_surface_changed(
     });
 }
 
-/// `nativeOnSurfaceDestroyed`: drop the surface and release its window (spec §8.1).
+/// `nativeOnSurfaceDestroyed`: drop the surface and release its window.
 pub fn native_on_surface_destroyed(handle: jlong) {
     guard("nativeOnSurfaceDestroyed", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -1312,7 +1312,7 @@ pub fn native_on_surface_destroyed(handle: jlong) {
 /// driving frames, `false` = a **fatal** render-thread failure (a first-surface
 /// install that could not succeed — see [`render_loop`]/[`AndroidAppHandle::render_fatal`]),
 /// on which Kotlin's `doFrame` stops the Choreographer loop rather than driving
-/// doomed frames against a permanent black screen (phase-11 fix F2). This is a
+/// doomed frames against a permanent black screen. This is a
 /// signature-shape change moving in lockstep with the Kotlin `external`
 /// declaration (the JNI symbol name is unchanged), following the
 /// `nativeOnSurfaceChanged`-density precedent.
@@ -1331,7 +1331,7 @@ pub fn native_on_frame(handle: jlong, frame_time_nanos: jlong) -> jboolean {
     })
 }
 
-/// `nativeOnTouch`: deliver one touch contact to the tree (spec §9).
+/// `nativeOnTouch`: deliver one touch contact to the tree.
 ///
 /// `action` is the normalised phase code the Kotlin side sends
 /// (`0`=down, `1`=move, `2`=up, `3`=cancel — see
@@ -1391,7 +1391,7 @@ pub fn native_on_destroy(handle: jlong) {
 }
 
 /// `nativeImeApply`: push a whole platform editing state into the focused widget
-/// (the mobile IME state-sync path, spec §14 Phase 4).
+/// (the mobile IME state-sync path).
 ///
 /// `text` is the Kotlin mirror `Editable`'s content, read into a Rust `String`
 /// (Java MUTF-8/UTF-16 → UTF-8) through the JNI string API. The four indices are
@@ -1728,7 +1728,7 @@ pub fn native_on_deep_link(mut env: EnvUnowned, handle: jlong, url: JString) {
 }
 
 /// `nativeOnInsetsChanged`: deliver the platform window insets (device px) into
-/// the retained tree (device-parity task 06, RESEARCH.md "Insets / SafeArea").
+/// the retained tree.
 ///
 /// The eight `jfloat`s are two per-edge sets in the order `WindowInsets` /
 /// [`logical_insets`](frust_shell_common::logical_insets) expect —
@@ -1740,7 +1740,7 @@ pub fn native_on_deep_link(mut env: EnvUnowned, handle: jlong, url: JString) {
 /// the render root ([`AndroidAppHandle::set_insets`]), which skips a no-op push
 /// (`WindowInsets` is `PartialEq`) and, on a real change, marks `LAYOUT | PAINT`
 /// pending so the next frame relayouts — the same dirtiness path a `set_theme`
-/// uses (task 01), so no new frame-gate input is needed. A missing handle is a
+/// uses, so no new frame-gate input is needed. A missing handle is a
 /// no-op (Kotlin only pushes insets after `nativeInit` yields a live handle).
 #[allow(clippy::too_many_arguments)]
 pub fn native_on_insets_changed(
@@ -1771,15 +1771,15 @@ pub fn native_on_insets_changed(
     });
 }
 
-/// `nativeOnBackPress`: the Android hardware/gesture back contract (device-parity
-/// task 06, RESEARCH.md "Android back"). Returns whether the framework consumed
+/// `nativeOnBackPress`: the Android hardware/gesture back contract. Returns
+/// whether the framework consumed
 /// the press: `JNI_TRUE` (this `jni`'s `jboolean` is a real `bool`) means Kotlin
 /// should NOT finish the activity — the framework will pop on its next rebuild;
 /// `JNI_FALSE` lets the default `OnBackPressedDispatcher` run (activity finish).
 ///
 /// The read of [`handles_back`] is synchronous while the [`push_back_press`] pop
 /// is applied on the next rebuild. [`handles_back`] consults the facade's live
-/// can-pop provider (device-parity fix F2 — see `frust_reactive::back`'s
+/// can-pop provider (see `frust_reactive::back`'s
 /// timing note), so it reflects the navigator's CURRENT stack depth at press
 /// time rather than a stale previous-frame snapshot: a press arriving right
 /// after a page push is decided against the real depth, not a rebuild-time flag
@@ -1804,7 +1804,7 @@ pub fn native_on_back_press(handle: jlong) -> jboolean {
 }
 
 /// `nativeInitAccessibility`: attach the accesskit Android adapter to the host
-/// `FrustSurfaceView` (phase 6d D3, spec §9). Called by Kotlin's
+/// `FrustSurfaceView`. Called by Kotlin's
 /// `surfaceCreated` right after a successful `nativeInit`, passing the view
 /// (`this`) as the accessibility host.
 ///

@@ -3,7 +3,7 @@
 //! background-blur intent, translucent fill washes for over-light and
 //! over-dark content, a specular hairline alpha, and a drop [`ShadowSpec`].
 //!
-//! This is **pure data**: no widget consumes it yet (a later wave paints
+//! This is **pure data**: no widget consumes it yet (a future update paints
 //! from it), and no blur is rendered here. A [`Theme`](crate::theme::Theme)
 //! carries one `GlassScale` regardless of design language so a widget can
 //! read a single API on either — [`GlassScale::ios27`] encodes the kit
@@ -12,8 +12,7 @@
 //!
 //! # Source
 //!
-//! Recipes mined from the iOS 27 "Liquid Glass" kit into
-//! `workflow/plans/features/frust-phase-6f-design-modernization/research/glass-recipes.json`
+//! Recipes mined from the iOS 27 "Liquid Glass" kit
 //! (584 records, retrieved 2026-07-17). The three canonical tiers below are
 //! the json's dominant fill stacks per corner-radius family (fill `rgb`
 //! values are 0-1 floats, `a` the wash alpha):

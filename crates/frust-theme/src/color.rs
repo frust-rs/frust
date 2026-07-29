@@ -4,11 +4,10 @@
 //! Values sourced from Google's Material 3 design-system tokens v0.192
 //! (`material-components/material-web`
 //! `tokens/versions/v0_192/_md-sys-color.scss` +
-//! `_md-ref-palette.scss`), resolved 2026-07-17, seed color `#6750A4`. See
-//! `workflow/plans/features/frust-phase-6a-foundations/research/RESEARCH.md`
-//! §Q5 for the role-count verification (47 non-deprecated roles counting
+//! `_md-ref-palette.scss`), resolved 2026-07-17, seed color `#6750A4`.
+//! Role-count verification: 47 non-deprecated roles counting
 //! `brightness` on [`crate::theme::Theme`]; 46 of those are `Color` fields
-//! here).
+//! here.
 //!
 //! `background`/`onBackground`/`surfaceVariant` are **not implemented** —
 //! Material 3 deprecated all three in favor of `surface`/`onSurface` and the
@@ -20,17 +19,12 @@
 //! [`ColorScheme::cupertino_light`]/[`ColorScheme::cupertino_dark`] fill the
 //! same 46 `Color` fields from Apple's iOS semantic color palette instead of
 //! the M3 tokens above — `ColorScheme` itself stays a single, fixed-role,
-//! design-language-agnostic struct (spec §17.1); see
+//! design-language-agnostic struct; see
 //! [`crate::theme::DesignLanguage`] for the tag a [`crate::theme::Theme`]
-//! carries to say which baseline it was built from. Sources (retrieved
-//! 2026-07-17, per
-//! `workflow/plans/features/frust-phase-6c-widget-catalog/research/RESEARCH.md`'s
-//! `cupertino-tokens-idioms` claims and its R19/R20/R22 refuted-claims
-//! corrections), **refreshed 2026-07-18** against the mined swatches in
-//! `workflow/plans/features/frust-phase-6f-design-modernization/research/kit-colors-type-metrics.json`
+//! carries to say which baseline it was built from. Sources retrieved
+//! 2026-07-17, **refreshed 2026-07-18** against mined swatches
 //! (Apple iOS 27 UI Kit, 107 named swatches across System Colors/Labels/
-//! Fills/Backgrounds/Separators/Grays/Liquid Glass/Fills-Vibrant — see that
-//! phase's `research/RESEARCH.md` §sketch-kit-token-mining) — every role
+//! Fills/Backgrounds/Separators/Grays/Liquid Glass/Fills-Vibrant) — every role
 //! below notes whether the 2026-07-18 kit value confirmed or changed the
 //! 2026-07-17 one:
 //!

@@ -61,10 +61,10 @@ use crate::sync_tail::{ScrollSyncTail, TailSignals};
 /// from `window`'s raw pointer, and — inline — owns the `SurfaceRenderer`
 /// directly) is declared before `window`, so on drop the executor is torn down
 /// (the split's `Drop` joins the render thread, dropping its surface) before the
-/// [`NativeWindow`] it borrows is released (spec §8.1: no surface outlives its
-/// window).
+/// [`NativeWindow`] it borrows is released: no surface outlives its
+/// window.
 pub struct AndroidAppHandle {
-    /// The render-path half of the frame loop (plan phase 11.B): either the
+    /// The render-path half of the frame loop: either the
     /// render-thread split ([`FrameExecutor::Split`], the default) — where a
     /// dedicated thread owns the [`RenderContext`]/[`SurfaceRenderer`] + surface
     /// and the UI thread only hands it finished scenes — or the pre-split inline
@@ -89,8 +89,8 @@ pub struct AndroidAppHandle {
     /// [`FrameInputs::signals_dirty`]. Without this wrap a completed async load's
     /// signal write notifies no subscriber, so `signals_dirty` never trips and
     /// the frame gate skips the frame that would paint the loaded content until a
-    /// touch forces a `Run` — the device-only "channel stuck on loading" stall
-    /// (see device-parity task 09's root-cause). Mirrors the desktop shell's
+    /// touch forces a `Run` — the device-only "channel stuck on loading" stall.
+    /// Mirrors the desktop shell's
     /// `ShellHandler::scope` (`frust-shell-desktop/src/app_handler.rs`):
     /// persistent across frames (not per-frame constructed) and re-tracked from
     /// scratch each `track`, so the sources frame N subscribes wake frame N+1.
@@ -105,20 +105,20 @@ pub struct AndroidAppHandle {
     /// (see the struct doc): its `Drop` calls `ANativeWindow_release`.
     window: Option<NativeWindow>,
     /// The app's active theme (M3 baseline). Mirrors the desktop shell's
-    /// appearance ownership (task 05): starts [`Brightness::Light`] here and is
+    /// appearance ownership: starts [`Brightness::Light`] here and is
     /// flipped by [`Self::set_appearance`] once Kotlin reports the platform's
     /// real dark-mode preference (`nativeSetAppearance`, called right after
     /// `nativeInit` returns a handle — see `platform/android/frust-embedding/src/main/kotlin/dev/frust/
     /// FrustSurfaceView.kt`'s `surfaceCreated`).
     theme: Theme,
-    /// The last window insets pushed to the render root (device-parity task 06),
-    /// in logical px. Retained so [`Self::set_insets`] can skip a no-op push
+    /// The last window insets pushed to the render root, in logical px.
+    /// Retained so [`Self::set_insets`] can skip a no-op push
     /// (`WindowInsets` is `PartialEq`) — both the `RenderRoot::set_insets` relayout
     /// and the app-side `provide_context` re-provide only fire on a real change.
     /// Starts zero (no occlusion) until Kotlin's first `nativeOnInsetsChanged`.
     insets: WindowInsets,
     /// Polls the process-wide app-facing theme override slot
-    /// (`frust::set_app_theme`/`clear_app_theme`, task 6c-04) once per
+    /// (`frust::set_app_theme`/`clear_app_theme`) once per
     /// frame (see [`Self::frame`]) — see
     /// `frust_shell_common::theme_override`'s module docs.
     theme_override: ThemeOverrideWatcher,
@@ -141,7 +141,7 @@ pub struct AndroidAppHandle {
     /// `Drop` detaches the delegate through its own retained `JavaVM`, touching
     /// neither the surface nor the window.
     a11y: Option<AndroidA11y>,
-    /// The skip-frame gate (task 17, spec §14 phase 7): consulted once per
+    /// The skip-frame gate: consulted once per
     /// [`Self::frame`] after the per-tick inputs are gathered. When it returns
     /// [`FrameDecision::Skip`](frust_shell_common::FrameDecision::Skip) the
     /// frame's rebuild/layout/paint/encode/present passes are all skipped and
@@ -195,7 +195,7 @@ pub struct AndroidAppHandle {
     /// gated on the drained [`ChangeFlags`](frust_core::view::ChangeFlags)
     /// (or a surface resize).
     first_layout_done: bool,
-    /// Pointer-event resampler (plan phase 10.C.1): buffers raw touch samples and
+    /// Pointer-event resampler: buffers raw touch samples and
     /// emits frame-boundary-interpolated `Move`s (Down/Up/Cancel pass through
     /// losslessly). When disabled (the `FRUST_NO_RESAMPLE` kill switch, resolved
     /// once at construction) [`Self::dispatch_touch`] delivers touches directly,
@@ -217,17 +217,17 @@ pub struct AndroidAppHandle {
     /// nothing on the hot path.
     pointer_scratch: Vec<PointerEvent>,
     /// The previous Choreographer tick's `frameTimeNanos`, for the deadline-
-    /// aware pacing estimate (plan phase 10.C.2): the tick-to-tick delta is this
+    /// aware pacing estimate: the tick-to-tick delta is this
     /// frame's deadline budget (see [`resample::frame_interval_nanos`]). `None`
     /// before the first frame.
     last_frame_time_nanos: Option<u64>,
     /// Running count of frames whose measured work (rebuild+layout+paint+encode,
-    /// excluding the vsync present wait) overran the frame-target deadline
-    /// (plan phase 10.C.2). **Instrumentation only** — accumulated and logged
+    /// excluding the vsync present wait) overran the frame-target deadline.
+    /// **Instrumentation only** — accumulated and logged
     /// (`frust-perf deadline`) behind [`perf::enabled`]; it never drops or
     /// reshapes work.
     deadline_overruns: u64,
-    /// The differ (platform-views task 03/05) turning this handle's
+    /// The differ turning this handle's
     /// published `PlatformViewFrame`s into the idempotent [`ViewCommand`]
     /// backlog `nativePlatformViewCommands` serves to Kotlin's per-frame
     /// poll. Ingested once per RUN frame, right after paint (see
@@ -238,7 +238,7 @@ pub struct AndroidAppHandle {
     /// force-hidden on backgrounding via [`Self::suspend_platform_views`]
     /// (`nativeOnPause`).
     platform_view_state: PlatformViewState,
-    /// The release gate's frame pairing (camera task 01): which frust frame
+    /// The release gate's frame pairing: which frust frame
     /// produced each of the differ's command batches, so
     /// [`Self::platform_view_commands`] hands Kotlin only the batches whose
     /// geometry is already **on screen**. Recorded right after each RUN frame's
@@ -249,10 +249,10 @@ pub struct AndroidAppHandle {
     ///
     /// Always on: a hosted view otherwise runs 3–5 frames ahead of the frust
     /// content it is pinned to while scrolling, and the gate measured strictly
-    /// better than the ungated path on both Phase-0 test devices with zero
-    /// overshoot on either (SPIKE-SYNC §2.5/§2.6.1) — so there is no dial.
+    /// better than the ungated path on both test devices with zero
+    /// overshoot on either — so there is no dial.
     platform_view_due: FramePairing,
-    /// The shape-aware tail stacked on top of that gate (camera task 12): a
+    /// The shape-aware tail stacked on top of that gate: a
     /// regime-gated, frame-timeline-derived hold that closes the compositor-queue
     /// residual the gate cannot see, and applies **only** while the surface is
     /// acquire-bound (where that residual is constant-shaped). Ticked once per
@@ -334,19 +334,18 @@ pub(crate) enum FrameExecutor {
 /// Three values, because they answer three different questions and none can
 /// substitute for another:
 ///
-/// - `count` — **how many** frames reached the screen (task 10), pushed into
+/// - `count` — **how many** frames reached the screen, pushed into
 ///   `AppTree::set_presented_frames` so an FPS-measuring widget reports the
 ///   presented rate rather than the Choreographer's paint cadence.
 /// - `frame_id` — **which** frame is on screen, the platform-view release
 ///   gate's input ([`AndroidAppHandle::platform_view_commands`]). The count
 ///   cannot answer this: the UI→render channel is depth-1 latest-wins, so
 ///   scenes the UI thread submitted are routinely overtaken and never rendered,
-///   and the two clocks drift apart by exactly the dropped frames (SPIKE-SYNC
-///   §2.5).
+///   and the two clocks drift apart by exactly the dropped frames.
 /// - `acquire_ewma_us` — **how deep the swapchain queue is**, as the wait the
 ///   render tail spends inside `acquire` (a quarter-weight EWMA in µs). This is
 ///   the regime discriminator the shape-aware scroll-sync tail switches on
-///   (camera task 12, [`crate::sync_tail`]): acquire-bound means every frame is
+///   ([`crate::sync_tail`]): acquire-bound means every frame is
 ///   equally late behind the same queue — a constant-shaped residual a hold can
 ///   close — while submit-bound means there is no queue to correct for. An
 ///   `Arc` field beside the two above, deliberately not the spike's
@@ -1097,16 +1096,16 @@ impl AndroidAppHandle {
 
         app.set_theme(Box::new(theme.clone()));
         // Thread the surface's RESOLVED translucency into the render root so
-        // the platform-view hole-punch clears each Mode B slot's rect (research
-        // VERIFY.md D1) — and only when the surface really came up translucent
-        // (review M1). At construction the split's surface may still be
+        // the platform-view hole-punch clears each Mode B slot's rect — and
+        // only when the surface really came up translucent, not merely
+        // requested. At construction the split's surface may still be
         // installing render-side, so this reads the request-seeded flag; the
         // per-frame `sync_translucent_resolved` below re-reads it every frame
         // and downgrades within one frame of a fallback.
         let resolved_translucent =
             crate::ffi_support::read_resolved_translucency(&translucent_resolved);
         app.set_surface_translucent(resolved_translucent);
-        // Seed the app-facing RESOLVED slot from that same value (task p1-01),
+        // Seed the app-facing RESOLVED slot from that same value,
         // so app/plugin code reading `frust::resolved_surface_mode()` during
         // the very first rebuild below sees a real verdict rather than
         // `Unknown`. Re-published every frame by `sync_translucent_resolved`.
@@ -1176,7 +1175,7 @@ impl AndroidAppHandle {
     /// a downgrade repaint without the punch).
     ///
     /// Also the shell's single publish point for the app-facing RESOLVED slot
-    /// (`frust::resolved_surface_mode()`, task p1-01): app code polls that slot
+    /// (`frust::resolved_surface_mode()`): app code polls that slot
     /// during rebuild, so it has to be current *before* the rebuild this frame
     /// leads into — publishing here rather than at the install sites keeps one
     /// UI-thread beat as the source for both consumers (the render root and the
@@ -1414,17 +1413,17 @@ impl AndroidAppHandle {
         self.frame_gate.note_resumed();
         // The old surface (and everything Kotlin's `FrustSurfaceView` composited
         // behind it) is gone — replay Create+Update for every currently-live
-        // platform-view slot (task 05) so the native side rebuilds its whole
+        // platform-view slot so the native side rebuilds its whole
         // sibling-view hierarchy from scratch rather than assuming any prior
         // placement survived. The replay supersedes every held batch, and the
         // frames those batches were paired with belong to the surface that just
-        // went away — so the pairing goes with it (camera task 01).
+        // went away — so the pairing goes with it.
         self.platform_view_state.reset_for_surface_recreate();
         self.platform_view_due.clear();
         // ...and with it the tail's hold: neither stage may outlive the
-        // frames it refers to (camera task 12, mirroring the pairing above).
+        // frames it refers to (mirroring the pairing above).
         self.sync_tail.clear();
-        // The new surface re-resolves its alpha mode from scratch (review M1);
+        // The new surface re-resolves its alpha mode from scratch;
         // the render thread stores the outcome when it installs. Re-push
         // whatever is known now — the next `frame` re-reads it, so a
         // downgrade lands within one frame of the install.
@@ -1435,10 +1434,10 @@ impl AndroidAppHandle {
     ///
     /// Assigning `window` last drops the previous [`NativeWindow`] (releasing it)
     /// — safe here because the previous surface was already torn down inside the
-    /// preceding `on_surface_created_from_android_window` (spec §8.1).
+    /// preceding `on_surface_created_from_android_window`.
     ///
-    /// `density` is this configuration's `displayMetrics.density` (device-parity
-    /// task 06): stored raw and re-sanitized at every use (layout/paint/insets),
+    /// `density` is this configuration's `displayMetrics.density`: stored raw
+    /// and re-sanitized at every use (layout/paint/insets),
     /// so a config change that alters the device pixel ratio takes effect on the
     /// next frame. Stored raw for the same reason `nativeInit`'s `scale` is —
     /// `sanitize_scale` runs once per frame at the point of use.
@@ -1448,19 +1447,19 @@ impl AndroidAppHandle {
         self.window = Some(window);
         // Surface (re)creation: force the next frame to run (and lay out at the
         // new dimensions) and open the gate's resume-warmup window — the first
-        // ticks after a surface swap must not be gated away (task 17).
+        // ticks after a surface swap must not be gated away.
         self.surface_dirty = true;
         self.frame_gate.note_resumed();
         // See `split_recreate_surface`'s matching call: a new surface means a
-        // fresh native-view hierarchy on the Kotlin side (task 05), and the
+        // fresh native-view hierarchy on the Kotlin side, and the
         // release-gate pairing refers to the old surface's frames.
         self.platform_view_state.reset_for_surface_recreate();
         self.platform_view_due.clear();
         // ...and with it the tail's hold: neither stage may outlive the
-        // frames it refers to (camera task 12, mirroring the pairing above).
+        // frames it refers to (mirroring the pairing above).
         self.sync_tail.clear();
         // Inline recreate: the renderer on this thread already holds the new
-        // surface, so this reads its freshly RESOLVED translucency (review M1)
+        // surface, so this reads its freshly RESOLVED translucency
         // — a recreate that fell back to opaque degrades to Mode A here rather
         // than punching black holes for the rest of the process.
         self.sync_translucent_resolved();
@@ -1471,7 +1470,7 @@ impl AndroidAppHandle {
     /// split sends a [`RenderCommand::SurfaceChanged`] command.
     ///
     /// `density` re-sanitizes and stores the display's device pixel ratio for
-    /// this configuration (device-parity task 06 — see [`Self::set_window`]).
+    /// this configuration (see [`Self::set_window`]).
     pub(crate) fn resize_surface(&mut self, physical: (u32, u32), density: f32) {
         match &mut self.executor {
             FrameExecutor::Inline(inline) => {
@@ -1533,7 +1532,7 @@ impl AndroidAppHandle {
     }
 
     /// Tear the surface down (`surfaceDestroyed`): drop the surface **first**,
-    /// then release the [`NativeWindow`] it borrowed (spec §8.1).
+    /// then release the [`NativeWindow`] it borrowed.
     ///
     /// The ordering is a hard correctness contract in the render-thread split:
     /// the render thread owns the surface built from `self.window`'s raw pointer,
@@ -1541,11 +1540,11 @@ impl AndroidAppHandle {
     /// `SurfaceDestroyed` and **blocks until the render thread has acknowledged**
     /// dropping that surface. Only after that ack returns do we set
     /// `self.window = None`, releasing the `ANativeWindow` — so the render thread
-    /// can never touch the window after it is released (the plan's Android
+    /// can never touch the window after it is released (a known Android
     /// surface-lifecycle-race hazard). The inline path drops its surface
     /// synchronously above, so the same window-after-surface order holds there.
     /// Force every currently-visible platform-view slot to hide
-    /// (`nativeOnPause`, task 05) — delegates to
+    /// (`nativeOnPause`) — delegates to
     /// [`PlatformViewState::suspend_all`].
     pub(crate) fn suspend_platform_views(&mut self) {
         self.platform_view_state.suspend_all();
@@ -1555,19 +1554,19 @@ impl AndroidAppHandle {
         // barrier — drop it so the hide goes out on the next poll.
         self.platform_view_due.clear();
         // ...and with it the tail's hold: neither stage may outlive the
-        // frames it refers to (camera task 12, mirroring the pairing above).
+        // frames it refers to (mirroring the pairing above).
         self.sync_tail.clear();
     }
 
-    /// Peek the differ's releasable command backlog (task 05, gated by camera
-    /// task 01). The `nativePlatformViewCommands` JNI export's read half; pair
+    /// Peek the differ's releasable command backlog. The
+    /// `nativePlatformViewCommands` JNI export's read half; pair
     /// with [`Self::acknowledge_platform_view_commands`], called first per the
     /// differ's acknowledge-then-peek contract.
     ///
     /// Not the *whole* backlog: a batch is held until the frust frame that
     /// painted its geometry is actually on screen, so a hosted native view
     /// moves with the frust content it is pinned to instead of 3–5 frames ahead
-    /// of it while scrolling ([`Self::platform_view_due`], SPIKE-SYNC §2.5).
+    /// of it while scrolling (see [`Self::platform_view_due`]).
     /// Held commands are not lost — the poll is idempotent and re-serves them
     /// the moment their frame lands (or the moment the staleness escape hatch
     /// declares that frame dropped). Kotlin needs no change: it applies exactly
@@ -1636,7 +1635,7 @@ impl AndroidAppHandle {
         self.window = None;
     }
 
-    /// Deliver one touch contact to the tree (spec §9), converting the incoming
+    /// Deliver one touch contact to the tree, converting the incoming
     /// physical view-local coordinates into the logical space the tree lays out
     /// in — the same `sanitize_scale` value `frame()` uses, so hit-testing and
     /// layout never disagree.
@@ -1731,7 +1730,7 @@ impl AndroidAppHandle {
     ///
     /// `action` is retained for future differentiation; v1 configures only
     /// `IME_ACTION_DONE`, so every action maps to `Enter`. Reuses the same
-    /// focus-routed key path a hardware Enter would (spec §9), so a widget's
+    /// focus-routed key path a hardware Enter would, so a widget's
     /// submit/newline handling stays in one place.
     pub(crate) fn ime_action(&mut self, _action: i32) {
         let event = InputEvent::Key(KeyEvent {
@@ -1739,19 +1738,19 @@ impl AndroidAppHandle {
             modifiers: Modifiers::default(),
             repeat: false,
         });
-        // Frame-gate latch (task 17): a soft-keyboard action forces the next
+        // Frame-gate latch: a soft-keyboard action forces the next
         // frame to run (see `dispatch_touch`).
         self.events_since_last_frame = true;
         let _ = self.app.event(&event);
     }
 
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop
-    /// shell's `RedrawRequested` path (spec §8) but driven by Choreographer.
+    /// shell's `RedrawRequested` path but driven by Choreographer.
     ///
     /// `frame_time_nanos` is Kotlin's Choreographer `frameTimeNanos` for this
     /// tick (already clamped non-negative at the JNI boundary — see
     /// [`crate::jni_glue::native_on_frame`]), the shell-owned monotonic clock
-    /// threaded into [`FrameTime`] (spec §8: `frust-core` never reads a clock
+    /// threaded into [`FrameTime`] (`frust-core` never reads a clock
     /// itself).
     ///
     /// A no-op when the surface isn't `SurfaceReady` (Kotlin keeps posting frames
@@ -1759,7 +1758,7 @@ impl AndroidAppHandle {
     /// the machine has already dropped the surface; recovery waits for the next
     /// `surfaceChanged`/`surfaceCreated` rather than recreating mid-frame.
     ///
-    /// # Frame gate (task 17, spec §14 phase 7)
+    /// # Frame gate
     ///
     /// The pass order is contract-critical: **pump first**, then gather every
     /// [`FrameInputs`] signal, then [`FrameGate::decide`]. On a [`Skip`] the
@@ -1768,7 +1767,7 @@ impl AndroidAppHandle {
     /// as before, with the layout pass itself finer-gated on the drained
     /// [`ChangeFlags`](frust_core::view::ChangeFlags). Every input either
     /// reads a tree accessor or a handle-side latch cleared here — see the
-    /// inline comments at each gather site for the RESEARCH §C mapping.
+    /// inline comments at each gather site for what each signal means.
     ///
     /// The pump → gather → decide ordering and the latch lifecycle are asserted
     /// only by inspection, not a unit test: this whole module is
@@ -1778,23 +1777,23 @@ impl AndroidAppHandle {
     /// host-tested where it lives — `frust_shell_common::frame_gate`'s
     /// `decide`/warmup/kill-switch tests — so what stays unverified here is only
     /// the wiring, which the `cargo check --target aarch64-linux-android` gate
-    /// compile-checks and the manual 7.E device checklist exercises.
+    /// compile-checks and a manual device checklist exercises.
     ///
     /// [`Skip`]: frust_shell_common::FrameDecision::Skip
     /// [`Run`]: frust_shell_common::FrameDecision::Run
     pub(crate) fn frame(&mut self, frame_time_nanos: u64) {
         // ---------------------------------------------------------------
-        // Per-tick input gathering (contract order, task 17 / task 07):
+        // Per-tick input gathering (contract order):
         // pump FIRST, then gather every FrameInputs signal, THEN decide.
         // ---------------------------------------------------------------
 
-        // Advance the scroll-sync tail (camera task 12) ahead of EVERY early
+        // Advance the scroll-sync tail ahead of EVERY early
         // return in this function — the frame gate's skip, the surface-ready
         // bail — because a held geometry batch ages in **display** frames, and
         // the Choreographer keeps delivering those while frust produces
         // nothing. That is what makes the settle case structural: a batch left
         // over from the last frame of a fling lands on schedule even though the
-        // scroll produced no further frust frame (SPIKE-SYNC §2.4).
+        // scroll produced no further frust frame.
         let acquire_wait_us = self.executor.acquire_wait_us();
         let tail_trace = self.sync_tail.tick(TailSignals {
             frame_time_nanos: frame_time_nanos as i64,
@@ -1802,7 +1801,7 @@ impl AndroidAppHandle {
             acquire_wait_us,
         });
         // One line per depth-or-regime *change*, plus a rate-limited periodic
-        // snapshot even without one (g2, C3 — `ScrollSyncTail::tick`'s
+        // snapshot even without one (`ScrollSyncTail::tick`'s
         // `DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES`, so the emit-or-not decision
         // stays host-tested rather than living here): a handful of lines per
         // fling, never per frame, behind the same `perf::enabled()` switch as
@@ -1815,7 +1814,7 @@ impl AndroidAppHandle {
         // `depth`/`target` are the ramped-vs-requested hold. `frame=` is the
         // tail's display-frame counter, which the gesture markers in
         // `dispatch_touch` stamp too: subtracting the two is the onset
-        // measurement (camera task 12b, SPIKE-SYNC §2.8).
+        // measurement.
         if let Some(trace) = tail_trace
             && perf::enabled()
         {
@@ -1967,14 +1966,14 @@ impl AndroidAppHandle {
         // very first frame, before any layout has established geometry.
         let force_layout = inputs.surface_changed_or_resized || !self.first_layout_done;
 
-        // Perf instrumentation (task 08, spec §14 phase 7.A): the process-wide
+        // Perf instrumentation: the process-wide
         // switch is one cached bool read (`perf::enabled`'s `OnceLock`), not a
         // clock read — every `Instant::now()` below is gated behind it via
         // `bool::then`, so a disabled build/run never reads a timer on this
         // hot path (guard first, per this module's perf convention).
         let perf_on = perf::enabled();
 
-        // Deadline-aware pacing (plan phase 10.C.2): estimate this frame's
+        // Deadline-aware pacing: estimate this frame's
         // target budget from the tick-to-tick delta, updating the stored tick
         // every frame (skip or run) so the estimate always reflects one refresh
         // interval rather than a gap across skipped ticks.
@@ -2059,7 +2058,7 @@ impl AndroidAppHandle {
         }
         let rebuild_time = rebuild_start.map_or(Duration::ZERO, |t| t.elapsed());
 
-        // Prompt teardown retire (native-widgets p1-09): the rebuild just above
+        // Prompt teardown retire: the rebuild just above
         // is where a removed `platform_view` widget's `View::teardown` runs and
         // reports its slot id. Drain those and dispose each native view right
         // now, instead of waiting out the differ's ~30-frame missing-streak
@@ -2073,7 +2072,7 @@ impl AndroidAppHandle {
             self.platform_view_state.retire(slot_id);
         }
 
-        // Layout-skip seam (task 16 / frame_gate module docs): drain the change
+        // Layout-skip seam (see the frame_gate module docs): drain the change
         // flags the rebuild (or a prior `set_theme`) accumulated, and run layout
         // only if they need it — or the first frame / a surface resize forces it.
         // The `set_theme => LAYOUT|PAINT` contract keeps `Text`'s layout-baked
@@ -2114,16 +2113,16 @@ impl AndroidAppHandle {
         let paint_start = perf_on.then(Instant::now);
         {
             let mut builder = SceneBuilder::new(&mut self.scene);
-            // HiDPI (spec task 08): lay out in logical pixels, then scale the
+            // HiDPI: lay out in logical pixels, then scale the
             // whole scene by the device pixel ratio for sharp glyphs.
             builder.push_transform(Affine::scale(scale));
-            // Shell-owned frame clock (spec §8: time enters from the shell, never
+            // Shell-owned frame clock (time enters from the shell, never
             // `Instant::now()` inside `frust-core`) — Choreographer's
             // `frameTimeNanos`, forwarded from Kotlin via `nativeOnFrame`.
             let frame_time = FrameTime::from_nanos(frame_time_nanos);
-            // The paint pass returns a `needs_frame` continuation signal (spec's
-            // v1 animation seam). The Choreographer keeps posting frames, but
-            // the frame gate (task 17) now decides whether each is *produced* —
+            // The paint pass returns a `needs_frame` continuation signal, the
+            // framework's animation seam. The Choreographer keeps posting frames, but
+            // the frame gate now decides whether each is *produced* —
             // so this flag is no longer irrelevant: latch it into
             // `last_needs_frame` so an in-flight animation/transition forces the
             // next frame to run (and stops forcing once it settles).

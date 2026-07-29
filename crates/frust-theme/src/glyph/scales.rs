@@ -1,9 +1,8 @@
 //! Glyph type / shape / elevation / motion / glass scales.
 //!
-//! Sourced from the vendored Glyph builds (retrieved 2026-07-21): the type
-//! scale + shape scale from `glyph-design-system.html` (RESEARCH §1.2/§1.3),
-//! the per-brightness elevation shadows from both HTML sources (§1.1b/§1.3),
-//! and the motion vocabulary from `glyph-motion.html` (§1.4). Each scale maps
+//! Sourced from the vendored Glyph design mockups (retrieved 2026-07-21): the
+//! type scale, shape scale, per-brightness elevation shadows, and motion
+//! vocabulary below are transcribed values, not invented ones. Each scale maps
 //! onto the *same* fixed struct its M3/Cupertino siblings use, so every
 //! existing widget keeps resolving tokens unchanged under a Glyph theme.
 
@@ -16,13 +15,12 @@ use crate::motion::{CosmeticLoopRate, EasingSet, MotionDurations, MotionScheme, 
 use crate::shape::ShapeScale;
 use crate::typography::TypeScale;
 
-// ---- Type scale (RESEARCH §1.2) ----------------------------------------
+// ---- Type scale ---------------------------------------------------------
 
 /// Which Glyph face a slot uses: **Space Mono** (700, display/headline) or
 /// **IBM Plex Mono** (UI: title/body/label). Both end their fallback stack in
 /// a generic `monospace` so a host without the bundled face still shapes
-/// fixed-width (task 18 embeds the actual bytes; task 02 added
-/// `stack_with_generic`).
+/// fixed-width.
 #[derive(Clone, Copy)]
 enum Face {
     /// Space Mono — the display/headline face.
@@ -44,8 +42,8 @@ impl Face {
 /// weight, face)`.
 type GlyphToken = (f32, f32, f32, FontWeight, Face);
 
-// The six Glyph type roles (RESEARCH §1.2). Web-authored sizes are noted where
-// the mobile-legibility floor (body >= 13 logical px, PLAN tunable) bumps them.
+// The six Glyph type roles. Web-authored sizes are noted where
+// the mobile-legibility floor (body >= 13 logical px, tunable) bumps them.
 // Line heights derive from the source's stated 1.5 body default (display/
 // headline tightened, per the compact terminal aesthetic) — documented policy,
 // not a per-token source value.
@@ -85,7 +83,7 @@ fn apply_glyph_emphasized(base: &TextStyle, token: GlyphToken) -> TextStyle {
 }
 
 impl TypeScale {
-    /// The Glyph type scale (RESEARCH §1.2; retrieved 2026-07-21). Maps the six
+    /// The Glyph type scale (retrieved 2026-07-21). Maps the six
     /// monospace-led Glyph roles onto the 30 `TypeScale` slots with per-slot
     /// families à la [`TypeScale::cupertino`]: Space Mono (700) fills every
     /// `display_*`/`headline_*` slot, IBM Plex Mono fills `title_*`/`body_*`/
@@ -93,7 +91,7 @@ impl TypeScale {
     /// (not inherited from `base`); `base`'s `style`/`color` are preserved.
     ///
     /// The web-authored `body` size (12.5) is bumped to the mobile-legibility
-    /// floor (13, PLAN tunable); the smaller `caption`/`micro` roles keep their
+    /// floor (13, tunable); the smaller `caption`/`micro` roles keep their
     /// authored sizes (documented in the const table above).
     pub fn glyph(base: &TextStyle) -> Self {
         Self {
@@ -131,10 +129,10 @@ impl TypeScale {
     }
 }
 
-// ---- Shape scale (RESEARCH §1.3) ---------------------------------------
+// ---- Shape scale ---------------------------------------------------------
 
 impl ShapeScale {
-    /// The Glyph shape scale (RESEARCH §1.3; retrieved 2026-07-21): the
+    /// The Glyph shape scale (retrieved 2026-07-21): the
     /// documented **4 / 6 / 10 / 16 / full** radius scale (`--radius-xs`
     /// canonical at 4, not the 3px authoring artifact; `--radius-full` = 999px
     /// → [`f64::INFINITY`]). Glyph's four finite radii fill the low/mid slots;
@@ -157,14 +155,14 @@ impl ShapeScale {
     }
 }
 
-// ---- Elevation (RESEARCH §1.1b / §1.3) ---------------------------------
+// ---- Elevation -------------------------------------------------------
 
 /// A Glyph elevation level: the two source-anchored recipes are the toast
 /// (`0 12px 32px`) and modal (`0 24px 60px`) shadows; the low levels are
-/// near-zero because Glyph is **borders-first, not shadow-first** (RESEARCH
-/// §1.3). Dark uses black at `.4`/`.5`; light uses warm ink (`ColorScheme`'s
-/// `shadow` role) at `.12`/`.18` — "a glow reads as haze on white, a shadow
-/// reads as lift" (§1.1b). The CSS blur-radius px is stored directly as
+/// near-zero because Glyph is **borders-first, not shadow-first**.
+/// Dark uses black at `.4`/`.5`; light uses warm ink (`ColorScheme`'s
+/// `shadow` role) at `.12`/`.18` — a glow reads as haze on white, a shadow
+/// reads as lift. The CSS blur-radius px is stored directly as
 /// `blur_std_dev` (tunable policy, matching [`crate::elevation`]'s own v1
 /// treatment). Levels 1-3 are a documented interpolation between the
 /// near-zero floor and the toast recipe; levels 4/5 are the exact source
@@ -194,8 +192,8 @@ const fn glyph_level(
 }
 
 impl Elevation {
-    /// The Glyph elevation table (RESEARCH §1.1b/§1.3; retrieved 2026-07-21) —
-    /// **per-brightness** shadows (the seam task 06 added): black `.4`/`.5`
+    /// The Glyph elevation table (retrieved 2026-07-21) —
+    /// **per-brightness** shadows: black `.4`/`.5`
     /// dark vs warm-ink `.12`/`.18` light. Borders-first, so levels 0-1 carry
     /// no/near-no shadow; levels 4 (toast `0 12px 32px`) and 5 (modal `0 24px
     /// 60px`) are the exact source recipes.
@@ -235,11 +233,11 @@ impl Elevation {
     }
 }
 
-// ---- Motion (RESEARCH §1.4) --------------------------------------------
+// ---- Motion ---------------------------------------------------------------
 
 impl MotionScheme {
-    /// The Glyph motion scheme (`glyph-motion.html`; retrieved 2026-07-21,
-    /// RESEARCH §1.4). Durations `100/150/220/340/600ms` and the three literal
+    /// The Glyph motion scheme (retrieved 2026-07-21).
+    /// Durations `100/150/220/340/600ms` and the three literal
     /// easings are **exact source values**; the six spring slots are
     /// **Community-approximate** hand-tuned physics approximations of the
     /// authored beziers (Glyph authors motion as bezier+duration, not springs,
@@ -302,8 +300,8 @@ impl MotionScheme {
 impl GlassScale {
     /// The Glyph glass scale (retrieved 2026-07-21). Glyph is **borders-first
     /// and opaque** — its backdrop-blur topbar and scanline overlay are
-    /// "web-presentation affordances, not required system features" (RESEARCH
-    /// §1.3) — so this mirrors [`GlassScale::opaque_material`]'s shape
+    /// web-presentation affordances, not required system features — so this
+    /// mirrors [`GlassScale::opaque_material`]'s shape
     /// (`blur_radius_intent == 0`, [`GlassMaterial::is_opaque`] true, empty
     /// fills → a widget paints its surface-container role). It differs in two
     /// Glyph-specific ways: a **visible hairline** (`border-bright`'s `.18`

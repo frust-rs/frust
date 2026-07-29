@@ -9,13 +9,12 @@
 //!
 //! **Shadow math is TUNABLE, not an M3-published spec.** Material 3's 2023
 //! direction replaced tonal-overlay tinting with *static surface-container
-//! roles* for most elevated surfaces (see
-//! `workflow/plans/features/frust-phase-6a-foundations/research/RESEARCH.md`'s
-//! refuted-claims list — this is the opposite of "primarily tonal overlay
-//! post-2023"), but shadows still exist alongside; M3 does not publish exact
-//! shadow blur/offset math, so this module defines a documented v1 mapping:
+//! roles* for most elevated surfaces — the opposite of "primarily tonal
+//! overlay post-2023" — but shadows still exist alongside; M3 does not
+//! publish exact shadow blur/offset math, so this module defines a
+//! documented v1 mapping:
 //! `y_offset = dp / 2.0 + 1.0`, `blur_std_dev = dp`, shadow color =
-//! `ColorScheme::shadow` at `color_alpha` ~0.3. The gallery example (task 09)
+//! `ColorScheme::shadow` at `color_alpha` ~0.3. A gallery example
 //! is the visual check for this mapping; treat it as adjustable, not load-
 //! bearing, Frust-specific policy.
 //!

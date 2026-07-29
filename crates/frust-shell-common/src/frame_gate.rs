@@ -1,11 +1,11 @@
 //! [`FrameGate`]: the shared skip-frame decision the mobile shells consult
-//! each tick (spec §14 phase 7).
+//! each tick.
 //!
 //! # What lives here
 //!
 //! - [`FrameInputs`] — the OR-list of per-frame "something changed" signals a
 //!   shell gathers from its own state (see the struct's field docs, each
-//!   naming the shell-side source and its `research/RESEARCH.md` §C entry).
+//!   naming the shell-side source).
 //! - [`FrameGate`] — a plain struct owning the resume-warmup counter and the
 //!   kill-switch flag; [`FrameGate::decide`] folds [`FrameInputs`] plus the
 //!   warmup into one [`FrameDecision`] (`Run`/`Skip`).
@@ -90,7 +90,7 @@ pub const NO_ANIM_PACING_VAR: &str = "FRUST_NO_ANIM_PACING";
 ///
 /// Both are shell-owned: [`now`](Self::now) is the platform frame clock
 /// (Choreographer / `CADisplayLink` timestamp — never a wall clock read inside
-/// `frust-core`, spec §8), and [`interval`](Self::interval) is `1 /
+/// `frust-core`), and [`interval`](Self::interval) is `1 /
 /// MotionScheme::cosmetic_loop_rate` resolved from the *active* theme each
 /// frame (so an app that retunes the token via `ThemeBuilder` re-paces live).
 #[derive(Debug, Clone, Copy)]
@@ -133,8 +133,7 @@ impl FrameDecision {
 /// The per-frame OR-list a shell gathers and hands to [`FrameGate::decide`].
 ///
 /// Every field is a "something that needs this frame to run" signal; the gate
-/// runs the frame if **any** is `true`. The list matches
-/// `research/RESEARCH.md` §C item-for-item, with two deliberate deltas noted
+/// runs the frame if **any** is `true`, with two deliberate deltas noted
 /// in the field docs:
 ///
 /// - **Semantics adapter needs** (§C's last item) is *not* a field here:
@@ -253,15 +252,15 @@ impl FrameInputs {
     }
 }
 
-/// The per-shell skip-frame gate (spec §14 phase 7): a plain struct — no
+/// The per-shell skip-frame gate: a plain struct — no
 /// globals — a shell constructs once and drives each frame via
 /// [`decide`](Self::decide).
 ///
 /// Owns two pieces of state: whether the gate is enabled at all (the
 /// [`NO_FRAME_GATE_VAR`] kill switch, resolved once at construction) and the
 /// resume-warmup countdown ([`WARMUP_FRAMES`], seeded by
-/// [`note_resumed`](Self::note_resumed)). No shell constructs one yet — this
-/// is the standalone, host-testable decision type tasks 17/18 wire in.
+/// [`note_resumed`](Self::note_resumed)) — the standalone, host-testable
+/// decision type the mobile shells wire in.
 #[derive(Debug)]
 pub struct FrameGate {
     /// When `false`, [`decide`](Self::decide) always returns
@@ -351,8 +350,8 @@ impl FrameGate {
     /// - the resume warmup is active (decrementing it by one), or
     /// - any [`FrameInputs`] field is set ([`FrameInputs::any_set`]) —
     ///
-    /// otherwise [`FrameDecision::Skip`]. Every input maps to a
-    /// `research/RESEARCH.md` §C OR-list entry (see [`FrameInputs`]'s docs).
+    /// otherwise [`FrameDecision::Skip`]. See [`FrameInputs`]'s docs for what
+    /// each input signal means.
     ///
     /// Takes `&mut self` because it advances the resume-warmup countdown.
     ///

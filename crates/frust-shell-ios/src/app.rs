@@ -67,7 +67,7 @@ use crate::ffi_support::TouchPhase;
 /// Everything a running iOS app needs across frames — the state behind the opaque
 /// handle Swift passes back into every C call.
 ///
-/// The `executor` owns the render path (plan phase 11.B): in the render-thread
+/// The `executor` owns the render path: in the render-thread
 /// split ([`FrameExecutor::Split`], the default) a dedicated thread owns the
 /// `RenderContext`/`SurfaceRenderer` + the `wgpu::Surface` and this UI thread only
 /// hands it finished scenes; in the inline fallback ([`FrameExecutor::Inline`],
@@ -78,7 +78,7 @@ use crate::ffi_support::TouchPhase;
 /// Swift-owned and merely retained (never freed) here so a lost surface can be
 /// recreated (see the module docs' *Layer lifetime contract*).
 pub struct IosAppHandle {
-    /// The render-path half of the frame loop (plan phase 11.B): either the
+    /// The render-path half of the frame loop: either the
     /// render-thread split ([`FrameExecutor::Split`], default) — where a dedicated
     /// thread owns the [`RenderContext`]/[`SurfaceRenderer`] + surface and the UI
     /// thread only hands it finished scenes — or the pre-split inline fallback
@@ -87,7 +87,7 @@ pub struct IosAppHandle {
     executor: FrameExecutor,
     text_ctx: TextContext,
     /// Polls the process-wide app-facing pending-font registry
-    /// (`frust::register_app_fonts`, task 14) once per frame (see [`Self::frame`],
+    /// (`frust::register_app_fonts`) once per frame (see [`Self::frame`],
     /// beside the theme-override poll) — draining any late registration into
     /// `text_ctx`. Also drained once at construction ([`Self::new`], after the
     /// background prewarm join, on this UI thread) before the first rebuild. See
@@ -103,8 +103,8 @@ pub struct IosAppHandle {
     /// [`FrameInputs::signals_dirty`]. Without this wrap a completed async load's
     /// signal write notifies no subscriber, so `signals_dirty` never trips and
     /// the frame gate skips the frame that would paint the loaded content until a
-    /// touch forces a `Run` — the device-only "channel stuck on loading" stall
-    /// (see device-parity task 09's root-cause). Mirrors the desktop shell's
+    /// touch forces a `Run` — the device-only "channel stuck on loading" stall.
+    /// Mirrors the desktop shell's
     /// `ShellHandler::scope` (`frust-shell-desktop/src/app_handler.rs`):
     /// persistent across frames (not per-frame constructed) and re-tracked from
     /// scratch each `track`, so the sources frame N subscribes wake frame N+1.
@@ -125,7 +125,7 @@ pub struct IosAppHandle {
     scale: f32,
     /// Set by `frust_pause`/`frust_resume`; while paused, `frame()` is a
     /// no-op — Metal command submission from a backgrounded iOS app can get the
-    /// process killed (spec §10.2), so this is the Rust-side enforcement point.
+    /// process killed, so this is the Rust-side enforcement point.
     paused: bool,
     /// Consecutive failed surface-recreate attempts in the current `SurfaceLost`
     /// episode. Compared against `ffi_support::MAX_RECREATE_ATTEMPTS` so a
@@ -134,14 +134,14 @@ pub struct IosAppHandle {
     /// ([`Self::set_surface`]).
     recreate_failures: u8,
     /// The app's active theme (M3 baseline). Mirrors the desktop shell's
-    /// appearance ownership (task 05): starts [`Brightness::Light`] here and is
+    /// appearance ownership: starts [`Brightness::Light`] here and is
     /// flipped by [`Self::set_appearance`] once Swift reports the platform's
     /// real dark-mode preference (`frust_set_appearance`, called right after
     /// `frust_init` returns a handle and again from `traitCollectionDidChange`
     /// — see `platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustViewController.swift`).
     theme: Theme,
     /// Polls the process-wide app-facing theme override slot
-    /// (`frust::set_app_theme`/`clear_app_theme`, task 6c-04) once per
+    /// (`frust::set_app_theme`/`clear_app_theme`) once per
     /// frame (see [`Self::frame`]) — see
     /// `frust_shell_common::theme_override`'s module docs.
     theme_override: ThemeOverrideWatcher,
@@ -156,23 +156,23 @@ pub struct IosAppHandle {
     /// *while* an override was active (during which `self.theme.brightness`
     /// itself does not move — see `effective_brightness_for_platform_change`).
     platform_brightness: Brightness,
-    /// The last window insets pushed to the render root (device-parity task 06),
-    /// in logical px. Retained so [`Self::set_insets`] skips a no-op push
+    /// The last window insets pushed to the render root, in logical px. Retained
+    /// so [`Self::set_insets`] skips a no-op push
     /// (`WindowInsets` is `PartialEq`) — both the relayout and the app-side
     /// `provide_context` re-provide only fire on a real change. Starts zero until
     /// Swift's first `frust_set_insets` (safe-area / keyboard-frame report).
     insets: WindowInsets,
     /// The accesskit adapter, attached lazily by `frust_init_accessibility`
-    /// once Swift has a `FrustView` (UIView) to hand over (phase-6d task 05).
+    /// once Swift has a `FrustView` (UIView) to hand over.
     /// `None` until then — `frust_init` only receives the `CAMetalLayer`, which
     /// the accesskit `SubclassingAdapter` cannot subclass. While `Some`, `frame()`
     /// drains its queued a11y actions (pre-rebuild) and pushes the post-layout
     /// semantics tree to it (see [`Self::frame`]).
     a11y: Option<IosA11yAdapter>,
-    /// The per-frame skip gate (spec §14 phase 7, task 18): consulted each
+    /// The per-frame skip gate: consulted each
     /// CADisplayLink tick to skip the rebuild/layout/paint/encode passes on an
     /// idle frame (nothing changed), so CPU/GPU stay near zero on a static
-    /// screen — the iOS counterpart to the Android shell's frame gate (task 17).
+    /// screen — the iOS counterpart to the Android shell's frame gate.
     /// Honors the `FRUST_NO_FRAME_GATE` kill switch (resolved once at
     /// construction — a set switch makes every frame run, pre-gate behavior
     /// verbatim). Its resume-warmup is (re)opened on resume / resize / surface
@@ -204,7 +204,7 @@ pub struct IosAppHandle {
     /// `push_theme`'s LAYOUT|PAINT change flags carry correctness either way;
     /// this explicit latch is belt-and-suspenders, mirroring the Android shell.
     appearance_dirty: bool,
-    /// Pointer-event resampler (plan phase 10.C.1) — the iOS counterpart to the
+    /// Pointer-event resampler — the iOS counterpart to the
     /// Android shell's field: buffers raw touch samples and emits
     /// frame-boundary-interpolated `Move`s while Down/Up/Cancel pass through
     /// losslessly. Disabled by the `FRUST_NO_RESAMPLE` kill switch (resolved
@@ -223,17 +223,17 @@ pub struct IosAppHandle {
     /// reallocated) so a drag's per-frame resample allocates nothing.
     pointer_scratch: Vec<PointerEvent>,
     /// The previous `CADisplayLink` tick timestamp (ns), for the deadline-aware
-    /// pacing estimate (plan phase 10.C.2): the tick-to-tick delta is this
+    /// pacing estimate: the tick-to-tick delta is this
     /// frame's deadline budget (see [`resample::frame_interval_nanos`]). `None`
     /// before the first frame.
     last_frame_time_nanos: Option<u64>,
     /// Running count of frames whose measured work (rebuild+layout+paint+encode,
-    /// excluding the vsync present wait) overran the frame-target deadline
-    /// (plan phase 10.C.2). **Instrumentation only** — accumulated and logged
+    /// excluding the vsync present wait) overran the frame-target deadline.
+    /// **Instrumentation only** — accumulated and logged
     /// (`frust-perf deadline`) behind [`perf::enabled`]; never drops work.
     deadline_overruns: u64,
     /// The surface-alpha **request** this handle's surface was (or, for the
-    /// split, will be) created with (platform-views task 06) — latched once at
+    /// split, will be) created with — latched once at
     /// construction from `SurfaceModeWatcher::current()` (read in
     /// [`crate::ffi_glue::create_handle`], before any surface exists) and read
     /// back by [`crate::ffi_glue::recover_surface`] so an inline surface
@@ -262,7 +262,7 @@ pub struct IosAppHandle {
     /// from frame 1 with no flicker; only a real resolution may downgrade it,
     /// observed within one frame (see [`Self::sync_translucent_resolved`]).
     translucent_resolved: Arc<AtomicBool>,
-    /// The platform-view command differ (platform-views task 06): turns the
+    /// The platform-view command differ: turns the
     /// tree's per-paint-pass [`frust_core::widget::PlatformViewFrame`]s into
     /// the idempotent command backlog `frust_platform_view_commands_json`
     /// serves. Fed via [`AppTree::platform_view_frames`] after every RUN
@@ -270,8 +270,8 @@ pub struct IosAppHandle {
     /// per [`PlatformViewState::ingest`]'s skip-safety contract.
     platform_views: PlatformViewState,
     /// The release gate pairing each published command batch with the frust
-    /// frame that painted its geometry (camera task 01's shared
-    /// [`FramePairing`], task 13's iOS half) — **only consulted while
+    /// frame that painted its geometry (the shared
+    /// [`FramePairing`]) — **only consulted while
     /// [`Self::present_sync`] is on**, which is what makes it correct here:
     /// the UI thread presents the frames itself, so it knows exactly which one
     /// just landed.
@@ -279,8 +279,9 @@ pub struct IosAppHandle {
     /// Unlike Android, where the gate is always on, iOS holds geometry only in
     /// the present-sync configuration. Ungated, iOS presents eagerly off the
     /// render thread, and holding the geometry back is the WRONG sign of
-    /// correction there (the native view already lags — SPIKE-SYNC §3.4.1, where
-    /// the frame-id gate measured as a no-op at best). Paired with the deferred
+    /// correction there (the native view already lags the frust surface, and the
+    /// frame-id gate measures as a no-op on iOS — it submits/presents 1:1 with no
+    /// skipped frames to remove). Paired with the deferred
     /// present it is the right one: the geometry waits for the frame it belongs
     /// to, and that frame lands in the very transaction that releases it.
     platform_view_due: FramePairing,
@@ -299,7 +300,7 @@ pub struct IosAppHandle {
 }
 
 /// One finished frame's payload crossing the UI→render-thread handoff in the
-/// split (plan phase 11.B): the painted [`Scene`] plus the clear color it was
+/// split: the painted [`Scene`] plus the clear color it was
 /// painted for (the live theme's surface color — it must ride *with* the frame so
 /// a mid-frame theme flip clears to the right color, mirroring the desktop and
 /// Android shells' `PaintedScene`). This is the `S` type parameter of
@@ -311,7 +312,7 @@ pub(crate) struct PaintedScene {
     pub(crate) base_color: peniko::Color,
 }
 
-/// The render→UI handoff slot for the **present-sync** path (camera task 13):
+/// The render→UI handoff slot for the **present-sync** path:
 /// a depth-1, latest-wins slot holding at most one submitted-but-unpresented
 /// frame ([`DeferredPresent`]).
 ///
@@ -321,7 +322,7 @@ pub(crate) struct PaintedScene {
 /// `[drawable present]` to run on the thread committing the `CATransaction`
 /// that also carries the hosted platform views' geometry — otherwise the
 /// drawable never reaches the compositor at all (measured on device: the whole
-/// screen stays the window background — `research/SPIKE-SYNC.md` §3.2). Under
+/// screen stays the window background). Under
 /// the render-thread split the present runs on the render thread, which commits
 /// no transaction. So when the host arms present-sync
 /// (`FrustViewController.synchronizesPresentWithPlatformViews` →
@@ -334,8 +335,7 @@ pub(crate) struct PaintedScene {
 ///
 /// iOS delays the *surface* to meet the view; Android delays the *view* to meet
 /// the surface. The two corrections have opposite signs, so this mechanism is
-/// deliberately iOS-local and shares nothing with the Android frame-id gate
-/// (PLAN.md's no-shared-knob constraint).
+/// deliberately iOS-local and shares nothing with the Android frame-id gate.
 ///
 /// # Discipline
 ///
@@ -354,8 +354,8 @@ pub(crate) struct PaintedScene {
 /// was painted in tick N-1 — pairing it with tick N's geometry would leave the
 /// surface lagging the view by a frame, the mirror of the defect. The id lets
 /// the UI thread tell the shared release gate
-/// ([`FramePairing`](frust_shell_common::platform_view::FramePairing), camera
-/// task 01's Android mechanism) exactly *which* frame it just presented, so the
+/// ([`FramePairing`](frust_shell_common::platform_view::FramePairing))
+/// exactly *which* frame it just presented, so the
 /// geometry released in the same transaction is that frame's own. Deferred
 /// present and paired release are two halves of one fix.
 pub(crate) struct PresentHandoff {
@@ -488,9 +488,8 @@ impl InlineExecutor {
             &self.presented,
             // Present-sync never applies inline: this tail already runs on the
             // UI thread inside the `CADisplayLink` tick, so wgpu's own present
-            // is *already* issued on the transaction-committing thread — the
-            // configuration the spike measured as "fully in sync"
-            // (`research/SPIKE-SYNC.md` §3.5). Deferring it a tick here would
+            // is *already* issued on the transaction-committing thread — fully
+            // in sync with no deferral needed. Deferring it a tick here would
             // only add latency.
             None,
         )
@@ -691,7 +690,7 @@ impl SplitExecutor {
         }
     }
 
-    /// The **iOS backgrounding barrier** (plan Risks / RESEARCH Q9): send a
+    /// The **iOS backgrounding barrier**: send a
     /// barriered [`RenderCommand::Pause`] and **block** until the render thread
     /// has acknowledged it. The render loop processes the `Pause` only after any
     /// in-flight frame's submit completes, moves its [`RenderPhase`] to `Paused`
@@ -725,12 +724,12 @@ impl SplitExecutor {
 
 impl Drop for SplitExecutor {
     fn drop(&mut self) {
-        // Present-sync teardown (task 13): release any parked, unpresented frame
+        // Present-sync teardown: release any parked, unpresented frame
         // FIRST, so the drawable it holds is gone before the render thread (and
         // with it the surface it came from) is torn down below. Presenting it
         // here would be wrong — `frust_destroy` runs as the view goes away.
         self.present.clear();
-        // Destroy-join ordering (plan Risks / RESEARCH Q9): drop the sender first
+        // Destroy-join ordering: drop the sender first
         // — that signals the render loop's `wait_next` to wake with a
         // disconnection and exit, dropping its `SurfaceRenderer` (and the
         // `wgpu::Surface` built from the retained `CAMetalLayer` pointer). Then
@@ -872,7 +871,7 @@ impl FrameExecutor {
 /// frame's autoreleased `CAMetalDrawable` (and other Metal temporaries) would
 /// accumulate and exhaust the layer's small drawable pool — a hard stall. On the
 /// inline path (the UIKit main thread) this nests inside the runloop's own pool,
-/// which is harmless (RESEARCH Q9 — the iOS-specific hazard the split adds).
+/// which is harmless — the iOS-specific hazard the split adds.
 ///
 /// # Present-sync
 ///
@@ -1119,16 +1118,16 @@ impl IosAppHandle {
 
         app.set_theme(Box::new(theme.clone()));
         // Thread the surface's RESOLVED translucency into the render root so
-        // the platform-view hole-punch clears each Mode B slot's rect (research
-        // VERIFY.md D1 — cross-platform) only when the surface really came up
-        // translucent (review M1). At construction the split's surface may
+        // the platform-view hole-punch clears each Mode B slot's rect only when
+        // the surface really came up translucent, not merely requested. At
+        // construction the split's surface may
         // still be installing render-side, so this reads the request-seeded
         // flag; `frame`'s per-frame `sync_translucent_resolved` re-reads it and
         // downgrades within one frame of a fallback.
         let resolved_translucent =
             crate::ffi_support::read_resolved_translucency(&translucent_resolved);
         app.set_surface_translucent(resolved_translucent);
-        // Seed the app-facing RESOLVED slot from that same value (task p1-01),
+        // Seed the app-facing RESOLVED slot from that same value,
         // so app/plugin code reading `frust::resolved_surface_mode()` during
         // the very first rebuild below sees a real verdict rather than
         // `Unknown`. Re-published every frame by `sync_translucent_resolved`.
@@ -1208,7 +1207,7 @@ impl IosAppHandle {
     /// downgrade repaint without the punch).
     ///
     /// Also this shell's single publish point for the app-facing RESOLVED slot
-    /// (`frust::resolved_surface_mode()`, task p1-01), mirroring Android: app
+    /// (`frust::resolved_surface_mode()`), mirroring Android: app
     /// code polls that slot during rebuild, so it must be current *before* the
     /// rebuild this frame leads into, and publishing here (rather than at the
     /// install/self-heal sites) keeps one UI-thread beat as the source for both
@@ -1459,7 +1458,7 @@ impl IosAppHandle {
         self.recreate_failures = 0;
         // A surface recreation forces the frame gate's resume-warmup: the first
         // ticks against the fresh surface must run even before their change
-        // signals are observable (spec §14 phase 7, task 18).
+        // signals are observable.
         self.frame_gate.note_resumed();
         // The recreated surface re-resolved its alpha mode from scratch (review
         // M1) — on this (inline) path the renderer on this thread already holds
@@ -1491,14 +1490,14 @@ impl IosAppHandle {
         self.scale = scale;
         // A resize (rotation / bounds change) forces the frame gate's
         // resume-warmup so the next frames re-layout/paint at the new size even
-        // if no other change signal fires (spec §14 phase 7, task 18).
+        // if no other change signal fires.
         self.frame_gate.note_resumed();
     }
 
     /// Mark the app paused (`frust_pause`): subsequent `frame()`s are no-ops.
     ///
     /// In the render-thread split this **barriers on the render thread's ack
-    /// before returning** (plan Risks / RESEARCH Q9): it sends a `Pause` command
+    /// before returning**: it sends a `Pause` command
     /// and blocks until the render thread has quiesced (moved to `Paused`, dropped
     /// any leftover scene, and acked). Only then does this return, so the app
     /// never backgrounds while the render thread might still submit Metal work —
@@ -1568,7 +1567,7 @@ impl IosAppHandle {
         }
         // Re-open the frame gate's resume-warmup: the first frames after
         // foregrounding must run unconditionally (a backgrounded app's change
-        // signals may have been coalesced away — spec §14 phase 7, task 18).
+        // signals may have been coalesced away).
         self.frame_gate.note_resumed();
     }
 
@@ -1591,7 +1590,7 @@ impl IosAppHandle {
         self.recreate_failures = self.recreate_failures.saturating_add(1);
     }
 
-    /// The inline renderer's current lifecycle phase (spec §8.1), or `None` in the
+    /// The inline renderer's current lifecycle phase, or `None` in the
     /// split (the render thread owns the phase). `pub(crate)` so [`crate::ffi_glue`]
     /// can gate the inline path's surface recreation on a `SurfaceLost` phase — the
     /// split self-heals render-side, so this returning `None` is exactly the "no
@@ -1603,7 +1602,7 @@ impl IosAppHandle {
         }
     }
 
-    /// Deliver one touch contact to the tree (spec §9).
+    /// Deliver one touch contact to the tree.
     ///
     /// **Coordinate asymmetry vs Android:** UIKit's `touch.location(in:)` is
     /// already in **logical points**, so — unlike the Android shell, which
@@ -1623,10 +1622,10 @@ impl IosAppHandle {
             TouchPhase::Cancelled => PointerPhase::Cancel,
         };
         // Latch for the frame gate: a touch between frames must force the next
-        // frame to run so the mutated state is reflected (spec §14 phase 7).
+        // frame to run so the mutated state is reflected.
         self.events_since_last_frame = true;
 
-        // Pointer resampling (plan phase 10.C.1): buffer the raw sample (stamped
+        // Pointer resampling: buffer the raw sample (stamped
         // on the shared resample clock) for [`Self::frame`] to emit a
         // frame-boundary-interpolated position; Down/Up/Cancel still pass
         // through losslessly. When the kill switch disabled the resampler,
@@ -1650,7 +1649,7 @@ impl IosAppHandle {
     }
 
     /// Push a whole editing state from the platform IME mirror into the focused
-    /// widget (the mobile state-sync path — spec §9). Delegates to
+    /// widget (the mobile state-sync path). Delegates to
     /// [`AppTree::ime_apply`]; the `EditingState`'s selection/composing indices are
     /// UTF-16 code units (converted to byte offsets by the widget/`frust-text`).
     /// The `needs_redraw` in the returned outcome is implicit here — the
@@ -1671,7 +1670,7 @@ impl IosAppHandle {
     }
 
     /// Publish the current accessibility tree to the iOS accesskit adapter, if it
-    /// changed since the last push (phase-6d D3-ios, generation-gated in task 18).
+    /// changed since the last push (generation-gated).
     /// Must run **after** [`Self::frame`]'s layout so node bounds are valid.
     ///
     /// Gated on the semantics generation exactly like the desktop/Android
@@ -1703,13 +1702,13 @@ impl IosAppHandle {
     }
 
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop
-    /// shell's `RedrawRequested` path (spec §8) but driven by the Swift
+    /// shell's `RedrawRequested` path but driven by the Swift
     /// `CADisplayLink`.
     ///
     /// `timestamp_ns` is the `CADisplayLink` tick's `timestamp`
     /// (`CFTimeInterval` seconds) converted to nanoseconds by the Swift caller
-    /// — the shell-owned monotonic clock threaded into [`FrameTime`] (spec §8:
-    /// `frust-core` never reads a clock itself).
+    /// — the shell-owned monotonic clock threaded into [`FrameTime`]
+    /// (`frust-core` never reads a clock itself).
     ///
     /// A no-op unless the surface is ready *and* the app is not paused (see
     /// [`crate::ffi_support::should_render_frame`]). Readiness comes from the
@@ -1798,7 +1797,7 @@ impl IosAppHandle {
         // Drain any queued accessibility actions (VoiceOver activations, etc.)
         // BEFORE the rebuild below, so a state change an action makes is picked up
         // by this very frame — the same "mutate now, rebuild next" model touch/IME
-        // input uses (spec §9 / phase-6d D2). The handler enqueued these on the
+        // input uses. The handler enqueued these on the
         // main thread; draining takes ownership of the batch so the queue's borrow
         // is dropped before `perform_accessibility_action` re-enters the tree.
         // Whether any action ran is a frame-gate input (`a11y_action_performed`).
@@ -1817,7 +1816,7 @@ impl IosAppHandle {
             }
         }
 
-        // Render-side surface self-heal (camera gate-fix g4), taken past the
+        // Render-side surface self-heal, taken past the
         // ready/paused gate like the drains below so a signal can never be
         // consumed on a no-op tick: the render thread recreated the surface from
         // the retained `CAMetalLayer` on its own (nothing external re-drives
@@ -1833,9 +1832,9 @@ impl IosAppHandle {
             self.reset_platform_views_for_surface_recreate();
         }
 
-        // Gather the RESEARCH §C OR-list of "something changed" signals and let
-        // the frame gate decide whether this frame runs (spec §14 phase 7, task
-        // 18 — mirrors the Android shell's task-17 wiring). `signals_dirty` is
+        // Gather the OR-list of "something changed" signals and let
+        // the frame gate decide whether this frame runs — mirrors the Android
+        // shell's own frame-gate wiring. `signals_dirty` is
         // drained AFTER the pump above (the pump-first ordering contract — see
         // `ReactiveRuntime::take_signals_dirty`) and only now that we are past the
         // ready/paused gate, so a no-op tick never consumes it. The gate honors
@@ -1861,7 +1860,7 @@ impl IosAppHandle {
             last_needs_frame: self.last_needs_frame,
             last_needs_frame_paced_only: self.last_needs_frame_paced_only,
             // Non-draining peek: a skipped frame leaves the flags for the next
-            // frame that runs to drain (spec §14 phase 7).
+            // frame that runs to drain.
             change_flags_pending: self.app.has_pending_change_flags(),
             // The `appearance_dirty` latch (set by `set_appearance`) is taken
             // only past the pause/ready gate — like the signals-dirty drain —
@@ -1872,7 +1871,7 @@ impl IosAppHandle {
             // resume-warmup via `note_resumed` (see `resize`/`set_surface`/
             // `resume`), so it needs no per-frame latch. What DOES need one is
             // the split's render-side self-heal, which never passes through a
-            // UI-thread entry point at all (gate-fix g4, above).
+            // UI-thread entry point at all (see the self-heal handling above).
             surface_changed_or_resized: surface_reinstalled,
             a11y_action_performed,
             // Driven by the gate's own warmup countdown (`note_resumed`).
@@ -1882,7 +1881,7 @@ impl IosAppHandle {
         // so the next frame only sees events that arrive from here on.
         self.events_since_last_frame = false;
 
-        // Deadline-aware pacing (plan phase 10.C.2): estimate this frame's target
+        // Deadline-aware pacing: estimate this frame's target
         // budget from the tick-to-tick delta, updating the stored tick every
         // frame (skip or run) so the estimate reflects one refresh interval
         // rather than a gap across skipped ticks.
@@ -1909,7 +1908,7 @@ impl IosAppHandle {
             // `skipped=` in the perf log line); the render-thread split sends
             // **nothing** across the channel on a skip (the render thread is the
             // single emitter and never sees skipped frames — split mode records no
-            // skip frames; known, logged for 11.E), so `record_skip` is a no-op
+            // skip frames, a known limitation), so `record_skip` is a no-op
             // there. Either way the CADisplayLink keeps ticking — only frame
             // *production* stops, callbacks don't (the accepted v1 shape, same as
             // Android — see `docs/DEVELOPMENT.md`).
@@ -1917,16 +1916,15 @@ impl IosAppHandle {
             return;
         }
 
-        // Perf instrumentation (spec §14 phase 7.A task 09): read the cached
+        // Perf instrumentation: read the cached
         // switch exactly once per frame and gate every `Instant::now()` read
         // below behind it — a disabled build takes zero clock reads on this
         // path, not merely a no-op record (`FrameStats::record` itself is
         // also a no-op when disabled, but the timer reads this guard skips
-        // are the actual hot-path cost the task's acceptance criteria call
-        // out).
+        // are the actual hot-path cost).
         let perf_on = perf::enabled();
 
-        // Pointer resampling (plan phase 10.C.1): drain buffered samples up to
+        // Pointer resampling: drain buffered samples up to
         // this frame's sample instant and feed the interpolated events into the
         // tree BEFORE the rebuild, so the rebuild reflects this frame's resampled
         // input (same `resample_clock` domain the raw samples were stamped in). A
@@ -1969,7 +1967,7 @@ impl IosAppHandle {
         }
         let rebuild = rebuild_start.map(|t| t.elapsed()).unwrap_or_default();
 
-        // Prompt teardown retire (native-widgets p1-09): the rebuild just above
+        // Prompt teardown retire: the rebuild just above
         // is where a removed `platform_view` widget's `View::teardown` runs and
         // reports its slot id. Drain those and dispose each native view right
         // now, instead of waiting out the differ's ~30-frame missing-streak
@@ -1983,13 +1981,13 @@ impl IosAppHandle {
             self.platform_views.retire(slot_id);
         }
 
-        // Change-flag DRAIN (camera gate-fix g4) — the fix for "the iOS frame
+        // Change-flag DRAIN — the fix for "the iOS frame
         // gate never idles at rest".
         //
         // `FrameInputs::change_flags_pending` above reads
         // `has_pending_change_flags()`, a deliberately NON-draining peek, so a
-        // frame the gate SKIPS leaves the dirtiness for the next frame that runs
-        // (spec §14 phase 7). Draining is the running frame's job — and this
+        // frame the gate SKIPS leaves the dirtiness for the next frame that runs.
+        // Draining is the running frame's job — and this
         // shell never did it: `RenderRoot::pending` is only ever cleared by
         // `take_change_flags`, so from the very first frame on (construction's
         // `push_theme` marks LAYOUT|PAINT, and the first rebuild marks
@@ -2025,8 +2023,8 @@ impl IosAppHandle {
         let layout = layout_start.map(|t| t.elapsed()).unwrap_or_default();
 
         // Push the accessibility tree AFTER layout (node bounds come from the
-        // post-layout geometry — spec §9), generation-gated so an unchanged tree
-        // is never re-walked or re-pushed (task 18 — see [`Self::publish_semantics`]).
+        // post-layout geometry), generation-gated so an unchanged tree
+        // is never re-walked or re-pushed (see [`Self::publish_semantics`]).
         // Not folded into either pass's timing above/below — it is a11y-conditional
         // work orthogonal to the rebuild/layout/paint/encode split.
         self.publish_semantics();
@@ -2035,8 +2033,8 @@ impl IosAppHandle {
         // reports the presented rate, not its `CADisplayLink` paint cadence (task
         // 10). A pure observation — `set_presented_frames` marks no ChangeFlags,
         // so a ticking counter never dirties layout NOR feeds the frame gate (the
-        // gate decision already ran above and never reads this), keeping the
-        // task-08 menu-idle behavior intact.
+        // gate decision already ran above and never reads this), keeping a
+        // menu-idle screen at zero frames.
         self.app
             .set_presented_frames(self.executor.presented_frames());
 
@@ -2044,10 +2042,10 @@ impl IosAppHandle {
         self.scene.reset();
         let paint_outcome = {
             let mut builder = SceneBuilder::new(&mut self.scene);
-            // HiDPI (spec task 08): lay out in logical pixels, then scale the
+            // HiDPI: lay out in logical pixels, then scale the
             // whole scene by the device pixel ratio for sharp glyphs.
             builder.push_transform(Affine::scale(scale));
-            // Shell-owned frame clock (spec §8: time enters from the shell, never
+            // Shell-owned frame clock (time enters from the shell, never
             // `Instant::now()` inside `frust-core`) — the `CADisplayLink`
             // timestamp forwarded from Swift.
             let frame_time = FrameTime::from_nanos(timestamp_ns);
