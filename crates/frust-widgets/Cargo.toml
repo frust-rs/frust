@@ -23,3 +23,9 @@ image = { workspace = true }
 # requests frust-theme's defaults, so this is one of the re-enabling edges
 # the facade's default-on `glyph-fonts` feature turns on.
 glyph-fonts = ["frust-theme/glyph-fonts"]
+# Compiles the GPU-free container test fixtures (`test_support`) into the
+# library, so a design system authored against `frust_widgets::authoring`
+# outside this crate can test its own containers against the same fixtures the
+# built-in catalogs use. Off by default — a normal app ships none of it; the
+# module is always available inside this crate's own `cfg(test)` build.
+test-support = []
