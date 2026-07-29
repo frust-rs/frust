@@ -379,6 +379,27 @@ pub use peniko::Color;
 /// ```
 pub use frust_shell_common::{clear_app_theme, set_app_theme};
 
+/// Design-system-facing base-theme seed:
+/// [`set_default_theme`] supplies the *starting* theme a shell seeds itself
+/// with, in place of its own built-in fallback — the seam a design-system
+/// plugin's `install()` calls. Unlike [`set_app_theme`], this does NOT pin
+/// brightness: the shell keeps re-deriving light/dark from the platform's own
+/// appearance against this same base, so a Glyph-themed app installed this
+/// way still honours system dark mode. See
+/// `frust_shell_common::theme_default`'s module docs for the full precedence
+/// order ([`set_app_theme`] override → [`set_default_theme`] base → the
+/// shell's built-in fallback) and the brightness-following contrast with
+/// [`set_app_theme`] spelled out in full.
+///
+/// ```no_run
+/// use frust::{Theme, set_default_theme};
+///
+/// // A design-system plugin's install() call, seeding the Glyph baseline as
+/// // the app's starting theme without pinning brightness.
+/// set_default_theme(Theme::glyph_baseline());
+/// ```
+pub use frust_shell_common::set_default_theme;
+
 /// App-facing system-UI (system-bar) override:
 /// [`set_system_ui_mode`] requests a status-/navigation-bar visibility mode —
 /// the Flutter `SystemChrome.setEnabledSystemUIMode` analog — reaching
