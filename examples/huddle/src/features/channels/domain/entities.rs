@@ -1,5 +1,5 @@
 //! Channel and DM entities — moved verbatim from the former `mock` module
-//! (huddle clean-architecture refactor, task 01). The shared dataset that
+//! (huddle clean-architecture refactor). The shared dataset that
 //! materializes these types now lives in [`crate::data::store`].
 
 /// A channel (a named, possibly private, multi-member conversation).

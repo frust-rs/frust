@@ -197,8 +197,8 @@ impl Component for CameraPage {
 
         // `take_picture` blocks up to 15s (Android) / 10s (Apple) — same
         // "pair with `spawn_blocking`, never call on the UI thread" contract
-        // as `request_permission` above (f1 documents this on the crate
-        // side). Extracting the session is a brief-lock `Arc` *clone* (see
+        // as `request_permission` above (the crate's own "Blocking API"
+        // doc). Extracting the session is a brief-lock `Arc` *clone* (see
         // `session_cell`'s doc comment), never a lock held across the
         // blocking call itself. `T = Option<String>`: `None` covers both
         // "no active session" and this task's own automatic first fetch at
@@ -355,9 +355,9 @@ fn block(children: Vec<FlexChild<CameraPageState>>) -> FlexChild<CameraPageState
 }
 
 /// A bounded list of filler rows so the preview slot can scroll fully
-/// off-screen and back (task 11's Details point 4; the M1 device-viewport
-/// lesson `platform_views.rs`'s own `filler_rows` doc comment tells in
-/// full) — duplicated locally per that module's own precedent (private,
+/// off-screen and back — see `platform_views.rs`'s own `filler_rows` doc
+/// comment for the device-viewport lesson behind the row count —
+/// duplicated locally per that module's own precedent (private,
 /// per-module, not shared).
 fn filler_rows() -> AnyView<CameraPageState> {
     let rows: Vec<AnyView<CameraPageState>> = (1..=64)
@@ -436,7 +436,7 @@ fn retry_permission_handler(state: &mut CameraPageState) {
 }
 
 // ---------------------------------------------------------------------------
-// Lens switch (C5)
+// Lens switch
 // ---------------------------------------------------------------------------
 
 /// Close the current session (if any) and flip [`CameraPageState::lens`],
@@ -444,7 +444,7 @@ fn retry_permission_handler(state: &mut CameraPageState) {
 /// existing open branch — not a second one — reopens on the new lens next
 /// rebuild. A no-op while no session is open (guarded by the early
 /// `let...else` below), matching this control's "disabled (or a no-op)
-/// while no session exists" contract (this task's Acceptance).
+/// while no session exists" contract.
 ///
 /// `Camera::open` isn't itself one of the crate's two blocking calls (only
 /// [`Camera::request_permission`]/[`CameraSession::take_picture`] are — the
@@ -473,7 +473,7 @@ fn switch_lens_handler(state: &mut CameraPageState) {
     state.open_error = None;
 
     // Capture/stream state belongs to the outgoing session — reset both so
-    // nothing from it leaks into the new one (this task's Acceptance).
+    // nothing from it leaks into the new one.
     state.streaming = false;
     state.stream_started_at = None;
     state.stream_error = None;
@@ -571,8 +571,7 @@ fn preview_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
 // ---------------------------------------------------------------------------
 
 /// A timestamped capture path under the OS temp directory — plain, no
-/// `frust-paths` dependency added for this device-gate page (out of this
-/// task's file scope).
+/// `frust-paths` dependency added for this device-gate page.
 fn capture_path() -> PathBuf {
     let epoch_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

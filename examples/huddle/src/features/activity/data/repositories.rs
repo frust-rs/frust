@@ -1,5 +1,5 @@
 //! [`StoreActivityRepository`] — the [`ActivityRepository`] implementation
-//! this app wires up (huddle clean-architecture refactor, task 04).
+//! this app wires up (huddle clean-architecture refactor).
 //!
 //! Adapts the shared in-memory [`crate::data::store`] to the activity domain
 //! trait: it materializes the mentions feed from the immutable dataset and
@@ -12,7 +12,8 @@
 //! changes.
 //!
 //! This is the **only** activity file that mentions [`crate::data::store`]
-//! (the inward dependency rule, PLAN Design Decision 3).
+//! (the inward dependency rule: only the data layer may reach into the
+//! shared store; domain/presentation never do).
 
 use std::time::Duration;
 
@@ -26,8 +27,7 @@ use crate::features::profile::domain::User;
 /// Mock load latency ("~400ms → skeletons") — long enough that the screen's
 /// loading skeletons are actually visible before the feed resolves. Fixed
 /// (not per-caller-tunable, unlike `messages`' latency), so it lives here
-/// with the store read (task 03's completion-summary refinement 1) rather
-/// than in the use case.
+/// with the store read rather than in the use case.
 pub const LOAD_LATENCY: Duration = Duration::from_millis(400);
 
 /// The store-backed [`ActivityRepository`]: materializes the mentions feed

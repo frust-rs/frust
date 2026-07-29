@@ -7,26 +7,24 @@
 //! This module is only the **shell**: the app state, the root [`navigator`]
 //! (whose home page is a [`glyph::app_bar`](frust::glyph::app_bar) — the
 //! brand mark, "glyph catalog" title, and the brightness/reduce-motion/
-//! animations toggles folded into its trailing actions (glyph-refinements
-//! task 18, superseding the old header-row `Row`; the animations toggle is
-//! catalog-animation-performance bug task 10) — over a [`safe_area`]'d body: the
+//! animations toggles folded into its trailing actions (superseding the old
+//! header-row `Row`) — over a [`safe_area`]'d body: the
 //! 10-section tab strip plus a [`pattern_switcher`](frust::motion::switcher::pattern_switcher)
 //! hosting one of ten section pages in a [`scroll_view`], under a bare
 //! [`toast_host`](frust::glyph::toast_host) overlay (default bottom-center
-//! anchoring, no app-side positioning — glyph-refinements task 07)), and the
+//! anchoring, no app-side positioning)), and the
 //! [`frust::app!`] entry binding all three platforms. The AppBar consumes the
 //! top window inset itself, so the body's [`safe_area`] disables its own top
 //! edge (`.top(false)`) to avoid double-padding it. The section pages
 //! themselves live in [`pages`] — each a `page(&CatalogState) ->
-//! AnyView<CatalogState>` filled in by a later task (see `pages/mod.rs` for
+//! AnyView<CatalogState>` (see `pages/mod.rs` for
 //! the page-fn contract).
 //!
 //! Back-dismiss (a pushed overlay/page, then the root navigator) works with
 //! **zero** catalog code — `frust::navigator` (imported below) auto-wires
-//! Android/gesture back handling for the shared [`NavigatorController`]
-//! (glyph-refinements task 08).
+//! Android/gesture back handling for the shared [`NavigatorController`].
 //!
-//! # Mode B background (platform-views task 10)
+//! # Mode B background
 //!
 //! The generated Android/iOS glue now turns `FRUST_TRANSLUCENT_SURFACE`/
 //! `translucentSurface` ON (this catalog is the framework's Mode B testbed —
@@ -142,17 +140,16 @@ pub struct CatalogState {
     /// appending to it.
     pub toasts: RwSignal<Vec<String>>,
     /// The shared navigator controller, so overlay pages (dialogs, the command
-    /// palette, a bottom sheet — filled by `c07`) can push onto the same
+    /// palette, a bottom sheet) can push onto the same
     /// root stack this shell mounts.
     pub nav: NavigatorController<CatalogState>,
     /// Whether the active section body has scrolled past
     /// [`ELEVATION_THRESHOLD_PX`], fed by the body `scroll_view`'s
     /// `on_scroll` and consumed by the root
-    /// [`app_bar`](frust::glyph::app_bar)'s `.elevated(...)` (task 18) — the
+    /// [`app_bar`](frust::glyph::app_bar)'s `.elevated(...)` — the
     /// same `y > 4` scrolled-shadow cue the AppBar's own reference HTML uses.
     pub elevated: RwSignal<bool>,
-    /// The header animations on/off toggle (default on;
-    /// catalog-animation-performance bug task 10). OFF means "every demo
+    /// The header animations on/off toggle (default on). OFF means "every demo
     /// renders its settled state — no frame requests anywhere": the toggle
     /// is **app-forced reduce motion + demo stop**, not a parallel
     /// mechanism — [`apply_theme`] ORs it into the same
@@ -222,10 +219,10 @@ const ELEVATION_THRESHOLD_PX: f64 = 4.0;
 /// The root [`glyph::app_bar`](frust::glyph::app_bar): a brand-mark leading
 /// glyph, the "glyph catalog" title, and the brightness/reduce-motion/
 /// animations toggles folded into its trailing actions — replacing the old
-/// header row's own `Row` (task 18) so the shell stacks exactly one bar. The
-/// animations toggle is the third, added by catalog-animation-performance
-/// bug task 10 beside the other two (Ed's decision — see
-/// [`CatalogState::animations_enabled`]'s doc comment for what OFF means).
+/// header row's own `Row` so the shell stacks exactly one bar. The
+/// animations toggle is the third, added beside the other two (Ed's
+/// decision — see [`CatalogState::animations_enabled`]'s doc comment for
+/// what OFF means).
 /// The AppBar consumes the top window inset itself (its [module
 /// docs](frust::glyph::app_bar)), so the body below never pads its own top
 /// edge.
@@ -325,7 +322,7 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     // would size the scroll_view to its content's intrinsic height, so the
     // viewport would never be smaller than the content and scrolling would
     // never engage (found on-device 2026-07-23). `on_scroll` feeds the root
-    // AppBar's `elevated` flag (task 18) off the body's own offset.
+    // AppBar's `elevated` flag off the body's own offset.
     let handles = state.clone();
     let body = flexible(
         1,
@@ -349,13 +346,13 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
         vec![inflexible(catalog_app_bar(state)), flexible(1, body_column)],
     );
 
-    // Toast host overlays the whole page (API.md's hosting note: a FIFO
-    // overlay mounted above every screen). A bare `toast_host` anchors itself
+    // Toast host overlays the whole page — a FIFO overlay mounted above
+    // every screen. A bare `toast_host` anchors itself
     // bottom-center with inset-aware margins — no app-side `Align`/`Padding`
-    // wrapper needed (glyph-refinements task 07's framework-side anchoring).
+    // wrapper needed (framework-side anchoring).
     //
-    // `AppBackground` is the BOTTOM-most layer (platform-views task 10 — see
-    // the module docs' "Mode B background" section): under the now-ON
+    // `AppBackground` is the BOTTOM-most layer (see
+    // the module docs' "Mode B background" section above): under the now-ON
     // `FRUST_TRANSLUCENT_SURFACE`/`translucentSurface` mobile glue, an
     // unpainted pixel anywhere in `column` would otherwise be a window
     // straight through the surface, not just `platform_views`'s own

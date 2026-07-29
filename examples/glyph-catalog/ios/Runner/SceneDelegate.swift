@@ -10,11 +10,13 @@ import FrustEmbedding
 private class MainViewController: FrustViewController {
     override var translucentSurface: Bool { true }
 
-    /// Arm the present-sync seam so the catalog exercises task 13's iOS fling-scroll fix.
-    /// The catalog is the Mode B testbed (gate finding D3 — embedded native views with
-    /// translucency); without this override, the stock testbed would skip this path.
-    /// `FrustViewController` implements the coupling contract (drives both
-    /// `CAMetalLayer.presentsWithTransaction` and `frust_set_present_sync` together).
+    /// Arms the present-sync seam so a scroll-driven frame's surface presentation
+    /// stays deferred until it meets the already-committed geometry of any hosted
+    /// platform view — this catalog is the Mode B (translucent-surface) testbed for
+    /// embedded native views, so leaving this off would leave that iOS-side
+    /// surface/view correction unexercised. `FrustViewController` implements the
+    /// coupling contract (drives both `CAMetalLayer.presentsWithTransaction` and
+    /// `frust_set_present_sync` together).
     override var synchronizesPresentWithPlatformViews: Bool { true }
 }
 

@@ -1,8 +1,7 @@
-//! Platform Views section (platform-views task 10): exercises the real
-//! [`frust::platform_view`] machinery — the framework's task-02/07/08/09
-//! native-view embedding contract — through the real machinery, superseding
-//! the abandoned platform-views spike branch's throwaway page (this task's
-//! own Notes: "keep the spike page OUT").
+//! Platform Views section: exercises the real
+//! [`frust::platform_view`] machinery — the framework's
+//! native-view embedding contract — superseding an earlier throwaway page
+//! that used to live here before this section replaced it.
 //!
 //! # Mode B testbed
 //!
@@ -12,7 +11,7 @@
 //! `android/app/src/main/kotlin/it/f0x/glyphcatalog/MainActivity.kt`'s
 //! `FrustActivity.translucentSurface` override and
 //! `ios/Runner/SceneDelegate.swift`'s `MainViewController.translucentSurface`
-//! override, both flipped ON by this task — which turns the WHOLE app's
+//! override, both flipped ON — which turns the WHOLE app's
 //! frust surface non-opaque, process-wide — not scoped to this one page.
 //! [`platform_view`]'s own module docs state the resulting paint
 //! contract plainly: "any region this slot's parent doesn't paint over is a
@@ -22,14 +21,14 @@
 //! this page's own [`mode_b_slot`] is the ONE deliberate hole in that
 //! backdrop, not an accident.
 //!
-//! # Sections (this task's Details)
+//! # Sections
 //! 1. [`mode_b_slot`] — a 300×400 `dev.frust.DemoStreamFactory` slot with two
-//!    corner buttons overlapping its bounds (one opaque, one 50%-alpha — the
-//!    alpha-over-alpha fringing probe device task 11 checks on iOS).
+//!    corner buttons overlapping its bounds (one opaque, one 50%-alpha — an
+//!    alpha-over-alpha fringing probe for an on-device check on iOS).
 //! 2. A self-update proof strip explaining that the slot's own counter runs
 //!    on its own Choreographer/Handler (iOS: `Timer`) loop, independent of
-//!    any frust frame — this page paints nothing per-frame itself (task 11's
-//!    zero-frust-frames trace target).
+//!    any frust frame — this page paints nothing per-frame itself (the
+//!    zero-frust-frames property an on-device trace confirms).
 //! 3. Stress toggles: show/hide the slot (a real dispose/create cycle, driven
 //!    by conditionally mounting/unmounting the widget — not a visibility
 //!    flag), bump its `params_json` (the `updateParams` path), and a second,
@@ -74,7 +73,7 @@ const DEMO_STREAM_VIEW_TYPE: &str = "DemoStreamFactory";
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 const DEMO_STREAM_VIEW_TYPE: &str = "dev.frust.DemoStreamFactory";
 
-/// The Mode B slot's fixed size (this task's Details: "a 300×400 slot").
+/// The Mode B slot's fixed size.
 const SLOT_W: f64 = 300.0;
 const SLOT_H: f64 = 400.0;
 
@@ -166,7 +165,7 @@ fn block(children: Vec<FlexChild<CatalogState>>) -> FlexChild<CatalogState> {
 }
 
 /// A bounded list of filler rows — the scrollable content that lets the Mode
-/// B slot scroll fully off-screen and back (this task's Details point 4).
+/// B slot scroll fully off-screen and back.
 /// Duplicated locally per `appbar.rs`'s own precedent (private, per-module,
 /// not shared): 64 rows, deliberately — at ~31 logical px per row this is
 /// ~2000px of content, comfortably taller than any phone viewport (the M1
@@ -216,7 +215,7 @@ fn maybe_debug_fill(view: PlatformViewView) -> PlatformViewView {
 /// ([`ButtonStyle::Primary`]), one wrapped in
 /// [`frust::motion::AnimatedOpacity`] at a static `0.5` (never retargeted, so
 /// it settles immediately with no ongoing animation — the alpha-over-alpha
-/// fringing probe this task's Details call out, static so it doesn't cost a
+/// fringing probe, static so it doesn't cost a
 /// frame request at rest). `bump` feeds the slot's `params_json` — the
 /// updateParams stress toggle's payload.
 fn mode_b_slot(bump: u32) -> AnyView<CatalogState> {

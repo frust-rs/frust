@@ -1,5 +1,5 @@
 //! Activity domain — the derived feed row (huddle clean-architecture
-//! refactor, task 04). Moved verbatim from the former flat
+//! refactor). Moved verbatim from the former flat
 //! `features/activity/mod.rs`.
 
 use super::entities::ActivityItem;

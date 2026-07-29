@@ -1,14 +1,14 @@
 //! Channels domain models — the derived roster rows the Home screen renders
-//! plus the flag-mutation params (huddle clean-architecture refactor, task 02).
+//! plus the flag-mutation params (huddle clean-architecture refactor).
 //!
-//! These are the *derived* domain types (per PLAN Design Decision 1's
-//! entities-vs-derived-rows split): [`ChannelItem`]/[`DmItem`] enrich the raw
+//! These are the *derived* domain types, distinct from the raw entities in
+//! `domain::entities`: [`ChannelItem`]/[`DmItem`] enrich the raw
 //! [`Channel`](super::entities::Channel)/[`Dm`](super::entities::Dm) entities
 //! with per-row unread/archived/muted state, and [`ChannelsData`] is the loaded
 //! roster the [`ChannelRepository`](super::repositories::ChannelRepository)
 //! produces. Plain data — no `frust`/reactive/data-layer imports (the inward
 //! dependency rule); the cross-feature [`UserStatus`] import is a domain→domain
-//! reuse, which the convention allows (PLAN Design Decision 2).
+//! reuse, which the convention allows.
 
 use crate::features::profile::domain::UserStatus;
 

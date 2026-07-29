@@ -14,15 +14,15 @@
 //! this module owns only the
 //! dataset + accessors, the app's transport-equivalent.
 //!
-//! # Shape (per PLAN)
+//! # Shape
 //!
 //! - 10 [`users`] (name, initials, [`UserStatus`]).
 //! - 6 [`channels`], one of them [`Channel::private`].
 //! - 9 [`dms`] (each a 1:1 conversation with a [`User`]) — one of them
 //!   (`dm-9`) deliberately carries no messages, so the channel feed's
 //!   empty-conversation state ("No messages yet — say hi") has a real
-//!   destination (task 22's empty-states audit; the frozen-hub rule is lifted
-//!   for this one addition).
+//!   destination (this hub file's usual freeze is lifted for this one
+//!   addition).
 //! - ~40 [`messages`] spread across the channels (varied: text lengths, a
 //!   link, a file stub, reactions).
 //! - one 120-message channel ([`FIREHOSE_ID`], `#firehose`) for pagination,
@@ -189,7 +189,7 @@ const DMS: [Dm; 9] = [
         preview: "Routes converged.",
     },
     // An empty DM: no messages in `MESSAGES`, so `messages_for("dm-9")` is
-    // empty and the feed shows its empty-conversation state (task 22).
+    // empty and the feed shows its empty-conversation state.
     Dm {
         id: "dm-9",
         user_id: 9,

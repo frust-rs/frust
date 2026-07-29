@@ -13,7 +13,7 @@
 //! **plain** function — the same shape [`crate::features::search::presentation::pages::search`]
 //! and [`thread`](crate::features::messages::presentation::pages::thread) use, and their documented reasoning — is what
 //! lets a row tap push the real `/channel/:id` route directly, instead of
-//! task 14's local in-tab drill-down workaround this task replaces. See
+//! an earlier local in-tab drill-down workaround. See
 //! [`crate::features::activity::presentation::controllers`]'s module docs for
 //! the thread-local instance's own "why" (mirroring
 //! [`crate::features::search::presentation::SearchController::instance`]).

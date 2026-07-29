@@ -1,4 +1,4 @@
-//! Foundations section (`c02`): live color/type/radius token specimens,
+//! Foundations section: live color/type/radius token specimens,
 //! reproducing reference §01 Foundations off the *current* theme rather than
 //! hardcoded hexes — every swatch/specimen below reads `use_context::<Theme>()`
 //! at build time, so toggling the header's brightness switch repaints this
@@ -7,14 +7,14 @@
 //!
 //! # Color-swatch primitive
 //!
-//! There is no generic "filled rounded box" widget in the `frust` facade
-//! (API friction — see this task's Completion Summary), so a swatch is a
-//! [`SizedBox`] wrapping an [`Image`] over a 1×1 solid-color [`ImageSource`]
-//! stretched with [`ImageFit::Fill`] — the same facade-only technique
-//! `examples/huddle`'s `ui::solid_source` helper uses, reproduced locally here
-//! (this task's scope is this file alone). Radius chips are a static
-//! rounded-rect fill (task 02-foundations-static-specimens: replaced
-//! [`frust::glyph::skeleton`] with a local [`StaticRoundedRect`] view).
+//! There is no generic "filled rounded box" widget in the `frust` facade, so
+//! a swatch is a [`SizedBox`] wrapping an [`Image`] over a 1×1 solid-color
+//! [`ImageSource`] stretched with [`ImageFit::Fill`] — the same facade-only
+//! technique `examples/huddle`'s `ui::solid_source` helper uses, reproduced
+//! locally here rather than shared, since this crate has no dependency on
+//! `examples/huddle`. Radius chips are a static rounded-rect fill — a local
+//! [`StaticRoundedRect`] view rather than [`frust::glyph::skeleton`], since a
+//! static specimen needs no skeleton-loading animation.
 //!
 //! # Unmapped Glyph text tokens
 //!
@@ -23,8 +23,7 @@
 //! as a deliberate, already-documented leftover (`on_surface_variant` already
 //! carries `fg-muted`). This page cannot resolve them from the live theme
 //! without hardcoding a literal hex (which would violate the "never hardcode
-//! hexes" rule below), so it labels them N/A rather than painting a swatch —
-//! see the Completion Summary.
+//! hexes" rule below), so it labels them N/A rather than painting a swatch.
 
 use frust::{
     AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, GlyphInk, Image, ImageFit,
@@ -112,7 +111,8 @@ impl Widget for StaticRoundedRectWidget {
 
 /// A 1×1 solid-color [`ImageSource`] — the facade-only way to paint an
 /// arbitrary filled rectangle (mirrors `examples/huddle`'s
-/// `ui::solid_source`, reproduced locally per this task's single-file scope).
+/// `ui::solid_source`, reproduced locally here rather than shared, since
+/// this crate has no dependency on `examples/huddle`).
 fn solid_source(color: Color) -> ImageSource {
     let c = color.components;
     let to_u8 = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -172,15 +172,15 @@ fn swatch_na(name: &str, reason: &str, label_color: Color) -> AnyView<CatalogSta
 }
 
 /// A small monospace-styled label (the Glyph type scale's `micro` slot),
-/// used for every swatch name/hex line — see the module docs' "mono name"
-/// requirement.
+/// used for every swatch name/hex line so labels stay visually consistent
+/// across the page.
 fn mono_label(content: String, color: Color) -> TextView {
     text(content).size(10.0).color(color)
 }
 
 /// Group `items` into rows of `per_row`, stacked vertically — the closest
 /// approximation of a wrapping grid the facade offers today (no `Wrap`
-/// widget; API friction, see the Completion Summary).
+/// widget yet).
 fn wrap_rows(mut items: Vec<AnyView<CatalogState>>, per_row: usize) -> AnyView<CatalogState> {
     let mut rows: Vec<AnyView<CatalogState>> = Vec::new();
     while !items.is_empty() {

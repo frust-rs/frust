@@ -1,3 +1,3 @@
-//! Activity feature pages (huddle clean-architecture refactor, task 04).
+//! Activity feature pages (huddle clean-architecture refactor).
 
 pub mod activity;

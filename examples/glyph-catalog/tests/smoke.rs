@@ -422,15 +422,15 @@ fn foundations_page_requests_no_frames_at_rest() {
 /// a fixed wall-clock span *regardless* of `reduce_motion`, which only
 /// desyncs the per-line cascade into a single fast fade rather than
 /// eliminating the reveal — see `term_block`'s module docs; the longest
-/// instance here is 5 lines, ≈510ms). "Settled state" (Acceptance Criterion
-/// #1) means at-rest AFTER any such mount-time reveal has finished, not on
-/// the very first post-mount paint.
+/// instance here is 5 lines, ≈510ms). "Settled state" means at-rest AFTER
+/// any such mount-time reveal has finished, not on the very first
+/// post-mount paint.
 const SETTLE_MS: u64 = 5000;
 
-/// The header's animations-off toggle:
-/// the coverage-sweep half of Acceptance Criterion #1 — "toggle off: headless
-/// paint of every section reports zero frame requests". Mirrors what the real
-/// toggle handler does (`lib.rs`'s `apply_theme`/`effective_reduce_motion`):
+/// The header's animations-off toggle: verifies that with animations off,
+/// headless paint of every section reports zero frame requests. Mirrors
+/// what the real toggle handler does (`lib.rs`'s
+/// `apply_theme`/`effective_reduce_motion`):
 /// force `MotionScheme::reduce_motion` through the threaded theme (the "every
 /// convention-following widget collapses" half) AND flip
 /// `CatalogState::animations_enabled` off (the half `pages::interactions`'
@@ -465,7 +465,7 @@ fn every_section_requests_no_frames_with_animations_disabled() {
             // First frame: mount (any one-shot entrance reveal starts here).
             let _ = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
             // Second frame, well past SETTLE_MS: the section's true at-rest
-            // state, the one Acceptance Criterion #1 actually targets.
+            // state, the one this test actually targets.
             let (_scene, outcome) =
                 frame_at(&mut root, &mut logic, &mut state, &mut tcx, SETTLE_MS);
             assert!(

@@ -179,21 +179,19 @@
 //!
 //! # GATE HARNESS: a measurement rig, not a demo
 //!
-//! [`gate_harness_block`]'s section exists solely to give
-//! a device gate's bars 5 and 6 something to measure —
-//! an earlier decomposition assigned those measurements to the device gate
-//! but never assigned anyone to build the affordances they need. It is
-//! marked GATE HARNESS in its own UI copy too (not a design-system section
-//! like the ones above), and **may be deleted outright** once the
-//! on-device gate has run: a live [`frust_native_widgets::live_slot_count`]
-//! readout (diagnostics-only, not a supported production API — see that
-//! fn's own doc comment), a mount/unmount cycler running its OWN six-control
-//! group (bar 5: proves the teardown-retire path disposes promptly
-//! rather than waiting out the differ's idle missing-streak backstop —
+//! [`gate_harness_block`]'s section exists solely to give an on-device test
+//! something to measure. It is marked GATE HARNESS in its own UI copy too
+//! (not a design-system section like the ones above), and **may be deleted
+//! outright** once that on-device gate has run: a live
+//! [`frust_native_widgets::live_slot_count`] readout (diagnostics-only, not
+//! a supported production API — see that fn's own doc comment), a
+//! mount/unmount cycler running its OWN six-control group (proves the
+//! teardown-retire path disposes promptly rather than waiting out the
+//! differ's idle missing-streak backstop —
 //! `plugins/native-widgets/src/registry.rs`'s module doc's Idle-deferred
-//! dispose finding), and a 50-slot `native_label` stress toggle, off by
-//! default (bar 6: a deferred measurement feeding a
-//! shared-container escalation decision). No nested `ScrollView` here: the
+//! dispose section), and a 50-slot `native_label` stress toggle, off by
+//! default (feeds a shared-container scroll-batch-jank / differ
+//! batch-sizing measurement). No nested `ScrollView` here: the
 //! whole "Native Widgets" page already rides one scroll view
 //! (`crate::home_page`'s `scroll_view(pages::current(...))` wrapper), so
 //! appending content to this page's own column is already scrollable.
@@ -846,19 +844,20 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogSta
 // ---------------------------------------------------------------------------
 // GATE HARNESS — a measurement rig, not a demo. See the
 // [module docs](self)'s "GATE HARNESS" section. This whole region may be
-// deleted outright once its device-gate bars 5/6 have run on device.
+// deleted outright once the underlying device gate (leak + lifecycle,
+// 50-slot stress — see below) has run on device.
 // ---------------------------------------------------------------------------
 
-/// How many single-control slots the bar-6 stress toggle mounts — 50
+/// How many single-control slots the stress toggle mounts — 50
 /// (`native_label`, "the cheapest control").
 const STRESS_SLOT_COUNT: u32 = 50;
 
 /// The mount/unmount cycler's per-half-step duration (mount, then unmount, is
 /// two half-steps = one cycle): slow enough that a human watching the page
-/// can see the group blink in and out, fast enough that a 100-cycle run (bar
-/// 5's own target count) finishes in `100 * 2 * CYCLE_STEP_MS` = 30s, well
-/// under a minute. **Community-approximate**: no spec pins this, it's just a
-/// human-observable-but-not-glacial pace.
+/// can see the group blink in and out, fast enough that a 100-cycle run (the
+/// cycler's own target count) finishes in `100 * 2 * CYCLE_STEP_MS` = 30s,
+/// well under a minute. **Community-approximate**: no spec pins this, it's
+/// just a human-observable-but-not-glacial pace.
 const CYCLE_STEP_MS: f64 = 150.0;
 
 /// A zero-size sentinel [`View`]/[`Widget`] pair whose only job is an
@@ -963,8 +962,8 @@ fn cycle_state(target: u32) -> (bool, u32, bool) {
 /// The mount/unmount cycler's own six-control group — deliberately SEPARATE
 /// instances from the six-control showcase above, so cycling never disrupts
 /// that section's own round-trip demo. Each mount allocates six fresh native
-/// slots; each unmount tears all six down — the teardown-retire path
-/// bar 5 exercises. Deliberately display-only (no callbacks/round-trip
+/// slots; each unmount tears all six down, exercising the teardown-retire
+/// path. Deliberately display-only (no callbacks/round-trip
 /// wiring): the point is create/dispose churn, not interaction.
 fn cycle_group(mounted: bool) -> AnyView<CatalogState> {
     if !mounted {
@@ -1001,7 +1000,7 @@ fn cycle_group(mounted: bool) -> AnyView<CatalogState> {
     ))
 }
 
-/// The 50-slot stress toggle's content (bar 6): [`STRESS_SLOT_COUNT`]
+/// The 50-slot stress toggle's content: [`STRESS_SLOT_COUNT`]
 /// single-control (`native_label`) slots in a plain vertical column. No
 /// nested `ScrollView` here — see the [module docs](self)'s note on why the
 /// whole page's own scroll view already covers this.
