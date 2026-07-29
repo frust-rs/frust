@@ -3585,6 +3585,86 @@ mod tests {
         );
     }
 
+    // --- An interactive edge-swipe pop drives the popped page's own
+    //     `Custom` preset RAW, bypassing `resolve_spec`'s `reduce_motion`
+    //     collapse — unlike a programmatic push/pop. This lives here (not in
+    //     `transition.rs`'s test module) because driving an interactive pop
+    //     needs this module's private test harness (`NavigatorController`,
+    //     `down`/`move_to`, `full_frame`, `nav_widget`) — the interactive-pop
+    //     path is not reachable from `transition.rs` at all. See
+    //     `PageTransition::Custom`'s doc comment and
+    //     `transition.rs`'s `custom_preset_collapses_under_reduce_motion_on_the_resolve_spec_path`
+    //     for the contrasting programmatic-path case. ---
+
+    #[test]
+    fn interactive_pop_calls_custom_fn_under_reduce_motion() {
+        // A plain `fn` pointer can't capture, so invocation is recorded
+        // through a process-static flag — fine here since this exact
+        // function is only ever installed/read by this one test.
+        static CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        fn recording_custom(_p: f64, _is_pop: bool, _size: Size) -> (Layer, Layer) {
+            CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+            (Layer::IDENTITY, Layer::IDENTITY)
+        }
+
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut reduced = Theme::m3_baseline();
+        reduced.motion.reduce_motion = true;
+        root.set_theme(Box::new(reduced));
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Push B with a `Custom` transition (explicit duration, so the
+        // collapse below is attributable to `reduce_motion` alone). This
+        // push's own animation still resolves through `resolve_spec` at its
+        // first paint (the `pending_spec` seam `paint_transition` drains)
+        // and collapses to `ReducedCrossfade` as documented — the caller's
+        // fn must NOT run for the push itself.
+        controller.push_with(
+            || sized_page(100.0, 80.0),
+            TransitionSpec::new(
+                PageTransition::Custom(recording_custom),
+                Timing::Duration(Duration::from_millis(80), Curve::Linear),
+            ),
+        );
+        run_until_settled(&mut root, &mut app, &mut state, 0);
+        assert!(
+            !CALLED.load(std::sync::atomic::Ordering::SeqCst),
+            "the programmatic push collapsed to ReducedCrossfade — Custom's fn must not run"
+        );
+        assert!(
+            nav_widget(&root).transition.is_none(),
+            "the push transition finalized before the swipe begins"
+        );
+
+        // Drive an interactive edge-swipe pop of B. `begin_interactive_pop`
+        // takes `spec.preset` (`Custom`) RAW and sets `pending_spec: None`,
+        // so `resolve_spec`'s `reduce_motion` collapse never runs on this
+        // path — `paint_transition` calls `resolve_layers` with the
+        // unresolved `Custom` preset directly.
+        let mut scene = TransitionScene::default();
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(1000));
+        root.event(&mut state, &move_to(40.0, 50.0)); // past slop -> steals
+        assert!(
+            nav_widget(&root).transition.is_some(),
+            "an interactive pop began"
+        );
+
+        full_frame(&mut root, &mut app, &mut state, ft(1016));
+        assert!(
+            CALLED.load(std::sync::atomic::Ordering::SeqCst),
+            "an interactive edge-swipe pop drives the popped page's own Custom \
+             preset directly under reduce_motion — the caller's fn IS called"
+        );
+    }
+
     // --- A completed swipe delivers the pop result. ---
 
     #[derive(Default)]

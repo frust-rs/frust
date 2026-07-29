@@ -165,7 +165,14 @@ const DEFAULT_SETTLE_SPRING: SpringDesc = SpringDesc {
 /// contract (documented on `Custom`) is a best-effort "names the same
 /// function" identity check, not a memory-safety- or correctness-critical
 /// comparison; the alternative (dropping `Eq` from the enum) breaks every
-/// other variant's equality for a single edge case.
+/// other variant's equality for a single edge case. The `#[allow]` sits at
+/// the enum level (not scoped to `Custom` alone) because a field-level
+/// attribute on a tuple-variant payload does not suppress a lint raised
+/// inside the derive macro's generated `PartialEq`/`Eq` impl — confirmed by
+/// attempting exactly that scoping, which left the warning in place; the
+/// derive expands against the whole enum, so only an enum- or module-level
+/// `#[allow]` (or a hand-written `impl PartialEq` dropping the derive
+/// entirely) reaches it.
 #[allow(unpredictable_function_pointer_comparisons)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PageTransition {
@@ -228,11 +235,24 @@ pub enum PageTransition {
     /// [`preset_enter_exit`]'s fallback arm, matching [`make_driver`]'s
     /// unthemed `ThemeDefault` fallback).
     ///
-    /// **Reduce-motion.** [`resolve_spec`]'s collapse to
-    /// [`PageTransition::ReducedCrossfade`] applies to `Custom` unchanged and
-    /// unconditionally — a custom transition inherits the accessibility rule
-    /// for free and cannot opt out; under `reduce_motion` the supplied
-    /// function is never called.
+    /// **Reduce-motion — programmatic path only.** [`resolve_spec`]'s
+    /// collapse to [`PageTransition::ReducedCrossfade`] applies to `Custom`
+    /// like every other preset when a transition is staged
+    /// **programmatically** (a push/pop/replace carrying a
+    /// [`TransitionSpec`]): the navigator resolves it against the active
+    /// `reduce_motion` flag on the transition's first paint, before the
+    /// preset is ever consulted, so a `Custom` fn staged that way is not
+    /// called.
+    ///
+    /// A **user-driven interactive edge-swipe pop** is a different path:
+    /// it is not routed through that collapse at all — the navigator drives
+    /// the popped page's own preset directly, raw, with no
+    /// [`resolve_spec`] step — so under `reduce_motion` the supplied
+    /// function **is** still called there. This is not specific to
+    /// `Custom`: every built-in preset behaves identically on an
+    /// interactive pop (a pre-existing accessibility gap, unrelated to
+    /// `Custom` and tracked separately — this doc narrows the claim to what
+    /// the code does, it does not fix the gap).
     Custom(fn(progress: f64, is_pop: bool, size: Size) -> (Layer, Layer)),
 }
 
@@ -1169,15 +1189,25 @@ mod tests {
     }
 
     #[test]
-    fn custom_preset_collapses_under_reduce_motion() {
-        // Under `reduce_motion`, `resolve_spec`'s collapse to
-        // `ReducedCrossfade` applies to `Custom` unchanged and
-        // unconditionally — the supplied function itself is never called by
-        // `resolve_spec`/`resolve_timing` (only `resolve_layers` ever calls
-        // it, and the navigator only calls `resolve_layers` with the
-        // *resolved* preset, which is `ReducedCrossfade` here, not `Custom`).
+    fn custom_preset_collapses_under_reduce_motion_on_the_resolve_spec_path() {
+        // This test covers only the `resolve_spec` seam — the path a
+        // **programmatic** push/pop/replace resolves its timing through
+        // (see `navigator.rs`'s `paint_transition`, the sole `resolve_spec`
+        // call site). Under `reduce_motion`, `resolve_spec` collapses
+        // `Custom` to `ReducedCrossfade` unchanged, so the supplied
+        // function itself is never called by `resolve_spec`/`resolve_timing`
+        // (only `resolve_layers` ever calls it, and this path only ever
+        // calls `resolve_layers` with the *resolved* preset,
+        // `ReducedCrossfade` here, not `Custom`).
+        //
+        // This is NOT a navigator-wide invariant: a user-driven interactive
+        // edge-swipe pop does not go through `resolve_spec` at all and DOES
+        // call the supplied function under `reduce_motion` — see
+        // `navigator.rs`'s
+        // `interactive_pop_calls_custom_fn_under_reduce_motion`, and
+        // `Custom`'s doc comment above.
         fn panics_if_called(_p: f64, _is_pop: bool, _size: Size) -> (Layer, Layer) {
-            panic!("Custom's function must not be invoked under reduce_motion");
+            panic!("Custom's function must not be invoked on the resolve_spec path");
         }
 
         let mut m = MotionScheme::m3_expressive();
