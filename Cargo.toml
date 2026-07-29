@@ -4,7 +4,7 @@ resolver = "2"
 # doesn't cover `plugins/`) — a platform plugin (frust-plugin + FFI crates
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets"]
 # examples/huddle (renamed from its prior directory name, task 09) is the
 # sole example (phase 8 examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
@@ -236,6 +236,18 @@ objc2-core-media = "0.3"
 objc2-core-video = "0.3"
 objc2-quartz-core = "0.3"
 dispatch2 = "0.3"
+# frust-native-widgets's Apple control surface
+# (`workflow/plans/features/frust-native-widgets/PLAN.md`'s pin-row note) —
+# `UIView`/`UIButton`/etc. bindings for the plugin's Rust-built native
+# controls. Fresh pin: no prior root-workspace consumer (the spike crate at
+# `plugins/native-widgets-spike/` is a standalone, excluded workspace).
+# Plain version string (no `default-features` set), matching
+# `objc2`/`objc2-foundation`'s shape above, so the member crate can pick its
+# own minimal feature list without Cargo's workspace-inheritance
+# restriction tripping. Pinned to minor per the Version-Pin Policy; the
+# tripwire is `cargo check --target aarch64-apple-ios-sim -p
+# frust-native-widgets`.
+objc2-ui-kit = "0.3"
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md / phase-5.5 research doc)
 reactive_graph = "0.2"

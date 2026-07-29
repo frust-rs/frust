@@ -412,6 +412,13 @@ class FrustSurfaceView(
     var platformViewHost: FrustViewHost? = null
 
     /**
+     * Mode B input forwarding (native-widgets spike 3): the interactive
+     * sibling view that owns the in-flight gesture, decided at touch-DOWN
+     * (null = frust owns it). Cleared on UP/CANCEL.
+     */
+    private var platformViewForwardTarget: View? = null
+
+    /**
      * The latest `expectedPresentationTimeNanos - frameTimeNanos` read off the
      * Choreographer frame timeline (API 33+) — how far ahead of *now* a window
      * frame committed on this tick is expected to reach the screen, which is
@@ -660,6 +667,31 @@ class FrustSurfaceView(
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (handle == 0L) {
             return false
+        }
+        // Mode B input forwarding (native-widgets spike 3): touch-DOWN decides
+        // ownership for the WHOLE gesture — a down inside an interactive
+        // slot's rect (outside its z-shields) hands this and every subsequent
+        // event of the gesture to the native sibling; frust never sees any of
+        // it. No mid-gesture handoff in v1.
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            platformViewForwardTarget = platformViewHost?.interactiveTargetAt(event.x, event.y)
+        }
+        val forwardTarget = platformViewForwardTarget
+        if (forwardTarget != null) {
+            val copy = MotionEvent.obtain(event)
+            // Sibling views are positioned via translationX/Y in the shared
+            // FrameLayout root, which this surface view fills at (0,0) — so
+            // window-space and surface-space coincide, and the child's local
+            // space is a pure translation.
+            copy.offsetLocation(-forwardTarget.translationX, -forwardTarget.translationY)
+            forwardTarget.dispatchTouchEvent(copy)
+            copy.recycle()
+            if (event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL
+            ) {
+                platformViewForwardTarget = null
+            }
+            return true
         }
         // Map Android's masked action to our fixed 0..3 ABI (see `nativeOnTouch`).
         // Single-pointer in v1: we forward the primary pointer's location only.

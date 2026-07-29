@@ -2,6 +2,13 @@
 //! ONLY the two shell FFI-glue callers may declare host translucency, and
 //! the `frust` facade must never re-export the declaration fn.
 //!
+//! Extended by native-widgets task p1-01 with the same pin over the RESOLVED
+//! slot's writer (`publish_resolved_surface_mode`, whose sanctioned callers
+//! are the two shells' `app.rs` UI-thread sync points), plus the app-facing
+//! half's positive checks: the facade DOES re-export the *reader*
+//! (`resolved_surface_mode`), and on a host with no shell running it answers
+//! `Unknown`.
+//!
 //! Precedent: `frust-drive/tests/print_free_cores.rs` (a plain `std::fs`
 //! source scan run as an ordinary `cargo test` — this repo has no
 //! lint-plugin tooling, see `docs/CODE_STANDARDS.md`). Chosen over a doc
@@ -18,10 +25,13 @@
 //!    files (`frust-shell-android/src/jni_glue.rs`,
 //!    `frust-shell-ios/src/ffi_glue.rs`) and `frust-shell-common`'s own
 //!    defining/test module (`surface_mode.rs`).
-//! 2. `crates/frust/src/lib.rs` (the facade) contains no `pub use` line
-//!    naming `declare_host_translucent_surface` or the old
-//!    `request_translucent_surface` — i.e. the facade doesn't re-export the
-//!    latch setter.
+//! 2. Likewise for `publish_resolved_surface_mode(` — the RESOLVED slot's
+//!    writer — whose allowlist is the two shells' `app.rs` (their single
+//!    UI-thread resolved-translucency sync point) plus `surface_mode.rs`.
+//! 3. `crates/frust/src/lib.rs` (the facade) contains no `pub use` line
+//!    naming `declare_host_translucent_surface`, the old
+//!    `request_translucent_surface`, or `publish_resolved_surface_mode` —
+//!    i.e. the facade re-exports neither writer.
 //!
 //! # What this is NOT
 //!
@@ -95,6 +105,21 @@ const ALLOWLIST: &[&str] = &[
     "crates/frust-shell-ios/src/ffi_glue.rs",
 ];
 
+/// Files allowed to call `publish_resolved_surface_mode(` (task p1-01) — each
+/// mobile shell's `app.rs`, which owns the one UI-thread beat that reads the
+/// live surface's resolved translucency and pushes it into the render root,
+/// plus `surface_mode.rs` itself (the definition and its own unit tests).
+///
+/// Deliberately NOT the `jni_glue.rs`/`ffi_glue.rs` install sites: those run
+/// render-side in the default split, while app code polls the slot during a
+/// UI-thread rebuild — publishing from the install would race the very
+/// consumer this slot exists for.
+const RESOLVED_PUBLISH_ALLOWLIST: &[&str] = &[
+    "crates/frust-shell-common/src/surface_mode.rs",
+    "crates/frust-shell-android/src/app.rs",
+    "crates/frust-shell-ios/src/app.rs",
+];
+
 /// True if `line`, trimmed, is a comment-only line (mirrors
 /// `print_free_cores.rs`'s comment-stripping — doc comments naming the fn in
 /// prose, e.g. `[\`declare_host_translucent_surface\`]`, must not count as a
@@ -103,13 +128,13 @@ fn is_comment_only(line: &str) -> bool {
     line.trim_start().starts_with("//")
 }
 
-#[test]
-fn only_shell_glue_may_declare_host_translucent_surface() {
-    let mut failures = Vec::new();
-
+/// Every real (non-comment) `<needle>` call site under `crates/*/src` outside
+/// `allowlist`, formatted as `path:line: <line>` for the failure message.
+fn call_sites_outside(needle: &str, allowlist: &[&str]) -> Vec<String> {
+    let mut hits = Vec::new();
     for path in all_crate_source_files() {
         let relp = rel(&path);
-        if ALLOWLIST.contains(&relp.as_str()) {
+        if allowlist.contains(&relp.as_str()) {
             continue;
         }
         let contents =
@@ -118,22 +143,42 @@ fn only_shell_glue_may_declare_host_translucent_surface() {
             if is_comment_only(line) {
                 continue;
             }
-            if line.contains("declare_host_translucent_surface(") {
-                failures.push(format!(
-                    "{relp}:{}: calls `declare_host_translucent_surface()` outside the \
-                     sanctioned shell-glue allowlist — only the generated host's JNI/C-ABI \
-                     entry points may declare host translucency (review M3). Line: {}",
-                    i + 1,
-                    line.trim()
-                ));
+            if line.contains(needle) {
+                hits.push(format!("{relp}:{}: {}", i + 1, line.trim()));
             }
         }
     }
+    hits
+}
+
+#[test]
+fn only_shell_glue_may_declare_host_translucent_surface() {
+    let failures = call_sites_outside("declare_host_translucent_surface(", ALLOWLIST);
 
     assert!(
         failures.is_empty(),
-        "host-declared-translucency ban violated ({} hit(s)) — see \
+        "host-declared-translucency ban violated ({} hit(s)) — only the generated host's \
+         JNI/C-ABI entry points may declare host translucency (review M3); see \
          crates/frust-shell-common/src/surface_mode.rs's module docs:\n{}",
+        failures.len(),
+        failures.join("\n"),
+    );
+}
+
+/// Task p1-01's writer pin: the RESOLVED slot is shell-published, exactly like
+/// the declaration latch is shell-declared. App code reads it and nothing
+/// else — a stray publish would let an app fake a platform verdict it never
+/// got, which is the same class of defect review M3 removed on the
+/// declaration side.
+#[test]
+fn only_shell_app_loops_may_publish_the_resolved_surface_mode() {
+    let failures = call_sites_outside("publish_resolved_surface_mode(", RESOLVED_PUBLISH_ALLOWLIST);
+
+    assert!(
+        failures.is_empty(),
+        "resolved-surface-mode publish ban violated ({} hit(s)) — only each mobile shell's \
+         own per-frame resolved-translucency sync may publish this slot (native-widgets \
+         p1-01); see crates/frust-shell-common/src/surface_mode.rs's module docs:\n{}",
         failures.len(),
         failures.join("\n"),
     );
@@ -164,9 +209,11 @@ fn facade_does_not_reexport_the_translucency_declaration() {
         in_pub_use = true;
         assert!(
             !line.contains("declare_host_translucent_surface")
-                && !line.contains("request_translucent_surface"),
-            "crates/frust/src/lib.rs:{}: facade re-exports the translucency-declaration fn — \
-             app Rust must never be able to set this latch (review M3). Line: {}",
+                && !line.contains("request_translucent_surface")
+                && !line.contains("publish_resolved_surface_mode"),
+            "crates/frust/src/lib.rs:{}: facade re-exports a surface-mode WRITER — app Rust \
+             must never be able to set the declaration latch (review M3) or fake a resolved \
+             verdict (p1-01). Line: {}",
             i + 1,
             line.trim()
         );
@@ -204,5 +251,30 @@ fn facade_reexport_scan_sees_multi_line_groups() {
     assert!(
         visited_banned,
         "the scan walk must visit continuation lines of a grouped `pub use`"
+    );
+}
+
+/// The reader half is app-facing by design (task p1-01): this test failing to
+/// *compile* is the real assertion — `frust::resolved_surface_mode` and
+/// `frust::ResolvedSurfaceMode` must both be reachable from the facade alone,
+/// since app code never depends on `frust-shell-common` directly.
+///
+/// Acceptance: on a host with no shell running (this test binary), the slot
+/// reads `Unknown` — not `Opaque`, which would be a claim about a surface
+/// nobody ever created.
+#[test]
+fn facade_exposes_the_resolved_reader_and_it_starts_unknown() {
+    let mode: frust::ResolvedSurfaceMode = frust::resolved_surface_mode();
+
+    assert_eq!(
+        mode,
+        frust::ResolvedSurfaceMode::Unknown,
+        "no shell published in this process, so the resolved slot must still read Unknown"
+    );
+    assert!(!mode.is_translucent());
+    assert!(
+        !mode.translucency_refused(),
+        "`Unknown` must never be mistaken for a refusal — a fallback branch keyed off it \
+         would fire on every desktop-preview run"
     );
 }

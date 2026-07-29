@@ -1,6 +1,5 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 389
 expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, false, 0))"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
@@ -9,24 +8,24 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
  PROJECTS                │                                                                          
   ▸ huddle               │  Dashboard                                                               
                          │  ━━━━━━━━━━                                                              
- DEVICES ↻ r             │                                                                          
-   none found     ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮e.                
-                  │                                                              │▓▓                
- SESSIONS         │  Choose a plugin to add to this project                      │▓▓                
-   none running   │  ▸ (o) shared-preferences                                    │▓▓                
-                  │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
- ACTIONS          │    ( ) secure-storage                                        │▓▓                
-   New project · n│        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
-   Add plugin · a │    ( ) clean-signals-frust                                   │▓▓                
-   Doctor · d     │        ✗ needs a sibling checkout (dev-machine only)         │▓▓                
-   Build · b      │    ( ) camera                                                │▓▓                
-   Clean · c      │        Camera preview (a platform view), still capture, and  │▓▓                
+ DEVICES ↻ r      ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+   none found     │                                                              │▓▓                
+                  │  Choose a plugin to add to this project                      │▓▓                
+ SESSIONS         │  ▸ (o) shared-preferences                                    │▓▓                
+   none running   │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
+                  │    ( ) secure-storage                                        │▓▓                
+ ACTIONS          │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
+   New project · n│    ( ) clean-signals-frust                                   │▓▓                
+   Add plugin · a │        ✗ needs a sibling checkout (dev-machine only)         │▓▓                
+   Doctor · d     │    ( ) camera                                                │▓▓                
+   Build · b      │        Camera preview (a platform view), still capture, and  │▓▓                
+   Clean · c      │    ( ) native-widgets                                        │▓▓                
+                  │        Real OS controls (button, label, switch, slider, pro  │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

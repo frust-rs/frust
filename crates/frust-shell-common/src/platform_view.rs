@@ -53,9 +53,8 @@
 //!   reappearance of the same `slot_id` is indistinguishable from a brand-new
 //!   one and gets a fresh `Create` (idempotent either way — see module docs'
 //!   Widget teardown tradeoff below). [`PlatformViewState::retire`] is the
-//!   second, explicit path to the same outcome, for a shell that has (or later
-//!   gains) a real teardown signal — both paths are kept deliberately, per the
-//!   plan.
+//!   second, explicit path to the same outcome — the one a real widget
+//!   teardown takes, immediately — and both are kept deliberately.
 //! - **Revive after Hide** (slot reappears in `ingest`'s frames before the
 //!   dispose threshold): since the slot is still tracked, this is just an
 //!   ordinary `Update` — `visible` flips back to `true` like any other
@@ -63,17 +62,45 @@
 //! - **Revive after Dispose**: the slot was forgotten, so this is
 //!   indistinguishable from new — fresh `Create` + `Update`.
 //!
+//! # Z-shields (`interactive` slots only)
+//!
+//! An interactive slot's `shields` list — the regions where frust content
+//! painted OVER the slot keeps winning input — is assembled **here**, not by
+//! the widget, from two sources:
+//!
+//! - the pass's auto-collected shield rects
+//!   (`RenderRoot::input_shields()`, reported by `frust-widgets`' `shield(child)`
+//!   wrapper), narrowed to those that overlap the slot's own `rect`; plus
+//! - the slot's own manually declared rects (`PlatformViewView::shield_local`,
+//!   the escape hatch), which arrive on the frame and are always kept.
+//!
+//! A **non-interactive** slot always ships an empty list: shields only mean
+//! anything to a host that is forwarding touches to the native view in the
+//! first place, so carrying them would be noise the host must ignore. The
+//! resulting [`ViewCommand::Update`] shape is unchanged either way — the wire
+//! format the two embeddings already parse never moved.
+//!
+//! Comparison is epsilon-based, like `rect`/`clip` (and order-sensitive: the
+//! collection order is paint order, which is deterministic for an unchanged
+//! tree), so a shield drifting sub-pixel with its chrome emits nothing.
+//!
 //! # Widget teardown detection tradeoff
 //!
-//! `frust-core` has no teardown hook in the frame channel (task 01 keeps core
-//! "dumb" deliberately), so [`PlatformViewState`] cannot know for certain that
-//! a missing slot's widget was actually dropped from the tree versus merely
-//! culled or transiently not repainting. [`DISPOSE_AFTER_MISSING_FRAMES`] is a
-//! heuristic streak threshold, not a real signal — a shell that gains an
-//! actual teardown channel in the future should call [`PlatformViewState::retire`]
-//! directly instead of waiting out the streak; both paths converge on the same
-//! `Dispose` command and the same "next Create is fresh" semantics, so neither
-//! needs to be removed once the other exists.
+//! `frust-core`'s per-pass frame channel is deliberately dumb (task 01), so
+//! [`PlatformViewState`] cannot tell from `ingest` alone whether a missing
+//! slot's widget was dropped from the tree or merely culled/transiently not
+//! repainting. [`DISPOSE_AFTER_MISSING_FRAMES`] is a heuristic streak
+//! threshold covering that gap.
+//!
+//! It is now the **backstop**, not the primary path: a torn-down
+//! `platform_view` widget reports its slot id to `frust-core`'s pending-retire
+//! list (`RenderRoot::take_retired_platform_views`), which each shell drains
+//! after its rebuild and feeds to [`PlatformViewState::retire`] — an immediate
+//! `Dispose`, no streak. Both paths converge on the same command and the same
+//! "next Create is fresh" semantics, and the streak still covers the cases the
+//! teardown hook cannot see (a widget dropped without `View::teardown`
+//! running). A merely culled slot reports no retire, so it correctly keeps
+//! living behind the streak.
 //!
 //! # Generation / acknowledgement / compaction
 //!
@@ -189,6 +216,10 @@ pub enum ViewCommand {
         view_type: String,
         /// Opaque creation params for the native factory (may be empty).
         params_json: String,
+        /// Mode B input forwarding (native-widgets spike 3): whether a
+        /// touch-DOWN inside this slot's rect hands the gesture to the
+        /// native sibling. Fixed at create in v1 (no live flip).
+        interactive: bool,
     },
     /// Place/resize/clip/show-or-hide an already-created slot. Logical px,
     /// absolute window coordinates (mirroring [`PlatformViewFrame`]) — the
@@ -202,6 +233,10 @@ pub enum ViewCommand {
         clip: Option<Rect>,
         /// `false` ⇒ hide the native view without disposing it.
         visible: bool,
+        /// The z-shield list (native-widgets spike 3): absolute-coordinate
+        /// regions where frust content over the slot keeps winning input.
+        /// Meaningful only for an interactive slot; empty otherwise.
+        shields: Vec<Rect>,
     },
     /// `params_json` changed (`params_generation` advanced) with no
     /// necessary rect/clip/visible change — a separate command so a shell
@@ -228,9 +263,11 @@ struct SlotEntry {
     view_type: String,
     params_json: String,
     params_generation: u64,
+    interactive: bool,
     last_rect: Rect,
     last_clip: Option<Rect>,
     last_visible: bool,
+    last_shields: Vec<Rect>,
     /// Consecutive `ingest` calls this slot has been absent from `frames`.
     /// Reset to `0` the instant it reappears.
     missing_streak: u32,
@@ -270,20 +307,30 @@ impl PlatformViewState {
         Self::default()
     }
 
-    /// Feed one paint pass's frames (`RenderRoot::platform_view_frames()`).
+    /// Feed one paint pass's frames (`RenderRoot::platform_view_frames()`) and
+    /// that same pass's z-shield rects (`RenderRoot::input_shields()`).
     /// Returns `true` if this call produced at least one command (i.e. the
     /// generation advanced) — a caller that only cares "did anything change"
     /// can skip calling [`commands`](Self::commands) entirely when this is
     /// `false`.
     ///
+    /// `input_shields` is a flat, slot-agnostic list (core never associates a
+    /// shield with a slot); this method owns the intersection rule — see the
+    /// module docs' Z-shields section. Pass `&[]` when a caller has no shield
+    /// channel: every slot then ships only its own manually declared rects.
+    ///
     /// Do not call this on a gate-skipped frame — see the module docs'
     /// Skip-safety section.
-    pub fn ingest(&mut self, frames: &[PlatformViewFrame]) -> bool {
+    pub fn ingest(&mut self, frames: &[PlatformViewFrame], input_shields: &[Rect]) -> bool {
         let mut batch = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
 
         for frame in frames {
             seen.insert(frame.slot_id);
+            // The shields this slot actually ships this pass (module docs'
+            // Z-shields): its own manual rects plus the auto-collected ones
+            // overlapping it, or nothing at all when it isn't interactive.
+            let shields = resolve_shields(frame, input_shields);
             // D-4: the slot's `view_type` changed under a live id. A different
             // `view_type` resolves to a different native factory, so the old
             // view must be torn down and a new one built — in THIS batch. Drop
@@ -304,12 +351,14 @@ impl PlatformViewState {
                         slot_id: frame.slot_id,
                         view_type: frame.view_type.clone(),
                         params_json: frame.params_json.clone(),
+                        interactive: frame.interactive,
                     });
                     batch.push(ViewCommand::Update {
                         slot_id: frame.slot_id,
                         rect: frame.rect,
                         clip: frame.clip,
                         visible: frame.visible,
+                        shields: shields.clone(),
                     });
                     self.live.insert(
                         frame.slot_id,
@@ -317,9 +366,11 @@ impl PlatformViewState {
                             view_type: frame.view_type.clone(),
                             params_json: frame.params_json.clone(),
                             params_generation: frame.params_generation,
+                            interactive: frame.interactive,
                             last_rect: frame.rect,
                             last_clip: frame.clip,
                             last_visible: frame.visible,
+                            last_shields: shields,
                             missing_streak: 0,
                         },
                     );
@@ -329,16 +380,19 @@ impl PlatformViewState {
                     if entry.last_visible != frame.visible
                         || rect_changed(entry.last_rect, frame.rect)
                         || clip_changed(entry.last_clip, frame.clip)
+                        || shields_changed(&entry.last_shields, &shields)
                     {
                         batch.push(ViewCommand::Update {
                             slot_id: frame.slot_id,
                             rect: frame.rect,
                             clip: frame.clip,
                             visible: frame.visible,
+                            shields: shields.clone(),
                         });
                         entry.last_rect = frame.rect;
                         entry.last_clip = frame.clip;
                         entry.last_visible = frame.visible;
+                        entry.last_shields = shields;
                     }
                     if entry.params_generation != frame.params_generation {
                         batch.push(ViewCommand::UpdateParams {
@@ -367,6 +421,7 @@ impl PlatformViewState {
                     rect: entry.last_rect,
                     clip: entry.last_clip,
                     visible: false,
+                    shields: entry.last_shields.clone(),
                 });
                 entry.last_visible = false;
             }
@@ -406,6 +461,7 @@ impl PlatformViewState {
                     rect: entry.last_rect,
                     clip: entry.last_clip,
                     visible: false,
+                    shields: entry.last_shields.clone(),
                 });
                 entry.last_visible = false;
             }
@@ -448,12 +504,14 @@ impl PlatformViewState {
                 slot_id,
                 view_type: entry.view_type.clone(),
                 params_json: entry.params_json.clone(),
+                interactive: entry.interactive,
             });
             batch.push(ViewCommand::Update {
                 slot_id,
                 rect: entry.last_rect,
                 clip: entry.last_clip,
                 visible: entry.last_visible,
+                shields: entry.last_shields.clone(),
             });
         }
     }
@@ -683,6 +741,36 @@ impl FramePairing {
     }
 }
 
+/// The shield list a slot ships this pass (module docs' Z-shields): nothing at
+/// all for a non-interactive slot, else its own manually declared rects
+/// (`PlatformViewView::shield_local`, already absolute) plus every
+/// auto-collected rect overlapping the slot's `rect`.
+///
+/// Overlap (not a positive-area intersection) is the same edge-inclusive test
+/// the widget's own visibility check uses; a duplicate — the same region
+/// declared manually AND painted by a `shield` wrapper — is dropped by the
+/// epsilon comparison, so a host never sees the same rect twice.
+fn resolve_shields(frame: &PlatformViewFrame, input_shields: &[Rect]) -> Vec<Rect> {
+    if !frame.interactive {
+        return Vec::new();
+    }
+    let mut resolved = frame.shields.clone();
+    for shield in input_shields {
+        if shield.overlaps(frame.rect) && !resolved.iter().any(|kept| !rect_changed(*kept, *shield))
+        {
+            resolved.push(*shield);
+        }
+    }
+    resolved
+}
+
+/// Whether two shield lists differ past [`EPSILON_PX`]. Order-sensitive: the
+/// list is built in paint order, which is stable for an unchanged tree, so a
+/// reorder legitimately means the shields moved.
+fn shields_changed(a: &[Rect], b: &[Rect]) -> bool {
+    a.len() != b.len() || a.iter().zip(b).any(|(a, b)| rect_changed(*a, *b))
+}
+
 fn rect_changed(a: Rect, b: Rect) -> bool {
     (a.x0 - b.x0).abs() >= EPSILON_PX
         || (a.y0 - b.y0).abs() >= EPSILON_PX
@@ -711,6 +799,8 @@ mod tests {
             rect,
             clip: None,
             visible,
+            interactive: false,
+            shields: Vec::new(),
         }
     }
 
@@ -718,10 +808,32 @@ mod tests {
         Rect::new(x0, y0, x1, y1)
     }
 
+    /// A frame for an `interactive` slot (the only kind that ships shields).
+    fn interactive_frame(slot_id: u64, rect: Rect) -> PlatformViewFrame {
+        PlatformViewFrame {
+            interactive: true,
+            ..frame(slot_id, rect, true)
+        }
+    }
+
+    /// The `shields` list of the last [`ViewCommand::Update`] in the backlog.
+    fn last_update_shields(state: &PlatformViewState) -> Vec<Rect> {
+        state
+            .commands()
+            .1
+            .iter()
+            .rev()
+            .find_map(|cmd| match cmd {
+                ViewCommand::Update { shields, .. } => Some(shields.clone()),
+                _ => None,
+            })
+            .expect("an Update command in the backlog")
+    }
+
     #[test]
     fn new_slot_emits_create_then_update_in_order() {
         let mut state = PlatformViewState::new();
-        let changed = state.ingest(&[frame(1, r(0.0, 0.0, 100.0, 50.0), true)]);
+        let changed = state.ingest(&[frame(1, r(0.0, 0.0, 100.0, 50.0), true)], &[]);
         assert!(changed);
 
         let (generation, cmds) = state.commands();
@@ -733,12 +845,14 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(0.0, 0.0, 100.0, 50.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -747,11 +861,11 @@ mod tests {
     #[test]
     fn sub_epsilon_rect_change_emits_nothing() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 100.0, 50.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 100.0, 50.0), true)], &[]);
         state.acknowledge(1);
 
         // 0.2px drift on every edge — below the 0.5px epsilon.
-        let changed = state.ingest(&[frame(1, r(0.2, 0.2, 100.2, 50.2), true)]);
+        let changed = state.ingest(&[frame(1, r(0.2, 0.2, 100.2, 50.2), true)], &[]);
         assert!(!changed);
         let (generation, cmds) = state.commands();
         assert_eq!(generation, 1); // unchanged — no new batch
@@ -761,10 +875,10 @@ mod tests {
     #[test]
     fn past_epsilon_rect_change_emits_update() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 100.0, 50.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 100.0, 50.0), true)], &[]);
         state.acknowledge(1);
 
-        let changed = state.ingest(&[frame(1, r(1.0, 0.0, 100.0, 50.0), true)]);
+        let changed = state.ingest(&[frame(1, r(1.0, 0.0, 100.0, 50.0), true)], &[]);
         assert!(changed);
         let (generation, cmds) = state.commands();
         assert_eq!(generation, 2);
@@ -775,6 +889,7 @@ mod tests {
                 rect: r(1.0, 0.0, 100.0, 50.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             }]
         );
     }
@@ -782,16 +897,16 @@ mod tests {
     #[test]
     fn missing_two_consecutive_ingests_hides_a_visible_slot() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         state.acknowledge(1);
 
         // Missing once: no hide yet.
-        let changed = state.ingest(&[]);
+        let changed = state.ingest(&[], &[]);
         assert!(!changed);
         assert_eq!(state.commands().1, &[]);
 
         // Missing twice consecutively: Hide.
-        let changed = state.ingest(&[]);
+        let changed = state.ingest(&[], &[]);
         assert!(changed);
         assert_eq!(
             state.commands().1,
@@ -800,29 +915,30 @@ mod tests {
                 rect: r(0.0, 0.0, 10.0, 10.0),
                 clip: None,
                 visible: false,
+                shields: Vec::new(),
             }]
         );
 
         // A further missing ingest doesn't re-emit the same Hide.
         state.acknowledge(state.commands().0);
-        let changed = state.ingest(&[]);
+        let changed = state.ingest(&[], &[]);
         assert!(!changed);
     }
 
     #[test]
     fn missing_past_dispose_threshold_disposes_the_slot() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         state.acknowledge(1);
 
         for _ in 0..(DISPOSE_AFTER_MISSING_FRAMES - 1) {
-            state.ingest(&[]);
+            state.ingest(&[], &[]);
         }
         // Not yet disposed at streak == DISPOSE_AFTER_MISSING_FRAMES - 1.
         let (_, cmds) = state.commands();
         assert!(!cmds.contains(&ViewCommand::Dispose { slot_id: 1 }));
 
-        let changed = state.ingest(&[]);
+        let changed = state.ingest(&[], &[]);
         assert!(changed);
         let (_, cmds) = state.commands();
         assert!(cmds.contains(&ViewCommand::Dispose { slot_id: 1 }));
@@ -831,12 +947,12 @@ mod tests {
     #[test]
     fn revive_after_hide_is_a_plain_update_not_a_create() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
-        state.ingest(&[]); // streak 1
-        state.ingest(&[]); // streak 2: Hide
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
+        state.ingest(&[], &[]); // streak 1
+        state.ingest(&[], &[]); // streak 2: Hide
         state.acknowledge(state.commands().0);
 
-        let changed = state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        let changed = state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         assert!(changed);
         let (_, cmds) = state.commands();
         assert_eq!(
@@ -846,6 +962,7 @@ mod tests {
                 rect: r(0.0, 0.0, 10.0, 10.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             }]
         );
         assert!(!cmds.iter().any(|c| matches!(c, ViewCommand::Create { .. })));
@@ -854,13 +971,13 @@ mod tests {
     #[test]
     fn revive_after_dispose_creates_fresh() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         for _ in 0..DISPOSE_AFTER_MISSING_FRAMES {
-            state.ingest(&[]);
+            state.ingest(&[], &[]);
         }
         state.acknowledge(state.commands().0);
 
-        let changed = state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        let changed = state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         assert!(changed);
         let (_, cmds) = state.commands();
         assert_eq!(
@@ -870,12 +987,14 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(0.0, 0.0, 10.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -884,9 +1003,9 @@ mod tests {
     #[test]
     fn acknowledge_compacts_the_backlog() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         let (gen1, _) = state.commands();
-        state.ingest(&[frame(2, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(2, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         let (gen2, cmds) = state.commands();
         assert_eq!(cmds.len(), 4); // both slots' Create+Update, un-acked
 
@@ -903,10 +1022,13 @@ mod tests {
     #[test]
     fn replay_after_reset_reproduces_every_live_slot() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[
-            frame(1, r(0.0, 0.0, 10.0, 10.0), true),
-            frame(2, r(20.0, 0.0, 30.0, 10.0), false),
-        ]);
+        state.ingest(
+            &[
+                frame(1, r(0.0, 0.0, 10.0, 10.0), true),
+                frame(2, r(20.0, 0.0, 30.0, 10.0), false),
+            ],
+            &[],
+        );
         state.acknowledge(state.commands().0);
         assert_eq!(state.commands().1, &[]);
 
@@ -921,23 +1043,27 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(0.0, 0.0, 10.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
                 ViewCommand::Create {
                     slot_id: 2,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 2,
                     rect: r(20.0, 0.0, 30.0, 10.0),
                     clip: None,
                     visible: false,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -947,15 +1073,18 @@ mod tests {
     fn two_slot_interleaving_does_not_cross_contaminate() {
         let mut state = PlatformViewState::new();
         // Slot 1 created; slot 2 not yet present.
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         state.acknowledge(state.commands().0);
 
         // Slot 2 appears; slot 1 unchanged (no rect/clip/visible drift) — only
         // slot 2's Create+Update should be emitted.
-        let changed = state.ingest(&[
-            frame(1, r(0.0, 0.0, 10.0, 10.0), true),
-            frame(2, r(50.0, 50.0, 60.0, 60.0), true),
-        ]);
+        let changed = state.ingest(
+            &[
+                frame(1, r(0.0, 0.0, 10.0, 10.0), true),
+                frame(2, r(50.0, 50.0, 60.0, 60.0), true),
+            ],
+            &[],
+        );
         assert!(changed);
         let (_, cmds) = state.commands();
         assert_eq!(
@@ -965,12 +1094,14 @@ mod tests {
                     slot_id: 2,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 2,
                     rect: r(50.0, 50.0, 60.0, 60.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -978,7 +1109,7 @@ mod tests {
 
         // Now slot 1 moves and slot 2 disappears (one missing frame — not yet
         // hidden): only slot 1's Update should appear.
-        let changed = state.ingest(&[frame(1, r(5.0, 0.0, 15.0, 10.0), true)]);
+        let changed = state.ingest(&[frame(1, r(5.0, 0.0, 15.0, 10.0), true)], &[]);
         assert!(changed);
         assert_eq!(
             state.commands().1,
@@ -987,6 +1118,7 @@ mod tests {
                 rect: r(5.0, 0.0, 15.0, 10.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             }]
         );
     }
@@ -996,13 +1128,13 @@ mod tests {
         let mut state = PlatformViewState::new();
         let mut f = frame(1, r(0.0, 0.0, 10.0, 10.0), true);
         f.params_json = "{\"a\":1}".to_string();
-        state.ingest(&[f]);
+        state.ingest(&[f], &[]);
         state.acknowledge(state.commands().0);
 
         let mut f2 = frame(1, r(0.0, 0.0, 10.0, 10.0), true);
         f2.params_json = "{\"a\":2}".to_string();
         f2.params_generation = 1;
-        let changed = state.ingest(&[f2]);
+        let changed = state.ingest(&[f2], &[]);
         assert!(changed);
         assert_eq!(
             state.commands().1,
@@ -1016,10 +1148,13 @@ mod tests {
     #[test]
     fn suspend_all_hides_every_visible_slot_immediately() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[
-            frame(1, r(0.0, 0.0, 10.0, 10.0), true),
-            frame(2, r(20.0, 0.0, 30.0, 10.0), true),
-        ]);
+        state.ingest(
+            &[
+                frame(1, r(0.0, 0.0, 10.0, 10.0), true),
+                frame(2, r(20.0, 0.0, 30.0, 10.0), true),
+            ],
+            &[],
+        );
         state.acknowledge(state.commands().0);
 
         // No missing streak at all — suspend_all fires on the very next call,
@@ -1035,12 +1170,14 @@ mod tests {
                     rect: r(0.0, 0.0, 10.0, 10.0),
                     clip: None,
                     visible: false,
+                    shields: Vec::new(),
                 },
                 ViewCommand::Update {
                     slot_id: 2,
                     rect: r(20.0, 0.0, 30.0, 10.0),
                     clip: None,
                     visible: false,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -1049,7 +1186,7 @@ mod tests {
     #[test]
     fn suspend_all_skips_already_hidden_slots() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), false)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), false)], &[]);
         state.acknowledge(state.commands().0);
 
         // The only live slot is already visible:false — nothing to emit.
@@ -1068,14 +1205,14 @@ mod tests {
     #[test]
     fn revive_after_suspend_all_is_a_plain_update() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         state.acknowledge(state.commands().0);
         state.suspend_all();
         state.acknowledge(state.commands().0);
 
         // The slot reappears in the next real ingest (e.g. the first frame
         // after resume) — an ordinary Update, no re-Create.
-        let changed = state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        let changed = state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         assert!(changed);
         let (_, cmds) = state.commands();
         assert_eq!(
@@ -1085,6 +1222,7 @@ mod tests {
                 rect: r(0.0, 0.0, 10.0, 10.0),
                 clip: None,
                 visible: true,
+                shields: Vec::new(),
             }]
         );
         assert!(!cmds.iter().any(|c| matches!(c, ViewCommand::Create { .. })));
@@ -1093,7 +1231,7 @@ mod tests {
     #[test]
     fn retire_disposes_immediately_regardless_of_missing_streak() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         state.acknowledge(state.commands().0);
 
         assert!(state.retire(1));
@@ -1109,12 +1247,12 @@ mod tests {
     #[test]
     fn view_type_swap_disposes_and_recreates_in_the_same_ingest() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         state.acknowledge(state.commands().0);
 
         let mut swapped = frame(1, r(0.0, 0.0, 10.0, 10.0), true);
         swapped.view_type = "dev.frust.Other".to_string();
-        let changed = state.ingest(&[swapped]);
+        let changed = state.ingest(&[swapped], &[]);
         assert!(changed);
         assert_eq!(
             state.commands().1,
@@ -1124,12 +1262,14 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Other".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(0.0, 0.0, 10.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -1138,15 +1278,18 @@ mod tests {
     #[test]
     fn view_type_swap_does_not_disturb_other_slots() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[
-            frame(1, r(0.0, 0.0, 10.0, 10.0), true),
-            frame(2, r(20.0, 0.0, 30.0, 10.0), true),
-        ]);
+        state.ingest(
+            &[
+                frame(1, r(0.0, 0.0, 10.0, 10.0), true),
+                frame(2, r(20.0, 0.0, 30.0, 10.0), true),
+            ],
+            &[],
+        );
         state.acknowledge(state.commands().0);
 
         let mut swapped = frame(2, r(20.0, 0.0, 30.0, 10.0), true);
         swapped.view_type = "dev.frust.Other".to_string();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true), swapped]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true), swapped], &[]);
         let (_, cmds) = state.commands();
         assert!(cmds.iter().all(|c| match c {
             ViewCommand::Create { slot_id, .. }
@@ -1159,10 +1302,10 @@ mod tests {
     #[test]
     fn unchanged_view_type_never_disposes() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         state.acknowledge(state.commands().0);
 
-        state.ingest(&[frame(1, r(5.0, 0.0, 15.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(5.0, 0.0, 15.0, 10.0), true)], &[]);
         assert!(
             !state
                 .commands()
@@ -1187,7 +1330,7 @@ mod tests {
             x += 1.0;
             assert!(x < 10_000.0, "backlog cap never tripped");
             let before = state.commands().1.len();
-            state.ingest(&frames_at(x));
+            state.ingest(&frames_at(x), &[]);
             if state.commands().1.len() < before {
                 return x;
             }
@@ -1215,23 +1358,27 @@ mod tests {
                     slot_id: 1,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 1,
                     rect: r(x, 0.0, x + 10.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
                 ViewCommand::Create {
                     slot_id: 2,
                     view_type: "dev.frust.Test".to_string(),
                     params_json: String::new(),
+                    interactive: false,
                 },
                 ViewCommand::Update {
                     slot_id: 2,
                     rect: r(x + 20.0, 0.0, x + 30.0, 10.0),
                     clip: None,
                     visible: true,
+                    shields: Vec::new(),
                 },
             ]
         );
@@ -1248,12 +1395,15 @@ mod tests {
     fn backlog_cap_keeps_a_dropped_slots_dispose() {
         let mut state = PlatformViewState::new();
         // Slot 1 lives and dies inside the un-acked window; slot 2 stays live.
-        state.ingest(&[
-            frame(1, r(0.0, 0.0, 10.0, 10.0), true),
-            frame(2, r(20.0, 0.0, 30.0, 10.0), true),
-        ]);
+        state.ingest(
+            &[
+                frame(1, r(0.0, 0.0, 10.0, 10.0), true),
+                frame(2, r(20.0, 0.0, 30.0, 10.0), true),
+            ],
+            &[],
+        );
         for _ in 0..DISPOSE_AFTER_MISSING_FRAMES {
-            state.ingest(&[frame(2, r(20.0, 0.0, 30.0, 10.0), true)]);
+            state.ingest(&[frame(2, r(20.0, 0.0, 30.0, 10.0), true)], &[]);
         }
         assert!(
             state
@@ -1286,7 +1436,7 @@ mod tests {
         let mut state = PlatformViewState::new();
         for i in 0..1_000 {
             let x = i as f64;
-            state.ingest(&[frame(1, r(x, 0.0, x + 10.0, 10.0), true)]);
+            state.ingest(&[frame(1, r(x, 0.0, x + 10.0, 10.0), true)], &[]);
             assert!(state.commands().1.len() <= MAX_PENDING_COMMANDS);
             state.acknowledge(state.commands().0);
         }
@@ -1298,9 +1448,9 @@ mod tests {
     #[test]
     fn commands_up_to_releases_only_the_due_prefix() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         let gen1 = state.commands().0;
-        state.ingest(&[frame(1, r(5.0, 0.0, 15.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(5.0, 0.0, 15.0, 10.0), true)], &[]);
         let gen2 = state.commands().0;
         assert_eq!(state.commands().1.len(), 3);
 
@@ -1319,9 +1469,9 @@ mod tests {
     #[test]
     fn commands_up_to_reports_the_acked_generation_when_it_releases_nothing() {
         let mut state = PlatformViewState::new();
-        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
         state.acknowledge(state.commands().0);
-        state.ingest(&[frame(1, r(9.0, 0.0, 19.0, 10.0), true)]);
+        state.ingest(&[frame(1, r(9.0, 0.0, 19.0, 10.0), true)], &[]);
 
         let (reported, cmds) = state.commands_up_to(1);
         assert!(cmds.is_empty());
@@ -1413,6 +1563,170 @@ mod tests {
         );
     }
 
+    // ---- Z-shield auto-collection (native-widgets p1-09) --------------------
+
+    #[test]
+    fn an_interactive_slot_carries_only_the_intersecting_shields() {
+        let mut state = PlatformViewState::new();
+        let slot = r(0.0, 0.0, 100.0, 100.0);
+        let over = r(10.0, 10.0, 40.0, 40.0); // inside the slot
+        let elsewhere = r(500.0, 500.0, 540.0, 540.0); // unrelated chrome
+
+        state.ingest(&[interactive_frame(1, slot)], &[over, elsewhere]);
+        assert_eq!(
+            last_update_shields(&state),
+            vec![over],
+            "only the shield overlapping the slot rides its Update"
+        );
+    }
+
+    #[test]
+    fn a_non_interactive_slot_carries_no_shields_at_all() {
+        let mut state = PlatformViewState::new();
+        let slot = r(0.0, 0.0, 100.0, 100.0);
+        // The same overlapping shield as above, but the slot forwards no input.
+        state.ingest(&[frame(1, slot, true)], &[r(10.0, 10.0, 40.0, 40.0)]);
+        assert!(
+            last_update_shields(&state).is_empty(),
+            "shields are meaningless to a host that isn't forwarding touches"
+        );
+    }
+
+    #[test]
+    fn a_moving_shield_emits_an_update_and_a_jittering_one_does_not() {
+        let mut state = PlatformViewState::new();
+        let slot = r(0.0, 0.0, 100.0, 100.0);
+        state.ingest(&[interactive_frame(1, slot)], &[r(10.0, 10.0, 40.0, 40.0)]);
+        state.acknowledge(state.commands().0);
+
+        // Sub-epsilon drift: nothing (the same discipline as rect/clip).
+        let changed = state.ingest(&[interactive_frame(1, slot)], &[r(10.2, 10.2, 40.2, 40.2)]);
+        assert!(!changed, "sub-epsilon shield drift emits nothing");
+
+        // A real move: an Update carrying the new shield, with the slot's own
+        // rect unchanged.
+        let moved = r(10.0, 60.0, 40.0, 90.0);
+        let changed = state.ingest(&[interactive_frame(1, slot)], &[moved]);
+        assert!(changed);
+        assert_eq!(
+            state.commands().1,
+            &[ViewCommand::Update {
+                slot_id: 1,
+                rect: slot,
+                clip: None,
+                visible: true,
+                shields: vec![moved],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_shield_leaving_the_pass_clears_it_from_the_slot() {
+        // The replace-per-pass contract end to end: chrome that stopped
+        // painting must stop shielding, or it keeps stealing touches forever.
+        let mut state = PlatformViewState::new();
+        let slot = r(0.0, 0.0, 100.0, 100.0);
+        state.ingest(&[interactive_frame(1, slot)], &[r(10.0, 10.0, 40.0, 40.0)]);
+        state.acknowledge(state.commands().0);
+
+        let changed = state.ingest(&[interactive_frame(1, slot)], &[]);
+        assert!(changed);
+        assert!(last_update_shields(&state).is_empty());
+    }
+
+    #[test]
+    fn manual_shield_local_rects_are_kept_and_unioned_without_duplicates() {
+        // The escape hatch still works, and a region declared BOTH ways lands
+        // once.
+        let mut state = PlatformViewState::new();
+        let slot = r(0.0, 0.0, 100.0, 100.0);
+        let manual = r(0.0, 0.0, 20.0, 20.0);
+        let auto = r(50.0, 50.0, 70.0, 70.0);
+        let mut f = interactive_frame(1, slot);
+        f.shields = vec![manual];
+
+        state.ingest(&[f], &[manual, auto]);
+        assert_eq!(
+            last_update_shields(&state),
+            vec![manual, auto],
+            "manual rects first, then the auto-collected ones, deduped"
+        );
+    }
+
+    #[test]
+    fn a_replay_preserves_each_slots_resolved_shields() {
+        // Surface recreation must rebuild the native side from the replay
+        // alone, shields included.
+        let mut state = PlatformViewState::new();
+        let slot = r(0.0, 0.0, 100.0, 100.0);
+        let over = r(10.0, 10.0, 40.0, 40.0);
+        state.ingest(&[interactive_frame(1, slot)], &[over]);
+        state.acknowledge(state.commands().0);
+
+        state.reset_for_surface_recreate();
+        assert_eq!(last_update_shields(&state), vec![over]);
+    }
+
+    // ---- Prompt teardown retire (native-widgets p1-09) -----------------------
+
+    #[test]
+    fn a_retired_slot_disposes_immediately_and_the_next_ingest_is_quiet() {
+        // The shell drains `RenderRoot::take_retired_platform_views()` after its
+        // rebuild and retires each id; the paint that follows no longer
+        // publishes the slot, and that absence must produce nothing further.
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
+        state.acknowledge(state.commands().0);
+
+        assert!(state.retire(1), "teardown disposes on the spot");
+        assert_eq!(state.commands().1, &[ViewCommand::Dispose { slot_id: 1 }]);
+        state.acknowledge(state.commands().0);
+
+        let changed = state.ingest(&[], &[]);
+        assert!(
+            !changed,
+            "the retired slot is already forgotten — no Hide, no second Dispose"
+        );
+    }
+
+    #[test]
+    fn a_merely_culled_slot_is_never_disposed_by_the_retire_path() {
+        // The keep-alive contract (camera A6): a scrolled-offscreen slot runs no
+        // teardown, so no retire arrives; it is Hidden by the streak and stays
+        // live well past the point a retire would have disposed it.
+        let mut state = PlatformViewState::new();
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
+        state.acknowledge(state.commands().0);
+
+        for _ in 0..(DISPOSE_AFTER_MISSING_FRAMES - 1) {
+            state.ingest(&[], &[]);
+        }
+        let (_, cmds) = state.commands();
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, ViewCommand::Update { visible: false, .. })),
+            "the culled slot is hidden"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, ViewCommand::Dispose { .. })),
+            "but never disposed without a real teardown signal"
+        );
+
+        // It revives as a plain Update — the native view (and, for camera, the
+        // session behind it) was never torn down.
+        state.acknowledge(state.commands().0);
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
+        assert!(
+            !state
+                .commands()
+                .1
+                .iter()
+                .any(|c| matches!(c, ViewCommand::Create { .. }))
+        );
+    }
+
     #[test]
     fn deterministic_replay_produces_an_identical_command_stream() {
         let sequence: Vec<Vec<PlatformViewFrame>> = vec![
@@ -1429,7 +1743,7 @@ mod tests {
             let mut state = PlatformViewState::new();
             let mut all = Vec::new();
             for frames in sequence {
-                state.ingest(frames);
+                state.ingest(frames, &[]);
                 all.extend(state.commands().1.iter().cloned());
                 // Compact after observing, mirroring a real shell's poll+ack.
                 state.acknowledge(state.commands().0);

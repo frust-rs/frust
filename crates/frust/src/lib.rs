@@ -136,7 +136,16 @@ pub use frust_widgets::{
 /// frust::app!(MapDemo);
 /// # fn main() {}
 /// ```
-pub use frust_widgets::{PlatformViewView, platform_view};
+///
+/// # Z-shields ([`shield`])
+///
+/// A slot marked `.interactive()` forwards a touch-DOWN inside its rect to the
+/// native view, including one that landed on frust chrome painted over it (the
+/// OS-side hit test knows nothing about the frust scene). Wrap that chrome in
+/// [`shield`] and it keeps winning input: the wrapper reports the rect it
+/// painted every frame, and the shell hands the overlapping ones to the host
+/// with the slot's placement.
+pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 
 /// The vendored Material Symbols starter icon set (Huddle showcase, Phase A),
 /// flat-re-exported so app code names `frust::icons::HOME` rather than the
@@ -415,6 +424,45 @@ pub use frust_shell_common::font_registry::register_app_fonts;
 // iOS's `frust_set_surface_mode`) to call from the same branch that already
 // configured the native window translucent, and is deliberately not
 // re-exported past that crate.
+
+/// App-facing **resolved** surface mode (native-widgets task p1-01) — the
+/// read-only outward half of the Mode B seam whose setter is deliberately
+/// absent (see the comment above): what the platform actually gave this
+/// process, not what the host asked for.
+///
+/// [`resolved_surface_mode`] answers [`ResolvedSurfaceMode::Unknown`] until a
+/// shell publishes (no surface yet, or the desktop preview, which has no Mode
+/// B host seam), then `Opaque`/`Translucent` — or
+/// [`ResolvedSurfaceMode::RefusedTranslucent`], the case this exists for: the
+/// host declared Mode B and the platform resolved the surface opaque anyway
+/// (no matching `CompositeAlphaMode`, or a GPU-tier blit-fallback surface —
+/// `docs/LIMITATIONS.md`'s `cam-blit-opaque`). frust's paint side degrades to
+/// the Mode A contract on its own, but the host's native-sibling z-order was
+/// fixed at build time, so a sibling arranged *behind* the surface is
+/// invisible **and untappable**. Branch on
+/// [`ResolvedSurfaceMode::translucency_refused`] to render a deliberate
+/// fallback instead of a dead rect.
+///
+/// **This is a poll, not a subscription** — the same contract as
+/// [`set_app_theme`]'s slot: reading it subscribes to nothing and a change
+/// never wakes a frame by itself. Read it during a rebuild (or paint/an event
+/// handler) on the UI thread, exactly where you'd read any other
+/// process-global shell state, and if the answer must change your UI's shape,
+/// write it into your own state so the normal dirty path runs.
+///
+/// ```no_run
+/// use frust::{ResolvedSurfaceMode, resolved_surface_mode};
+///
+/// // A native-widget slot deciding whether its platform sibling can actually
+/// // be seen this frame.
+/// let native_sibling_visible = match resolved_surface_mode() {
+///     ResolvedSurfaceMode::RefusedTranslucent => false,
+///     ResolvedSurfaceMode::Unknown
+///     | ResolvedSurfaceMode::Opaque
+///     | ResolvedSurfaceMode::Translucent => true,
+/// };
+/// ```
+pub use frust_shell_common::{ResolvedSurfaceMode, resolved_surface_mode};
 
 /// The animation vocabulary (spec §8): the shell-fed frame clock ([`FrameTime`])
 /// plus the pure easing/interpolation/spring math a widget or app advances it

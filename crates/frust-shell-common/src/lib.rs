@@ -24,11 +24,15 @@
 //! per-paint-pass platform-view frames into an idempotent
 //! [`ViewCommand`]/[`PlatformViewState`] backlog both mobile shells' FFI peek
 //! getters serve (platform-views task 03), and [`surface_mode`] is the
-//! process-global translucent-surface latch
+//! process-global translucent-surface pair: the host **declaration** latch
 //! ([`declare_host_translucent_surface`]/[`SurfaceModeWatcher`]) — settable
 //! only by each shell's own JNI/C-ABI host-glue callback, never re-exported
 //! past this crate (review-fix-2 t01, review M3) — each shell's
-//! surface-creation path reads pre-configure.
+//! surface-creation path reads pre-configure, plus the **resolved** slot
+//! ([`publish_resolved_surface_mode`]/[`resolved_surface_mode`], native-widgets
+//! task p1-01) each mobile shell publishes the live surface's actual verdict
+//! into, so app code can observe a `RefusedTranslucent` platform refusal
+//! instead of an invisible native sibling.
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
 //! (retained tree / `RenderRoot`) plus `frust-scene`/`frust-text`/
@@ -64,7 +68,10 @@ pub use render_split::{
     scene_return_channel,
 };
 pub use resample::{PointerResampler, RawPointerSample};
-pub use surface_mode::{SurfaceMode, SurfaceModeWatcher, declare_host_translucent_surface};
+pub use surface_mode::{
+    ResolvedSurfaceMode, SurfaceMode, SurfaceModeWatcher, declare_host_translucent_surface,
+    publish_resolved_surface_mode, resolved_surface_mode,
+};
 pub use system_ui::{
     SystemUiMode, SystemUiOverlay, SystemUiWatcher, current_system_ui_mode, encoded_state,
     set_system_ui_mode,

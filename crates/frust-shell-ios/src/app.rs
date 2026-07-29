@@ -54,7 +54,8 @@ use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
     RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
-    effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
+    effective_brightness_for_platform_change, logical_insets, logical_size,
+    publish_resolved_surface_mode, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, DesignLanguage, Theme};
@@ -1012,21 +1013,25 @@ fn to_pv_command(cmd: &ViewCommand, scale: f64) -> crate::ffi_support::PlatformV
             slot_id,
             view_type,
             params_json,
+            interactive,
         } => crate::ffi_support::PlatformViewCommand::Create {
             slot_id: *slot_id,
             view_type: view_type.clone(),
             params_json: params_json.clone(),
+            interactive: *interactive,
         },
         ViewCommand::Update {
             slot_id,
             rect,
             clip,
             visible,
+            shields,
         } => crate::ffi_support::PlatformViewCommand::Update {
             slot_id: *slot_id,
             rect: to_pv_rect(*rect, scale),
             clip: clip.map(|c| to_pv_rect(c, scale)),
             visible: *visible,
+            shields: shields.iter().map(|s| to_pv_rect(*s, scale)).collect(),
         },
         ViewCommand::UpdateParams {
             slot_id,
@@ -1120,9 +1125,14 @@ impl IosAppHandle {
         // still be installing render-side, so this reads the request-seeded
         // flag; `frame`'s per-frame `sync_translucent_resolved` re-reads it and
         // downgrades within one frame of a fallback.
-        app.set_surface_translucent(crate::ffi_support::read_resolved_translucency(
-            &translucent_resolved,
-        ));
+        let resolved_translucent =
+            crate::ffi_support::read_resolved_translucency(&translucent_resolved);
+        app.set_surface_translucent(resolved_translucent);
+        // Seed the app-facing RESOLVED slot from that same value (task p1-01),
+        // so app/plugin code reading `frust::resolved_surface_mode()` during
+        // the very first rebuild below sees a real verdict rather than
+        // `Unknown`. Re-published every frame by `sync_translucent_resolved`.
+        publish_resolved_surface_mode(resolved_translucent);
         provide_context(theme.clone());
         app.rebuild();
         let mut executor = executor;
@@ -1196,6 +1206,13 @@ impl IosAppHandle {
     /// and [`AppTree::set_surface_translucent`] is no-op-if-unchanged (marking
     /// `ChangeFlags::PAINT` only on an actual flip — which is what makes a
     /// downgrade repaint without the punch).
+    ///
+    /// Also this shell's single publish point for the app-facing RESOLVED slot
+    /// (`frust::resolved_surface_mode()`, task p1-01), mirroring Android: app
+    /// code polls that slot during rebuild, so it must be current *before* the
+    /// rebuild this frame leads into, and publishing here (rather than at the
+    /// install/self-heal sites) keeps one UI-thread beat as the source for both
+    /// the render root and the app. One uncontended `Mutex` store per frame.
     fn sync_translucent_resolved(&mut self) -> bool {
         if let FrameExecutor::Inline(inline) = &self.executor {
             crate::ffi_support::publish_resolved_translucency(
@@ -1204,6 +1221,7 @@ impl IosAppHandle {
             );
         }
         let resolved = crate::ffi_support::read_resolved_translucency(&self.translucent_resolved);
+        publish_resolved_surface_mode(resolved);
         self.app.set_surface_translucent(resolved);
         resolved
     }
@@ -1951,6 +1969,20 @@ impl IosAppHandle {
         }
         let rebuild = rebuild_start.map(|t| t.elapsed()).unwrap_or_default();
 
+        // Prompt teardown retire (native-widgets p1-09): the rebuild just above
+        // is where a removed `platform_view` widget's `View::teardown` runs and
+        // reports its slot id. Drain those and dispose each native view right
+        // now, instead of waiting out the differ's ~30-frame missing-streak
+        // heuristic (which cannot tell a torn-down slot from a culled one). A
+        // merely culled slot reports nothing here, so the streak still covers
+        // it — that asymmetry is the camera keep-alive contract. Mirrors the
+        // Android shell's placement exactly; the resulting batch is a lifecycle
+        // command, deliberately NOT paired with a frame (like `suspend_all`), so
+        // the present-sync release gate never holds it.
+        for slot_id in self.app.take_retired_platform_views() {
+            self.platform_views.retire(slot_id);
+        }
+
         // Change-flag DRAIN (camera gate-fix g4) — the fix for "the iOS frame
         // gate never idles at rest".
         //
@@ -2039,7 +2071,9 @@ impl IosAppHandle {
         // behind the gate's early `return`, so a Skip records nothing AND
         // submits nothing: the recorded id can never run ahead of what will
         // actually be sent.
-        let produced = self.platform_views.ingest(self.app.platform_view_frames());
+        let produced = self
+            .platform_views
+            .ingest(self.app.platform_view_frames(), self.app.input_shields());
         if produced && self.present_sync {
             let (generation, _) = self.platform_views.commands();
             self.platform_view_due

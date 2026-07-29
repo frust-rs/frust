@@ -19,3 +19,12 @@
 # own `-derivedDataPath`, so this only appears when the package itself is built
 # directly, but it must never be committed.
 /platform/ios/FrustEmbedding/.build/
+
+# Same rule for a plugin's own Swift package (`plugins/<name>/platform/ios` —
+# ARCHITECTURE's plugin-contribution shape). Building one in place drops the
+# same SwiftPM `.build/` index-build tree (~178MB for frust-camera); a
+# consuming app passes its own `-derivedDataPath`, so this only appears on a
+# direct package build. Globbed rather than path-pinned so a second plugin
+# Swift package is covered the day it lands — `frust-camera` is the only
+# instance today.
+/plugins/*/platform/ios/.build/

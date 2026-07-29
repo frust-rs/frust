@@ -17,7 +17,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::num::NonZeroU64;
 
-use kurbo::{Point, Size};
+use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
@@ -66,6 +66,15 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// slot from the prior frame does not linger as a stale frame. Core stays
     /// dumb here: task 03's differ owns absent-means-hide/dispose semantics.
     platform_view_frames: Vec<PlatformViewFrame>,
+    /// The z-shield rects the tree reported during the most recent
+    /// [`RenderRoot::paint`] (via [`crate::widget::PaintCtx::report_input_shield`]),
+    /// surfaced to the shell via [`RenderRoot::input_shields`].
+    ///
+    /// Exactly the `platform_view_frames` discipline above — REPLACED wholesale
+    /// every pass, so a pass whose shields stopped painting reports none. Core
+    /// stays dumb: it never associates a shield with a slot, that is the
+    /// shell-side differ's job.
+    input_shields: Vec<Rect>,
     /// Dirtiness accumulated since the last [`RenderRoot::take_change_flags`] —
     /// merged from each rebuild so a shell can decide, in one place, whether a
     /// frame needs layout/paint at all.
@@ -140,6 +149,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             focus_active: false,
             ime_state: None,
             platform_view_frames: Vec::new(),
+            input_shields: Vec::new(),
             pending: ChangeFlags::NONE,
             theme: None,
             insets: WindowInsets::default(),
@@ -302,6 +312,37 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// never sees a stale frame for a slot that stopped painting.
     pub fn platform_view_frames(&self) -> &[PlatformViewFrame] {
         &self.platform_view_frames
+    }
+
+    /// The z-shield rects reported during the most recent [`RenderRoot::paint`]
+    /// (see [`crate::widget::PaintCtx::report_input_shield`]), in paint order.
+    ///
+    /// Replaced wholesale every pass, exactly like
+    /// [`RenderRoot::platform_view_frames`] — a shell feeds both into the same
+    /// differ ingest call, and the differ intersects these against each
+    /// interactive slot's rect.
+    pub fn input_shields(&self) -> &[Rect] {
+        &self.input_shields
+    }
+
+    /// Drain the slot ids whose `platform_view` widgets were torn down since the
+    /// last call (`View::teardown` ran on them — see
+    /// [`crate::widget::report_retired_slot`]).
+    ///
+    /// The prompt-teardown channel: a shell calls this once per frame, right
+    /// after its rebuild, and retires each id in its platform-view differ
+    /// (`PlatformViewState::retire`) so a disposed slot's native view goes away
+    /// immediately instead of waiting out the differ's missing-streak
+    /// heuristic. Draining is destructive, mirroring
+    /// [`RenderRoot::take_change_flags`]: an id is reported exactly once, so a
+    /// shell that drains and drops the result loses the prompt path (the
+    /// missing-streak backstop still covers it).
+    ///
+    /// A merely *culled* slot (scrolled offscreen, a parent skipping paint)
+    /// never appears here — culling doesn't run `teardown` — which is what
+    /// keeps the camera keep-alive contract intact.
+    pub fn take_retired_platform_views(&mut self) -> Vec<u64> {
+        crate::widget::take_retired_slots()
     }
 
     /// Take (and clear) the dirtiness accumulated since the last call.
@@ -529,6 +570,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // check, and a pass that publishes none must clear out every
             // stale frame from the previous one (see the field's doc comment).
             self.platform_view_frames = ctx.take_platform_views();
+            // Same replace-per-pass discipline for the z-shield channel: a pass
+            // whose shields stopped painting reports none, so a stale shield can
+            // never keep stealing input from an interactive slot (see
+            // `PaintCtx::report_input_shield`).
+            self.input_shields = ctx.take_input_shields();
             // Fold a bubbled `request_layout` into `pending` so the *next* frame
             // relayouts. `pending` survives to the next frame and feeds both the
             // frame gate (`has_pending_change_flags`) and the Android layout-skip
@@ -981,9 +1027,11 @@ mod tests {
         assert_eq!(scene2.texts, vec![(Point::ZERO, "two".to_string())]);
     }
 
-    /// A leaf widget that publishes a fixed [`PlatformViewFrame`] on every
-    /// paint, unless `should_publish` is false (the widget-level toggle that
-    /// simulates a slot no longer publishing between two rebuilds).
+    /// A leaf widget that publishes a fixed [`PlatformViewFrame`] — and reports
+    /// a z-shield rect over its own bounds — on every paint, unless
+    /// `should_publish` is false (the widget-level toggle that simulates a slot
+    /// no longer publishing between two rebuilds). Both channels ride the same
+    /// toggle so one fixture covers both replace-per-pass contracts.
     struct PlatformViewProbeWidget {
         slot_id: u64,
         should_publish: bool,
@@ -1003,7 +1051,10 @@ mod tests {
                     rect: kurbo::Rect::from_origin_size(ctx.origin(), ctx.size()),
                     clip: None,
                     visible: true,
+                    interactive: false,
+                    shields: Vec::new(),
                 });
+                ctx.report_input_shield(kurbo::Rect::from_origin_size(ctx.origin(), ctx.size()));
             }
         }
     }
@@ -1126,6 +1177,91 @@ mod tests {
             "a paint pass with no publishers must yield an empty slice"
         );
     }
+
+    #[test]
+    fn input_shields_arrive_in_order_and_clear_on_empty_pass() {
+        // The shield channel's half of the contract above (native-widgets
+        // p1-09): two shields reported in one pass both survive (the `Vec`
+        // extend, not an `Option` overwrite), and a pass that reports none
+        // replaces the collection rather than merging — a stale shield must
+        // never keep stealing input from an interactive slot.
+        let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
+        let mut state = PvState {
+            publish_a: true,
+            publish_b: true,
+        };
+        root.rebuild(&mut platform_view_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert_eq!(root.input_shields().len(), 2);
+        assert_eq!(
+            root.input_shields()[0],
+            Rect::from_origin_size(Point::ZERO, Size::new(10.0, 10.0)),
+            "a shield is reported in absolute paint coordinates"
+        );
+
+        state.publish_a = false;
+        state.publish_b = false;
+        root.rebuild(&mut platform_view_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            root.input_shields().is_empty(),
+            "a paint pass reporting no shields must yield an empty slice"
+        );
+    }
+
+    #[test]
+    fn retired_platform_views_drain_exactly_once() {
+        // The prompt-teardown channel (native-widgets p1-09): a reported slot
+        // id is handed to the shell once and then gone, mirroring
+        // `take_change_flags`. Serialized against the other test touching the
+        // process-wide list (see `RETIRE_TEST_LOCK`).
+        let _guard = RETIRE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
+        let _ = root.take_retired_platform_views(); // clear anything a sibling left
+
+        crate::widget::report_retired_slot(7);
+        crate::widget::report_retired_slot(9);
+        assert_eq!(root.take_retired_platform_views(), vec![7, 9]);
+        assert!(
+            root.take_retired_platform_views().is_empty(),
+            "draining is destructive — a second drain reports nothing"
+        );
+    }
+
+    #[test]
+    fn retired_platform_views_are_capped_dropping_the_oldest() {
+        // A shell that never drains (desktop: no native compositor) must not
+        // grow this list forever; past the cap the OLDEST id is dropped and the
+        // differ's missing-streak backstop covers it.
+        let _guard = RETIRE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
+        let _ = root.take_retired_platform_views();
+
+        for slot_id in 0..1_000u64 {
+            crate::widget::report_retired_slot(slot_id);
+        }
+        let drained = root.take_retired_platform_views();
+        assert!(drained.len() <= 256, "the pending list stays bounded");
+        assert_eq!(
+            *drained.last().expect("non-empty"),
+            999,
+            "the newest report always survives"
+        );
+        assert!(
+            !drained.contains(&0),
+            "the oldest reports are the ones dropped"
+        );
+    }
+
+    /// Serializes the two tests that drive the process-wide retire list
+    /// (`crate::widget::report_retired_slot`), which `cargo test`'s parallel
+    /// threads would otherwise interleave — the same shape
+    /// `frust-shell-common::theme_override`'s tests use for its global slot.
+    static RETIRE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// A root widget that advances no state but requests a continuation frame on
     /// every paint — stands in for an animating widget (e.g. a scroll fling).

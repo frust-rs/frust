@@ -65,6 +65,27 @@ kurbo = "0.13.1"
 # hand-added exactly as the applier would add it.
 frust-camera = { path = "../../plugins/camera" }
 
+# frust-native-widgets (native-widgets p1-06): the device-gate vehicle for the
+# "Native Widgets" catalog section — `src/pages/native_widgets.rs`. Same
+# hand-added-path-dep shape as `frust-camera` above (not yet a `frust tui` Add
+# Plugin contribution — that registry entry is Phase 3's packaging work).
+# Default features on: this catalog wants the `frust-api` builders
+# (`native_button`/etc.), not just the bare platform plugin.
+#
+# `demo-components` (native-widgets p3-08) is the plugin's NON-default demo
+# feature: `DemoCard`, one `NativeComponent` owning a real native subtree. It
+# ships inside the plugin rather than here because implementing that trait needs
+# `jni::objects::JObject` (Android) / `objc2-ui-kit` (iOS) in the *implementing*
+# crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions sanction
+# only a `frust-core`/`kurbo`/`peniko` escape hatch for an `examples/*` app —
+# see `plugins/native-widgets/src/demo.rs`'s module doc. Turning the feature on
+# adds NO dependency to this app (it resolves to the same `frust-api` set the
+# default already pulls); the page mounts the card behind an on-page toggle that
+# is OFF by default, so the six-slot gate constant is unchanged at rest.
+frust-native-widgets = { path = "../../plugins/native-widgets", features = [
+    "demo-components",
+] }
+
 # Dev-only: the headless smoke test drives Frust's `RenderRoot` directly (the
 # desktop shell's own rebuild/layout/paint seam) — no GPU, no window — the
 # same harness shape as `examples/huddle`'s own headless `tests/*.rs`. `frust-core`/

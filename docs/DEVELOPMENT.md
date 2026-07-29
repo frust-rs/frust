@@ -202,14 +202,14 @@ record "huddle/clean-signals-frust gate not run — no clean-signals-rs sibling 
 instead, and do not touch either directory without the sibling in place. This gate is
 separate from `frust build apk`/`run`'s pipeline gate (*Run*).
 
-The `cpu-tier` feature (experimental `vello_cpu` render backend, non-default — see
-*Version-Pin Policy*) is headless and needs no GPU, but isn't compiled by the standard
-chain above since the feature is off by default; run it directly when touching
-`frust-render`:
-
-```bash
-cargo test -p frust-render --features cpu-tier
-```
+**Non-default features are not compiled by the chain above.** `frust-render`'s
+`cpu-tier` (experimental `vello_cpu` render backend — see *Version-Pin Policy*) is
+headless and needs no GPU: run `cargo test -p frust-render --features cpu-tier` when
+touching `frust-render`. `frust-native-widgets`' `demo-components` is a composite
+`NativeComponent` demo of real JNI/UIKit view construction, shipped inside the plugin
+rather than in `examples/glyph-catalog` (which merely switches it on) because an app
+crate cannot implement that trait without raw `jni`/`objc2-ui-kit` deps the plugin does
+not re-export; the mobile compile gates below are the only thing that builds it.
 
 **Manual/gated tests** (not part of the default `cargo test --workspace` run — each
 requires local hardware or is slow, and is marked `#[ignore]` with a reason):
@@ -232,30 +232,31 @@ cargo test -p frust-cli --test create_ios -- --ignored
 # real Gradle build — needs Android SDK/NDK; ~1 minute.
 cargo test -p frust-cli --test build_e2e -- --ignored
 
-# Android compile gate (no device needed): the whole facade graph must
-# compile for the Android target.
+# Android compile gate (no device needed): the whole facade graph must compile for Android.
 cargo check --target aarch64-linux-android -p frust
 cargo check --target aarch64-linux-android -p frust-plugin
 cargo check --target aarch64-linux-android -p frust-shared-preferences
 cargo check --target aarch64-linux-android -p frust-secure-storage
 cargo check --target aarch64-linux-android -p frust-camera
+cargo check --target aarch64-linux-android -p frust-native-widgets
+cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
-# iOS compile gate (no device/Xcode needed — a type-check, runs on Linux
-# too; only building/running an iOS app needs macOS, see Prerequisites):
-# the whole facade graph must compile for the iOS Simulator target
-# (frust-secure-storage also gates the real device target).
+# iOS compile gate (a type-check, no device/Xcode needed — runs on Linux too; only
+# building/running an iOS app needs macOS, see Prerequisites): the whole facade graph
+# must compile for the Simulator target (frust-secure-storage also gates the device target).
 cargo check --target aarch64-apple-ios-sim -p frust
 cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences
 cargo check --target aarch64-apple-ios-sim -p frust-secure-storage
 cargo check --target aarch64-apple-ios -p frust-secure-storage
 cargo check --target aarch64-apple-ios-sim -p frust-camera
+cargo check --target aarch64-apple-ios-sim -p frust-native-widgets
+cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
 ```
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
 uncompiled on any host in this repo's history. Screen-reader verification
 (TalkBack/VoiceOver) and the `cpu-tier` tier's visual behavior on real hardware are
-unverified — both need a device/Simulator or physical GPU this headless host cannot
-provide.
+unverified — both need a device/Simulator or physical GPU this headless host cannot provide.
 
 **Neither compile gate above touches Kotlin or Swift.** `cargo check --target
 aarch64-linux-android`/`aarch64-apple-ios*` only type-checks the Rust `frust-*` graph —
@@ -433,6 +434,7 @@ not floating. Each row's tripwire must be re-run after touching that pin:
 | `objc2 0.6` / `objc2-foundation 0.3` minor | Apple ObjC bridge (`frust-shared-preferences`'s `NSUserDefaults` backend; `frust-secure-storage`'s apple arm also pulls `objc2-foundation` for `NSString`/`NSError`; `frust-camera`'s apple arm pulls the full `objc2-av-foundation`/`objc2-core-media`/`objc2-core-video`/`objc2-quartz-core`/`dispatch2`/`block2` stack, each pinned `0.3`/`0.6` minor — `objc2-av-foundation 0.3.2` itself permits `objc2 >=0.6.2, <0.8.0`, wider than this workspace's own `0.6` caret) | `cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences && cargo check --target aarch64-apple-ios-sim -p frust-camera` |
 | `androidx.camera:camera-{core,camera2,lifecycle} 1.6.1` (Gradle, not a Cargo pin) minor | `frust-camera`'s Android CameraX session/preview stack (`plugins/camera/platform/android/build.gradle.kts`); deliberately not `camera-view` (no `PreviewView`) | `(cd examples/glyph-catalog/android && ./gradlew :frust-camera:compileReleaseKotlin)` |
 | `objc2-security 0.3` / `objc2-local-authentication 0.3` minor | `frust-secure-storage`'s Apple Keychain backend + biometric gate (`SecAccessControl`/`LAContext`) | the secure-storage mobile compile gates above |
+| `objc2-ui-kit` / `objc2-quartz-core` / `objc2-core-text` / `objc2-core-foundation` 0.3 minor | `frust-native-widgets`'s (`plugins/native-widgets`) UIKit binding, plus its theme-ladder L2 (`objc2-quartz-core`'s `CALayer.cornerRadius`) and L3 (`objc2-core-text`/`objc2-core-foundation` resolving the embedded Glyph font bytes to a `CTFont`) direct pins — each already resolved transitively before this crate named it directly, so no lockfile version change. `cargo tree -i objc2-ui-kit` legitimately shows two versions — `0.2.2` pulled transitively by `accesskit_ios`/`winit`, `0.3.2` consumed solely by `frust-native-widgets` — an expected split, not `cargo tree -d` drift; do not force-align them | `cargo check --target aarch64-apple-ios-sim -p frust-native-widgets` |
 | `keyring-core 1.0` / `zbus-secret-service-keyring-store 1.0` (`rt-async-io-crypto-rust` feature, keeps the plugin tokio-free) / `windows-native-keyring-store 1.1` minor | `frust-secure-storage`'s desktop Linux/Windows backend | `cargo test -p frust-secure-storage` |
 | `notify 8` minor (`frust-cli`-only) | `frust run --watch`'s filesystem watcher (`ctrlc` floats, shared by `frust-drive`/`frust-cli`, unpinned) | `cargo test -p frust-cli` |
 | `ratatui 0.30` / `crossterm 0.29` / `ansi-to-tui 8.0.1` minor | `frust-tui`'s render/terminal/log stack, pre-1.0 churn expected | `cargo test -p frust-tui` |

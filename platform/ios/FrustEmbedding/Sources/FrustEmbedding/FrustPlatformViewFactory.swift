@@ -26,13 +26,40 @@ import UIKit
 // hook here — a hosted view either handles a touch itself or it falls
 // through to the Frust surface behind/in front of it. Frust never
 // intercepts a touch destined for a hosted view.
-@objc public protocol FrustPlatformViewFactory {
+// The explicit `@objc(FrustPlatformViewFactory)` name is LOAD-BEARING for the
+// same reason the class annotation above is: without it, Swift registers the
+// protocol with the ObjC runtime under its MANGLED name
+// (`_TtP14FrustEmbedding24FrustPlatformViewFactory_`), so a non-Swift
+// implementor (e.g. a Rust `define_class!` factory attaching conformance by
+// name via `objc_getProtocol`) can never match the object
+// `class_conformsToProtocol` checks against. Swift-side conformances are
+// by-type and unaffected. (Found by the native-widgets Phase 0 spike.)
+@objc(FrustPlatformViewFactory) public protocol FrustPlatformViewFactory {
     /// Create the native view for a freshly-created slot. Called on the main
     /// thread; must not block. `paramsJson` is the app-supplied parameter
     /// blob (the same JSON the Rust `platform_view` widget was given) — the
     /// factory decides its own schema. The returned view is positioned,
     /// sized, clipped, and shown/hidden entirely by `FrustViewHost` from the
     /// command channel; the factory should not set its own frame.
+    ///
+    /// **The return value is non-optional, and that is a real contract a
+    /// non-Swift factory must honour by hand.** `FrustViewHost.applyCreate`
+    /// calls `wrapper.addSubview(content)` on the result with no nil check —
+    /// correct, since this method neither returns an optional nor throws. A
+    /// factory written in Swift gets that guarantee from the compiler; a
+    /// factory implemented in **Objective-C or Rust** (`objc2`'s
+    /// `define_class!` — `frust-native-widgets` is the in-repo precedent) does
+    /// **not**, because Objective-C does not enforce nullability, and a nil
+    /// returned into this non-optional binding is an unchecked crash at first
+    /// use.
+    ///
+    /// So a non-Swift factory MUST return an **empty placeholder `UIView` on
+    /// every failure path** — a failed create, a caught panic, unreadable
+    /// params, anything — rather than nil. The host then positions an
+    /// invisible, inert slot: a dead slot, not a crashed frame loop. This
+    /// mirrors what Android's `FrustPlatformViewFactory.createView` gets by
+    /// throwing into `FrustViewHost`'s `catch (Throwable)`; iOS has no
+    /// exception channel here, so the placeholder return is the equivalent.
     func createView(paramsJson: String) -> UIView
 
     /// A params-only change (no reposition) for an already-created view.

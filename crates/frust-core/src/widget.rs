@@ -12,6 +12,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use frust_scene::{GlyphRun, SceneBuilder, ShaderProgram};
@@ -610,6 +611,16 @@ pub struct PaintCtx<'a> {
     /// from each child rather than overwrite, or every slot but the last
     /// child's would silently vanish. See [`PaintCtx::publish_platform_view`].
     platform_views: Vec<PlatformViewFrame>,
+    /// Absolute-coordinate z-shield rects reported this (sub)paint via
+    /// [`PaintCtx::report_input_shield`], in paint order.
+    ///
+    /// The same `Vec`-extend discipline as `platform_views` above and for the
+    /// same reason: any number of shields can paint in one pass, so
+    /// [`ChildPod::paint_child`] EXTENDS rather than overwrites. Consumed by
+    /// the shell-side platform-view differ, which intersects them against each
+    /// interactive slot's rect — core stays dumb about what a shield means (see
+    /// [`PaintCtx::report_input_shield`]).
+    input_shields: Vec<Rect>,
     /// Whether the shell created a translucent (alpha-channel, "Mode B") GPU
     /// surface for this frame, threaded down by the render root
     /// ([`crate::app::RenderRoot::paint`], seeded from
@@ -645,6 +656,7 @@ impl<'a> PaintCtx<'a> {
             hero: None,
             visible_rect: None,
             platform_views: Vec::new(),
+            input_shields: Vec::new(),
             translucent: false,
         }
     }
@@ -944,6 +956,32 @@ impl<'a> PaintCtx<'a> {
         std::mem::take(&mut self.platform_views)
     }
 
+    /// Report an absolute-coordinate region where frust content painted OVER a
+    /// platform-view slot must keep winning pointer input (the "z-shield").
+    ///
+    /// The auto-collection half of the Mode B input contract (native-widgets
+    /// p1-09): an interactive slot hands a touch-DOWN inside its rect to the
+    /// native sibling, EXCEPT inside a shield. `frust-widgets`' `shield(child)`
+    /// wrapper is the reporter — it paints its child unchanged and reports its
+    /// own painted rect here — so an app marks chrome that overlaps a slot
+    /// rather than hand-listing rects on the slot itself.
+    ///
+    /// Core stays dumb, exactly as it does for [`PlatformViewFrame`]: this is a
+    /// flat, pass-scoped rect list with no slot association at all. The
+    /// shell-side differ (`frust-shell-common::platform_view`) owns the
+    /// intersection rule that decides which shields belong to which slot.
+    /// Pushes (never overwrites) — see the `input_shields` field doc.
+    pub fn report_input_shield(&mut self, rect: Rect) {
+        self.input_shields.push(rect);
+    }
+
+    /// Take (and clear) every z-shield rect reported during this (sub)paint, in
+    /// paint order. The [`PaintCtx::take_platform_views`] sibling for the shield
+    /// channel (see [`PaintCtx::report_input_shield`]).
+    pub fn take_input_shields(&mut self) -> Vec<Rect> {
+        std::mem::take(&mut self.input_shields)
+    }
+
     /// Report a tagged ("hero") element's absolute paint `bounds` and read back
     /// what it should do this frame.
     ///
@@ -1019,6 +1057,7 @@ impl<'a> PaintCtx<'a> {
             hero: Some(registry),
             visible_rect: self.visible_rect,
             platform_views: Vec::new(),
+            input_shields: Vec::new(),
             translucent: self.translucent,
         };
         f(&mut child);
@@ -1041,6 +1080,9 @@ impl<'a> PaintCtx<'a> {
         // channel is a `Vec` merge rather than the `ime_state` `Option` merge
         // above.
         self.platform_views.extend(child.platform_views);
+        // The z-shield channel merges the same way, for the same reason (see
+        // `PaintCtx::report_input_shield`).
+        self.input_shields.extend(child.input_shields);
     }
 
     /// Seed the hero reporter lent by an ancestor. Called by
@@ -1194,6 +1236,61 @@ pub fn next_slot_id() -> u64 {
     NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Upper bound on the undrained retire list (see [`report_retired_slot`]).
+///
+/// Only reachable when nothing drains — a desktop app (no native compositor,
+/// so no drain) that churns platform-view slots, or a mobile shell whose frame
+/// loop has stopped. Past the cap the OLDEST id is dropped: the shell-side
+/// differ's missing-streak backstop still disposes that slot, so a dropped id
+/// costs a slower teardown, never a leak. Sized far above any realistic
+/// per-frame teardown burst.
+const MAX_PENDING_RETIRED_SLOTS: usize = 256;
+
+/// The process-wide pending-retire list backing [`report_retired_slot`] /
+/// [`take_retired_slots`].
+///
+/// A `Mutex<Vec<_>>` rather than a `RenderRoot` field for the same reason
+/// [`NEXT_SLOT_ID`] is a process-wide counter: a widget being torn down has no
+/// `RenderRoot` handle to reach — and unlike `build`/`rebuild`, the id-space is
+/// already process-global, so a global drain is coherent. Same single-root
+/// caveat as `next_slot_id`, revisited together with it if multi-root ever
+/// lands. Panics are impossible while the lock is held (a `Vec` push/take), but
+/// the poison-tolerant `unwrap_or_else(into_inner)` idiom is used anyway,
+/// matching `frust-shell-common`'s process-global slots.
+static RETIRED_SLOTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// Record that the widget owning `slot_id` was torn down (its `View::teardown`
+/// ran), so the shell can dispose the native view promptly instead of waiting
+/// out the differ's missing-streak heuristic.
+///
+/// The teardown half of the platform-view frame channel: `paint` says "this
+/// slot exists here", this says "this slot is gone for good". Kept a flat
+/// process-wide list (not a per-pass channel) because teardown does NOT run in
+/// the paint pass — it runs mid-rebuild, arbitrarily deep inside a
+/// `Component`'s own nested build context, so there is no threaded per-frame
+/// sink every teardown can reach.
+///
+/// Drained by [`crate::app::RenderRoot::take_retired_platform_views`]; a shell
+/// with no native compositor simply never drains, which is why the list is
+/// capped (see [`MAX_PENDING_RETIRED_SLOTS`]).
+pub fn report_retired_slot(slot_id: u64) {
+    let mut pending = RETIRED_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+    if pending.len() >= MAX_PENDING_RETIRED_SLOTS {
+        // Drop-oldest: the differ's missing-streak backstop still catches the
+        // dropped id (see the constant's doc).
+        pending.remove(0);
+    }
+    pending.push(slot_id);
+}
+
+/// Take (and clear) every slot id reported to [`report_retired_slot`] since the
+/// last call, in teardown order. Drained once per frame by a shell through
+/// [`crate::app::RenderRoot::take_retired_platform_views`].
+pub fn take_retired_slots() -> Vec<u64> {
+    let mut pending = RETIRED_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *pending)
+}
+
 /// A platform-view child's paint-time frame — everything a shell's native
 /// compositor (task 03) needs to place, size, clip, and dispose a native
 /// sibling view for one paint pass.
@@ -1229,6 +1326,24 @@ pub struct PlatformViewFrame {
     /// `false` ⇒ hidden (offscreen/culled by the widget itself, distinct from
     /// simply being absent from the collection this pass).
     pub visible: bool,
+    /// Mode B input forwarding (native-widgets spike 3 vocabulary): whether
+    /// the hosted native view should receive pointer input — a touch-DOWN
+    /// inside `rect` (and outside every `shields` rect) hands the whole
+    /// gesture to the native sibling in the embedding. `false` (the default)
+    /// keeps the v1 no-input contract: the frust surface consumes everything.
+    pub interactive: bool,
+    /// The z-shield list: absolute-coordinate regions where frust content
+    /// drawn OVER this slot must keep winning input. Only consulted when
+    /// `interactive`. Same coordinate space as `rect`.
+    ///
+    /// Carries only the slot's own **manually declared** shields
+    /// (`PlatformViewView::shield_local`, the escape hatch). The ordinary
+    /// source is auto-collection: a `shield(child)` wrapper reports its painted
+    /// rect through [`PaintCtx::report_input_shield`], and the shell-side differ
+    /// merges whichever of those intersect this `rect` into the command it
+    /// emits — so the shipped wire shape is the union of both, assembled one
+    /// layer up.
+    pub shields: Vec<Rect>,
 }
 
 /// The result of a whole [`crate::app::RenderRoot::paint`] pass.
@@ -1543,6 +1658,10 @@ impl ChildPod {
         // survive; an Option-based merge here would silently drop every slot
         // but the last child painted (see `PaintCtx::publish_platform_view`).
         ctx.platform_views.extend(child_ctx.take_platform_views());
+        // Bubble any z-shield rects reported this paint the same way, and for
+        // the same reason — two sibling shields must both survive (see
+        // `PaintCtx::report_input_shield`).
+        ctx.input_shields.extend(child_ctx.take_input_shields());
     }
 
     /// Collect the child's semantics, translating the current absolute origin
@@ -2027,6 +2146,8 @@ mod tests {
                     rect: Rect::from_origin_size(ctx.origin(), ctx.size()),
                     clip: None,
                     visible: true,
+                    interactive: false,
+                    shields: Vec::new(),
                 });
             }
         }

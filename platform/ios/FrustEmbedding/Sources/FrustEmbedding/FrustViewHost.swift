@@ -34,6 +34,30 @@ final class FrustViewHost {
         let wrapper: UIView
         let content: UIView
         let factory: FrustPlatformViewFactory
+        /// Mode B input forwarding (native-widgets spike 3): whether a touch
+        /// landing inside this slot's rect should fall through the Frust
+        /// surface to [content] (see `FrustView.hitTest`).
+        let interactive: Bool
+        /// The z-shield list (logical points, same space as [wrapper]'s
+        /// frame): regions where Frust content drawn over the slot keeps
+        /// winning input. Replaced wholesale by every `update` command.
+        var shields: [CGRect]
+    }
+
+    /// Mode B input forwarding (native-widgets spike 3): whether a touch at
+    /// `point` (in the shared superview's coordinate space — the Frust
+    /// surface fills it at origin zero, so `FrustView`-local and superview
+    /// space coincide) belongs to an interactive hosted view. `true` ⇒ the
+    /// Frust surface's `hitTest` returns nil and UIKit routes the whole
+    /// gesture to the sibling natively.
+    func interactiveSlotContains(_ point: CGPoint) -> Bool {
+        for slot in slots.values {
+            guard slot.interactive, !slot.wrapper.isHidden else { continue }
+            guard slot.wrapper.frame.contains(point) else { continue }
+            if slot.shields.contains(where: { $0.contains(point) }) { continue }
+            return true
+        }
+        return false
     }
 
     /// The Frust surface view (a `FrustView`); hosted wrappers are inserted
@@ -132,7 +156,13 @@ final class FrustViewHost {
         } else {
             containerView.superview?.insertSubview(wrapper, aboveSubview: containerView)
         }
-        slots[slotId] = Slot(wrapper: wrapper, content: content, factory: factory)
+        slots[slotId] = Slot(
+            wrapper: wrapper,
+            content: content,
+            factory: factory,
+            interactive: (command["interactive"] as? Bool) ?? false,
+            shields: []
+        )
     }
 
     private func applyUpdate(slotId: UInt64, command: [String: Any]) {
@@ -161,6 +191,11 @@ final class FrustViewHost {
             slot.content.frame = slot.wrapper.bounds
         }
         slot.wrapper.isHidden = !visible
+
+        // The z-shield list rides every update in the same physical-px space
+        // as `rect` — converted to points and replaced wholesale.
+        let shieldArrays = (command["shields"] as? [Any]) ?? []
+        slots[slotId]?.shields = shieldArrays.compactMap { pointsRect($0, scale: scale) }
     }
 
     private func applyUpdateParams(slotId: UInt64, command: [String: Any]) {
