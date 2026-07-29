@@ -58,6 +58,11 @@ Mono + IBM Plex Mono (~1MB) for the Glyph design language's type scale. An app o
 via `frust = { ..., default-features = false }`, which removes the fonts from the whole
 graph (confirmed via `cargo tree -e features`).
 
+**Widget-authoring test fixtures.** `frust-widgets`' non-default `test-support` feature
+compiles in the crate's GPU-free container-widget fixtures (`authoring::test_support`),
+so a design system built outside this crate can test its own containers the same way;
+off by default in a normal app build.
+
 ## Run
 
 ```bash
@@ -75,11 +80,10 @@ clippy, from its own directory) is the conditional step in *Test* below, gated o
 clean-signals-rs sibling checkout.
 
 **Glyph design-language gate.** `examples/huddle`'s appearance settings expose a
-four-way `System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph dark+light visual
-check (desktop, Android, iOS) plus a reduced-motion pass (OS accessibility setting on)
-round out the manual visual gate above — no automated check exists for either. Every
-shell now seeds `Theme::glyph_baseline()` by default, so this gate also covers
-first-launch appearance, not just the toggle.
+four-way `System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph dark+light check
+(desktop, Android, iOS) plus a reduced-motion pass round out the manual gate above — no
+automated check exists for either. Every shell falls back to `Theme::glyph_baseline()`
+when no default was seeded, so this also covers first-launch appearance.
 
 `examples/huddle` additionally builds and runs on Android and iOS, from its own
 directory (its own `frust.toml`, package `it.f0x.huddle`):

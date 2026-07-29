@@ -469,6 +469,15 @@ Conventions for `Widget::semantics` (see `docs/ARCHITECTURE.md`'s Semantics pass
   instead, letting the mobile frame gate throttle it to `MotionScheme::cosmetic_loop_rate`,
   and must still honor `reduce_motion` (freeze in place, stop requesting frames).
   **Input-driven frames are never paced.**
+- **Design-system code targets `frust_widgets::authoring`, never a catalog module.** A
+  baseline widget never imports `material`/`cupertino`/`glyph`; the container/callback
+  plumbing, event routing, and callback erasure every widget needs live in the public
+  `authoring` module instead — the same surface the three built-in catalogs themselves consume
+  (`docs/ARCHITECTURE.md`'s `frust-widgets` row); `PRESSED_OPACITY`'s `material::state_layer`
+  re-export is compatibility-only. `PageTransition::Custom` carries two contracts: pair it
+  with an explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to
+  the M3 default, 300ms + `Curve::Emphasized`), and `reduce_motion` still collapses it to
+  `ReducedCrossfade` unconditionally — a custom transition cannot opt out.
 
 ## Testing Patterns
 
