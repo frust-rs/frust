@@ -95,9 +95,10 @@ open class FrustActivity : ComponentActivity() {
     /**
      * Host opt-in for a **translucent** (Mode B) render surface — see
      * [FrustSurfaceView.translucentSurface] for the full contract. Override to
-     * `true` in an app that composites Frust content over native sibling views,
-     * and pair it with the Rust-side `frust::request_translucent_surface`
-     * latch; the default `false` keeps the opaque (Mode A) surface.
+     * `true` in an app that composites Frust content over native sibling
+     * views; the embedding's own JNI glue then declares the mode to the Rust
+     * shell (`declare_host_translucent_surface`) — app Rust cannot. The
+     * default `false` keeps the opaque (Mode A) surface.
      */
     open val translucentSurface: Boolean
         get() = false

@@ -80,7 +80,7 @@ class FrustSurfaceView(
      * clears to a transparent base and punches an otherwise-opaque
      * swapchain, painting black rectangles where the hole should show
      * through instead. It must also stay paired with the Rust-side
-     * `frust::request_translucent_surface` latch: the shell reads that latch
+     * `declare_host_translucent_surface` latch: the shell reads that latch
      * once, at surface-creation time, so a mismatch is a startup-visible
      * failure rather than a recoverable one. This is also why there is no
      * app-Rust equivalent call — only a host may declare translucency.
