@@ -1,4 +1,4 @@
-//! Deep-link routing smoke for the Huddle skeleton (task 10).
+//! Deep-link routing smoke for the Huddle skeleton.
 //!
 //! `push_deep_link` writes a process-wide signal, so this is deliberately the
 //! ONE test in its own binary that touches it (mirroring `examples/navdemo`'s

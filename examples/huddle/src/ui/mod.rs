@@ -8,20 +8,18 @@
 //! - [`toast`] — the overlay toast/snackbar service ([`toast::ToastController`])
 //!   mounted in the shell's reserved overlay slot.
 //! - [`sheet`] — the in-screen bottom-sheet overlay (scrim + slide-in +
-//!   drag-to-dismiss) plus the emoji-picker / action-row content helpers Phase
-//!   D's message actions mount (task 20); the hub freeze is lifted for Phase D.
+//!   drag-to-dismiss) plus the emoji-picker / action-row content helpers the
+//!   message actions mount.
 //! - [`fill_box`] — the arbitrary-color rounded-rect escape-hatch primitives
 //!   (`fill_box` leaf + `filled_box` single-child container), promoted here
-//!   from `screens::home` (device-parity-round2 task R2) so the feed restyle
-//!   and Home share them.
+//!   from `screens::home` so the feed restyle and Home share them.
 //! - [`scaffold`] — the shared titled-screen shell (`scaffold`/
-//!   `placeholder_body`), promoted here from the `screens` hub (huddle
-//!   clean-architecture refactor, task 05) so the profile/search/thread
-//!   pages can share it.
+//!   `placeholder_body`), promoted here from the `screens` hub so the
+//!   profile/search/thread pages can share it.
 //! - [`solid_source`] — the arbitrary-color 1×1 `ImageSource` fill helper
 //!   (`solid_source`/`solid_source_alpha`), promoted here from
-//!   `features::settings` (huddle clean-architecture refactor, task 05) so
-//!   the You tab's avatar block can share it with the settings pages.
+//!   `features::settings` so the You tab's avatar block can share it with
+//!   the settings pages.
 
 pub mod fill_box;
 pub mod scaffold;

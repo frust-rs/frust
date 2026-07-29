@@ -2,7 +2,7 @@
 //! owning feature's `presentation/pages/` module (see `src/README-phase-c.md`
 //! for the feature-slice convention this crate follows).
 //!
-//! Twelve routes covering every destination in the plan:
+//! Twelve routes covering every destination:
 //! `/` (Home tab), `/search`, `/activity`, `/you`, `/channel/:id`,
 //! `/thread/:id`, `/user/:id`, `/you/settings`, `/you/settings/notifications`,
 //! `/you/settings/appearance`, `/you/settings/about`, and
@@ -32,7 +32,7 @@ use crate::features::settings::presentation::pages::{
 };
 
 /// The `/` route (and the navigator's initial page): the Home tab (now a
-/// channels-feature page — huddle clean-architecture refactor, task 02).
+/// channels-feature page).
 pub fn home_page(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
     channels_home::home_screen(controller)
 }

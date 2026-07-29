@@ -1,4 +1,4 @@
-//! `swipeable_row` — a reusable horizontal swipe-to-action row (Phase C, task 11).
+//! `swipeable_row` — a reusable horizontal swipe-to-action row.
 //!
 //! A small hand-rolled [`View`]/[`Widget`] pair built directly against
 //! `frust-core` — the facade's documented "low-level escape hatch" pattern
@@ -26,8 +26,8 @@
 //! # Generic API
 //!
 //! Actions are passed in ([`SwipeableRow::on_swipe_right`]/[`on_swipe_left`]),
-//! each an accent color plus an `Fn(&mut State)` callback, so Phase D can reuse
-//! the same widget for swipe-to-reply.
+//! each an accent color plus an `Fn(&mut State)` callback, so the same widget
+//! also drives the feed's swipe-to-reply affordance (see [`SwipeMarker::Reply`]).
 
 use std::rc::Rc;
 
@@ -84,7 +84,7 @@ pub enum SwipeMarker {
     /// A plain rounded-square marker — the generic archive/mute default
     /// (unchanged from the original widget).
     Square,
-    /// A left-pointing reply arrow — the swipe-to-reply affordance (task 22).
+    /// A left-pointing reply arrow — the swipe-to-reply affordance.
     Reply,
 }
 
@@ -133,7 +133,7 @@ impl<State: 'static> SwipeableRow<State> {
 
     /// [`on_swipe_right`](Self::on_swipe_right) with an explicit
     /// [`SwipeMarker`] — the swipe-to-reply feed rows pass
-    /// [`SwipeMarker::Reply`] (task 22).
+    /// [`SwipeMarker::Reply`].
     pub fn on_swipe_right_marked<F: Fn(&mut State) + 'static>(
         mut self,
         color: Color,
@@ -554,7 +554,7 @@ impl Widget for SwipeableWidget {
 }
 
 // ---------------------------------------------------------------------------
-// press_pop — pressed-state scale-dip micro-interaction (task 22)
+// press_pop — pressed-state scale-dip micro-interaction
 // ---------------------------------------------------------------------------
 
 /// The scale a pressed child dips to — a subtle ~0.92 "pop" (spec-less tactile
@@ -564,7 +564,7 @@ const PRESS_SCALE: f64 = 0.92;
 
 /// A transparent wrapper that scales its child down to [`PRESS_SCALE`] about its
 /// center while the pointer is pressed on it, then springs back on release — the
-/// composer send button / emoji-cell micro-interaction (task 22).
+/// composer send button / emoji-cell micro-interaction.
 ///
 /// It never captures the pointer or consumes an event: it forwards every phase
 /// to the child (so the wrapped [`GestureDetector`](frust::GestureDetector)'s

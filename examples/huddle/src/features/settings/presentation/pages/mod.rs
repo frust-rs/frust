@@ -1,4 +1,4 @@
-//! `settings` presentation pages (huddle clean-architecture refactor, task 05).
+//! `settings` presentation pages.
 
 pub mod settings;
 pub mod settings_about;

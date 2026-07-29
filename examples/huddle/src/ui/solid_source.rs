@@ -1,11 +1,10 @@
 //! `solid_source`/`solid_source_alpha` — the facade-only way to paint an
 //! arbitrary (possibly translucent) filled rectangle: stretch a 1×1
 //! [`ImageSource`] to fill with [`ImageFit::Fill`](frust::ImageFit).
-//! Promoted here from `features::settings` (huddle clean-architecture
-//! refactor, task 05) once the You tab's cross-feature use (the current
-//! user's avatar block) made it clear this is a feature-generic fill helper,
-//! not settings-specific — mirrors [`crate::ui::fill_box`]'s promotion
-//! precedent (device-parity-round2 task R2). Used by the appearance/about
+//! Promoted here from `features::settings` once the You tab's cross-feature
+//! use (the current user's avatar block) made it clear this is a
+//! feature-generic fill helper, not settings-specific — mirrors
+//! [`crate::ui::fill_box`]'s promotion precedent. Used by the appearance/about
 //! settings pages, the You tab's avatar block, and the theme-swap fade veil,
 //! none of which map onto a themed widget's own surface fill.
 

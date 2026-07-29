@@ -1,5 +1,5 @@
 //! Settings menu (`/you/settings`) — the list-stack root into the nested
-//! settings pages (Huddle showcase, task 15).
+//! settings pages.
 //!
 //! Three [`list_item`] rows (Notifications / Appearance / About), each with a
 //! leading glyph and a trailing [`icons::CHEVRON_RIGHT`], pushing its nested page

@@ -4,8 +4,8 @@
 //! You (settings). Channel → message feed → thread flow, a settings stack, and
 //! a workspace switcher, all over the shared mock dataset in
 //! [`data::store`]. Each feature is a `{domain, data, presentation}` slice
-//! under [`features`] (the huddle clean-architecture refactor); [`lib`](self),
-//! [`shell`], [`routes`], and [`ui`] remain the shared hub files.
+//! under [`features`]; [`lib`](self), [`shell`], [`routes`], and [`ui`]
+//! remain the shared hub files.
 //!
 //! # Overlay slot
 //!
@@ -13,7 +13,7 @@
 //! toast/snackbar service mounts above every screen, below nothing. The
 //! [`ToastController`](ui::toast::ToastController) handle is
 //! [`provide_context`]-ed under the root owner so any screen can raise a toast
-//! (the undo affordance Phase C's swipe actions use).
+//! (the undo affordance the swipe actions use).
 //!
 //! # Theme delivery
 //!
@@ -27,7 +27,7 @@
 //! The router is wired to the process-wide deep-link source via
 //! [`router_with_deep_links`]; a link lands on any route, including
 //! `/channel/:id` and `/user/:id`. Deep-link scheme stays `teamdemo`
-//! (the platform manifest scheme is a later platforms task).
+//! (the platform manifest scheme isn't wired to it yet).
 
 pub mod data;
 pub mod failure;
@@ -68,7 +68,7 @@ pub struct HuddleState {
     /// a cold-start link already arrived). `Rc` so the bottom bar's closures —
     /// rebuilt fresh every `build` — can cheaply clone a handle into each tap.
     pub nav: Rc<RouterDeepLinks<HuddleState>>,
-    /// The Android/gesture back-press ⇄ navigator glue (device-parity task 14):
+    /// The Android/gesture back-press ⇄ navigator glue:
     /// wired to the *same* [`NavigatorController`] as [`nav`](Self::nav) (a
     /// clone sharing the same `Rc`-backed depth — see [`BackHandler`]'s docs),
     /// so a platform back press pops whatever page the router pushed and
@@ -94,11 +94,10 @@ impl Component for HuddleApp {
     fn init(&self) -> HuddleState {
         let toasts = ToastController::new();
         // Provide the toast handle under the root owner so every screen can
-        // raise a toast via `use_context::<ToastController>()` (Phase C seam).
+        // raise a toast via `use_context::<ToastController>()`.
         provide_context(toasts.clone());
 
-        // Composition root (huddle clean-architecture refactor, task 02 / PLAN
-        // Design Decision 4): construct each feature's repository ONCE and
+        // Composition root: construct each feature's repository ONCE and
         // publish it under the root Owner via context — the same mechanism the
         // `ToastController` above (and `Theme`) use. Pages/controllers recover
         // it with `use_context` inside `use_controller`, so construction stays
@@ -151,8 +150,7 @@ impl Component for HuddleApp {
         // `handles_back` from the current depth — see `BackHandler::track`'s
         // docs for the one-rebuild refresh lag. Drawer/sheet-first dismissal
         // on back is a known gap: `BackHandler` has no app-level intercept
-        // hook today (see this crate's device-parity task 14 completion
-        // summary), so an open sheet/drawer does not yet close on a back
+        // hook today, so an open sheet/drawer does not yet close on a back
         // press — only the navigator pops.
         state.back.track();
         // Navigates on a new warm deep link; a no-op otherwise (dedup'd).

@@ -1,4 +1,4 @@
-//! `sheet` — a reusable bottom-sheet overlay (Phase D, task 20).
+//! `sheet` — a reusable bottom-sheet overlay.
 //!
 //! A hand-rolled [`View`]/[`Widget`] pair built directly against
 //! `frust-core` — the same "low-level escape hatch" precedent
@@ -15,7 +15,8 @@
 //! (`frust`'s catalog `widgets_modals` screen is the reference). Huddle's
 //! feed/thread screens are plain functions that only reach the shell's router
 //! through `&mut HuddleState`, with no per-screen navigator to push over, and
-//! wiring one in would churn the frozen `routes.rs`. This overlay instead mounts
+//! wiring one in would require restructuring the shared `routes.rs` route
+//! table. This overlay instead mounts
 //! into the screen's own `Stack` top layer: the caller stores "which sheet is
 //! open" in a screen-local signal and, while it is `Some`, wraps its content in
 //! `Stack(vec![screen, sheet(panel).on_dismiss(..)])`.
@@ -38,11 +39,11 @@
 //!
 //! [`sheet_action_row`] builds one full-width tappable row (the long-press menu
 //! and attachment-sheet rows), and [`emoji_grid`] the curated color-emoji
-//! reaction picker (real color glyphs, verified in wave A). Both are generic
-//! over the app state so the feed and thread screens (and task 21's
-//! create-channel) share them.
+//! reaction picker (real color glyphs). Both are generic
+//! over the app state so the feed and thread screens (and create-channel)
+//! share them.
 //!
-//! # Keyboard avoidance (device-parity task 14)
+//! # Keyboard avoidance
 //!
 //! [`SheetWidget::layout`] rides the panel above the on-screen keyboard: it
 //! reads the *raw* `WindowInsets::view_insets.bottom` off `LayoutCtx` (not the
@@ -50,8 +51,8 @@
 //! that formula intentionally clamps to zero under an IME overlap, backwards
 //! for a widget that must proactively avoid it) and shrinks the height
 //! available to the panel by that amount, since the shell never resizes the
-//! window itself under edge-to-edge (`examples/huddle/android`/`ios`'s task-08
-//! wiring) — a sheet must consume the inset itself. [`avoid_keyboard`] exposes
+//! window itself under edge-to-edge (see `examples/huddle/android`/`ios`'s
+//! edge-to-edge wiring) — a sheet must consume the inset itself. [`avoid_keyboard`] exposes
 //! the same raw-inset bottom padding as a small standalone wrapper for content
 //! that isn't a [`sheet`] (`channel_feed`'s composer bar).
 
@@ -249,8 +250,8 @@ pub struct SheetWidget {
     /// This widget's own resolved (full-bleed) size.
     size: Size,
     /// The panel's natural height (grab handle + content), clamped to the
-    /// height still available above the live keyboard occlusion (device-
-    /// parity task 14 — see `layout`'s `available` local).
+    /// height still available above the live keyboard occlusion — see
+    /// `layout`'s `available` local.
     panel_height: f64,
     /// The panel's settled top edge (`available - panel_height`, where
     /// `available = size.height - view_insets.bottom` — see `layout`).
@@ -399,14 +400,14 @@ impl Widget for SheetWidget {
         let content_bc = BoxConstraints::new(Size::new(w, 0.0), Size::new(w, f64::INFINITY));
         let content_size = self.content.layout_child(ctx, &content_bc);
 
-        // Keyboard avoidance (device-parity task 14, item 2): the panel rides
+        // Keyboard avoidance: the panel rides
         // above the on-screen keyboard rather than being covered by it. Reads
         // the *raw* IME occlusion (`view_insets.bottom`, not the derived
         // safe-area `padding()` a `SafeArea` widget consumes — that formula
         // intentionally clamps to zero under an IME overlap, which is the
         // wrong direction here) directly off `LayoutCtx::window_insets`, since
         // the shell never resizes the window itself under edge-to-edge (see
-        // `examples/huddle/android`/`ios`'s task-08 wiring) — the sheet must
+        // `examples/huddle/android`/`ios`'s edge-to-edge wiring) — the sheet must
         // avoid the keyboard, not rely on a shrunk window. `available` is the
         // full-bleed height minus that occlusion; the panel (and, transitively,
         // its content) never extends into it.
@@ -610,8 +611,8 @@ where
             // gives the cell a tight column width; `Padding` fills it and sizes
             // its height to the glyph, so each cell spans its whole column and
             // stays tappable end-to-end.
-            // press_pop adds the pressed-state scale dip (task 22
-            // micro-interaction); it forwards every event so the tap still fires.
+            // press_pop adds the pressed-state scale dip micro-interaction; it
+            // forwards every event so the tap still fires.
             let cell = crate::ui::swipeable::press_pop(
                 GestureDetector(Padding(
                     EdgeInsets::all(EMOJI_CELL_PAD),
@@ -636,13 +637,13 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Drag-up-to-dismiss (task 21: the workspace-switcher top drawer)
+// Drag-up-to-dismiss (used by the workspace-switcher top drawer)
 // ---------------------------------------------------------------------------
 
 /// A vertical drag-*up*-to-dismiss wrapper — [`SheetWidget`]'s downward
 /// drag-dismiss mechanics mirrored to the opposite direction, for a
 /// top-anchored panel that dismisses on an upward drag instead of a downward
-/// one (`screens::workspace_drawer`'s drawer, task 21). Unlike [`sheet`] this
+/// one (`screens::workspace_drawer`'s drawer). Unlike [`sheet`] this
 /// wraps a natural-sized child in place — no full-bleed scrim of its own; the
 /// drawer already paints a separate scrim layer alongside it in its own
 /// `Stack` — and tracks the drag as an upward `lift` added to the content's
@@ -887,7 +888,7 @@ pub fn action_menu<State: 'static>(rows: Vec<AnyView<State>>) -> AnyView<State> 
 }
 
 // ---------------------------------------------------------------------------
-// Standalone keyboard avoidance (device-parity task 14, item 2)
+// Standalone keyboard avoidance
 // ---------------------------------------------------------------------------
 
 /// Pads `child`'s bottom edge by the window's *raw* live keyboard occlusion
@@ -1093,7 +1094,7 @@ mod tests {
             .expect("root is a SheetWidget")
     }
 
-    /// A pushed IME inset (device-parity task 14, item 2) lifts the panel's
+    /// A pushed IME inset lifts the panel's
     /// settled top edge above the simulated keyboard — driven via
     /// `RenderRoot::set_insets` (mirrors `frust-widgets::safe_area`'s test
     /// harness pattern).

@@ -1,4 +1,4 @@
-//! Home-actions integration tests (Phase D task 21): the app-bar ADD action
+//! Home-actions integration tests: the app-bar ADD action
 //! opening the create-channel sheet, creating a channel appending a live row
 //! and a toast, the row long-press menu's Mute action (state flip and undo
 //! toast, swipe parity), and the same menu's Invite-people entry confirming
@@ -312,7 +312,7 @@ fn app_bar_add_opens_the_create_channel_sheet() {
 }
 
 /// The workspace tile pushes `/workspace-switcher` — the drawer's real entry
-/// point (task 21).
+/// point.
 #[test]
 fn workspace_tile_pushes_the_switcher() {
     let _g = serial();

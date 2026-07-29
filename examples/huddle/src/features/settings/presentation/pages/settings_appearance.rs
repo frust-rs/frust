@@ -1,6 +1,6 @@
 //! Appearance settings (`/you/settings/appearance`) — the full theming engine:
 //! brightness + design language, **3 accent themes**, **dynamic type scaling**,
-//! and the ~200ms fade veil around every swap (Huddle showcase, task 15).
+//! and the ~200ms fade veil around every swap.
 //!
 //! This is the single place the app calls `set_app_theme`/`clear_app_theme` (via
 //! the hosted [`SettingsController`] → `SetTheme` use case). Every selector on
@@ -177,7 +177,7 @@ fn design_selector(
         // the Glyph catalog has no connected segmented-selector widget yet, and
         // `button_group`'s shape (labelled slots + a `selected` index) is a fine
         // fit for a settings toggle regardless of the active design language —
-        // this row is settings-screen chrome, not in-app Glyph surface (task 28).
+        // this row is settings-screen chrome, not in-app Glyph surface.
         DesignLanguage::Material3 | DesignLanguage::Glyph => {
             any(button_group::<AppearanceState, _>(
                 DesignChoice::ALL.into_iter().map(|c| c.label()),
@@ -230,7 +230,7 @@ fn brightness_switch(
     match design_lang {
         // Glyph reuses the Material `Switch` for this toggle — the Glyph
         // catalog has no dedicated switch widget yet, and this settings-screen
-        // control isn't itself in-app Glyph chrome (task 28).
+        // control isn't itself in-app Glyph chrome.
         DesignLanguage::Material3 | DesignLanguage::Glyph => any(Row(vec![
             any(text("Dark").size(14.0)),
             any(SizedBox(Some(8.0), None)),

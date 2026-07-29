@@ -1,6 +1,6 @@
 //! Architecture conformance test: enforces huddle's per-feature
-//! clean-architecture layering, hardened across several passes against
-//! reviewer-found bypasses in the scan itself — see the "What this is NOT"
+//! clean-architecture layering, hardened across several rounds of fixes
+//! against bypasses found in the scan itself — see the "What this is NOT"
 //! section below.
 //!
 //! A plain `std::fs` source scan over `src/`, run as an ordinary `cargo test`
@@ -57,20 +57,20 @@
 //! This is a **substring/token scan, not a parser** — it has no `syn`/AST
 //! understanding of Rust `use` trees, paths, or types. An initial adversarial
 //! review demonstrated three concrete ways a substring scan can be defeated;
-//! the first hardening pass closed those three, but a follow-up adversarial
-//! re-review reproduced two more gaps *in that hardening itself* (both
-//! closed here, by the second hardening pass). A convergence re-review then
+//! a first round of fixes closed those three, but a follow-up
+//! review reproduced two more gaps *in that fix itself* (both
+//! closed here, by a second round of fixes). A further review then
 //! found one more, LATENT (fails-safe, never a bypass) gap, closed here by
-//! the third hardening pass (below):
+//! a third round of fixes (below):
 //!
-//! 1. **Alias/use-form bypass — CLOSED (first hardening pass).** A single
+//! 1. **Alias/use-form bypass — CLOSED (first round).** A single
 //!    `"::data::"`/
 //!    `"::presentation::"` needle missed `use ...::data as msgdata;` (no
-//!    trailing `::`). Superseded by the second pass's segment tokenizer (gap
+//!    trailing `::`). Superseded by the second round's segment tokenizer (gap
 //!    B below),
 //!    which makes every use-form terminator (`;`, ` as `, `}`, `,`, a
 //!    brace-list member, …) irrelevant — see [`has_exact_segment`].
-//! 2. **Concrete-repo-name bypass — CLOSED (first hardening pass).** A
+//! 2. **Concrete-repo-name bypass — CLOSED (first round).** A
 //!    facade re-export
 //!    (`pub use data::repositories::StoreChannelRepository;` from a feature
 //!    `mod.rs`) never matched the old `::data::`/`::presentation::` needles
@@ -79,14 +79,14 @@
 //!    `Store[A-Za-z]*Repository`/`InMemory[A-Za-z]*Repository` name pattern
 //!    itself anywhere outside the data layer/composition root/allowlist (see
 //!    check (e)), covering both direct construction and a re-export.
-//! 3. **Split-use bypass — CLOSED (first hardening pass).** A `use` tree
+//! 3. **Split-use bypass — CLOSED (first round).** A `use` tree
 //!    spanning multiple
 //!    physical lines could put a banned segment on a different physical line
 //!    than the rest of the path, defeating a needle scanned line-by-line.
 //!    [`join_use_statements`] concatenates a `use ...;` statement's physical
 //!    lines into one logical line before any check runs.
-//! 4. **Gap A — `pub use` join trigger — CLOSED (second hardening pass).**
-//!    The first pass's
+//! 4. **Gap A — `pub use` join trigger — CLOSED (second round).**
+//!    The first round's
 //!    [`join_use_statements`] only recognized a joinable statement by the
 //!    literal `"use "` prefix, so a split `pub use`/`pub(crate) use`/
 //!    `pub(super) use` re-export (the exact facade-re-export shape check (e)
@@ -94,8 +94,8 @@
 //!    bypass for the join-trigger's own blind spot. [`is_use_trigger_line`]
 //!    now recognizes bare `use `, and any `pub`/`pub(...)`-prefixed `use `,
 //!    as a join trigger — see its doc comment for the exact accepted forms.
-//! 5. **Gap B — brace-list membership forms — CLOSED (second hardening
-//!    pass).** Every needle from the first pass
+//! 5. **Gap B — brace-list membership forms — CLOSED (second round).**
+//!    Every needle from the first round
 //!    required a `::` immediately before the banned segment; a
 //!    rustfmt-produced grouped import puts a segment straight after `{`, `, `,
 //!    or inside a nested `{self, ...}` group with no `::` prefix at all
@@ -106,10 +106,10 @@
 //!    `(`, `)` — see [`tokenize_segments`]) and an *exact* `data`/`presentation`
 //!    segment token is banned regardless of which punctuation surrounds it, so
 //!    no enumeration of use-form terminators is needed at all — the
-//!    recommended fix shape from that re-review.
-//! 6. **Trailing-comment false positive — CLOSED (third hardening pass).**
-//!    The convergence re-review's one
-//!    confirmed Major: [`has_exact_segment`]'s segment tokenizer ran over
+//!    recommended fix shape from that review.
+//! 6. **Trailing-comment false positive — CLOSED (third round).**
+//!    This review's one
+//!    confirmed high-severity finding: [`has_exact_segment`]'s segment tokenizer ran over
 //!    un-comment-stripped `use`-line text, so a trailing `// … data …`
 //!    comment on an otherwise-clean `use` line could trip an exact-token
 //!    false positive on the comment's own prose — LATENT (fails-safe: a loud
@@ -263,7 +263,7 @@ fn production_lines(contents: &str) -> Vec<Line> {
 /// full attribute/visibility parser (deliberately: this crate's `use`/
 /// `pub use` style never carries an attribute or doc comment on the same
 /// physical line as the keyword itself), but it closes a follow-up
-/// re-review's **gap A**: the first pass's join trigger matched only the
+/// review's **gap A**: the first round's join trigger matched only the
 /// literal `"use "` prefix, so a
 /// split `pub use`/`pub(crate) use` facade re-export — exactly the shape
 /// check (e) exists to police — was never joined at all, reopening the
@@ -296,7 +296,7 @@ fn is_use_trigger_line(trimmed: &str) -> bool {
 /// parser: any non-comment line (comments are already stripped by the time
 /// this runs) whose trimmed text opens a `use` statement (see
 /// [`is_use_trigger_line`] — broadened to `pub`-prefixed forms by the second
-/// hardening pass's gap
+/// round's gap
 /// A closure) has subsequent lines appended (each trimmed) until the
 /// accumulated text contains a `;` — the one character every `use` statement
 /// in this codebase's style (one item per statement, `rustfmt`-formatted)
@@ -307,7 +307,7 @@ fn is_use_trigger_line(trimmed: &str) -> bool {
 /// panicking; the resulting text is scanned as-is like anything else.
 ///
 /// **Trailing `//` comments are stripped on this path only (the third
-/// hardening pass, closing a convergence re-review finding).** Every physical line that's part of a `use` statement — the trigger
+/// round of fixes, closing a further-review finding).** Every physical line that's part of a `use` statement — the trigger
 /// line and every line appended to it — is run through
 /// [`strip_trailing_comment`] before it's checked for `;` or joined, so a
 /// trailing `// … data …` comment can no longer feed a banned segment token
@@ -430,8 +430,8 @@ fn is_data_layer_file(relp: &str) -> bool {
 /// (`:` is one of the delimiter chars, so `"a::b"` yields `["a", "", "b"]`
 /// before empty segments are filtered).
 ///
-/// This is the second hardening pass's answer to that re-review's **gap
-/// B**: the first pass's needle list
+/// This is the second round's answer to that review's **gap
+/// B**: the first round's needle list
 /// required a `::` immediately before a banned segment, which a brace-list
 /// member (`use x::{domain::Foo, data::Bar};` — `data` sits right after
 /// `", "`, not `"::"`) or a nested `{self, ...}` group never supplies. Once
@@ -954,11 +954,11 @@ fn search_and_profile_domain_and_data_stay_sync_infallible() {
 
 // ---------------------------------------------------------------------------
 // (g) trailing `//` comments on a use line don't trip the segment scan
-//     (one confirmed Major, LATENT/fails-safe; closed by the third
-//     hardening pass)
+//     (one confirmed high-severity finding, LATENT/fails-safe; closed by
+//     the third round of fixes)
 // ---------------------------------------------------------------------------
 
-/// A convergence re-review's finding: before the third hardening pass, [`has_exact_segment`] ran over
+/// A further-review finding: before the third round of fixes, [`has_exact_segment`] ran over
 /// un-comment-stripped `use`-line text, so a trailing `// … data …` comment
 /// on an otherwise-clean `use` line could trip an exact-token false positive
 /// on the comment's own prose, not on anything actually imported. This test

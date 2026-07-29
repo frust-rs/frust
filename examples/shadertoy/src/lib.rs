@@ -60,7 +60,7 @@ fn fps_color(fps: f64) -> Color {
 
 /// The menu screen: a title plus one button per registered shader.
 ///
-/// System UI (task 17): the menu was never meant to be immersive — bars stay
+/// System UI: the menu was never meant to be immersive — bars stay
 /// visible here (`EdgeToEdge`), so the screen is wrapped in [`safe_area`] to
 /// keep its content clear of them. Entering a shader flips to
 /// `ImmersiveSticky` (see `running_screen`'s back button, which restores

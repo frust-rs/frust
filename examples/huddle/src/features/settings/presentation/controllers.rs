@@ -1,7 +1,6 @@
 //! `settings` presentation — [`SettingsController`] and
-//! [`NotificationsController`] (huddle clean-architecture refactor, task 05;
-//! moved verbatim from the former flat `features::settings`/
-//! `features::settings::notifications` modules).
+//! [`NotificationsController`], moved verbatim from the former flat
+//! `features::settings`/`features::settings::notifications` modules.
 //!
 //! [`SettingsController`] owns the two selection signals ([`DesignChoice`] and
 //! [`BrightnessChoice`]) and drives the [`SetTheme`] use case, which is the

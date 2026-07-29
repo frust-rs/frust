@@ -1,11 +1,10 @@
 //! `settings` feature — the design-language + brightness selection spine,
-//! notification preferences, and the four settings screens (huddle
-//! clean-architecture refactor, task 05).
+//! notification preferences, and the four settings screens.
 //!
 //! No `data/` layer: nothing in this feature reads the shared store
 //! (verified — `grep -rn "mock::\|data::store" domain/ presentation/`
-//! finds no hits), so [`SetTheme`]/[`NotificationsController`] stay exactly
-//! as infallible as before the refactor — see [`domain`]'s module docs.
+//! finds no hits), so [`SetTheme`]/[`NotificationsController`] stay
+//! infallible — see [`domain`]'s module docs.
 
 pub mod domain;
 pub mod presentation;

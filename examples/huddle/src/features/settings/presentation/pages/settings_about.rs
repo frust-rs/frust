@@ -1,5 +1,4 @@
-//! About page (`/you/settings/about`) — app icon, version, and a few card rows
-//! (Huddle showcase, task 15).
+//! About page (`/you/settings/about`) — app icon, version, and a few card rows.
 //!
 //! The app icon is painted from `assets/logo.png` via [`Image`] when the bytes
 //! decode, degrading to an initials block (the same solid-tile escape hatch the

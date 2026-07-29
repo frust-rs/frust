@@ -1,4 +1,4 @@
-//! Message-action integration tests (Phase D task 20): the long-press context
+//! Message-action integration tests: the long-press context
 //! menu, the emoji reaction picker, the mock attachment sheet, and the
 //! composer's emoji/attach wiring.
 //!

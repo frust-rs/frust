@@ -1,4 +1,4 @@
-//! Profile + workspace-switcher screen tests (Phase C task 16).
+//! Profile + workspace-switcher screen tests.
 //!
 //! Every test that touches process-global reactive state (the shared
 //! background executor's timing) takes the [`support::serial`] lock first,
