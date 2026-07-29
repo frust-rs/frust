@@ -49,7 +49,7 @@ use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::UiSpans;
 use frust_shell_common::{
-    SurfaceSize, ThemeOverrideWatcher, effective_brightness_for_platform_change,
+    SurfaceSize, ThemeOverrideWatcher, default_theme, effective_brightness_for_platform_change,
     render_thread_enabled,
 };
 use frust_text::TextContext;
@@ -197,11 +197,13 @@ where
         semantics_seen: 0,
         fatal: None,
         epoch,
-        // Glyph baseline, Dark until `resumed` seeds the window's real
-        // preference (`brightness_from_winit` below overwrites `brightness`
-        // unconditionally, so the baseline's own dark-first default never leaks
-        // into a light-preference platform).
-        theme: Theme::glyph_baseline(),
+        // The seeded base theme (`base_theme`: a design system's
+        // `set_default_theme`, else the built-in fallback), carrying that
+        // base's own brightness only until `resumed` seeds the window's real
+        // preference (`brightness_from_winit` there overwrites `brightness`
+        // unconditionally, so the Glyph fallback's dark-first default never
+        // leaks into a light-preference platform).
+        theme: base_theme(default_theme()),
         theme_seeded: false,
         theme_override: ThemeOverrideWatcher::new(),
         theme_override_active: false,
@@ -217,16 +219,39 @@ where
     // per-frame poll in `RedrawRequested` picks up any later registration.
     handler.font_registry.drain_into(&mut handler.text_ctx);
 
-    // Bundled Glyph font auto-registration: the default theme just
-    // constructed above is the Glyph baseline, so register the bundled Space
-    // Mono / IBM Plex Mono faces directly into the shell's `TextContext`
-    // before the first layout — same pre-first-layout timing as the drain
-    // above, so the first frame shapes with Glyph fonts with no relayout
-    // needed.
+    // Bundled Glyph font auto-registration: when the base theme just
+    // constructed above is a Glyph one (the built-in fallback always is; a
+    // seeded default may not be), register the bundled Space Mono / IBM Plex
+    // Mono faces directly into the shell's `TextContext` before the first
+    // layout — same pre-first-layout timing as the drain above, so the first
+    // frame shapes with Glyph fonts with no relayout needed.
     register_glyph_fonts_if_active(&handler.theme, &mut handler.text_ctx);
 
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
+}
+
+/// The base [`Theme`] this shell seeds itself from: the design-system-supplied
+/// default (`frust_shell_common::set_default_theme`, read back through
+/// [`default_theme`]) when a plugin seeded one, else the shell's own built-in
+/// fallback.
+///
+/// A seeded default supplies only the *starting point*: unlike an app-forced
+/// override (`set_app_theme`) it does not pin brightness — every call site
+/// below still derives `brightness` from the platform's own preference against
+/// this base, so a design-system default keeps following system dark mode.
+///
+/// **Phase B**: the fallback below becomes `Theme::neutral()` once the Glyph
+/// design system ships as a plugin that seeds itself through
+/// `set_default_theme`; grep `Phase B` for the two mobile shells' twins of this
+/// function.
+///
+/// Takes the slot's value as an argument rather than reading the process-global
+/// itself, so the fallback ladder is unit-testable without touching a
+/// process-wide slot that has no reset; every call site passes
+/// [`default_theme()`](default_theme).
+fn base_theme(seeded: Option<Theme>) -> Theme {
+    seeded.unwrap_or_else(Theme::glyph_baseline)
 }
 
 /// Bundled Glyph font auto-registration: registers
@@ -507,7 +532,9 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// the nanosecond delta to [`RenderRoot::paint`]. This stays the
     /// desktop clock; only the mobile shells swap in a platform vsync timestamp.
     epoch: Instant,
-    /// The app's active theme (M3 baseline). The shell owns the appearance
+    /// The app's active theme — the seeded base ([`base_theme`]: a design
+    /// system's `set_default_theme`, else the built-in fallback) until an
+    /// app-forced override replaces it. The shell owns the appearance
     /// state: its `brightness` is seeded from the window's reported preference
     /// in `resumed` and flipped live on `WindowEvent::ThemeChanged`. On every
     /// change the shell re-boxes it into [`RenderRoot::set_theme`] (so widgets
@@ -879,7 +906,11 @@ where
             // Override-wins rule: while an app-forced theme
             // override is active, this platform change must not flip
             // brightness — `effective_brightness_for_platform_change` passes
-            // the current brightness through unchanged in that case.
+            // the current brightness through unchanged in that case. A seeded
+            // *default* is deliberately not pinned that way: `self.theme` still
+            // IS that base (`base_theme` seeded it and nothing replaced it), so
+            // flipping its brightness in place re-derives light/dark from the
+            // design system's own theme.
             WindowEvent::ThemeChanged(winit_theme) => {
                 self.theme.brightness = effective_brightness_for_platform_change(
                     self.theme_override_active,
@@ -998,7 +1029,13 @@ where
                         self.apply_theme(&window);
                     }
                     Some(None) => {
-                        self.theme = Theme::glyph_baseline();
+                        // Reverting an override lands on the base this shell
+                        // seeded itself from — the design-system default when
+                        // one was supplied, else the built-in fallback
+                        // (`base_theme`) — with brightness re-derived from the
+                        // window's current preference rather than inherited
+                        // from the cleared override.
+                        self.theme = base_theme(default_theme());
                         self.theme.brightness = brightness_from_winit(window.theme());
                         self.theme_override_active = false;
                         self.apply_theme(&window);
@@ -1188,7 +1225,8 @@ where
 mod tests {
     use super::{
         ComposeLatch, ElementState, Ime, Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme,
-        brightness_from_winit, build_tree_update, finish, map_key_event, map_modifiers,
+        base_theme, brightness_from_winit, build_tree_update, default_theme,
+        effective_brightness_for_platform_change, finish, map_key_event, map_modifiers,
         map_named_key, physical_to_logical, register_glyph_fonts_if_active,
     };
     use frust_core::SemanticsUpdate;
@@ -1631,5 +1669,97 @@ mod tests {
             "a non-Glyph default theme must not auto-register the bundled \
              Glyph fonts"
         );
+    }
+
+    // --- base_theme (the default-theme seed ladder) ---
+
+    #[test]
+    fn unset_default_seeds_the_builtin_fallback() {
+        // No design system seeded a default: the shell falls back to its own
+        // built-in theme, byte-identical to the hardcoded
+        // `Theme::glyph_baseline()` seed this seam replaced (Phase A ships zero
+        // observable change).
+        assert_eq!(base_theme(None), Theme::glyph_baseline());
+    }
+
+    #[test]
+    fn seeded_default_is_used_and_still_follows_platform_brightness() {
+        // A design system's `set_default_theme` supplies the base...
+        let seeded = Theme::m3_baseline();
+        let mut theme = base_theme(Some(seeded.clone()));
+        assert_eq!(theme.design_language, seeded.design_language);
+        assert_ne!(
+            theme.design_language,
+            Theme::glyph_baseline().design_language
+        );
+
+        // ...and brightness still comes from the platform, exactly as the seed
+        // (`resumed`), reset (`clear_app_theme`) and appearance-change
+        // (`WindowEvent::ThemeChanged`) sites derive it — a seeded default is a
+        // starting point, not a pin.
+        theme.brightness = brightness_from_winit(Some(WinitTheme::Dark));
+        assert_eq!(theme.brightness, Brightness::Dark);
+        assert_eq!(theme.design_language, seeded.design_language);
+        theme.brightness = brightness_from_winit(Some(WinitTheme::Light));
+        assert_eq!(theme.brightness, Brightness::Light);
+    }
+
+    #[test]
+    fn app_theme_override_beats_a_seeded_default() {
+        // `set_app_theme` still wins: the override poll's `Some(Some(theme))`
+        // arm assigns the forced theme wholesale and never consults
+        // `base_theme`, so the seeded base is out of the picture...
+        let seeded = Theme::m3_baseline();
+        let forced = Theme::cupertino_baseline();
+        assert_ne!(
+            base_theme(Some(seeded)).design_language,
+            forced.design_language
+        );
+
+        // ...and unlike a seeded default it pins brightness against a live
+        // platform flip (`WindowEvent::ThemeChanged`'s override-wins rule).
+        assert_eq!(
+            effective_brightness_for_platform_change(true, Brightness::Light, Brightness::Dark),
+            Brightness::Light
+        );
+        assert_eq!(
+            effective_brightness_for_platform_change(false, Brightness::Light, Brightness::Dark),
+            Brightness::Dark
+        );
+    }
+
+    #[test]
+    fn clear_app_theme_falls_back_to_the_seeded_default_not_the_builtin() {
+        // The override poll's `Some(None)` arm, line for line: a cleared
+        // override reverts to the *seeded* base with the platform's brightness.
+        let seeded = Theme::m3_baseline();
+        let mut reverted = base_theme(Some(seeded.clone()));
+        reverted.brightness = brightness_from_winit(Some(WinitTheme::Dark));
+        assert_eq!(reverted, seeded.with_brightness(Brightness::Dark));
+
+        // With nothing seeded, the same arm lands on the built-in fallback —
+        // the pre-seam behavior, unchanged.
+        let mut fallback = base_theme(None);
+        fallback.brightness = brightness_from_winit(Some(WinitTheme::Dark));
+        assert_eq!(
+            fallback,
+            Theme::glyph_baseline().with_brightness(Brightness::Dark)
+        );
+    }
+
+    #[test]
+    fn seed_sites_read_the_process_global_default_slot() {
+        // The wiring check the argument-taking `base_theme` tests above can't
+        // make: what every call site actually passes is
+        // `frust_shell_common::default_theme()`, so a plugin's
+        // `set_default_theme` really does reach the shell's seed.
+        //
+        // Deliberately the only test in this binary that touches the
+        // process-wide slot (it has no reset), so nothing here is
+        // order-dependent: every other test passes its `Option<Theme>`
+        // explicitly.
+        let seeded = Theme::cupertino_baseline();
+        frust_shell_common::set_default_theme(seeded.clone());
+        assert_eq!(base_theme(default_theme()), seeded);
     }
 }
