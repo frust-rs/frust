@@ -1,14 +1,13 @@
-//! The search feature's domain repository contract (huddle
-//! clean-architecture refactor, task 04) — **sync, infallible** (PLAN Design
-//! Decision 8: search has no `ControllerCore`/`UseCase` spine and nothing
-//! that can fail — see [`super`]'s module docs, preserved here).
+//! The search feature's domain repository contract — **sync, infallible**:
+//! search has no `ControllerCore`/`UseCase` spine and nothing that can fail
+//! — see [`super`]'s module docs, preserved here.
 //!
 //! [`SearchRepository`] carries only plain synchronous reads shaped by what
 //! [`filter`](super::filter::filter)/the search page actually read today
 //! (`channels`/`users`/`messages`/`firehose_messages` for the filter itself,
 //! `user` for a message-hit row's author lookup) — **no `async`, no
 //! `HuddleFailure`**. If a future real data source makes search fallible,
-//! this trait widens then (PLAN Design Decision 8's own closing note).
+//! this trait widens then.
 
 use crate::features::channels::domain::Channel;
 use crate::features::messages::domain::Message;

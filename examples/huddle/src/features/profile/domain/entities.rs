@@ -1,6 +1,6 @@
-//! User entities — moved verbatim from the former `mock` module (huddle
-//! clean-architecture refactor, task 01). The shared dataset that
-//! materializes these types now lives in [`crate::data::store`].
+//! User entities — moved verbatim from the former `mock` module. The shared
+//! dataset that materializes these types now lives in
+//! [`crate::data::store`].
 
 /// A member's presence state (the status dot in avatars and roster rows).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

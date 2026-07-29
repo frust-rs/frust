@@ -55,8 +55,8 @@
 //! SearchRepository + Send + Sync>` via `use_context` the moment it lazily
 //! constructs the controller (production's composition root,
 //! `crate::HuddleApp::init`, publishes it once) — the same cleaner,
-//! `cfg(test)`-free injection task 02 establishes (no external test crate
-//! constructs `SearchController` directly — see the completion summary). The
+//! `cfg(test)`-free injection pattern used elsewhere in this crate (no
+//! external test crate constructs `SearchController` directly). The
 //! repo is moved into [`Self::results`]'s `Memo` closure, so `filter` reads
 //! through it on every recompute.
 
@@ -93,7 +93,7 @@ impl SearchController {
             static INSTANCE: RefCell<Option<SearchController>> = const { RefCell::new(None) };
         }
         INSTANCE.with(|cell| {
-            // Self-heal (task 22 hardening): the cached controller's `query`
+            // Self-heal: the cached controller's `query`
             // signal (and the `results` `Memo` derived from it) are owned by the
             // reactive `Owner` live when `new` ran; a headless test that disposes
             // its owner and re-enters (or a reused test thread) leaves a disposed
@@ -124,12 +124,12 @@ mod tests {
     /// The test-wiring composition root: the real store-backed repository
     /// behind the domain trait object. `#[cfg(test)]`-only wiring, so it is
     /// the sole place the presentation layer touches `data/` — exactly as
-    /// the production composition root (`crate::HuddleApp::init`) is (task
-    /// 02's completion-summary pattern note; production presentation
-    /// imports no `data/`). Search's tests assert against the REAL dataset
-    /// shape (a "leadership" channel, "ada"-matching users, capped firehose
-    /// hits), so — unlike Activity's `FakeActivityRepository` — the real
-    /// store-backed repo is what keeps every assertion verbatim.
+    /// the production composition root (`crate::HuddleApp::init`) is
+    /// (production presentation imports no `data/`). Search's tests assert
+    /// against the REAL dataset shape (a "leadership" channel,
+    /// "ada"-matching users, capped firehose hits), so — unlike Activity's
+    /// `FakeActivityRepository` — the real store-backed repo is what keeps
+    /// every assertion verbatim.
     fn store_repo() -> Arc<dyn SearchRepository + Send + Sync> {
         Arc::new(StoreSearchRepository::new())
     }

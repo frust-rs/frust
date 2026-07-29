@@ -1,4 +1,3 @@
-//! The search feature's data layer (huddle clean-architecture refactor,
-//! task 04).
+//! The search feature's data layer.
 
 pub mod repositories;

@@ -1,4 +1,4 @@
-//! `profile` presentation pages (huddle clean-architecture refactor, task 05).
+//! `profile` presentation pages.
 
 pub mod profile;
 pub mod you;

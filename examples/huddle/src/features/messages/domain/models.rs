@@ -1,15 +1,14 @@
 //! `messages` domain models — the owned, mutable working copies the feed and
-//! thread render from, plus the message-load use-case params (huddle
-//! clean-architecture refactor, task 03; moved from the former flat
-//! `features/messages/mod.rs`).
+//! thread render from, plus the message-load use-case params (moved from the
+//! former flat `features/messages/mod.rs`).
 //!
 //! [`FeedMessage`] is the owned counterpart to the immutable
 //! [`Message`](super::entities::Message) entity: reactions toggle, a thread
 //! grows, and runtime-authored messages (a send, a canned reply) append to a
 //! feed the static dataset never mutates. These are plain data + behavior
-//! (Design Decision 2 lets a domain model reuse another feature's domain — the
-//! current-user id below comes from `profile::domain`); nothing here reaches
-//! the data layer or `frust`.
+//! (a domain model may reuse another feature's domain — the current-user id
+//! below comes from `profile::domain`); nothing here reaches the data layer
+//! or `frust`.
 
 use std::time::Duration;
 
@@ -63,7 +62,7 @@ impl FeedBody {
 /// A single emoji reaction with a count and whether the current user is in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeedReaction {
-    /// The emoji character (real color-glyph rendering, verified in wave A).
+    /// The emoji character (real color-glyph rendering).
     pub emoji: String,
     /// How many members reacted.
     pub count: u32,

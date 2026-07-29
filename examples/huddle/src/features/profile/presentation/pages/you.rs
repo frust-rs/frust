@@ -1,5 +1,5 @@
 //! You tab (`/you`) — the current user's card and the entry into the settings
-//! stack (Huddle showcase, task 15).
+//! stack.
 //!
 //! The header is the current user's card: a hero-wrapped avatar (tag
 //! `avatar-u1`, the shared-element source for the `/user/:id` profile page), the

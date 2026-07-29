@@ -1,13 +1,14 @@
 //! [`StoreSearchRepository`] — the [`SearchRepository`] implementation this
-//! app wires up (huddle clean-architecture refactor, task 04).
+//! app wires up.
 //!
 //! Adapts the shared in-memory [`crate::data::store`] to the search domain
 //! trait. Every method is a direct, infallible passthrough to a store
-//! accessor — search has no failure-mapping site (PLAN Design Decision 8;
-//! see [`crate::features::search::domain::repositories`]'s module docs).
+//! accessor — search has no failure-mapping site (see
+//! [`crate::features::search::domain::repositories`]'s module docs).
 //!
-//! This is the **only** search file that mentions [`crate::data::store`]
-//! (the inward dependency rule, PLAN Design Decision 3).
+//! This is the **only** search file that mentions [`crate::data::store`] —
+//! the inward dependency rule: only the `data` layer may depend on the
+//! concrete shared store; `domain` and `presentation` never do.
 
 use crate::data::store;
 use crate::features::channels::domain::Channel;
