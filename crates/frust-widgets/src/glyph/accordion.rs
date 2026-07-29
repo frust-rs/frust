@@ -22,8 +22,17 @@
 //! `motion.easing.spatial` curve — the "220ms spatial" the task specifies.
 //! Because the animation clock lives on [`PaintCtx`] (not [`LayoutCtx`]), the
 //! reveal is advanced during paint and the freshest value is read by the next
-//! layout pass; `PaintCtx::request_frame` keeps the frames coming while it
-//! animates. (`reduce_motion` snaps straight to the target.)
+//! layout pass — but the *height* this widget reports is computed from that
+//! value in `layout`, so a paint-only `request_frame` is not enough: on the
+//! mobile intra-frame layout skip (`docs/ARCHITECTURE.md`'s Frame gate),
+//! layout never re-runs just because paint asked for another frame, and the
+//! revealed height would freeze until something else dirtied the tree. While
+//! the reveal driver is still animating, `paint` instead calls
+//! `PaintCtx::request_layout` (which implies `request_frame`), forcing the
+//! next frame's layout to re-run and pick up the freshly-advanced value —
+//! paint requests layout, the next frame relayouts, and the height tracks the
+//! animation on every platform, gated or not. (`reduce_motion` snaps straight
+//! to the target and requests neither.)
 //!
 //! # Token resolution
 //!
@@ -365,11 +374,16 @@ impl Widget for AccordionWidget {
             })
             .unwrap_or((FALLBACK_DURATION, Curve::EaseInOut));
 
-        // Advance the reveal (clock lives here). reduce_motion snaps.
+        // Advance the reveal (clock lives here). reduce_motion snaps. While
+        // still animating, request layout (not just another frame) — the
+        // revealed height is computed in `layout` from `reveal_value`, so the
+        // mobile intra-frame layout skip needs an explicit relayout request
+        // to keep the height tracking the animation (see the module docs'
+        // "Content-size-independent height reveal" section).
         if reduce_motion {
             self.reveal.snap();
         } else if self.reveal.advance(ctx.frame_time(), dur, curve) {
-            ctx.request_frame();
+            ctx.request_layout();
         }
         self.reveal_value = self.reveal.value().clamp(0.0, 1.0);
 
@@ -744,6 +758,146 @@ mod tests {
         w.paint(&mut ctx, &mut rec);
         assert_eq!(w.reveal_value, 1.0);
         assert!(!ctx.needs_frame(), "snapped: no further frames requested");
+    }
+
+    #[test]
+    fn paint_requests_layout_while_reveal_is_animating() {
+        // Acceptance criterion 1: after `set_target` flips open (via a
+        // rebuild), each paint during the reveal animation must report
+        // `PaintOutcome::needs_layout == true`; once settled, false. Driven
+        // through `RenderRoot` (not a bare `PaintCtx`) since only
+        // `RenderRoot::paint` accepts an explicit `FrameTime` from outside
+        // `frust-core`.
+        let mut state = ();
+        let mut root: frust_core::RenderRoot<(), AccordionView<()>> = frust_core::RenderRoot::new();
+        root.rebuild(
+            &mut |_s: &mut ()| accordion("Details", body()).open(false),
+            &mut state,
+        );
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(320.0, 400.0), &mut tcx as &mut dyn Any);
+        let mut scene = Recorder::default();
+        let settled_closed = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            !settled_closed.needs_layout,
+            "already-settled closed state requests no layout"
+        );
+
+        // Flip open — the reveal driver now has a pending retarget.
+        root.rebuild(
+            &mut |_s: &mut ()| accordion("Details", body()).open(true),
+            &mut state,
+        );
+        root.layout_with_text(Size::new(320.0, 400.0), &mut tcx as &mut dyn Any);
+
+        let mut t_ns = 0u64;
+        let mut saw_animating_frame = false;
+        loop {
+            let mut scene = Recorder::default();
+            let outcome = root.paint(&mut scene, FrameTime::from_nanos(t_ns));
+            if outcome.needs_layout {
+                saw_animating_frame = true;
+                assert!(outcome.needs_frame, "request_layout implies needs_frame");
+                // Re-run layout for the next frame, as a real shell would on
+                // seeing `needs_layout` in the pending change flags.
+                root.layout_with_text(Size::new(320.0, 400.0), &mut tcx as &mut dyn Any);
+            } else {
+                break;
+            }
+            t_ns += 16_000_000; // ~16ms per simulated frame
+            assert!(
+                t_ns < 2_000_000_000,
+                "reveal animation should settle well under 2s of simulated frames"
+            );
+        }
+        assert!(
+            saw_animating_frame,
+            "at least one paint during the reveal reported needs_layout"
+        );
+
+        // One more settled paint reports no further layout request.
+        let mut scene = Recorder::default();
+        let settled_open = root.paint(&mut scene, FrameTime::from_nanos(t_ns));
+        assert!(
+            !settled_open.needs_layout,
+            "settled: no more layout requests"
+        );
+    }
+
+    #[test]
+    fn multi_instance_toggle_only_animates_the_toggled_instance() {
+        // Acceptance criterion 2: three accordions in a Column — toggling
+        // only the middle one must animate only its own body clip/height,
+        // leaving the other two closed and clip-free throughout. Regression
+        // guard for the "content on wrong instance" symptom now that
+        // relayout tracks the reveal animation.
+        #[derive(Default)]
+        struct S {
+            open: [bool; 3],
+        }
+
+        fn body_s() -> crate::sized::SizedBoxView<S> {
+            crate::sized::SizedBox::<S>(Some(200.0), Some(100.0))
+        }
+
+        fn view(s: &mut S) -> AnyView<S> {
+            any(crate::Column(vec![
+                any(accordion("A", body_s())
+                    .open(s.open[0])
+                    .on_toggle(|s: &mut S| s.open[0] = !s.open[0])),
+                any(accordion("B", body_s())
+                    .open(s.open[1])
+                    .on_toggle(|s: &mut S| s.open[1] = !s.open[1])),
+                any(accordion("C", body_s())
+                    .open(s.open[2])
+                    .on_toggle(|s: &mut S| s.open[2] = !s.open[2])),
+            ]))
+        }
+
+        let mut state = S::default();
+        let mut root: frust_core::RenderRoot<S, AnyView<S>> = frust_core::RenderRoot::new();
+        root.rebuild(&mut view, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(320.0, 2000.0), &mut tcx as &mut dyn Any);
+        let mut scene = Recorder::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert!(scene.clips.is_empty(), "all three closed: no body clip yet");
+
+        // Toggle only the middle instance open.
+        state.open[1] = true;
+        root.rebuild(&mut view, &mut state);
+        root.layout_with_text(Size::new(320.0, 2000.0), &mut tcx as &mut dyn Any);
+
+        let mut t_ns = 0u64;
+        let mut saw_mid_clip = false;
+        loop {
+            let mut scene = Recorder::default();
+            let outcome = root.paint(&mut scene, FrameTime::from_nanos(t_ns));
+            // Only the toggled (middle) instance ever reveals a body clip —
+            // A and C stay closed and clip-free on every frame.
+            assert!(
+                scene.clips.len() <= 1,
+                "only the toggled instance ever reveals a body clip, got {}",
+                scene.clips.len()
+            );
+            if let Some(&(_, size)) = scene.clips.first() {
+                saw_mid_clip = true;
+                assert!(size.height > 0.0);
+            }
+            if !outcome.needs_layout {
+                break;
+            }
+            root.layout_with_text(Size::new(320.0, 2000.0), &mut tcx as &mut dyn Any);
+            t_ns += 16_000_000;
+            assert!(
+                t_ns < 2_000_000_000,
+                "reveal animation should settle well under 2s of simulated frames"
+            );
+        }
+        assert!(
+            saw_mid_clip,
+            "the toggled instance revealed a body clip during animation"
+        );
     }
 
     #[test]

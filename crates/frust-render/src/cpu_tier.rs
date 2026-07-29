@@ -300,6 +300,31 @@ impl SceneSink for CpuSink<'_> {
         self.ctx.pop_layer();
     }
 
+    fn clear_rect(&mut self, transform: Affine, rect: &Rect) {
+        // The hole-punch: a clip layer whose composite is `Compose::DestOut`
+        // with an opaque fill erases the region on pop, weighted by the fill's
+        // own coverage (see `convert.rs`'s vello impl for why NOT
+        // `Compose::Clear` — vello's GPU pipeline applies Clear at 16-px-tile
+        // granularity past unaligned edges; DestOut is pixel-exact on both
+        // tiers, kept identical here for cross-tier parity).
+        self.ctx.set_transform(transform);
+        let clip = rect.to_path(FLATTEN_TOLERANCE);
+        self.ctx.push_layer(
+            Some(&clip),
+            Some(peniko::BlendMode::new(
+                peniko::Mix::Normal,
+                peniko::Compose::DestOut,
+            )),
+            None,
+            None,
+            None,
+        );
+        self.ctx.set_fill_rule(Fill::NonZero);
+        self.ctx.set_paint(Color::BLACK);
+        self.ctx.fill_rect(rect);
+        self.ctx.pop_layer();
+    }
+
     fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath) {
         self.ctx.set_transform(transform);
         self.ctx.set_fill_rule(Fill::NonZero);

@@ -1,0 +1,1632 @@
+//! The six app-facing builders (native-widgets Phase 1, p1-06): `native_button`/
+//! `native_label`/`native_switch`/`native_slider`/`native_progress`/
+//! `native_image`, each composing exactly one [`platform_view`] slot behind
+//! this crate's one Android factory (PLAN.md 3.1's "N controls = N slots"
+//! envelope).
+//!
+//! # Retained identity via `Component`, not a hand-rolled `Widget`
+//!
+//! Each builder is a plain, `Clone`-able data struct implementing
+//! [`Component`] (`frust-core`'s retained-local-state seam,
+//! `docs/ARCHITECTURE.md`'s Component state boundary): `Component::State` is
+//! a bare [`SlotId`], allocated once in `Component::init` and retained across
+//! every rebuild by the `ComponentWidget` frust-core builds around it. That
+//! stable id is what gets injected into `params_json` as `__frustSlot`
+//! (`crate::runtime`'s generic-factory contract) — the builder function
+//! itself runs fresh every rebuild (a new struct value, current props), but
+//! the SAME slot id round-trips through every `create`/`update_params` call
+//! this plugin's runtime ever sees for that widget instance. Note this slot
+//! id is this plugin's OWN bookkeeping key (drawn from a private counter,
+//! below) — it never needs to equal `frust_core::widget::next_slot_id()`'s
+//! differ-facing id for the SAME `platform_view` widget, because nothing on
+//! the platform side ever compares the two: `create`/`update_params` key
+//! `NativeRuntime`'s own registry by whatever `__frustSlot` says, and
+//! `disposeView` resolves by native-view **object identity**, never a slot
+//! id at all (`crate::android`'s module doc, "Which call carries the slot
+//! id").
+//!
+//! Each builder therefore implements `View<Outer>` for **every** `Outer` by
+//! hand-delegating to [`frust_core::component`] (mirroring
+//! `ComponentView<C>`'s own blanket impl) — see the [`impl_native_view!`]
+//! macro at the bottom of this file.
+//!
+//! # No public `NativeWidget` trait
+//!
+//! None of this reaches for `crate::runtime::NativeWidget` (which stays
+//! `pub(crate)`, Phase 3's business) — a builder only ever calls the
+//! runtime's already-`pub(crate)` `with_runtime`/`set_callback` seam, same
+//! crate.
+//!
+//! # The translucency-refused fallback (Ed's Phase 1 ruling)
+//!
+//! Every builder consults `frust::resolved_surface_mode()` before composing
+//! its native slot: on [`ResolvedSurfaceMode::RefusedTranslucent`], it
+//! renders [`placeholder`] instead — a frust-drawn, semantics-labelled box —
+//! rather than an invisible, untappable native slot
+//! (`docs/ARCHITECTURE.md`'s Platform-view flow: "App Rust now is told ...
+//! so a plugin can fall back deliberately instead of a dead slot"). The
+//! refusal is logged once, crate-wide, not once per control per frame.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Once};
+
+use frust::glyph::{AlertVariant, alert};
+use frust::{
+    PlatformViewView, ResolvedSurfaceMode, SizedBox, Theme, on_cleanup, platform_view,
+    resolved_surface_mode, use_context,
+};
+use frust_core::{
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentWidget, LayoutCtx,
+    PaintCtx, PaintScene, SemanticsCtx, View, Widget, any, component,
+};
+use kurbo::Size;
+
+use crate::controls::{
+    BACKGROUND_COLOR, CHECKED, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, DARK, ENABLED, FIT,
+    INDETERMINATE, MAX, MIN, PROGRESS_TINT, TEXT, TEXT_COLOR, TEXT_SIZE_SP, THUMB_TINT, TRACK_TINT,
+    TYPEFACE, VALUE,
+};
+use crate::controls::{button, image, label, progress, slider, switch};
+use crate::registry::SlotId;
+use crate::runtime::{escape, with_identity, with_runtime};
+
+use super::signals::{on_click, on_toggled, on_value_changed};
+use super::theme::{self, ResolvedTheme};
+
+/// The one factory class every control resolves through, per platform.
+///
+/// - **Android**: `dev.frust.nativewidgets.FrustNativeControlFactory`, the
+///   class in this plugin's own `com.android.library` module
+///   (`plugins/native-widgets/platform/android`), which a consuming app wires
+///   in via `Contribution::GradleModule` — never a copied file. The
+///   `dev.frust.` prefix is required by `FrustViewHost`'s factory resolution
+///   and the `nativewidgets` subpackage by the packaging rule; both halves
+///   are baked into the JNI export symbol names (`crate::android`'s *Package*
+///   note), so this string is fixed once shipped.
+/// - **iOS**: the bare Objective-C runtime name `FrustNativeControlFactory`,
+///   which `FrustViewHost.resolveFactory` feeds to `NSClassFromString`
+///   (`docs/CODE_STANDARDS.md`'s Naming Conventions: iOS has no package
+///   prefix). Since p2-01 that class is a Rust `define_class!` class — no
+///   Swift — and **this string must stay byte-identical to
+///   `crate::apple::factory::FACTORY_CLASS_NAME`**, which is the name that
+///   class registers under. A mismatch is silent: the lookup returns nil, the
+///   host takes its unresolvable-factory branch, and every native control on
+///   iOS renders nothing (`research/RESEARCH-P2-REFRESH.md` §6b).
+/// - **Anywhere else**: no factory exists; the Android spelling stands in so
+///   the constant is always defined.
+///
+/// `pub(super)` rather than private since p3-02: the generic mounting builder
+/// ([`crate::api::mount`]) composes the same one factory these six do —
+/// a public component is served by the same runtime, so it must resolve
+/// through the same class.
+#[cfg(target_os = "android")]
+pub(super) const VIEW_TYPE: &str = "dev.frust.nativewidgets.FrustNativeControlFactory";
+#[cfg(target_os = "ios")]
+pub(super) const VIEW_TYPE: &str = "FrustNativeControlFactory";
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(super) const VIEW_TYPE: &str = "dev.frust.nativewidgets.FrustNativeControlFactory";
+
+/// This plugin's own per-widget-instance identity counter (module doc: "this
+/// slot id is this plugin's OWN bookkeeping key"). Deliberately independent
+/// of `frust_core::widget::next_slot_id()` — nothing on the platform side
+/// ever compares the two, so a private counter avoids reaching into
+/// `frust-core`'s widget-tree internals for a value nothing downstream reads
+/// as a differ id.
+///
+/// `pub(super)` since p3-02 — the generic mounting builder
+/// ([`crate::api::mount`]) draws its slot ids from the same counter, so a
+/// public component and a built-in control can never collide on one.
+pub(super) fn next_local_slot() -> SlotId {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Log the translucency-refused fallback exactly once, crate-wide — never
+/// once per control, never once per frame (the task's "Log once" rule).
+static REFUSAL_LOGGED: Once = Once::new();
+
+fn warn_refusal_once() {
+    REFUSAL_LOGGED.call_once(|| {
+        log::warn!(
+            "frust-native-widgets: the host declared a translucent surface but the platform \
+             refused it (ResolvedSurfaceMode::RefusedTranslucent) — rendering frust-drawn \
+             placeholders instead of native controls; see docs/ARCHITECTURE.md's Platform-view \
+             flow"
+        );
+    });
+}
+
+/// The frust-drawn placeholder every builder degrades to under
+/// [`ResolvedSurfaceMode::RefusedTranslucent`]: a sized box, a warning fill
+/// (`frust::glyph::alert`'s `Warning` variant, which also contributes a
+/// `Role::Alert` semantics node carrying `control` as its label — the
+/// "semantics label" half of the task's fallback spec), instead of an
+/// invisible, untappable native slot.
+///
+/// # Device-gate bar 7 fix (`research/VERIFY-P1.md`)
+///
+/// `alert`'s explanatory body prose is longer than most slot boxes allow
+/// (e.g. `native_switch`'s 70x40, `native_progress`'s 260x24) — `SizedBox`
+/// only tightens the reported [`Size`] the layout pass sees, it does not
+/// stop `AlertWidget::paint` from drawing glyph runs sized off its own
+/// unclamped content, so the prose used to spill straight through into
+/// whatever the neighbouring slot painted. `AlertWidget` also drives its
+/// screen-reader description off that same body string
+/// (`docs/CODE_STANDARDS.md`'s Semantics Conventions — a widget's `body`
+/// text doubles as both its painted prose and its accessibility
+/// description), and it lives in `frust-widgets`, outside this crate's
+/// charter to change for this task (`docs/ARCHITECTURE.md`'s Plugin
+/// Conventions: a platform plugin depends on `frust`/`frust-core` only, and
+/// this task's own scope is `builders.rs`). Clipping the whole banner's
+/// paint to the slot rect (below) is what lets the full explanation stay in
+/// the semantics tree and the one-time [`warn_refusal_once`] log while
+/// guaranteeing the placeholder never paints outside its own slot, at any
+/// slot size the builders allow.
+///
+/// `pub(super)` since p3-02: the generic mounting builder
+/// ([`crate::api::mount`]) degrades through this same placeholder — including
+/// its clip wrapper — rather than re-deriving the refusal path.
+pub(super) fn placeholder<State: 'static>(
+    size: Option<(f64, f64)>,
+    control: &str,
+) -> AnyView<State> {
+    warn_refusal_once();
+    let banner = alert(
+        AlertVariant::Warning,
+        format!("Native {control} unavailable"),
+        "the host declared a translucent surface but the platform refused it — rendering a \
+         frust placeholder instead of an invisible native slot.",
+    );
+    let sized = SizedBox(size.map(|(w, _)| w), size.map(|(_, h)| h)).child(banner);
+    any(ClipToSlot { child: any(sized) })
+}
+
+/// Clips its child's paint to this widget's own laid-out bounds — see
+/// [`placeholder`]'s "Device-gate bar 7 fix" doc for why this exists instead
+/// of shrinking or wrapping the prose itself. A thin, crate-local wrapper
+/// (not a `frust-widgets` container) built directly against
+/// [`AnyView`]/[`Widget`] rather than `frust-widgets`' crate-private
+/// `ChildPod` plumbing, which this crate has no access to
+/// (`docs/CODE_STANDARDS.md`'s Plugin Conventions).
+struct ClipToSlot<State: 'static> {
+    child: AnyView<State>,
+}
+
+/// The retained widget for [`ClipToSlot`].
+struct ClipToSlotWidget {
+    child: Box<dyn Widget>,
+}
+
+impl<State: 'static> View<State> for ClipToSlot<State> {
+    type Element = ClipToSlotWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+        ClipToSlotWidget {
+            child: self.child.build(ctx),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut Self::Element,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        self.child.rebuild(&prev.child, &mut element.child, ctx)
+    }
+
+    fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
+        self.child.teardown(&mut element.child, ctx);
+    }
+}
+
+impl Widget for ClipToSlotWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        self.child.layout(ctx, bc)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // The clip rect is THIS widget's own laid-out origin/size — exactly
+        // the slot rect the placeholder was given, never the child's
+        // unclamped natural content size.
+        scene.push_clip(ctx.origin(), ctx.size());
+        self.child.paint(ctx, scene);
+        scene.pop_clip();
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // Transparent wrapper: forward unchanged so the full title+body
+        // detail still reaches a screen reader regardless of what got
+        // visually clipped (`docs/CODE_STANDARDS.md`'s Semantics
+        // Conventions — a container must forward, never drop, a child's
+        // subtree).
+        self.child.semantics(ctx);
+    }
+}
+
+/// Apply an explicit `.size(w, h)` if the caller provided one, else leave the
+/// slot at [`PlatformViewView`]'s own default (fill the parent) — v1 has no
+/// measure step either way (the task spec: "explicit `.size(w,h)` required
+/// (no measure in v1)"), so an omitted call degrades to filling the parent
+/// rather than a made-up constant. `pub(super)` since p3-02, for
+/// [`crate::api::mount`]'s generic builder.
+pub(super) fn resolve_size(size: Option<(f64, f64)>, view: PlatformViewView) -> PlatformViewView {
+    match size {
+        Some((w, h)) => view.size(w, h),
+        None => view,
+    }
+}
+
+/// The active theme's resolved tokens (theme ladder L2, p1-07), or `None`
+/// when no theme has been threaded — `use_context::<Theme>()`'s own
+/// documented `None` cases (a bare-core test, a build running outside any
+/// reactive `Owner`; `reactive_graph::owner::use_context`'s own doc: "Panics
+/// if no value is found" only applies to its `expect_context` sibling, never
+/// this one). Every builder's `Component::build` calls this once per
+/// rebuild — spike 4a's proven mechanism (`crates/frust/tests/
+/// theme_reactivity_spike.rs`) is what makes that rebuild re-run, and
+/// therefore re-resolve, on `set_app_theme` — and threads the result into
+/// `build_with_mode` explicitly, the same "thread it as a parameter so a
+/// test can force it" shape `resolved_surface_mode()` already uses above.
+fn ambient_theme_tokens() -> Option<ResolvedTheme> {
+    use_context::<Theme>().as_ref().map(theme::resolve)
+}
+
+/// A tiny flat-JSON body writer — this crate hand-rolls JSON at the wire
+/// boundary rather than pulling in `serde` (`docs/CODE_STANDARDS.md`'s
+/// Language Idioms; `crate::runtime::Params`/`with_identity` are the
+/// reader/identity-encoder halves this writes the *body* half for). Only the
+/// handful of primitive field shapes the six controls need.
+struct ParamsBody(String);
+
+impl ParamsBody {
+    fn new() -> Self {
+        Self(String::new())
+    }
+
+    fn push_key(&mut self, key: &str) {
+        if !self.0.is_empty() {
+            self.0.push(',');
+        }
+        self.0.push('"');
+        self.0.push_str(key);
+        self.0.push_str("\":");
+    }
+
+    /// A raw (unquoted) literal — a bool or integer, whose `Display` already
+    /// matches JSON's own spelling (`true`/`false`, plain digits).
+    fn push_raw(&mut self, key: &str, value: impl std::fmt::Display) {
+        self.push_key(key);
+        self.0.push_str(&value.to_string());
+    }
+
+    /// A JSON string value, escaped via [`crate::runtime::escape`].
+    fn push_str(&mut self, key: &str, value: &str) {
+        self.push_key(key);
+        self.0.push('"');
+        self.0.push_str(&escape(value));
+        self.0.push('"');
+    }
+
+    /// A string field only when present — a missing optional field decodes
+    /// to the control's own platform default (`crate::controls`'s
+    /// degrade-don't-fail rule), so omitting the key entirely is correct.
+    fn push_opt_str(&mut self, key: &str, value: Option<&str>) {
+        if let Some(v) = value {
+            self.push_str(key, v);
+        }
+    }
+
+    fn finish(self) -> String {
+        self.0
+    }
+}
+
+// ============================================================================
+// Button
+// ============================================================================
+
+/// A real `android.widget.Button` rendered from pure Rust — see the
+/// [module docs](self). Build one with [`native_button`].
+#[derive(Clone)]
+pub struct NativeButtonView {
+    text: String,
+    enabled: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+    on_press: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+/// A native `Button` captioned `text` — see [`NativeButtonView`].
+pub fn native_button(text: impl Into<String>) -> NativeButtonView {
+    NativeButtonView {
+        text: text.into(),
+        enabled: true,
+        content_description: None,
+        size: None,
+        on_press: None,
+    }
+}
+
+impl NativeButtonView {
+    /// `View.setEnabled` — default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The TalkBack label; falls back to the caption when unset.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// Fires on a tap, on the platform main thread (events-as-signals — see
+    /// `crate::api::signals`): write an `RwSignal` from inside for the
+    /// blessed one-frame-wake idiom.
+    pub fn on_press(mut self, handler: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_press = Some(Arc::new(handler));
+        self
+    }
+
+    /// The encoded `params_json` for `slot` — split out from
+    /// [`Component::build`] so a test can snapshot it directly. `tokens`
+    /// (theme ladder L2, p1-07) folds the active theme's background/text
+    /// colour, corner radius, and text size in, threaded explicitly like
+    /// `mode` below so a test can pin an exact resolved value without a live
+    /// reactive context.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_str(TEXT, &self.text);
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(TEXT_COLOR, t.on_accent_fill);
+            body.push_raw(BACKGROUND_COLOR, t.accent_fill);
+            body.push_raw(CORNER_RADIUS_DP, t.corner_radius_dp);
+            body.push_raw(TEXT_SIZE_SP, t.button_text_size_sp);
+            body.push_str(TYPEFACE, t.button_typeface.wire());
+        }
+        with_identity(button::KIND, slot, &body.finish())
+    }
+
+    /// [`Component::build`]'s real body, with `mode`/`tokens` threaded
+    /// explicitly so a test can force the
+    /// [`ResolvedSurfaceMode::RefusedTranslucent`] branch or an exact theme
+    /// resolution without touching the process-global resolved-mode slot
+    /// (whose writer is pinned to the two shells' own FFI glue,
+    /// `crates/frust/tests/surface_mode_conformance.rs`) or a live reactive
+    /// context.
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Button");
+        }
+        let params = self.params_for(slot, tokens);
+        if let Some(on_press) = self.on_press.clone() {
+            with_runtime(|rt| rt.set_callback(slot, on_click(on_press)));
+        }
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .interactive()
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| self.text.clone()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeButtonView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // Ties this slot's `NativeRuntime::pending_callbacks` entry to the
+        // Component's own lifetime, not to the native create/dispose
+        // lifecycle (c1-01, applying `NativeImageView::init`'s f2-03 fix to
+        // the identical leak shape one table over — see
+        // `crate::runtime`'s doc on `pending_callbacks` and
+        // `NativeRuntime::forget_pending_callback`). `init` runs exactly
+        // once, under this component's own `Owner`, so `on_cleanup` fires
+        // exactly once when that owner disposes — regardless of whether a
+        // culled-then-republished cycle already parked a second pending
+        // entry `dispose_slot` never sees.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// Label
+// ============================================================================
+
+/// A real `android.widget.TextView` rendered from pure Rust — display-only
+/// (no listener, no `.interactive()`). Build one with [`native_label`].
+#[derive(Clone)]
+pub struct NativeLabelView {
+    text: String,
+    enabled: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+}
+
+/// A native `Label` showing `text` — see [`NativeLabelView`].
+pub fn native_label(text: impl Into<String>) -> NativeLabelView {
+    NativeLabelView {
+        text: text.into(),
+        enabled: true,
+        content_description: None,
+        size: None,
+    }
+}
+
+impl NativeLabelView {
+    /// `View.setEnabled` — a `TextView` renders its disabled state through
+    /// the colour state list, so this is visible even without interaction.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The TalkBack label; falls back to `text` when unset.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// `tokens` (theme ladder L2, p1-07 + the f1-01 followup) folds the
+    /// active theme's background/body-text colour and size in — see
+    /// [`NativeButtonView::params_for`]'s doc for why it's threaded
+    /// explicitly, and [`crate::api::theme`]'s module doc's *Explicit
+    /// backgrounds* section for why an EXPLICIT background is folded here
+    /// too (f1-01: it used to be entirely absent, pinning `Label` to
+    /// whichever brightness it was created under).
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_str(TEXT, &self.text);
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(BACKGROUND_COLOR, t.surface_bg);
+            body.push_raw(TEXT_COLOR, t.body_text);
+            body.push_raw(TEXT_SIZE_SP, t.body_text_size_sp);
+            body.push_str(TYPEFACE, t.body_typeface.wire());
+        }
+        with_identity(label::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Label");
+        }
+        let params = self.params_for(slot, tokens);
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| self.text.clone()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeLabelView {
+    type State = SlotId;
+
+    // No `on_cleanup` here (c1-01): `Label` is display-only and never calls
+    // `set_callback`, so its slot never has a `pending_callbacks` entry to
+    // reap. `NativeButtonView::init`'s doc explains the cleanup this
+    // Component deliberately omits.
+    fn init(&self) -> SlotId {
+        next_local_slot()
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// Switch
+// ============================================================================
+
+/// A real `android.widget.Switch` rendered from pure Rust — a **controlled**
+/// component (`docs/CODE_STANDARDS.md`'s Interaction Semantics): the app owns
+/// `checked`, and a user toggle only ever arrives through [`Self::on_toggle`]
+/// as a *requested* value. Build one with [`native_switch`].
+#[derive(Clone)]
+pub struct NativeSwitchView {
+    checked: bool,
+    enabled: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+    on_toggle: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+}
+
+/// A native `Switch` at the app-owned `checked` state — see
+/// [`NativeSwitchView`].
+pub fn native_switch(checked: bool) -> NativeSwitchView {
+    NativeSwitchView {
+        checked,
+        enabled: true,
+        content_description: None,
+        size: None,
+        on_toggle: None,
+    }
+}
+
+impl NativeSwitchView {
+    /// `View.setEnabled` — default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The TalkBack label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// Fires with the *requested* checked state on a user toggle — the app
+    /// confirms (or rejects) it by feeding `checked` back through the next
+    /// build, the controlled-component contract every interactive frust
+    /// widget follows.
+    pub fn on_toggle(mut self, handler: impl Fn(bool) + Send + Sync + 'static) -> Self {
+        self.on_toggle = Some(Arc::new(handler));
+        self
+    }
+
+    /// `tokens` (theme ladder L2, p1-07) folds the active theme's
+    /// thumb/track tints in — see [`NativeButtonView::params_for`]'s doc for
+    /// why it's threaded explicitly. Deliberately **no** background fold
+    /// (f2-04, reversing the f1-01 followup): see [`crate::api::theme`]'s
+    /// module doc's *Explicit backgrounds* section for why `Switch` is
+    /// excluded — a flat `View.setBackgroundColor` here would replace
+    /// `?attr/selectableItemBackgroundBorderless`'s touch ripple, and the
+    /// thumb/track tints below already carry the theme without it.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(CHECKED, self.checked);
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(THUMB_TINT, t.accent_ink);
+            body.push_raw(TRACK_TINT, t.accent_fill);
+            // `Switch` never sets on/off text through this plugin today, but
+            // it's a `TextView` subclass under the hood (`android.widget.Switch
+            // extends CompoundButton extends Button extends TextView`) — see
+            // `crate::api::theme`'s module doc on why this shares `Label`'s
+            // typeface rather than going unset.
+            body.push_str(TYPEFACE, t.body_typeface.wire());
+        }
+        with_identity(switch::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Switch");
+        }
+        let params = self.params_for(slot, tokens);
+        if let Some(on_toggle) = self.on_toggle.clone() {
+            with_runtime(|rt| rt.set_callback(slot, on_toggled(on_toggle)));
+        }
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .interactive()
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "switch".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeSwitchView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc (c1-01) — `Switch` registers a
+        // callback via `Self::on_toggle`, so it needs the same
+        // `pending_callbacks` reaper.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// Slider
+// ============================================================================
+
+/// A real `android.widget.SeekBar` rendered from pure Rust — controlled, like
+/// [`NativeSwitchView`]: the app owns `value`, and a drag only ever arrives
+/// through [`Self::on_change`] as a requested value. Build one with
+/// [`native_slider`].
+#[derive(Clone)]
+pub struct NativeSliderView {
+    value: i32,
+    min: i32,
+    max: i32,
+    enabled: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+    on_change: Option<Arc<dyn Fn(i32) + Send + Sync>>,
+}
+
+/// A native `Slider` at `value`, ranging over `[min, max]` — see
+/// [`NativeSliderView`].
+pub fn native_slider(value: i32, min: i32, max: i32) -> NativeSliderView {
+    NativeSliderView {
+        value,
+        min,
+        max,
+        enabled: true,
+        content_description: None,
+        size: None,
+        on_change: None,
+    }
+}
+
+impl NativeSliderView {
+    /// `View.setEnabled` — default `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The TalkBack label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// Fires with the requested **app-space** value on a drag
+    /// (`crate::controls::slider`'s platform-space mapping already undone).
+    pub fn on_change(mut self, handler: impl Fn(i32) + Send + Sync + 'static) -> Self {
+        self.on_change = Some(Arc::new(handler));
+        self
+    }
+
+    /// `tokens` (theme ladder L2, p1-07) folds the active theme's
+    /// progress/thumb tints in — see [`NativeButtonView::params_for`]'s doc
+    /// for why it's threaded explicitly. Deliberately **no** background fold
+    /// (f2-04, reversing the f1-01 followup): see [`crate::api::theme`]'s
+    /// module doc's *Explicit backgrounds* section for why `Slider` is
+    /// excluded — a flat `View.setBackgroundColor` here would replace
+    /// `AbsSeekBar`'s `?attr/selectableItemBackgroundBorderless` touch
+    /// ripple, and the progress/thumb tints below already carry the theme
+    /// without it.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(VALUE, self.value);
+        body.push_raw(MIN, self.min);
+        body.push_raw(MAX, self.max);
+        body.push_raw(ENABLED, self.enabled);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(PROGRESS_TINT, t.accent_fill);
+            body.push_raw(THUMB_TINT, t.accent_ink);
+        }
+        with_identity(slider::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Slider");
+        }
+        let params = self.params_for(slot, tokens);
+        if let Some(on_change) = self.on_change.clone() {
+            with_runtime(|rt| rt.set_callback(slot, on_value_changed(on_change)));
+        }
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .interactive()
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "slider".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeSliderView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // See `NativeButtonView::init`'s doc (c1-01) — `Slider` registers a
+        // callback via `Self::on_change`, so it needs the same
+        // `pending_callbacks` reaper.
+        on_cleanup(move || {
+            with_runtime(|rt| rt.forget_pending_callback(slot));
+        });
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// Progress
+// ============================================================================
+
+/// A real `android.widget.ProgressBar` rendered from pure Rust — display-only
+/// (no listener, no `.interactive()`). Build one with [`native_progress`].
+#[derive(Clone)]
+pub struct NativeProgressView {
+    value: i32,
+    min: i32,
+    max: i32,
+    indeterminate: bool,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+}
+
+/// A native `ProgressBar` at `value`, ranging over `[min, max]` — see
+/// [`NativeProgressView`].
+pub fn native_progress(value: i32, min: i32, max: i32) -> NativeProgressView {
+    NativeProgressView {
+        value,
+        min,
+        max,
+        indeterminate: false,
+        content_description: None,
+        size: None,
+    }
+}
+
+impl NativeProgressView {
+    /// Spinner mode: `true` ignores `value` entirely.
+    pub fn indeterminate(mut self, indeterminate: bool) -> Self {
+        self.indeterminate = indeterminate;
+        self
+    }
+
+    /// The TalkBack label.
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// `tokens` (theme ladder L2, p1-07 + the f1-01 followup) folds the
+    /// active theme's background/progress tint in — see
+    /// [`NativeButtonView::params_for`]'s doc for why it's threaded
+    /// explicitly.
+    fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(VALUE, self.value);
+        body.push_raw(MIN, self.min);
+        body.push_raw(MAX, self.max);
+        body.push_raw(INDETERMINATE, self.indeterminate);
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        if let Some(t) = tokens {
+            body.push_raw(BACKGROUND_COLOR, t.surface_bg);
+            body.push_raw(PROGRESS_TINT, t.accent_fill);
+        }
+        with_identity(progress::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "ProgressBar");
+        }
+        let params = self.params_for(slot, tokens);
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "progress".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeProgressView {
+    type State = SlotId;
+
+    // No `on_cleanup` here (c1-01): `ProgressBar` is display-only and never
+    // calls `set_callback` — see `NativeLabelView::init`'s doc.
+    fn init(&self) -> SlotId {
+        next_local_slot()
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// Image
+// ============================================================================
+
+/// How a [`NativeImageView`] scales its bytes into the slot's box — the
+/// public mirror of `crate::controls::image::Fit`, which stays `pub(crate)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeImageFit {
+    /// Whole image, aspect kept, centred (the platform's own default).
+    #[default]
+    Contain,
+    /// Fills the box, aspect kept, cropped.
+    Cover,
+    /// Fills the box, aspect ignored.
+    Fill,
+    /// No scaling at all, centred.
+    Center,
+}
+
+impl NativeImageFit {
+    /// The wire spelling `crate::controls::image::Fit::from_params` decodes.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Contain => "contain",
+            Self::Cover => "cover",
+            Self::Fill => "fill",
+            Self::Center => "center",
+        }
+    }
+}
+
+/// A real `android.widget.ImageView` rendered from pure Rust, showing
+/// app-supplied encoded bytes (PNG/JPEG/WebP — whatever `BitmapFactory`
+/// reads). Display-only (no listener, no `.interactive()`). Build one with
+/// [`native_image`].
+#[derive(Clone)]
+pub struct NativeImageView {
+    bytes: Arc<[u8]>,
+    fit: NativeImageFit,
+    content_description: Option<String>,
+    size: Option<(f64, f64)>,
+}
+
+/// A native `Image` showing `bytes` — see [`NativeImageView`].
+pub fn native_image(bytes: Arc<[u8]>) -> NativeImageView {
+    NativeImageView {
+        bytes,
+        fit: NativeImageFit::default(),
+        content_description: None,
+        size: None,
+    }
+}
+
+impl NativeImageView {
+    /// How the image scales into the slot's box.
+    pub fn fit(mut self, fit: NativeImageFit) -> Self {
+        self.fit = fit;
+        self
+    }
+
+    /// The TalkBack label. An unlabelled image is invisible to a screen
+    /// reader — set this (or say so explicitly with an empty string).
+    pub fn content_description(mut self, label: impl Into<String>) -> Self {
+        self.content_description = Some(label.into());
+        self
+    }
+
+    /// Explicit slot size — see [`resolve_size`]'s doc for the no-call
+    /// fallback.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.size = Some((width, height));
+        self
+    }
+
+    /// The encoded `params_json` for `slot`, given the publish revision
+    /// [`crate::controls::image::publish_bytes`] already returned — split out
+    /// from [`Self::build_with_mode`] so a test can snapshot it without
+    /// re-publishing. `tokens` only ever contributes [`DARK`] here (theme
+    /// ladder L1, p1-07): an app-supplied image's *content* is arbitrary
+    /// bytes, so folding an accent tint over it the way the other five
+    /// controls fold colour tokens would corrupt a real photo rather than
+    /// theme a control — [`NativeImageView`] exposes no tint builder yet for
+    /// the same reason (`api::builders`' own "left for a future task" note
+    /// on styling knobs).
+    fn params_for(&self, slot: SlotId, rev: u64, tokens: Option<ResolvedTheme>) -> String {
+        let mut body = ParamsBody::new();
+        body.push_raw(image::REV, rev);
+        body.push_str(FIT, self.fit.wire());
+        body.push_opt_str(CONTENT_DESCRIPTION, self.content_description.as_deref());
+        body.push_raw(DARK, tokens.is_some_and(|t| t.dark));
+        with_identity(image::KIND, slot, &body.finish())
+    }
+
+    fn build_with_mode(
+        &self,
+        slot: SlotId,
+        mode: ResolvedSurfaceMode,
+        tokens: Option<ResolvedTheme>,
+    ) -> AnyView<SlotId> {
+        if mode.translucency_refused() {
+            return placeholder(self.size, "Image");
+        }
+        // Publish (or re-confirm) this slot's bytes BEFORE encoding params —
+        // `image::publish_bytes` is idempotent for the same `Arc` (module
+        // doc: "an app that hands its buffer down every rebuild produces no
+        // params change and no decode"), and the runtime's later
+        // `ImageProps::decode` reads this same table back by slot.
+        let rev = image::publish_bytes(slot, Arc::clone(&self.bytes));
+        let params = self.params_for(slot, rev, tokens);
+        let view = platform_view(VIEW_TYPE)
+            .params_json(params)
+            .semantics_label(
+                self.content_description
+                    .clone()
+                    .unwrap_or_else(|| "image".into()),
+            );
+        any(resolve_size(self.size, view))
+    }
+}
+
+impl Component for NativeImageView {
+    type State = SlotId;
+
+    fn init(&self) -> SlotId {
+        let slot = next_local_slot();
+        // Tie the publish-table entry's lifetime to this Component, not to
+        // the native create/dispose lifecycle (f2-03,
+        // `docs/CODE_STANDARDS.md`'s "Teardown disposes the component's
+        // `Owner`; register cleanup via `on_cleanup`, not `Drop`"). `init`
+        // runs exactly once, under this component's own `Owner`, so
+        // `on_cleanup` here fires exactly once when that owner disposes —
+        // regardless of whether paint culling already ran the counted
+        // `claim_bytes`/`release_bytes` pair to zero and back on the
+        // platform side in between (`crate::controls::image`'s module doc).
+        //
+        // No second `on_cleanup` for `NativeRuntime::pending_callbacks`
+        // (c1-01): `Image` is display-only and never calls `set_callback` —
+        // see `NativeLabelView::init`'s doc for the same reasoning.
+        on_cleanup(move || image::retire(slot));
+        slot
+    }
+
+    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+        self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
+    }
+}
+
+// ============================================================================
+// The `View<Outer>` delegate (module doc)
+// ============================================================================
+
+/// Implement `View<Outer>` for every `Outer` state by delegating to
+/// `frust_core::component` — mirroring `ComponentView<C>`'s own blanket impl,
+/// which this crate cannot reach directly (its `component: C` field is
+/// private): each call clones `self`/`prev` into a throwaway `ComponentView`,
+/// cheap for these small builder structs, and correct because
+/// `ComponentView::rebuild` never actually reads its `prev` argument (it
+/// always re-runs `Component::build` against the retained `State` — see
+/// `frust_core::component`'s own doc comment).
+macro_rules! impl_native_view {
+    ($ty:ty) => {
+        impl<Outer: 'static> View<Outer> for $ty {
+            type Element = ComponentWidget<$ty>;
+
+            fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+                // Fully-qualified: `ComponentView<$ty>: View<Outer>` for every
+                // `Outer`, so a plain `.build(ctx)` call leaves `Outer`
+                // unconstrained — pin it to the impl we're writing.
+                <frust_core::ComponentView<$ty> as View<Outer>>::build(
+                    &component(self.clone()),
+                    ctx,
+                )
+            }
+
+            fn rebuild(
+                &self,
+                prev: &Self,
+                element: &mut Self::Element,
+                ctx: &mut BuildCtx<'_>,
+            ) -> ChangeFlags {
+                <frust_core::ComponentView<$ty> as View<Outer>>::rebuild(
+                    &component(self.clone()),
+                    &component(prev.clone()),
+                    element,
+                    ctx,
+                )
+            }
+
+            fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
+                <frust_core::ComponentView<$ty> as View<Outer>>::teardown(
+                    &component(self.clone()),
+                    element,
+                    ctx,
+                );
+            }
+        }
+    };
+}
+
+impl_native_view!(NativeButtonView);
+impl_native_view!(NativeLabelView);
+impl_native_view!(NativeSwitchView);
+impl_native_view!(NativeSliderView);
+impl_native_view!(NativeProgressView);
+impl_native_view!(NativeImageView);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust_core::{BoxConstraints, LayoutCtx, PaintCtx, PaintScene, Widget};
+    use frust_text::TextContext;
+    use kurbo::{Point, Rect, Shape, Size};
+    use peniko::{Brush, Color};
+    use std::any::Any;
+
+    /// A minimal `PaintScene` — only `fill_rect`/`draw_text` have no default
+    /// (see `frust_core::widget::PaintScene`'s trait definition); every other
+    /// method a placeholder's `alert`/`SizedBox` might call is defaulted.
+    #[derive(Default)]
+    struct NullScene;
+
+    impl PaintScene for NullScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+    }
+
+    fn build_any<State: 'static>(view: AnyView<State>) -> Box<dyn Widget> {
+        let mut counter = 0u64;
+        view.build(&mut BuildCtx::new(&mut counter))
+    }
+
+    // --- params_json snapshots, one per control (no theme) -------------------
+    //
+    // `None` is exactly what `ambient_theme_tokens()` returns absent a live
+    // reactive context (this module's own doc comment) — every snapshot
+    // below carries a plain `"dark":false` and no other theme field, the
+    // p1-06 shape plus theme ladder L1's always-present flag.
+
+    #[test]
+    fn button_params_snapshot() {
+        let view = native_button("Save")
+            .enabled(false)
+            .content_description("Save the note");
+        assert_eq!(
+            view.params_for(7, None),
+            "{\"__frustControl\":\"button\",\"__frustSlot\":7,\"text\":\"Save\",\"enabled\":false,\
+             \"contentDescription\":\"Save the note\",\"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn label_params_snapshot() {
+        let view = native_label("42 fps");
+        assert_eq!(
+            view.params_for(3, None),
+            "{\"__frustControl\":\"label\",\"__frustSlot\":3,\"text\":\"42 fps\",\"enabled\":true,\
+             \"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn switch_params_snapshot() {
+        let view = native_switch(true).content_description("wifi");
+        assert_eq!(
+            view.params_for(11, None),
+            "{\"__frustControl\":\"switch\",\"__frustSlot\":11,\"checked\":true,\"enabled\":true,\
+             \"contentDescription\":\"wifi\",\"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn slider_params_snapshot() {
+        let view = native_slider(25, 0, 50);
+        assert_eq!(
+            view.params_for(5, None),
+            "{\"__frustControl\":\"slider\",\"__frustSlot\":5,\"value\":25,\"min\":0,\"max\":50,\
+             \"enabled\":true,\"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn progress_params_snapshot() {
+        let view = native_progress(30, 10, 110).indeterminate(false);
+        assert_eq!(
+            view.params_for(2, None),
+            "{\"__frustControl\":\"progress\",\"__frustSlot\":2,\"value\":30,\"min\":10,\
+             \"max\":110,\"indeterminate\":false,\"dark\":false}"
+        );
+    }
+
+    #[test]
+    fn image_params_snapshot() {
+        let view =
+            native_image(Arc::from(vec![1u8, 2, 3].into_boxed_slice())).fit(NativeImageFit::Cover);
+        assert_eq!(
+            view.params_for(900, 42, None),
+            "{\"__frustControl\":\"image\",\"__frustSlot\":900,\"imageRev\":42,\"fit\":\"cover\",\
+             \"dark\":false}"
+        );
+    }
+
+    // --- theme ladder L2: token folding, one snapshot per colour-bearing
+    // control (dark + light, real Glyph hex via `theme::resolve`) ----------
+
+    fn dark_tokens() -> ResolvedTheme {
+        theme::resolve(&Theme::glyph_baseline())
+    }
+
+    fn light_tokens() -> ResolvedTheme {
+        theme::resolve(&Theme::glyph_baseline().with_brightness(frust::Brightness::Light))
+    }
+
+    #[test]
+    fn button_folds_background_text_radius_and_size_from_a_dark_theme() {
+        let view = native_button("Save");
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(7, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"button\",\"__frustSlot\":7,\"text\":\"Save\",\"enabled\":\
+                 true,\"dark\":true,\"textColor\":{},\"backgroundColor\":{},\"cornerRadiusDp\":{},\
+                 \"textSizeSp\":{},\"typeface\":\"{}\"}}",
+                tokens.on_accent_fill,
+                tokens.accent_fill,
+                tokens.corner_radius_dp,
+                tokens.button_text_size_sp,
+                tokens.button_typeface.wire()
+            )
+        );
+    }
+
+    #[test]
+    fn button_folds_a_light_theme_distinctly_from_dark() {
+        let view = native_button("Save");
+        let dark = view.params_for(7, Some(dark_tokens()));
+        let light = view.params_for(7, Some(light_tokens()));
+        assert_ne!(
+            dark, light,
+            "Glyph's accent-role split changes `primary` between brightnesses \
+             (dark: primary == primary_container; light: they diverge)"
+        );
+        assert!(light.contains("\"dark\":false"));
+        assert!(dark.contains("\"dark\":true"));
+    }
+
+    #[test]
+    fn label_folds_body_text_colour_and_size() {
+        let view = native_label("42 fps");
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(3, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"label\",\"__frustSlot\":3,\"text\":\"42 fps\",\"enabled\":\
+                 true,\"dark\":true,\"backgroundColor\":{},\"textColor\":{},\"textSizeSp\":{},\
+                 \"typeface\":\"{}\"}}",
+                tokens.surface_bg,
+                tokens.body_text,
+                tokens.body_text_size_sp,
+                tokens.body_typeface.wire()
+            )
+        );
+    }
+
+    #[test]
+    fn switch_folds_thumb_and_track_tint_but_never_a_background() {
+        // f2-04: `Switch` deliberately folds no background — the thumb/track
+        // tints already carry the theme, and an explicit `backgroundColor`
+        // would replace `?attr/selectableItemBackgroundBorderless`'s ripple
+        // (`crate::api::theme`'s module doc's *Explicit backgrounds*
+        // section).
+        let view = native_switch(true);
+        let tokens = dark_tokens();
+        let params = view.params_for(11, Some(tokens));
+        assert_eq!(
+            params,
+            format!(
+                "{{\"__frustControl\":\"switch\",\"__frustSlot\":11,\"checked\":true,\"enabled\":\
+                 true,\"dark\":true,\"thumbTint\":{},\"trackTint\":{},\
+                 \"typeface\":\"{}\"}}",
+                tokens.accent_ink,
+                tokens.accent_fill,
+                tokens.body_typeface.wire()
+            )
+        );
+        assert!(
+            !params.contains("backgroundColor"),
+            "Switch must never fold an explicit background — it would defeat the ripple"
+        );
+    }
+
+    #[test]
+    fn slider_folds_progress_and_thumb_tint_but_never_a_background() {
+        // f2-04: same rationale as the Switch test above — `AbsSeekBar` also
+        // carries `?attr/selectableItemBackgroundBorderless`.
+        let view = native_slider(25, 0, 50);
+        let tokens = dark_tokens();
+        let params = view.params_for(5, Some(tokens));
+        assert_eq!(
+            params,
+            format!(
+                "{{\"__frustControl\":\"slider\",\"__frustSlot\":5,\"value\":25,\"min\":0,\"max\":\
+                 50,\"enabled\":true,\"dark\":true,\"progressTint\":{},\
+                 \"thumbTint\":{}}}",
+                tokens.accent_fill, tokens.accent_ink
+            )
+        );
+        assert!(
+            !params.contains("backgroundColor"),
+            "Slider must never fold an explicit background — it would defeat the ripple"
+        );
+    }
+
+    #[test]
+    fn progress_folds_progress_tint_only() {
+        let view = native_progress(30, 10, 110);
+        let tokens = dark_tokens();
+        assert_eq!(
+            view.params_for(2, Some(tokens)),
+            format!(
+                "{{\"__frustControl\":\"progress\",\"__frustSlot\":2,\"value\":30,\"min\":10,\
+                 \"max\":110,\"indeterminate\":false,\"dark\":true,\"backgroundColor\":{},\
+                 \"progressTint\":{}}}",
+                tokens.surface_bg, tokens.accent_fill
+            )
+        );
+    }
+
+    #[test]
+    fn image_folds_only_the_dark_flag_never_a_tint() {
+        // An app-supplied photo is arbitrary content — theming it would
+        // corrupt the image, not style a control (module doc on
+        // `NativeImageView::params_for`).
+        let view = native_image(Arc::from(vec![1u8].into_boxed_slice()));
+        assert_eq!(
+            view.params_for(900, 42, Some(dark_tokens())),
+            "{\"__frustControl\":\"image\",\"__frustSlot\":900,\"imageRev\":42,\"fit\":\"contain\",\
+             \"dark\":true}"
+        );
+    }
+
+    // --- the zero-FFI property: an unchanged theme yields PartialEq-equal
+    // Props (acceptance criterion) -------------------------------------------
+
+    #[test]
+    fn an_unchanged_theme_yields_partial_eq_equal_button_props() {
+        use crate::controls::button::ButtonProps;
+        use crate::runtime::Params;
+
+        let view = native_button("Save").content_description("Save the note");
+        let tokens = dark_tokens();
+        let a = ButtonProps::decode(&Params::new(&view.params_for(7, Some(tokens)))).unwrap();
+        let b = ButtonProps::decode(&Params::new(&view.params_for(7, Some(tokens)))).unwrap();
+        assert_eq!(
+            a, b,
+            "the SAME resolved theme, folded twice, must decode to PartialEq-equal \
+             Props — this is what keeps the runtime's diff gate from crossing the FFI \
+             boundary on a rebuild the theme didn't actually change"
+        );
+
+        // A genuinely different theme (light) must NOT compare equal.
+        let c =
+            ButtonProps::decode(&Params::new(&view.params_for(7, Some(light_tokens())))).unwrap();
+        assert_ne!(a, c);
+    }
+
+    // --- the translucency-refused fallback ----------------------------------
+
+    #[test]
+    fn a_refused_slot_publishes_no_platform_view_frame() {
+        for (name, view) in [
+            (
+                "Button",
+                native_button("Save").build_with_mode(
+                    1,
+                    ResolvedSurfaceMode::RefusedTranslucent,
+                    None,
+                ),
+            ),
+            (
+                "Switch",
+                native_switch(true).build_with_mode(
+                    2,
+                    ResolvedSurfaceMode::RefusedTranslucent,
+                    None,
+                ),
+            ),
+        ] {
+            let mut element = build_any(view);
+            let mut scene = NullScene;
+            let mut pctx = PaintCtx::new(Point::ZERO, Size::new(120.0, 44.0));
+            element.paint(&mut pctx, &mut scene);
+            assert!(
+                pctx.take_platform_views().is_empty(),
+                "{name}: a refused slot must render no native platform_view frame"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrefused_slot_still_builds_the_native_platform_view() {
+        for mode in [
+            ResolvedSurfaceMode::Unknown,
+            ResolvedSurfaceMode::Opaque,
+            ResolvedSurfaceMode::Translucent,
+        ] {
+            let btn = native_button("Save").size(120.0, 44.0);
+            let expected_params = btn.params_for(9, None);
+            let view = btn.build_with_mode(9, mode, None);
+            let mut element = build_any(view);
+            let mut lctx = LayoutCtx::new();
+            element.layout(&mut lctx, &BoxConstraints::tight(Size::new(120.0, 44.0)));
+            let mut scene = NullScene;
+            let mut pctx = PaintCtx::new(Point::ZERO, Size::new(120.0, 44.0));
+            element.paint(&mut pctx, &mut scene);
+            let frames = pctx.take_platform_views();
+            assert_eq!(frames.len(), 1, "{mode:?}");
+            assert_eq!(frames[0].view_type, VIEW_TYPE);
+            assert_eq!(frames[0].params_json, expected_params);
+            assert!(frames[0].interactive, "a Button slot is interactive");
+        }
+    }
+
+    #[test]
+    fn a_display_only_control_never_sets_interactive() {
+        let view = native_label("hi").build_with_mode(4, ResolvedSurfaceMode::Opaque, None);
+        let mut element = build_any(view);
+        let mut scene = NullScene;
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 30.0));
+        element.paint(&mut pctx, &mut scene);
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert!(!frames[0].interactive, "Label never forwards native input");
+    }
+
+    // --- device-gate bar 7 (`research/VERIFY-P1.md`): the refusal
+    // placeholder's prose must never paint outside its own slot rect -------
+
+    /// A recording [`PaintScene`] that actually honours the clip stack
+    /// (unlike [`NullScene`] above), so it models what a real backend would
+    /// visually produce: every primitive's own reported bounds get
+    /// intersected against whatever clip is active *at paint time* before
+    /// being recorded. With no clip pushed (the pre-fix shape), a
+    /// primitive's raw, unclamped bounds are recorded as-is — which is
+    /// exactly what makes this test capable of catching the original
+    /// overflow rather than trivially passing by construction.
+    #[derive(Default)]
+    struct BoundsRecorder {
+        clip_stack: Vec<Rect>,
+        /// Every painted primitive's bounds, already clipped against
+        /// whatever was active when it painted.
+        painted: Vec<Rect>,
+    }
+
+    impl BoundsRecorder {
+        fn record(&mut self, rect: Rect) {
+            let bounded = match self.clip_stack.last() {
+                Some(clip) => rect.intersect(*clip),
+                None => rect,
+            };
+            // A fully-clipped-away rect never actually paints a pixel —
+            // skip it rather than recording a degenerate zero-size rect.
+            if bounded.width() > 0.0 && bounded.height() > 0.0 {
+                self.painted.push(bounded);
+            }
+        }
+    }
+
+    impl PaintScene for BoundsRecorder {
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: Color) {
+            self.record(Rect::from_origin_size(origin, size));
+        }
+
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, _radius: f64, _color: Color) {
+            self.record(Rect::from_origin_size(origin, size));
+        }
+
+        fn stroke_path(
+            &mut self,
+            origin: Point,
+            path: &kurbo::BezPath,
+            width: f64,
+            _brush: &Brush,
+        ) {
+            let bbox = path.bounding_box() + origin.to_vec2();
+            // Pad by the stroke width so the border's own ink is covered,
+            // not just its centerline path.
+            self.record(bbox.inflate(width, width));
+        }
+
+        fn push_clip(&mut self, origin: Point, size: Size) {
+            let rect = Rect::from_origin_size(origin, size);
+            let bounded = match self.clip_stack.last() {
+                Some(prev) => rect.intersect(*prev),
+                None => rect,
+            };
+            self.clip_stack.push(bounded);
+        }
+
+        fn pop_clip(&mut self) {
+            self.clip_stack.pop();
+        }
+
+        fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+            let Some(first) = run.glyphs.first() else {
+                return;
+            };
+            // The run's transform is a pure translation baked from the
+            // paint-time origin (`frust_text::TextLayout::to_scene_runs`) —
+            // `.translation()` recovers it directly. Glyph x/y are local
+            // (pre-transform) positions; no font-metrics access exists at
+            // this layer, so a generous `font_size`-wide margin around the
+            // glyphs' local extent stands in for real ascent/descent —
+            // over-approximating is fine here, since this test only needs
+            // to catch genuine overflow, not measure exact ink bounds.
+            let base = run.transform.translation();
+            let margin = run.font_size as f64;
+            let (min_x, max_x) = run
+                .glyphs
+                .iter()
+                .map(|g| g.x as f64)
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
+                    (lo.min(x), hi.max(x))
+                });
+            let rect = Rect::new(
+                base.x + min_x - margin,
+                base.y + first.y as f64 - margin,
+                base.x + max_x + margin,
+                base.y + first.y as f64 + margin,
+            );
+            self.record(rect);
+        }
+    }
+
+    fn rect_fits_within(outer: Rect, inner: Rect) -> bool {
+        const TOLERANCE: f64 = 0.01;
+        inner.x0 >= outer.x0 - TOLERANCE
+            && inner.y0 >= outer.y0 - TOLERANCE
+            && inner.x1 <= outer.x1 + TOLERANCE
+            && inner.y1 <= outer.y1 + TOLERANCE
+    }
+
+    #[test]
+    fn placeholder_paints_within_its_slot_rect_at_every_slot_size() {
+        // A range of slot sizes the app-facing builders actually allow,
+        // including `native_switch`'s own deliberately small box
+        // (`examples/glyph-catalog/src/pages/native_widgets.rs`) and an
+        // even smaller one to stress the invariant further — the task's
+        // own "including the smallest" requirement.
+        for (label, (w, h)) in [
+            ("native_switch's own box (70x40)", (70.0, 40.0)),
+            ("native_progress's own box (260x24)", (260.0, 24.0)),
+            ("native_button's own box (160x48)", (160.0, 48.0)),
+            ("a deliberately tiny box (40x16)", (40.0, 16.0)),
+        ] {
+            let view: AnyView<()> = placeholder(Some((w, h)), "Switch");
+            let mut element = build_any(view);
+
+            let mut text_ctx = TextContext::new();
+            let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn Any);
+            let bc = BoxConstraints::tight(Size::new(w, h));
+            let laid = element.layout(&mut lctx, &bc);
+            assert_eq!(
+                laid,
+                Size::new(w, h),
+                "{label}: the placeholder's own reported size must stay exactly the \
+                 slot's declared size"
+            );
+
+            let mut rec = BoundsRecorder::default();
+            let mut pctx = PaintCtx::new(Point::ZERO, laid);
+            element.paint(&mut pctx, &mut rec);
+
+            assert!(
+                !rec.painted.is_empty(),
+                "{label}: expected the placeholder to paint something"
+            );
+            let slot_rect = Rect::from_origin_size(Point::ZERO, laid);
+            for bounds in &rec.painted {
+                assert!(
+                    rect_fits_within(slot_rect, *bounds),
+                    "{label}: painted bounds {bounds:?} escaped the slot rect {slot_rect:?}"
+                );
+            }
+        }
+    }
+
+    /// p1-06's refusal test must still pass unchanged after the clip wrapper
+    /// — re-asserted here (mirrors `a_refused_slot_publishes_no_platform_view_frame`
+    /// above) against the `BoundsRecorder`'s clip-aware scene too, so both
+    /// scenes agree the refusal path never touches platform-view frames.
+    #[test]
+    fn a_refused_slot_still_publishes_no_platform_view_frame_through_the_clip_wrapper() {
+        let view =
+            native_switch(true).build_with_mode(2, ResolvedSurfaceMode::RefusedTranslucent, None);
+        let mut element = build_any(view);
+        let mut text_ctx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx as &mut dyn Any);
+        element.layout(&mut lctx, &BoxConstraints::tight(Size::new(70.0, 40.0)));
+        let mut rec = BoundsRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(70.0, 40.0));
+        element.paint(&mut pctx, &mut rec);
+        assert!(
+            pctx.take_platform_views().is_empty(),
+            "a refused slot must render no native platform_view frame, even through the \
+             clip wrapper"
+        );
+    }
+}

@@ -12,7 +12,7 @@ use frust_text::{FontFamily, FontWeight, GenericSlot, LineHeight, TextStyle};
 
 use crate::elevation::{Elevation, ElevationLevel, ShadowSpec, SurfaceRole};
 use crate::glass::{GlassMaterial, GlassScale};
-use crate::motion::{EasingSet, MotionDurations, MotionScheme, MotionSpring};
+use crate::motion::{CosmeticLoopRate, EasingSet, MotionDurations, MotionScheme, MotionSpring};
 use crate::shape::ShapeScale;
 use crate::typography::TypeScale;
 
@@ -292,6 +292,7 @@ impl MotionScheme {
                 exit: Curve::Cubic(0.4, 0.0, 1.0, 1.0),
             },
             reduce_motion: false,
+            cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
         }
     }
 }
@@ -471,6 +472,13 @@ mod tests {
         assert_eq!(m.easing.spatial, Curve::Cubic(0.34, 1.35, 0.64, 1.0));
         assert_eq!(m.easing.effects, Curve::Cubic(0.16, 1.0, 0.3, 1.0));
         assert_eq!(m.easing.exit, Curve::Cubic(0.4, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn glyph_cosmetic_loop_rate_defaults_to_30hz() {
+        // Task acceptance criterion 1: default 30 on every baseline — the
+        // other two (m3/cupertino) are covered in `crate::motion`'s tests.
+        assert_eq!(MotionScheme::glyph().cosmetic_loop_rate.hz(), 30.0);
     }
 
     #[test]

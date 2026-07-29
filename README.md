@@ -18,6 +18,36 @@ platforms, the way the Flutter CLI does for Flutter.
 
 Pre-1.0. APIs are unstable and may change without notice between commits.
 
+> [!WARNING]
+> Frust can currently be considered in an alpha state. In particular, we're
+> still working on the following:
+>
+> - [**Animation performance on mobile**](https://github.com/f0x-it-llc/frust/issues/3)
+>   — a perpetual animation anywhere on screen currently drives a full-scene
+>   re-encode and a full-surface GPU pass at the display's max refresh rate
+>   (device heat, janky scroll on animated screens). Root-caused with a fix
+>   plan in flight; see the issue for measurements and details.
+> - **No partial repaint / damage regions** — a whole-stack gap shared with
+>   the wider ecosystem today ([wgpu#2869](https://github.com/gfx-rs/wgpu/issues/2869),
+>   [xilem#789](https://github.com/linebender/xilem/issues/789)); every
+>   frame re-rasterizes the full surface.
+> - **iOS Simulator cannot render** under the pinned Vello 0.9 / wgpu 29
+>   (the Simulator GPU lacks `INDIRECT_EXECUTION`); physical iOS devices
+>   are unaffected — see `docs/DEVELOPMENT.md` Known Issues.
+> - **Back handling is single-navigator, process-wide** — concurrently-live
+>   navigators (per-tab stacks, multi-window) are unsupported until the
+>   back provider slot is widened to a stack.
+>
+> Frust also inherits Vello 0.9's alpha-state limitations, notably:
+>
+> - [Blur and filter effects are unimplemented](https://github.com/linebender/vello/issues/476)
+>   (glass materials degrade to opaque fills).
+> - [Conflation artifacts](https://github.com/linebender/vello/issues/49).
+> - [GPU memory allocation strategy](https://github.com/linebender/vello/issues/366).
+> - [Glyph caching](https://github.com/linebender/vello/issues/204).
+> - [Bitmap color-emoji strikes that aren't RGBA8 are skipped](https://github.com/linebender/vello/issues/1031)
+>   (Android CBDT emoji at risk; desktop sbix verified safe).
+
 ## Quickstart
 
 Prerequisites: Rust 1.88+ (edition 2024); Android needs the
@@ -65,8 +95,9 @@ curriculum for understanding how Frust turns a `View` into pixels — from
 the display list through the widget paint seam, the frame loop, the
 Vello/wgpu encode-present path, text shaping, the mobile frame gate, and
 the measurement tooling. Every chapter anchors to real files in this repo
-and ends with runnable experiments (build a scene by hand, break
-bubblebench on purpose, trace a frame with `FRUST_TRACE=1`), plus a
+and ends with runnable experiments (build a scene by hand, break the S1
+bubble-chart benchmark scenario on purpose, trace a frame with
+`FRUST_TRACE=1`), plus a
 verified watchlist of talks and university lectures for the theory —
 after you've seen the mechanism working.
 

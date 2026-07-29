@@ -14,6 +14,7 @@ use frust_core::anim::FrameTime;
 use frust_core::event::{EditingState, EventOutcome, ImeEvent, ImeState, InputEvent};
 use frust_core::insets::WindowInsets;
 use frust_core::view::{ChangeFlags, View};
+use frust_core::widget::PlatformViewFrame;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, SemanticsUpdate};
 use kurbo::Size;
 
@@ -158,6 +159,25 @@ pub trait AppTree {
     /// [`AppTree`] impls compile unchanged; the concrete tree overrides it.
     fn set_presented_frames(&mut self, _presented: u64) {}
 
+    /// Store whether the shell's GPU surface is translucent (alpha-channel,
+    /// "Mode B"), threaded into every subsequent paint pass (delegates to
+    /// [`RenderRoot::set_surface_translucent`]).
+    ///
+    /// A shell pushes the surface's **resolved** translucency here — what
+    /// `frust_render::SurfaceRenderer::surface_resolved_translucent` reports
+    /// after an install, NOT the [`crate::SurfaceModeWatcher`] request latch
+    /// (review finding M1: a translucency request the platform refuses must
+    /// degrade to the opaque Mode A contract, or the punch presents black
+    /// rectangles). Both mobile shells re-read it every frame, so a
+    /// render-thread fallback downgrades within one frame. The platform-view
+    /// hole-punch then clears each slot's rect on a genuinely translucent
+    /// surface so an opaque app backdrop doesn't seal the hole (see
+    /// [`RenderRoot::set_surface_translucent`]). Desktop leaves the default
+    /// (opaque). Defaulted to a **no-op** so existing [`AppTree`] impls compile
+    /// unchanged; the concrete tree overrides it — mirrors
+    /// [`AppTree::set_insets`]'s default-no-op precedent.
+    fn set_surface_translucent(&mut self, _translucent: bool) {}
+
     /// Collect the accessibility tree for the current frame (spec §9, phase-6d),
     /// for a shell to push into its platform `accesskit_*` adapter. Delegates to
     /// [`RenderRoot::semantics`]; must run **after** [`AppTree::layout`] so node
@@ -189,6 +209,49 @@ pub trait AppTree {
         node_id: u64,
         action: accesskit::Action,
     ) -> EventOutcome;
+
+    /// The [`PlatformViewFrame`]s the tree published during the most recent
+    /// paint pass (platform-views tasks 05/06; delegates to
+    /// [`RenderRoot::platform_view_frames`]). A shell's peek-getter path feeds
+    /// this into a [`crate::platform_view::PlatformViewState`]'s
+    /// [`ingest`](crate::platform_view::PlatformViewState::ingest) after each
+    /// RUN frame's paint (never on a gate-`Skip`, per that method's
+    /// skip-safety contract).
+    ///
+    /// Defaulted to an empty slice so existing [`AppTree`] impls compile
+    /// unchanged; the concrete tree overrides it — mirrors
+    /// [`AppTree::set_insets`]'s default-no-op precedent.
+    fn platform_view_frames(&self) -> &[PlatformViewFrame] {
+        &[]
+    }
+
+    /// The z-shield rects the tree reported during the most recent paint pass
+    /// (native-widgets p1-09; delegates to [`RenderRoot::input_shields`]) — the
+    /// second argument of the same
+    /// [`ingest`](crate::platform_view::PlatformViewState::ingest) call
+    /// [`AppTree::platform_view_frames`] feeds.
+    ///
+    /// Defaulted to an empty slice like the frames getter above, so an
+    /// [`AppTree`] impl that predates the shield channel still compiles (and
+    /// simply ships no auto-collected shields).
+    fn input_shields(&self) -> &[kurbo::Rect] {
+        &[]
+    }
+
+    /// Drain the slot ids whose `platform_view` widgets were torn down since the
+    /// last call (native-widgets p1-09; delegates to
+    /// [`RenderRoot::take_retired_platform_views`]).
+    ///
+    /// A shell calls this right after [`AppTree::rebuild`] and retires each id
+    /// in its [`PlatformViewState`](crate::platform_view::PlatformViewState), so
+    /// a disposed slot's native view goes away on the next frame instead of
+    /// waiting out the differ's missing-streak heuristic. Draining is
+    /// destructive — an id is reported exactly once.
+    ///
+    /// Defaulted to an empty `Vec`, mirroring the two getters above.
+    fn take_retired_platform_views(&mut self) -> Vec<u64> {
+        Vec::new()
+    }
 }
 
 /// Concrete [`AppTree`] holding one app's state, logic and retained root.
@@ -262,6 +325,10 @@ where
         self.root.set_presented_frames(presented);
     }
 
+    fn set_surface_translucent(&mut self, translucent: bool) {
+        self.root.set_surface_translucent(translucent);
+    }
+
     fn semantics(&mut self) -> SemanticsUpdate {
         self.root.semantics()
     }
@@ -281,6 +348,18 @@ where
     ) -> EventOutcome {
         self.root
             .perform_accessibility_action(&mut self.state, accesskit::NodeId(node_id), action)
+    }
+
+    fn platform_view_frames(&self) -> &[PlatformViewFrame] {
+        self.root.platform_view_frames()
+    }
+
+    fn input_shields(&self) -> &[kurbo::Rect] {
+        self.root.input_shields()
+    }
+
+    fn take_retired_platform_views(&mut self) -> Vec<u64> {
+        self.root.take_retired_platform_views()
     }
 }
 
@@ -418,6 +497,23 @@ mod tests {
             unimplemented!()
         }
         // set_insets deliberately NOT overridden — exercises the default no-op.
+    }
+
+    #[test]
+    fn app_tree_platform_view_frames_defaults_to_empty_slice() {
+        // Compiles (the default impl exists) and is a benign empty read — a
+        // pre-platform-views `AppTree` impl is unaffected.
+        let tree = MinimalTree;
+        assert!(tree.platform_view_frames().is_empty());
+    }
+
+    #[test]
+    fn app_tree_shield_and_retire_channels_default_to_empty() {
+        // Same additive contract for the two p1-09 channels: an `AppTree` impl
+        // that predates them compiles and reports nothing.
+        let mut tree = MinimalTree;
+        assert!(tree.input_shields().is_empty());
+        assert!(tree.take_retired_platform_views().is_empty());
     }
 
     #[test]

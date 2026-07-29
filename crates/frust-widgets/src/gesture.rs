@@ -44,6 +44,42 @@
 //! capture keeping the `FrameGate` running; desktop is dirty-driven, so paint
 //! calls [`PaintCtx::request_frame`] while the timer is pending so it keeps
 //! painting with no input until the threshold is reached.
+//!
+//! # Hold-progress observation
+//!
+//! [`on_hold_progress`](GestureDetectorView::on_hold_progress) reuses the same
+//! paint-clock timer as `on_long_press` to let a widget render charge-up
+//! feedback (e.g. a charge ring) for a held press. Paint computes progress —
+//! `(frame_time - press_start) / threshold`, clamped `0.0..=1.0` — every frame
+//! while a press is pending, but (the same callback-from-paint caveat as
+//! `on_long_press` above) can only *record* it; the observation is delivered on
+//! the next pointer event that already carries a mutable `EventCtx` (an in-slop
+//! `Move`, matching `on_long_press`'s fire-on-move-arrival). A drag past
+//! [`TOUCH_SLOP`] or an early release *before* the threshold — i.e. the
+//! `Move`/`Up` arm handling that transition, never `PointerPhase::Cancel`
+//! (see the Cancel staleness gap below) — delivers a final `0.0`; reaching the
+//! threshold delivers a final `1.0`. [`hold_threshold_ms`](GestureDetectorView::hold_threshold_ms)
+//! overrides [`LONG_PRESS_MS`] for both `on_long_press` and this timer.
+//!
+//! ## Cancel staleness gap
+//!
+//! A platform `Cancel` (gesture steal, e.g. a parent `ScrollView` claiming
+//! the drag; or structural teardown, e.g. the child subtree changing shape
+//! mid-hold) delivers **no** final observation — the Cancel-never-mutates-state
+//! convention above means `on_hold_progress` is never called from that arm.
+//! The consumer's last-observed `progress` therefore stays stale (whatever it
+//! was mid-hold) until a full new press cycle (`Down`→...→`Up`/threshold)
+//! delivers a fresh `0.0`/`1.0` through the normal path — there is no
+//! Cancel-delivered reset. **Consumer-side reset idiom:** since a fresh press
+//! cycle's *first* observation is always a low value counting up from near
+//! `0.0`, a consumer that stored a stale non-zero `progress` can self-correct
+//! at the top of its `on_hold_progress` callback by detecting a restart (the
+//! incoming value is lower than the last-stored one after a gap) and treating
+//! it as the new cycle's baseline rather than carrying the stale high value
+//! forward — see `demo_charge_ring` in `examples/glyph-catalog`'s
+//! `pages/interactions.rs` for a worked instance. Do not add a Cancel-arm
+//! callback to close this gap; it would violate the Cancel-never-mutates-state
+//! convention (`docs/CODE_STANDARDS.md`).
 
 use std::rc::Rc;
 
@@ -72,6 +108,8 @@ pub struct GestureDetectorView<State: 'static> {
     child: AnyView<State>,
     on_tap: Option<GestureCallback<State>>,
     on_long_press: Option<GestureCallback<State>>,
+    on_hold_progress: Option<crate::TypedArgCallback<State, f64>>,
+    hold_threshold_ms: Option<u64>,
 }
 
 /// Wrap `child` in a gesture detector (no recognisers until one is attached,
@@ -83,6 +121,8 @@ pub fn GestureDetector<State: 'static, V: View<State>>(child: V) -> GestureDetec
         child: any(child),
         on_tap: None,
         on_long_press: None,
+        on_hold_progress: None,
+        hold_threshold_ms: None,
     }
 }
 
@@ -102,6 +142,42 @@ impl<State: 'static> GestureDetectorView<State> {
         self.on_long_press = Some(Rc::new(on_long_press));
         self
     }
+
+    /// Observe press-hold progress (`0.0..=1.0` against
+    /// [`hold_threshold_ms`](Self::hold_threshold_ms), default [`LONG_PRESS_MS`])
+    /// while the child is held — the primitive a charge-up ring or similar hold
+    /// feedback widget renders from. See the [module docs](self#hold-progress-observation)
+    /// for the delivery/firing semantics: paint-clock timed, delivered on the
+    /// next pointer event, with a final `0.0` on an early lift/drag-past-slop
+    /// or a final `1.0` on reaching the threshold.
+    ///
+    /// **Cancel staleness gap**: a platform `PointerPhase::Cancel` (gesture
+    /// steal or structural teardown) delivers **no** final observation — the
+    /// last value this callback saw stays stale until the next full press
+    /// cycle. See the [module docs](self#cancel-staleness-gap) for the
+    /// consumer-side reset idiom that self-corrects on the next touch-down
+    /// rather than waiting for a full press-release.
+    pub fn on_hold_progress<F: Fn(&mut State, f64) + 'static>(
+        mut self,
+        on_hold_progress: F,
+    ) -> Self {
+        self.on_hold_progress = Some(Rc::new(on_hold_progress));
+        self
+    }
+
+    /// Override the hold threshold (milliseconds), used by both
+    /// [`on_long_press`](Self::on_long_press) and
+    /// [`on_hold_progress`](Self::on_hold_progress); defaults to [`LONG_PRESS_MS`].
+    ///
+    /// Resolved with a floor of 1ms (`ms.max(1)`) at both `build`/`rebuild` —
+    /// `hold_threshold_ms(0)` never divides progress by zero (`f64::clamp`
+    /// passes a `NaN` numerator/denominator-zero result straight through
+    /// rather than clamping it away), so it instead yields a defined, finite
+    /// progress that reaches `1.0` on the very next paint.
+    pub fn hold_threshold_ms(mut self, ms: u64) -> Self {
+        self.hold_threshold_ms = Some(ms);
+        self
+    }
 }
 
 /// The gesture recogniser's state machine. `Copy` so an event arm can inspect it
@@ -112,11 +188,15 @@ enum Recognizer {
     Idle,
     /// A press is down and still within the slop (tap + long-press both viable).
     /// `press_start` is recorded on the first paint after `Down`; `elapsed`
-    /// flips once a paint observes the hold exceeding [`LONG_PRESS_MS`].
+    /// flips once a paint observes the hold exceeding the threshold. `progress`
+    /// is paint's latest `0.0..=1.0` hold-progress observation, delivered to
+    /// `on_hold_progress` on the next pointer event (see the [module
+    /// docs](self#hold-progress-observation)).
     Pressed {
         down_pos: Point,
         press_start: Option<FrameTime>,
         elapsed: bool,
+        progress: f64,
     },
     /// The press moved past the slop — became a drag; neither recogniser fires.
     Dragged,
@@ -131,6 +211,11 @@ pub struct GestureDetectorWidget {
     state: Recognizer,
     on_tap: Option<crate::ErasedCallback>,
     on_long_press: Option<crate::ErasedCallback>,
+    on_hold_progress: Option<crate::ErasedArgCallback<f64>>,
+    /// Resolved hold threshold in ms — [`GestureDetectorView::hold_threshold_ms`]
+    /// if set, else [`LONG_PRESS_MS`]. Shared by the long-press timer and the
+    /// hold-progress computation.
+    threshold_ms: f64,
 }
 
 impl<State: 'static> View<State> for GestureDetectorView<State> {
@@ -142,6 +227,18 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
             state: Recognizer::Idle,
             on_tap: self.on_tap.as_ref().map(crate::erase_callback),
             on_long_press: self.on_long_press.as_ref().map(crate::erase_callback),
+            on_hold_progress: self
+                .on_hold_progress
+                .as_ref()
+                .map(crate::erase_callback_arg),
+            // `.max(1)` guards against a 0ms override: `f64::clamp` passes
+            // NaN through unchanged, so an unguarded `0.0 / 0.0` divisor in
+            // paint's progress computation would poison every subsequent
+            // observation. See `hold_threshold_ms`'s doc comment.
+            threshold_ms: self
+                .hold_threshold_ms
+                .map(|ms| ms.max(1) as f64)
+                .unwrap_or(LONG_PRESS_MS),
         }
     }
 
@@ -153,6 +250,15 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
     ) -> ChangeFlags {
         element.on_tap = self.on_tap.as_ref().map(crate::erase_callback);
         element.on_long_press = self.on_long_press.as_ref().map(crate::erase_callback);
+        element.on_hold_progress = self
+            .on_hold_progress
+            .as_ref()
+            .map(crate::erase_callback_arg);
+        // Same NaN guard as `build` above — see `hold_threshold_ms`'s doc comment.
+        element.threshold_ms = self
+            .hold_threshold_ms
+            .map(|ms| ms.max(1) as f64)
+            .unwrap_or(LONG_PRESS_MS);
         crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
@@ -169,27 +275,33 @@ impl Widget for GestureDetectorWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        // Measure the long-press across paints (the only pass with a clock).
-        // Record the press epoch on the first paint, mark `elapsed` once the
-        // hold exceeds the threshold, and — while the timer is still pending —
-        // request another frame so the dirty-driven desktop shell keeps painting
-        // with no input (mobile keeps the FrameGate alive via pointer capture).
+        // Measure the long-press/hold-progress across paints (the only pass
+        // with a clock). Record the press epoch on the first paint, mark
+        // `elapsed` once the hold exceeds the threshold, refresh the
+        // `0.0..=1.0` progress observation every paint, and — while the timer
+        // is still pending — request another frame so the dirty-driven desktop
+        // shell keeps painting with no input (mobile keeps the FrameGate alive
+        // via pointer capture).
         //
-        // Only run the timer when an `on_long_press` handler is wired: a
-        // tap-only detector has no long-press to mark, so it neither flips
-        // `elapsed` (which would otherwise swallow the release, since a held
-        // press resolves as a would-be long-press that fires nothing) nor
-        // request_frame's pointlessly during the hold — a small battery win.
-        if self.on_long_press.is_some()
+        // Only run the timer when an `on_long_press`/`on_hold_progress` handler
+        // is wired: a tap-only detector has no long-press to mark and no
+        // progress to observe, so it neither flips `elapsed` (which would
+        // otherwise swallow the release, since a held press resolves as a
+        // would-be long-press that fires nothing) nor request_frame's
+        // pointlessly during the hold — a small battery win.
+        if (self.on_long_press.is_some() || self.on_hold_progress.is_some())
             && let Recognizer::Pressed {
                 press_start,
                 elapsed,
+                progress,
                 ..
             } = &mut self.state
         {
             let start = *press_start.get_or_insert(ctx.frame_time());
+            let elapsed_ms = ctx.frame_time().saturating_sub(start).as_secs_f64() * 1000.0;
+            *progress = (elapsed_ms / self.threshold_ms).clamp(0.0, 1.0);
             if !*elapsed {
-                if ctx.frame_time().saturating_sub(start).as_secs_f64() * 1000.0 >= LONG_PRESS_MS {
+                if elapsed_ms >= self.threshold_ms {
                     *elapsed = true; // paint only marks; the callback fires on the next event
                 } else {
                     ctx.request_frame();
@@ -207,36 +319,58 @@ impl Widget for GestureDetectorWidget {
                         down_pos: p.position,
                         press_start: None,
                         elapsed: false,
+                        progress: 0.0,
                     };
                     ctx.capture_pointer();
-                    // Prompt a paint so the long-press timer starts promptly.
+                    // Prompt a paint so the long-press/progress timer starts promptly.
                     ctx.request_redraw();
                     self.child.event_child(ctx, event);
                     return EventResult::Handled;
                 }
                 PointerPhase::Move => {
                     if let Recognizer::Pressed {
-                        down_pos, elapsed, ..
+                        down_pos,
+                        elapsed,
+                        progress,
+                        ..
                     } = self.state
                     {
                         if (p.position - down_pos).hypot() > TOUCH_SLOP {
-                            self.state = Recognizer::Dragged; // became a drag; disarms both
-                        } else if elapsed {
-                            // Threshold already passed and a pointer event arrived:
-                            // fire the long-press now (fire-on-move-arrival). If the
-                            // handler was unwired mid-gesture (rebuild between the
-                            // marking paint and this Move), fall through to on_tap
-                            // so the press still resolves rather than silently dying.
-                            self.state = Recognizer::Fired;
-                            self.child.event_child(ctx, event);
-                            if let Some(cb) = self.on_long_press.as_mut() {
-                                cb(ctx);
-                                ctx.request_redraw();
-                            } else if let Some(cb) = self.on_tap.as_mut() {
-                                cb(ctx);
+                            // Became a drag — disarms both. A mid-hold progress
+                            // observation resets to exactly 0.0 (never a stale
+                            // >0 value left behind); this is the Move arm, not
+                            // Cancel, so it's allowed to touch state.
+                            self.state = Recognizer::Dragged;
+                            if let Some(cb) = self.on_hold_progress.as_mut() {
+                                cb(ctx, 0.0);
                                 ctx.request_redraw();
                             }
-                            return EventResult::Handled;
+                        } else {
+                            // Deliver the latest paint-observed progress: paint has
+                            // no EventCtx, so this in-slop Move is the deferred-fire
+                            // opportunity (mirrors on_long_press's fire-on-move-arrival
+                            // below — this also delivers the final 1.0 once `elapsed`).
+                            if let Some(cb) = self.on_hold_progress.as_mut() {
+                                cb(ctx, progress);
+                                ctx.request_redraw();
+                            }
+                            if elapsed {
+                                // Threshold already passed and a pointer event arrived:
+                                // fire the long-press now (fire-on-move-arrival). If the
+                                // handler was unwired mid-gesture (rebuild between the
+                                // marking paint and this Move), fall through to on_tap
+                                // so the press still resolves rather than silently dying.
+                                self.state = Recognizer::Fired;
+                                self.child.event_child(ctx, event);
+                                if let Some(cb) = self.on_long_press.as_mut() {
+                                    cb(ctx);
+                                    ctx.request_redraw();
+                                } else if let Some(cb) = self.on_tap.as_mut() {
+                                    cb(ctx);
+                                    ctx.request_redraw();
+                                }
+                                return EventResult::Handled;
+                            }
                         }
                     }
                     self.child.event_child(ctx, event);
@@ -248,9 +382,24 @@ impl Widget for GestureDetectorWidget {
                     // a tap. Never both.
                     let fire_long = matches!(self.state, Recognizer::Pressed { elapsed: true, .. });
                     let fire_tap = matches!(self.state, Recognizer::Pressed { elapsed: false, .. });
+                    // A final hold-progress observation, only if the press was
+                    // still `Pressed` at Up (a `Fired`/`Dragged` state already
+                    // delivered its final call from the Move arm above): 1.0 if
+                    // the threshold was reached, else a clean 0.0 (early lift).
+                    let final_progress = match self.state {
+                        Recognizer::Pressed { elapsed: true, .. } => Some(1.0),
+                        Recognizer::Pressed { elapsed: false, .. } => Some(0.0),
+                        _ => None,
+                    };
                     self.state = Recognizer::Idle;
                     self.child.event_child(ctx, event);
                     self.child.set_active(false);
+                    if let Some(progress) = final_progress
+                        && let Some(cb) = self.on_hold_progress.as_mut()
+                    {
+                        cb(ctx, progress);
+                        ctx.request_redraw();
+                    }
                     // A held-past-threshold press prefers on_long_press, but falls
                     // through to on_tap when no long-press handler is wired — a
                     // tap-only detector must still fire the tap on an in-bounds
@@ -299,10 +448,11 @@ mod tests {
         long_presses: u32,
     }
 
-    /// A trivial full-bleed child that ignores events.
+    /// A trivial full-bleed child that ignores events. Generic over `State` so
+    /// it's reusable across both `TapState` and `HoldState` test fixtures.
     struct Blank;
     struct BlankWidget;
-    impl View<TapState> for Blank {
+    impl<State: 'static> View<State> for Blank {
         type Element = BlankWidget;
         fn build(&self, _ctx: &mut BuildCtx<'_>) -> BlankWidget {
             BlankWidget
@@ -609,5 +759,260 @@ mod tests {
         root.event(&mut state, &ev(PointerPhase::Up, 11.0, 11.0));
         assert_eq!(state.long_presses, 1, "both wired: hold still long-presses");
         assert_eq!(state.taps, 0, "both wired: a long-press never also taps");
+    }
+
+    // --- Hold-progress observation (task 15) ----------------------------------
+    //
+    // `on_hold_progress` rides the same paint-clock timer as `on_long_press`:
+    // paint records the latest 0.0..=1.0 observation, and it's delivered on the
+    // next pointer event carrying a mutable `EventCtx` — an in-slop `Move` (the
+    // same fire-on-move-arrival opportunity `on_long_press` uses) or `Up`.
+
+    #[derive(Default)]
+    struct HoldState {
+        taps: u32,
+        long_presses: u32,
+        progress: Vec<f64>,
+    }
+
+    fn hold_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(frust_core::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: frust_core::PointerButton::Primary,
+        })
+    }
+
+    /// A `RenderRoot` over a `GestureDetector` wired with all three callbacks,
+    /// at the default [`LONG_PRESS_MS`] threshold.
+    fn progress_root() -> RenderRoot<HoldState, GestureDetectorView<HoldState>> {
+        fn logic(_: &mut HoldState) -> GestureDetectorView<HoldState> {
+            GestureDetector::<HoldState, _>(Blank)
+                .on_tap(|s: &mut HoldState| s.taps += 1)
+                .on_long_press(|s: &mut HoldState| s.long_presses += 1)
+                .on_hold_progress(|s: &mut HoldState, p| s.progress.push(p))
+        }
+        let mut root = RenderRoot::new();
+        let mut state = HoldState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root
+    }
+
+    /// Like [`progress_root`], but with an overridden `hold_threshold_ms`.
+    fn progress_root_with_threshold(
+        ms: u64,
+    ) -> RenderRoot<HoldState, GestureDetectorView<HoldState>> {
+        fn logic(state: &mut HoldState, ms: u64) -> GestureDetectorView<HoldState> {
+            let _ = state;
+            GestureDetector::<HoldState, _>(Blank)
+                .on_long_press(|s: &mut HoldState| s.long_presses += 1)
+                .on_hold_progress(|s: &mut HoldState, p| s.progress.push(p))
+                .hold_threshold_ms(ms)
+        }
+        let mut root = RenderRoot::new();
+        let mut state = HoldState::default();
+        root.rebuild(&mut |s: &mut HoldState| logic(s, ms), &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root
+    }
+
+    #[test]
+    fn hold_progress_increases_monotonically_and_long_press_still_fires() {
+        // Criterion 1: progress observations increase monotonically 0->1;
+        // on_long_press still fires per its existing contract.
+        let mut root = progress_root();
+        let mut state = HoldState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 10.0)); // in-slop jitter
+        root.paint(&mut sink, ft(150.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 11.0, 10.0));
+        root.paint(&mut sink, ft(300.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 11.0));
+        root.paint(&mut sink, ft(500.0)); // elapsed marked (500ms threshold)
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 11.0, 11.0)); // fires long-press
+
+        assert_eq!(
+            state.progress,
+            vec![0.0, 0.3, 0.6, 1.0],
+            "progress observations increase monotonically 0..1"
+        );
+        assert_eq!(state.long_presses, 1, "threshold reached: long-press fires");
+        assert_eq!(state.taps, 0);
+
+        // A following Up must not double-fire anything.
+        root.event(&mut state, &hold_ev(PointerPhase::Up, 11.0, 11.0));
+        assert_eq!(state.long_presses, 1);
+        assert_eq!(
+            state.progress.len(),
+            4,
+            "Up after a fired long-press adds no observation"
+        );
+    }
+
+    #[test]
+    fn early_lift_delivers_a_final_zero_observation_and_no_long_press() {
+        // Criterion 2: early lift at ~50% -> a final 0.0 observation; no long-press.
+        let mut root = progress_root();
+        let mut state = HoldState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(250.0)); // ~50% of the 500ms threshold, not elapsed
+        root.event(&mut state, &hold_ev(PointerPhase::Up, 11.0, 11.0));
+
+        assert_eq!(
+            state.progress.last().copied(),
+            Some(0.0),
+            "an early lift's final observation resets to exactly 0.0"
+        );
+        assert_eq!(state.long_presses, 0, "early lift never long-presses");
+    }
+
+    #[test]
+    fn move_past_slop_mid_hold_delivers_a_final_zero_and_no_long_press() {
+        // Criterion 3: move past slop mid-hold -> cancel + 0.0; no long-press fire.
+        let mut root = progress_root();
+        let mut state = HoldState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(300.0)); // 60% held, not elapsed
+        // 30px move: well past TOUCH_SLOP (18) -> becomes a drag.
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 40.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Up, 10.0, 40.0));
+
+        assert_eq!(
+            state.progress.last().copied(),
+            Some(0.0),
+            "a drag past slop delivers a final 0.0 observation"
+        );
+        assert_eq!(state.long_presses, 0);
+        assert_eq!(state.taps, 0);
+    }
+
+    #[test]
+    fn hold_threshold_ms_override_is_respected_by_both_callbacks() {
+        // Criterion 4: hold_threshold_ms(700) respected by both callbacks.
+        let mut root = progress_root_with_threshold(700);
+        let mut state = HoldState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(600.0)); // past the default 500ms, short of 700ms
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 10.0));
+        assert_eq!(
+            state.long_presses, 0,
+            "the 700ms override must not fire long-press at 600ms"
+        );
+        assert!(
+            (state.progress.last().copied().unwrap() - 600.0 / 700.0).abs() < 1e-9,
+            "progress reflects the overridden 700ms threshold, not the 500ms default"
+        );
+
+        root.paint(&mut sink, ft(700.0)); // now past the overridden threshold
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 11.0, 10.0));
+        assert_eq!(
+            state.long_presses, 1,
+            "the 700ms override still fires long-press once reached"
+        );
+        assert_eq!(state.progress.last().copied(), Some(1.0));
+    }
+
+    #[test]
+    fn no_hold_progress_handler_is_a_benign_noop() {
+        // Criterion 5: on_tap/on_long_press-only users unaffected.
+        let mut w = widget(true);
+        let mut state = TapState::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 11.0, 11.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 12.0, 12.0));
+        assert_eq!(state.taps, 1);
+        assert_eq!(state.long_presses, 0);
+    }
+
+    // --- Cancel staleness gap + zero-threshold NaN guard (followup f2) -------
+
+    #[test]
+    fn cancel_leaves_progress_stale_until_fresh_down_cycle_delivers_clean_value() {
+        // Regression for the Cancel staleness gap (see gesture.rs module
+        // docs): a platform Cancel delivers NO final observation, so the
+        // consumer's last-observed progress stays whatever it was mid-hold.
+        // A fresh Down-cycle's first observation must start low again, never
+        // resuming from the stale value Cancel left behind — the reset idiom
+        // works at the widget contract level.
+        let mut root = progress_root();
+        let mut state = HoldState::default();
+        let mut sink = NullScene;
+
+        // Cycle 1: hold to ~30% progress, then Cancel (gesture steal).
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 10.0)); // delivers 0.0
+        root.paint(&mut sink, ft(150.0)); // 30% of the 500ms default threshold
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 11.0, 10.0)); // delivers 0.3
+        let before_cancel_len = state.progress.len();
+        let stale_value = *state.progress.last().unwrap();
+        assert!(
+            stale_value > 0.0,
+            "sanity: mid-hold progress is non-zero before Cancel"
+        );
+
+        root.event(&mut state, &hold_ev(PointerPhase::Cancel, 11.0, 10.0));
+        assert_eq!(
+            state.progress.len(),
+            before_cancel_len,
+            "Cancel delivers no observation — the Cancel-never-mutates-state convention"
+        );
+
+        // Cycle 2: a fresh Down cycle. The first delivered observation must
+        // be a low, fresh value — never the stale value Cancel left behind.
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(150.0)); // press_start re-anchors here; elapsed_ms = 0
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 10.0));
+        let fresh_value = *state.progress.last().unwrap();
+        assert!(
+            fresh_value < stale_value,
+            "a fresh Down-cycle's first observation starts low, self-correcting the stale \
+             ring (fresh={fresh_value}, stale={stale_value})"
+        );
+        assert_eq!(
+            fresh_value, 0.0,
+            "a fresh press-start yields exactly 0.0 progress"
+        );
+    }
+
+    #[test]
+    fn zero_threshold_guard_yields_finite_progress_never_nan() {
+        // Regression: `hold_threshold_ms(0)` must resolve to a floor of 1ms
+        // (`ms.max(1)`), never dividing progress by zero — `f64::clamp`
+        // passes a NaN numerator/zero-denominator result straight through
+        // rather than clamping it away, which would otherwise poison every
+        // subsequent observation.
+        let mut root = progress_root_with_threshold(0);
+        let mut state = HoldState::default();
+        let mut sink = NullScene;
+
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 10.0)); // first observation
+        let p0 = state.progress[0];
+        assert!(!p0.is_nan(), "zero threshold must never yield NaN progress");
+        assert!(
+            (0.0..=1.0).contains(&p0),
+            "progress stays in the defined [0.0, 1.0] range"
+        );
+
+        // The 1ms floor is reached almost immediately: elapsed marks, and
+        // the long-press fires on the very next deliverable event, per the
+        // existing fire-on-move-arrival convention.
+        root.paint(&mut sink, ft(1.0));
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 11.0, 10.0));
+        assert_eq!(
+            state.long_presses, 1,
+            "long-press fires almost immediately at the 1ms floor"
+        );
     }
 }

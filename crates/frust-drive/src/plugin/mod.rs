@@ -5,10 +5,17 @@
 //! or platform contributions are scaffolded (the template-hygiene decision).
 //! Instead, a plugin's contributions are applied to an existing generated
 //! project on demand: [`add_plugin`] performs the exact edits a plugin's
-//! README documents (a Cargo.toml dependency, an Android manifest permission,
-//! an Info.plist key, a Kotlin helper file, an R8 keep rule), each **idempotent**
+//! README documents (a Cargo.toml dependency, an Info.plist key, a Gradle
+//! library-module include, an Android manifest permission), each **idempotent**
 //! — running it twice yields a byte-identical tree, every line item reported
 //! [`AddOutcome::AlreadyPresent`] the second time.
+//!
+//! A plugin's Android Kotlin is **not** copied into the app: it ships as the
+//! plugin's own `com.android.library` module under `platform/android/`, wired
+//! in by [`Contribution::GradleModule`], with its permission carried by the
+//! manifest merger and its R8 keep rules by `consumerProguardFiles`. That is
+//! why there is no `KotlinFile`/`ProguardRule` contribution — a copied file
+//! and a hand-appended keep rule both drift from the plugin they came from.
 //!
 //! v1 is a **static in-crate registry** ([`known_plugins`]): the
 //! `frust-plugin.toml` cargo-metadata discovery ARCHITECTURE.md sketches stays
@@ -72,8 +79,16 @@ pub enum Contribution {
     /// project's existing `frust` path dep (crates unpublished — version deps
     /// come post-publish). `name` is the crate/dependency name.
     CargoDep { name: &'static str },
-    /// A `<uses-permission android:name="..."/>` line inserted into
-    /// `AndroidManifest.xml` before `</manifest>`.
+    /// A `<uses-permission android:name="..."/>` line inserted into the app's
+    /// own `AndroidManifest.xml` before `</manifest>`.
+    ///
+    /// **Prefer [`Contribution::GradleModule`]**: a permission declared in a
+    /// plugin module's own `src/main/AndroidManifest.xml` is folded into the
+    /// app by the manifest merger, so the app's manifest is never edited and
+    /// the permission cannot outlive the plugin. Reach for this variant only
+    /// when the permission genuinely belongs to the *app* rather than to the
+    /// plugin's module — e.g. one whose presence depends on app-level policy
+    /// the merger cannot supply. No plugin uses it today.
     ManifestPermission { permission: &'static str },
     /// A `<key>/<string>` pair (with an explanatory XML comment) inserted into
     /// `Info.plist` before the root `</dict>`.
@@ -82,18 +97,81 @@ pub enum Contribution {
         value: &'static str,
         comment: &'static str,
     },
-    /// A Kotlin helper written into `android/app/src/main/kotlin/...`,
-    /// write-if-absent; `contents` is embedded from the plugin's canonical
-    /// `platform/` copy at compile time.
-    KotlinFile {
-        relative_path: &'static str,
-        contents: &'static str,
+    /// A Gradle library module included into the generated project: appends
+    /// the `include(...)` + `projectDir` (+ build-directory redirect) lines to
+    /// `android/settings.gradle.kts` and the `implementation(project(...))`
+    /// line to `android/app/build.gradle.kts`, both idempotently.
+    ///
+    /// One contribution, two files, **one** [`AddItem`] — the report is a
+    /// per-contribution ledger, not a per-file one. A half-applied state (one
+    /// file wired, the other not) completes the other file and reports
+    /// [`AddOutcome::Applied`].
+    GradleModule {
+        /// The Gradle project path, e.g. `":frust-secure-storage"`.
+        gradle_name: &'static str,
+        /// The module directory, relative to the frust repo root, e.g.
+        /// `"plugins/secure-storage/platform/android"`.
+        rel_path: &'static str,
     },
-    /// A marker-commented keep rule appended to `proguard-rules.pro`,
-    /// skip-if-marker-present.
-    ProguardRule {
-        marker: &'static str,
-        rule: &'static str,
+    /// A plugin's local Swift package added to the generated app's
+    /// `ios/Runner.xcodeproj/project.pbxproj` as a second package reference
+    /// beside the embedding's `FrustEmbedding` — the iOS counterpart of
+    /// [`Contribution::GradleModule`].
+    ///
+    /// One contribution, **six** pbxproj sites, **one** [`AddItem`] (the
+    /// `GradleModule` precedent, widened): the `PBXBuildFile` object and its
+    /// entry in the Frameworks build phase, the target's
+    /// `packageProductDependencies` entry, the project's `packageReferences`
+    /// entry, and the `XCLocalSwiftPackageReference` /
+    /// `XCSwiftPackageProductDependency` objects themselves. A half-applied
+    /// state completes the missing sites and reports [`AddOutcome::Applied`];
+    /// only a fully-wired project reports [`AddOutcome::AlreadyPresent`].
+    ///
+    /// The whole edit is built in memory, re-scanned, and written once — a
+    /// half-edited `project.pbxproj` will not open in Xcode.
+    SwiftPackageRef {
+        /// The Swift package *and* product name, e.g. `"FrustCamera"` — both
+        /// the `XCLocalSwiftPackageReference` comment and the
+        /// `XCSwiftPackageProductDependency`'s `productName`, matching how the
+        /// embedding's own wiring names `FrustEmbedding`.
+        package_name: &'static str,
+        /// The package directory, relative to the frust repo root, e.g.
+        /// `"plugins/camera/platform/ios/FrustCamera"` — resolved exactly like
+        /// a [`Contribution::GradleModule`]'s `rel_path`, since the written
+        /// `relativePath` is resolved by Xcode against the directory
+        /// *containing* the `.xcodeproj` (`<project>/ios/`), one level below
+        /// the project root a relative `frust` path dep is written against.
+        rel_path: &'static str,
+    },
+    /// A macro invocation appended to the app crate's `src/lib.rs`.
+    ///
+    /// The escape hatch for a plugin whose platform side needs something the
+    /// **app crate itself** must emit — because the app crate is the staticlib
+    /// root, and some linker-visible properties only hold when the reference
+    /// originates there.
+    ///
+    /// It exists for exactly one measured reason (frust-camera task 14): a
+    /// `#[unsafe(no_mangle)]` C export that lives in a *dependency* crate and
+    /// is called only from Swift is dropped by the release profile's
+    /// `lto = "fat"` before the Swift side links, because nothing in Rust
+    /// references it. An app that merely *added* the plugin and never calls its
+    /// API is precisely the failing case — and precisely what Add Plugin
+    /// produces. Planting a `#[used]` reference in the app crate keeps LTO from
+    /// treating the symbol as dead.
+    ///
+    /// Prefer any other variant. Reach for this only when the contribution
+    /// genuinely cannot live in the plugin's own crate or platform module.
+    AppCrateMacro {
+        /// The invocation to append, e.g. `"frust_camera::ios_exports!();"`.
+        /// Also the idempotence key — an exact substring match against the
+        /// existing file means the edit is already present.
+        invocation: &'static str,
+        /// An optional `#[cfg(...)]` predicate written above the invocation,
+        /// e.g. `"target_vendor = \"apple\""`. `None` emits it unguarded.
+        cfg: Option<&'static str>,
+        /// A short `//` comment written above, explaining why the app crate has
+        /// to carry this.
+        comment: &'static str,
     },
 }
 
@@ -107,10 +185,15 @@ impl Contribution {
                 format!("AndroidManifest.xml permission `{permission}`")
             }
             Contribution::PlistEntry { key, .. } => format!("Info.plist key `{key}`"),
-            Contribution::KotlinFile { relative_path, .. } => {
-                format!("Kotlin helper `{relative_path}`")
+            Contribution::GradleModule { gradle_name, .. } => {
+                format!("Gradle module `{gradle_name}`")
             }
-            Contribution::ProguardRule { rule, .. } => format!("proguard-rules.pro rule `{rule}`"),
+            Contribution::SwiftPackageRef { package_name, .. } => {
+                format!("Xcode Swift package `{package_name}`")
+            }
+            Contribution::AppCrateMacro { invocation, .. } => {
+                format!("app crate `src/lib.rs` invocation `{invocation}`")
+            }
         }
     }
 }
@@ -181,6 +264,31 @@ pub enum PluginAddError {
     /// No `frust = {{ path = ... }}` dependency to derive plugin paths from.
     #[error("no `frust = {{ path = ... }}` dependency to derive plugin paths from")]
     NoFrustDependency,
+    /// A freshly minted `project.pbxproj` object id is already in use.
+    /// Unreachable while the mint scans the same file it writes, but a
+    /// collision would silently redefine an existing object — the one
+    /// corruption an idempotent applier must never risk — so it fails loudly
+    /// instead ([`Contribution::SwiftPackageRef`]).
+    #[error(
+        "project file `{file}` already uses minted pbxproj object id `{id}` (refusing to overwrite)"
+    )]
+    PbxIdCollision { file: String, id: String },
+    /// The `ABCD…00NN` object-id space of a `project.pbxproj` is full (`NN` is
+    /// two hex digits, so 256 ids) — nothing is written.
+    #[error("project file `{file}` has no free `…00NN` pbxproj object id left")]
+    PbxIdSpaceExhausted { file: String },
+    /// A [`Contribution::SwiftPackageRef`]'s in-memory edit failed its own
+    /// re-scan: one of the six sites is missing or carries a mismatched id, so
+    /// the file is left untouched rather than written half-wired.
+    #[error(
+        "Swift package `{package}` wiring for `{file}` failed verification (site `{site}`); \
+         nothing was written"
+    )]
+    PbxWiringNotVerified {
+        file: String,
+        package: String,
+        site: String,
+    },
     /// A required sibling checkout (facade plugin) is not on disk.
     #[error("required sibling checkout `{sibling}` not found (expected at `{}`)", .expected.display())]
     SiblingCheckoutMissing { sibling: String, expected: PathBuf },

@@ -55,6 +55,9 @@ pub(crate) trait SceneSink {
     fn push_layer(&mut self, transform: Affine, rect: &Rect, alpha: f32);
     /// Pop the most recently pushed layer.
     fn pop_layer(&mut self);
+    /// Clear `rect` to full transparency (alpha 0) under `transform`, erasing
+    /// the backdrop already drawn beneath it — the platform-view hole-punch.
+    fn clear_rect(&mut self, transform: Affine, rect: &Rect);
     /// Fill an arbitrary vector path with `brush` under `transform`, using
     /// the nonzero winding rule.
     fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath);
@@ -113,6 +116,26 @@ pub(crate) fn encode_into_with_shaders(
     shader_images: &HashMap<(u64, u32, u32), ImageData>,
     adapter_max: u32,
 ) {
+    // Active clip/opacity group stack, tracked so a `ClearRect` can be HOISTED
+    // to the root: a `Compose::Clear` inside a vello layer group only clears
+    // that group's own accumulated content — anything painted OUTSIDE the
+    // group (an app-root backdrop below a scroll_view's clip) survives the
+    // group composite, defeating the Mode B hole punch (t11-redo defect D4,
+    // pixel-proven in `tests/gpu_smoke.rs`). On `ClearRect` the walk pops
+    // every open group, emits the clear at root — bounded by the intersection
+    // of the popped groups' clip bounds so a partially-scrolled slot still
+    // clips to its viewport — then re-pushes the same groups and continues.
+    // Content painted before the slot (any nesting) is cleared; content
+    // painted after (overlapping chrome) composites over the hole as before.
+    // Caveat: an opacity group split this way composites its two halves
+    // independently (a transient, transition-only artifact where translucent
+    // group content overlaps a slot mid-animation — documented tradeoff).
+    enum Group {
+        Clip,
+        Layer(f32),
+    }
+    let mut groups: Vec<(Group, Affine, Rect)> = Vec::new();
+
     for command in scene.commands() {
         match command {
             Command::FillRect {
@@ -134,8 +157,14 @@ pub(crate) fn encode_into_with_shaders(
                 transform,
             } => sink.stroke_line(*transform, brush, *p0, *p1, *width),
             Command::GlyphRun(run) => sink.draw_glyph_run(run),
-            Command::PushClip { rect, transform } => sink.push_clip(*transform, rect),
-            Command::PopClip => sink.pop_clip(),
+            Command::PushClip { rect, transform } => {
+                groups.push((Group::Clip, *transform, *rect));
+                sink.push_clip(*transform, rect);
+            }
+            Command::PopClip => {
+                groups.pop();
+                sink.pop_clip();
+            }
             Command::Image {
                 data,
                 dest,
@@ -154,8 +183,43 @@ pub(crate) fn encode_into_with_shaders(
                 rect,
                 alpha,
                 transform,
-            } => sink.push_layer(*transform, rect, *alpha),
-            Command::PopLayer => sink.pop_layer(),
+            } => {
+                groups.push((Group::Layer(*alpha), *transform, *rect));
+                sink.push_layer(*transform, rect, *alpha);
+            }
+            Command::PopLayer => {
+                groups.pop();
+                sink.pop_layer();
+            }
+            Command::ClearRect { rect, transform } if groups.is_empty() => {
+                sink.clear_rect(*transform, rect);
+            }
+            Command::ClearRect { rect, transform } => {
+                // Hoist to root (see the `groups` doc above): bound the punch
+                // by every open group's clip bbox, pop them all, clear, then
+                // re-push. Bboxes are exact for the axis-aligned transforms
+                // frust emits (translate/scale); a rotated clip would bound
+                // conservatively.
+                let mut punch = transform.transform_rect_bbox(*rect);
+                for (_, t, r) in &groups {
+                    punch = punch.intersect(t.transform_rect_bbox(*r));
+                }
+                if punch.width() > 0.0 && punch.height() > 0.0 {
+                    for (kind, ..) in groups.iter().rev() {
+                        match kind {
+                            Group::Clip => sink.pop_clip(),
+                            Group::Layer(_) => sink.pop_layer(),
+                        }
+                    }
+                    sink.clear_rect(Affine::IDENTITY, &punch);
+                    for (kind, t, r) in &groups {
+                        match kind {
+                            Group::Clip => sink.push_clip(*t, r),
+                            Group::Layer(alpha) => sink.push_layer(*t, r, *alpha),
+                        }
+                    }
+                }
+            }
             Command::Path {
                 path,
                 style,
@@ -320,6 +384,39 @@ impl SceneSink for vello::Scene {
         vello::Scene::pop_layer(self);
     }
 
+    fn clear_rect(&mut self, transform: Affine, rect: &Rect) {
+        // The hole-punch: a layer whose composite is `Compose::DestOut` with an
+        // OPAQUE fill erases the destination (color *and* alpha) exactly where
+        // the source covers — `dst' = dst·(1−src.a)`, so a full-alpha fill
+        // zeroes the rect while the fill's own antialiased coverage keeps the
+        // erase pixel-exact at the edges. Deliberately NOT `Compose::Clear`:
+        // vello 0.9 applies Clear at 16-px-tile granularity, ignoring the
+        // layer's per-pixel clip coverage in boundary tiles, which bleeds the
+        // punch up to 15 px past an unaligned rect edge (t11-redo defect D4;
+        // pixel-proven by `tests/gpu_smoke.rs`'s unaligned-edge probe on Metal
+        // and as a visible ring on cupid). DestOut weights the erase by the
+        // source's own alpha, so unpainted pixels in a boundary tile are
+        // untouched by construction.
+        //
+        // Fill the clip inside the layer so the erase has full geometric
+        // coverage across `rect` (the color is irrelevant — only alpha drives
+        // DestOut).
+        //
+        // `self.push_layer`/`vello::Scene::pop_layer` resolve to vello's own
+        // inherent methods, not this `SceneSink` impl (see the note on the
+        // `push_layer` impl above — re-verify after any vello bump).
+        let blend = peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::DestOut);
+        self.push_layer(Fill::NonZero, blend, 1.0, transform, rect);
+        self.fill(
+            Fill::NonZero,
+            transform,
+            &Brush::Solid(Color::BLACK),
+            None,
+            rect,
+        );
+        vello::Scene::pop_layer(self);
+    }
+
     fn fill_path(&mut self, transform: Affine, brush: &Brush, path: &BezPath) {
         self.fill(Fill::NonZero, transform, brush, None, path);
     }
@@ -403,6 +500,10 @@ mod tests {
             transform: Affine,
         },
         PopLayer,
+        ClearRect {
+            rect: Rect,
+            transform: Affine,
+        },
         FillPath {
             path: BezPath,
             transform: Affine,
@@ -515,6 +616,13 @@ mod tests {
 
         fn pop_layer(&mut self) {
             self.events.push(Event::PopLayer);
+        }
+
+        fn clear_rect(&mut self, transform: Affine, rect: &Rect) {
+            self.events.push(Event::ClearRect {
+                rect: *rect,
+                transform,
+            });
         }
 
         fn fill_path(&mut self, transform: Affine, _brush: &Brush, path: &BezPath) {
@@ -943,6 +1051,95 @@ mod tests {
     }
 
     #[test]
+    fn clear_rect_maps_to_clear_call_with_rect_and_transform() {
+        // The platform-view hole-punch: a `ClearRect` command lowers to the
+        // sink's `clear_rect` under the recorded (widget-position) transform.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((12.0, 8.0));
+        builder.push_transform(translate);
+        let rect = Rect::new(0.0, 0.0, 80.0, 60.0);
+        builder.clear_rect(rect);
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::ClearRect {
+                rect,
+                transform: translate,
+            }]
+        );
+    }
+
+    #[test]
+    fn mode_a_scene_encodes_no_clear_rect_even_with_a_slot_sized_region() {
+        // Review finding M1's encode-level half: when the surface's RESOLVED
+        // translucency is `false` (an opaque swapchain — including a
+        // `TranslucentPreferred` request that fell back, see context.rs's
+        // `forced_mismatch_translucent_request_resolves_not_translucent`), the
+        // slot widget emits NO `ClearRect`, so the encode walk must produce no
+        // `clear_rect` on the sink at all — nothing gets `DestOut`-zeroed and
+        // the slot region simply keeps whatever painted there (Mode A: the
+        // native view covers it from on top).
+        //
+        // Asserted at ENCODE level rather than at the recording-`PaintScene`
+        // level deliberately (the t11-redo D4 lesson: a recording-level test
+        // missed a real defect in this exact punch path).
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let backdrop = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let slot = Rect::new(50.0, 50.0, 150.0, 150.0);
+        builder.fill_rect(backdrop, Brush::Solid(RED));
+        // A Mode A slot paints nothing of its own; the scene carries only the
+        // app's own content over the slot's region.
+        builder.push_clip(slot);
+        builder.pop_clip();
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert!(
+            !sink
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::ClearRect { .. })),
+            "an opaque-resolved surface must encode no punch: {:?}",
+            sink.events
+        );
+    }
+
+    #[test]
+    fn clear_rect_punches_beneath_a_backdrop_fill_preserving_order() {
+        // The exact D1 shape: an opaque backdrop fill, then a slot clear over
+        // part of it — the clear must encode AFTER the fill so it erases it.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let backdrop = Rect::new(0.0, 0.0, 200.0, 200.0);
+        let hole = Rect::new(50.0, 50.0, 150.0, 150.0);
+        builder.fill_rect(backdrop, Brush::Solid(RED));
+        builder.clear_rect(hole);
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::FillRect {
+                    rect: backdrop,
+                    transform: Affine::IDENTITY,
+                },
+                Event::ClearRect {
+                    rect: hole,
+                    transform: Affine::IDENTITY,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn clip_and_layer_nest_preserving_push_pop_order() {
         // push_clip -> push_layer -> pop_layer -> pop_clip: the encode step
         // must preserve command-stream order, mirroring the builder-level
@@ -993,6 +1190,9 @@ mod tests {
         builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), Brush::Solid(RED));
         builder.pop_layer();
         builder.pop_clip();
+        // The hole-punch's `Compose::DestOut` layer must round-trip through the
+        // real `vello::Scene` sink without panicking (the acceptance criterion).
+        builder.clear_rect(Rect::new(2.0, 2.0, 8.0, 8.0));
 
         let mut vello_scene = vello::Scene::new();
         encode_scene(&scene, &mut vello_scene);

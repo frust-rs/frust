@@ -2,7 +2,7 @@
 # `[workspace] exclude`) so the generated Android/iOS projects resolve a
 # project-local `target/` dir and the `[profile.*]` blocks below take effect
 # (they only apply in a workspace root) — the same shape as
-# `examples/bubblebench` and `examples/huddle`. The root workspace's globs
+# `examples/huddle`. The root workspace's globs
 # (`crates/*`, `examples/*`, `plugins/shared-preferences`) never reach
 # `benchmarks/`, so no root-manifest `exclude` entry is required for it (see
 # task 02's completion summary for the check).
@@ -30,12 +30,13 @@ frust = { path = "../../crates/frust" }
 
 # `frust-core` + `kurbo` + `peniko`: the facade's documented "low-level escape
 # hatch" (see `docs/ARCHITECTURE.md`), the same production dependency
-# `examples/bubblebench`/`examples/huddle` carry. Here it backs the S1
-# animation-storm scenario's hand-rolled `BubbleChart` `View`/`Widget` pair
-# (a copy of bubblebench's `chart.rs`, painting gradient circles + shaped text
-# through `PaintScene::fill_path`/`stroke_path`/`draw_glyph_run`) which no
-# facade widget covers. `frust-text` is the shaping surface that chart drives
-# from layout (the same `TextContext` the shell threads through `LayoutCtx`).
+# `examples/huddle` carries. Here it backs the S1 animation-storm scenario's
+# hand-rolled `BubbleChart` `View`/`Widget` pair (originally a copy of the
+# now-removed `examples/bubblebench`'s `chart.rs`, painting gradient circles +
+# shaped text through `PaintScene::fill_path`/`stroke_path`/`draw_glyph_run`)
+# which no facade widget covers. `frust-text` is the shaping surface that
+# chart drives from layout (the same `TextContext` the shell threads through
+# `LayoutCtx`).
 frust-core = { path = "../../crates/frust-core" }
 frust-text = { path = "../../crates/frust-text" }
 kurbo = "0.13.1"
@@ -74,7 +75,7 @@ log = "0.4"
 
 # Dev-only: the headless tests drive Frust's `RenderRoot` directly (the
 # desktop shell's own rebuild/layout/paint seam) — no GPU, no window — the
-# same harness shape as `examples/bubblebench/tests/bench.rs`.
+# same harness shape as `examples/huddle`'s own headless `tests/*.rs`.
 [dev-dependencies]
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
@@ -82,10 +83,9 @@ reactive_graph = "0.2"
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
 # store distribution (spec §12.2). Hand-synced with Frust's own root
-# `Cargo.toml`, `examples/huddle/Cargo.toml`, and
-# `examples/bubblebench/Cargo.toml` (see `docs/DEVELOPMENT.md`'s Version-Pin
-# Policy hand-sync rule) — see any of those manifests for the full measured
-# rationale behind `lto = "fat"` + `codegen-units = 1`.
+# `Cargo.toml` and `examples/huddle/Cargo.toml` (see `docs/DEVELOPMENT.md`'s
+# Version-Pin Policy hand-sync rule) — see either of those manifests for the
+# full measured rationale behind `lto = "fat"` + `codegen-units = 1`.
 [features]
 # Release-lean log ceiling — see the `log` dependency above for why this is a
 # release-only opt-in rather than an unconditional manifest feature. The CLI

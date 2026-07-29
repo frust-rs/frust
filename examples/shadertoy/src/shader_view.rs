@@ -1,6 +1,7 @@
 //! `ShaderView`: the escape-hatch `View`/`Widget` pair painting a fullscreen,
 //! continuously-animated fragment-shader quad ([`frust_scene::ShaderProgram`])
-//! — the same hand-rolled pattern as `examples/bubblebench/src/chart.rs`'s
+//! — the same hand-rolled pattern as
+//! `benchmarks/frust_bench/src/scenarios/s1_animation/chart.rs`'s
 //! `BubbleChart`.
 
 use frust::{FrameTime, RwSignal, Set};
@@ -92,7 +93,9 @@ impl<State: 'static> View<State> for ShaderView {
 
 impl ShaderViewWidget {
     /// Count this painted frame and publish the measured rate ~once a second
-    /// (identical cadence to `examples/bubblebench/src/chart.rs`'s `track_fps`).
+    /// (identical cadence to
+    /// `benchmarks/frust_bench/src/scenarios/s1_animation/chart.rs`'s
+    /// `track_fps`).
     ///
     /// `presented` is the shell's running presented-frame count
     /// (`PaintCtx::presented_frames`), or `None` when no shell wired one. **When

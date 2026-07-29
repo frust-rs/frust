@@ -1,0 +1,180 @@
+[package]
+name = "frust-camera"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# CameraError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# The Android nativeOn* export stubs and the Apple backend's own diagnostics
+# both log rather than print (platform plugins never own stdout/stderr the
+# way `frust-drive` does) — a leaf, framework-free dependency.
+log = { workspace = true }
+
+# The Android `(JavaVM, application Context)` platform-handle substrate this
+# crate's Android backend calls through (`frust_plugin::android::with_jni_env`
+# — the `FrustBiometric` classloader-lookup mechanism secure-storage
+# pioneered, `plugins/secure-storage/src/android.rs`). Unconditional per the
+# task: **no other `frust-*` dependency** — the platform-plugin charter (see
+# `docs/ARCHITECTURE.md`'s Module Structure / `docs/CODE_STANDARDS.md`'s
+# Plugin Conventions).
+frust-plugin = { path = "../../crates/frust-plugin" }
+
+# Android: the plugin's own JNI exports (`Java_dev_frust_camera_FrustCameraHost_native*`
+# — the frozen Kotlin↔Rust contract, task file's table) and the Rust→Kotlin
+# `FrustCameraHost` calls (task 06) both need `jni` directly — matching
+# `frust-shared-preferences`'/`frust-secure-storage`'s Android arm (their own
+# JNI signature calls don't go through `frust-plugin`'s re-export alone).
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# Apple (iOS; macOS desktop preview shares this arm like the other plugins):
+# AVFoundation via `objc2-av-foundation` — session config, device discovery +
+# permission, `AVCapturePhotoOutput`/`AVCaptureVideoDataOutput` sample
+# delegates (Plan Phase 2/3), the `AVCaptureVideoPreviewLayer` the Swift
+# preview factory hosts. Every objc2 crate below is `default-features =
+# false` + an explicit feature list (RESEARCH-REFRESH.md §5: 171 flags, 168
+# default-on — pulling the default set would compile in the whole
+# AVFoundation/AVKit/CoreImage surface this plugin never touches).
+#
+# Not `{ workspace = true }` for any of these: Cargo's workspace-dependency
+# inheritance forbids a member from overriding `default-features` unless the
+# workspace-level entry already sets it explicitly, and none of these do (see
+# `objc2-foundation`'s comment in `plugins/secure-storage/Cargo.toml` for the
+# same restriction) — so every version below repeats the workspace pin
+# literally instead of inheriting.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { workspace = true }
+# `alloc`/`std`: baseline. `NSString`/`NSError`/`NSObject`: error messages and
+# the capture-delegate base class (task 07, `define_class!`). `NSArray`:
+# device-discovery-session result lists. `NSData`: TASK-02 GAP (added by task
+# 07) — `AVCapturePhoto.fileDataRepresentation()` returns an `NSData` the
+# still-capture delegate flattens to bytes, and `objc2-av-foundation` enables
+# only `objc2-foundation/alloc` itself, so naming the type needs this feature
+# here. `NSNotification`: session runtime-error/interruption notifications
+# (Phase 2). `NSDictionary` + `NSValue` (which is where `NSNumber` lives) +
+# `objc2-core-foundation`: TASK-02 GAP (added by task 09) — the image stream
+# pins its delivered pixel format through
+# `AVCaptureVideoDataOutput.videoSettings`, a
+# `{kCVPixelBufferPixelFormatTypeKey: NSNumber}` dictionary whose key is a
+# CoreVideo `CFString`, and the `CFString`→`NSString` toll-free-bridge `AsRef`
+# impls are behind this crate's own `objc2-core-foundation` feature. That
+# feature adds no package to the graph (`objc2-core-foundation` is already
+# there, via `objc2-av-foundation`/`objc2-core-video`).
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSObject",
+    "NSString",
+    "NSError",
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSNotification",
+    "NSValue",
+    "objc2-core-foundation",
+] }
+# TASK-02 GAP (added by task 07): the `AVCaptureDevice
+# requestAccessForMediaType:completionHandler:` permission bridge needs to
+# *construct* a block (`block2::RcBlock`), not just name the `DynBlock`
+# parameter type `objc2-av-foundation` re-exports nothing of — so `block2` has
+# to be a direct dependency, not only an `objc2-av-foundation` feature. Version
+# range matches what `objc2-av-foundation 0.3.2` itself requires
+# (`>=0.6.1, <0.8.0`); `0.6.2` was already in `Cargo.lock` transitively, so
+# this edge resolves to the same version and moves no pin.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+# `objc2-av-foundation 0.3.2` requires `objc2 >=0.6.2, <0.8.0` (permits
+# 0.7.x — RESEARCH-REFRESH.md §5 correction; do not write "requires objc2
+# ^0.6"). Coverage, one feature per RESEARCH-REFRESH.md §5's confirmed
+# surface:
+#   - `AVCaptureSession`/`AVCaptureSessionPreset`: session config,
+#     begin/commitConfiguration, `AVCaptureConnection.videoRotationAngle`.
+#   - `AVCaptureDevice`: device discovery,
+#     `requestAccessForMediaType:completionHandler:` (permission).
+#   - `AVCaptureInput`: `AVCaptureDeviceInput`.
+#   - `AVCaptureOutputBase`: the shared output base `AVCapturePhotoOutput`/
+#     `AVCaptureVideoDataOutput` build on (both `#[cfg]` on it internally).
+#   - `AVCapturePhotoOutput`: still capture + `AVCapturePhotoCaptureDelegate`.
+#   - `AVCaptureVideoDataOutput`: the image-stream output (task 09) +
+#     `AVCaptureVideoDataOutputSampleBufferDelegate`.
+#   - `AVCaptureVideoPreviewLayer`: the Swift preview factory's CALayer.
+#   - `AVMediaFormat`: the `AVMediaTypeVideo` constant every capture-input/
+#     device call needs.
+#   - `AVError`: the AVFoundation `NSError` domain/code constants.
+#   - `block2`: NOT in the plan's original dependency list, but required —
+#     `AVCaptureDevice.rs`'s `requestAccessForMediaType_completionHandler`
+#     references `block2::DynBlock` unconditionally once `AVCaptureDevice` is
+#     enabled (no `#[cfg(feature = "block2")]` gate of its own), so omitting
+#     it fails the Apple compile gate. Verified against the vendored
+#     `objc2-av-foundation-0.3.2` source, 2026-07-26.
+#   - `dispatch2`/`objc2-core-media`/`objc2-core-video`/`objc2-quartz-core`:
+#     the serial dispatch queue + sibling-crate types
+#     (`objc2-av-foundation`'s own optional-dependency features, activated
+#     here so its `#[cfg(feature = "...")]`-gated methods — `CMSampleBuffer`
+#     access, `CVPixelBuffer` plane access, the `CALayer` preview layer base —
+#     actually compile in).
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVCaptureSession",
+    "AVCaptureSessionPreset",
+    "AVCaptureDevice",
+    "AVCaptureInput",
+    "AVCaptureOutputBase",
+    "AVCapturePhotoOutput",
+    "AVCaptureVideoDataOutput",
+    "AVCaptureVideoPreviewLayer",
+    "AVMediaFormat",
+    "AVError",
+    "bitflags",
+    "block2",
+    "dispatch2",
+    "objc2-core-foundation",
+    "objc2-core-media",
+    "objc2-core-video",
+    "objc2-quartz-core",
+] }
+# `CMSampleBuffer`/`CMTime`: the sample-buffer delegate's per-frame timing and
+# plane access (task 09). `CMFormatDescription`: the sample buffer's media
+# format. `objc2-core-video`: TASK-02 GAP (added by task 09) —
+# `CMSampleBuffer::image_buffer()` (the `CVPixelBuffer` every streamed frame
+# hangs off) is `#[cfg]`-gated on it. Direct dependency (not just
+# `objc2-av-foundation`'s transitively activated one) since `apple.rs` names
+# `objc2_core_media` types itself.
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "std",
+    "CMBase",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMTime",
+    "objc2-core-video",
+] }
+# `CVPixelBuffer`: zero-copy plane access for the image stream (task 09,
+# `CVPixelBufferLockBaseAddress`/`GetBaseAddressOfPlane`). `CVReturn`:
+# TASK-02 GAP (added by task 09) — the lock/unlock pair returns a `CVReturn`
+# and is `#[cfg]`-gated on that feature, so without it those two symbols are
+# simply absent.
+objc2-core-video = { version = "0.3", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+] }
+# `CALayer` ONLY — `AVCaptureVideoPreviewLayer` itself lives in
+# `objc2-av-foundation` (RESEARCH-REFRESH.md §5 correction), not here.
+# `CAMediaTiming` matches `objc2-av-foundation`'s own internal feature
+# request for this crate (its `AVCaptureVideoPreviewLayer` feature needs it).
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "CALayer",
+    "CAMediaTiming",
+] }
+# The serial dispatch queue the video-data-output sample delegate (task 09)
+# and photo-capture delegate (task 07) run on.
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2",
+] }

@@ -12,9 +12,9 @@
 //! [`SizedBox`] wrapping an [`Image`] over a 1×1 solid-color [`ImageSource`]
 //! stretched with [`ImageFit::Fill`] — the same facade-only technique
 //! `examples/huddle`'s `ui::solid_source` helper uses, reproduced locally here
-//! (this task's scope is this file alone). Radius chips instead reuse
-//! [`frust::glyph::skeleton`] (`.radius(..)`) as the closest existing
-//! facade-level rounded-box primitive.
+//! (this task's scope is this file alone). Radius chips are a static
+//! rounded-rect fill (task 02-foundations-static-specimens: replaced
+//! [`frust::glyph::skeleton`] with a local [`StaticRoundedRect`] view).
 //!
 //! # Unmapped Glyph text tokens
 //!
@@ -28,13 +28,87 @@
 
 use frust::{
     AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, GlyphInk, Image, ImageFit,
-    ImageSource, Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any, glyph,
+    ImageSource, Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any,
     inflexible, text, use_context,
 };
+use frust_core::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+};
+use kurbo::Size;
 
 use crate::CatalogState;
 
 // ---- Local facade-only helpers (this file's own scope; see module docs) ---
+
+/// A static rounded-rect fill widget — the facade lacks a built-in
+/// "filled rounded box" primitive (API friction), so this local view/widget
+/// pair paints a fixed-size, non-animating rounded rectangle filled with a
+/// theme-resolved color.
+struct StaticRoundedRectView {
+    width: f64,
+    height: f64,
+    radius: f64,
+    color: Color,
+}
+
+impl StaticRoundedRectView {
+    /// Create a static rounded-rect fill `width` × `height`, with corner
+    /// radius `radius`, filled with the resolved `color`.
+    fn new(width: f64, height: f64, radius: f64, color: Color) -> Self {
+        StaticRoundedRectView {
+            width: width.max(0.0),
+            height: height.max(0.0),
+            radius,
+            color,
+        }
+    }
+}
+
+impl<State: 'static> View<State> for StaticRoundedRectView {
+    type Element = StaticRoundedRectWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> StaticRoundedRectWidget {
+        StaticRoundedRectWidget {
+            width: self.width,
+            height: self.height,
+            radius: self.radius,
+            color: self.color,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        element: &mut StaticRoundedRectWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        element.width = self.width;
+        element.height = self.height;
+        element.radius = self.radius;
+        element.color = self.color;
+        ChangeFlags::PAINT
+    }
+}
+
+/// The retained widget for [`StaticRoundedRectView`].
+struct StaticRoundedRectWidget {
+    width: f64,
+    height: f64,
+    radius: f64,
+    color: Color,
+}
+
+impl Widget for StaticRoundedRectWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(Size::new(self.width, self.height))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let origin = ctx.origin();
+        let size = ctx.size();
+        scene.fill_rounded_rect(origin, size, self.radius, self.color);
+    }
+}
 
 /// A 1×1 solid-color [`ImageSource`] — the facade-only way to paint an
 /// arbitrary filled rectangle (mirrors `examples/huddle`'s
@@ -164,19 +238,26 @@ fn type_specimen(view: TextView, meta: &str, label_color: Color) -> AnyView<Cata
     ))
 }
 
-/// One radius chip: a themed-fill rounded box (via [`glyph::skeleton`],
-/// this file's closest available rounded-rect primitive — see the module
-/// docs) at `radius`, sized against [`RADIUS_CHIP_SIZE`], labeled underneath.
-fn radius_chip(label: &str, radius: f64, label_color: Color) -> AnyView<CatalogState> {
+/// One radius chip: a static rounded-rect fill at `radius`, sized against
+/// [`RADIUS_CHIP_SIZE`], filled with `fill_color`, labeled underneath.
+fn radius_chip(
+    label: &str,
+    radius: f64,
+    fill_color: Color,
+    label_color: Color,
+) -> AnyView<CatalogState> {
     let resolved = ShapeScale::resolve(radius, RADIUS_CHIP_SIZE, RADIUS_CHIP_SIZE);
     any(Padding(
         EdgeInsets::all(8.0),
         FlexView::new(
             Axis::Vertical,
             vec![
-                inflexible(any(
-                    glyph::skeleton(RADIUS_CHIP_SIZE, RADIUS_CHIP_SIZE).radius(resolved)
-                )),
+                inflexible(any(StaticRoundedRectView::new(
+                    RADIUS_CHIP_SIZE,
+                    RADIUS_CHIP_SIZE,
+                    resolved,
+                    fill_color,
+                ))),
                 inflexible(any(mono_label(label.to_string(), label_color))),
             ],
         )
@@ -386,15 +467,16 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
     ));
 
     // ---- Radius scale -----------------------------------------------------
+    let raised_bg = scheme.surface_container_high;
     page_children.push(section(
         "Radius scale",
-        Some("4 / 6 / 10 / 16 / full, theme.shape — painted via glyph::skeleton(..).radius(..)"),
+        Some("4 / 6 / 10 / 16 / full, theme.shape — static rounded-rect fill"),
         any(Row(vec![
-            radius_chip("4px", shape.extra_small, muted),
-            radius_chip("6px", shape.small, muted),
-            radius_chip("10px", shape.medium, muted),
-            radius_chip("16px", shape.large, muted),
-            radius_chip("full", shape.full, muted),
+            radius_chip("4px", shape.extra_small, raised_bg, muted),
+            radius_chip("6px", shape.small, raised_bg, muted),
+            radius_chip("10px", shape.medium, raised_bg, muted),
+            radius_chip("16px", shape.large, raised_bg, muted),
+            radius_chip("full", shape.full, raised_bg, muted),
         ])),
     ));
 

@@ -65,15 +65,24 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
 /// (spec §10.2, Makepad `app_main!` precedent).
 ///
-/// Stamps out the fourteen `frust_*` symbols the generated Swift app declares
+/// Stamps out the nineteen `frust_*` symbols the generated Swift app declares
 /// (the seven lifecycle/input exports, the three text-input exports —
 /// `frust_ime_apply`, `frust_ime_state_json`, `frust_string_free` —
 /// `frust_set_appearance` (task 08's dark-mode export),
 /// `frust_on_deep_link` (task 07's cold-start/running deep-link delivery),
 /// `frust_init_accessibility` (phase-6d task 05's accesskit adapter
 /// attach — the one export whose UIView pointer the CAMetalLayer-only
-/// `frust_init` cannot supply), plus `frust_set_insets` (device-parity
-/// task 06's SafeArea inset delivery)), each delegating to the non-generic runtime in
+/// `frust_init` cannot supply), `frust_set_insets` (device-parity
+/// task 06's SafeArea inset delivery), `frust_system_ui_state`
+/// (glyph-refinements task 10's system-UI override peek — see
+/// `ffi_glue::system_ui_state`), plus `frust_set_surface_mode` and
+/// `frust_platform_view_commands_json` (platform-views task 06's
+/// translucent-surface opt-in latch and command-backlog peek getter — see
+/// `ffi_glue::set_surface_mode`/`ffi_glue::platform_view_commands_json`),
+/// plus `frust_set_present_sync` and `frust_present_frame` (camera task 13's
+/// present-sync latch and its per-tick UI-thread present — see
+/// `ffi_glue::set_present_sync`/`ffi_glue::present_frame`)),
+/// each delegating to the non-generic runtime in
 /// [`ffi_glue`]. `frust_init` constructs the app's erased view tree and returns
 /// an opaque handle; the rest operate on that handle. It also initializes the
 /// process-wide
@@ -289,6 +298,68 @@ macro_rules! ios_app {
             url: *const ::core::ffi::c_char,
         ) {
             $crate::ffi_glue::on_deep_link(handle, url)
+        }
+
+        /// `frust_system_ui_state`: peek the process-wide system-UI override
+        /// slot (task 03) for `FrustViewController`'s per-frame poll — see
+        /// `ffi_glue::system_ui_state`'s doc comment for the returned `u64`'s
+        /// packing scheme and the iOS status-bar/home-indicator mapping table.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_system_ui_state(handle: *mut ::core::ffi::c_void) -> u64 {
+            $crate::ffi_glue::system_ui_state(handle)
+        }
+
+        /// `frust_set_surface_mode`: latch the process-wide translucent-surface
+        /// opt-in (platform-views task 06) — callable BEFORE `frust_init`.
+        /// `translucent` is `0`/`1` (no `<stdbool.h>` precedent in this crate's
+        /// ABI, mirroring `frust_set_appearance`'s `dark: u8`). Takes no handle:
+        /// the slot is process-global.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_set_surface_mode(translucent: u8) {
+            $crate::ffi_glue::set_surface_mode(translucent)
+        }
+
+        /// `frust_platform_view_commands_json`: the platform-view command
+        /// backlog (platform-views task 06) as a heap-allocated JSON C string
+        /// the caller must release with `frust_string_free`. `ack_generation`
+        /// is the generation the caller last finished applying (`0` on the
+        /// first call); returns null on the no-change fast path
+        /// (`generation == ack_generation`) or with no live handle.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_platform_view_commands_json(
+            handle: *mut ::core::ffi::c_void,
+            ack_generation: u64,
+        ) -> *mut ::core::ffi::c_char {
+            $crate::ffi_glue::platform_view_commands_json(handle, ack_generation)
+        }
+
+        /// `frust_set_present_sync`: latch the process-wide present-sync
+        /// opt-in (camera task 13) — callable BEFORE `frust_init`, like
+        /// `frust_set_surface_mode`, and paired in the same host branch with
+        /// `CAMetalLayer.presentsWithTransaction = true`. `enabled` is `0`/`1`.
+        /// Armed, the render thread hands each submitted frame to the UI
+        /// thread, which presents it via `frust_present_frame` inside the
+        /// `CATransaction` that commits platform-view geometry — so frust's
+        /// surface and its native siblings land in one visual frame with the
+        /// render-thread split still on (see `ffi_glue::set_present_sync`).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_set_present_sync(enabled: u8) {
+            $crate::ffi_glue::set_present_sync(enabled)
+        }
+
+        /// `frust_present_frame`: present the frame the render thread parked
+        /// for the UI thread (camera task 13). Called once per
+        /// `CADisplayLink` tick, right after `FrustViewHost.poll`. A no-op
+        /// when present-sync is unarmed, on the inline render path, or on a
+        /// gate-skipped tick (see `ffi_glue::present_frame`).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_present_frame(handle: *mut ::core::ffi::c_void) {
+            $crate::ffi_glue::present_frame(handle)
         }
     };
 }

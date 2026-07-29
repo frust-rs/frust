@@ -40,7 +40,7 @@
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread::JoinHandle;
 
@@ -58,16 +58,20 @@ use frust_reactive::{ReactiveRuntime, handles_back, push_back_press, push_deep_l
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
-    AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceSize, guard,
+    AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceMode,
+    SurfaceModeWatcher, SurfaceSize, ViewCommand, declare_host_translucent_surface, guard,
     next_render_phase, render_channel, render_thread_enabled, run_guarded_thread,
     scene_return_channel,
 };
 use frust_text::TextContext;
 
-use crate::app::{AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor};
+use crate::app::{
+    AndroidAppHandle, FrameExecutor, InlineExecutor, PaintedScene, RenderSignals, SplitExecutor,
+};
 use crate::ffi_support::{
-    ImeJsonState, build_ime_state_json, load_pipeline_cache, normalize_ime_indices,
-    pipeline_cache_differs, pipeline_cache_path, write_pipeline_cache_atomic,
+    ImeJsonState, PlatformViewCommandJson, build_ime_state_json, build_platform_view_commands_json,
+    load_pipeline_cache, normalize_ime_indices, pipeline_cache_differs, pipeline_cache_path,
+    platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
 };
 
 /// Startup-span name (task 13): the persisted pipeline-cache blob has been read
@@ -155,6 +159,40 @@ static PLATFORM_INIT: Once = Once::new();
 /// stays valid for the process lifetime (a dropped `Global` would invalidate
 /// it). Set exactly once, under [`PLATFORM_INIT`]; never taken out or dropped.
 static CONTEXT_GLOBAL: OnceLock<Global<JObject<'static>>> = OnceLock::new();
+
+/// Process-wide "a surface has begun being created" flag (platform-views
+/// task 05): stored `true` at the top of [`create_handle`], read by
+/// [`native_set_surface_mode`] to warn on a too-late latch call. The
+/// translucent-surface opt-in ([`frust_shell_common::surface_mode`]'s module
+/// docs' Latch contract) is pre-init-only — the surface format is fixed at
+/// creation — so a call after this flag flips has no effect on the current
+/// surface; best-effort (this flag flips once per process, at the first
+/// `nativeInit`, not per-handle).
+static ANY_SURFACE_CREATED: AtomicBool = AtomicBool::new(false);
+
+/// Resolve the [`frust_render::SurfaceAlphaRequest`] a surface-creation call
+/// should pass, from the process-wide translucent-surface latch
+/// ([`SurfaceModeWatcher::current`], platform-views task 03/05):
+/// [`SurfaceMode::Translucent`] resolves to
+/// [`frust_render::SurfaceAlphaRequest::TranslucentPreferred`] (task 04's
+/// capability-probed resolution table then picks the actual
+/// `wgpu::CompositeAlphaMode`), [`SurfaceMode::Opaque`] (the default) to
+/// today's unchanged [`frust_render::SurfaceAlphaRequest::Opaque`]. Read
+/// fresh at each surface-creation call site rather than cached, since the
+/// latch itself never reverts once set — a stale cached `false` read before
+/// a same-process `nativeSetSurfaceMode(true)` call would otherwise survive
+/// past it.
+///
+/// This produces the REQUEST only. Whether the surface actually came up
+/// translucent is a separate, per-install value the UI thread reads from the
+/// `translucent_resolved` flag [`install_surface`] publishes (review finding
+/// M1) — never re-derive "am I translucent?" from this function.
+fn surface_alpha_request() -> frust_render::SurfaceAlphaRequest {
+    match SurfaceModeWatcher::current() {
+        SurfaceMode::Translucent => frust_render::SurfaceAlphaRequest::TranslucentPreferred,
+        SurfaceMode::Opaque => frust_render::SurfaceAlphaRequest::Opaque,
+    }
+}
 
 /// `JNI_OnLoad`: the JVM calls this once when the native library is loaded, well
 /// before the first `nativeInit` (task 19, spec §14 phase 7.E). It captures the
@@ -500,6 +538,7 @@ fn install_surface(
     cache_path: Option<&Path>,
     startup_spans: &mut Option<StartupSpans>,
     first_install: bool,
+    translucent_resolved: &AtomicBool,
 ) -> Result<()> {
     // Load + seed the pipeline cache before the surface (and thus vello's
     // renderer + pipeline cache) is created — first install only. The cache
@@ -529,9 +568,23 @@ fn install_surface(
             window_ptr,
             width.max(1),
             height.max(1),
+            surface_alpha_request(),
         )
     })
     .context("frust-shell-android: failed to create Android render surface")?;
+
+    // Publish the surface's RESOLVED translucency to the UI thread (review
+    // finding M1): `surface_alpha_request()` above is only what we ASKED for —
+    // `frust-render` resolves it against the platform's advertised alpha modes
+    // and can fall back to an opaque swapchain. The UI thread reads this flag
+    // every frame (`AndroidAppHandle::sync_translucent_resolved`) before
+    // choosing the base color and pushing `set_surface_translucent`, so a
+    // fallback degrades to the Mode A contract instead of `DestOut`-punching
+    // black rectangles. Written on EVERY (re)install, never only the first.
+    publish_resolved_translucency(
+        translucent_resolved,
+        Some(renderer.surface_resolved_translucent()),
+    );
 
     if first_install {
         if let Some(spans) = startup_spans.as_mut() {
@@ -580,6 +633,15 @@ const THREAD_PRIORITY_DISPLAY: libc::c_int = -4;
 /// otherwise leaves a permanent black screen with no platform signal). Later
 /// reinstall failures stay log-only.
 ///
+/// `translucent_resolved` is the resolved-translucency seam (review finding
+/// M1): this thread creates the surface, so only it can see whether the
+/// requested translucent alpha mode was actually granted. It stores the
+/// outcome on every (re)install (and clears it on a failed one) for the UI
+/// thread — which owns the `RenderRoot` and the per-frame base color — to read
+/// each frame. Seeded from the REQUEST by
+/// [`spawn_split_executor`], so the common (capable) case is Mode B from frame
+/// 1 and only a real resolution can downgrade it.
+///
 /// [`UiSpans`]: frust_shell_common::perf::UiSpans
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableWindowPtr>,
@@ -587,7 +649,8 @@ pub(crate) fn render_loop(
     cache_dir: Option<String>,
     fatal: Arc<AtomicBool>,
     scene_return: SceneReturnSender<Scene>,
-    presented: Arc<AtomicU64>,
+    signals: Arc<RenderSignals>,
+    translucent_resolved: Arc<AtomicBool>,
 ) {
     // Render-thread priority self-boost (phase-11 fix F6): raise this dedicated
     // render thread to the display band so a busy UI thread can't starve the GPU
@@ -651,9 +714,16 @@ pub(crate) fn render_loop(
                         cache_path.as_deref(),
                         &mut startup_spans,
                         first_install,
+                        &translucent_resolved,
                     ) {
                         Ok(()) => first_install_done = true,
                         Err(err) => {
+                            // A failed (re)install leaves no surface whose
+                            // translucency we can vouch for — clear the flag
+                            // rather than leaving the previous surface's value
+                            // standing (review M1: never punch a hole you
+                            // can't prove is a window).
+                            publish_resolved_translucency(&translucent_resolved, None);
                             log::error!(
                                 "frust-shell-android: render-thread surface install failed: {err:#}"
                             );
@@ -718,7 +788,12 @@ pub(crate) fn render_loop(
                     &mut frame_stats,
                     &mut startup_spans,
                     perf_on,
-                    &presented,
+                    &signals,
+                    // Which frame this scene is — the UI thread stamped it into
+                    // `FrameMeta` at submission; `render_scene` publishes it back
+                    // out on an actual present, for the platform-view release
+                    // gate to pair a geometry batch against (camera task 01).
+                    frame.meta.frame_id,
                 );
             }
             // Give the drained scene back for the UI thread to reclaim (review
@@ -802,6 +877,12 @@ fn create_handle(
     cache_dir: Option<String>,
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> Result<jlong> {
+    // Mark that a surface has begun being created in this process (task 05):
+    // read by `native_set_surface_mode` to warn on a too-late latch call. Set
+    // unconditionally here, before the fallible steps below, since the latch
+    // contract only cares "was init attempted", not whether it succeeded.
+    ANY_SURFACE_CREATED.store(true, Ordering::Release);
+
     // Cold-start span recorder (task 08, spec §14 phase 7.A). `begin()` marks
     // the epoch; every span below is a delta from here, closed out by the first
     // successful render. A no-op recorder (allocates nothing further) when
@@ -830,10 +911,35 @@ fn create_handle(
     // Both retain `window` in `AndroidAppHandle` (the UI thread owns the
     // `NativeWindow` and releases it only after the render thread — split — acks
     // dropping the surface built from its pointer).
+    // The resolved-translucency seam (review finding M1). SEEDED FROM THE
+    // REQUEST: the surface is created asynchronously on the render thread in
+    // the default split, and an all-but-certain grant (the shipped Android
+    // config resolves `Inherit`) should not cost a Mode-A flash on frame 1 —
+    // so the optimistic value stands until the render thread reports a real
+    // resolution, which can only ever downgrade it. One clone per surface
+    // owner (render thread or inline renderer), one in the handle for the UI
+    // thread's per-frame read.
+    let translucent_resolved = Arc::new(AtomicBool::new(
+        SurfaceModeWatcher::current() == SurfaceMode::Translucent,
+    ));
+
     let (executor, text_ctx) = if render_thread_enabled() {
-        spawn_split_executor(startup_spans, &window, physical, scale, cache_dir)
+        spawn_split_executor(
+            startup_spans,
+            &window,
+            physical,
+            scale,
+            cache_dir,
+            Arc::clone(&translucent_resolved),
+        )
     } else {
-        build_inline_executor(startup_spans, &window, physical, cache_dir)?
+        build_inline_executor(
+            startup_spans,
+            &window,
+            physical,
+            cache_dir,
+            &translucent_resolved,
+        )?
     };
 
     // Process-once (the runtime's own `OnceLock` provides that property; a
@@ -858,7 +964,15 @@ fn create_handle(
     // desktop shell's per-frame `with_owner` wrap and the facade `run()` init.
     let handle = rt.with_owner(|| {
         let app = make_app();
-        AndroidAppHandle::new(executor, text_ctx, window, physical, scale, app)
+        AndroidAppHandle::new(
+            executor,
+            text_ctx,
+            window,
+            physical,
+            scale,
+            translucent_resolved,
+            app,
+        )
     });
 
     // SAFETY: hand a uniquely-owned boxed handle to the JVM as `jlong`; it is
@@ -879,6 +993,7 @@ fn build_inline_executor(
     window: &NativeWindow,
     physical: (u32, u32),
     cache_dir: Option<String>,
+    translucent_resolved: &AtomicBool,
 ) -> Result<(FrameExecutor, TextContext)> {
     let mut renderer = frust_render::SurfaceRenderer::new();
 
@@ -925,9 +1040,19 @@ fn build_inline_executor(
             window_ptr,
             physical.0,
             physical.1,
+            surface_alpha_request(),
         )
     })
     .context("frust-shell-android: failed to create Android render surface")?;
+
+    // Replace the request-seeded optimism with the real resolution (review
+    // finding M1) — on this path the renderer lives on the UI thread, so the
+    // handle's per-frame sync re-reads it from the renderer anyway; storing it
+    // here keeps the flag correct for the construction-time push too.
+    publish_resolved_translucency(
+        translucent_resolved,
+        Some(renderer.surface_resolved_translucent()),
+    );
 
     startup_spans.record(perf::SPAN_ADAPTER_READY);
     startup_spans.record(perf::SPAN_DEVICE_READY);
@@ -964,6 +1089,7 @@ fn spawn_split_executor(
     physical: (u32, u32),
     scale: jfloat,
     cache_dir: Option<String>,
+    translucent_resolved: Arc<AtomicBool>,
 ) -> (FrameExecutor, TextContext) {
     // Font/`TextContext` warmup (phase 10.D) stays UI-side — layout runs on the
     // UI thread. The GPU work is off-thread now, so this join's ordering vs GPU
@@ -988,11 +1114,12 @@ fn spawn_split_executor(
     let fatal = Arc::new(AtomicBool::new(false));
     let fatal_render = Arc::clone(&fatal);
 
-    // Presented-frame counter (task 10): one clone drives into the render thread
-    // (bumped on each `FrameOutcome::Rendered`), one stays in the `SplitExecutor`
-    // for the UI thread to read before paint. Mirrors the `fatal` flag's shape.
-    let presented = Arc::new(AtomicU64::new(0));
-    let presented_render = Arc::clone(&presented);
+    // Present bookkeeping (task 10's counter + camera task 01's presented frame
+    // id): one clone drives into the render thread (recorded on each
+    // `FrameOutcome::Rendered`), one stays in the `SplitExecutor` for the UI
+    // thread to read before paint. Mirrors the `fatal` flag's shape.
+    let signals = Arc::new(RenderSignals::default());
+    let signals_render = Arc::clone(&signals);
 
     // Move `startup_spans` (init_entry + font spans already recorded) into the
     // render thread, which owns the rest of the startup line.
@@ -1009,7 +1136,8 @@ fn spawn_split_executor(
                     cache_dir,
                     fatal_render,
                     scene_return_tx,
-                    presented_render,
+                    signals_render,
+                    translucent_resolved,
                 )
             })
         })
@@ -1029,7 +1157,7 @@ fn spawn_split_executor(
             join,
             fatal,
             scene_return_rx,
-            presented,
+            signals,
         )),
         text_ctx,
     )
@@ -1147,7 +1275,11 @@ pub fn native_on_surface_changed(
             // window is released.
             pollster::block_on(unsafe {
                 renderer.on_surface_created_from_android_window(
-                    render_cx, window_ptr, physical.0, physical.1,
+                    render_cx,
+                    window_ptr,
+                    physical.0,
+                    physical.1,
+                    surface_alpha_request(),
                 )
             })
         };
@@ -1229,12 +1361,17 @@ pub fn native_on_resume(handle: jlong) {
     });
 }
 
-/// `nativeOnPause`: activity paused. Bookkeeping only in v0 (see [`native_on_resume`]).
+/// `nativeOnPause`: activity paused. Bookkeeping only in v0 (see
+/// [`native_on_resume`]), plus (platform-views task 05) hiding every
+/// currently-visible platform-view slot: a backgrounded app's native
+/// sibling views should disappear with it rather than linger on top of
+/// whatever now shows behind the (possibly composited-away) frust surface.
 pub fn native_on_pause(handle: jlong) {
     guard("nativeOnPause", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
-        if unsafe { handle_mut(handle) }.is_some() {
+        if let Some(app) = unsafe { handle_mut(handle) } {
             log::debug!("frust-shell-android: onPause");
+            app.suspend_platform_views();
         }
     });
 }
@@ -1350,10 +1487,221 @@ pub fn native_set_appearance(handle: jlong, dark: jboolean) {
     });
 }
 
+/// `nativeSystemUiState`: return the process-wide system-UI override slot's
+/// packed `(generation, mode)` state (task 09) for Kotlin's `doFrame` to poll,
+/// mirroring the proven `nativeImeState`-in-`doFrame` per-frame-poll idiom.
+///
+/// Returns [`frust_shell_common::encoded_state`] verbatim — the packing
+/// scheme (`(generation << 8) | mode_bits`) and its unit tests live in
+/// `frust_shell_common::system_ui`'s module docs, which task 14's Kotlin
+/// decoder is written against; this export is a thin, `guard`-wrapped
+/// one-liner over that already-tested encoding fn, per this task's contract.
+/// The slot is process-global (task 03), not per-handle, so no
+/// `AndroidAppHandle` lookup is needed beyond the standard liveness check
+/// every native call makes: a missing handle returns `0` (generation `0`,
+/// `EdgeToEdge` — "nothing to apply", matching the slot's own initial state
+/// per the module docs) rather than a live peek, so a torn-down native side
+/// never reports a stale mode as pending.
+pub fn native_system_ui_state(handle: jlong) -> jlong {
+    guard("nativeSystemUiState", 0, || {
+        if !crate::ffi_support::handle_is_live(handle) {
+            return 0;
+        }
+        frust_shell_common::encoded_state() as jlong
+    })
+}
+
+/// `nativeSetSurfaceMode`: declare a translucent (alpha-channel) GPU surface
+/// before the surface is created (platform-views task 05).
+///
+/// The generated Kotlin glue calls this **only** from the same
+/// `FRUST_TRANSLUCENT_SURFACE`-gated branch that already set
+/// `SurfaceHolder`'s `PixelFormat.TRANSLUCENT` and arranged the
+/// native-sibling z-order, and always **before** `nativeInit` (template
+/// task 08's contract) — forwarding straight to
+/// [`declare_host_translucent_surface`], the process-wide, one-way pre-init
+/// latch (`frust_shell_common::surface_mode`'s module docs' Latch contract:
+/// the surface format is fixed at creation, so there is no "revert" call and
+/// no live re-flip). Calling this from anywhere other than that host-glue
+/// branch — e.g. without the matching `PixelFormat` already set — is a
+/// host-template bug, not a supported opt-in (review M3); this is why the
+/// underlying function is not re-exported past `frust-shell-common`. A call
+/// after [`ANY_SURFACE_CREATED`] is already set (i.e. after some
+/// `nativeInit` in this process has begun) is logged and is a no-op for the
+/// current surface — it cannot retroactively change a format already
+/// chosen. `translucent == false` is always a no-op too: there is nothing to
+/// "un-latch".
+///
+/// Declaring only sets the *request*: a device advertising no translucent
+/// alpha mode still comes up opaque, and the paint contract follows the
+/// RESOLVED outcome (`frust_render::SurfaceRenderer::surface_resolved_translucent`,
+/// review finding M1), not this latch.
+pub fn native_set_surface_mode(translucent: jboolean) {
+    guard("nativeSetSurfaceMode", (), || {
+        if !translucent {
+            return;
+        }
+        if ANY_SURFACE_CREATED.load(Ordering::Acquire) {
+            log::warn!(
+                "frust-shell-android: nativeSetSurfaceMode(true) called after a surface \
+                 already exists in this process; the translucent-surface latch is \
+                 pre-init-only (v1) and has no effect on the current surface"
+            );
+            return;
+        }
+        declare_host_translucent_surface();
+    });
+}
+
+/// `nativePlatformViewCommands`: return the native-sibling-compositor command
+/// backlog (task 03's differ) as JSON, for Kotlin's per-frame poll —
+/// mirrors [`native_ime_state`]'s shape exactly (fresh JSON per call,
+/// JNI-owned `JString`, guard-wrapped, `null` on a missing handle).
+///
+/// `ack_generation` is the generation Kotlin's own last successful poll
+/// returned (round-tripped back on the next call, `0` on the first ever
+/// poll); this first [`AndroidAppHandle::acknowledge_platform_view_commands`]s
+/// it — compacting the differ's backlog
+/// (`frust_shell_common::platform_view`'s module docs' Generation/
+/// acknowledgement section) — then serializes the resulting
+/// `(generation, &[ViewCommand])` snapshot. A negative `ack_generation`
+/// (untrusted JNI input) clamps to `0` rather than wrapping through the
+/// `as u64` cast.
+///
+/// **Frozen JSON wire contract** (byte-identical, served by task 06's iOS
+/// shell too — see [`build_platform_view_commands_json`]):
+///
+/// ```text
+/// {"generation":7,"commands":[
+///  {"op":"create","slot":3,"viewType":"dev.frust.XFactory","params":"{...}"},
+///  {"op":"update","slot":3,"rect":[x,y,w,h],"clip":[x,y,w,h]|null,"visible":true},
+///  {"op":"updateParams","slot":3,"params":"{...}"},
+///  {"op":"dispose","slot":3}]}
+/// ```
+///
+/// Rects are **PHYSICAL px** — [`platform_view_commands_to_json`] multiplies
+/// the differ's logical-px rects by this handle's stored scale factor at
+/// this boundary (the physical-at-FFI/logical-inside rule, applied outbound
+/// — mirrors [`native_on_insets_changed`]'s inbound direction) so Kotlin does
+/// zero density math.
+///
+/// Returns a null `jstring` on the no-change fast path
+/// ([`platform_view_commands_up_to_date`] — the `nativeSystemUiState`
+/// cheapness bar: a no-change poll costs one JNI call and no allocation) or
+/// when there is no live native handle.
+pub fn native_platform_view_commands(
+    mut env: EnvUnowned,
+    handle: jlong,
+    ack_generation: jlong,
+) -> jstring {
+    guard("nativePlatformViewCommands", std::ptr::null_mut(), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return std::ptr::null_mut();
+        };
+        let ack_generation = ack_generation.max(0) as u64;
+        app.acknowledge_platform_view_commands(ack_generation);
+        // Read the scale up front: the release peek borrows the handle mutably
+        // (the scroll-sync tail records this poll's hold — camera task 12), so
+        // it cannot be re-borrowed while `commands` is alive.
+        let scale = app.sanitized_scale();
+        let (generation, commands) = app.platform_view_commands();
+        if platform_view_commands_up_to_date(generation, ack_generation) {
+            return std::ptr::null_mut(); // no-change fast path
+        }
+        let json_commands = platform_view_commands_to_json(commands, scale);
+        let json = build_platform_view_commands_json(generation, &json_commands);
+        env.with_env(|env| Ok::<JObject, jni::errors::Error>(JString::new(env, &json)?.into()))
+            .resolve::<LogErrorAndDefault>()
+            .into_raw()
+    })
+}
+
+/// `nativeSetFrameTimeline`: hand this tick's Choreographer frame-timeline
+/// delta (`expectedPresentationTimeNanos − frameTimeNanos`, API 33+) to the
+/// scroll-sync tail (camera task 12) — the one signal in this shell only the
+/// JVM side can read (`Choreographer.postVsyncCallback` has no NDK equivalent
+/// in this crate's dependency set).
+///
+/// Kotlin pushes it once per `doFrame` **while a platform view is actually
+/// hosted**, and pushes `0` otherwise; `0` (and any implausible value) leaves
+/// the platform-view release path gate-only, so an app that never hosts a
+/// native sibling — or runs below API 33 — pays nothing and behaves exactly as
+/// before. Fire-and-forget: no return value, no ordering requirement beyond
+/// "before this tick's `nativeOnFrame`", and a missing handle is a no-op.
+pub fn native_set_frame_timeline(handle: jlong, expected_present_delta_nanos: jlong) {
+    guard("nativeSetFrameTimeline", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_frame_timeline(expected_present_delta_nanos);
+        }
+    })
+}
+
+/// Map the differ's [`ViewCommand`] backlog (task 03) onto the host-testable
+/// [`PlatformViewCommandJson`] the JSON builder consumes, converting each
+/// rect/clip from the differ's logical px to **physical** px at this FFI
+/// boundary — mirrors [`ime_state_to_json`]'s caret-rect conversion.
+fn platform_view_commands_to_json(
+    commands: &[ViewCommand],
+    scale: f64,
+) -> Vec<PlatformViewCommandJson> {
+    commands
+        .iter()
+        .map(|cmd| match cmd {
+            ViewCommand::Create {
+                slot_id,
+                view_type,
+                params_json,
+                interactive,
+            } => PlatformViewCommandJson::Create {
+                slot_id: *slot_id,
+                view_type: view_type.clone(),
+                params_json: params_json.clone(),
+                interactive: *interactive,
+            },
+            ViewCommand::Update {
+                slot_id,
+                rect,
+                clip,
+                visible,
+                shields,
+            } => PlatformViewCommandJson::Update {
+                slot_id: *slot_id,
+                rect: scale_rect(*rect, scale),
+                clip: clip.map(|c| scale_rect(c, scale)),
+                visible: *visible,
+                shields: shields.iter().map(|s| scale_rect(*s, scale)).collect(),
+            },
+            ViewCommand::UpdateParams {
+                slot_id,
+                params_json,
+            } => PlatformViewCommandJson::UpdateParams {
+                slot_id: *slot_id,
+                params_json: params_json.clone(),
+            },
+            ViewCommand::Dispose { slot_id } => {
+                PlatformViewCommandJson::Dispose { slot_id: *slot_id }
+            }
+        })
+        .collect()
+}
+
+/// Scale one differ rect (logical px) to physical px, as the `(x, y, width,
+/// height)` tuple [`PlatformViewCommandJson`]'s JSON builder expects.
+fn scale_rect(rect: kurbo::Rect, scale: f64) -> (f32, f32, f32, f32) {
+    (
+        (rect.x0 * scale) as f32,
+        (rect.y0 * scale) as f32,
+        (rect.width() * scale) as f32,
+        (rect.height() * scale) as f32,
+    )
+}
+
 /// `nativeOnDeepLink`: deliver a platform deep link (cold-start, forwarded
-/// from `MainActivity.onCreate`'s `intent?.data`, or running, from
-/// `MainActivity.onNewIntent` — see `templates/app/android.tmpl`'s
-/// `MainActivity`/`FrustSurfaceView` queue-until-handle-ready contract,
+/// from `FrustActivity.onCreate`'s `intent?.data`, or running, from
+/// `FrustActivity.onNewIntent` — see `platform/android/frust-embedding/src/main/kotlin/dev/frust/`'s
+/// `FrustActivity`/`FrustSurfaceView` queue-until-handle-ready contract,
 /// task 07) into the process-wide deep-link source
 /// ([`frust_reactive::push_deep_link`]).
 ///

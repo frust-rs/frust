@@ -57,21 +57,22 @@ use anyhow::{Context, Result, bail};
 
 use frust_core::event::{EditingState, ImeState};
 use frust_reactive::{ReactiveRuntime, push_deep_link};
-use frust_render::{RenderContext, SurfacePhase, SurfaceRenderer};
+use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
-    AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceSize, guard,
-    next_render_phase, render_channel, render_thread_enabled, run_guarded_thread,
-    scene_return_channel,
+    AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceMode,
+    SurfaceModeWatcher, SurfaceSize, guard, next_render_phase, render_channel,
+    render_thread_enabled, run_guarded_thread, scene_return_channel,
 };
 use frust_text::TextContext;
 
 use crate::accessibility::IosA11yAdapter;
 use crate::app::{
-    FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, SplitExecutor, render_scene,
+    FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, PresentHandoff, SplitExecutor,
+    render_scene,
 };
-use crate::ffi_support::CaretRect;
+use crate::ffi_support::{CaretRect, publish_resolved_translucency};
 
 /// Startup-span name (phase 10.D): `create_handle` is about to join the
 /// background font-preload thread [`create_handle`] spawned at the top of its
@@ -295,6 +296,7 @@ impl SendableMetalLayer {
 /// The unsafe `on_surface_created_from_metal_layer` call is confined here (a
 /// sanctioned zone); its `SAFETY` note states the cross-thread ownership contract
 /// [`SendableMetalLayer`] documents.
+#[allow(clippy::too_many_arguments)]
 fn install_surface(
     renderer: &mut SurfaceRenderer,
     render_cx: &mut RenderContext,
@@ -303,6 +305,8 @@ fn install_surface(
     height: u32,
     startup_spans: &mut Option<StartupSpans>,
     first_install: bool,
+    alpha: SurfaceAlphaRequest,
+    translucent_resolved: &AtomicBool,
 ) -> Result<()> {
     // SAFETY: `metal_layer` is the Swift-owned `CAMetalLayer*` the UI thread's
     // `IosAppHandle` keeps alive until `frust_destroy` — which joins THIS render
@@ -314,9 +318,22 @@ fn install_surface(
             metal_layer,
             width.max(1),
             height.max(1),
+            alpha,
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
+    // Publish the surface's RESOLVED translucency to the UI thread (review
+    // finding M1): `alpha` above is only what we ASKED for — `frust-render`
+    // resolves it against the layer's advertised alpha modes and can fall back
+    // to an opaque swapchain. The UI thread reads this flag every frame
+    // (`IosAppHandle::sync_translucent_resolved`) before choosing the base
+    // color and pushing `set_surface_translucent`, so a fallback degrades to
+    // the Mode A contract instead of `DestOut`-punching black rectangles.
+    // Written on EVERY (re)install, including the render-side self-heal.
+    publish_resolved_translucency(
+        translucent_resolved,
+        Some(renderer.surface_resolved_translucent()),
+    );
     if first_install && let Some(spans) = startup_spans.as_mut() {
         spans.record(perf::SPAN_ADAPTER_READY);
         spans.record(perf::SPAN_DEVICE_READY);
@@ -352,12 +369,39 @@ fn install_surface(
 /// failure — an incapable GPU/driver — is unrecoverable and otherwise leaves a
 /// permanent black screen with no platform signal). Later reinstall/self-heal
 /// failures stay log-only.
+///
+/// `translucent_resolved` is the resolved-translucency seam (review finding
+/// M1): this thread creates the surface — including the self-heal above — so
+/// only it can see whether the requested translucent alpha mode was actually
+/// granted. It stores the outcome on every (re)install (and clears it on a
+/// failed one) for the UI thread, which owns the `RenderRoot` and the
+/// per-frame base color, to read each frame. Seeded from the REQUEST by
+/// [`spawn_split_executor`], so the common (capable) case is Mode B from frame
+/// 1 and only a real resolution can downgrade it.
+///
+/// `present` is the render side of the present-sync handoff (camera task 13):
+/// when the host armed it, this thread hands each submitted frame to the UI
+/// thread to present inside the platform-view `CATransaction` instead of
+/// presenting here (see [`crate::app::PresentHandoff`]). Any parked frame is
+/// dropped around a surface (re)install below — it belongs to a swapchain that
+/// no longer exists.
+///
+/// `surface_reinstalled` is the UI thread's only notice that the self-heal above
+/// happened (camera gate-fix g4): this thread sets it on every self-heal attempt
+/// so the next `CADisplayLink` tick runs a real frame against the fresh
+/// swapchain instead of being skipped by the now-actually-idling frame gate. See
+/// [`crate::app::SplitExecutor::surface_reinstalled`] for the full rationale.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_loop(
     receiver: RenderReceiver<PaintedScene, SendableMetalLayer>,
     startup_spans: StartupSpans,
     fatal: Arc<AtomicBool>,
     scene_return: SceneReturnSender<Scene>,
     presented: Arc<AtomicU64>,
+    alpha: SurfaceAlphaRequest,
+    translucent_resolved: Arc<AtomicBool>,
+    present: Arc<PresentHandoff>,
+    surface_reinstalled: Arc<AtomicBool>,
 ) {
     // Render-thread QoS self-boost (phase-11 fix F6): tag this dedicated render
     // thread as user-interactive so the scheduler treats its GPU submit work at
@@ -403,6 +447,11 @@ pub(crate) fn render_loop(
                     metal_layer = Some(ptr);
                     physical = (size.width, size.height);
                     let first_install = !first_install_done;
+                    // Present-sync (task 13): a frame parked for the UI thread
+                    // belongs to the swapchain about to be replaced — drop it
+                    // rather than let the next tick present a frame from a dead
+                    // surface.
+                    present.clear();
                     match install_surface(
                         &mut renderer,
                         &mut render_cx,
@@ -411,12 +460,20 @@ pub(crate) fn render_loop(
                         size.height,
                         &mut startup_spans,
                         first_install,
+                        alpha,
+                        &translucent_resolved,
                     ) {
                         Ok(()) => {
                             first_install_done = true;
                             recreate_failures = 0;
                         }
                         Err(err) => {
+                            // A failed (re)install leaves no surface whose
+                            // translucency we can vouch for — clear the flag
+                            // rather than leaving the previous surface's value
+                            // standing (review M1: never punch a hole you
+                            // can't prove is a window).
+                            publish_resolved_translucency(&translucent_resolved, None);
                             log::error!(
                                 "frust-shell-ios: render-thread surface install failed: {err:#}"
                             );
@@ -486,6 +543,10 @@ pub(crate) fn render_loop(
                     &mut startup_spans,
                     perf_on,
                     &presented,
+                    // Present-sync: park this frame under its own id so the UI
+                    // thread can tell the platform-view release gate which
+                    // frame it just put on screen (task 13).
+                    Some((&present, frame.meta.frame_id)),
                 );
 
                 // iOS self-heals a lost surface from the retained layer (nothing
@@ -495,6 +556,20 @@ pub(crate) fn render_loop(
                     && recreate_failures < crate::ffi_support::MAX_RECREATE_ATTEMPTS
                     && let Some(ptr) = metal_layer
                 {
+                    // Same reason as the `SurfaceCreated` arm above: nothing
+                    // parked for the old (lost) swapchain may survive into the
+                    // new one.
+                    present.clear();
+                    // Tell the UI thread a self-heal happened (camera gate-fix
+                    // g4) — set for the ATTEMPT, not just a success: either way
+                    // the frame that was in flight never presented, and the next
+                    // tick must run rather than be skipped by the frame gate. On
+                    // success it repaints the fresh swapchain; on failure it
+                    // hands this arm another scene to retry from, still bounded
+                    // by `MAX_RECREATE_ATTEMPTS` above (once the budget is spent
+                    // this arm stops running, so the flag stops being set and the
+                    // loop settles back to idle instead of storming).
+                    surface_reinstalled.store(true, Ordering::Release);
                     match install_surface(
                         &mut renderer,
                         &mut render_cx,
@@ -503,9 +578,15 @@ pub(crate) fn render_loop(
                         physical.1,
                         &mut startup_spans,
                         false,
+                        alpha,
+                        &translucent_resolved,
                     ) {
                         Ok(()) => recreate_failures = 0,
                         Err(err) => {
+                            // Same clear-on-failure contract as the install arm
+                            // above (review M1) — a failed self-heal must not
+                            // leave the lost surface's translucency standing.
+                            publish_resolved_translucency(&translucent_resolved, None);
                             recreate_failures = recreate_failures.saturating_add(1);
                             log::error!(
                                 "frust-shell-ios: render-thread surface recreate failed \
@@ -562,6 +643,25 @@ fn create_handle(
     let font_preinit = std::thread::spawn(TextContext::new);
     let physical = (width.max(1), height.max(1));
 
+    // Read the translucent opt-in latch (platform-views task 06) BEFORE any
+    // surface is created: `frust_set_surface_mode` must be called before
+    // `frust_init` for it to take effect (see
+    // `frust_shell_common::surface_mode`'s module docs — a one-way,
+    // pre-surface-creation latch). Mapped once here and threaded through both
+    // executor paths' surface-creation call sites plus the handle's recreate
+    // logic — this is the REQUEST only; the base color and the hole-punch
+    // contract follow the RESOLVED outcome (`translucent_resolved` below,
+    // review finding M1). Per task 04's resolution table,
+    // `TranslucentPreferred` resolves to `PostMultiplied` on Metal — the
+    // spike-verified shipping mode (see `SurfaceAlphaRequest`'s doc comment
+    // for the alpha-semantics caveat: vello outputs premultiplied, and
+    // whether wgpu's Metal backend converts under `PostMultiplied` awaits
+    // task 11's device-eyes verdict — nothing speculative is built here).
+    let alpha = match SurfaceModeWatcher::current() {
+        SurfaceMode::Translucent => SurfaceAlphaRequest::TranslucentPreferred,
+        SurfaceMode::Opaque => SurfaceAlphaRequest::Opaque,
+    };
+
     // Build the render-path executor (plan phase 11.B), chosen once by the
     // `FRUST_NO_RENDER_THREAD` kill switch:
     //
@@ -578,10 +678,48 @@ fn create_handle(
     // Both retain `metal_layer` in `IosAppHandle` (Swift owns it and releases it
     // only after `frust_destroy` — which, in the split, joins the render thread
     // first, dropping the surface built from the pointer).
+    // The resolved-translucency seam (review finding M1). SEEDED FROM THE
+    // REQUEST: the surface is created asynchronously on the render thread in
+    // the default split, and an all-but-certain grant (Metal resolves
+    // `PostMultiplied`) should not cost a Mode-A flash on frame 1 — so the
+    // optimistic value stands until the render thread reports a real
+    // resolution, which can only ever downgrade it. One clone per surface
+    // owner (render thread or inline renderer), one in the handle for the UI
+    // thread's per-frame read.
+    let translucent_resolved = Arc::new(AtomicBool::new(
+        alpha == SurfaceAlphaRequest::TranslucentPreferred,
+    ));
+
+    // Read the present-sync latch (camera task 13) beside the translucency one
+    // above, and for the same reason: `frust_set_present_sync` must precede
+    // `frust_init`, and the choice is fixed for the surface's lifetime. Armed,
+    // the render thread parks each submitted frame for the UI thread to present
+    // inside the platform-view `CATransaction` (see `PresentHandoff`); unarmed
+    // — the default — the slot is inert and the render tail is byte-for-byte
+    // today's. Never armed on the inline path: that tail already presents on
+    // the UI thread.
+    let present = Arc::new(PresentHandoff::new(present_sync_enabled()));
+
     let (executor, text_ctx) = if render_thread_enabled() {
-        spawn_split_executor(startup, metal_layer, physical, scale, font_preinit)
+        spawn_split_executor(
+            startup,
+            metal_layer,
+            physical,
+            scale,
+            font_preinit,
+            alpha,
+            Arc::clone(&translucent_resolved),
+            present,
+        )
     } else {
-        build_inline_executor(startup, metal_layer, physical, font_preinit)?
+        build_inline_executor(
+            startup,
+            metal_layer,
+            physical,
+            font_preinit,
+            alpha,
+            &translucent_resolved,
+        )?
     };
 
     // Process-wide reactive runtime init (idempotent — `ReactiveRuntime::init`'s
@@ -613,7 +751,16 @@ fn create_handle(
     // it here, the split records it render-side on the first handed-off scene.
     let handle = rt.with_owner(|| {
         let app = make_app();
-        IosAppHandle::new(executor, text_ctx, metal_layer, physical, scale, app)
+        IosAppHandle::new(
+            executor,
+            text_ctx,
+            metal_layer,
+            physical,
+            scale,
+            alpha,
+            translucent_resolved,
+            app,
+        )
     });
 
     // SAFETY: hand a uniquely-owned boxed handle to Swift as a raw pointer; it is
@@ -630,6 +777,8 @@ fn build_inline_executor(
     metal_layer: *mut c_void,
     physical: (u32, u32),
     font_preinit: std::thread::JoinHandle<TextContext>,
+    alpha: SurfaceAlphaRequest,
+    translucent_resolved: &AtomicBool,
 ) -> Result<(FrameExecutor, TextContext)> {
     let mut render_cx = RenderContext::new();
     let mut renderer = SurfaceRenderer::new();
@@ -643,9 +792,18 @@ fn build_inline_executor(
             metal_layer,
             physical.0,
             physical.1,
+            alpha,
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
+    // Replace the request-seeded optimism with the real resolution (review
+    // finding M1) — on this path the renderer lives on the UI thread, so the
+    // handle's per-frame sync re-reads it from the renderer anyway; storing it
+    // here keeps the flag correct for the construction-time push too.
+    publish_resolved_translucency(
+        translucent_resolved,
+        Some(renderer.surface_resolved_translucent()),
+    );
     // `RenderContext::ensure_device` creates the adapter, the logical device, and
     // this call's surface/renderer readiness in one async chain with no
     // finer-grained seam — all three spans land at this single point (an
@@ -678,12 +836,16 @@ fn build_inline_executor(
 /// ([`render_loop`]), so `frust_init` never blocks the UI thread on it. Only the
 /// font-preload join (needed by UI-side layout) stays on this UI thread. Returns
 /// the executor plus the joined [`TextContext`].
+#[allow(clippy::too_many_arguments)]
 fn spawn_split_executor(
     mut startup: StartupSpans,
     metal_layer: *mut c_void,
     physical: (u32, u32),
     scale: f32,
     font_preinit: std::thread::JoinHandle<TextContext>,
+    alpha: SurfaceAlphaRequest,
+    translucent_resolved: Arc<AtomicBool>,
+    present: Arc<PresentHandoff>,
 ) -> (FrameExecutor, TextContext) {
     // Font/`TextContext` warmup (phase 10.D) stays UI-side — layout runs on the UI
     // thread. The GPU work is off-thread now, so this join's ordering vs surface
@@ -719,6 +881,20 @@ fn spawn_split_executor(
     let presented = Arc::new(AtomicU64::new(0));
     let presented_render = Arc::clone(&presented);
 
+    // Present-sync handoff (task 13): one clone into the render thread (parks
+    // each submitted frame when armed), one in the `SplitExecutor` for the UI
+    // thread's `frust_present_frame` to take from. Same `Arc`-shared-slot shape
+    // as the two counters above — no channel, no protocol.
+    let present_render = Arc::clone(&present);
+
+    // Surface-self-heal signal (camera gate-fix g4): one clone into the render
+    // thread (set on each render-side `SurfaceLost` recreate attempt), one in the
+    // `SplitExecutor` for the UI thread to take once per frame — the same
+    // `Arc<AtomicBool>` shape as the `fatal` flag above. Created here rather than
+    // in `create_handle` because only these two owners ever touch it.
+    let surface_reinstalled = Arc::new(AtomicBool::new(false));
+    let surface_reinstalled_render = Arc::clone(&surface_reinstalled);
+
     // Move `startup` (init_entry + font spans already recorded) into the render
     // thread, which owns the rest of the startup line. The raw `metal_layer`
     // pointer is NOT captured by the closure (it is `!Send`); it crosses the
@@ -737,6 +913,10 @@ fn spawn_split_executor(
                     fatal_render,
                     scene_return_tx,
                     presented_render,
+                    alpha,
+                    translucent_resolved,
+                    present_render,
+                    surface_reinstalled_render,
                 )
             })
         })
@@ -757,6 +937,8 @@ fn spawn_split_executor(
             fatal,
             scene_return_rx,
             presented,
+            present,
+            surface_reinstalled,
         )),
         text_ctx,
     )
@@ -779,8 +961,10 @@ fn spawn_split_executor(
 /// This is the sole recovery call into `on_surface_created_from_metal_layer`
 /// outside [`create_handle`], and keeps the `unsafe` confined to this module.
 fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
-    // Read the retained pointer before taking the `&mut` borrow of the renderer.
+    // Read the retained pointer (and the latched alpha request) before taking
+    // the `&mut` borrow of the renderer below.
     let metal_layer = app.metal_layer();
+    let alpha = app.surface_alpha();
     let result = {
         // Inline-only: the render-thread split self-heals render-side (see
         // `render_loop`), so its `inline_renderer_mut()` is `None` and this is
@@ -798,11 +982,21 @@ fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
                 metal_layer,
                 physical.0,
                 physical.1,
+                alpha,
             )
         })
     };
     match result {
-        Ok(()) => app.set_surface(physical, scale),
+        Ok(()) => {
+            app.set_surface(physical, scale);
+            // Re-emit Create+Update for every live platform-view slot
+            // (platform-views task 06): a defensive resync after any surface
+            // disruption, mirroring the split's would-be replay (see the
+            // module docs' iOS surface recovery note — the split self-heals
+            // render-side with no UI-side signal to drive this from, an
+            // accepted v1 gap; the inline path has full state access here).
+            app.reset_platform_views_for_surface_recreate();
+        }
         Err(err) => {
             app.record_recreate_failure();
             if app.recreate_failures() >= crate::ffi_support::MAX_RECREATE_ATTEMPTS {
@@ -1139,7 +1333,7 @@ pub fn set_insets(
 /// `SceneDelegate.scene(_:willConnectTo:options:)`'s
 /// `connectionOptions.urlContexts`, or running, from
 /// `SceneDelegate.scene(_:openURLContexts:)` — see
-/// `templates/app/ios.tmpl`'s `SceneDelegate`/`FrustViewController`
+/// `platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustSceneDelegate.swift`/`FrustViewController.swift`
 /// queue-until-handle-ready contract, task 07) into the process-wide
 /// deep-link source ([`frust_reactive::push_deep_link`]).
 ///
@@ -1162,6 +1356,185 @@ pub fn on_deep_link(handle: *mut c_void, url: *const c_char) {
             push_deep_link(url);
         }
     });
+}
+
+/// `frust_system_ui_state`: peek the process-wide system-UI override slot
+/// (task 03, `frust_shell_common::system_ui`) for `FrustViewController`'s
+/// per-`CADisplayLink`-tick poll, returning [`encoded_state`]'s packed
+/// `(generation, mode)` `u64` verbatim — the packing scheme and its tests
+/// live in `frust-shell-common` (see task 03's module docs for the exact bit
+/// layout).
+///
+/// Takes `handle` and ignores it: the slot is process-global (a shell-wide
+/// override, not a per-app-instance one — mirrors [`crate::app::IosAppHandle`]
+/// carrying no such state of its own), but every other export in this crate's
+/// surface takes the opaque handle as its first argument, so this follows
+/// that shape for calling-convention uniformity rather than being the one
+/// no-argument export — a caller-side no-op branch on a live handle isn't
+/// needed either way since the read never touches it.
+///
+/// # iOS semantic mapping (RESEARCH.md §6)
+///
+/// `FrustViewController` (task 14) decodes the returned `u64` and, on a
+/// generation change, stores the decoded flags and calls
+/// `setNeedsStatusBarAppearanceUpdate()` / `setNeedsUpdateOfHomeIndicatorAutoHidden()`
+/// so UIKit re-queries `prefersStatusBarHidden`/`prefersHomeIndicatorAutoHidden`
+/// next layout pass:
+///
+/// | [`frust_shell_common::SystemUiMode`] | status bar | home indicator |
+/// |---|---|---|
+/// | `Immersive` / `ImmersiveSticky` / `LeanBack` | hidden | auto-hidden |
+/// | `Manual { top, bottom }` | hidden iff `!top` | auto-hidden iff `!bottom` |
+/// | `EdgeToEdge` | visible | not auto-hidden |
+///
+/// iOS has no sticky/non-sticky or lean-back distinction and no *force*-hide
+/// of the home indicator — every hiding mode above folds to the same
+/// status-bar-hidden + home-indicator-auto-hide behavior, and the system
+/// (not the app) decides when a swipe re-reveals it (see
+/// `frust_shell_common::system_ui`'s module docs, "Platform behavior
+/// differences").
+pub fn system_ui_state(handle: *mut c_void) -> u64 {
+    guard("frust_system_ui_state", 0, || {
+        let _ = handle;
+        frust_shell_common::encoded_state()
+    })
+}
+
+/// `frust_set_surface_mode`: declare the process-wide translucent-surface
+/// latch (platform-views task 06) — see
+/// `frust_shell_common::surface_mode`'s module docs for the one-way,
+/// pre-surface-creation latch contract. `translucent` is `0`/`1` (no
+/// `<stdbool.h>` precedent in this crate's ABI — mirrors
+/// [`set_appearance`]'s `dark: u8`).
+///
+/// Callable **only** from the generated `FrustViewController`'s
+/// `translucentSurface`-gated branch (task 09) — the same branch that
+/// already set `CAMetalLayer.isOpaque = false` and arranged the
+/// native-sibling subview order — and always **before** `frust_init`, ahead
+/// of constructing the native handle. Calling this without that layer
+/// configuration already in place is a host-template bug, not a supported
+/// opt-in (review M3); this is why the underlying
+/// `declare_host_translucent_surface` is not re-exported past
+/// `frust-shell-common`. Takes no handle argument: the slot is
+/// process-global (mirrors [`system_ui_state`]'s shape), and there is
+/// nothing to guard against a null handle here since the read never touches
+/// one. A call after the surface already exists has no effect on that
+/// surface (the latch is read once, at surface-creation time, inside
+/// [`create_handle`]).
+///
+/// Declaring only sets the *request*: a layer advertising no translucent alpha
+/// mode still comes up opaque, and the paint contract follows the RESOLVED
+/// outcome ([`SurfaceRenderer::surface_resolved_translucent`], review finding
+/// M1), not this latch.
+pub fn set_surface_mode(translucent: u8) {
+    guard("frust_set_surface_mode", (), || {
+        if translucent != 0 {
+            frust_shell_common::declare_host_translucent_surface();
+        }
+    });
+}
+
+/// The process-global present-sync latch (camera task 13), written by
+/// [`set_present_sync`] and read once per handle in [`create_handle`].
+///
+/// Deliberately **iOS-local** rather than a `frust-shell-common` module beside
+/// `surface_mode`: the two platforms need opposite corrections for the same
+/// defect — Android delays the *view* to meet the surface (the frame-id gate),
+/// iOS delays the *surface* to meet the view — so a shared "platform-view sync"
+/// knob would be structurally wrong (PLAN.md's no-shared-knob constraint,
+/// `research/SPIKE-SYNC.md` §3.4.1). Nothing outside this shell can observe or
+/// set it.
+static PRESENT_SYNC: AtomicBool = AtomicBool::new(false);
+
+/// `frust_set_present_sync`: declare that this host presents the frust surface
+/// inside the `CATransaction` that commits hosted platform-view geometry
+/// (camera task 13) — the iOS shipping form of `research/SPIKE-SYNC.md`'s rung
+/// 1, **with the render-thread split left on**.
+///
+/// `enabled` is `0`/`1` (the same no-`<stdbool.h>` convention as
+/// [`set_surface_mode`]/[`set_appearance`]). Takes no handle: the slot is
+/// process-global and must be latched **before** `frust_init`, since it is read
+/// once when the handle's executor is built.
+///
+/// Callable **only** from `FrustViewController`'s
+/// `synchronizesPresentWithPlatformViews`-gated branch — the same branch that
+/// sets `CAMetalLayer.presentsWithTransaction = true`. The two must move
+/// together, exactly like the `translucentSurface` seam above: arming this
+/// without the layer flag defers each present by a tick for no benefit (a
+/// plain, eager present issued late), and setting the layer flag without arming
+/// this stops presentation dead under the split (the drawable is handed to a
+/// thread that commits no transaction — measured, §3.2). Neither half is
+/// reachable from app Rust; this is a host build-time choice.
+///
+/// The UI thread must then call `frust_present_frame` once per display-link
+/// tick, after `FrustViewHost.poll` — see [`present_frame`].
+pub fn set_present_sync(enabled: u8) {
+    guard("frust_set_present_sync", (), || {
+        PRESENT_SYNC.store(enabled != 0, Ordering::Release);
+    });
+}
+
+/// Read the present-sync latch (see [`PRESENT_SYNC`]) at handle-construction
+/// time.
+fn present_sync_enabled() -> bool {
+    PRESENT_SYNC.load(Ordering::Acquire)
+}
+
+/// `frust_present_frame`: present the frame the render thread parked for the UI
+/// thread — the UI-thread half of present-sync (camera task 13, see
+/// [`set_present_sync`]).
+///
+/// Swift calls this once per `CADisplayLink` tick, **after**
+/// `FrustViewHost.poll` has applied this frame's platform-view geometry, so the
+/// `[drawable present]` and the sibling views' geometry land in one
+/// `CATransaction` committed by this thread. Cheap and safe to call
+/// unconditionally: with present-sync unarmed (the default), on the inline
+/// render path, or on a gate-skipped tick, nothing is ever parked and this is a
+/// mutex check plus a return. A null/dead handle is a benign no-op.
+pub fn present_frame(handle: *mut c_void) {
+    guard("frust_present_frame", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.present_pending_frame();
+        }
+    });
+}
+
+/// `frust_platform_view_commands_json`: the platform-view command backlog
+/// as a heap-allocated, caller-freed JSON C string (platform-views task
+/// 06) — the iOS counterpart to `frust-shell-android`'s
+/// `nativePlatformViewCommands` (task 05), byte-identical schema (see
+/// [`crate::ffi_support::platform_view_commands_json`]'s doc comment).
+///
+/// `ack_generation` is the generation the Swift side last finished
+/// applying (round-tripped from a prior call's decoded `"generation"`
+/// field, `0` on the very first call) — compacts the differ's backlog on
+/// the way in. Returns null on the no-change fast path
+/// (`generation == ack_generation`) or when there is no live handle;
+/// otherwise a fresh `CString` the caller **must** release via
+/// [`string_free`]/`frust_string_free` (identical ownership contract to
+/// [`ime_state_json`]).
+pub fn platform_view_commands_json(handle: *mut c_void, ack_generation: u64) -> *mut c_char {
+    guard(
+        "frust_platform_view_commands_json",
+        std::ptr::null_mut(),
+        || {
+            // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+            let Some(app) = (unsafe { handle_mut(handle) }) else {
+                return std::ptr::null_mut();
+            };
+            match app.platform_view_commands_json(ack_generation) {
+                Some(json) => match CString::new(json) {
+                    // Hand the caller ownership; reclaimed in `string_free`.
+                    Ok(cstr) => cstr.into_raw(),
+                    // An interior NUL can't cross as a C string — benign null
+                    // fallback, mirroring `ime_state_json`.
+                    Err(_) => std::ptr::null_mut(),
+                },
+                None => std::ptr::null_mut(),
+            }
+        },
+    )
 }
 
 /// `frust_destroy`: reclaim and drop the boxed handle (which drops the surface;

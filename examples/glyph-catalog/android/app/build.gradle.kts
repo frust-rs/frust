@@ -106,8 +106,9 @@ android {
                 )
             }
             // R8 + resource shrink (Phase 7 task 12): the Kotlin/Java side is
-            // small (one view, one vendored accesskit delegate) so the dex win
-            // is modest, but shipping unminified release code is not the
+            // small (this app's `MainActivity` plus the `:frust-embedding`
+            // module) so the dex win is modest, but shipping unminified
+            // release code is not the
             // Frust default. `proguard-rules.pro` carries the two keep
             // rules R8 needs beyond AGP's own default rule set (JNI-bound
             // classes it can't otherwise prove are live) — see that file's
@@ -160,17 +161,24 @@ android {
     // }
 }
 
-// Device-parity task 08 (RESEARCH.md "Insets / SafeArea / SystemChrome",
-// "Android back"): `androidx.core` backs edge-to-edge
-// (`WindowCompat.setDecorFitsSystemWindows`), status/nav-bar icon contrast
-// (`WindowInsetsControllerCompat`), and per-edge inset merging
-// (`androidx.core.graphics.Insets.max`) in `FrustSurfaceView`;
-// `androidx.activity` backs `MainActivity`'s `ComponentActivity` base class
-// and its `onBackPressedDispatcher` back-press callback. Neither dependency
-// existed in this template before task 08.
+// Frust's Android embedding: the Kotlin host (`FrustActivity`,
+// `FrustSurfaceView`, `FrustViewHost`, the vendored accesskit delegate) this
+// app's `MainActivity` extends, plus the JNI declarations the Rust side
+// exports against. Included by path — see `settings.gradle.kts` and
+// `gradle.properties`' `frust.embedding.dir`.
+//
+// `androidx.core` (edge-to-edge, inset merging, bar-icon contrast) and
+// `androidx.activity` (`ComponentActivity`, `onBackPressedDispatcher`) are
+// re-exported transitively by the module's `api` declarations, so this app
+// declares neither directly.
 dependencies {
-    implementation("androidx.core:core:1.13.1")
-    implementation("androidx.activity:activity:1.8.1")
+    implementation(project(":frust-embedding"))
+    // frust:plugin-dependencies — plugin-contributed dependencies go below.
+    implementation(project(":frust-camera"))
+    // frust-native-widgets' one factory + one listener class
+    // (`dev.frust.nativewidgets`), previously hand-copied into this app's own
+    // source tree and now supplied by the plugin's own library module.
+    implementation(project(":frust-native-widgets"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each

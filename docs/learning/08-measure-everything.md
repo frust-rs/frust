@@ -66,14 +66,14 @@ stats); `RESULTS.md` holds only *actual* device runs. macOS caveat: BSD
 
 Also in the drawer: `scripts/size-report.sh` (release `.so`/APK size +
 cargo-bloat) and `scripts/devloop-measure.sh` (incremental-build wall time,
-defaults to bubblebench).
+defaults to huddle).
 
 ## Experiments
 
 ### 8.1 — Your first raw capture + histogram
 
 ```bash
-cd examples/bubblebench
+cd benchmarks/frust_bench
 FRUST_TRACE=1 FRUST_TRACE_RAW=1 cargo run 2>&1 | tee /tmp/bb.raw
 ```
 
@@ -114,8 +114,9 @@ anything render-path-adjacent later, this is the regression check.
 ### 8.4 — Mark your own scenario
 
 `mark_scenario_start/end` (`perf.rs` ≈507–535) is public shell-common API.
-Wrap something you care about in bubblebench (e.g. the first 10s after
-launch vs. after a Reset) and slice your raw log by the marker lines. You
+Wrap something you care about in `frust_bench`'s S1 scenario (e.g. the first
+10s after launch vs. after a Reset) and slice your raw log by the marker
+lines. You
 now have the same tooling the S1–S8 suite uses, on your own workload.
 
 ## Where to go from here

@@ -1,0 +1,266 @@
+# `frust-native-widgets`: the native-controls-from-pure-Rust platform
+# plugin (`workflow/plans/features/frust-native-widgets/PLAN.md`). Leaf
+# platform plugin per `docs/CODE_STANDARDS.md`'s Plugin Conventions:
+# `frust-plugin` + FFI crates only, never another `frust-*` framework
+# crate. Feature lists below start from the throwaway spike crate's
+# proven shape (`plugins/native-widgets-spike/Cargo.toml`, commit
+# `92b7674`), trimmed/annotated the way `plugins/camera/Cargo.toml`
+# documents its own objc2 surface.
+[package]
+name = "frust-native-widgets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# NativeWidgetError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# Exports/backends log rather than print — platform plugins never own
+# stdout/stderr the way `frust-drive` does.
+log = { workspace = true }
+
+# The app-facing `api` feature (p1-06): the facade-glue half PLAN.md's Phase 3
+# sanctions depending on `frust`. Both `optional = true`, gated behind the
+# `frust-api` feature below — `cargo check -p frust-native-widgets
+# --no-default-features` must still hold the platform-plugin charter line
+# (`frust-plugin` + FFI crates only): with the feature off, neither crate
+# reaches this crate's dependency graph at all.
+#
+# `frust-core` rides alongside `frust` rather than `frust` alone, because the
+# builders (`src/api/builders.rs`) hand-implement `View<Outer>` for every
+# outer app-state type (mirroring `ComponentView<C>`'s own blanket impl,
+# unreachable from outside `frust-core` since its `component: C` field is
+# private) — that impl's own method signatures need `BuildCtx`/`ChangeFlags`,
+# which the `frust` facade does not re-export (its own re-export list stops at
+# `Component`/`ComponentView`/`component`). The same documented
+# `frust-core`/`kurbo`(/`peniko`) escape hatch `examples/*` apps use
+# (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions) applies here for
+# the same reason: a gap no facade widget covers.
+frust = { workspace = true, optional = true }
+frust-core = { workspace = true, optional = true }
+# The `ClipToSlot` wrapper (`src/api/builders.rs`'s f1-02 refusal-placeholder
+# overflow fix, `workflow/plans/features/frust-native-widgets/followups/
+# p1-fix-1/f1-02-placeholder-layout.md`) hand-implements `Widget::layout`,
+# whose trait signature returns a bare `kurbo::Size` — the same
+# `frust-core`/`kurbo` escape hatch pairing described above, now needed
+# outside `#[cfg(test)]` too (previously dev-only, below). `optional = true`
+# + gated into `frust-api` below for the same reason as `frust`/`frust-core`:
+# `--no-default-features` must keep this crate's platform-plugin charter
+# line intact.
+kurbo = { workspace = true, optional = true }
+# Theme ladder L3 (p1-08, `src/api/theme.rs`'s `publish_glyph_font_bytes`):
+# the source of the bundled Glyph font bytes (`frust_theme::glyph::font_data`)
+# this crate's Android backend registers into a real `Typeface`. The `frust`
+# facade does NOT re-export these bytes (confirmed at implementation time —
+# neither `frust_theme::glyph` nor its `font_data` accessor appears anywhere
+# in `crates/frust/src/lib.rs`'s re-export list), so this is a direct,
+# feature-gated dependency rather than reaching the bytes through the facade.
+# `optional = true`, gated behind `frust-api` below — same charter-line gate
+# as `frust`/`frust-core` above: with the feature off, this crate never
+# reaches this crate's dependency graph either. Inherits the workspace's own
+# `default-features = false` entry (the gf2 glyph-fonts opt-out chain,
+# `docs/DEVELOPMENT.md`'s *Glyph bundled fonts*) — this crate's own
+# `glyph-fonts` feature below re-requests the bundled bytes, mirroring
+# `frust-widgets`' identical edge.
+frust-theme = { workspace = true, optional = true }
+
+# The Android `(JavaVM, application Context)` platform-handle substrate
+# this crate's Android backend calls through
+# (`frust_plugin::android::with_jni_env`, the `with_jni_env` idiom every
+# platform plugin's Android arm reuses). Unconditional per the platform-
+# plugin charter (`docs/ARCHITECTURE.md`'s Module Structure /
+# `docs/CODE_STANDARDS.md`'s Plugin Conventions) — inert
+# (`NotInitialized`) on non-Android targets, so it stays an unconditional
+# dependency rather than target-gated.
+frust-plugin = { path = "../../crates/frust-plugin" }
+
+# Android: the plugin's own JNI exports (the generic
+# `Java_dev_frust_nativewidgets_FrustNativeControlFactory_native*` / `FrustNativeListener`
+# contract p1-03 lands) and the retained-handle registry's `Global<JObject>`
+# RAII wrapper (this task) both need `jni` directly, matching every other
+# plugin's Android arm.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# iOS only — **not** `target_vendor = "apple"`. Unlike
+# `plugins/camera`/`plugins/shared-preferences`/`plugins/secure-storage`,
+# this plugin's Apple surface is UIKit (`objc2-ui-kit`), which doesn't
+# exist on macOS (no AppKit backend, no Mac Catalyst support here); gating
+# on `target_vendor = "apple"` would try to link the `UIKit` framework into
+# a macOS desktop-preview host build and fail (`ld: framework 'UIKit' not
+# found`) — confirmed by `cargo test -p frust-native-widgets` on this
+# macOS host. Controls via `objc2-ui-kit`, the Rust `define_class!` factory
+# via `objc2`/`objc2-foundation` (Phase 0 spike 2 — no Swift factory
+# needed). Every objc2-family crate below is `default-features = false` +
+# an explicit feature list per CODE_STANDARDS (pulling the default set
+# would compile in the whole UIKit surface this plugin never touches).
+#
+# Not `{ workspace = true }` for `objc2-foundation`/`objc2-ui-kit`: Cargo's
+# workspace-dependency inheritance forbids a member from overriding
+# `default-features` unless the workspace-level entry already sets it
+# explicitly, and neither does (see `plugins/camera/Cargo.toml`'s comment
+# for the same restriction) — so both repeat the workspace pin literally.
+# `objc2` itself keeps its (lighter) default features, matching every
+# other plugin's Apple arm (`objc2 = { workspace = true }`).
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = { workspace = true }
+# `NSObject`/`NSString`: the `define_class!` factory's superclass and
+# params-json marshalling (spike 2's proven shape) — this task's registry
+# doesn't need either directly, but every later native-widgets task
+# (runtime, controls, events) builds on this crate and needs both, so they
+# land now rather than in a second Cargo.toml touch.
+# `NSData`: `Image`'s `UIImage::imageWithData:` payload (p2-02). The
+# `objc2-ui-kit/UIImage` feature below already turns it on transitively, but
+# this crate *names* `NSData` in its own source, so it is requested here
+# explicitly rather than relied on as a side effect of someone else's
+# feature list.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSObject",
+    "NSString",
+    "NSData",
+] }
+# `UIView`: the retained-handle registry (`AppleHandle` wraps a
+# `Retained<UIView>`, the type every control view specializes to, p1-02).
+# `UIButton`/`UIControl`/`UILabel`/`UIResponder` + `UISwitch`/`UISlider`/
+# `UIProgressView`/`UIImage`/`UIImageView`: the v1 control set's six classes
+# and the `UIImage` payload one of them decodes (p2-02, PLAN 2.1's parity
+# set). `UIColor`/`UIFont`: the shared property surface every control's
+# `Setter` plan applies through (packed-ARGB colours, `TextSizeSp`).
+# `UIAccessibility`: `Setter::ContentDescription`'s
+# `NSObject.accessibilityLabel` category — the VoiceOver counterpart of
+# Android's `setContentDescription`. `objc2-core-foundation`: NOT a control,
+# a *type* gate — every `CGFloat`-taking constructor this arm calls
+# (`UIColor::colorWithRed:green:blue:alpha:`, `UIFont::systemFontOfSize:`)
+# is `#[cfg(feature = "objc2-core-foundation")]`-gated in objc2-ui-kit,
+# because `CGFloat` itself lives in that crate. `UIInterface`: theme ladder
+# L1 (p2-04) — `UIView.overrideUserInterfaceStyle` is
+# `#[cfg(feature = "UIInterface")]`-gated in objc2-ui-kit (the `UIUserInterfaceStyle`
+# enum's own home). `objc2-quartz-core`: L2's corner radius
+# (`UIView.layer` → `CALayer.cornerRadius`/`masksToBounds`) — objc2-ui-kit's
+# own `objc2-quartz-core` feature already requests `CALayer` +
+# `objc2-core-foundation` on ITS OWN edge to that crate (verified against
+# `objc2-ui-kit-0.3.2/Cargo.toml`), which is what makes `setCornerRadius`
+# (a `CGFloat` setter) available; this crate still takes its own explicit
+# `objc2-quartz-core` dependency below rather than relying on that
+# transitive activation alone, matching this file's own "every FFI surface
+# this crate touches is a named, minimal, direct dependency" discipline.
+# `objc2-core-text`: L3's typeface resolution — `objc2-ui-kit`'s
+# `AsRef<UIFont> for CTFont` / `AsRef<CTFont> for UIFont` toll-free-bridge
+# impls (`UIFont.rs`) are gated on this same feature name.
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "UIView",
+    "UIButton",
+    "UIControl",
+    "UILabel",
+    "UIResponder",
+    "UISwitch",
+    "UISlider",
+    "UIProgressView",
+    "UIImage",
+    "UIImageView",
+    "UIColor",
+    "UIFont",
+    "UIAccessibility",
+    "UIInterface",
+    "objc2-core-foundation",
+    "objc2-quartz-core",
+    "objc2-core-text",
+] }
+# Theme ladder L2 (p2-04): `UIView::layer()` returns a `CALayer`, and
+# `Setter::ThemedBackground`'s corner radius applies through
+# `CALayer.setCornerRadius`/`setMasksToBounds` — see this file's own
+# Version-Pin Policy precedent, `plugins/camera/Cargo.toml`'s identical
+# `objc2-quartz-core` row (pinned root-side at `objc2-quartz-core = "0.3"`
+# for `CALayer` — this crate repeats the version literal for the same
+# workspace-inheritance reason `objc2-foundation`/`objc2-ui-kit` above do).
+# `objc2-core-foundation`: the `CGFloat` type gate `setCornerRadius` needs,
+# same reason `objc2-ui-kit` requests it above.
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "CALayer",
+    "objc2-core-foundation",
+] }
+# Theme ladder L3 (p2-04): the CoreText half of Glyph typeface resolution
+# (`crate::apple::fonts`) — `CTFontManagerCreateFontDescriptorFromData`
+# builds a `CTFontDescriptor` straight from the embedded font bytes'
+# `CFData` (no cache file, no system-wide font-manager registration, no
+# `block2` completion handler — see that module's doc for why this is
+# simpler than the deprecated `CTFontManagerRegisterGraphicsFont`/modern
+# `CTFontManagerRegisterFontDescriptors` routes), and
+# `CTFont::with_font_descriptor` resolves a real, sized `CTFont` from it —
+# handed to UIKit as a `UIFont` via the toll-free bridge `objc2-ui-kit`'s
+# own `objc2-core-text` feature (above) exposes. Fresh pin: no prior
+# workspace consumer names this crate directly (`objc2-core-text 0.3.2` was
+# already resolving into `Cargo.lock` transitively — this only promotes it
+# to a direct dependency, no lockfile version change).
+objc2-core-text = { version = "0.3", default-features = false, features = [
+    "std",
+    "CTFont",
+    "CTFontDescriptor",
+    "CTFontManager",
+] }
+# `CFData::from_static_bytes`: wraps the embedded, `'static` Glyph font
+# bytes for `CTFontManagerCreateFontDescriptorFromData` with no copy. Fresh
+# pin for the same reason as `objc2-core-text` above (already
+# transitively resolved; this promotes it to direct).
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFData",
+] }
+
+[dev-dependencies]
+# The `frust-api` feature's host tests build/paint a widget tree directly
+# (`src/api/builders.rs`'s tests, mirroring `frust-widgets::platform_view`'s
+# own `NullScene`/`PaintCtx` test style) — a minimal `PaintScene` needs
+# `kurbo`'s `Point`/`Size` and `peniko::Color` regardless of the feature gate,
+# so both ride as dev-only (never shipped, never counted against
+# `--no-default-features`).
+kurbo = { workspace = true }
+peniko = { workspace = true }
+# f1-02's `placeholder_paints_within_its_slot_rect_at_every_slot_size` test
+# lays out a real `alert()` banner (`AlertWidget::layout` calls
+# `ctx.text_context::<frust_text::TextContext>()`), so it needs a genuine
+# `TextContext` to shape the title/body runs rather than a stub — dev-only,
+# same rationale as `kurbo`/`peniko` above.
+frust-text = { workspace = true }
+# Same test's recording `PaintScene` impl names `frust_scene::GlyphRun` in
+# its `draw_glyph_run` signature (`PaintScene::draw_glyph_run`'s own
+# parameter type) — dev-only, mirroring `crates/frust-widgets/src/glyph/
+# alert.rs`'s own test module doing the same.
+frust-scene = { workspace = true }
+
+[features]
+default = ["frust-api", "glyph-fonts"]
+# The app-facing builders (`native_button`/`native_label`/etc., p1-06).
+# Default-on so an app that adds this crate to its `Cargo.toml` gets them for
+# free; `--no-default-features` is the charter-line gate (`Cargo.toml`'s
+# `[dependencies]` comment above `frust`/`frust-core`/`frust-theme`).
+frust-api = ["dep:frust", "dep:frust-core", "dep:frust-theme", "dep:kurbo"]
+# Forwards into `frust-theme`'s own `glyph-fonts` (gf2 opt-out chain,
+# mirroring `frust-widgets`'/`frust`'s own edges, `docs/DEVELOPMENT.md`'s
+# *Glyph bundled fonts*) — theme ladder L3's (p1-08) bundled Space Mono/IBM
+# Plex Mono bytes. A separate feature (not folded into `frust-api` itself) so
+# an app can drop the ~1MB of font bytes while keeping every other
+# `frust-api` capability: `frust-native-widgets = { default-features = false,
+# features = ["frust-api"] }`. Only meaningful alongside `frust-api` (nothing
+# else in this crate touches `frust-theme`) — `--no-default-features` drops
+# both together, preserving this crate's platform-plugin charter line
+# (`cargo tree -p frust-native-widgets --no-default-features -e normal`).
+glyph-fonts = ["frust-theme/glyph-fonts"]
+# The demo composite (`src/demo.rs`, p3-08): ONE `NativeComponent` owning a real
+# native subtree, so p3-02's `add_child`/`addSubview` have a caller outside a
+# host test and the whole define → register → mount path gets device coverage.
+#
+# **Non-default, deliberately.** It ships inside this plugin only because an app
+# crate cannot implement `NativeComponent` without raw `jni`/`objc2-ui-kit`
+# dependencies of its own (see `src/demo.rs`'s module doc) — it is a
+# demonstration, not part of this crate's product surface, so nothing gets it by
+# merely adding the crate. It adds **no dependency**: it needs the same
+# `frust`/`frust-core`/`frust-theme`/`kurbo` set `frust-api` already gates (a
+# component is only mountable through that facade glue), which is why it enables
+# `frust-api` rather than standing beside it. Off by default, it therefore never
+# reaches the `--no-default-features` tree and the charter line above is intact.
+demo-components = ["frust-api"]

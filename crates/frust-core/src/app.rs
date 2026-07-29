@@ -17,7 +17,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::num::NonZeroU64;
 
-use kurbo::{Point, Size};
+use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
@@ -29,7 +29,7 @@ use crate::layout::BoxConstraints;
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
 use crate::tree::{WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
-use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene};
+use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewFrame};
 
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
 /// single-root application.
@@ -58,6 +58,23 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// [`RenderRoot::ime_state`]. Persists across rebuilds/events until refreshed
     /// by a new publish or cleared on blur.
     ime_state: Option<ImeState>,
+    /// The [`PlatformViewFrame`]s the tree published during the most recent
+    /// [`RenderRoot::paint`], surfaced to the shell via
+    /// [`RenderRoot::platform_view_frames`]. Unlike `ime_state` above, this is
+    /// REPLACED wholesale every pass (never merged with the previous one), so
+    /// a pass that publishes none yields an empty `Vec` — a culled/removed
+    /// slot from the prior frame does not linger as a stale frame. Core stays
+    /// dumb here: task 03's differ owns absent-means-hide/dispose semantics.
+    platform_view_frames: Vec<PlatformViewFrame>,
+    /// The z-shield rects the tree reported during the most recent
+    /// [`RenderRoot::paint`] (via [`crate::widget::PaintCtx::report_input_shield`]),
+    /// surfaced to the shell via [`RenderRoot::input_shields`].
+    ///
+    /// Exactly the `platform_view_frames` discipline above — REPLACED wholesale
+    /// every pass, so a pass whose shields stopped painting reports none. Core
+    /// stays dumb: it never associates a shield with a slot, that is the
+    /// shell-side differ's job.
+    input_shields: Vec<Rect>,
     /// Dirtiness accumulated since the last [`RenderRoot::take_change_flags`] —
     /// merged from each rebuild so a shell can decide, in one place, whether a
     /// frame needs layout/paint at all.
@@ -89,6 +106,15 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// ticking presented count never forces a relayout or feeds the mobile frame
     /// gate.
     presented_frames: Option<u64>,
+    /// Whether the shell created a translucent (alpha-channel, "Mode B") GPU
+    /// surface, threaded into every subsequent paint pass and recovered by
+    /// widgets through [`crate::widget::PaintCtx::is_translucent`]. A plain
+    /// `bool` core stores by value (like the insets); `false` (opaque, "Mode A")
+    /// until a shell pushes one via [`RenderRoot::set_surface_translucent`] — the
+    /// supported default for every desktop app and bare-core test. The
+    /// platform-view hole-punch is the sole reader: a slot clears its rect only
+    /// on a translucent surface (see `frust-widgets`' `PlatformViewWidget`).
+    surface_translucent: bool,
     /// The persistent, never-reused per-pod semantics base-id allocator's next
     /// value (phase-6d D1). Seeded at `2` (ids `0`/`1` reserved: `0` keeps
     /// `NonZeroU64` valid, `1` is the [`ROOT_NODE_ID`] window node), advanced as
@@ -122,10 +148,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             pointer_captured: false,
             focus_active: false,
             ime_state: None,
+            platform_view_frames: Vec::new(),
+            input_shields: Vec::new(),
             pending: ChangeFlags::NONE,
             theme: None,
             insets: WindowInsets::default(),
             presented_frames: None,
+            surface_translucent: false,
             // Ids 0 and 1 are reserved (see the field doc); pods start at 2.
             semantics_alloc: Cell::new(2),
             root_semantics_id: Cell::new(None),
@@ -222,6 +251,37 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.presented_frames
     }
 
+    /// Store whether the shell's GPU surface is translucent (alpha-channel,
+    /// "Mode B"), threaded into every subsequent paint pass and recovered by
+    /// widgets through [`crate::widget::PaintCtx::is_translucent`]. A shell
+    /// pushes the surface's **resolved** translucency here — what the GPU
+    /// backend reports after the surface is installed, not what the app
+    /// requested via `frust-shell-common::surface_mode`'s latch: a translucency
+    /// request the platform refuses must degrade to the opaque contract, or
+    /// every `platform_view` slot punches a hole in an opaque swapchain
+    /// (black rectangles). Every desktop app leaves the default `false`
+    /// (opaque, "Mode A").
+    ///
+    /// Marks `PAINT` pending on an actual change (`PartialEq`-guarded, mirroring
+    /// [`RenderRoot::set_insets`]'s no-op guard): translucency is read purely at
+    /// paint time (the hole-punch runs in `paint`, never baked at layout), so a
+    /// flip must repaint but need not relayout. A flip is rare but **real**: a
+    /// surface (re)install can resolve differently from the previous one, and
+    /// both mobile shells re-push this every frame (the no-op-if-unchanged
+    /// guard is what makes that free).
+    pub fn set_surface_translucent(&mut self, translucent: bool) {
+        if self.surface_translucent == translucent {
+            return;
+        }
+        self.surface_translucent = translucent;
+        self.pending |= ChangeFlags::PAINT;
+    }
+
+    /// Whether the shell's GPU surface is currently marked translucent.
+    pub fn is_surface_translucent(&self) -> bool {
+        self.surface_translucent
+    }
+
     /// Whether a captured pointer gesture is currently in flight.
     pub fn is_pointer_captured(&self) -> bool {
         self.pointer_captured
@@ -242,6 +302,47 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// shell can query it between frames) and is cleared when focus is lost.
     pub fn ime_state(&self) -> Option<ImeState> {
         self.ime_state.clone()
+    }
+
+    /// The [`PlatformViewFrame`]s published during the most recent
+    /// [`RenderRoot::paint`], in paint order.
+    ///
+    /// Replaced wholesale every pass (see the `platform_view_frames` field
+    /// doc), so a pass with no publishers yields an empty slice — a shell
+    /// never sees a stale frame for a slot that stopped painting.
+    pub fn platform_view_frames(&self) -> &[PlatformViewFrame] {
+        &self.platform_view_frames
+    }
+
+    /// The z-shield rects reported during the most recent [`RenderRoot::paint`]
+    /// (see [`crate::widget::PaintCtx::report_input_shield`]), in paint order.
+    ///
+    /// Replaced wholesale every pass, exactly like
+    /// [`RenderRoot::platform_view_frames`] — a shell feeds both into the same
+    /// differ ingest call, and the differ intersects these against each
+    /// interactive slot's rect.
+    pub fn input_shields(&self) -> &[Rect] {
+        &self.input_shields
+    }
+
+    /// Drain the slot ids whose `platform_view` widgets were torn down since the
+    /// last call (`View::teardown` ran on them — see
+    /// [`crate::widget::report_retired_slot`]).
+    ///
+    /// The prompt-teardown channel: a shell calls this once per frame, right
+    /// after its rebuild, and retires each id in its platform-view differ
+    /// (`PlatformViewState::retire`) so a disposed slot's native view goes away
+    /// immediately instead of waiting out the differ's missing-streak
+    /// heuristic. Draining is destructive, mirroring
+    /// [`RenderRoot::take_change_flags`]: an id is reported exactly once, so a
+    /// shell that drains and drops the result loses the prompt path (the
+    /// missing-streak backstop still covers it).
+    ///
+    /// A merely *culled* slot (scrolled offscreen, a parent skipping paint)
+    /// never appears here — culling doesn't run `teardown` — which is what
+    /// keeps the camera keep-alive contract intact.
+    pub fn take_retired_platform_views(&mut self) -> Vec<u64> {
+        crate::widget::take_retired_slots()
     }
 
     /// Take (and clear) the dirtiness accumulated since the last call.
@@ -400,6 +501,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// frame (desktop `window.request_redraw()`; the mobile continuous loops
     /// already do so). Mirrors how [`RenderRoot::event`] surfaces `needs_redraw`.
     ///
+    /// A widget whose animation changes its *layout* signals
+    /// [`PaintCtx::request_layout`] instead (or as well); that bubbles up the same
+    /// way and is folded here into the render root's pending [`ChangeFlags`]
+    /// (`LAYOUT`), so the *next* frame's
+    /// [`take_change_flags`](RenderRoot::take_change_flags)`().needs_layout()`
+    /// reports it and the mobile intra-frame layout skip relayouts while the
+    /// animation is in flight. It is also surfaced on the returned
+    /// [`PaintOutcome::needs_layout`].
+    ///
     /// `frame_time` is the shell's shared monotonic clock for this frame (spec §8:
     /// time enters `frust-core` from the shell, never `Instant::now()` here). It
     /// is seeded onto the root [`PaintCtx`] and threaded unchanged to every child
@@ -415,6 +525,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let insets = self.insets;
         // Same disjoint `Copy` read: the presented-frame count threaded to widgets.
         let presented_frames = self.presented_frames;
+        // Same disjoint `Copy` read: the surface-translucency flag the
+        // platform-view hole-punch reads (see `PaintCtx::is_translucent`).
+        let surface_translucent = self.surface_translucent;
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             // Seed the shared shell clock so the whole paint pass sees one time.
@@ -427,6 +540,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // Thread the shell's presented-frame count down (global; a widget
             // measuring FPS differences it — see `PaintCtx::presented_frames`).
             ctx.set_presented_frames(presented_frames);
+            // Thread the surface-translucency flag down (global; the
+            // platform-view hole-punch gates its rect-clear on it — see
+            // `PaintCtx::is_translucent`).
+            ctx.set_translucent(surface_translucent);
             // Seed the root widget's paint-time focus from the cached focus path
             // so a leaf-root editable observes its own focus; deeper focus is
             // threaded per-pod by `ChildPod::paint_child`.
@@ -447,8 +564,36 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             {
                 self.ime_state = Some(ime);
             }
+            // Replace (never merge) the whole platform-view collection with
+            // whatever this pass published — unlike `ime_state` above there is
+            // no single "the" published instance to guard behind a focus
+            // check, and a pass that publishes none must clear out every
+            // stale frame from the previous one (see the field's doc comment).
+            self.platform_view_frames = ctx.take_platform_views();
+            // Same replace-per-pass discipline for the z-shield channel: a pass
+            // whose shields stopped painting reports none, so a stale shield can
+            // never keep stealing input from an interactive slot (see
+            // `PaintCtx::report_input_shield`).
+            self.input_shields = ctx.take_input_shields();
+            // Fold a bubbled `request_layout` into `pending` so the *next* frame
+            // relayouts. `pending` survives to the next frame and feeds both the
+            // frame gate (`has_pending_change_flags`) and the Android layout-skip
+            // (`take_change_flags().needs_layout()`), so no shell change is needed
+            // on any platform. Deliberately opt-in: `request_frame` alone never
+            // sets LAYOUT, keeping paint-only animations layout-free.
+            let needs_layout = ctx.needs_layout();
+            if needs_layout {
+                self.pending |= ChangeFlags::LAYOUT;
+            }
             PaintOutcome {
                 needs_frame: ctx.needs_frame(),
+                needs_layout,
+                // Aggregate tick class: paced-only iff a frame was requested and
+                // every request was CosmeticLoop-class. The mobile frame gate
+                // (task 06) may throttle such a frame; any Transition request
+                // (including the LAYOUT-implying `request_layout` above) leaves
+                // this false so the frame runs every vsync.
+                needs_frame_paced_only: ctx.needs_frame_paced_only(),
             }
         } else {
             PaintOutcome::default()
@@ -882,6 +1027,242 @@ mod tests {
         assert_eq!(scene2.texts, vec![(Point::ZERO, "two".to_string())]);
     }
 
+    /// A leaf widget that publishes a fixed [`PlatformViewFrame`] — and reports
+    /// a z-shield rect over its own bounds — on every paint, unless
+    /// `should_publish` is false (the widget-level toggle that simulates a slot
+    /// no longer publishing between two rebuilds). Both channels ride the same
+    /// toggle so one fixture covers both replace-per-pass contracts.
+    struct PlatformViewProbeWidget {
+        slot_id: u64,
+        should_publish: bool,
+    }
+
+    impl crate::widget::Widget for PlatformViewProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            if self.should_publish {
+                ctx.publish_platform_view(PlatformViewFrame {
+                    slot_id: self.slot_id,
+                    view_type: "dev.frust.Probe".to_string(),
+                    params_json: String::new(),
+                    params_generation: 0,
+                    rect: kurbo::Rect::from_origin_size(ctx.origin(), ctx.size()),
+                    clip: None,
+                    visible: true,
+                    interactive: false,
+                    shields: Vec::new(),
+                });
+                ctx.report_input_shield(kurbo::Rect::from_origin_size(ctx.origin(), ctx.size()));
+            }
+        }
+    }
+
+    /// A root widget owning two independently toggleable [`ChildPod`]s (a
+    /// minimal two-slot container) so a rebuild can flip either slot's
+    /// `should_publish` — the fixture the "two slots in one pass" and
+    /// "empty-pass clears stale frames" acceptance criteria need.
+    struct PlatformViewRootWidget {
+        a: crate::widget::ChildPod,
+        b: crate::widget::ChildPod,
+    }
+
+    impl crate::widget::Widget for PlatformViewRootWidget {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.a.layout_child(ctx, bc);
+            self.b.layout_child(ctx, bc);
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.a.paint_child(ctx, scene);
+            self.b.paint_child(ctx, scene);
+        }
+    }
+
+    /// The `View` producing [`PlatformViewRootWidget`], reconciling each
+    /// slot's `should_publish` flag on rebuild like any controlled widget.
+    struct PlatformViewRootView {
+        publish_a: bool,
+        publish_b: bool,
+    }
+
+    impl View<PvState> for PlatformViewRootView {
+        type Element = PlatformViewRootWidget;
+
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> Self::Element {
+            PlatformViewRootWidget {
+                a: crate::widget::ChildPod::new(Box::new(PlatformViewProbeWidget {
+                    slot_id: 1,
+                    should_publish: self.publish_a,
+                })),
+                b: crate::widget::ChildPod::new(Box::new(PlatformViewProbeWidget {
+                    slot_id: 2,
+                    should_publish: self.publish_b,
+                })),
+            }
+        }
+
+        fn rebuild(
+            &self,
+            prev: &Self,
+            element: &mut Self::Element,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            if prev.publish_a != self.publish_a || prev.publish_b != self.publish_b {
+                element
+                    .a
+                    .widget_mut()
+                    .downcast_mut::<PlatformViewProbeWidget>()
+                    .expect("slot a stays a PlatformViewProbeWidget")
+                    .should_publish = self.publish_a;
+                element
+                    .b
+                    .widget_mut()
+                    .downcast_mut::<PlatformViewProbeWidget>()
+                    .expect("slot b stays a PlatformViewProbeWidget")
+                    .should_publish = self.publish_b;
+                ChangeFlags::PAINT
+            } else {
+                ChangeFlags::NONE
+            }
+        }
+    }
+
+    /// App state for the platform-view frame-channel tests.
+    #[derive(Default)]
+    struct PvState {
+        publish_a: bool,
+        publish_b: bool,
+    }
+
+    fn platform_view_logic(state: &mut PvState) -> PlatformViewRootView {
+        PlatformViewRootView {
+            publish_a: state.publish_a,
+            publish_b: state.publish_b,
+        }
+    }
+
+    #[test]
+    fn platform_view_frames_arrive_in_order_and_clear_on_empty_pass() {
+        let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
+        let mut state = PvState {
+            publish_a: true,
+            publish_b: true,
+        };
+        root.rebuild(&mut platform_view_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+
+        // Two slots publishing in one pass both arrive, in paint order — the
+        // regression test for the overwrite hazard (an Option-based `ime_state`
+        // shape here would leave only the second slot's frame).
+        let frames = root.platform_view_frames();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].slot_id, 1);
+        assert_eq!(frames[1].slot_id, 2);
+
+        // Next pass: neither slot publishes (simulates both going away/culled).
+        // The collection is REPLACED, so the previous pass's frames must not
+        // survive as stale entries.
+        state.publish_a = false;
+        state.publish_b = false;
+        root.rebuild(&mut platform_view_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            root.platform_view_frames().is_empty(),
+            "a paint pass with no publishers must yield an empty slice"
+        );
+    }
+
+    #[test]
+    fn input_shields_arrive_in_order_and_clear_on_empty_pass() {
+        // The shield channel's half of the contract above (native-widgets
+        // p1-09): two shields reported in one pass both survive (the `Vec`
+        // extend, not an `Option` overwrite), and a pass that reports none
+        // replaces the collection rather than merging — a stale shield must
+        // never keep stealing input from an interactive slot.
+        let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
+        let mut state = PvState {
+            publish_a: true,
+            publish_b: true,
+        };
+        root.rebuild(&mut platform_view_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert_eq!(root.input_shields().len(), 2);
+        assert_eq!(
+            root.input_shields()[0],
+            Rect::from_origin_size(Point::ZERO, Size::new(10.0, 10.0)),
+            "a shield is reported in absolute paint coordinates"
+        );
+
+        state.publish_a = false;
+        state.publish_b = false;
+        root.rebuild(&mut platform_view_logic, &mut state);
+        root.layout(Size::new(200.0, 200.0));
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            root.input_shields().is_empty(),
+            "a paint pass reporting no shields must yield an empty slice"
+        );
+    }
+
+    #[test]
+    fn retired_platform_views_drain_exactly_once() {
+        // The prompt-teardown channel (native-widgets p1-09): a reported slot
+        // id is handed to the shell once and then gone, mirroring
+        // `take_change_flags`. Serialized against the other test touching the
+        // process-wide list (see `RETIRE_TEST_LOCK`).
+        let _guard = RETIRE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
+        let _ = root.take_retired_platform_views(); // clear anything a sibling left
+
+        crate::widget::report_retired_slot(7);
+        crate::widget::report_retired_slot(9);
+        assert_eq!(root.take_retired_platform_views(), vec![7, 9]);
+        assert!(
+            root.take_retired_platform_views().is_empty(),
+            "draining is destructive — a second drain reports nothing"
+        );
+    }
+
+    #[test]
+    fn retired_platform_views_are_capped_dropping_the_oldest() {
+        // A shell that never drains (desktop: no native compositor) must not
+        // grow this list forever; past the cap the OLDEST id is dropped and the
+        // differ's missing-streak backstop covers it.
+        let _guard = RETIRE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut root: RenderRoot<PvState, PlatformViewRootView> = RenderRoot::new();
+        let _ = root.take_retired_platform_views();
+
+        for slot_id in 0..1_000u64 {
+            crate::widget::report_retired_slot(slot_id);
+        }
+        let drained = root.take_retired_platform_views();
+        assert!(drained.len() <= 256, "the pending list stays bounded");
+        assert_eq!(
+            *drained.last().expect("non-empty"),
+            999,
+            "the newest report always survives"
+        );
+        assert!(
+            !drained.contains(&0),
+            "the oldest reports are the ones dropped"
+        );
+    }
+
+    /// Serializes the two tests that drive the process-wide retire list
+    /// (`crate::widget::report_retired_slot`), which `cargo test`'s parallel
+    /// threads would otherwise interleave — the same shape
+    /// `frust-shell-common::theme_override`'s tests use for its global slot.
+    static RETIRE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A root widget that advances no state but requests a continuation frame on
     /// every paint — stands in for an animating widget (e.g. a scroll fling).
     struct FrameWidget;
@@ -928,6 +1309,149 @@ mod tests {
         anim.layout(Size::new(100.0, 100.0));
         let mut scene2 = RecordingScene::default();
         assert!(anim.paint(&mut scene2, FrameTime::ZERO).needs_frame);
+    }
+
+    /// A root widget whose animation changes its layout: it requests a layout
+    /// re-run on every paint — stands in for an expanding accordion.
+    struct LayoutFrameWidget;
+    impl crate::widget::Widget for LayoutFrameWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_layout();
+        }
+    }
+
+    struct LayoutFrameView;
+    impl View<AppState> for LayoutFrameView {
+        type Element = LayoutFrameWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> LayoutFrameWidget {
+            LayoutFrameWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut LayoutFrameWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn paint_folds_request_layout_into_pending_change_flags() {
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+
+        // A root calling `request_layout` in paint surfaces it on the outcome AND
+        // folds LAYOUT into `pending`, so the NEXT frame's `take_change_flags`
+        // reports `needs_layout()`.
+        let mut anim: RenderRoot<AppState, LayoutFrameView> = RenderRoot::new();
+        anim.rebuild(&mut |_s: &mut AppState| LayoutFrameView, &mut state);
+        anim.layout(Size::new(100.0, 100.0));
+        // Drain any rebuild/layout dirtiness so we observe only paint's fold.
+        let _ = anim.take_change_flags();
+        let mut scene = RecordingScene::default();
+        let outcome = anim.paint(&mut scene, FrameTime::ZERO);
+        assert!(outcome.needs_layout, "outcome reports needs_layout");
+        // `request_layout` implies `request_frame`, so the animation still runs.
+        assert!(outcome.needs_frame, "request_layout implies needs_frame");
+        assert!(
+            anim.has_pending_change_flags(),
+            "the fold survives to the next frame"
+        );
+        assert!(
+            anim.take_change_flags().needs_layout(),
+            "next frame's take_change_flags reports needs_layout"
+        );
+    }
+
+    #[test]
+    fn paint_request_frame_only_does_not_fold_layout() {
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+
+        // A paint-only animation (request_frame, no request_layout) must NOT fold
+        // LAYOUT — the mobile layout-skip win depends on this staying opt-in.
+        let mut anim: RenderRoot<AppState, FrameView> = RenderRoot::new();
+        anim.rebuild(&mut |_s: &mut AppState| FrameView, &mut state);
+        anim.layout(Size::new(100.0, 100.0));
+        let _ = anim.take_change_flags();
+        let mut scene = RecordingScene::default();
+        let outcome = anim.paint(&mut scene, FrameTime::ZERO);
+        assert!(outcome.needs_frame);
+        assert!(
+            !outcome.needs_layout,
+            "request_frame alone: no needs_layout"
+        );
+        assert!(
+            !anim.has_pending_change_flags(),
+            "request_frame alone must not fold LAYOUT into pending"
+        );
+    }
+
+    /// A root whose paint requests a *pacable* cosmetic-loop frame — stands in
+    /// for a skeleton shimmer whose cadence the mobile frame gate may throttle.
+    struct PacedFrameWidget;
+    impl crate::widget::Widget for PacedFrameWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame_paced();
+        }
+    }
+
+    struct PacedFrameView;
+    impl View<AppState> for PacedFrameView {
+        type Element = PacedFrameWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PacedFrameWidget {
+            PacedFrameWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PacedFrameWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn paint_surfaces_paced_only_tick_class_on_outcome() {
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+
+        // A paced-only root surfaces `needs_frame_paced_only` on the outcome so
+        // the mobile frame gate (task 06) may throttle its cadence.
+        let mut paced: RenderRoot<AppState, PacedFrameView> = RenderRoot::new();
+        paced.rebuild(&mut |_s: &mut AppState| PacedFrameView, &mut state);
+        paced.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        let outcome = paced.paint(&mut scene, FrameTime::ZERO);
+        assert!(outcome.needs_frame);
+        assert!(
+            outcome.needs_frame_paced_only,
+            "a purely-cosmetic frame surfaces as paced-only"
+        );
+
+        // A Transition-class (`request_frame`) root is never paced-only, keeping
+        // today's every-vsync behavior for existing callers.
+        let mut anim: RenderRoot<AppState, FrameView> = RenderRoot::new();
+        anim.rebuild(&mut |_s: &mut AppState| FrameView, &mut state);
+        anim.layout(Size::new(100.0, 100.0));
+        let mut scene2 = RecordingScene::default();
+        let outcome2 = anim.paint(&mut scene2, FrameTime::ZERO);
+        assert!(outcome2.needs_frame);
+        assert!(
+            !outcome2.needs_frame_paced_only,
+            "request_frame stays unpaced (Transition)"
+        );
     }
 
     /// A root widget that records the `frame_time` its paint observed, so a test

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The CAMERA permission travels with this module: the Android manifest merger
+  folds it into any app that depends on `:frust-camera`, so a consuming app
+  never edits its own AndroidManifest.xml and the permission cannot outlive the
+  plugin. It is a runtime permission — `FrustCameraHost.requestPermission()`
+  drives the system dialog.
+
+  The provider below is how `FrustCameraHost` obtains an application `Context`
+  BEFORE any view exists. The frozen Rust->Kotlin contract
+  (`plugins/camera/src/android.rs`) gives `openCamera(int lensFacing)` no
+  Context argument, and a session must be openable before its preview slot is
+  created (the slot's `params_json` carries the session id `openCamera`
+  returns) — so the Activity handed through the platform-view factory seam is
+  too late for `ProcessCameraProvider.getInstance(context)`. A no-op
+  `ContentProvider` whose `onCreate` runs at process start is the standard
+  library-self-initialization mechanism for exactly this (`androidx.startup`'s
+  `InitializationProvider`, Firebase's `FirebaseInitProvider`), and it keeps the
+  frozen contract untouched.
+
+  `${applicationId}` is substituted by AGP at manifest-merge time, so the
+  authority is unique per consuming app (two apps on one device cannot collide).
+  `exported="false"`: nothing outside the app may reach it — it exposes no data
+  and every ContentProvider operation below throws.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.camera`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <application>
+        <provider
+            android:name="dev.frust.camera.FrustCameraInitProvider"
+            android:authorities="${applicationId}.frustcamerainit"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
+</manifest>

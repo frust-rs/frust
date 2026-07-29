@@ -30,8 +30,8 @@
 
 use std::any::Any;
 use std::ffi::c_void;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -43,16 +43,19 @@ use frust_core::event::{
 use frust_core::insets::WindowInsets;
 use frust_reactive::{ReactiveRuntime, TrackedScope, provide_context};
 use frust_render::{
-    AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
+    AcquireOutcome, DeferredPresent, EncodeOutcome, FrameOutcome, RenderContext,
+    SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer,
 };
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::{self, FramePasses, FrameStats, RenderSpans, StartupSpans, UiSpans};
+use frust_shell_common::platform_view::{FramePairing, ViewCommand};
 use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
-    AppTree, FrameGate, FrameInputs, FrameMeta, RenderCommand, RenderSender, SceneFrame,
-    SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
-    effective_brightness_for_platform_change, logical_insets, logical_size, sanitize_scale,
+    AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
+    RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
+    effective_brightness_for_platform_change, logical_insets, logical_size,
+    publish_resolved_surface_mode, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, DesignLanguage, Theme};
@@ -135,7 +138,7 @@ pub struct IosAppHandle {
     /// flipped by [`Self::set_appearance`] once Swift reports the platform's
     /// real dark-mode preference (`frust_set_appearance`, called right after
     /// `frust_init` returns a handle and again from `traitCollectionDidChange`
-    /// — see `templates/app/ios.tmpl`'s `FrustViewController`).
+    /// — see `platform/ios/FrustEmbedding/Sources/FrustEmbedding/FrustViewController.swift`).
     theme: Theme,
     /// Polls the process-wide app-facing theme override slot
     /// (`frust::set_app_theme`/`clear_app_theme`, task 6c-04) once per
@@ -187,6 +190,13 @@ pub struct IosAppHandle {
     /// frame the gate runs; a skipped frame leaves it untouched. Without it the
     /// gate would skip the follow-up frame a running animation needs.
     last_needs_frame: bool,
+    /// Handle-side latch feeding [`FrameInputs::last_needs_frame_paced_only`]:
+    /// the previous paint's [`frust_core::PaintOutcome::needs_frame_paced_only`]
+    /// (its frame request aggregated to [`frust_core::TickClass::CosmeticLoop`]
+    /// alone). Lets [`FrameGate::decide_paced`] throttle a paced-only decorative
+    /// loop to the theme's `cosmetic_loop_rate` instead of every `CADisplayLink`
+    /// tick. Latched beside `last_needs_frame`; a skipped frame leaves it.
+    last_needs_frame_paced_only: bool,
     /// Handle-side latch feeding [`FrameInputs::theme_or_appearance_changed`]:
     /// set by [`Self::set_appearance`] on an OS-driven light/dark flip, taken
     /// only past the pause/ready gate (like the signals-dirty drain) so a flip
@@ -222,6 +232,70 @@ pub struct IosAppHandle {
     /// (plan phase 10.C.2). **Instrumentation only** — accumulated and logged
     /// (`frust-perf deadline`) behind [`perf::enabled`]; never drops work.
     deadline_overruns: u64,
+    /// The surface-alpha **request** this handle's surface was (or, for the
+    /// split, will be) created with (platform-views task 06) — latched once at
+    /// construction from `SurfaceModeWatcher::current()` (read in
+    /// [`crate::ffi_glue::create_handle`], before any surface exists) and read
+    /// back by [`crate::ffi_glue::recover_surface`] so an inline surface
+    /// recreate asks for the same alpha mode the initial surface did.
+    ///
+    /// **A request, not an outcome**: it does NOT drive the paint contract —
+    /// [`Self::translucent_resolved`] does (review finding M1).
+    surface_alpha: SurfaceAlphaRequest,
+    /// Whether this handle's surface **actually came up** translucent — the
+    /// RESOLVED capability behind [`Self::frame`]'s base-color swap and
+    /// `RenderRoot::set_surface_translucent` (review finding M1).
+    ///
+    /// `frust-render` resolves [`Self::surface_alpha`] against the platform's
+    /// advertised alpha modes and can silently fall back to an opaque
+    /// swapchain; keying the transparent base color and the `platform_view`
+    /// hole punch off the request alone would then `DestOut`-zero real pixels
+    /// and present black rectangles. So the "fixed before the surface exists,
+    /// never changes" invariant is **false** — a (re)install can downgrade
+    /// this, and every install path re-resolves it.
+    ///
+    /// An `Arc<AtomicBool>` (the `fatal`/`presented` cross-thread pattern)
+    /// because in the default render-thread split the surface is created — and
+    /// self-healed after a `SurfaceLost` — on the RENDER thread, while this (UI)
+    /// thread owns the `RenderRoot` and the per-frame base color. **Seeded from
+    /// the request at construction** so the capable common case renders Mode B
+    /// from frame 1 with no flicker; only a real resolution may downgrade it,
+    /// observed within one frame (see [`Self::sync_translucent_resolved`]).
+    translucent_resolved: Arc<AtomicBool>,
+    /// The platform-view command differ (platform-views task 06): turns the
+    /// tree's per-paint-pass [`frust_core::widget::PlatformViewFrame`]s into
+    /// the idempotent command backlog `frust_platform_view_commands_json`
+    /// serves. Fed via [`AppTree::platform_view_frames`] after every RUN
+    /// frame's paint (see [`Self::frame`]) — never on a gate-skipped frame,
+    /// per [`PlatformViewState::ingest`]'s skip-safety contract.
+    platform_views: PlatformViewState,
+    /// The release gate pairing each published command batch with the frust
+    /// frame that painted its geometry (camera task 01's shared
+    /// [`FramePairing`], task 13's iOS half) — **only consulted while
+    /// [`Self::present_sync`] is on**, which is what makes it correct here:
+    /// the UI thread presents the frames itself, so it knows exactly which one
+    /// just landed.
+    ///
+    /// Unlike Android, where the gate is always on, iOS holds geometry only in
+    /// the present-sync configuration. Ungated, iOS presents eagerly off the
+    /// render thread, and holding the geometry back is the WRONG sign of
+    /// correction there (the native view already lags — SPIKE-SYNC §3.4.1, where
+    /// the frame-id gate measured as a no-op at best). Paired with the deferred
+    /// present it is the right one: the geometry waits for the frame it belongs
+    /// to, and that frame lands in the very transaction that releases it.
+    platform_view_due: FramePairing,
+    /// The id of the last frame **this thread presented** through
+    /// [`Self::present_pending_frame`] — the release gate's "is that frame on
+    /// screen yet?" input. UI-thread-owned (a plain `u64`, no atomic): under
+    /// present-sync the render thread never presents, so there is no second
+    /// writer. Stays `0` — and is never read — outside present-sync.
+    presented_frame_id: u64,
+    /// Whether present-sync is active for this handle: the host armed it *and*
+    /// the render-thread split is engaged (the inline path presents on this
+    /// thread already, so it neither parks frames nor advances
+    /// [`Self::presented_frame_id`] — gating geometry on it there would stall
+    /// the backlog behind a frame id that never moves). Fixed at construction.
+    present_sync: bool,
 }
 
 /// One finished frame's payload crossing the UI→render-thread handoff in the
@@ -235,6 +309,107 @@ pub struct IosAppHandle {
 pub(crate) struct PaintedScene {
     pub(crate) scene: Scene,
     pub(crate) base_color: peniko::Color,
+}
+
+/// The render→UI handoff slot for the **present-sync** path (camera task 13):
+/// a depth-1, latest-wins slot holding at most one submitted-but-unpresented
+/// frame ([`DeferredPresent`]).
+///
+/// # Why it exists
+///
+/// A `CAMetalLayer` with `presentsWithTransaction = true` requires
+/// `[drawable present]` to run on the thread committing the `CATransaction`
+/// that also carries the hosted platform views' geometry — otherwise the
+/// drawable never reaches the compositor at all (measured on device: the whole
+/// screen stays the window background — `research/SPIKE-SYNC.md` §3.2). Under
+/// the render-thread split the present runs on the render thread, which commits
+/// no transaction. So when the host arms present-sync
+/// (`FrustViewController.synchronizesPresentWithPlatformViews` →
+/// `frust_set_present_sync`), the render thread stops presenting: it submits as
+/// usual and parks the acquired frame here, and the UI thread presents it from
+/// `frust_present_frame`, inside the same display-link tick (and transaction)
+/// that `FrustViewHost.poll` commits sibling geometry in. **The split stays
+/// on** — this is the ladder rung 1 shipping form, not "turn the split off on
+/// iOS".
+///
+/// iOS delays the *surface* to meet the view; Android delays the *view* to meet
+/// the surface. The two corrections have opposite signs, so this mechanism is
+/// deliberately iOS-local and shares nothing with the Android frame-id gate
+/// (PLAN.md's no-shared-knob constraint).
+///
+/// # Discipline
+///
+/// Latest-wins, exactly like the UI→render scene channel: storing over an
+/// un-taken frame **drops** the older one (its drawable returns to the layer's
+/// pool un-presented) rather than blocking the render thread, so a UI thread
+/// that misses a tick costs one dropped frame and never a deadlock. A tick with
+/// nothing parked presents nothing — the zero-frames-at-rest contract is
+/// untouched.
+///
+/// # Pairing
+///
+/// The parked frame carries its own `frame_id`, because deferring the present
+/// alone would only *move* the desync: the render thread is a tick behind the
+/// UI thread (its `acquire` blocks on vsync), so the frame presented in tick N
+/// was painted in tick N-1 — pairing it with tick N's geometry would leave the
+/// surface lagging the view by a frame, the mirror of the defect. The id lets
+/// the UI thread tell the shared release gate
+/// ([`FramePairing`](frust_shell_common::platform_view::FramePairing), camera
+/// task 01's Android mechanism) exactly *which* frame it just presented, so the
+/// geometry released in the same transaction is that frame's own. Deferred
+/// present and paired release are two halves of one fix.
+pub(crate) struct PresentHandoff {
+    /// Whether the host armed present-sync. Read once from the process-global
+    /// latch at handle construction and never mutated afterwards (the layer's
+    /// `presentsWithTransaction` is likewise a fixed, pre-`frust_init` host
+    /// choice — see `frust_set_present_sync`), so a plain `bool` shared behind
+    /// the `Arc` suffices; no atomic, no interior mutability.
+    armed: bool,
+    /// The parked frame and the id of the frust frame that painted it, if any.
+    /// `Mutex` rather than a channel: the slot is depth-1 and both sides only
+    /// ever store/take one value, so a channel's queueing would be a liability
+    /// (a backlog of stale drawables), not a feature.
+    slot: Mutex<Option<(u64, DeferredPresent)>>,
+}
+
+impl PresentHandoff {
+    pub(crate) fn new(armed: bool) -> Self {
+        Self {
+            armed,
+            slot: Mutex::new(None),
+        }
+    }
+
+    /// Whether the render thread should defer its present into this slot.
+    pub(crate) fn is_armed(&self) -> bool {
+        self.armed
+    }
+
+    /// Park a freshly submitted frame (and the id of the frust frame that
+    /// painted it) for the UI thread — render thread side. Any frame still
+    /// parked is dropped; see the latest-wins discipline above.
+    fn store(&self, frame_id: u64, frame: DeferredPresent) {
+        // Poisoning can only come from a panic while the slot is held, which is
+        // a `take`/`store` of an `Option` — no invariant to corrupt — so recover
+        // the guard rather than panicking across an FFI-adjacent path.
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some((frame_id, frame));
+    }
+
+    /// Take the parked frame to present it (UI thread side); `None` when the
+    /// render thread produced nothing since the last tick (a gate-skipped or
+    /// still-in-flight frame).
+    fn take(&self) -> Option<(u64, DeferredPresent)> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Drop any parked frame without presenting it — used where presenting
+    /// would be wrong or impossible: backgrounding (Metal work from a suspended
+    /// app can get the process killed), a surface (re)install (the parked frame
+    /// belongs to a swapchain that no longer exists), and teardown.
+    pub(crate) fn clear(&self) {
+        drop(self.take());
+    }
 }
 
 /// The render-path half of the iOS frame loop (plan phase 11.B): either the
@@ -311,6 +486,13 @@ impl InlineExecutor {
             &mut self.startup_spans,
             perf_on,
             &self.presented,
+            // Present-sync never applies inline: this tail already runs on the
+            // UI thread inside the `CADisplayLink` tick, so wgpu's own present
+            // is *already* issued on the transaction-committing thread — the
+            // configuration the spike measured as "fully in sync"
+            // (`research/SPIKE-SYNC.md` §3.5). Deferring it a tick here would
+            // only add latency.
+            None,
         )
     }
 
@@ -392,6 +574,41 @@ pub(crate) struct SplitExecutor {
     /// `FrameOutcome::Rendered`). A plain `Arc<AtomicU64>` — no channel/protocol,
     /// mirroring the `fatal`-flag pattern.
     presented: Arc<AtomicU64>,
+    /// The present-sync handoff slot (camera task 13): one clone here (the UI
+    /// thread takes and presents from it in
+    /// [`IosAppHandle::present_pending_frame`]), one on the render thread
+    /// ([`crate::ffi_glue::render_loop`], which parks each submitted frame in
+    /// it instead of presenting when armed). Inert — never written, always
+    /// empty — when the host did not arm present-sync, which is the default.
+    /// See [`PresentHandoff`].
+    present: Arc<PresentHandoff>,
+    /// The render thread's "I just (re)installed the surface myself" signal
+    /// (camera gate-fix g4): set by [`crate::ffi_glue::render_loop`]'s
+    /// `SurfaceLost` self-heal arm, taken once per frame by
+    /// [`FrameExecutor::take_surface_reinstalled`] and fed into
+    /// [`FrameInputs::surface_changed_or_resized`].
+    ///
+    /// # Why the flag exists
+    ///
+    /// iOS is the one shell whose surface loss has **no platform entry point**:
+    /// the `CAMetalLayer` is permanent, so nothing external re-drives creation
+    /// and the render thread heals itself (see [`crate::ffi_glue::render_loop`]'s
+    /// iOS surface recovery). Android's equivalent arrives as a Kotlin
+    /// `surfaceChanged`, which latches its own gate input. Before the frame gate
+    /// actually idled on iOS that gap was invisible — the next of an unbroken
+    /// stream of frames repainted the healed surface within a tick. Now that a
+    /// resting screen produces no frames at all, a self-heal with no UI-side
+    /// signal would leave the fresh swapchain un-painted (and, under
+    /// present-sync, the platform-view batch paired with the lost frame held)
+    /// until some unrelated dirtiness happened along. So the render thread says
+    /// so, and the next tick runs a real frame.
+    ///
+    /// A plain `Arc<AtomicBool>` — one clone here, one on the render thread —
+    /// the same shape as [`Self::fatal`]/[`Self::presented`], no channel or
+    /// protocol. Inert on the inline path, which recovers UI-side in
+    /// `frust_render_frame`/`frust_resize` (and re-opens the gate's warmup
+    /// through `IosAppHandle::set_surface`) instead.
+    surface_reinstalled: Arc<AtomicBool>,
 }
 
 impl SplitExecutor {
@@ -401,6 +618,8 @@ impl SplitExecutor {
         fatal: Arc<AtomicBool>,
         scene_return: SceneReturnReceiver<Scene>,
         presented: Arc<AtomicU64>,
+        present: Arc<PresentHandoff>,
+        surface_reinstalled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             sender: Some(sender),
@@ -411,6 +630,8 @@ impl SplitExecutor {
             scene_return,
             spare_scene: None,
             presented,
+            present,
+            surface_reinstalled,
         }
     }
 
@@ -504,6 +725,11 @@ impl SplitExecutor {
 
 impl Drop for SplitExecutor {
     fn drop(&mut self) {
+        // Present-sync teardown (task 13): release any parked, unpresented frame
+        // FIRST, so the drawable it holds is gone before the render thread (and
+        // with it the surface it came from) is torn down below. Presenting it
+        // here would be wrong — `frust_destroy` runs as the view goes away.
+        self.present.clear();
         // Destroy-join ordering (plan Risks / RESEARCH Q9): drop the sender first
         // — that signals the render loop's `wait_next` to wake with a
         // disconnection and exit, dropping its `SurfaceRenderer` (and the
@@ -540,6 +766,39 @@ impl FrameExecutor {
         match self {
             FrameExecutor::Inline(inline) => inline.presented.load(Ordering::Relaxed),
             FrameExecutor::Split(split) => split.presented.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The id of the last frame **handed to** the render side — the release
+    /// gate's submission cursor, against which a batch whose own frame was
+    /// dropped by the depth-1 latest-wins channel is declared stale
+    /// (`MAX_FRAMES_IN_FLIGHT`). The next frame to be submitted is therefore
+    /// this + 1, which is the id a batch ingested during that frame's paint is
+    /// paired with.
+    ///
+    /// `0` on the inline path, which stamps no frame ids — harmless, because
+    /// the gate that reads this is only ever armed in the split (see
+    /// `IosAppHandle::present_sync`).
+    fn submitted_frame_id(&self) -> u64 {
+        match self {
+            FrameExecutor::Inline(_) => 0,
+            FrameExecutor::Split(split) => split.frame_id,
+        }
+    }
+
+    /// Take (and clear) the render thread's surface-self-heal signal — `true`
+    /// exactly once per render-side surface (re)install attempt (camera gate-fix
+    /// g4; see [`SplitExecutor::surface_reinstalled`] for why iOS needs it and
+    /// Android does not). Always `false` on the inline path, which recovers
+    /// UI-side instead.
+    ///
+    /// `swap` rather than a load: the signal must be consumed by the one frame
+    /// it forces to run, or a single self-heal would keep forcing `Run` forever
+    /// — the very defect this gate-fix task exists to close.
+    fn take_surface_reinstalled(&self) -> bool {
+        match self {
+            FrameExecutor::Inline(_) => false,
+            FrameExecutor::Split(split) => split.surface_reinstalled.swap(false, Ordering::AcqRel),
         }
     }
 
@@ -614,6 +873,20 @@ impl FrameExecutor {
 /// accumulate and exhaust the layer's small drawable pool — a hard stall. On the
 /// inline path (the UIKit main thread) this nests inside the runloop's own pool,
 /// which is harmless (RESEARCH Q9 — the iOS-specific hazard the split adds).
+///
+/// # Present-sync
+///
+/// `present` is the render side of the [`PresentHandoff`] slot, paired with the
+/// id of the frame being rendered (`None` on the inline path, which needs no
+/// deferral). When it is `Some` **and armed**, the submit step becomes
+/// `submit_deferred`: the frame's GPU work is submitted here as usual, but its
+/// `[drawable present]` is parked — under its own frame id — for the UI thread
+/// to issue inside the platform-view transaction (camera task 13). The
+/// `presented` counter and the `first_frame_presented` startup span are still
+/// stamped here, so on that path both run up to one display-link tick ahead of
+/// the actual present — a constant offset that leaves the *rate* those values
+/// report unchanged (iOS uses the counter for FPS reporting only; the frame-id
+/// gate that needs a true presented count is Android-only).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_scene(
     renderer: &mut SurfaceRenderer,
@@ -625,6 +898,7 @@ pub(crate) fn render_scene(
     startup_spans: &mut Option<StartupSpans>,
     perf_on: bool,
     presented: &AtomicU64,
+    present: Option<(&PresentHandoff, u64)>,
 ) -> Duration {
     autoreleasepool(|_pool| {
         // Encode span (GPU/CPU encode, no swapchain touch).
@@ -653,10 +927,23 @@ pub(crate) fn render_scene(
         };
         let acquire_time = acquire_start.map_or(Duration::ZERO, |t| t.elapsed());
 
-        // Submit span (blit + queue-submit + present).
+        // Submit span (blit + queue-submit + present — the present itself is
+        // deferred to the UI thread under present-sync, see this fn's docs).
         let submit_start = perf_on.then(Instant::now);
         let render_result = match acquire_result {
-            Ok(AcquireOutcome::Acquired) => renderer.submit(render_cx),
+            Ok(AcquireOutcome::Acquired) => {
+                match present.filter(|(handoff, _)| handoff.is_armed()) {
+                    Some((handoff, frame_id)) => {
+                        renderer.submit_deferred(render_cx).map(|(outcome, frame)| {
+                            if let Some(frame) = frame {
+                                handoff.store(frame_id, frame);
+                            }
+                            outcome
+                        })
+                    }
+                    None => renderer.submit(render_cx),
+                }
+            }
             Ok(AcquireOutcome::Reconfigured) => Ok(FrameOutcome::Redraw),
             Ok(AcquireOutcome::Lost) => Ok(FrameOutcome::SurfaceLost),
             Ok(AcquireOutcome::Skipped) => Ok(FrameOutcome::Skipped),
@@ -705,6 +992,60 @@ pub(crate) fn render_scene(
     })
 }
 
+/// Map one differ [`ViewCommand`] onto the host-testable
+/// [`crate::ffi_support::PlatformViewCommand`] shape, converting its logical,
+/// absolute-window rect/clip into physical px (`* scale`) — the one place
+/// this crate crosses from `frust_shell_common`'s `kurbo::Rect`-typed
+/// vocabulary into the FFI-boundary-safe plain-`f64` one (see
+/// [`crate::ffi_support::PvRect`]'s doc comment for why `kurbo` can't appear
+/// in `ffi_support` itself).
+fn to_pv_command(cmd: &ViewCommand, scale: f64) -> crate::ffi_support::PlatformViewCommand {
+    fn to_pv_rect(rect: kurbo::Rect, scale: f64) -> crate::ffi_support::PvRect {
+        crate::ffi_support::PvRect {
+            x: rect.x0 * scale,
+            y: rect.y0 * scale,
+            w: rect.width() * scale,
+            h: rect.height() * scale,
+        }
+    }
+    match cmd {
+        ViewCommand::Create {
+            slot_id,
+            view_type,
+            params_json,
+            interactive,
+        } => crate::ffi_support::PlatformViewCommand::Create {
+            slot_id: *slot_id,
+            view_type: view_type.clone(),
+            params_json: params_json.clone(),
+            interactive: *interactive,
+        },
+        ViewCommand::Update {
+            slot_id,
+            rect,
+            clip,
+            visible,
+            shields,
+        } => crate::ffi_support::PlatformViewCommand::Update {
+            slot_id: *slot_id,
+            rect: to_pv_rect(*rect, scale),
+            clip: clip.map(|c| to_pv_rect(c, scale)),
+            visible: *visible,
+            shields: shields.iter().map(|s| to_pv_rect(*s, scale)).collect(),
+        },
+        ViewCommand::UpdateParams {
+            slot_id,
+            params_json,
+        } => crate::ffi_support::PlatformViewCommand::UpdateParams {
+            slot_id: *slot_id,
+            params_json: params_json.clone(),
+        },
+        ViewCommand::Dispose { slot_id } => {
+            crate::ffi_support::PlatformViewCommand::Dispose { slot_id: *slot_id }
+        }
+    }
+}
+
 impl IosAppHandle {
     /// Assemble a handle with an already-created, `SurfaceReady` renderer.
     ///
@@ -738,12 +1079,15 @@ impl IosAppHandle {
     /// [`perf::SPAN_FIRST_REBUILD_DONE`] via [`FrameExecutor::record_first_rebuild`]
     /// — inline records it here, the split records it render-side on the first
     /// handed-off scene.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         executor: FrameExecutor,
         mut text_ctx: TextContext,
         metal_layer: *mut c_void,
         physical: (u32, u32),
         scale: f32,
+        surface_alpha: SurfaceAlphaRequest,
+        translucent_resolved: Arc<AtomicBool>,
         mut app: Box<dyn AppTree>,
     ) -> Self {
         // Construction-time font drain (task 14): apply any fonts registered via
@@ -774,6 +1118,21 @@ impl IosAppHandle {
         }
 
         app.set_theme(Box::new(theme.clone()));
+        // Thread the surface's RESOLVED translucency into the render root so
+        // the platform-view hole-punch clears each Mode B slot's rect (research
+        // VERIFY.md D1 — cross-platform) only when the surface really came up
+        // translucent (review M1). At construction the split's surface may
+        // still be installing render-side, so this reads the request-seeded
+        // flag; `frame`'s per-frame `sync_translucent_resolved` re-reads it and
+        // downgrades within one frame of a fallback.
+        let resolved_translucent =
+            crate::ffi_support::read_resolved_translucency(&translucent_resolved);
+        app.set_surface_translucent(resolved_translucent);
+        // Seed the app-facing RESOLVED slot from that same value (task p1-01),
+        // so app/plugin code reading `frust::resolved_surface_mode()` during
+        // the very first rebuild below sees a real verdict rather than
+        // `Unknown`. Re-published every frame by `sync_translucent_resolved`.
+        publish_resolved_surface_mode(resolved_translucent);
         provide_context(theme.clone());
         app.rebuild();
         let mut executor = executor;
@@ -785,6 +1144,13 @@ impl IosAppHandle {
         // reason `resize`/`set_surface`/`resume` re-open the window).
         let mut frame_gate = FrameGate::new();
         frame_gate.note_resumed();
+        // Present-sync is active only in the split with the host's latch set
+        // (see the `present_sync` field doc). Resolved once here rather than
+        // re-matched per frame.
+        let present_sync = match &executor {
+            FrameExecutor::Split(split) => split.present.is_armed(),
+            FrameExecutor::Inline(_) => false,
+        };
         Self {
             executor,
             text_ctx,
@@ -808,13 +1174,56 @@ impl IosAppHandle {
             frame_gate,
             events_since_last_frame: false,
             last_needs_frame: false,
+            last_needs_frame_paced_only: false,
             appearance_dirty: false,
             resampler: PointerResampler::new(),
             resample_clock: Instant::now(),
             pointer_scratch: Vec::new(),
             last_frame_time_nanos: None,
             deadline_overruns: 0,
+            surface_alpha,
+            translucent_resolved,
+            platform_views: PlatformViewState::new(),
+            platform_view_due: FramePairing::new(),
+            presented_frame_id: 0,
+            present_sync,
         }
+    }
+
+    /// Re-read the live surface's RESOLVED translucency and push it into the
+    /// render root, returning it for this frame's base-color choice (review
+    /// finding M1).
+    ///
+    /// Two sources, one flag:
+    /// - **Inline** (`FRUST_NO_RENDER_THREAD`): the renderer lives on this
+    ///   thread, so its `surface_resolved_translucent()` is authoritative and
+    ///   is copied into the shared flag here — never stale, even after a failed
+    ///   recreate (the renderer still describes whatever surface is live).
+    /// - **Split** (default): the render thread stored the resolution when it
+    ///   installed (or self-healed) the surface; this is a plain atomic load.
+    ///
+    /// Cheap enough to call every frame: one enum match plus one atomic load,
+    /// and [`AppTree::set_surface_translucent`] is no-op-if-unchanged (marking
+    /// `ChangeFlags::PAINT` only on an actual flip — which is what makes a
+    /// downgrade repaint without the punch).
+    ///
+    /// Also this shell's single publish point for the app-facing RESOLVED slot
+    /// (`frust::resolved_surface_mode()`, task p1-01), mirroring Android: app
+    /// code polls that slot during rebuild, so it must be current *before* the
+    /// rebuild this frame leads into, and publishing here (rather than at the
+    /// install/self-heal sites) keeps one UI-thread beat as the source for both
+    /// the render root and the app. One uncontended `Mutex` store per frame.
+    fn sync_translucent_resolved(&mut self) -> bool {
+        if let FrameExecutor::Inline(inline) = &self.executor {
+            crate::ffi_support::publish_resolved_translucency(
+                &self.translucent_resolved,
+                Some(inline.renderer.surface_resolved_translucent()),
+            );
+        }
+        let resolved = crate::ffi_support::read_resolved_translucency(&self.translucent_resolved);
+        publish_resolved_surface_mode(resolved);
+        self.app.set_surface_translucent(resolved);
+        resolved
     }
 
     /// Store the accesskit adapter for the app's `FrustView` (phase-6d task 05).
@@ -930,6 +1339,62 @@ impl IosAppHandle {
         self.metal_layer
     }
 
+    /// The surface-alpha request this handle's surface was created with
+    /// (platform-views task 06), read by [`crate::ffi_glue::recover_surface`]
+    /// so an inline surface recreate requests the same alpha mode the initial
+    /// surface did (see the field doc).
+    pub(crate) fn surface_alpha(&self) -> SurfaceAlphaRequest {
+        self.surface_alpha
+    }
+
+    /// Re-emit `Create`+`Update` for every currently-live platform-view slot
+    /// (platform-views task 06), for the inline path's successful surface
+    /// recreate ([`crate::ffi_glue::recover_surface`]) to call. Delegates to
+    /// [`PlatformViewState::reset_for_surface_recreate`].
+    pub(crate) fn reset_platform_views_for_surface_recreate(&mut self) {
+        self.platform_views.reset_for_surface_recreate();
+        // The replay supersedes every held batch, and the frames those batches
+        // were paired with belong to the surface that just went away — so the
+        // pairing goes with it (camera task 01's contract, task 13's iOS half).
+        self.platform_view_due.clear();
+    }
+
+    /// `frust_platform_view_commands_json`'s core (platform-views task 06):
+    /// acknowledge `ack_generation` (compacting the differ's backlog), then
+    /// serialize whatever remains into the wire JSON both mobile shells'
+    /// peek getters return verbatim (`frust-shell-android`'s
+    /// `nativePlatformViewCommands`, task 05, shares the byte-identical
+    /// schema). `None` on the no-change fast path.
+    ///
+    /// Converts each command's logical, absolute-window rect/clip into
+    /// **physical** px (`* scale`) at this FFI boundary — the
+    /// physical-at-FFI/logical-inside rule, applied outbound (matches every
+    /// other outbound-geometry seam in this shell).
+    pub(crate) fn platform_view_commands_json(&mut self, ack_generation: u64) -> Option<String> {
+        self.platform_views.acknowledge(ack_generation);
+        // Keep the gate's bookkeeping in step with the differ's (camera task
+        // 01's contract): a batch the host has applied needs no pairing.
+        self.platform_view_due.acknowledge(ack_generation);
+        // Under present-sync, serve only the prefix whose producing frame is on
+        // screen — with the present issued from this thread, "on screen" means
+        // "presented in this very transaction" (see `platform_view_due`).
+        // Otherwise serve the whole backlog, byte-for-byte as before.
+        let (generation, commands) = if self.present_sync {
+            let releasable = self
+                .platform_view_due
+                .releasable_generation(self.presented_frame_id, self.executor.submitted_frame_id());
+            self.platform_views.commands_up_to(releasable)
+        } else {
+            self.platform_views.commands()
+        };
+        let scale = sanitize_scale(self.scale) as f64;
+        let mapped: Vec<crate::ffi_support::PlatformViewCommand> = commands
+            .iter()
+            .map(|cmd| to_pv_command(cmd, scale))
+            .collect();
+        crate::ffi_support::platform_view_commands_json(generation, ack_generation, &mapped)
+    }
+
     /// Whether the render-thread split is engaged (as opposed to the inline
     /// fallback) — the FFI layer branches surface *recovery* on this: the split
     /// self-heals a lost surface render-side (the render loop recreates from the
@@ -996,6 +1461,11 @@ impl IosAppHandle {
         // ticks against the fresh surface must run even before their change
         // signals are observable (spec §14 phase 7, task 18).
         self.frame_gate.note_resumed();
+        // The recreated surface re-resolved its alpha mode from scratch (review
+        // M1) — on this (inline) path the renderer on this thread already holds
+        // it, so a recreate that fell back to opaque degrades to Mode A right
+        // here rather than punching black holes for the rest of the process.
+        self.sync_translucent_resolved();
     }
 
     /// Resize the live surface in place (rotation / bounds change). The
@@ -1038,8 +1508,53 @@ impl IosAppHandle {
     /// hand off a new scene while the barrier is in flight.
     pub(crate) fn pause(&mut self) {
         self.paused = true;
+        // Backgrounding path (platform-views task 06): hide every live
+        // platform-view slot immediately rather than waiting out the
+        // ordinary missing-streak Hide (paint doesn't run while paused, so
+        // `ingest` never drives that path — see `PlatformViewState::suspend_all`).
+        self.platform_views.suspend_all();
+        // While backgrounded nothing is painted or presented, so a pairing
+        // recorded before the pause would hold this hide behind a frame that
+        // never lands. The gate is a smoothing device, not a correctness
+        // barrier — drop it so the hide goes out on the next poll (the Android
+        // shell's `suspend_platform_views` does the same).
+        self.platform_view_due.clear();
         if let FrameExecutor::Split(split) = &mut self.executor {
             split.pause_barrier();
+            // Present-sync (task 13): the barrier has returned, so the render
+            // thread has quiesced and can park nothing more. Drop whatever it
+            // parked last — a backgrounded app must issue no Metal work (the
+            // same rule the barrier itself exists for), and the next foreground
+            // frame produces a fresh drawable anyway.
+            split.present.clear();
+        }
+    }
+
+    /// Present the frame the render thread parked for this thread, if any — the
+    /// UI-thread half of the present-sync path (camera task 13), called from
+    /// `frust_present_frame` inside the display-link tick, right after
+    /// `FrustViewHost.poll` has committed this frame's sibling geometry.
+    ///
+    /// A no-op when present-sync is not armed (nothing is ever parked), when
+    /// the frame gate skipped this tick, or on the inline path (which presents
+    /// in-line already). Never blocks on the render thread: an empty slot is
+    /// simply nothing to present this tick.
+    pub(crate) fn present_pending_frame(&mut self) {
+        if let FrameExecutor::Split(split) = &self.executor
+            && let Some((frame_id, frame)) = split.present.take()
+        {
+            // Tell the release gate which frame is now on screen BEFORE
+            // presenting, so the `FrustViewHost.poll` that follows in this same
+            // transaction releases exactly this frame's geometry (the Swift
+            // ordering contract: present, then poll, both inside one
+            // `CATransaction`). `max` because ids only move forward.
+            self.presented_frame_id = self.presented_frame_id.max(frame_id);
+            // The actual `[drawable present]`: with the layer's
+            // `presentsWithTransaction` set, wgpu-hal commits the present
+            // command buffer, waits until it is scheduled, and hands the
+            // drawable over — all on THIS (transaction-committing) thread,
+            // which is the whole contract.
+            frame.present();
         }
     }
 
@@ -1270,6 +1785,16 @@ impl IosAppHandle {
             return;
         }
 
+        // Resolved-translucency sync (review finding M1), before the gate
+        // inputs are gathered below: a render-thread fallback-to-opaque (or a
+        // self-healed recreate that resolved differently) flips
+        // `RenderRoot::set_surface_translucent` to `false`, which marks
+        // `ChangeFlags::PAINT` and so forces THIS frame to run
+        // (`change_flags_pending`) and repaint without the hole punch. The
+        // returned value also drives the base color below, so the clear color
+        // and the punch contract can never disagree.
+        let translucent_resolved = self.sync_translucent_resolved();
+
         // Drain any queued accessibility actions (VoiceOver activations, etc.)
         // BEFORE the rebuild below, so a state change an action makes is picked up
         // by this very frame — the same "mutate now, rebuild next" model touch/IME
@@ -1290,6 +1815,22 @@ impl IosAppHandle {
                     .app
                     .perform_accessibility_action(req.target_node.0, req.action);
             }
+        }
+
+        // Render-side surface self-heal (camera gate-fix g4), taken past the
+        // ready/paused gate like the drains below so a signal can never be
+        // consumed on a no-op tick: the render thread recreated the surface from
+        // the retained `CAMetalLayer` on its own (nothing external re-drives
+        // creation on iOS — see `SplitExecutor::surface_reinstalled`), so this
+        // frame must actually run and repaint the fresh swapchain. Replay every
+        // live platform-view slot too, mirroring the inline path's
+        // `recover_surface`: the replay supersedes any batch still held by the
+        // present-sync release gate and clears the pairing, so geometry paired
+        // with the frame that was lost cannot strand now that a resting screen
+        // produces no further frames to release it.
+        let surface_reinstalled = self.executor.take_surface_reinstalled();
+        if surface_reinstalled {
+            self.reset_platform_views_for_surface_recreate();
         }
 
         // Gather the RESEARCH §C OR-list of "something changed" signals and let
@@ -1318,6 +1859,7 @@ impl IosAppHandle {
             pointer_capture_active: self.app.is_pointer_captured(),
             focus_or_ime_active: self.app.is_focus_active() || self.app.ime_state().is_some(),
             last_needs_frame: self.last_needs_frame,
+            last_needs_frame_paced_only: self.last_needs_frame_paced_only,
             // Non-draining peek: a skipped frame leaves the flags for the next
             // frame that runs to drain (spec §14 phase 7).
             change_flags_pending: self.app.has_pending_change_flags(),
@@ -1326,10 +1868,12 @@ impl IosAppHandle {
             // mirroring the Android shell input-for-input.
             theme_or_appearance_changed: theme_or_appearance_changed
                 || std::mem::take(&mut self.appearance_dirty),
-            // Surface (re)creation/resize is folded into the gate's resume-warmup
-            // via `note_resumed` (see `resize`/`set_surface`/`resume`), so it is
-            // not threaded as a separate per-frame latch here.
-            surface_changed_or_resized: false,
+            // A UI-driven surface (re)creation/resize is folded into the gate's
+            // resume-warmup via `note_resumed` (see `resize`/`set_surface`/
+            // `resume`), so it needs no per-frame latch. What DOES need one is
+            // the split's render-side self-heal, which never passes through a
+            // UI-thread entry point at all (gate-fix g4, above).
+            surface_changed_or_resized: surface_reinstalled,
             a11y_action_performed,
             // Driven by the gate's own warmup countdown (`note_resumed`).
             resumed_recently: false,
@@ -1347,7 +1891,19 @@ impl IosAppHandle {
             timestamp_ns,
         );
 
-        if self.frame_gate.decide(inputs).is_skip() {
+        // Animation pacing (frame-gate pacing): a frame whose ONLY dirtiness is
+        // a paced (CosmeticLoop) request is throttled to the active theme's
+        // `cosmetic_loop_rate` rather than reproduced every `CADisplayLink`
+        // tick. `now` is this tick's display-link clock (the same domain `paint`
+        // consumes below); the interval is `1 / rate` resolved from the live
+        // theme so a retuned token re-paces live. Every other FrameInputs signal
+        // still forces an immediate Run — pacing never delays real work.
+        let pacing = FramePacing {
+            now: FrameTime::from_nanos(timestamp_ns),
+            interval: Duration::from_secs_f32(1.0 / self.theme.motion.cosmetic_loop_rate.hz()),
+        };
+
+        if self.frame_gate.decide_paced(inputs, pacing).is_skip() {
             // Nothing changed: skip rebuild/layout/paint/encode entirely. Inline
             // records a `skipped` FramePasses (ZERO pass durations; counts toward
             // `skipped=` in the perf log line); the render-thread split sends
@@ -1413,6 +1969,48 @@ impl IosAppHandle {
         }
         let rebuild = rebuild_start.map(|t| t.elapsed()).unwrap_or_default();
 
+        // Prompt teardown retire (native-widgets p1-09): the rebuild just above
+        // is where a removed `platform_view` widget's `View::teardown` runs and
+        // reports its slot id. Drain those and dispose each native view right
+        // now, instead of waiting out the differ's ~30-frame missing-streak
+        // heuristic (which cannot tell a torn-down slot from a culled one). A
+        // merely culled slot reports nothing here, so the streak still covers
+        // it — that asymmetry is the camera keep-alive contract. Mirrors the
+        // Android shell's placement exactly; the resulting batch is a lifecycle
+        // command, deliberately NOT paired with a frame (like `suspend_all`), so
+        // the present-sync release gate never holds it.
+        for slot_id in self.app.take_retired_platform_views() {
+            self.platform_views.retire(slot_id);
+        }
+
+        // Change-flag DRAIN (camera gate-fix g4) — the fix for "the iOS frame
+        // gate never idles at rest".
+        //
+        // `FrameInputs::change_flags_pending` above reads
+        // `has_pending_change_flags()`, a deliberately NON-draining peek, so a
+        // frame the gate SKIPS leaves the dirtiness for the next frame that runs
+        // (spec §14 phase 7). Draining is the running frame's job — and this
+        // shell never did it: `RenderRoot::pending` is only ever cleared by
+        // `take_change_flags`, so from the very first frame on (construction's
+        // `push_theme` marks LAYOUT|PAINT, and the first rebuild marks
+        // LAYOUT|PAINT again) that input latched `true` forever and every
+        // `CADisplayLink` tick therefore decided `Run`. Measured on an iPhone SE
+        // before this drain: ~44-59 fps of full pipeline work on a screen where
+        // nothing changes, `skipped=0` on every raw line, against Android's zero
+        // frames in 60 s on the same page.
+        //
+        // Android drains at exactly this point in its own frame body, as the
+        // input to its layout-skip seam (`take_change_flags().needs_layout()`),
+        // which is why its gate does idle. iOS still relayouts every `Run`
+        // unconditionally (the intra-frame layout skip is not wired here — see
+        // `docs/ARCHITECTURE.md`'s iOS frame pipeline), so the drained flags are
+        // deliberately dropped rather than gating the layout call below: this
+        // frame runs both passes regardless, so nothing is lost by clearing
+        // them. Anything that marks flags between frames (`set_theme`,
+        // `set_insets`, `set_surface_translucent`, a rebuild) still forces the
+        // next frame to run, exactly as on Android.
+        let _drained = self.app.take_change_flags();
+
         // Sanitize once per frame; layout and the paint transform below MUST
         // consume this identical value (an untrusted `f32` scale from the FFI
         // boundary must never let the two passes disagree — see `sanitize_scale`).
@@ -1458,12 +2056,40 @@ impl IosAppHandle {
             outcome
         };
         let paint = paint_start.map(|t| t.elapsed()).unwrap_or_default();
+
+        // Platform-view differ ingest (platform-views task 06): feed this RUN
+        // frame's published frames into the command backlog
+        // `frust_platform_view_commands_json` serves. Only ever called on a
+        // frame that actually painted (never on the `Skip` `return` above) —
+        // `PlatformViewState::ingest`'s skip-safety contract.
+        //
+        // Under present-sync, pair whatever the differ produced with the frame
+        // that painted it — the one submitted just below, i.e. the submission
+        // cursor plus one — so the release gate holds that geometry until this
+        // thread presents that frame (camera task 13; the same shape as the
+        // Android shell's always-on pairing, task 01). Both statements sit
+        // behind the gate's early `return`, so a Skip records nothing AND
+        // submits nothing: the recorded id can never run ahead of what will
+        // actually be sent.
+        let produced = self
+            .platform_views
+            .ingest(self.app.platform_view_frames(), self.app.input_shields());
+        if produced && self.present_sync {
+            let (generation, _) = self.platform_views.commands();
+            self.platform_view_due
+                .record(generation, self.executor.submitted_frame_id() + 1);
+        }
+
         // Latch this paint's `needs_frame` continuation signal (spec's v1
         // animation seam) for the NEXT frame's gate: unlike before task 18 — when
         // the continuous CADisplayLink loop let this flag be dropped — the gate
         // would now skip the follow-up frame an in-flight animation/transition
         // needs, so it is fed forward via `FrameInputs::last_needs_frame`.
         self.last_needs_frame = paint_outcome.needs_frame;
+        // Latch the aggregated tick-class for the NEXT frame's gate so a
+        // paced-only decorative loop can be throttled (see
+        // `FrameInputs::last_needs_frame_paced_only`).
+        self.last_needs_frame_paced_only = paint_outcome.needs_frame_paced_only;
 
         // Hand the finished frame to the render-path executor (plan phase 11.B).
         // The inline fallback runs the encode→acquire→submit tail synchronously
@@ -1483,7 +2109,19 @@ impl IosAppHandle {
             paint,
             skipped: false,
         };
-        let base_color = self.theme.scheme().surface;
+        // Mode B translucent base clear (platform-views task 06, corrected by
+        // review M1): a surface that RESOLVED translucent (`translucent_resolved`,
+        // read at the top of this frame — not the request latch) clears to
+        // alpha-0 instead of the theme's opaque surface color, so a native
+        // sibling view placed behind this one shows through wherever the tree
+        // paints nothing (Mode B paint contract — the app must paint every
+        // chrome surface explicitly, per the plan's spike lesson). Opaque —
+        // requested-but-refused included — is bit-for-bit today's behavior.
+        let base_color = crate::ffi_support::base_clear_color(
+            translucent_resolved,
+            peniko::Color::TRANSPARENT,
+            self.theme.scheme().surface,
+        );
         let size = SurfaceSize {
             width: self.physical.0,
             height: self.physical.1,

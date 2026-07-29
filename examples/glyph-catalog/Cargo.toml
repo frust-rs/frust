@@ -1,7 +1,7 @@
 # Standalone package: excluded from the root workspace (see root Cargo.toml's
 # `[workspace] exclude`) so the generated Android/iOS projects resolve a
 # project-local `target/` dir and the `[profile.*]` blocks below take effect
-# (they only apply in a workspace root) — the same shape as `examples/bubblebench`.
+# (they only apply in a workspace root) — the same shape as `examples/huddle`.
 [workspace]
 
 [package]
@@ -37,21 +37,65 @@ frust = { path = "../../crates/frust" }
 # builds only (riding the same features plumbing that turns on
 # `frust/perf-trace` for debug/profile), so release strips stray info/debug
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
-# `frust-perf` output. Mirrors `examples/bubblebench/Cargo.toml`'s block.
+# `frust-perf` output. Mirrors `examples/huddle/Cargo.toml`'s block.
 log = "0.4"
+
+# Low-level escape hatch (glyph-refinements task 20): the AppBar section's
+# overflow-menu demo anchors `frust::glyph::show_glyph_menu` at the kebab
+# icon's own painted window-coordinate rect — task 16's documented "caller
+# reports its own rect" contract (`crates/frust-widgets/src/glyph/menu.rs`'s
+# module docs literally name this "task 20's own wiring": no
+# ancestor-bounds query exists, so the anchor icon must capture its own
+# bounds during paint). No facade widget reports a child's painted bounds,
+# so this is a genuine gap — the same shape `examples/huddle`'s
+# `frust-core`/`kurbo`/`peniko` escape hatch documents
+# (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions); `peniko` isn't
+# needed here (the wrapper widget paints nothing of its own — only its
+# child). `examples/glyph-catalog/src/pages/interactions.rs` ruled out the
+# same promotion for its own (avoidable) `ContainerTransform` use — this one
+# is unavoidable, since `glyph_menu`'s anchor has no facade-level substitute.
+frust-core = { path = "../../crates/frust-core" }
+kurbo = "0.13.1"
+
+# frust-camera (frust-camera task 11): the device-gate vehicle for the whole
+# feature — see `src/pages/camera.rs`. Path dep out of this checkout, the
+# same in-repo shape `examples/huddle` uses for `clean-signals-frust`
+# (`docs/DEVELOPMENT.md`'s Version-Pin Policy) — not yet a `frust tui` Add
+# Plugin contribution (task 10, not landed at this task's authoring time), so
+# hand-added exactly as the applier would add it.
+frust-camera = { path = "../../plugins/camera" }
+
+# frust-native-widgets (native-widgets p1-06): the device-gate vehicle for the
+# "Native Widgets" catalog section — `src/pages/native_widgets.rs`. Same
+# hand-added-path-dep shape as `frust-camera` above (not yet a `frust tui` Add
+# Plugin contribution — that registry entry is Phase 3's packaging work).
+# Default features on: this catalog wants the `frust-api` builders
+# (`native_button`/etc.), not just the bare platform plugin.
+#
+# `demo-components` (native-widgets p3-08) is the plugin's NON-default demo
+# feature: `DemoCard`, one `NativeComponent` owning a real native subtree. It
+# ships inside the plugin rather than here because implementing that trait needs
+# `jni::objects::JObject` (Android) / `objc2-ui-kit` (iOS) in the *implementing*
+# crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions sanction
+# only a `frust-core`/`kurbo`/`peniko` escape hatch for an `examples/*` app —
+# see `plugins/native-widgets/src/demo.rs`'s module doc. Turning the feature on
+# adds NO dependency to this app (it resolves to the same `frust-api` set the
+# default already pulls); the page mounts the card behind an on-page toggle that
+# is OFF by default, so the six-slot gate constant is unchanged at rest.
+frust-native-widgets = { path = "../../plugins/native-widgets", features = [
+    "demo-components",
+] }
 
 # Dev-only: the headless smoke test drives Frust's `RenderRoot` directly (the
 # desktop shell's own rebuild/layout/paint seam) — no GPU, no window — the
-# same harness shape as `examples/bubblebench/tests/bench.rs`. The catalog's
-# own code depends on the `frust` facade alone; these lower-level crates back
-# only the test's `RenderRoot`/`PaintScene`/`TextContext` plumbing.
+# same harness shape as `examples/huddle`'s own headless `tests/*.rs`. `frust-core`/
+# `kurbo` above are already real dependencies (see the block above), so only
+# the test-only pieces stay dev-only here.
 [dev-dependencies]
-frust-core = { path = "../../crates/frust-core" }
 frust-text = { path = "../../crates/frust-text" }
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
 reactive_graph = "0.2"
-kurbo = "0.13.1"
 peniko = "0.6.1"
 
 [features]
@@ -59,7 +103,7 @@ peniko = "0.6.1"
 # release-only opt-in rather than an unconditional manifest feature. The CLI
 # passes `--features lean` for `--release` builds; debug/profile builds omit
 # it (and enable `frust/perf-trace` instead). Mirrors
-# `examples/bubblebench/Cargo.toml`'s block verbatim.
+# `examples/huddle/Cargo.toml`'s block verbatim.
 lean = ["log/release_max_level_warn"]
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
@@ -79,7 +123,7 @@ lean = ["log/release_max_level_warn"]
 # that protects render-path perf is in place, so `opt-level` stays at its
 # default (3) and no carve-out is needed. This block and its
 # `[profile.profile]` counterpart are hand-synced with Frust's own root
-# `Cargo.toml` and `examples/bubblebench/Cargo.toml`.
+# `Cargo.toml` and `examples/huddle/Cargo.toml`.
 [profile.release]
 lto = "fat"
 codegen-units = 1
@@ -133,6 +177,6 @@ opt-level = 2
 # win over this wildcard since a named package override takes precedence
 # over `"*"`. Targets emulator/debug first-frame cost — parley/swash/image/
 # kurbo compiled at `opt-level = 0` are part of that cost. Hand-synced with
-# Frust's own root `Cargo.toml` and `examples/bubblebench/Cargo.toml`.
+# Frust's own root `Cargo.toml` and `examples/huddle/Cargo.toml`.
 [profile.dev.package."*"]
 opt-level = 1

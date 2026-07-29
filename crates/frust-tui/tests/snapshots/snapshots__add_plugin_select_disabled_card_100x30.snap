@@ -8,24 +8,24 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
  PROJECTS                │                                                                          
   ▸ huddle               │  Dashboard                                                               
                          │  ━━━━━━━━━━                                                              
- DEVICES ↻ r             │                                                                          
-   none found            │  No session running — start a run to open a log tab here.                
-                  ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
- SESSIONS         │                                                              │▓▓                
-   none running   │  Choose a plugin to add to this project                      │▓▓                
-                  │  ▸ (o) shared-preferences                                    │▓▓                
- ACTIONS          │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
-   New project · n│    ( ) secure-storage                                        │▓▓                
-   Add plugin · a │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
-   Doctor · d     │    ( ) clean-signals-frust                                   │▓▓                
-   Build · b      │        ✗ needs a sibling checkout (dev-machine only)         │▓▓                
-   Clean · c      │                                                              │▓▓                
+ DEVICES ↻ r      ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+   none found     │                                                              │▓▓                
+                  │  Choose a plugin to add to this project                      │▓▓                
+ SESSIONS         │  ▸ (o) shared-preferences                                    │▓▓                
+   none running   │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
+                  │    ( ) secure-storage                                        │▓▓                
+ ACTIONS          │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
+   New project · n│    ( ) clean-signals-frust                                   │▓▓                
+   Add plugin · a │        ✗ needs a sibling checkout (dev-machine only)         │▓▓                
+   Doctor · d     │    ( ) camera                                                │▓▓                
+   Build · b      │        Camera preview (a platform view), still capture, and  │▓▓                
+   Clean · c      │    ( ) native-widgets                                        │▓▓                
+                  │        Real OS controls (button, label, switch, slider, pro  │▓▓                
+                  │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-                         │                                                                          
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

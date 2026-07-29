@@ -46,7 +46,7 @@ The stage shaders in `vello_shaders-0.9.0/shader/` (utilities live in
 This table *is* Raph Levien's "sort-middle architecture" post, in filenames.
 Read in this order: `flatten.wgsl` (most familiar math) → `binning.wgsl` →
 `coarse.wgsl` → `fine.wgsl` (the payoff: find the gradient-evaluation code
-your bubblebench experiment 2.1 was stressing).
+your chapter-2 bubble-chart experiment (2.1) was stressing).
 
 ## Experiments
 
@@ -79,13 +79,13 @@ defining trait of an all-compute renderer.
 
 ### 5.4 — (Optional) Capture a real frame
 
-On this Mac, Xcode's Metal debugger can capture bubblebench:
-`cargo build` the example, then Xcode → Debug → Debug Executable… → pick
-`target/debug/bubblebench`, enable GPU Frame Capture (Metal), run, capture a
-frame — you'll see the compute dispatch chain above by name, with timings
-per stage. (On Linux/Android, RenderDoc plays the same role over Vulkan.)
-Optional because setup friction is real — but nothing cements the table
-above like seeing your own bubbles pass through it.
+On this Mac, Xcode's Metal debugger can capture the S1 bubble scenario:
+`cargo build` in `benchmarks/frust_bench`, then Xcode → Debug → Debug
+Executable… → pick `target/debug/frustbench`, enable GPU Frame Capture
+(Metal), run, capture a frame — you'll see the compute dispatch chain above
+by name, with timings per stage. (On Linux/Android, RenderDoc plays the same
+role over Vulkan.) Optional because setup friction is real — but nothing
+cements the table above like seeing your own bubbles pass through it.
 
 ## When the theory will land (and only now)
 

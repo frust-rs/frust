@@ -33,6 +33,7 @@ pub mod material;
 pub mod motion;
 pub mod nav;
 mod padding;
+mod platform_view;
 mod radio;
 mod safe_area;
 mod scroll;
@@ -65,8 +66,8 @@ pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
 pub use nav::hero::{HeroView, HeroWidget, hero};
 pub use nav::navigator::{
-    NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult, ResultCallback,
-    navigator,
+    BackPolicy, NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult,
+    PushOptions, ResultCallback, navigator,
 };
 pub use nav::path::{Location, PathPattern, RouteParams};
 pub use nav::router::{
@@ -75,6 +76,9 @@ pub use nav::router::{
 };
 pub use nav::transition::{PageTransition, Timing, TransitionSpec};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
+pub use platform_view::{
+    PlatformViewView, PlatformViewWidget, ShieldView, ShieldWidget, platform_view, shield,
+};
 pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use safe_area::{SafeAreaView, SafeAreaWidget, safe_area};
 pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};

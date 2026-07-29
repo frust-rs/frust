@@ -1,6 +1,7 @@
 //! Headless integration tests: drive the real `RenderRoot`
 //! rebuild→layout→paint seam against a recording paint target — no GPU, no
-//! window — mirroring `examples/bubblebench/tests/bench.rs`'s harness shape.
+//! window — mirroring `examples/huddle`'s own headless `tests/*.rs` harness
+//! shape.
 
 use std::any::Any;
 

@@ -37,10 +37,22 @@
 //! `RenderRoot::set_theme` guarantees by marking `LAYOUT` pending. Encode and
 //! present are frame-level only: a frame the gate runs always presents.
 //!
-//! # Wiring is a later task
+//! # Animation pacing (frame-gate pacing)
 //!
-//! This module ships the decision type + switch only; no shell constructs or
-//! feeds a [`FrameGate`] yet (tasks 17/18 wire the Android/iOS shells).
+//! On top of the whole-frame skip, a frame whose *only* dirtiness source is a
+//! paced ([`frust_core::TickClass::CosmeticLoop`]) frame request — a shimmer,
+//! idle pulse, or spinner with no user-visible endpoint — is throttled to the
+//! active theme's `MotionScheme::cosmetic_loop_rate` rather than reproduced on
+//! every vsync. The shell feeds the paced-only fact through
+//! [`FrameInputs::last_needs_frame_paced_only`] and the per-frame clock +
+//! interval through [`FramePacing`] to [`FrameGate::decide_paced`]; any
+//! input/signal/change-flag/transition dirtiness is **never** paced (it runs
+//! immediately, per the default-to-run rule). The `FRUST_NO_FRAME_GATE` kill
+//! switch disables pacing too (a disabled gate always runs), and
+//! [`NO_ANIM_PACING_VAR`] (`FRUST_NO_ANIM_PACING`) disables *only* the pacing
+//! while leaving the skip gate active.
+
+use frust_core::anim::FrameTime;
 
 /// The resume-warmup window length: after a [`FrameGate::note_resumed`] the
 /// next `WARMUP_FRAMES` [`decide`](FrameGate::decide) calls force a `Run`
@@ -61,6 +73,37 @@ pub const WARMUP_FRAMES: u8 = 3;
 ///
 /// [`Run`]: FrameDecision::Run
 pub const NO_FRAME_GATE_VAR: &str = "FRUST_NO_FRAME_GATE";
+
+/// The animation-pacing kill-switch variable: when set to any non-`"0"` value,
+/// [`FrameGate::new`] disables *only* the paced-loop throttling — the
+/// whole-frame skip gate stays active, but every paced ([`CosmeticLoop`])
+/// request runs on its vsync as before. Narrower than [`NO_FRAME_GATE_VAR`]
+/// (which disables the whole gate), it isolates the pacing behavior for A/B
+/// diagnosis. Parsed with the same compile-time-`option_env!` + runtime-env
+/// family as [`NO_FRAME_GATE_VAR`] / `FRUST_TRACE`.
+///
+/// [`CosmeticLoop`]: frust_core::TickClass::CosmeticLoop
+pub const NO_ANIM_PACING_VAR: &str = "FRUST_NO_ANIM_PACING";
+
+/// The per-frame pacing context a shell hands to [`FrameGate::decide_paced`]:
+/// this tick's frame clock and the active theme's paced-loop interval.
+///
+/// Both are shell-owned: [`now`](Self::now) is the platform frame clock
+/// (Choreographer / `CADisplayLink` timestamp — never a wall clock read inside
+/// `frust-core`, spec §8), and [`interval`](Self::interval) is `1 /
+/// MotionScheme::cosmetic_loop_rate` resolved from the *active* theme each
+/// frame (so an app that retunes the token via `ThemeBuilder` re-paces live).
+#[derive(Debug, Clone, Copy)]
+pub struct FramePacing {
+    /// This tick's shell frame-clock reading. Only *differences* of two
+    /// [`FrameTime`]s from the same shell carry meaning (see [`FrameTime`]).
+    pub now: FrameTime,
+    /// The minimum interval between two paced ([`CosmeticLoop`]) frame
+    /// productions, `1 / cosmetic_loop_rate` from the active theme.
+    ///
+    /// [`CosmeticLoop`]: frust_core::TickClass::CosmeticLoop
+    pub interval: std::time::Duration,
+}
 
 /// The outcome of [`FrameGate::decide`]: whether the shell should run this
 /// frame's rebuild/layout/paint/encode/present passes, or skip them entirely.
@@ -130,6 +173,15 @@ pub struct FrameInputs {
     /// `PaintOutcome::needs_frame`, latched by the shell from the prior
     /// frame's `AppTree::paint` return.
     pub last_needs_frame: bool,
+    /// *last paint's `needs_frame_paced_only`*: the prior frame's frame request
+    /// aggregated to [`frust_core::TickClass::CosmeticLoop`] alone — a pacable
+    /// decorative loop with no concurrent transition. Latched by the shell from
+    /// `PaintOutcome::needs_frame_paced_only`. Meaningful only alongside
+    /// [`last_needs_frame`](Self::last_needs_frame); with every *other* input
+    /// clear ([`is_paced_only_frame`](Self::is_paced_only_frame)) it is the sole
+    /// signal [`FrameGate::decide_paced`] throttles to the theme's cadence. Any
+    /// concurrent transition/input clears it, so the frame runs immediately.
+    pub last_needs_frame_paced_only: bool,
     /// §C: *pending `ChangeFlags`*. A rebuild (or `set_theme`) left layout/
     /// paint dirtiness undrained. Source:
     /// [`AppTree::has_pending_change_flags`](crate::AppTree::has_pending_change_flags)
@@ -166,11 +218,38 @@ impl FrameInputs {
             || self.pointer_capture_active
             || self.focus_or_ime_active
             || self.last_needs_frame
+            || self.last_needs_frame_paced_only
             || self.change_flags_pending
             || self.theme_or_appearance_changed
             || self.surface_changed_or_resized
             || self.a11y_action_performed
             || self.resumed_recently
+    }
+
+    /// Whether the *only* dirtiness this frame is a paced ([`CosmeticLoop`])
+    /// frame request — the throttleable case [`FrameGate::decide_paced`] paces.
+    ///
+    /// True iff [`last_needs_frame`](Self::last_needs_frame) and
+    /// [`last_needs_frame_paced_only`](Self::last_needs_frame_paced_only) are
+    /// both set and **every other** OR-list input is clear. Any
+    /// input/signal/change-flag/transition alongside it makes this `false`, so
+    /// the gate runs the frame immediately rather than pacing it (the
+    /// default-to-run rule — see `docs/CODE_STANDARDS.md`'s Frame-Gate
+    /// conventions).
+    ///
+    /// [`CosmeticLoop`]: frust_core::TickClass::CosmeticLoop
+    pub fn is_paced_only_frame(&self) -> bool {
+        self.last_needs_frame
+            && self.last_needs_frame_paced_only
+            && !self.signals_dirty
+            && !self.events_since_last_frame
+            && !self.pointer_capture_active
+            && !self.focus_or_ime_active
+            && !self.change_flags_pending
+            && !self.theme_or_appearance_changed
+            && !self.surface_changed_or_resized
+            && !self.a11y_action_performed
+            && !self.resumed_recently
     }
 }
 
@@ -189,9 +268,19 @@ pub struct FrameGate {
     /// [`FrameDecision::Run`] — the kill switch and [`disabled`](Self::disabled)
     /// path, pre-gate behavior verbatim.
     enabled: bool,
+    /// When `false`, [`decide_paced`](Self::decide_paced) never throttles a
+    /// paced-only frame (it runs on its vsync as before) — the
+    /// [`NO_ANIM_PACING_VAR`] kill switch, resolved once at construction. The
+    /// whole-frame skip gate stays active regardless.
+    anim_pacing: bool,
     /// Frames left in the resume-warmup window; while `> 0`,
     /// [`decide`](Self::decide) forces a `Run` and decrements it.
     warmup_remaining: u8,
+    /// The frame clock reading of the last *produced* frame while pacing, used
+    /// to measure the paced-loop interval. `None` until the first paced
+    /// decision; re-anchored to `now` on every produced frame (see
+    /// [`decide_paced`](Self::decide_paced)).
+    last_paced_run: Option<FrameTime>,
 }
 
 impl FrameGate {
@@ -200,7 +289,7 @@ impl FrameGate {
     /// runtime env, any non-`"0"` value), this is equivalent to
     /// [`disabled`](Self::disabled).
     pub fn new() -> Self {
-        Self::with_enabled(!kill_switch_engaged())
+        Self::with_flags(!kill_switch_engaged(), !anim_pacing_kill_switch_engaged())
     }
 
     /// A gate that always [`Run`](FrameDecision::Run)s regardless of inputs —
@@ -208,15 +297,27 @@ impl FrameGate {
     /// env read). Mirrors [`FrameGate::new`]'s behavior when
     /// [`NO_FRAME_GATE_VAR`] is set.
     pub fn disabled() -> Self {
-        Self::with_enabled(false)
+        Self::with_flags(false, false)
     }
 
     /// Construct with an explicit enabled flag, bypassing the env read — the
     /// test/advanced seam (mirrors [`crate::perf::FrameStats::new_enabled`]).
+    /// Animation pacing follows `enabled` (a disabled gate never paces because
+    /// it never skips); use [`with_flags`](Self::with_flags) to vary the two
+    /// independently.
     pub fn with_enabled(enabled: bool) -> Self {
+        Self::with_flags(enabled, enabled)
+    }
+
+    /// Construct with explicit `enabled` (whole-frame skip) and `anim_pacing`
+    /// (paced-loop throttling) flags, bypassing both env reads — the test seam
+    /// for the pacing behavior in isolation.
+    pub fn with_flags(enabled: bool, anim_pacing: bool) -> Self {
         Self {
             enabled,
+            anim_pacing,
             warmup_remaining: 0,
+            last_paced_run: None,
         }
     }
 
@@ -254,7 +355,41 @@ impl FrameGate {
     /// `research/RESEARCH.md` §C OR-list entry (see [`FrameInputs`]'s docs).
     ///
     /// Takes `&mut self` because it advances the resume-warmup countdown.
+    ///
+    /// This is the non-paced entry: a paced-only frame runs on every tick (no
+    /// throttling), the conservative pre-pacing behavior. Use
+    /// [`decide_paced`](Self::decide_paced) to honor the theme's cosmetic-loop
+    /// cadence.
     pub fn decide(&mut self, inputs: FrameInputs) -> FrameDecision {
+        self.decide_impl(inputs, None)
+    }
+
+    /// Decide whether this frame runs, honoring animation pacing.
+    ///
+    /// Identical to [`decide`](Self::decide) except that when the *only*
+    /// dirtiness is a paced ([`CosmeticLoop`]) frame request
+    /// ([`FrameInputs::is_paced_only_frame`]) and pacing is enabled, the frame
+    /// is throttled to `pacing.interval`: it runs only once
+    /// `pacing.now - last_paced_run >= interval`, otherwise [`Skip`]s. A skip
+    /// leaves `last_needs_frame` alive (the shell doesn't repaint, so it never
+    /// re-latches), so the gate keeps waking and never starves the loop; the
+    /// interval is re-anchored to the clock of every *produced* frame (whatever
+    /// its cause), so a transition frame mid-loop resets the cadence.
+    ///
+    /// Any non-paced input (an event, a signal write, a transition request,
+    /// pending change flags, …) makes [`is_paced_only_frame`] `false`, so the
+    /// frame runs immediately — pacing never delays real work.
+    ///
+    /// [`CosmeticLoop`]: frust_core::TickClass::CosmeticLoop
+    /// [`Skip`]: FrameDecision::Skip
+    /// [`is_paced_only_frame`]: FrameInputs::is_paced_only_frame
+    pub fn decide_paced(&mut self, inputs: FrameInputs, pacing: FramePacing) -> FrameDecision {
+        self.decide_impl(inputs, Some(pacing))
+    }
+
+    /// The shared decision body behind [`decide`](Self::decide) (no pacing) and
+    /// [`decide_paced`](Self::decide_paced) (pacing context supplied).
+    fn decide_impl(&mut self, inputs: FrameInputs, pacing: Option<FramePacing>) -> FrameDecision {
         if !self.enabled {
             return FrameDecision::Run;
         }
@@ -264,11 +399,67 @@ impl FrameGate {
         if warming {
             self.warmup_remaining -= 1;
         }
-        if warming || inputs.any_set() {
+
+        // A paced-only frame (and pacing enabled, and not warming) is the sole
+        // throttleable case; every other Run resets the pace cadence to its
+        // own clock (see the anchor calls below).
+        let paced_case =
+            !warming && self.anim_pacing && pacing.is_some() && inputs.is_paced_only_frame();
+
+        if warming {
+            self.anchor_non_paced(pacing);
+            return FrameDecision::Run;
+        }
+
+        if paced_case {
+            let p = pacing.expect("paced_case implies pacing.is_some()");
+            return match self.last_paced_run {
+                // Inside the interval since the last produced frame: throttle.
+                // The shell leaves `last_needs_frame` set across a skip (no
+                // repaint re-latches it), so the gate keeps waking and never
+                // starves the loop.
+                Some(last) if p.now.saturating_sub(last) < p.interval => FrameDecision::Skip,
+                _ => {
+                    self.anchor_paced(p);
+                    FrameDecision::Run
+                }
+            };
+        }
+
+        if inputs.any_set() {
+            // A non-paced Run (event/signal/transition/change-flag): reset the
+            // pace cadence to this real frame so a paced frame never fires
+            // immediately after one.
+            self.anchor_non_paced(pacing);
             FrameDecision::Run
         } else {
             FrameDecision::Skip
         }
+    }
+
+    /// Anchor the pace clock to this frame's exact clock — used for every
+    /// *non-paced* produced frame (warmup / event / transition), so the loop's
+    /// next interval is measured from the most recent real frame.
+    fn anchor_non_paced(&mut self, pacing: Option<FramePacing>) {
+        if let Some(p) = pacing {
+            self.last_paced_run = Some(p.now);
+        }
+    }
+
+    /// Anchor the pace clock for a *paced* fire: advance by exactly one interval
+    /// to hold a drift-free cadence on the discrete vsync grid (anchoring to the
+    /// raw `now`, which lands up to a tick past the ideal fire time, would drift
+    /// the effective rate below the cap). After a long stall (≥ two intervals —
+    /// a paused/resumed loop) reset to `now` instead, so the loop resumes at
+    /// cadence rather than firing a catch-up burst.
+    fn anchor_paced(&mut self, p: FramePacing) {
+        let next = match self.last_paced_run {
+            Some(last) if p.now.saturating_sub(last) < p.interval * 2 => {
+                FrameTime::from_nanos(last.as_nanos().saturating_add(p.interval.as_nanos() as u64))
+            }
+            _ => p.now,
+        };
+        self.last_paced_run = Some(next);
     }
 }
 
@@ -286,6 +477,18 @@ fn kill_switch_engaged() -> bool {
     kill_switch(
         option_env!("FRUST_NO_FRAME_GATE"),
         std::env::var(NO_FRAME_GATE_VAR).ok().as_deref(),
+    )
+}
+
+/// Reads the [`NO_ANIM_PACING_VAR`] kill switch from the compile-time define and
+/// the process environment, the same `option_env!` + runtime-env shape as
+/// [`kill_switch_engaged`]. Public so a non-`FrameGate` consumer (the desktop
+/// shell, which paces via a delayed redraw rather than a skip gate) can honor
+/// the same switch. Either source set to a non-`"0"` value engages it.
+pub fn anim_pacing_kill_switch_engaged() -> bool {
+    kill_switch(
+        option_env!("FRUST_NO_ANIM_PACING"),
+        std::env::var(NO_ANIM_PACING_VAR).ok().as_deref(),
     )
 }
 
@@ -314,6 +517,7 @@ mod tests {
             "pointer_capture_active" => i.pointer_capture_active = true,
             "focus_or_ime_active" => i.focus_or_ime_active = true,
             "last_needs_frame" => i.last_needs_frame = true,
+            "last_needs_frame_paced_only" => i.last_needs_frame_paced_only = true,
             "change_flags_pending" => i.change_flags_pending = true,
             "theme_or_appearance_changed" => i.theme_or_appearance_changed = true,
             "surface_changed_or_resized" => i.surface_changed_or_resized = true,
@@ -333,6 +537,7 @@ mod tests {
         "pointer_capture_active",
         "focus_or_ime_active",
         "last_needs_frame",
+        "last_needs_frame_paced_only",
         "change_flags_pending",
         "theme_or_appearance_changed",
         "surface_changed_or_resized",
@@ -381,8 +586,9 @@ mod tests {
         // must force a Run.
         assert_eq!(
             ALL_INPUTS.len(),
-            10,
-            "the OR-list must have all ten RESEARCH §C-derived inputs"
+            11,
+            "the OR-list must have all ten RESEARCH §C-derived inputs plus the \
+             paced-only signal"
         );
         for field in ALL_INPUTS {
             let mut gate = FrameGate::with_enabled(true);
@@ -483,5 +689,208 @@ mod tests {
         assert!(!FrameDecision::Run.is_skip());
         assert!(FrameDecision::Skip.is_skip());
         assert!(!FrameDecision::Skip.is_run());
+    }
+
+    // -----------------------------------------------------------------
+    // decide_paced: animation pacing
+    // -----------------------------------------------------------------
+
+    use std::time::Duration;
+
+    /// One vsync step of a `hz`-Hz refresh, in nanoseconds.
+    fn step_nanos(hz: f64) -> u64 {
+        (1_000_000_000.0 / hz) as u64
+    }
+
+    /// The paced-only input: a prior paced (CosmeticLoop) frame request with
+    /// every other OR-list signal clear — the sole case pacing throttles.
+    fn paced_only() -> FrameInputs {
+        FrameInputs {
+            last_needs_frame: true,
+            last_needs_frame_paced_only: true,
+            ..FrameInputs::default()
+        }
+    }
+
+    /// A 30Hz cosmetic-loop interval, the framework default.
+    fn interval_30hz() -> Duration {
+        Duration::from_secs_f64(1.0 / 30.0)
+    }
+
+    #[test]
+    fn is_paced_only_frame_requires_last_needs_frame_and_no_other_input() {
+        assert!(paced_only().is_paced_only_frame());
+        // paced flag without last_needs_frame is not a paced-only frame.
+        let only_flag = FrameInputs {
+            last_needs_frame_paced_only: true,
+            ..FrameInputs::default()
+        };
+        assert!(!only_flag.is_paced_only_frame());
+        // any concurrent input disqualifies pacing.
+        let mut with_event = paced_only();
+        with_event.events_since_last_frame = true;
+        assert!(!with_event.is_paced_only_frame());
+    }
+
+    #[test]
+    fn paced_only_stream_runs_at_the_cap_not_every_vsync() {
+        // A 120Hz tick stream feeding paced-only inputs, capped at 30Hz, must
+        // produce ~30 runs per simulated second (one every ~4 ticks).
+        let mut gate = FrameGate::with_flags(true, true);
+        let tick = step_nanos(120.0);
+        let interval = interval_30hz();
+
+        let mut runs = 0usize;
+        // 120 ticks == 1 simulated second.
+        for i in 0..120u64 {
+            let pacing = FramePacing {
+                now: FrameTime::from_nanos(i * tick),
+                interval,
+            };
+            if gate.decide_paced(paced_only(), pacing).is_run() {
+                runs += 1;
+            }
+        }
+        // 30Hz cap over 1s ⇒ ~30 runs. Allow ±2 for boundary rounding of the
+        // 120→30 tick ratio.
+        assert!(
+            (28..=32).contains(&runs),
+            "paced-only 120Hz stream should run ~30x/s, ran {runs}"
+        );
+    }
+
+    #[test]
+    fn transition_input_mid_interval_runs_immediately() {
+        // Pace a loop, then a transition (paced_only == false) arrives inside
+        // the interval — it must run immediately, never wait for the cap.
+        let mut gate = FrameGate::with_flags(true, true);
+        let interval = interval_30hz();
+
+        // First paced frame runs and anchors the pace clock at t=0.
+        let run0 = gate.decide_paced(
+            paced_only(),
+            FramePacing {
+                now: FrameTime::from_nanos(0),
+                interval,
+            },
+        );
+        assert!(run0.is_run());
+        // A tick well inside the 33ms interval, but carrying a transition
+        // request (paced-only flag cleared) — runs immediately.
+        let mut transition = FrameInputs {
+            last_needs_frame: true,
+            last_needs_frame_paced_only: false,
+            ..FrameInputs::default()
+        };
+        // sanity: this is NOT a paced-only frame
+        assert!(!transition.is_paced_only_frame());
+        let decision = gate.decide_paced(
+            transition,
+            FramePacing {
+                now: FrameTime::from_nanos(step_nanos(120.0)),
+                interval,
+            },
+        );
+        assert_eq!(
+            decision,
+            FrameDecision::Run,
+            "a transition mid-interval must run immediately, not pace"
+        );
+        // A plain event mid-interval likewise runs immediately.
+        transition = FrameInputs {
+            events_since_last_frame: true,
+            ..FrameInputs::default()
+        };
+        assert_eq!(
+            gate.decide_paced(
+                transition,
+                FramePacing {
+                    now: FrameTime::from_nanos(2 * step_nanos(120.0)),
+                    interval,
+                },
+            ),
+            FrameDecision::Run,
+            "an event mid-interval must run immediately"
+        );
+    }
+
+    #[test]
+    fn paced_skip_leaves_the_request_alive_and_never_starves() {
+        // A long paced-only stream must keep producing frames at the cap — it
+        // never stops running entirely (starvation guard).
+        let mut gate = FrameGate::with_flags(true, true);
+        let tick = step_nanos(120.0);
+        let interval = interval_30hz();
+
+        let mut last_run_tick: Option<u64> = None;
+        let mut max_gap = 0u64;
+        let mut total_runs = 0usize;
+        for i in 0..600u64 {
+            // 5 simulated seconds
+            let pacing = FramePacing {
+                now: FrameTime::from_nanos(i * tick),
+                interval,
+            };
+            if gate.decide_paced(paced_only(), pacing).is_run() {
+                total_runs += 1;
+                if let Some(prev) = last_run_tick {
+                    max_gap = max_gap.max(i - prev);
+                }
+                last_run_tick = Some(i);
+            }
+        }
+        assert!(
+            total_runs > 0,
+            "paced stream must keep running (no starvation)"
+        );
+        // The gap between runs stays bounded near the 4-tick cap ratio — never
+        // an unbounded stall.
+        assert!(
+            max_gap <= 5,
+            "paced runs must stay periodic; observed max gap of {max_gap} ticks"
+        );
+    }
+
+    #[test]
+    fn anim_pacing_kill_switch_runs_every_tick() {
+        // Gate enabled (skips still work) but pacing disabled: a paced-only
+        // stream runs every vsync, pre-pacing behavior.
+        let mut gate = FrameGate::with_flags(true, false);
+        let tick = step_nanos(120.0);
+        let interval = interval_30hz();
+        for i in 0..120u64 {
+            let pacing = FramePacing {
+                now: FrameTime::from_nanos(i * tick),
+                interval,
+            };
+            assert_eq!(
+                gate.decide_paced(paced_only(), pacing),
+                FrameDecision::Run,
+                "with pacing disabled every paced tick must run"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_gate_ignores_pacing() {
+        // FRUST_NO_FRAME_GATE (disabled gate) forces Run regardless of pacing.
+        let mut gate = FrameGate::disabled();
+        for i in 0..10u64 {
+            let pacing = FramePacing {
+                now: FrameTime::from_nanos(i * step_nanos(120.0)),
+                interval: interval_30hz(),
+            };
+            assert_eq!(gate.decide_paced(paced_only(), pacing), FrameDecision::Run);
+        }
+    }
+
+    #[test]
+    fn non_paced_decide_runs_paced_only_every_tick() {
+        // The non-pacing `decide` entry never throttles: a paced-only frame is
+        // just another `any_set` Run (conservative pre-pacing behavior).
+        let mut gate = FrameGate::with_flags(true, true);
+        for _ in 0..10 {
+            assert_eq!(gate.decide(paced_only()), FrameDecision::Run);
+        }
     }
 }

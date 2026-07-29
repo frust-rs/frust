@@ -43,7 +43,7 @@ mod tier;
 pub use context::{DetachedSurface, RenderContext, SurfaceFactory};
 pub use convert::encode_scene;
 pub use lifecycle::{AcquireOutcome, EncodeOutcome, FrameOutcome, SurfacePhase};
-pub use renderer::SurfaceRenderer;
+pub use renderer::{DeferredPresent, SurfaceAlphaRequest, SurfaceRenderer};
 pub use tier::{
     GPU_REQUIRED_DOWNLEVEL_FLAGS, RENDER_TIER_ENV_VAR, RenderTier, TierCaps, TierOutcome,
     TierSelection, parse_render_tier_override, render_tier_override_from_env, select_render_tier,

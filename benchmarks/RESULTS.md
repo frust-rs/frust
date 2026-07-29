@@ -332,11 +332,11 @@ contain only perf/marker/blank lines).
   on every continuously-rendering scenario.
 - Flutter: 3.44.2 stable, `flutter build ios --profile
   --dart-define=SCENARIO=<sN>` (one build per scenario, 8 builds; team
-  `87MFQ5L648` from the committed Xcode project;
+  `<team-id>` from the committed Xcode project;
   `CADisableMinimumFrameDurationOnPhone` already in Info.plist — fairness
   gate §6 satisfied).
 - Frust: **RELEASE** (`frust build ios --release`, signed
-  `FRUST_IOS_TEAM=87MFQ5L648`), one build for all scenarios, repo `main`
+  `FRUST_IOS_TEAM=<team-id>`), one build for all scenarios, repo `main`
   @ `82dc949` (S5 layout-parity v2 + full phase-10 optimization set).
   `FRUST_TRACE=1 FRUST_TRACE_RAW=1` baked via `--define` (the iOS
   run-script's `FRUST_DEFINES`/`option_env!` path — no `perf.rs` touch

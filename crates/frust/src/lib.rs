@@ -81,9 +81,71 @@ pub use frust_widgets::{
     NavigatorView, Padding, PaddingView, PageBuilder, PageTransition, PopResult, Radio, RadioView,
     RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView,
     Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
-    TransitionSpec, button, checkbox, flexible, hero, icon, inflexible, keyed, navigator, radio,
-    safe_area, scroll_view, slider, text, text_input,
+    TransitionSpec, button, checkbox, flexible, hero, icon, inflexible, keyed, radio, safe_area,
+    scroll_view, slider, text, text_input,
 };
+
+/// Platform-view embedding (platform-views feature, tasks 02/07): reserve
+/// layout space for a native view (a map, a video player, ...) composited
+/// alongside the frust surface. [`platform_view`] takes the
+/// `"dev.frust.<Factory>"`-style native factory name registered on each
+/// platform and returns a builder ([`PlatformViewView`]) over the
+/// params/size contract — flat-re-exported from `frust-widgets` so app code
+/// never names that crate directly.
+///
+/// # Paint contract (Mode B)
+///
+/// Under Mode B compositing the frust surface itself is translucent, so
+/// **any region this slot's parent doesn't paint over is a window straight
+/// through to the native view (or the OS background) behind it** — this is
+/// the mechanism Mode B relies on, not a bug. Size/position a slot
+/// deliberately, and don't rely on an unpainted sibling region staying
+/// opaque.
+///
+/// Mode B is selected by the generated host's `FRUST_TRANSLUCENT_SURFACE`
+/// (Android)/`translucentSurface` (iOS) build-time constant — **not** from
+/// Rust: that constant drives, in one host-glue branch, the native window's
+/// pixel format (`PixelFormat.TRANSLUCENT`/`CAMetalLayer.isOpaque = false`),
+/// the native-sibling z-order/subview arrangement, and the
+/// `nativeSetSurfaceMode`/`frust_set_surface_mode` call together (review
+/// M3/M4 — flipping only some of these is a host-template defect). There is
+/// no app-Rust opt-in call; the generated project's template (task 08/09) is
+/// the sole route into Mode B.
+///
+/// ```no_run
+/// use frust::{AnyView, Column, Component, any, platform_view, text};
+///
+/// #[derive(Default)]
+/// struct MapDemo;
+///
+/// impl Component for MapDemo {
+///     type State = ();
+///
+///     fn init(&self) -> Self::State {}
+///
+///     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+///         any(Column(vec![
+///             any(text("map below")),
+///             any(platform_view("dev.frust.MapFactory")
+///                 .params_json(r#"{"style":"dark"}"#)
+///                 .size(320.0, 240.0)),
+///         ]))
+///     }
+/// }
+///
+/// frust::app!(MapDemo);
+/// # fn main() {}
+/// ```
+///
+/// # Z-shields ([`shield`])
+///
+/// A slot marked `.interactive()` forwards a touch-DOWN inside its rect to the
+/// native view, including one that landed on frust chrome painted over it (the
+/// OS-side hit test knows nothing about the frust scene). Wrap that chrome in
+/// [`shield`] and it keeps winning input: the wrapper reports the rect it
+/// painted every frame, and the shell hands the overlapping ones to the host
+/// with the slot's placement.
+pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 
 /// The vendored Material Symbols starter icon set (Huddle showcase, Phase A),
 /// flat-re-exported so app code names `frust::icons::HOME` rather than the
@@ -190,6 +252,60 @@ mod router_glue;
 /// from every `Component::build`.
 pub use back_glue::{BackHandler, attach_back_handler};
 
+/// Build a [`NavigatorView`] driven by `controller` — the facade's back-aware
+/// wrapper over [`frust_widgets::navigator`] (glyph-refinements task 08).
+///
+/// Interposes on the flat widget re-export: same signature and return shape, but
+/// every rebuild it *additionally* auto-wires Android/gesture back handling for
+/// `controller` — so an app using `frust::navigator` gets the full back contract
+/// (dismissable overlay dismiss → navigation pop → app exit at the root) with
+/// **zero** back-specific app code, and with `frust::handles_back` reporting
+/// whether a root-level press should fall through to the platform.
+///
+/// The wiring routes a consumed press through
+/// [`NavigatorController::request_back`] (honoring each page's back policy —
+/// pop / animated-dismiss / veto — rather than a bare pop) and computes
+/// `handles_back` from the navigator's predictive-back interest. It shares a
+/// single process-wide consumption source with any explicit [`BackHandler`] on
+/// the same controller, so constructing a `BackHandler` *and* calling
+/// `frust::navigator` (as `examples/huddle` does) still consumes each press
+/// exactly once — no double-pop. See [`back_glue`]'s module docs for the
+/// consume/dedupe and timing contracts.
+///
+/// ```no_run
+/// use frust::{AnyView, Component, NavigatorController, any, navigator, text};
+///
+/// #[derive(Default)]
+/// struct App;
+///
+/// struct AppState {
+///     nav: NavigatorController<AppState>,
+/// }
+///
+/// impl Component for App {
+///     type State = AppState;
+///
+///     fn init(&self) -> AppState {
+///         AppState { nav: NavigatorController::new() }
+///     }
+///
+///     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+///         // Back handling is automatic — no BackHandler needed.
+///         any(navigator(&state.nav, || any(text("home"))))
+///     }
+/// }
+///
+/// frust::app!(App);
+/// # fn main() {}
+/// ```
+pub fn navigator<State: 'static>(
+    controller: &NavigatorController<State>,
+    initial: impl Fn() -> AnyView<State> + 'static,
+) -> NavigatorView<State> {
+    back_glue::auto_wire(controller);
+    frust_widgets::navigator(controller, initial)
+}
+
 /// Router ⇄ deep-link auto-wiring (Phase 6b, task 08): [`router_with_deep_links`]/
 /// [`RouterDeepLinks`] resolve a [`Router`]'s start location from the process's
 /// cold-start deep link (falling back to an app-supplied default) and keep
@@ -263,6 +379,24 @@ pub use peniko::Color;
 /// ```
 pub use frust_shell_common::{clear_app_theme, set_app_theme};
 
+/// App-facing system-UI (system-bar) override (glyph-refinements task 03):
+/// [`set_system_ui_mode`] requests a status-/navigation-bar visibility mode —
+/// the Flutter `SystemChrome.setEnabledSystemUIMode` analog — reaching
+/// whichever shell is running the next time it polls (once per frame,
+/// mirroring [`set_app_theme`]'s delivery timing). See
+/// `frust_shell_common::system_ui`'s module docs for the full layering
+/// rationale, the thread contract (a plain `Mutex`-guarded process-global,
+/// callable from any thread), the FFI wire format tasks 09/10 export, and
+/// where Android/iOS diverge from the five-mode vocabulary.
+///
+/// ```no_run
+/// use frust::{SystemUiMode, set_system_ui_mode};
+///
+/// // Hide all system bars; an edge swipe re-shows them.
+/// set_system_ui_mode(SystemUiMode::Immersive);
+/// ```
+pub use frust_shell_common::{SystemUiMode, SystemUiOverlay, set_system_ui_mode};
+
 /// App-facing pending-font registry (glyph-design-system task 08):
 /// [`register_app_fonts`] pushes raw font bytes (TTF/OTF, or a TTC/OTC
 /// collection) to be registered into the running shell's `TextContext` the
@@ -280,6 +414,55 @@ pub use frust_shell_common::{clear_app_theme, set_app_theme};
 /// frust::register_app_fonts(font_bytes);
 /// ```
 pub use frust_shell_common::font_registry::register_app_fonts;
+
+// No app-facing translucent-surface opt-in lives here (review-fix-2 t01,
+// review M3): Mode B is a build-time HOST configuration selected by the
+// generated template's `FRUST_TRANSLUCENT_SURFACE`/`translucentSurface`
+// constant, never a runtime Rust call — see [`platform_view`]'s Mode B
+// section above. `frust_shell_common::declare_host_translucent_surface`
+// exists only for the generated host glue (Android's `nativeSetSurfaceMode`,
+// iOS's `frust_set_surface_mode`) to call from the same branch that already
+// configured the native window translucent, and is deliberately not
+// re-exported past that crate.
+
+/// App-facing **resolved** surface mode (native-widgets task p1-01) — the
+/// read-only outward half of the Mode B seam whose setter is deliberately
+/// absent (see the comment above): what the platform actually gave this
+/// process, not what the host asked for.
+///
+/// [`resolved_surface_mode`] answers [`ResolvedSurfaceMode::Unknown`] until a
+/// shell publishes (no surface yet, or the desktop preview, which has no Mode
+/// B host seam), then `Opaque`/`Translucent` — or
+/// [`ResolvedSurfaceMode::RefusedTranslucent`], the case this exists for: the
+/// host declared Mode B and the platform resolved the surface opaque anyway
+/// (no matching `CompositeAlphaMode`, or a GPU-tier blit-fallback surface —
+/// `docs/LIMITATIONS.md`'s `cam-blit-opaque`). frust's paint side degrades to
+/// the Mode A contract on its own, but the host's native-sibling z-order was
+/// fixed at build time, so a sibling arranged *behind* the surface is
+/// invisible **and untappable**. Branch on
+/// [`ResolvedSurfaceMode::translucency_refused`] to render a deliberate
+/// fallback instead of a dead rect.
+///
+/// **This is a poll, not a subscription** — the same contract as
+/// [`set_app_theme`]'s slot: reading it subscribes to nothing and a change
+/// never wakes a frame by itself. Read it during a rebuild (or paint/an event
+/// handler) on the UI thread, exactly where you'd read any other
+/// process-global shell state, and if the answer must change your UI's shape,
+/// write it into your own state so the normal dirty path runs.
+///
+/// ```no_run
+/// use frust::{ResolvedSurfaceMode, resolved_surface_mode};
+///
+/// // A native-widget slot deciding whether its platform sibling can actually
+/// // be seen this frame.
+/// let native_sibling_visible = match resolved_surface_mode() {
+///     ResolvedSurfaceMode::RefusedTranslucent => false,
+///     ResolvedSurfaceMode::Unknown
+///     | ResolvedSurfaceMode::Opaque
+///     | ResolvedSurfaceMode::Translucent => true,
+/// };
+/// ```
+pub use frust_shell_common::{ResolvedSurfaceMode, resolved_surface_mode};
 
 /// The animation vocabulary (spec §8): the shell-fed frame clock ([`FrameTime`])
 /// plus the pure easing/interpolation/spring math a widget or app advances it

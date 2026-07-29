@@ -1,6 +1,6 @@
 //! Headless tests for the scenario driver + the two implemented scenarios
 //! (S1, S7), driving Frust's `RenderRoot` directly (no GPU, no window) — the
-//! same harness shape as `examples/bubblebench/tests/bench.rs`.
+//! same harness shape as `examples/huddle`'s own headless `tests/*.rs`.
 
 use std::any::Any;
 

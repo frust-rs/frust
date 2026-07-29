@@ -20,7 +20,19 @@
 //! lifecycle vocabulary, gated by [`render_thread_enabled`], plus
 //! [`scene_return_channel`]'s reverse give-back slot restoring buffer reuse
 //! across the split) the shells split the frame pipeline across (plan phase
-//! 11.B).
+//! 11.B). The [`platform_view`] module is the differ turning `frust-core`'s
+//! per-paint-pass platform-view frames into an idempotent
+//! [`ViewCommand`]/[`PlatformViewState`] backlog both mobile shells' FFI peek
+//! getters serve (platform-views task 03), and [`surface_mode`] is the
+//! process-global translucent-surface pair: the host **declaration** latch
+//! ([`declare_host_translucent_surface`]/[`SurfaceModeWatcher`]) — settable
+//! only by each shell's own JNI/C-ABI host-glue callback, never re-exported
+//! past this crate (review-fix-2 t01, review M3) — each shell's
+//! surface-creation path reads pre-configure, plus the **resolved** slot
+//! ([`publish_resolved_surface_mode`]/[`resolved_surface_mode`], native-widgets
+//! task p1-01) each mobile shell publishes the live surface's actual verdict
+//! into, so app code can observe a `RefusedTranslucent` platform refusal
+//! instead of an invisible native sibling.
 //!
 //! This crate is deliberately platform-free: it depends on `frust-core`
 //! (retained tree / `RenderRoot`) plus `frust-scene`/`frust-text`/
@@ -36,13 +48,19 @@ mod ffi_support;
 pub mod font_registry;
 pub mod frame_gate;
 pub mod perf;
+pub mod platform_view;
 pub mod render_split;
 pub mod resample;
+mod surface_mode;
+mod system_ui;
 mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
 pub use ffi_support::{guard, logical_insets, logical_size, run_guarded_thread, sanitize_scale};
-pub use frame_gate::{FrameDecision, FrameGate, FrameInputs};
+pub use frame_gate::{
+    FrameDecision, FrameGate, FrameInputs, FramePacing, anim_pacing_kill_switch_engaged,
+};
+pub use platform_view::{PlatformViewState, ViewCommand};
 pub use render_split::{
     Ack, AckWaiter, FrameMeta, NO_RENDER_THREAD_VAR, RenderBatch, RenderCommand, RenderEvent,
     RenderPhase, RenderReceiver, RenderSender, SceneFrame, SceneReturnReceiver, SceneReturnSender,
@@ -50,6 +68,14 @@ pub use render_split::{
     scene_return_channel,
 };
 pub use resample::{PointerResampler, RawPointerSample};
+pub use surface_mode::{
+    ResolvedSurfaceMode, SurfaceMode, SurfaceModeWatcher, declare_host_translucent_surface,
+    publish_resolved_surface_mode, resolved_surface_mode,
+};
+pub use system_ui::{
+    SystemUiMode, SystemUiOverlay, SystemUiWatcher, current_system_ui_mode, encoded_state,
+    set_system_ui_mode,
+};
 pub use theme_override::{
     ThemeOverrideWatcher, clear_app_theme, effective_brightness_for_platform_change, set_app_theme,
     theme_override_active,

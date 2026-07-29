@@ -173,7 +173,9 @@ impl Widget for DotsLoaderWidget {
         }
 
         if !reduce_motion {
-            ctx.request_frame();
+            // A dot pulse is a decorative loop — its exact cadence is
+            // imperceptible, so the mobile frame gate may pace it (task 08).
+            ctx.request_frame_paced();
         }
     }
 }
@@ -282,6 +284,10 @@ mod tests {
         let mut scene = RecordingScene::default();
         w.paint(&mut ctx, &mut scene);
         assert!(ctx.needs_frame());
+        assert!(
+            ctx.needs_frame_paced_only(),
+            "a dot pulse is a CosmeticLoop request — the frame gate must be able to pace it"
+        );
     }
 
     #[test]

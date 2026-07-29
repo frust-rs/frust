@@ -363,6 +363,7 @@ impl Widget for LinearProgressWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
+        let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
         let (indicator, track) = Self::resolve_colors(theme);
         let size = ctx.size();
         let origin = ctx.origin();
@@ -409,7 +410,12 @@ impl Widget for LinearProgressWidget {
                 }
             }
             ProgressValue::Indeterminate => {
-                self.indeterminate.advance(ctx.frame_time());
+                // `reduce_motion` freezes the sweeping segment wherever it
+                // currently sits and stops requesting frames — the same
+                // skip-animation shape `glyph::skeleton`'s shimmer uses.
+                if !reduce_motion {
+                    self.indeterminate.advance(ctx.frame_time());
+                }
                 let t = self.indeterminate.value_clamped();
                 let segment_w = size.width * LINEAR_INDETERMINATE_SEGMENT_FRACTION;
                 // Sweep the segment's leading edge from off the left edge to
@@ -444,7 +450,12 @@ impl Widget for LinearProgressWidget {
                         );
                     }
                 }
-                ctx.request_frame();
+                if !reduce_motion {
+                    // The sweeping segment is a decorative loop — its exact
+                    // cadence is imperceptible, so the mobile frame gate may
+                    // pace it (task 08).
+                    ctx.request_frame_paced();
+                }
             }
         }
 
@@ -681,6 +692,7 @@ impl Widget for CircularProgressWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
+        let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
         let color = Self::resolve_color(theme);
         let size = ctx.size();
         let origin = ctx.origin();
@@ -718,7 +730,12 @@ impl Widget for CircularProgressWidget {
                 }
             }
             ProgressValue::Indeterminate => {
-                self.indeterminate.advance(ctx.frame_time());
+                // `reduce_motion` freezes the sweeping arc wherever it
+                // currently sits and stops requesting frames — the same
+                // skip-animation shape `glyph::skeleton`'s shimmer uses.
+                if !reduce_motion {
+                    self.indeterminate.advance(ctx.frame_time());
+                }
                 let t = self.indeterminate.value_clamped();
                 let start = START_ANGLE + t * TAU;
                 let path = if wavy {
@@ -735,7 +752,12 @@ impl Widget for CircularProgressWidget {
                     arc_path(center, radius, start, CIRCULAR_INDETERMINATE_SWEEP)
                 };
                 scene.stroke_path(Point::ZERO, &path, CIRCULAR_STROKE, &brush);
-                ctx.request_frame();
+                if !reduce_motion {
+                    // The sweeping arc is a decorative loop — its exact
+                    // cadence is imperceptible, so the mobile frame gate may
+                    // pace it (task 08).
+                    ctx.request_frame_paced();
+                }
             }
         }
 
@@ -864,6 +886,27 @@ mod tests {
             assert!(
                 ctx.needs_frame(),
                 "indeterminate must keep requesting frames"
+            );
+            assert!(
+                ctx.needs_frame_paced_only(),
+                "the sweeping segment is a CosmeticLoop request — the frame gate must be able to pace it"
+            );
+        }
+    }
+
+    #[test]
+    fn linear_indeterminate_reduce_motion_freezes_and_stops_requesting_frames() {
+        let mut theme = Theme::m3_baseline();
+        theme.motion.reduce_motion = true;
+        let mut w = build_linear(ProgressValue::Indeterminate);
+        for _ in 0..3 {
+            let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, LINEAR_TRACK_HEIGHT))
+                .with_theme(&theme);
+            let mut scene = RecordingScene::default();
+            w.paint(&mut ctx, &mut scene);
+            assert!(
+                !ctx.needs_frame(),
+                "reduce_motion must not request a continuation frame"
             );
         }
     }
@@ -1054,11 +1097,34 @@ mod tests {
             let mut scene = RecordingScene::default();
             w.paint(&mut ctx, &mut scene);
             assert!(ctx.needs_frame());
+            assert!(
+                ctx.needs_frame_paced_only(),
+                "the sweeping arc is a CosmeticLoop request — the frame gate must be able to pace it"
+            );
             assert_eq!(
                 scene.strokes.len(),
                 1,
                 "always paints exactly one arc segment"
             );
+        }
+    }
+
+    #[test]
+    fn circular_indeterminate_reduce_motion_freezes_and_stops_requesting_frames() {
+        let mut theme = Theme::m3_baseline();
+        theme.motion.reduce_motion = true;
+        let mut w = build_circular(ProgressValue::Indeterminate);
+        for _ in 0..3 {
+            let mut ctx =
+                PaintCtx::new(Point::ZERO, Size::new(CIRCULAR_DIAMETER, CIRCULAR_DIAMETER))
+                    .with_theme(&theme);
+            let mut scene = RecordingScene::default();
+            w.paint(&mut ctx, &mut scene);
+            assert!(
+                !ctx.needs_frame(),
+                "reduce_motion must not request a continuation frame"
+            );
+            assert_eq!(scene.strokes.len(), 1, "still paints a frozen arc segment");
         }
     }
 

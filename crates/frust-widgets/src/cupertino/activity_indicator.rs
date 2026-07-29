@@ -151,15 +151,22 @@ impl Widget for CupertinoActivityIndicatorWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        let base = resolve_color(Theme::from_paint_ctx(ctx));
+        let theme = Theme::from_paint_ctx(ctx);
+        let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
+        let base = resolve_color(theme);
         let size = ctx.size();
         let origin = ctx.origin();
         let radius = size.width.min(size.height) / 2.0;
         let center = Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
 
         // Which spoke is currently the brightest (steps once per loop).
+        // `reduce_motion` freezes the rotation wherever it currently sits and
+        // stops requesting frames — the same skip-animation shape
+        // `glyph::skeleton`'s shimmer uses.
         let phase = if self.animating {
-            self.rotation.advance(ctx.frame_time());
+            if !reduce_motion {
+                self.rotation.advance(ctx.frame_time());
+            }
             self.rotation.value_clamped()
         } else {
             0.0
@@ -192,8 +199,11 @@ impl Widget for CupertinoActivityIndicatorWidget {
             );
         }
 
-        if self.animating {
-            ctx.request_frame();
+        if self.animating && !reduce_motion {
+            // The rotating spoke ring is a decorative loop — its exact
+            // cadence is imperceptible, so the mobile frame gate may pace it
+            // (task 08).
+            ctx.request_frame_paced();
         }
     }
 
@@ -285,6 +295,28 @@ mod tests {
                 ctx.needs_frame(),
                 "an animating spinner keeps requesting frames"
             );
+            assert!(
+                ctx.needs_frame_paced_only(),
+                "the rotating spoke ring is a CosmeticLoop request — the frame gate must be able to pace it"
+            );
+        }
+    }
+
+    #[test]
+    fn reduce_motion_freezes_the_ring_and_stops_requesting_frames() {
+        let mut theme = Theme::cupertino_baseline();
+        theme.motion.reduce_motion = true;
+        let mut w = build(true);
+        for _ in 0..3 {
+            let mut ctx =
+                PaintCtx::new(Point::ZERO, Size::new(DIAMETER, DIAMETER)).with_theme(&theme);
+            let mut rec = StrokeRecorder::default();
+            w.paint(&mut ctx, &mut rec);
+            assert!(
+                !ctx.needs_frame(),
+                "reduce_motion must not request a continuation frame"
+            );
+            assert_eq!(rec.strokes.len(), SPOKE_COUNT, "still paints a frozen ring");
         }
     }
 

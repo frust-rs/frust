@@ -12,10 +12,18 @@ use frust_drive::process::ProcessRunner;
 
 /// Build-output directories removed relative to the project root, beyond
 /// `cargo clean`'s own `target/`: the Gradle app-module build dir, the
+/// Gradle root-project build dir (where the generated
+/// `android/settings.gradle.kts` redirects the `:frust-embedding` embedding
+/// module's output, keeping the shared frust checkout pristine), the
 /// project-local Gradle cache, and `build/` (covers `build/ios`, spec
 /// §12.6's `-derivedDataPath`/archive output).
 /// Keep in sync with `templates/app/.gitignore`'s build-output patterns.
-const REMOVED_DIRS: &[&str] = &["android/app/build", "android/.gradle", "build"];
+const REMOVED_DIRS: &[&str] = &[
+    "android/app/build",
+    "android/build",
+    "android/.gradle",
+    "build",
+];
 
 /// The testable core of `clean`, taking an injected [`ProcessRunner`] and
 /// project directory. `commands::dispatch` constructs the real runner and
@@ -130,11 +138,13 @@ mod tests {
     }
 
     #[test]
-    fn removes_the_three_build_dirs() {
+    fn removes_the_build_dirs() {
         let dir = unique_project_dir("removes-dirs");
         fs::write(dir.join("frust.toml"), "[app]\nname = \"x\"\norg = \"y\"\n").unwrap();
         fs::create_dir_all(dir.join("android/app/build")).unwrap();
         fs::write(dir.join("android/app/build/marker"), "x").unwrap();
+        // The `:frust-embedding` module's redirected Gradle output.
+        fs::create_dir_all(dir.join("android/build/frust-embedding")).unwrap();
         fs::create_dir_all(dir.join("android/.gradle")).unwrap();
         fs::create_dir_all(dir.join("build/ios")).unwrap();
 
@@ -143,6 +153,7 @@ mod tests {
         assert_eq!(code, 0);
 
         assert!(!dir.join("android/app/build").exists());
+        assert!(!dir.join("android/build").exists());
         assert!(!dir.join("android/.gradle").exists());
         assert!(!dir.join("build").exists());
         let _ = fs::remove_dir_all(&dir);

@@ -256,6 +256,149 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
 }
 
 // ---------------------------------------------------------------------
+// Platform-view command JSON (platform-views task 05): the host-testable
+// core of `nativePlatformViewCommands`.
+//
+// `frust-shell-common` (which owns `ViewCommand`/`PlatformViewState`) is only
+// a dependency of this crate under `cfg(target_os = "android")` (see this
+// crate's `Cargo.toml`), so it cannot appear in a host-compiled signature —
+// the same constraint `ImeJsonState` above exists to work around.
+// `PlatformViewCommandJson` is the plain, dependency-free mirror of
+// `frust_shell_common::ViewCommand`; `crate::jni_glue`'s
+// `platform_view_commands_to_json` maps the real differ output onto this at
+// the one Android-only call site, exactly like `ime_state_to_json` above.
+// ---------------------------------------------------------------------
+
+/// A plain, `frust-shell-common`/JNI-free view of one platform-view command,
+/// ready to be serialised into the `nativePlatformViewCommands` JSON both
+/// mobile shells serve (platform-views task 05/06's frozen wire contract).
+///
+/// Rect/clip tuples are `(x, y, width, height)` **physical px** — already
+/// scaled at the mapping site ([`crate::jni_glue`]'s
+/// `platform_view_commands_to_json`), mirroring [`ImeJsonState`]'s caret rect
+/// (the physical-at-FFI/logical-inside rule, applied outbound).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PlatformViewCommandJson {
+    /// Mirrors `frust_shell_common::ViewCommand::Create`.
+    Create {
+        slot_id: u64,
+        view_type: String,
+        params_json: String,
+        interactive: bool,
+    },
+    /// Mirrors `frust_shell_common::ViewCommand::Update`.
+    Update {
+        slot_id: u64,
+        rect: (f32, f32, f32, f32),
+        clip: Option<(f32, f32, f32, f32)>,
+        visible: bool,
+        shields: Vec<(f32, f32, f32, f32)>,
+    },
+    /// Mirrors `frust_shell_common::ViewCommand::UpdateParams`.
+    UpdateParams { slot_id: u64, params_json: String },
+    /// Mirrors `frust_shell_common::ViewCommand::Dispose`.
+    Dispose { slot_id: u64 },
+}
+
+/// Whether `nativePlatformViewCommands`'s no-change fast path applies:
+/// nothing has been produced since the generation Kotlin last acknowledged
+/// (round-tripped back as `ack_generation`) — the differ's own
+/// `acknowledge`-then-peek contract (`frust_shell_common::platform_view`'s
+/// module docs) reduces to exactly this equality check once the ack has been
+/// applied. A `true` here means `nativePlatformViewCommands` returns a null
+/// `jstring` instead of a JSON payload, mirroring `nativeSystemUiState`'s
+/// cheapness bar (a no-change poll costs one JNI call, no allocation).
+#[inline]
+pub(crate) fn platform_view_commands_up_to_date(generation: u64, ack_generation: u64) -> bool {
+    generation == ack_generation
+}
+
+/// Format one `(x, y, width, height)` rect tuple as the JSON wire array
+/// `[x,y,w,h]`, sanitising any non-finite component to `0` (mirrors
+/// [`json_number`]'s NaN/inf guard — a rect crossing this boundary must
+/// always be parseable JSON).
+fn platform_view_rect_json((x, y, w, h): (f32, f32, f32, f32)) -> String {
+    format!(
+        "[{},{},{},{}]",
+        json_number(x),
+        json_number(y),
+        json_number(w),
+        json_number(h),
+    )
+}
+
+/// Serialise one [`PlatformViewCommandJson`] into its JSON object — see
+/// [`build_platform_view_commands_json`] for the full wire shape.
+fn platform_view_command_json(cmd: &PlatformViewCommandJson) -> String {
+    match cmd {
+        PlatformViewCommandJson::Create {
+            slot_id,
+            view_type,
+            params_json,
+            interactive,
+        } => format!(
+            "{{\"op\":\"create\",\"slot\":{slot_id},\"viewType\":\"{}\",\"params\":\"{}\",\"interactive\":{interactive}}}",
+            json_escape(view_type),
+            json_escape(params_json),
+        ),
+        PlatformViewCommandJson::Update {
+            slot_id,
+            rect,
+            clip,
+            visible,
+            shields,
+        } => {
+            let shields_json = shields
+                .iter()
+                .map(|s| platform_view_rect_json(*s))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"op\":\"update\",\"slot\":{slot_id},\"rect\":{},\"clip\":{},\"visible\":{visible},\"shields\":[{shields_json}]}}",
+                platform_view_rect_json(*rect),
+                clip.map_or_else(|| "null".to_string(), platform_view_rect_json),
+            )
+        }
+        PlatformViewCommandJson::UpdateParams {
+            slot_id,
+            params_json,
+        } => format!(
+            "{{\"op\":\"updateParams\",\"slot\":{slot_id},\"params\":\"{}\"}}",
+            json_escape(params_json),
+        ),
+        PlatformViewCommandJson::Dispose { slot_id } => {
+            format!("{{\"op\":\"dispose\",\"slot\":{slot_id}}}")
+        }
+    }
+}
+
+/// Serialise a whole not-yet-acknowledged platform-view command backlog into
+/// the `nativePlatformViewCommands` JSON both mobile shells serve
+/// byte-identically (platform-views task 05's frozen contract, task 06's iOS
+/// shell mirrors it exactly):
+///
+/// `{"generation":N,"commands":[{"op":"create","slot":N,"viewType":"...","params":"..."},`
+/// `{"op":"update","slot":N,"rect":[x,y,w,h],"clip":[x,y,w,h]|null,"visible":bool},`
+/// `{"op":"updateParams","slot":N,"params":"..."},{"op":"dispose","slot":N}]}`.
+///
+/// An empty `commands` slice still yields a valid (if pointless — the caller
+/// should have taken the [`platform_view_commands_up_to_date`] fast path
+/// instead) `{"generation":N,"commands":[]}`.
+pub(crate) fn build_platform_view_commands_json(
+    generation: u64,
+    commands: &[PlatformViewCommandJson],
+) -> String {
+    let mut cmds = String::new();
+    for (i, cmd) in commands.iter().enumerate() {
+        if i > 0 {
+            cmds.push(',');
+        }
+        cmds.push_str(&platform_view_command_json(cmd));
+    }
+    format!("{{\"generation\":{generation},\"commands\":[{cmds}]}}")
+}
+
+// ---------------------------------------------------------------------
 // Pipeline-cache persistence (task 13): pure path / diff / IO helpers.
 //
 // The Android shell persists wgpu's `PipelineCache` blob across launches so
@@ -338,9 +481,112 @@ pub(crate) fn resolve_preinit<T>(joined: Option<Option<T>>, fresh: impl FnOnce()
     }
 }
 
+/// Publish a surface (re)install's **resolved** translucency onto the shared,
+/// cross-thread flag the UI thread reads each frame (review finding M1).
+///
+/// `resolved` is `Some(translucent)` for a successful install — the value
+/// `frust_render::SurfaceRenderer::surface_resolved_translucent` reports for
+/// the surface that just went live — and `None` for a FAILED one, which stores
+/// `false`: with no surface whose alpha mode we can vouch for, the safe
+/// contract is the opaque Mode A one (never punch a hole you can't prove is a
+/// window), and leaving the previous surface's value standing would be exactly
+/// the stale-truth bug this seam exists to remove.
+///
+/// `Release` pairs with [`read_resolved_translucency`]'s `Acquire` so the UI
+/// thread observing a store also observes everything the render thread did
+/// before it.
+#[inline]
+pub(crate) fn publish_resolved_translucency(
+    flag: &std::sync::atomic::AtomicBool,
+    resolved: Option<bool>,
+) {
+    flag.store(
+        resolved.unwrap_or(false),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+/// The UI-thread half of [`publish_resolved_translucency`]: read the live
+/// surface's resolved translucency before choosing this frame's base color and
+/// pushing `RenderRoot::set_surface_translucent`.
+///
+/// Until the render thread's first install lands, this reads the
+/// construction-time seed — the app's REQUEST — so the capable common case
+/// renders Mode B from frame 1; a fallback downgrades it within one frame of
+/// the install (the one-optimistic-frame window, documented at the field).
+#[inline]
+pub(crate) fn read_resolved_translucency(flag: &std::sync::atomic::AtomicBool) -> bool {
+    flag.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// This frame's base clear color, chosen from the surface's **resolved**
+/// translucency (review finding M1).
+///
+/// A surface that really came up translucent clears to `transparent` so a
+/// native sibling view behind it shows through wherever nothing painted (Mode
+/// B); everything else — including a translucency request the platform
+/// refused — clears to the theme's opaque surface color, exactly as before
+/// platform views existed.
+///
+/// Generic over the color type purely so this decision stays host-testable:
+/// `peniko` is an Android-gated dependency of this crate, and this module
+/// compiles on every host (see the module docs).
+#[inline]
+pub(crate) fn base_clear_color<C>(
+    resolved_translucent: bool,
+    transparent: C,
+    opaque_surface: C,
+) -> C {
+    if resolved_translucent {
+        transparent
+    } else {
+        opaque_surface
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn resolved_translucency_handoff_survives_a_fake_install_sequence() {
+        // The Arc<AtomicBool> handoff the render-thread split runs on (review
+        // finding M1), driven here with FAKE installs so it is host-testable
+        // (the real `install_surface` needs a GPU and an `ANativeWindow`).
+        //
+        // Seeded from the REQUEST: the app asked for translucency, so frame 1
+        // renders Mode B optimistically rather than flashing opaque while the
+        // render thread is still creating the surface.
+        let flag = AtomicBool::new(true);
+        assert!(read_resolved_translucency(&flag));
+
+        // A real resolution can only ever downgrade it: this device advertised
+        // no translucent alpha mode, so the surface came up opaque.
+        publish_resolved_translucency(&flag, Some(false));
+        assert!(
+            !read_resolved_translucency(&flag),
+            "the UI thread must observe a render-thread downgrade"
+        );
+        assert_eq!(
+            base_clear_color(read_resolved_translucency(&flag), "TRANSPARENT", "surface"),
+            "surface",
+            "a fallback-to-opaque surface keeps the opaque theme base color"
+        );
+
+        // A capable reinstall (e.g. after a rotation) restores Mode B.
+        publish_resolved_translucency(&flag, Some(true));
+        assert!(read_resolved_translucency(&flag));
+        assert_eq!(
+            base_clear_color(read_resolved_translucency(&flag), "TRANSPARENT", "surface"),
+            "TRANSPARENT"
+        );
+
+        // A FAILED reinstall clears it rather than leaving the previous
+        // surface's `true` standing.
+        publish_resolved_translucency(&flag, None);
+        assert!(!read_resolved_translucency(&flag));
+    }
 
     #[test]
     fn resolve_preinit_adopts_a_ready_context() {
@@ -526,6 +772,202 @@ mod tests {
             "{json}"
         );
         assert!(!json.contains("NaN") && !json.contains("inf"), "{json}");
+    }
+
+    // -----------------------------------------------------------------
+    // Platform-view command JSON (platform-views task 05)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn platform_view_json_create_golden() {
+        let json = build_platform_view_commands_json(
+            1,
+            &[PlatformViewCommandJson::Create {
+                slot_id: 3,
+                view_type: "dev.frust.MapFactory".to_string(),
+                params_json: "{\"style\":\"dark\"}".to_string(),
+                interactive: false,
+            }],
+        );
+        assert_eq!(
+            json,
+            "{\"generation\":1,\"commands\":[{\"op\":\"create\",\"slot\":3,\"viewType\":\"dev.frust.MapFactory\",\"params\":\"{\\\"style\\\":\\\"dark\\\"}\",\"interactive\":false}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_update_golden_with_clip() {
+        let json = build_platform_view_commands_json(
+            2,
+            &[PlatformViewCommandJson::Update {
+                slot_id: 3,
+                rect: (0.0, 10.0, 100.0, 200.0),
+                clip: Some((0.0, 10.0, 50.0, 200.0)),
+                visible: true,
+                shields: Vec::new(),
+            }],
+        );
+        assert_eq!(
+            json,
+            "{\"generation\":2,\"commands\":[{\"op\":\"update\",\"slot\":3,\"rect\":[0,10,100,200],\"clip\":[0,10,50,200],\"visible\":true,\"shields\":[]}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_update_golden_without_clip_is_null() {
+        let json = build_platform_view_commands_json(
+            3,
+            &[PlatformViewCommandJson::Update {
+                slot_id: 1,
+                rect: (0.0, 0.0, 10.0, 10.0),
+                clip: None,
+                visible: false,
+                shields: Vec::new(),
+            }],
+        );
+        assert_eq!(
+            json,
+            "{\"generation\":3,\"commands\":[{\"op\":\"update\",\"slot\":1,\"rect\":[0,0,10,10],\"clip\":null,\"visible\":false,\"shields\":[]}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_update_params_golden() {
+        let json = build_platform_view_commands_json(
+            4,
+            &[PlatformViewCommandJson::UpdateParams {
+                slot_id: 5,
+                params_json: "{\"a\":2}".to_string(),
+            }],
+        );
+        assert_eq!(
+            json,
+            "{\"generation\":4,\"commands\":[{\"op\":\"updateParams\",\"slot\":5,\"params\":\"{\\\"a\\\":2}\"}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_dispose_golden() {
+        let json = build_platform_view_commands_json(
+            5,
+            &[PlatformViewCommandJson::Dispose { slot_id: 3 }],
+        );
+        assert_eq!(
+            json,
+            "{\"generation\":5,\"commands\":[{\"op\":\"dispose\",\"slot\":3}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_escapes_quotes_and_backslashes_in_view_type_and_params() {
+        let json = build_platform_view_commands_json(
+            1,
+            &[PlatformViewCommandJson::Create {
+                slot_id: 1,
+                view_type: "dev.frust.\"Weird\"Factory".to_string(),
+                params_json: r"a\b".to_string(),
+                interactive: false,
+            }],
+        );
+        assert!(
+            json.contains(r#""viewType":"dev.frust.\"Weird\"Factory""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""params":"a\\b""#), "{json}");
+    }
+
+    #[test]
+    fn platform_view_json_multiple_commands_in_one_batch() {
+        let json = build_platform_view_commands_json(
+            7,
+            &[
+                PlatformViewCommandJson::Create {
+                    slot_id: 3,
+                    view_type: "dev.frust.XFactory".to_string(),
+                    params_json: String::new(),
+                    interactive: false,
+                },
+                PlatformViewCommandJson::Update {
+                    slot_id: 3,
+                    rect: (0.0, 0.0, 10.0, 10.0),
+                    clip: None,
+                    visible: true,
+                    shields: Vec::new(),
+                },
+            ],
+        );
+        assert_eq!(
+            json,
+            "{\"generation\":7,\"commands\":[{\"op\":\"create\",\"slot\":3,\"viewType\":\"dev.frust.XFactory\",\"params\":\"\",\"interactive\":false},{\"op\":\"update\",\"slot\":3,\"rect\":[0,0,10,10],\"clip\":null,\"visible\":true,\"shields\":[]}]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_json_empty_backlog_is_a_valid_empty_array() {
+        assert_eq!(
+            build_platform_view_commands_json(0, &[]),
+            "{\"generation\":0,\"commands\":[]}"
+        );
+    }
+
+    #[test]
+    fn platform_view_rect_json_sanitizes_non_finite_components() {
+        let json = build_platform_view_commands_json(
+            1,
+            &[PlatformViewCommandJson::Update {
+                slot_id: 1,
+                rect: (f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 4.0),
+                clip: None,
+                visible: true,
+                shields: Vec::new(),
+            }],
+        );
+        assert!(json.contains("\"rect\":[0,0,0,4]"), "{json}");
+        assert!(!json.contains("NaN") && !json.contains("inf"), "{json}");
+    }
+
+    #[test]
+    fn platform_view_up_to_date_is_generation_equality() {
+        assert!(platform_view_commands_up_to_date(0, 0));
+        assert!(platform_view_commands_up_to_date(5, 5));
+        assert!(!platform_view_commands_up_to_date(6, 5));
+        assert!(!platform_view_commands_up_to_date(5, 6));
+    }
+
+    /// The AC's "ack compaction round-trip" host-tested at this crate's
+    /// boundary: `frust_shell_common::PlatformViewState`'s own compaction
+    /// logic is exhaustively unit-tested in that (non-target-gated) crate
+    /// (task 03's `acknowledge_compacts_the_backlog` and friends) — it isn't
+    /// reachable from this crate's host build at all, since
+    /// `frust-shell-common` is only a dependency of `frust-shell-android`
+    /// under `cfg(target_os = "android")` (this crate's `Cargo.toml`). What
+    /// IS host-testable here is the JSON layer's half of the round trip:
+    /// Kotlin polls generation N, gets a payload; it round-trips N back as
+    /// `ack_generation`; a second poll with nothing new must take the
+    /// no-change fast path rather than re-serializing an (empty) payload.
+    #[test]
+    fn platform_view_ack_round_trip_at_the_json_layer() {
+        let (generation, commands) = (
+            3u64,
+            vec![PlatformViewCommandJson::Create {
+                slot_id: 1,
+                view_type: "dev.frust.X".to_string(),
+                params_json: String::new(),
+                interactive: false,
+            }],
+        );
+        // First poll: Kotlin's ack_generation starts at 0 (nothing seen yet)
+        // — not up to date, so it gets the real JSON payload.
+        assert!(!platform_view_commands_up_to_date(generation, 0));
+        let first_json = build_platform_view_commands_json(generation, &commands);
+        assert!(first_json.contains("\"op\":\"create\""));
+
+        // Kotlin round-trips `generation` back as its next `ack_generation`;
+        // nothing new was produced in between (the differ's own generation
+        // is still 3) — this must be the no-change fast path (null jstring
+        // at the JNI layer, tested here as the boolean the export branches
+        // on).
+        assert!(platform_view_commands_up_to_date(generation, generation));
     }
 
     // -----------------------------------------------------------------

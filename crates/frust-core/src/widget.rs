@@ -12,6 +12,8 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use frust_scene::{GlyphRun, SceneBuilder, ShaderProgram};
 use kurbo::{Affine, BezPath, Point, Rect, Size};
@@ -183,6 +185,24 @@ pub trait PaintScene {
     /// [`PaintScene::push_layer`].
     fn pop_layer(&mut self) {}
 
+    /// Clear an axis-aligned rectangle (at `origin`/`size`) to full
+    /// transparency (alpha 0), erasing everything already painted below it in
+    /// this scene — a real destination-clearing composite, not merely skipping
+    /// paint over the region.
+    ///
+    /// The platform-view hole-punch (`frust-widgets`' `PlatformViewWidget`) is
+    /// the sole v1 consumer: on a translucent (Mode B) surface a slot punches
+    /// its rect so an opaque app backdrop painted below it (the catalog's
+    /// `AppBackground`) doesn't seal the hole the hosted native view shows
+    /// through. Gated on [`PaintCtx::is_translucent`] by the widget — clearing
+    /// on an opaque surface would erase real app content, and the clear is
+    /// disregarded there anyway (see [`frust_scene::Command::ClearRect`]).
+    ///
+    /// Defaulted to a no-op so pre-existing recorder scenes stay valid; the
+    /// `SceneBuilder` implementation records a real
+    /// [`frust_scene::Command::ClearRect`].
+    fn clear_rect(&mut self, _origin: Point, _size: Size) {}
+
     /// Fill an arbitrary vector path (e.g. an arc — see
     /// [`frust_scene::arc_path`]) at `origin`, using the nonzero winding
     /// rule and `brush`.
@@ -288,6 +308,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn pop_layer(&mut self) {
         SceneBuilder::pop_layer(self);
+    }
+
+    fn clear_rect(&mut self, origin: Point, size: Size) {
+        SceneBuilder::clear_rect(self, rect_at(origin, size));
     }
 
     fn fill_path(&mut self, origin: Point, path: &BezPath, brush: &Brush) {
@@ -445,6 +469,37 @@ impl Default for LayoutCtx<'static> {
     }
 }
 
+/// The *class* of a continuation-frame request a widget makes during paint —
+/// how urgent the next frame is, so the mobile frame gate can decide whether it
+/// may be paced (see [`crate::app::RenderRoot::paint`] and the frame gate).
+///
+/// A widget continues an animation by asking for another frame during paint
+/// ([`PaintCtx::request_frame`] / [`PaintCtx::request_frame_paced`]); this tag
+/// says whether that next frame is user-visible motion that must land on the
+/// very next vsync ([`TickClass::Transition`]) or a decorative loop whose cadence
+/// can be throttled without a perceptible glitch ([`TickClass::CosmeticLoop`]).
+///
+/// **Aggregation is a max-lattice**: `Transition` dominates `CosmeticLoop`. Over
+/// a whole paint pass, ANY [`TickClass::Transition`] request makes the frame
+/// unpaced (must run every vsync, today's behavior); only when *every* request
+/// this frame is [`TickClass::CosmeticLoop`] may the gate pace it. No request at
+/// all leaves the frame as it is today — the class is only meaningful once a
+/// frame was actually requested (see [`PaintCtx::frame_class`]).
+///
+/// The *gate-side* pacing behavior is implemented separately (the frame gate,
+/// task 06); this type is only the vocabulary a widget uses to declare intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TickClass {
+    /// A pacable decorative loop (e.g. a skeleton shimmer, an idle pulse) — the
+    /// gate may throttle its cadence when this is the *only* class requested
+    /// this frame. Never dominates a concurrent [`TickClass::Transition`].
+    CosmeticLoop,
+    /// User-visible motion that must reproduce every vsync — a page transition,
+    /// a fling, a caret blink, a layout animation. Today's `request_frame`
+    /// behavior, and the dominant class in the aggregation above.
+    Transition,
+}
+
 /// Context passed to [`Widget::paint`].
 ///
 /// Carries the widget's resolved geometry (as stored in its pod after layout) so
@@ -455,10 +510,37 @@ impl Default for LayoutCtx<'static> {
 /// [`ChildPod::paint_child`] and out of [`crate::app::RenderRoot::paint`] as a
 /// [`PaintOutcome`], mirroring how [`EventCtx::request_redraw`] surfaces through
 /// [`crate::event::EventOutcome`].
+///
+/// A frame request also carries a [`TickClass`] (see [`PaintCtx::request_frame`]
+/// vs [`PaintCtx::request_frame_paced`]): the aggregate class over the whole
+/// paint pass — Transition-dominates-CosmeticLoop — surfaces on
+/// [`PaintOutcome::needs_frame_paced_only`] for the mobile frame gate to pace a
+/// purely-cosmetic frame.
 pub struct PaintCtx<'a> {
     origin: Point,
     size: Size,
     needs_frame: bool,
+    /// Whether a widget whose animation changes its *layout* (not just paint)
+    /// asked, via [`PaintCtx::request_layout`], to have layout re-run next frame.
+    /// Bubbles up through [`ChildPod::paint_child`] exactly like `needs_frame`
+    /// and out of [`crate::app::RenderRoot::paint`] as [`PaintOutcome::needs_layout`],
+    /// which folds into the render root's pending [`ChangeFlags`] so the mobile
+    /// intra-frame layout skip re-runs layout while the animation is in flight.
+    /// Deliberately opt-in: [`PaintCtx::request_frame`] alone never sets it, so
+    /// paint-only animations stay layout-free.
+    needs_layout: bool,
+    /// Whether any continuation-frame request this (sub)paint was
+    /// [`TickClass::Transition`] (unpaced, must run every vsync). The
+    /// max-lattice half of the tick-class aggregation: it starts `false` and
+    /// only ever flips `true` (a [`ChildPod::paint_child`]/
+    /// [`PaintCtx::with_hero_registry`] bubble ORs it up), so ANY Transition
+    /// request over the whole pass wins. Meaningful only when `needs_frame` is
+    /// set: `needs_frame && !frame_unpaced` is the "paced-only" state the frame
+    /// gate may throttle (see [`PaintCtx::frame_class`],
+    /// [`PaintCtx::needs_frame_paced_only`]). `request_layout` implies
+    /// Transition (a layout animation is user-visible motion), and the
+    /// unchanged `request_frame` sets it too (today's every-vsync behavior).
+    frame_unpaced: bool,
     ime_state: Option<ImeState>,
     /// Whether the widget being painted currently holds the focus path — seeded
     /// from its pod's recorded focus flag ([`ChildPod::is_focused`]) by
@@ -508,6 +590,46 @@ pub struct PaintCtx<'a> {
     /// case (no shared-element transition in flight), so
     /// [`PaintCtx::report_hero`] is a no-op returning [`HeroDirective::Normal`].
     hero: Option<&'a RefCell<HeroFrames>>,
+    /// The absolute (global-coordinate) rectangle a scroll ancestor is currently
+    /// showing, threaded down by [`ChildPod::paint_child`] like the theme/clock so
+    /// a container can cull paint of children fully outside it. `None` (the
+    /// default) means "no viewport constraint — paint everything", so every
+    /// pre-culling behavior is unchanged. A [`ScrollView`](crate::app) sets it to
+    /// its viewport via [`PaintCtx::constrain_visible_rect`], which *intersects*
+    /// (never widens) a nested rect, so an inner scroll surface can only ever
+    /// narrow the visible region an outer one already established. Consulted by
+    /// `Flex` (see [`PaintCtx::visible_rect`]); coordinates match
+    /// [`PaintCtx::origin`]'s absolute space, so a child's absolute bounds test
+    /// directly against it.
+    visible_rect: Option<Rect>,
+    /// [`PlatformViewFrame`]s published this (sub)paint via
+    /// [`PaintCtx::publish_platform_view`], in paint order.
+    ///
+    /// Unlike `ime_state` above (an `Option` — at most one focused editable
+    /// publishes per pass), this is a `Vec`: any number of platform-view slots
+    /// can paint in the same pass, so [`ChildPod::paint_child`] must EXTEND it
+    /// from each child rather than overwrite, or every slot but the last
+    /// child's would silently vanish. See [`PaintCtx::publish_platform_view`].
+    platform_views: Vec<PlatformViewFrame>,
+    /// Absolute-coordinate z-shield rects reported this (sub)paint via
+    /// [`PaintCtx::report_input_shield`], in paint order.
+    ///
+    /// The same `Vec`-extend discipline as `platform_views` above and for the
+    /// same reason: any number of shields can paint in one pass, so
+    /// [`ChildPod::paint_child`] EXTENDS rather than overwrites. Consumed by
+    /// the shell-side platform-view differ, which intersects them against each
+    /// interactive slot's rect — core stays dumb about what a shield means (see
+    /// [`PaintCtx::report_input_shield`]).
+    input_shields: Vec<Rect>,
+    /// Whether the shell created a translucent (alpha-channel, "Mode B") GPU
+    /// surface for this frame, threaded down by the render root
+    /// ([`crate::app::RenderRoot::paint`], seeded from
+    /// [`crate::app::RenderRoot::set_surface_translucent`]) and copied into each
+    /// child by [`ChildPod::paint_child`], mirroring `theme`/`window_insets`.
+    /// `false` in the normal opaque ("Mode A") case, bare-core tests, and every
+    /// desktop app. Read by the platform-view hole-punch (see
+    /// [`PaintCtx::is_translucent`]).
+    translucent: bool,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -523,6 +645,8 @@ impl<'a> PaintCtx<'a> {
             origin,
             size,
             needs_frame: false,
+            needs_layout: false,
+            frame_unpaced: false,
             ime_state: None,
             has_focus: false,
             frame_time: FrameTime::ZERO,
@@ -530,6 +654,10 @@ impl<'a> PaintCtx<'a> {
             window_insets: WindowInsets::default(),
             presented_frames: None,
             hero: None,
+            visible_rect: None,
+            platform_views: Vec::new(),
+            input_shields: Vec::new(),
+            translucent: false,
         }
     }
 
@@ -538,6 +666,16 @@ impl<'a> PaintCtx<'a> {
     /// known theme; the render root threads it via [`PaintCtx::set_theme`].
     pub fn with_theme(mut self, theme: &'a dyn Any) -> Self {
         self.theme = Some(theme);
+        self
+    }
+
+    /// Mark this paint pass as running against a translucent ("Mode B") surface.
+    /// Chainable builder mirroring [`PaintCtx::with_theme`] — used by widget unit
+    /// tests exercising the platform-view hole-punch; the render root threads the
+    /// real flag via [`PaintCtx::set_translucent`] (see
+    /// [`PaintCtx::is_translucent`]).
+    pub fn with_translucent(mut self, translucent: bool) -> Self {
+        self.translucent = translucent;
         self
     }
 
@@ -678,13 +816,105 @@ impl<'a> PaintCtx<'a> {
     /// `ControlFlow::Wait` loop would otherwise idle); the mobile shells'
     /// continuous per-frame loops already schedule the next frame and can ignore
     /// it. Mirrors [`EventCtx::request_redraw`].
+    ///
+    /// This requests a [`TickClass::Transition`] frame — the unpaced,
+    /// every-vsync class, unchanged from today's behavior. A widget whose next
+    /// frame is a *pacable* decorative loop calls [`Self::request_frame_paced`]
+    /// (or [`Self::request_frame_class`]) instead so the mobile frame gate may
+    /// throttle it.
     pub fn request_frame(&mut self) {
+        self.request_frame_class(TickClass::Transition);
+    }
+
+    /// Request a continuation frame whose next tick is a *pacable* decorative
+    /// loop ([`TickClass::CosmeticLoop`]) — a shimmer, an idle pulse, a spinner
+    /// whose exact cadence is imperceptible.
+    ///
+    /// Bubbles like [`Self::request_frame`], but leaves the frame paceable: only
+    /// if *every* request this frame is `CosmeticLoop` may the frame gate throttle
+    /// it (see [`TickClass`]'s max-lattice aggregation). Any concurrent
+    /// [`Self::request_frame`]/[`Self::request_layout`] elsewhere in the tree
+    /// re-forces every-vsync cadence, so a paced request is never a downgrade of
+    /// user-visible motion.
+    pub fn request_frame_paced(&mut self) {
+        self.request_frame_class(TickClass::CosmeticLoop);
+    }
+
+    /// Request a continuation frame of an explicit [`TickClass`] — the general
+    /// form behind [`Self::request_frame`] (Transition) and
+    /// [`Self::request_frame_paced`] (CosmeticLoop).
+    ///
+    /// Always sets `needs_frame`; a [`TickClass::Transition`] request additionally
+    /// marks the aggregate unpaced (the max-lattice OR — see [`TickClass`]). A
+    /// `CosmeticLoop` request never clears an already-unpaced aggregate.
+    pub fn request_frame_class(&mut self, class: TickClass) {
         self.needs_frame = true;
+        if class == TickClass::Transition {
+            self.frame_unpaced = true;
+        }
     }
 
     /// Whether a continuation frame was requested during this (sub)paint.
     pub fn needs_frame(&self) -> bool {
         self.needs_frame
+    }
+
+    /// The aggregate [`TickClass`] requested during this (sub)paint, or `None`
+    /// if no frame was requested.
+    ///
+    /// Follows the [`TickClass`] max-lattice: [`TickClass::Transition`] if any
+    /// request this pass was Transition-class (unpaced), else
+    /// [`TickClass::CosmeticLoop`] when at least one paced request was made and
+    /// no Transition one was. `None` means "as today — no continuation frame".
+    pub fn frame_class(&self) -> Option<TickClass> {
+        if !self.needs_frame {
+            None
+        } else if self.frame_unpaced {
+            Some(TickClass::Transition)
+        } else {
+            Some(TickClass::CosmeticLoop)
+        }
+    }
+
+    /// Whether a frame was requested and *every* request this (sub)paint was
+    /// [`TickClass::CosmeticLoop`] — the paced-only state the mobile frame gate
+    /// (task 06) may throttle. Convenience for
+    /// `frame_class() == Some(TickClass::CosmeticLoop)`.
+    pub fn needs_frame_paced_only(&self) -> bool {
+        self.needs_frame && !self.frame_unpaced
+    }
+
+    /// Signal that this paint advanced animation state that changes the widget's
+    /// *layout* (not just its paint), so layout must re-run next frame.
+    ///
+    /// This is the layout counterpart to [`Self::request_frame`]: a widget whose
+    /// animation only repaints (a color fade, a caret blink) calls
+    /// `request_frame` alone and stays layout-free under the mobile intra-frame
+    /// layout skip, whereas a widget whose animation resizes/repositions its
+    /// children (an expanding accordion) calls this so layout is re-run while the
+    /// animation is in flight. The flag bubbles up through
+    /// [`ChildPod::paint_child`] exactly like `needs_frame` and out of
+    /// [`crate::app::RenderRoot::paint`] as [`PaintOutcome::needs_layout`], which
+    /// folds into the render root's pending [`crate::view::ChangeFlags`]
+    /// (`LAYOUT`) so the *next* frame relayouts.
+    ///
+    /// Calling this also implies [`Self::request_frame`] (a widget animating its
+    /// layout necessarily wants another frame), so a caller needs only one call
+    /// per animating-layout frame. That implied frame is
+    /// [`TickClass::Transition`] (unpaced): a layout animation is user-visible
+    /// motion, so it never leaves the frame paceable.
+    pub fn request_layout(&mut self) {
+        self.needs_layout = true;
+        // A widget animating its layout necessarily wants another frame; setting
+        // `needs_frame` too means one call suffices per animating-layout frame.
+        // A layout animation is user-visible motion, so the implied frame is
+        // Transition-class (unpaced) — mark the aggregate accordingly.
+        self.request_frame_class(TickClass::Transition);
+    }
+
+    /// Whether a layout re-run was requested during this (sub)paint.
+    pub fn needs_layout(&self) -> bool {
+        self.needs_layout
     }
 
     /// Publish the focused editable's current IME surface during paint.
@@ -705,6 +935,51 @@ impl<'a> PaintCtx<'a> {
     /// Take the IME surface published during this (sub)paint, if any.
     pub fn take_ime_state(&mut self) -> Option<ImeState> {
         self.ime_state.take()
+    }
+
+    /// Publish a platform-view child's paint-time frame (task 02's
+    /// `PlatformViewSlot`) for this paint pass.
+    ///
+    /// Pushes onto a `Vec` rather than setting an `Option` — deliberately NOT
+    /// the same shape as [`PaintCtx::publish_ime_state`]. IME state has a
+    /// single focused surface at most, so an overwrite is correct there; a
+    /// platform view has no such "the" instance, so two slots publishing in
+    /// one pass must both survive. [`ChildPod::paint_child`] bubbles this by
+    /// `extend`, never overwrite, for exactly that reason.
+    pub fn publish_platform_view(&mut self, frame: PlatformViewFrame) {
+        self.platform_views.push(frame);
+    }
+
+    /// Take (and clear) every platform-view frame published during this
+    /// (sub)paint, in paint order.
+    pub fn take_platform_views(&mut self) -> Vec<PlatformViewFrame> {
+        std::mem::take(&mut self.platform_views)
+    }
+
+    /// Report an absolute-coordinate region where frust content painted OVER a
+    /// platform-view slot must keep winning pointer input (the "z-shield").
+    ///
+    /// The auto-collection half of the Mode B input contract (native-widgets
+    /// p1-09): an interactive slot hands a touch-DOWN inside its rect to the
+    /// native sibling, EXCEPT inside a shield. `frust-widgets`' `shield(child)`
+    /// wrapper is the reporter — it paints its child unchanged and reports its
+    /// own painted rect here — so an app marks chrome that overlaps a slot
+    /// rather than hand-listing rects on the slot itself.
+    ///
+    /// Core stays dumb, exactly as it does for [`PlatformViewFrame`]: this is a
+    /// flat, pass-scoped rect list with no slot association at all. The
+    /// shell-side differ (`frust-shell-common::platform_view`) owns the
+    /// intersection rule that decides which shields belong to which slot.
+    /// Pushes (never overwrites) — see the `input_shields` field doc.
+    pub fn report_input_shield(&mut self, rect: Rect) {
+        self.input_shields.push(rect);
+    }
+
+    /// Take (and clear) every z-shield rect reported during this (sub)paint, in
+    /// paint order. The [`PaintCtx::take_platform_views`] sibling for the shield
+    /// channel (see [`PaintCtx::report_input_shield`]).
+    pub fn take_input_shields(&mut self) -> Vec<Rect> {
+        std::mem::take(&mut self.input_shields)
     }
 
     /// Report a tagged ("hero") element's absolute paint `bounds` and read back
@@ -739,6 +1014,22 @@ impl<'a> PaintCtx<'a> {
         }
     }
 
+    /// Whether a shared-element ("hero") transition is currently in flight over
+    /// this subtree — i.e. an ancestor installed a hero reporter via
+    /// [`PaintCtx::with_hero_registry`], the same condition that makes
+    /// [`PaintCtx::report_hero`] record rather than no-op.
+    ///
+    /// The public, boolean sibling of the crate-private
+    /// [`PaintCtx::hero_ref`], exposed so a container that culls far-offscreen
+    /// children (a `Flex` under a `ScrollView`) can *stop* culling while a hero
+    /// is morphing: a tagged descendant scrolled beyond the warm margin would
+    /// otherwise never paint, and so never report its bounds
+    /// ([`PaintCtx::report_hero`]) for the morph. `false` in the normal case
+    /// (no transition), so culling is unaffected off the transition path.
+    pub fn hero_active(&self) -> bool {
+        self.hero.is_some()
+    }
+
     /// Run `f` with a paint context that has `registry` installed as the
     /// tagged-rect ("hero") reporter, threading this context's clock/theme/
     /// focus/geometry down unchanged. A container paints a subtree inside the
@@ -755,6 +1046,8 @@ impl<'a> PaintCtx<'a> {
             origin: self.origin,
             size: self.size,
             needs_frame: false,
+            needs_layout: false,
+            frame_unpaced: false,
             ime_state: None,
             has_focus: self.has_focus,
             frame_time: self.frame_time,
@@ -762,14 +1055,34 @@ impl<'a> PaintCtx<'a> {
             window_insets: self.window_insets,
             presented_frames: self.presented_frames,
             hero: Some(registry),
+            visible_rect: self.visible_rect,
+            platform_views: Vec::new(),
+            input_shields: Vec::new(),
+            translucent: self.translucent,
         };
         f(&mut child);
         if child.needs_frame {
             self.needs_frame = true;
         }
+        if child.needs_layout {
+            self.needs_layout = true;
+        }
+        // Max-lattice OR: any Transition request inside dominates, keeping the
+        // aggregate unpaced (mirrors `ChildPod::paint_child`'s absorb).
+        if child.frame_unpaced {
+            self.frame_unpaced = true;
+        }
         if let Some(ime) = child.ime_state.take() {
             self.ime_state = Some(ime);
         }
+        // EXTEND, never overwrite — mirrors `ChildPod::paint_child`'s absorb;
+        // see `PaintCtx::publish_platform_view`'s doc comment for why this
+        // channel is a `Vec` merge rather than the `ime_state` `Option` merge
+        // above.
+        self.platform_views.extend(child.platform_views);
+        // The z-shield channel merges the same way, for the same reason (see
+        // `PaintCtx::report_input_shield`).
+        self.input_shields.extend(child.input_shields);
     }
 
     /// Seed the hero reporter lent by an ancestor. Called by
@@ -783,6 +1096,68 @@ impl<'a> PaintCtx<'a> {
     /// context (copied, so it does not hold a borrow of `self`).
     pub(crate) fn hero_ref(&self) -> Option<&'a RefCell<HeroFrames>> {
         self.hero
+    }
+
+    /// The absolute-coordinate visible rectangle a scroll ancestor has threaded
+    /// down, or `None` when no viewport constraint is in effect (paint
+    /// everything). A container that culls offscreen children (`Flex` under a
+    /// `ScrollView`) tests each child's absolute bounds against this; a widget
+    /// with no interest in culling ignores it entirely. See
+    /// [`PaintCtx::constrain_visible_rect`] for how a scroll surface sets it.
+    pub fn visible_rect(&self) -> Option<Rect> {
+        self.visible_rect
+    }
+
+    /// Constrain the threaded visible rectangle to `rect` (in absolute paint
+    /// coordinates), the seam a [`ScrollView`](crate::app) uses to publish its
+    /// viewport to descendants.
+    ///
+    /// When no rect is threaded yet this installs `rect`; when one already is
+    /// (a nested scroll surface), the two are **intersected** — the visible
+    /// region can only ever narrow, never widen, as scroll surfaces nest, so an
+    /// inner viewport never re-reveals content an outer one clipped away. The
+    /// value flows to children unchanged via [`ChildPod::paint_child`], mirroring
+    /// how `window_insets`/`theme` are threaded.
+    pub fn constrain_visible_rect(&mut self, rect: Rect) {
+        self.visible_rect = Some(match self.visible_rect {
+            Some(existing) => existing.intersect(rect),
+            None => rect,
+        });
+    }
+
+    /// Seed the visible rectangle lent by an ancestor. Called by
+    /// [`ChildPod::paint_child`] for each child, mirroring how `theme` is
+    /// threaded (copied down unchanged), so a descendant container observes the
+    /// same viewport constraint the scroll ancestor established.
+    pub(crate) fn set_visible_rect(&mut self, rect: Option<Rect>) {
+        self.visible_rect = rect;
+    }
+
+    /// The visible rectangle this context carries, for re-lending to a child
+    /// context (copied, so it holds no borrow of `self`).
+    pub(crate) fn visible_rect_ref(&self) -> Option<Rect> {
+        self.visible_rect
+    }
+
+    /// Whether the shell created a translucent (alpha-channel, "Mode B") GPU
+    /// surface for this frame — threaded from the render root and copied down to
+    /// every descendant like the theme/insets.
+    ///
+    /// `false` in the normal opaque ("Mode A") case, bare-core tests, and every
+    /// desktop app. The platform-view hole-punch reads it: a slot only clears
+    /// its rect ([`PaintScene::clear_rect`]) when this is `true`, so punching
+    /// never erases app content on an opaque surface (see `frust-widgets`'
+    /// `PlatformViewWidget::paint`).
+    pub fn is_translucent(&self) -> bool {
+        self.translucent
+    }
+
+    /// Seed the shell's surface-translucency flag. Called by
+    /// [`crate::app::RenderRoot::paint`] at the root and by
+    /// [`ChildPod::paint_child`] for each child, mirroring how `theme` is
+    /// threaded (copied down unchanged).
+    pub(crate) fn set_translucent(&mut self, translucent: bool) {
+        self.translucent = translucent;
     }
 }
 
@@ -846,6 +1221,131 @@ pub enum HeroDirective {
     },
 }
 
+/// A process-wide monotonic counter backing [`next_slot_id`].
+static NEXT_SLOT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate a fresh, stable platform-view slot id.
+///
+/// Called once per widget instance at construction (task 02's
+/// `PlatformViewSlot`) — the same stability class as [`ChildPod`]'s
+/// semantics base id: identity that must survive a tree reorder, so it is
+/// never derived from tree position. A flat process-wide counter rather than
+/// a per-[`crate::app::RenderRoot`] allocator, since a widget has no
+/// `RenderRoot` handle to draw one from at construction time.
+pub fn next_slot_id() -> u64 {
+    NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Upper bound on the undrained retire list (see [`report_retired_slot`]).
+///
+/// Only reachable when nothing drains — a desktop app (no native compositor,
+/// so no drain) that churns platform-view slots, or a mobile shell whose frame
+/// loop has stopped. Past the cap the OLDEST id is dropped: the shell-side
+/// differ's missing-streak backstop still disposes that slot, so a dropped id
+/// costs a slower teardown, never a leak. Sized far above any realistic
+/// per-frame teardown burst.
+const MAX_PENDING_RETIRED_SLOTS: usize = 256;
+
+/// The process-wide pending-retire list backing [`report_retired_slot`] /
+/// [`take_retired_slots`].
+///
+/// A `Mutex<Vec<_>>` rather than a `RenderRoot` field for the same reason
+/// [`NEXT_SLOT_ID`] is a process-wide counter: a widget being torn down has no
+/// `RenderRoot` handle to reach — and unlike `build`/`rebuild`, the id-space is
+/// already process-global, so a global drain is coherent. Same single-root
+/// caveat as `next_slot_id`, revisited together with it if multi-root ever
+/// lands. Panics are impossible while the lock is held (a `Vec` push/take), but
+/// the poison-tolerant `unwrap_or_else(into_inner)` idiom is used anyway,
+/// matching `frust-shell-common`'s process-global slots.
+static RETIRED_SLOTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// Record that the widget owning `slot_id` was torn down (its `View::teardown`
+/// ran), so the shell can dispose the native view promptly instead of waiting
+/// out the differ's missing-streak heuristic.
+///
+/// The teardown half of the platform-view frame channel: `paint` says "this
+/// slot exists here", this says "this slot is gone for good". Kept a flat
+/// process-wide list (not a per-pass channel) because teardown does NOT run in
+/// the paint pass — it runs mid-rebuild, arbitrarily deep inside a
+/// `Component`'s own nested build context, so there is no threaded per-frame
+/// sink every teardown can reach.
+///
+/// Drained by [`crate::app::RenderRoot::take_retired_platform_views`]; a shell
+/// with no native compositor simply never drains, which is why the list is
+/// capped (see [`MAX_PENDING_RETIRED_SLOTS`]).
+pub fn report_retired_slot(slot_id: u64) {
+    let mut pending = RETIRED_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+    if pending.len() >= MAX_PENDING_RETIRED_SLOTS {
+        // Drop-oldest: the differ's missing-streak backstop still catches the
+        // dropped id (see the constant's doc).
+        pending.remove(0);
+    }
+    pending.push(slot_id);
+}
+
+/// Take (and clear) every slot id reported to [`report_retired_slot`] since the
+/// last call, in teardown order. Drained once per frame by a shell through
+/// [`crate::app::RenderRoot::take_retired_platform_views`].
+pub fn take_retired_slots() -> Vec<u64> {
+    let mut pending = RETIRED_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *pending)
+}
+
+/// A platform-view child's paint-time frame — everything a shell's native
+/// compositor (task 03) needs to place, size, clip, and dispose a native
+/// sibling view for one paint pass.
+///
+/// All rects are logical px, **absolute window coordinates** — the same
+/// space [`PaintCtx::report_hero`] callers use, built from the painting
+/// pod's [`PaintCtx::origin`]/[`PaintCtx::size`]. Frames are
+/// paint-pass-scoped: [`crate::app::RenderRoot::paint`] replaces the whole
+/// collection every pass, so a slot that didn't paint this pass (a culled
+/// subtree) simply has no frame in
+/// [`crate::app::RenderRoot::platform_view_frames`] — task 03's differ owns
+/// absent-means-hide/dispose semantics, not this crate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlatformViewFrame {
+    /// Stable per-widget-instance id, allocated once via [`next_slot_id`] at
+    /// construction — never derived from tree position, so a reorder keeps
+    /// identity.
+    pub slot_id: u64,
+    /// `"dev.frust.<Factory>"` convention naming which native view factory
+    /// creates this slot's platform view.
+    pub view_type: String,
+    /// Opaque creation params for the native factory (may be empty).
+    pub params_json: String,
+    /// Bumped by the widget (task 02) whenever `params_json` changes; this
+    /// crate only ever carries the number through.
+    pub params_generation: u64,
+    /// Absolute paint bounds.
+    pub rect: Rect,
+    /// `visible_rect` (see [`PaintCtx::visible_rect`]) intersected with
+    /// `rect`, or `None` when fully visible — no scroll ancestor is clipping
+    /// it.
+    pub clip: Option<Rect>,
+    /// `false` ⇒ hidden (offscreen/culled by the widget itself, distinct from
+    /// simply being absent from the collection this pass).
+    pub visible: bool,
+    /// Mode B input forwarding (native-widgets spike 3 vocabulary): whether
+    /// the hosted native view should receive pointer input — a touch-DOWN
+    /// inside `rect` (and outside every `shields` rect) hands the whole
+    /// gesture to the native sibling in the embedding. `false` (the default)
+    /// keeps the v1 no-input contract: the frust surface consumes everything.
+    pub interactive: bool,
+    /// The z-shield list: absolute-coordinate regions where frust content
+    /// drawn OVER this slot must keep winning input. Only consulted when
+    /// `interactive`. Same coordinate space as `rect`.
+    ///
+    /// Carries only the slot's own **manually declared** shields
+    /// (`PlatformViewView::shield_local`, the escape hatch). The ordinary
+    /// source is auto-collection: a `shield(child)` wrapper reports its painted
+    /// rect through [`PaintCtx::report_input_shield`], and the shell-side differ
+    /// merges whichever of those intersect this `rect` into the command it
+    /// emits — so the shipped wire shape is the union of both, assembled one
+    /// layer up.
+    pub shields: Vec<Rect>,
+}
+
 /// The result of a whole [`crate::app::RenderRoot::paint`] pass.
 ///
 /// `needs_frame` is whether any widget advanced animation state during paint and
@@ -853,10 +1353,33 @@ pub enum HeroDirective {
 /// shell turns it into another scheduled frame — the desktop shell via
 /// `window.request_redraw()`, the mobile shells implicitly through their
 /// continuous loop. Mirrors [`crate::event::EventOutcome`]'s `needs_redraw`.
+///
+/// `needs_layout` is whether any widget asked (via [`PaintCtx::request_layout`])
+/// to have layout re-run next frame because its animation changed its layout, not
+/// just its paint. [`crate::app::RenderRoot::paint`] folds it into the render
+/// root's pending [`crate::view::ChangeFlags`] (`LAYOUT`) so the next frame's
+/// `take_change_flags().needs_layout()` reports it — driving the mobile
+/// intra-frame layout skip to relayout while the animation is in flight.
+///
+/// `needs_frame_paced_only` is the aggregated [`TickClass`] verdict: `true` only
+/// when a frame was requested and *every* request this frame was
+/// [`TickClass::CosmeticLoop`] (a pacable decorative loop), `false` the instant
+/// any [`TickClass::Transition`] request (including any `request_layout`) joined
+/// in. The mobile frame gate (task 06) may throttle such a purely-cosmetic frame
+/// to a lower cadence; a `false` here means the frame runs every vsync as today.
+/// Only meaningful when `needs_frame` is `true`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaintOutcome {
     /// Whether the shell should schedule another frame to continue an animation.
     pub needs_frame: bool,
+    /// Whether the render root folded a layout-continuation request into its
+    /// pending change flags (a widget called [`PaintCtx::request_layout`]).
+    pub needs_layout: bool,
+    /// Whether a frame was requested and every request this frame was
+    /// [`TickClass::CosmeticLoop`] — the paced-only state the mobile frame gate
+    /// may throttle (see [`PaintCtx::needs_frame_paced_only`]). Meaningful only
+    /// when `needs_frame` is set.
+    pub needs_frame_paced_only: bool,
 }
 
 /// A retained UI element living in the widget tree.
@@ -1086,6 +1609,15 @@ impl ChildPod {
         // wrapper nested arbitrarily deep under an installer sees it. `None` in
         // the normal case (no shared-element transition in flight).
         child_ctx.set_hero(ctx.hero_ref());
+        // Thread the scroll ancestor's visible rect down unchanged (absolute
+        // coords, so a nested container tests its children directly against it),
+        // mirroring the theme/insets. `None` in the normal case (no scroll
+        // ancestor culling), so paint descends into every child as before.
+        child_ctx.set_visible_rect(ctx.visible_rect_ref());
+        // Thread the shell's surface-translucency flag down unchanged (copied
+        // bool, global and origin-independent), mirroring the theme/insets — the
+        // platform-view hole-punch reads it (see `PaintCtx::is_translucent`).
+        child_ctx.set_translucent(ctx.is_translucent());
         // Thread the pod's recorded focus path into paint (the mirror of how
         // `event_child` seeds the child `EventCtx`), so a focus-dependent widget
         // observes a container-routed blur that never reached its `event()`.
@@ -1098,8 +1630,21 @@ impl ChildPod {
         // matching the effective gating focus-path routing gives events.
         child_ctx.set_has_focus(self.focused && ctx.has_focus());
         self.widget.paint(&mut child_ctx, scene);
-        if child_ctx.needs_frame() {
-            ctx.request_frame();
+        // Bubble the child's continuation-frame request AND its tick class up
+        // unchanged: forwarding the aggregate class (rather than always calling
+        // `request_frame`, which is Transition) is what lets a purely-cosmetic
+        // subtree stay paceable through nested containers. `frame_class()` is
+        // `None` when the child asked for nothing, so a still child bubbles
+        // nothing (the max-lattice identity).
+        if let Some(class) = child_ctx.frame_class() {
+            ctx.request_frame_class(class);
+        }
+        // Bubble the child's layout-continuation request the same way as
+        // `needs_frame`, so a nested widget animating its layout keeps layout
+        // re-running up the whole tree. (`request_layout` also re-forces the
+        // Transition class via `request_frame_class` above's contract.)
+        if child_ctx.needs_layout() {
+            ctx.request_layout();
         }
         // Bubble a focused editable's republished IME surface up the paint path,
         // so `RenderRoot::paint` can refresh the shell-facing state after a
@@ -1107,6 +1652,16 @@ impl ChildPod {
         if let Some(ime) = child_ctx.take_ime_state() {
             ctx.publish_ime_state(ime);
         }
+        // Bubble any platform-view frames published this paint by EXTENDING
+        // the parent's Vec — deliberately NOT the `ime_state` overwrite shape
+        // above. Two sibling slots publishing in the same pass must both
+        // survive; an Option-based merge here would silently drop every slot
+        // but the last child painted (see `PaintCtx::publish_platform_view`).
+        ctx.platform_views.extend(child_ctx.take_platform_views());
+        // Bubble any z-shield rects reported this paint the same way, and for
+        // the same reason — two sibling shields must both survive (see
+        // `PaintCtx::report_input_shield`).
+        ctx.input_shields.extend(child_ctx.take_input_shields());
     }
 
     /// Collect the child's semantics, translating the current absolute origin
@@ -1229,6 +1784,36 @@ mod tests {
 
         fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
             ctx.request_frame();
+        }
+    }
+
+    /// A leaf widget whose animation changes its layout: it signals
+    /// [`PaintCtx::request_layout`] on every paint — stands in for an animating
+    /// widget that resizes/repositions (e.g. an expanding accordion).
+    struct LayoutAnimator;
+
+    impl Widget for LayoutAnimator {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_layout();
+        }
+    }
+
+    /// A leaf widget whose animation is a *pacable* decorative loop: it signals
+    /// [`PaintCtx::request_frame_paced`] on every paint — stands in for a
+    /// shimmer/idle-pulse whose cadence the frame gate may throttle.
+    struct PacedAnimator;
+
+    impl Widget for PacedAnimator {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame_paced();
         }
     }
 
@@ -1534,6 +2119,393 @@ mod tests {
         assert!(!pctx2.needs_frame());
         anim.paint_child(&mut pctx2, &mut scene);
         assert!(pctx2.needs_frame());
+    }
+
+    /// A leaf widget that publishes a fixed [`PlatformViewFrame`] on every
+    /// paint, unless `should_publish` is false — the `false` arm stands in for
+    /// a slot that didn't paint this pass (culled subtree), exercising the
+    /// "no publishers this pass" acceptance criterion at the `RenderRoot`
+    /// level (see `app.rs`'s tests).
+    struct PlatformViewProbe {
+        slot_id: u64,
+        should_publish: bool,
+    }
+
+    impl Widget for PlatformViewProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            if self.should_publish {
+                ctx.publish_platform_view(PlatformViewFrame {
+                    slot_id: self.slot_id,
+                    view_type: "dev.frust.Probe".to_string(),
+                    params_json: String::new(),
+                    params_generation: 0,
+                    rect: Rect::from_origin_size(ctx.origin(), ctx.size()),
+                    clip: None,
+                    visible: true,
+                    interactive: false,
+                    shields: Vec::new(),
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn child_pod_extends_platform_views_never_overwrites() {
+        // Two slots publishing across two `paint_child` calls in one pass must
+        // BOTH survive, in paint order — the regression test for the
+        // Option-overwrite hazard: an ime_state-shaped merge here would leave
+        // only the second slot's frame (see `PaintCtx::publish_platform_view`'s
+        // doc comment).
+        let mut lctx = LayoutCtx::new();
+
+        let mut first = ChildPod::new(Box::new(PlatformViewProbe {
+            slot_id: 1,
+            should_publish: true,
+        }));
+        first.set_origin(Point::new(0.0, 0.0));
+        first.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        let mut second = ChildPod::new(Box::new(PlatformViewProbe {
+            slot_id: 2,
+            should_publish: true,
+        }));
+        second.set_origin(Point::new(20.0, 0.0));
+        second.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 100.0));
+        first.paint_child(&mut pctx, &mut scene);
+        second.paint_child(&mut pctx, &mut scene);
+
+        let frames = pctx.take_platform_views();
+        assert_eq!(
+            frames.len(),
+            2,
+            "both slots' frames must survive, not just the last-painted one"
+        );
+        assert_eq!(frames[0].slot_id, 1);
+        assert_eq!(frames[1].slot_id, 2);
+    }
+
+    /// A container widget wrapping a single child pod at a fixed offset —
+    /// stands in for `frust-widgets::Padding` to test that a published frame's
+    /// rect compounds correctly under nesting rather than staying local to the
+    /// innermost pod.
+    struct TranslatingWrapper {
+        child: ChildPod,
+    }
+
+    impl Widget for TranslatingWrapper {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.child.layout_child(ctx, bc)
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.child.paint_child(ctx, scene);
+        }
+    }
+
+    #[test]
+    fn platform_view_frame_rect_is_absolute_under_nested_translation() {
+        // Wrap a publishing probe under two levels of translation — an inner
+        // pod at (5, 7) inside a wrapper placed at (100, 200) — the published
+        // rect must land in ABSOLUTE window coordinates (the same space
+        // `PaintCtx::report_hero` callers use), not local to either level.
+        let mut lctx = LayoutCtx::new();
+
+        let inner = ChildPod::new(Box::new(PlatformViewProbe {
+            slot_id: 9,
+            should_publish: true,
+        }));
+        let mut wrapper = TranslatingWrapper { child: inner };
+        wrapper.child.set_origin(Point::new(5.0, 7.0));
+        wrapper
+            .child
+            .layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        let mut outer = ChildPod::new(Box::new(wrapper));
+        outer.set_origin(Point::new(100.0, 200.0));
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 400.0));
+        outer.paint_child(&mut pctx, &mut scene);
+
+        let frames = pctx.take_platform_views();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].rect,
+            Rect::from_origin_size(Point::new(105.0, 207.0), Size::new(10.0, 10.0))
+        );
+    }
+
+    #[test]
+    fn request_frame_alone_does_not_set_needs_layout() {
+        // A paint-only animation (request_frame, no request_layout) must leave
+        // `needs_layout` clear — the phase-10/11 layout-skip win depends on this.
+        let mut anim = ChildPod::new(Box::new(Animator));
+        let mut lctx = LayoutCtx::new();
+        anim.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        anim.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame(), "request_frame sets needs_frame");
+        assert!(
+            !pctx.needs_layout(),
+            "request_frame alone must NOT set needs_layout"
+        );
+    }
+
+    #[test]
+    fn request_layout_implies_needs_frame() {
+        // `request_layout` also sets `needs_frame` so one call per
+        // animating-layout frame suffices.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        assert!(!ctx.needs_frame());
+        assert!(!ctx.needs_layout());
+        ctx.request_layout();
+        assert!(ctx.needs_layout());
+        assert!(ctx.needs_frame());
+    }
+
+    #[test]
+    fn child_pod_bubbles_needs_layout_from_child_paint() {
+        // A non-layout-animating child leaves the parent's layout flag clear.
+        let mut still = ChildPod::new(Box::new(FixedBox {
+            intrinsic: Size::new(10.0, 10.0),
+        }));
+        let mut lctx = LayoutCtx::new();
+        still.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        still.paint_child(&mut pctx, &mut scene);
+        assert!(!pctx.needs_layout());
+
+        // A layout-animating child bubbles its request into the parent context.
+        let mut anim = ChildPod::new(Box::new(LayoutAnimator));
+        anim.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut pctx2 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        assert!(!pctx2.needs_layout());
+        anim.paint_child(&mut pctx2, &mut scene);
+        assert!(pctx2.needs_layout());
+        // Bubbling `request_layout` also carries the implied `needs_frame`.
+        assert!(pctx2.needs_frame());
+    }
+
+    #[test]
+    fn needs_layout_bubbles_through_nested_containers() {
+        // A container holding a single `ChildPod` forwards paint via
+        // `paint_child`; a layout-animating leaf two levels deep must still
+        // surface `needs_layout` at the outermost paint context.
+        struct SingleChildContainer {
+            child: ChildPod,
+        }
+        impl Widget for SingleChildContainer {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                self.child.layout_child(ctx, bc)
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                self.child.paint_child(ctx, scene);
+            }
+        }
+
+        let inner = SingleChildContainer {
+            child: ChildPod::new(Box::new(LayoutAnimator)),
+        };
+        let mut outer = ChildPod::new(Box::new(SingleChildContainer {
+            child: ChildPod::new(Box::new(inner)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(
+            pctx.needs_layout(),
+            "needs_layout bubbles up nested containers"
+        );
+        assert!(pctx.needs_frame());
+    }
+
+    /// A single-`ChildPod` container that forwards paint via `paint_child`,
+    /// reused by the tick-class bubbling tests below.
+    struct SingleChildContainer {
+        child: ChildPod,
+    }
+    impl Widget for SingleChildContainer {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.child.layout_child(ctx, bc)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.child.paint_child(ctx, scene);
+        }
+    }
+
+    #[test]
+    fn no_request_yields_no_frame_class() {
+        // No frame requested at all → `frame_class()` is `None` and the frame is
+        // not paced-only (as today: nothing to schedule).
+        let ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        assert!(ctx.frame_class().is_none());
+        assert!(!ctx.needs_frame());
+        assert!(!ctx.needs_frame_paced_only());
+    }
+
+    #[test]
+    fn request_frame_is_transition_unpaced() {
+        // The unchanged `request_frame` is a Transition request: it must NOT be
+        // paced-only, preserving today's every-vsync behavior for existing callers.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame();
+        assert!(ctx.needs_frame());
+        assert_eq!(ctx.frame_class(), Some(TickClass::Transition));
+        assert!(
+            !ctx.needs_frame_paced_only(),
+            "request_frame stays unpaced (Transition), unchanged behavior"
+        );
+    }
+
+    #[test]
+    fn request_frame_paced_is_cosmetic_loop() {
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced();
+        assert!(ctx.needs_frame());
+        assert_eq!(ctx.frame_class(), Some(TickClass::CosmeticLoop));
+        assert!(ctx.needs_frame_paced_only());
+    }
+
+    #[test]
+    fn transition_dominates_cosmetic_regardless_of_order() {
+        // Paced then Transition → unpaced.
+        let mut a = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        a.request_frame_paced();
+        a.request_frame();
+        assert_eq!(a.frame_class(), Some(TickClass::Transition));
+        assert!(!a.needs_frame_paced_only());
+
+        // Transition then paced → still unpaced (a CosmeticLoop never clears it).
+        let mut b = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        b.request_frame();
+        b.request_frame_paced();
+        assert_eq!(b.frame_class(), Some(TickClass::Transition));
+        assert!(!b.needs_frame_paced_only());
+    }
+
+    #[test]
+    fn request_layout_implies_transition_class() {
+        // `request_layout` is user-visible motion, so it re-forces the unpaced
+        // Transition class even if a paced request preceded it.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced();
+        assert!(ctx.needs_frame_paced_only());
+        ctx.request_layout();
+        assert_eq!(ctx.frame_class(), Some(TickClass::Transition));
+        assert!(
+            !ctx.needs_frame_paced_only(),
+            "request_layout implies Transition, leaving the frame unpaced"
+        );
+    }
+
+    #[test]
+    fn child_pod_bubbles_paced_class_from_child_paint() {
+        // A purely-cosmetic child bubbles a paced request into the parent — the
+        // parent's aggregate stays paced-only.
+        let mut anim = ChildPod::new(Box::new(PacedAnimator));
+        let mut lctx = LayoutCtx::new();
+        anim.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        anim.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame());
+        assert_eq!(pctx.frame_class(), Some(TickClass::CosmeticLoop));
+        assert!(pctx.needs_frame_paced_only());
+    }
+
+    #[test]
+    fn paced_class_bubbles_through_nested_containers() {
+        // A cosmetic-loop leaf two levels deep must still surface as paced-only
+        // at the outermost paint context (the bubbling identity of the lattice).
+        let inner = SingleChildContainer {
+            child: ChildPod::new(Box::new(PacedAnimator)),
+        };
+        let mut outer = ChildPod::new(Box::new(SingleChildContainer {
+            child: ChildPod::new(Box::new(inner)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame());
+        assert!(
+            pctx.needs_frame_paced_only(),
+            "a nested cosmetic-loop leaf stays paced-only up the tree"
+        );
+    }
+
+    #[test]
+    fn mixed_sibling_requests_aggregate_to_unpaced() {
+        // Two sibling children under one container: one paced, one Transition.
+        // The container's aggregate must be unpaced (any Transition dominates).
+        struct TwoChildContainer {
+            a: ChildPod,
+            b: ChildPod,
+        }
+        impl Widget for TwoChildContainer {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                self.a.layout_child(ctx, bc);
+                self.b.layout_child(ctx, bc)
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                self.a.paint_child(ctx, scene);
+                self.b.paint_child(ctx, scene);
+            }
+        }
+
+        let mut outer = ChildPod::new(Box::new(TwoChildContainer {
+            a: ChildPod::new(Box::new(PacedAnimator)),
+            b: ChildPod::new(Box::new(Animator)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame());
+        assert_eq!(pctx.frame_class(), Some(TickClass::Transition));
+        assert!(
+            !pctx.needs_frame_paced_only(),
+            "a mixed paced+transition sibling set aggregates to unpaced"
+        );
+    }
+
+    #[test]
+    fn with_hero_registry_bubbles_paced_class() {
+        // The hero-reporter sub-context absorbs a paced request the same way it
+        // absorbs `needs_frame`/`needs_layout`.
+        let registry = RefCell::new(HeroFrames::default());
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.with_hero_registry(&registry, |child| {
+            child.request_frame_paced();
+        });
+        assert!(ctx.needs_frame());
+        assert!(
+            ctx.needs_frame_paced_only(),
+            "with_hero_registry bubbles the paced class up"
+        );
+
+        // A Transition inside the closure dominates the outer aggregate too.
+        let mut ctx2 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx2.request_frame_paced();
+        ctx2.with_hero_registry(&registry, |child| {
+            child.request_frame();
+        });
+        assert_eq!(ctx2.frame_class(), Some(TickClass::Transition));
+        assert!(!ctx2.needs_frame_paced_only());
     }
 
     #[test]

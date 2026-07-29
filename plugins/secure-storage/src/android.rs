@@ -62,9 +62,11 @@
 //!    [`authenticate`] (the framework `BiometricPrompt`, rendered by the
 //!    system) before `doFinal`.
 //! 3. **The Kotlin helper** — the framework `AuthenticationCallback` is an
-//!    abstract class JNI cannot subclass, so the app must ship
-//!    `dev.frust.FrustBiometric` (the plugin's canonical
-//!    `platform/FrustBiometric.kt`; see the plugin `README.md`). It is looked
+//!    abstract class JNI cannot subclass, so the installed app must carry
+//!    `dev.frust.securestorage.FrustBiometric`. It ships in this plugin's own
+//!    `com.android.library` module (`platform/android/`, included as
+//!    `:frust-secure-storage`; see the plugin `README.md`), not as a file
+//!    copied into the app. It is looked
 //!    up through the **application `Context`'s classloader** (a bare
 //!    `FindClass` on a JNI worker thread sees only the bootstrap loader, never
 //!    app classes). Absent → [`SecureStorageError::NotAvailable`]`(`[`Unavailability::HelperMissing`](crate::Unavailability::HelperMissing)`)`.
@@ -126,18 +128,24 @@ const AUTHENTICATOR_BIOMETRIC_STRONG: i32 = 0x0000_000F;
 const AUTHENTICATOR_DEVICE_CREDENTIAL: i32 = 0x0000_8000;
 /// `BiometricManager.BIOMETRIC_SUCCESS` (= 0).
 const BIOMETRIC_SUCCESS: i32 = 0;
-/// The sentinel [`FrustBiometric.authenticate`](../../platform/FrustBiometric.kt)
-/// returns on success (any other value is a framework `BiometricPrompt`
-/// `ERROR_*` code — see [`map_prompt_error`]).
+/// The sentinel `FrustBiometric.authenticate` returns on success (any other
+/// value is a framework `BiometricPrompt` `ERROR_*` code — see
+/// [`map_prompt_error`]). Source:
+/// `platform/android/src/main/kotlin/dev/frust/securestorage/FrustBiometric.kt`.
 const HELPER_SUCCESS: i32 = 0;
 
-/// The app-supplied Kotlin helper's fully-qualified class name (binary/dotted
-/// form, as `ClassLoader.loadClass` expects — **not** the slash form
-/// `FindClass` wants). Ships as the plugin's canonical
-/// `platform/FrustBiometric.kt`, copied into the app per the plugin
-/// `README.md`; looked up through the application classloader (see
+/// The Kotlin helper's fully-qualified class name (binary/dotted form, as
+/// `ClassLoader.loadClass` expects — **not** the slash form `FindClass`
+/// wants). Ships in this plugin's own Gradle library module
+/// (`platform/android/`, included as `:frust-secure-storage` per the plugin
+/// `README.md`); looked up through the application classloader (see
 /// [`find_helper_class`]).
-const HELPER_CLASS_BINARY: &str = "dev.frust.FrustBiometric";
+///
+/// `dev.frust` is the `frust-embedding` module's exclusive package, so the
+/// helper takes the `dev.frust.securestorage` subpackage. This string and the
+/// module's `namespace`/`package` declaration are one contract — change one and
+/// you must change the other.
+const HELPER_CLASS_BINARY: &str = "dev.frust.securestorage.FrustBiometric";
 
 /// A `frust.ss.<store>`-namespaced Android secure store: one Keystore AES-GCM
 /// key + one `SharedPreferences` file, both keyed by [`Self::store_id`].
@@ -163,9 +171,10 @@ impl AndroidStore {
     /// `AndroidStore::standard`). For a **gated** store (S05):
     /// [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedApiLevel`]`)`
     /// on API < 28 (the framework `BiometricPrompt` floor), or
-    /// `NotAvailable(`[`Unavailability::HelperMissing`]`)` if the app's
-    /// `dev.frust.FrustBiometric` helper class is absent — both probed here so
-    /// a misconfigured gate fails at open, not mid-read.
+    /// `NotAvailable(`[`Unavailability::HelperMissing`]`)` if the
+    /// `dev.frust.securestorage.FrustBiometric` helper class is absent (the
+    /// plugin's Android module isn't wired in) — both probed here so a
+    /// misconfigured gate fails at open, not mid-read.
     pub(crate) fn open(name: &str, auth: Option<AuthOptions>) -> Result<Self, SecureStorageError> {
         with_context(|env, context| {
             if auth.is_some() {
@@ -480,8 +489,8 @@ fn context_class_loader<'local>(
     .l()
 }
 
-/// Look the app's `dev.frust.FrustBiometric` helper class up through the
-/// application classloader. Returns `Ok(None)` — never an error — when the
+/// Look the `dev.frust.securestorage.FrustBiometric` helper class up through
+/// the application classloader. Returns `Ok(None)` — never an error — when the
 /// class is absent (`ClassNotFoundException`), which the gate maps to
 /// [`Unavailability::HelperMissing`]; a genuine JNI failure is a
 /// [`SecureStorageError::Storage`].
@@ -491,8 +500,8 @@ fn find_helper_class<'local>(
 ) -> Result<Option<JObject<'local>>, SecureStorageError> {
     let loader = run_jni(env, |env| context_class_loader(env, context))?;
     let name = run_jni(env, |env| env.new_string(HELPER_CLASS_BINARY))?;
-    // classLoader.loadClass("dev.frust.FrustBiometric") — throws
-    // ClassNotFoundException if the app didn't ship the helper.
+    // classLoader.loadClass("dev.frust.securestorage.FrustBiometric") — throws
+    // ClassNotFoundException if the plugin's Android module isn't wired in.
     let class = env.call_method(
         &loader,
         jni_str!("loadClass"),
@@ -595,8 +604,8 @@ fn apply_auth_binding<'local>(
 
 /// Block on the framework `BiometricPrompt` for one gated cipher operation
 /// (S05): wrap `cipher` in a `BiometricPrompt.CryptoObject`, then call the
-/// app's `dev.frust.FrustBiometric.authenticate(...)` static helper, which
-/// posts the prompt to the main executor, subclasses the abstract
+/// `dev.frust.securestorage.FrustBiometric.authenticate(...)` static helper,
+/// which posts the prompt to the main executor, subclasses the abstract
 /// `AuthenticationCallback`, and latches the result on this background thread.
 /// Returns the authenticated `Cipher` (`CryptoObject.getCipher()`) ready for
 /// `doFinal`.
