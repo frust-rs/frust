@@ -1,6 +1,5 @@
 //! [`ThemeBuilder`]: the `defineTheme`/`copyWith` analog for composing a
-//! [`Theme`](crate::theme::Theme) from a baseline plus layered edits
-//! (PLAN.md Phase 2 step 1).
+//! [`Theme`](crate::theme::Theme) from a baseline plus layered edits.
 //!
 //! A theme starts from one of [`Theme::m3_baseline`](crate::theme::Theme::m3_baseline)/
 //! [`Theme::cupertino_baseline`](crate::theme::Theme::cupertino_baseline) (or any other
@@ -209,7 +208,7 @@ impl ThemeBuilder {
         self
     }
 
-    /// Set the [`DesignLanguage`] tag. Purely a tag (spec §17.1, see
+    /// Set the [`DesignLanguage`] tag. Purely a tag (see
     /// [`crate::theme::DesignLanguage`]'s docs) — this does not itself swap
     /// any token group; pair it with the whole-group swaps above when
     /// actually changing baselines.

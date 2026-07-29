@@ -1,9 +1,5 @@
-//! Durable regression pin for the L2 live re-theme mechanism (originally
-//! written as native-widgets Phase 0 spike 4a's probe — see
-//! `workflow/plans/features/frust-native-widgets/research/SPIKE.md`'s Spike
-//! 4a section for that session's GO verdict and device corroboration; this
-//! file is the mechanism's permanent regression test, not the spike record
-//! itself).
+//! Durable regression pin for the L2 live re-theme mechanism: this file is
+//! the mechanism's permanent regression test, not a one-off experiment.
 //!
 //! Question this pins: does a `use_context::<Theme>()`-derived builder param
 //! rebuild on `set_app_theme`? The L2 live re-theme story for native widgets
@@ -129,7 +125,7 @@ fn use_context_theme_param_rebuilds_on_set_app_theme() {
     );
 }
 
-/// The fallback question the runbook poses (explicit theme-generation signal)
+/// An alternative approach (an explicit theme-generation signal)
 /// is only needed if the mechanism above fails — this companion pins the
 /// inverse property that makes the mechanism sufficient: a rebuild ALWAYS
 /// re-runs `Component::build` (no memoization), so context freshness is the

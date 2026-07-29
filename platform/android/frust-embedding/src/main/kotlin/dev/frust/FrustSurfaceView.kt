@@ -28,7 +28,7 @@ import org.json.JSONException
 import org.json.JSONObject
 
 /**
- * The Frust Android render surface (spec Phase 2 §10.1). Package
+ * The Frust Android render surface. Package
  * `dev.frust` is fixed across every app — it's what keeps the JNI export
  * names (`Java_dev_frust_FrustSurfaceView_native*`) stable, so do not
  * rename or move this file. The hosting activity (normally [FrustActivity],
@@ -39,13 +39,13 @@ import org.json.JSONObject
  * call [loadNativeLibrary] first (as [FrustActivity.onCreate] does), since
  * the library's name is the app's, not the framework's.
  *
- * Soft-keyboard text input (spec §14 Phase 4) uses the Flutter-proven
+ * Soft-keyboard text input uses the Flutter-proven
  * **state-sync** contract, not op-forwarding: [FrustInputConnection] owns
  * composition mechanics against a mirror [Editable], pushes the whole editing
  * state into Rust via `nativeImeApply`, then pulls the reconciled state back via
  * `nativeImeState` to keep the `InputMethodManager` synchronised.
  *
- * `androidx.core` (device-parity task 08) backs the inset listener
+ * `androidx.core` backs the inset listener
  * ([dispatchInsets]) and status/nav-bar icon contrast
  * ([updateSystemBarsAppearance]) below — the only AndroidX dependency this
  * view uses.
@@ -67,18 +67,20 @@ class FrustSurfaceView(
      * recipe (`PixelFormat.TRANSLUCENT` + `setZOrderOnTop(true)`). The
      * on-top z-order (surface above the window) is needed for native
      * sibling views to composite; media-overlay below-window arrangement
-     * erased them. Input routing is unchanged (SurfaceView does not consume
-     * input; device-verified on §A row 10 of VERIFY.md).
+     * erased them. Input routing is unchanged — device-verified: a
+     * SurfaceView does not consume input, so taps still reach the frust
+     * content painted over a hosted slot.
      *
      * **This parameter is the whole Mode B switch: it must drive the
      * `SurfaceHolder` pixel format, the [FrustViewHost] z-order
      * arrangement, AND the `nativeSetSurfaceMode` declaration together.**
      * Flipping only some of them is a defect — the Rust side trusts
      * `nativeSetSurfaceMode(true)` as proof the window is *already*
-     * translucent (review M3); calling it without the matching
-     * `PixelFormat.TRANSLUCENT` reintroduces the exact black-rectangle bug
-     * that finding fixed. It must also stay paired with the Rust-side
-     * `frust::request_translucent_surface` latch: the shell reads that latch
+     * translucent; calling it without the matching `PixelFormat.TRANSLUCENT`
+     * clears to a transparent base and punches an otherwise-opaque
+     * swapchain, painting black rectangles where the hole should show
+     * through instead. It must also stay paired with the Rust-side
+     * `declare_host_translucent_surface` latch: the shell reads that latch
      * once, at surface-creation time, so a mismatch is a startup-visible
      * failure rather than a recoverable one. This is also why there is no
      * app-Rust equivalent call — only a host may declare translucency.
@@ -164,9 +166,9 @@ class FrustSurfaceView(
 
     /**
      * Decoded mirror of `frust_shell_common::system_ui::SystemUiMode`
-     * (task 03, Flutter `SystemUiMode` parity) — the vocabulary
+     * (Flutter `SystemUiMode` parity) — the vocabulary
      * [pollSystemUiState] decodes `nativeSystemUiState`'s packed `u64`
-     * into for [onSystemUiModeChanged]. `MainActivity` (task 14) applies
+     * into for [onSystemUiModeChanged]. `MainActivity` applies
      * one of these via `WindowInsetsControllerCompat`. Declared in the class
      * body, NOT the companion object: Kotlin resolves companion members
      * (`FrustSurfaceView.decodeSystemUiMode`) through the outer class name,
@@ -181,9 +183,9 @@ class FrustSurfaceView(
         data class Manual(val top: Boolean, val bottom: Boolean) : SystemUiMode()
     }
 
-    // JNI exports implemented by `frust-shell-android` (spec Phase 2
-    // task 24, Phase 4 IME) — these names and signatures are load-bearing,
-    // matched exactly by `#[no_mangle] extern "system" fn Java_dev_frust_*`.
+    // JNI exports implemented by `frust-shell-android` — these names and
+    // signatures are load-bearing, matched exactly by
+    // `#[no_mangle] extern "system" fn Java_dev_frust_*`.
     // `cacheDir` is the app's `context.cacheDir.absolutePath` — the Rust side
     // persists the wgpu pipeline cache under it (`<cacheDir>/frust/`) so a
     // warm start skips Vulkan shader-pipeline compilation. The JNI symbol name is
@@ -191,10 +193,10 @@ class FrustSurfaceView(
     // `native_init` gained the parameter together.
     private external fun nativeInit(surface: Surface, scaleFactor: Float, cacheDir: String): Long
 
-    // `density` (device-parity task 06/08) is `resources.displayMetrics.density`
+    // `density` is `resources.displayMetrics.density`
     // for the current configuration — a BREAKING signature change from the
     // pre-parity three-arg form; the Rust `native_on_surface_changed` gained
-    // the same trailing parameter in the same phase (task 06).
+    // the same trailing parameter in lockstep.
     private external fun nativeOnSurfaceChanged(
         handle: Long,
         surface: Surface,
@@ -213,7 +215,7 @@ class FrustSurfaceView(
     // in lockstep with the Rust `native_on_frame` signature.
     private external fun nativeOnFrame(handle: Long, frameTimeNanos: Long): Boolean
 
-    // Touch delivery (spec §9). `action` is a fixed numeric ABI shared with the
+    // Touch delivery. `action` is a fixed numeric ABI shared with the
     // Rust `nativeOnTouch` glue — DO NOT renumber without changing both sides:
     //   0 = down (ACTION_DOWN / ACTION_POINTER_DOWN)
     //   1 = move (ACTION_MOVE)
@@ -229,7 +231,7 @@ class FrustSurfaceView(
 
     private external fun nativeOnDestroy(handle: Long)
 
-    // IME state-sync exports (spec §14 Phase 4). Indices are UTF-16 code units
+    // IME state-sync exports. Indices are UTF-16 code units
     // (Java-native), passed through the Rust seam unchanged.
     private external fun nativeImeApply(
         handle: Long,
@@ -246,7 +248,7 @@ class FrustSurfaceView(
 
     private external fun nativeImeAction(handle: Long, action: Int)
 
-    // Appearance (spec §17, task 08): flip the app's theme brightness between
+    // Appearance: flip the app's theme brightness between
     // light and dark. `dark` mirrors Configuration.UI_MODE_NIGHT_YES — see
     // [isDarkMode]. Called once right after `nativeInit` returns a handle and
     // again on every `onConfigurationChanged` (the manifest declares `uiMode`
@@ -254,11 +256,11 @@ class FrustSurfaceView(
     // instead of recreating the activity).
     private external fun nativeSetAppearance(handle: Long, dark: Boolean)
 
-    // Deep links (task 07). `url` is the raw `Intent.data` Uri's `toString()`,
+    // Deep links. `url` is the raw `Intent.data` Uri's `toString()`,
     // forwarded to `frust_reactive::push_deep_link` on the Rust side.
     private external fun nativeOnDeepLink(handle: Long, url: String)
 
-    // Accessibility (spec §9, phase 6d). Attaches the accesskit Android adapter
+    // Accessibility. Attaches the accesskit Android adapter
     // to this view. `view` is the accessibility host — always `this`
     // (`FrustSurfaceView` IS a `View`); the adapter installs a
     // `View.AccessibilityDelegate` + `OnHoverListener` on it (posted to the UI
@@ -267,8 +269,7 @@ class FrustSurfaceView(
     // startup. Called once, right after `nativeInit` returns a live handle.
     private external fun nativeInitAccessibility(handle: Long, view: View)
 
-    // Insets (device-parity task 06/08 — RESEARCH.md "Insets / SafeArea").
-    // The eight floats are physical px: `viewPadding` (system-bar/cutout
+    // Insets. The eight floats are physical px: `viewPadding` (system-bar/cutout
     // occlusion, vp*) then `viewInsets` (the IME area, vi*), each l/t/r/b —
     // see [dispatchInsets].
     private external fun nativeOnInsetsChanged(
@@ -283,13 +284,11 @@ class FrustSurfaceView(
         viBottom: Float,
     )
 
-    // Android back (device-parity task 06/08 — RESEARCH.md "Android back").
-    // Returns whether the framework consumed the press (it will pop on the
-    // next rebuild) — see [dispatchBackPress].
+    // Android back. Returns whether the framework consumed the press (it
+    // will pop on the next rebuild) — see [dispatchBackPress].
     private external fun nativeOnBackPress(handle: Long): Boolean
 
-    // System UI / SystemChrome (task 03/09 — RESEARCH.md "Insets / SafeArea /
-    // SystemChrome"): returns the process-wide `frust::set_system_ui_mode`
+    // System UI / SystemChrome: returns the process-wide `frust::set_system_ui_mode`
     // override slot's packed `(generation, mode)` state
     // (`frust_shell_common::system_ui::encoded_state()`'s doc comment has the
     // exact bit layout) for [pollSystemUiState] to decode.
@@ -301,22 +300,22 @@ class FrustSurfaceView(
     // application context (never the Activity), strictly before `nativeInit`.
     private external fun nativeInitPlatform(context: Context)
 
-    // Platform views (platform-views task 05): latch a translucent (Mode B)
+    // Platform views: latch a translucent (Mode B)
     // GPU surface BEFORE `nativeInit` creates it — a process-wide, pre-init-only
     // one-way opt-in (a call after a surface already exists is a no-op on the
     // Rust side). Takes no handle by design. Called from [surfaceCreated] only
     // when [FRUST_TRANSLUCENT_SURFACE] is true.
     private external fun nativeSetSurfaceMode(translucent: Boolean)
 
-    // Platform views (platform-views task 05): the native-sibling-compositor
-    // command backlog (task 03's differ) as JSON for [FrustViewHost] to apply,
-    // or null on the no-change fast path (or a dead handle) — Kotlin treats null
+    // Platform views: the native-sibling-compositor command backlog (the
+    // Rust-side differ) as JSON for [FrustViewHost] to apply, or null on the
+    // no-change fast path (or a dead handle) — Kotlin treats null
     // as "nothing to do", keeping a steady frame allocation-free (no JSON parse).
     // `ackGeneration` round-trips [FrustViewHost.ackedGeneration] so the differ
     // can compact acknowledged commands. Rects in the JSON are physical px.
     private external fun nativePlatformViewCommands(handle: Long, ackGeneration: Long): String?
 
-    // Platform-view scroll sync (camera task 12): push this tick's Choreographer
+    // Platform-view scroll sync: push this tick's Choreographer
     // frame-timeline delta (`expectedPresentationTimeNanos - frameTimeNanos`) to
     // the native scroll-sync tail, which derives from it how many display frames
     // a geometry batch must be held so a hosted native view lands WITH the frust
@@ -381,7 +380,7 @@ class FrustSurfaceView(
 
     /**
      * The last system-UI slot generation observed by [pollSystemUiState]
-     * (task 03/09's `frust::set_system_ui_mode` override). Starts at `0`,
+     * (the `frust::set_system_ui_mode` override). Starts at `0`,
      * matching the slot's initial (never-requested) generation, so an app
      * that never calls the API never fires [onSystemUiModeChanged].
      */
@@ -391,7 +390,7 @@ class FrustSurfaceView(
      * Set by `MainActivity` (which owns the `Window` a
      * `WindowInsetsControllerCompat` needs) to receive a decoded
      * [SystemUiMode] whenever [pollSystemUiState] observes a fresh
-     * `frust::set_system_ui_mode` call (task 14). `null` until the Activity
+     * `frust::set_system_ui_mode` call. `null` until the Activity
      * wires it up in `onCreate`; a mode observed before that is dropped —
      * mirrors this file's other startup-race cases (e.g. [pendingDeepLink]),
      * though in practice `onCreate` wires this listener up well before the
@@ -412,7 +411,7 @@ class FrustSurfaceView(
     var platformViewHost: FrustViewHost? = null
 
     /**
-     * Mode B input forwarding (native-widgets spike 3): the interactive
+     * Mode B input forwarding: the interactive
      * sibling view that owns the in-flight gesture, decided at touch-DOWN
      * (null = frust owns it). Cleared on UP/CANCEL.
      */
@@ -475,8 +474,7 @@ class FrustSurfaceView(
             holder.setFormat(PixelFormat.TRANSLUCENT)
             setZOrderOnTop(true)
         }
-        // Insets (device-parity task 08 — RESEARCH.md "Insets / SafeArea").
-        // Fires on attach and on every later system-bar/cutout/IME change.
+        // Insets. Fires on attach and on every later system-bar/cutout/IME change.
         // This view is the FrameLayout root's render-surface child; any native
         // sibling views (platform-views feature) are positioned by Frust in
         // absolute paint coordinates and do not consume insets, so the original
@@ -490,7 +488,7 @@ class FrustSurfaceView(
 
     /**
      * Compute and forward the platform window insets to `nativeOnInsetsChanged`
-     * (physical px, task 06 signature): `viewPadding` is the system-bar +
+     * (physical px): `viewPadding` is the system-bar +
      * display-cutout occlusion, max-merged per edge (mirrors Flutter's
      * `FlutterView.onApplyWindowInsets`, `FlutterView.java:751-793`);
      * `viewInsets` is the IME area. A missing handle is a no-op — the insets
@@ -499,7 +497,7 @@ class FrustSurfaceView(
      *
      * Pre-API-30 devices have no native `Type.ime()` insets; `WindowInsetsCompat`
      * falls back to its own best-effort IME detection there — an accepted
-     * degradation, not a bug, per task 08's spec.
+     * degradation, not a bug.
      */
     private fun dispatchInsets(windowInsets: WindowInsetsCompat) {
         if (handle == 0L) return
@@ -521,9 +519,8 @@ class FrustSurfaceView(
     }
 
     /**
-     * Android back (device-parity task 08 — RESEARCH.md "Android back"),
-     * called by `MainActivity`'s `onBackPressedDispatcher` callback. Wraps
-     * `nativeOnBackPress`: `true` means the framework consumed the press
+     * Android back, called by `MainActivity`'s `onBackPressedDispatcher`
+     * callback. Wraps `nativeOnBackPress`: `true` means the framework consumed the press
      * (it will pop on the next rebuild); `false` means `MainActivity` should
      * fall through to its default (finish) behavior. A missing handle
      * (native side not up yet) never claims the press.
@@ -534,9 +531,8 @@ class FrustSurfaceView(
     }
 
     /**
-     * Status/nav-bar icon contrast (task 08 — RESEARCH.md "Insets / SafeArea
-     * / SystemChrome"): light icons on a dark theme and vice versa, the one
-     * `WindowInsetsControllerCompat` use that's real in Flutter's embedder
+     * Status/nav-bar icon contrast: light icons on a dark theme and vice
+     * versa, the one `WindowInsetsControllerCompat` use that's real in Flutter's embedder
      * (`setSystemUIOverlayStyle` is not deprecated, but Frust uses the
      * AndroidX compat surface instead). `WindowCompat.getInsetsController`
      * (not the deprecated `ViewCompat.getWindowInsetsController(View)`)
@@ -586,9 +582,9 @@ class FrustSurfaceView(
         if (handle == 0L) {
             if (translucentSurface) {
                 // Latch the alpha surface config on the Rust side BEFORE the
-                // surface is created (platform-views task 05) — a one-way,
-                // pre-init-only opt-in paired with the holder's translucent
-                // format configured in [init].
+                // surface is created — a one-way, pre-init-only opt-in
+                // paired with the holder's translucent format configured in
+                // [init].
                 nativeSetSurfaceMode(true)
             }
             // Initialize plugin platform handles before native init.
@@ -599,12 +595,12 @@ class FrustSurfaceView(
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
                 updateSystemBarsAppearance(isDarkMode)
-                // Attach the accesskit accessibility adapter to this view (spec
-                // §9, phase 6d). Best-effort: the native side isolates any
+                // Attach the accesskit accessibility adapter to this view.
+                // Best-effort: the native side isolates any
                 // failure in its own guard, so a missing delegate class or JNI
                 // hiccup degrades to "no a11y" rather than blocking startup.
                 nativeInitAccessibility(handle, this)
-                // Re-dispatch the last known insets (task 08): a recreated
+                // Re-dispatch the last known insets: a recreated
                 // handle must not stay stale until the next system dispatch,
                 // which may never come if nothing about the insets changed.
                 lastInsets?.let { dispatchInsets(it) }
@@ -668,7 +664,7 @@ class FrustSurfaceView(
         if (handle == 0L) {
             return false
         }
-        // Mode B input forwarding (native-widgets spike 3): touch-DOWN decides
+        // Mode B input forwarding: touch-DOWN decides
         // ownership for the WHOLE gesture — a down inside an interactive
         // slot's rect (outside its z-shields) hands this and every subsequent
         // event of the gesture to the native sibling; frust never sees any of
@@ -782,7 +778,7 @@ class FrustSurfaceView(
 
     /**
      * Per-frame poll of the process-wide system-UI override slot
-     * (`frust::set_system_ui_mode`, task 03/09) — decodes
+     * (`frust::set_system_ui_mode`) — decodes
      * `nativeSystemUiState`'s packed `(generation, mode)` `u64` and hands a
      * decoded [SystemUiMode] to [onSystemUiModeChanged] only when the
      * generation has advanced since the last poll (mirrors
@@ -838,7 +834,7 @@ class FrustSurfaceView(
         // Once the surface is lost the handle stays valid and the native frame
         // is a cheap no-op, so re-posting is always correct while `running`.
         if (handle != 0L) {
-            // Platform-view scroll sync (camera task 12): hand the native side
+            // Platform-view scroll sync: hand the native side
             // this tick's frame-timeline sample BEFORE `nativeOnFrame`, which is
             // where the scroll-sync tail advances. Inert (one `Long` field
             // compare) unless a native sibling is actually on screen.
@@ -858,10 +854,10 @@ class FrustSurfaceView(
             // field's published state; a no-op when they already match, so normal
             // typing never triggers a spurious restart.
             pollImeAfterDispatch()
-            // Per-frame system-UI poll (task 03/09/14): cheap generation-gated
+            // Per-frame system-UI poll: cheap generation-gated
             // JNI read, applied only on an actual `set_system_ui_mode` change.
             pollSystemUiState()
-            // Per-frame platform-view command poll (platform-views task 05/08):
+            // Per-frame platform-view command poll:
             // the null-return fast path keeps a no-change frame allocation-free
             // (a null string means "nothing to do" — no JSON parse); only a
             // non-null batch reaches the host applier. An app with no platform
@@ -880,7 +876,7 @@ class FrustSurfaceView(
 
     /**
      * Push this tick's frame-timeline sample to the native scroll-sync tail and
-     * arm the next one (platform views, camera task 12).
+     * arm the next one.
      *
      * Sampling is **scoped to frames that actually host a native sibling**: the
      * tail exists only to align a hosted view's geometry with the Frust content
@@ -889,8 +885,8 @@ class FrustSurfaceView(
      * `0`-valued push that stands the tail down when the last slot goes away.
      *
      * Below API 33 ([frameTimelineCallback] `== null`) there is no timeline to
-     * read and the native side stays gate-only, which the Phase-0 measurements
-     * put strictly ahead of the ungated behaviour on every device tested.
+     * read and the native side stays gate-only, which measured strictly ahead
+     * of the ungated behaviour on every device tested.
      */
     private fun sampleFrameTimeline() {
         val sampling = frameTimelineCallback != null && platformViewHost?.hasHostedViews == true

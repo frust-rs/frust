@@ -13,7 +13,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 
 /**
- * The Frust Android host activity (spec Phase 2 §10.1) — everything a
+ * The Frust Android host activity — everything a
  * generated app's `MainActivity` used to carry inline, now framework-owned.
  * A generated `MainActivity` is `class MainActivity : FrustActivity()` and
  * nothing else; an app that needs more overrides one of the extension points
@@ -32,23 +32,21 @@ import androidx.core.view.WindowInsetsControllerCompat
  * them `final`); a subclass overriding one MUST call through to `super`, since
  * this class owns the surface's lifecycle forwards.
  *
- * `ComponentActivity` (not plain `Activity`, device-parity task 08) is the
- * base class purely for [getOnBackPressedDispatcher] — see the back-press
- * callback below; nothing else about the activity's lifecycle behavior
- * changes.
+ * `ComponentActivity` (not plain `Activity`) is the base class purely for
+ * [getOnBackPressedDispatcher] — see the back-press callback below; nothing
+ * else about the activity's lifecycle behavior changes.
  *
- * Edge-to-edge (task 08 — RESEARCH.md "Insets / SafeArea / SystemChrome"):
- * `WindowCompat.setDecorFitsSystemWindows(window, false)` draws content
- * under the system bars, which stay **visible** (`SystemUiMode.edgeToEdge`
- * semantics — this is not a bar-hiding fullscreen mode, hence the
- * manifest's `Theme.NoTitleBar`, not `.Fullscreen`).
+ * Edge-to-edge: `WindowCompat.setDecorFitsSystemWindows(window, false)` draws
+ * content under the system bars, which stay **visible**
+ * (`SystemUiMode.edgeToEdge` semantics — this is not a bar-hiding fullscreen
+ * mode, hence the manifest's `Theme.NoTitleBar`, not `.Fullscreen`).
  * `FrustSurfaceView`'s `OnApplyWindowInsetsListener` reports the
  * resulting system-bar/cutout/IME occlusion back into the framework via
  * `nativeOnInsetsChanged`. `windowSoftInputMode="adjustResize"` (manifest)
  * is intentionally inert once edge-to-edge is on — the IME arrives as an
  * inset push instead of a window resize, matching Flutter's model.
  *
- * Deep links (task 07): cold-start delivery forwards `intent?.data` from
+ * Deep links: cold-start delivery forwards `intent?.data` from
  * [onCreate]; a running instance receives a link via [onNewIntent] instead
  * (the app's manifest entry declares `android:launchMode="singleTop"`
  * precisely so a warm relaunch reuses this instance rather than creating a
@@ -57,7 +55,7 @@ import androidx.core.view.WindowInsetsControllerCompat
  * routinely races ahead of `nativeInit`, since that only runs once the
  * `SurfaceHolder` callback fires).
  *
- * Back (task 08 — RESEARCH.md "Android back"): a single always-enabled
+ * Back: a single always-enabled
  * `onBackPressedDispatcher` callback offers every press to the framework
  * first ([FrustSurfaceView.dispatchBackPress], wrapping `nativeOnBackPress`).
  * When the framework didn't consume it (no navigator, or already at the root
@@ -66,9 +64,8 @@ import androidx.core.view.WindowInsetsControllerCompat
  * `ComponentActivity`'s own default handler, which finishes the activity —
  * then re-enables itself for the next press.
  *
- * System UI / SystemChrome (task 03/09/14 — RESEARCH.md "Insets / SafeArea /
- * SystemChrome", Flutter `SystemChrome.setEnabledSystemUIMode` parity): this
- * Activity owns the `Window` a `WindowInsetsControllerCompat` needs, so
+ * System UI / SystemChrome (Flutter `SystemChrome.setEnabledSystemUIMode`
+ * parity): this Activity owns the `Window` a `WindowInsetsControllerCompat` needs, so
  * [FrustSurfaceView] (which owns `doFrame` and therefore the per-frame poll)
  * hands a decoded mode to [applySystemUiMode] via
  * [FrustSurfaceView.onSystemUiModeChanged], wired up in [onCreate].
@@ -98,16 +95,17 @@ open class FrustActivity : ComponentActivity() {
     /**
      * Host opt-in for a **translucent** (Mode B) render surface — see
      * [FrustSurfaceView.translucentSurface] for the full contract. Override to
-     * `true` in an app that composites Frust content over native sibling views,
-     * and pair it with the Rust-side `frust::request_translucent_surface`
-     * latch; the default `false` keeps the opaque (Mode A) surface.
+     * `true` in an app that composites Frust content over native sibling
+     * views; the embedding's own JNI glue then declares the mode to the Rust
+     * shell (`declare_host_translucent_surface`) — app Rust cannot. The
+     * default `false` keeps the opaque (Mode A) surface.
      */
     open val translucentSurface: Boolean
         get() = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Perf instrumentation (spec §14 phase 7.A, task 08): a single fixed
+        // Perf instrumentation: a single fixed
         // marker at activity-create entry, under the same "frust" logcat
         // tag the Rust side's `frust-perf startup ...`/`frust-perf
         // frame ...` lines use, so the Kotlin-side gap (process start ->
@@ -175,8 +173,7 @@ open class FrustActivity : ComponentActivity() {
 
     /**
      * Apply a decoded [FrustSurfaceView.SystemUiMode] via
-     * `WindowInsetsControllerCompat` (task 03/09/14 — RESEARCH.md "Insets /
-     * SafeArea / SystemChrome"), Flutter `SystemChrome.setEnabledSystemUIMode`
+     * `WindowInsetsControllerCompat`, Flutter `SystemChrome.setEnabledSystemUIMode`
      * parity. Mirrors [FrustSurfaceView]'s own `updateSystemBarsAppearance`
      * (same `WindowCompat.getInsetsController` call, driving bar visibility
      * here instead of icon contrast there).
@@ -185,8 +182,8 @@ open class FrustActivity : ComponentActivity() {
      * equivalent — like `Immersive`, it maps to
      * [WindowInsetsControllerCompat.BEHAVIOR_DEFAULT] (any edge swipe
      * reveals the bars); only `ImmersiveSticky` gets the transient-swipe
-     * behavior. See `frust_shell_common::system_ui`'s module docs (task 03)
-     * for the full platform-parity notes, including the Android 16/API
+     * behavior. See `frust_shell_common::system_ui`'s module docs for the
+     * full platform-parity notes, including the Android 16/API
      * 36+ forced-edge-to-edge caveat this Activity cannot work around.
      */
     protected open fun applySystemUiMode(mode: FrustSurfaceView.SystemUiMode) {

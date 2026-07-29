@@ -1,4 +1,4 @@
-//! Shell + route + toast smoke tests for the Huddle skeleton (task 10).
+//! Shell + route + toast smoke tests for the Huddle skeleton.
 //!
 //! Every test that touches process-global reactive state (the shared background
 //! executor's timing, `push_transparent_for_result`'s deep-owner interaction)
@@ -113,7 +113,7 @@ fn routes_push_and_pop_without_panicking() {
     assert!(root.root_id().is_some(), "a pop rebuilds cleanly");
 }
 
-/// The Android/gesture back contract (device-parity task 14, item 3): a back
+/// The Android/gesture back contract: a back
 /// press pops the mounted navigator, and `frust::handles_back` mirrors
 /// whether the framework will consume the *next* press (a single-page stack
 /// bubbles to the platform instead). `state.back.track()` runs every
@@ -174,8 +174,7 @@ fn back_press_pops_the_navigator_and_root_bubbles_to_the_platform() {
 
 /// A modal pushed transparently through the real, mounted `NavigatorController`
 /// and popped with a result delivers that `PopResult` back into app state — the
-/// same round trip the toast undo affordance and Phase C sheets build on. (Ported
-/// from the convergence `examples/catalog` modal round-trip test.)
+/// same round trip the toast undo affordance and the sheet overlays build on.
 #[test]
 fn modal_round_trip_delivers_its_result() {
     let _g = serial();

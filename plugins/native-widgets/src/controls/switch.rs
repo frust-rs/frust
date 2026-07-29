@@ -3,15 +3,16 @@
 //! Five properties: checked, enabled, thumb tint, track tint, accessibility
 //! label. Every one of them is [`Tier::Cheap`](super::Tier::Cheap).
 //!
-//! # No explicit background (f2-04)
+//! # No explicit background
 //!
 //! Unlike `Label`/`ProgressBar`, `SwitchProps` deliberately carries no
 //! `background_color` field. `android.widget.Switch`
 //! (`Widget.Material.CompoundButton.Switch`) draws its default background
 //! from `?attr/selectableItemBackgroundBorderless`, which paints the
-//! Material touch ripple; a flat `View.setBackgroundColor` (the fix f1-01
-//! shipped, and this followup reverts for this control) replaces that
-//! drawable outright, so a themed `Switch` lost its ripple. The thumb/track
+//! Material touch ripple; a flat `View.setBackgroundColor` (an earlier fix
+//! shipped this for every control, then a follow-up reverted it for this
+//! one) replaces that drawable outright, so a themed `Switch` lost its
+//! ripple. The thumb/track
 //! tints below already carry the theme with no such tradeoff — see
 //! `crate::api::theme`'s module doc's *Explicit backgrounds* section for the
 //! full account.
@@ -68,7 +69,7 @@
 //!   result in an action message being sent"*. React Native's iOS switch
 //!   relies on exactly this: `RCTSwitchComponentView.mm`'s `updateProps`
 //!   applies values through `setOn:animated:` and its `-onChange:` simply does
-//!   not fire (`research/RESEARCH-P2-REFRESH.md` §3–§4).
+//!   not fire.
 //! - **Caveat A**: Apple documents that guarantee *explicitly* only for
 //!   `setOn(_:animated:)` — which is why the Apple arm below calls exactly
 //!   that (with `animated: false`, so the visible result matches the plain
@@ -81,19 +82,19 @@
 //!   therefore not dismissed.
 //!
 //! So this arm ships **no iOS-specific echo machinery, and no per-instance
-//! suppression flag** (f2-02 deleted Android's; there is nothing to
+//! suppression flag** (Android's was deleted; there is nothing to
 //! reinstate). Should Caveat B ever bite, the protection is *inherited from
 //! the shared runtime*, not built here: a re-entrant callback lands in the
 //! same `crate::runtime::with_runtime` borrow and is dropped there, exactly as
 //! Android's synchronous echo is. Whether it bites at all is **proven on
-//! device in task p2-05**, not asserted here.
+//! device separately**, not asserted here.
 //!
 //! **v1 limitation, deliberate:** an app that *rejects* a toggle (reports the
 //! same value back) produces no props change at all, so `update` never runs
 //! and the platform's flip stands until the next differing params.
 //! `NativeWidget::on_event` is handed no platform context, so a control cannot
 //! revert from the event itself; closing this needs an event-time context in
-//! the trait, which Phase 3 decides.
+//! the trait, which is a future design decision.
 
 use super::{
     CHECKED, CONTENT_DESCRIPTION, ENABLED, Plan, Setter, THUMB_TINT, TRACK_TINT, TYPEFACE, color,
@@ -129,7 +130,7 @@ pub(crate) struct SwitchProps {
     pub(crate) track_tint: Option<i32>,
     /// The TalkBack label.
     pub(crate) content_description: Option<String>,
-    /// Theme ladder L3 (p1-08): the resolved
+    /// Theme ladder L3: the resolved
     /// [`crate::api::theme::ResolvedTheme::body_typeface`], or
     /// [`Typeface::System`] when absent. `Switch` never sets on/off text
     /// through this plugin today, but it's a `TextView` subclass under the
@@ -351,7 +352,7 @@ pub(crate) mod platform {
     //!
     //! # `thumbTintColor` is silently ignored on iOS 26 — a platform bug
     //!
-    //! Found by the p2-05 device gate on iOS 26.5.2: the `UISwitch` thumb
+    //! Found during on-device testing on iOS 26.5.2: the `UISwitch` thumb
     //! renders the system white **whatever** `Setter::ThumbTint` assigns,
     //! while the `onTintColor` set on the very next line still works. The
     //! theme's `accent_ink` therefore does not reach the thumb on that OS, and
@@ -393,7 +394,7 @@ pub(crate) mod platform {
     pub(crate) struct SwitchState {
         view: Retained<UISwitch>,
         /// The target-action object `create` attached as `view`'s
-        /// `ValueChanged` action (task p2-03). `UIControl` holds it weakly,
+        /// `ValueChanged` action. `UIControl` holds it weakly,
         /// so this field is the only thing keeping it alive for the slot's
         /// lifetime (`crate::apple::events`'s module doc's *Target
         /// retention*) — dropped alongside the rest of `State` when
@@ -503,8 +504,8 @@ pub(crate) mod platform {
             }
             // A `UISwitch` renders no text at all on iOS (its `title` property
             // is unavailable here), so there is no font to set — silently, not
-            // via `platform::resolve_font`'s degrade warning (theme ladder L3,
-            // p2-04), because nothing is being degraded. The field exists in
+            // via `platform::resolve_font`'s degrade warning (theme ladder L3),
+            // because nothing is being degraded. The field exists in
             // the shared `Props` because Android's `Switch` IS a `TextView`
             // (see `SwitchProps::typeface`).
             Setter::Typeface(_) => {}
@@ -595,7 +596,7 @@ mod tests {
         );
     }
 
-    // f2-04: `SwitchProps` carries no `background_color` field at all (module
+    // `SwitchProps` carries no `background_color` field at all (module
     // doc's *No explicit background* section) — there is no wire-shape left
     // to plan a `Setter::BackgroundColor` for, so the two background-setter
     // tests that used to live here (mirroring `label.rs`/`progress.rs`) are
@@ -644,7 +645,7 @@ mod tests {
         assert_eq!(observed, Some(true));
     }
 
-    // f2-02: there is no per-instance suppression parameter to test an echo
+    // There is no per-instance suppression parameter to test an echo
     // against anymore. `CompoundButton.setChecked`'s listener notification is
     // synchronous-only on every supported Android version (AOSP source: the
     // call happens in the same stack frame as `setChecked`, guarded only by

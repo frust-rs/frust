@@ -1,4 +1,4 @@
-//! Flex layout container (spec §6.2): `Row`/`Column` over a main/cross axis.
+//! Flex layout container: `Row`/`Column` over a main/cross axis.
 //!
 //! [`FlexView`]/[`FlexWidget`] are the declarative/retained pair (mirroring
 //! [`crate::text`]'s `TextView`/`TextWidget`). A flex lays its children out along
@@ -61,7 +61,7 @@ impl Axis {
     }
 }
 
-/// How children are aligned along the cross axis (spec §6.2).
+/// How children are aligned along the cross axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrossAxisAlignment {
     /// Pack each child at the cross-axis start (top for a Row, left for a Column).
@@ -89,7 +89,7 @@ pub enum MainAxisAlignment {
 /// `key` is `None` for the plain [`Row`]/[`Column`]/[`flexible`]/[`inflexible`]
 /// sugar (positional reconciliation, unchanged) and `Some` only for children
 /// built with [`keyed`], which opts the whole list into key-matched
-/// reconciliation (spec §6.3) so reorders/inserts preserve widget state.
+/// reconciliation so reorders/inserts preserve widget state.
 pub struct FlexChild<State: 'static> {
     view: AnyView<State>,
     flex: u32,
@@ -115,7 +115,7 @@ pub fn inflexible<State: 'static, V: View<State>>(view: V) -> FlexChild<State> {
 }
 
 /// An inflexible child tagged with a stable [`ChildKey`], for a list whose items
-/// reorder, insert, or delete between frames (spec §6.3).
+/// reorder, insert, or delete between frames.
 ///
 /// Attaching a key to *any* child opts the whole [`FlexView`] into keyed
 /// reconciliation: on the next rebuild, children are matched to their live
@@ -626,7 +626,7 @@ mod tests {
         assert_eq!(scene.rects[1].0, Point::new(20.0, 0.0));
     }
 
-    // --- Paint-time visible-rect culling (task 07) ------------------------
+    // --- Paint-time visible-rect culling ------------------------------------
 
     /// Build+lay out a 5-row vertical column of 100x100 leaves (rows at
     /// y = 0,100,200,300,400) inside a 100x500 box.
@@ -729,12 +729,12 @@ mod tests {
         assert_eq!(log, vec![7], "a culled-but-laid-out row still fires on Up");
     }
 
-    // --- Cull exemptions: focused child + hero-in-flight (task f3) ---------
+    // --- Cull exemptions: focused child + hero-in-flight --------------------
     //
     // Both exemptions only ever ADD a paint: an offscreen ANIMATOR with neither
-    // property is still suppressed (the whole point of task 07), which the
-    // "unfocused sibling still culled" assertions below keep honest — a
-    // focused/hero child bypasses that suppression by design.
+    // property is still suppressed (the whole point of visible-rect culling),
+    // which the "unfocused sibling still culled" assertions below keep honest
+    // — a focused/hero child bypasses that suppression by design.
 
     /// A leaf that, on every paint, bumps a shared paint counter, fills a rect,
     /// and republishes an [`ImeState`] carrying its current `value` — standing in
@@ -764,8 +764,8 @@ mod tests {
             element: &mut ImeLeafWidget,
             _ctx: &mut BuildCtx<'_>,
         ) -> ChangeFlags {
-            // A controlled change threaded in via rebuild (never an event) — the
-            // exact shape task f3's Problem A is about.
+            // A controlled change threaded in via rebuild (never an event) — an
+            // app-driven IME state update takes exactly this shape.
             element.value = self.value.clone();
             ChangeFlags::NONE
         }
@@ -855,7 +855,7 @@ mod tests {
 
     #[test]
     fn focused_cull_exemption_republishes_a_rebuild_mutation_immediately() {
-        // Task f3 Problem A, the stale-then-fixed regression. An offscreen field
+        // The stale-then-fixed regression. An offscreen field
         // whose value is mutated via REBUILD (no event) must republish on the very
         // next paint. Unfocused: culled → no republish → the shell keeps a stale
         // surface (the bug). Focused: exempt → republished immediately (the fix).
@@ -913,7 +913,7 @@ mod tests {
 
     #[test]
     fn animated_scale_child_straddling_the_cull_boundary_does_not_pop() {
-        // Task f3 Problem C: the cull is LAYOUT-BOX-ONLY. An AnimatedScale child
+        // The cull is LAYOUT-BOX-ONLY. An AnimatedScale child
         // magnifies its paint far past its layout box (~2.8×), but the cull tests
         // the box, so a child whose BOX overlaps the warm band paints regardless
         // of scale (no scale-driven pop), and one whose box is fully outside is
@@ -1000,7 +1000,7 @@ mod tests {
         assert_eq!(w.children[0].size(), Size::new(7.0, 7.0));
     }
 
-    // --- Capture-vs-rebuild fixtures (review R5) ---------------------------
+    // --- Capture-vs-rebuild fixtures ----------------------------------------
     //
     // A vertical list of fixed 50x20 rows, each of which captures on `Down` and
     // "fires" (records its id into the `Vec<u32>` app state) only on an `Up`
@@ -1159,7 +1159,7 @@ mod tests {
 
     #[test]
     fn append_after_preserves_captured_drag_before_change() {
-        // (Task 02, capture side) An armed child BEFORE the change point survives
+        // An armed child BEFORE the change point survives
         // an append-after: the appended tail is past the stable prefix, so the
         // captured row keeps its `active` path and fires on Up as normal. This is
         // Flutter's invariant — a sibling structural change must not break an
@@ -1189,7 +1189,7 @@ mod tests {
 
     #[test]
     fn type_swap_before_armed_index_cancels_with_synthetic_cancel() {
-        // (Task 02, capture side) An armed child at an index PAST the change point
+        // An armed child at an index PAST the change point
         // (a type swap at an earlier index drops the stable prefix to that swap, so
         // the armed row sits in the cancelled tail) still receives a synthetic
         // `Cancel` — it unwinds its state machine rather than being silently
@@ -1307,7 +1307,7 @@ mod tests {
         assert_eq!(log, vec![1], "captured row fires on Up as normal");
     }
 
-    // --- Positional focus-retention fixtures (task 02) --------------------
+    // --- Positional focus-retention fixtures --------------------------------
     //
     // The focus analog of the capture tests above: a `FocusRow` requests focus on
     // `Down` and records its id on a focus-routed `Key` event, so a test can prove
@@ -1411,7 +1411,7 @@ mod tests {
         );
     }
 
-    // --- Keyed reconciliation fixtures (task 58) --------------------------
+    // --- Keyed reconciliation fixtures --------------------------------------
     //
     // A stateful probe row: `CounterWidget` holds an internal `count` that starts
     // at 0 on build and increments on every `Down`, pushing the post-increment
@@ -1607,7 +1607,7 @@ mod tests {
 
     #[test]
     fn keyed_reorder_preserves_captured_drag() {
-        // (Task 02) A key-matched row's identity is intact across a reorder, so its
+        // A key-matched row's identity is intact across a reorder, so its
         // in-flight capture is CARRIED with the relocated pod — not cancelled. The
         // captured drag completes and fires on the row at its new index.
         let mut counter = 0u64;
@@ -1679,7 +1679,7 @@ mod tests {
 
     #[test]
     fn keyed_reorder_preserves_focus_and_key_routing() {
-        // (Task 02) Focus is the second recorded path and rides along with the
+        // Focus is the second recorded path and rides along with the
         // relocated pod: a key-matched focused row keeps its focus across a reorder,
         // and the container routes a subsequent Key event to it at its new index.
         let mut counter = 0u64;
@@ -1722,7 +1722,7 @@ mod tests {
 
     #[test]
     fn keyed_removed_focused_key_clears_focus() {
-        // (Task 02) Removing the focused keyed row breaks its identity: the pod is
+        // Removing the focused keyed row breaks its identity: the pod is
         // torn down, so no focused pod remains and a subsequent Key reaches nobody.
         let mut counter = 0u64;
         let prev: FlexView<Vec<u32>> = FlexView::new(

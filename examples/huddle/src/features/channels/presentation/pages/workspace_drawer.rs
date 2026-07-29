@@ -1,12 +1,10 @@
 //! Workspace switcher (`/workspace-switcher`) — a top drawer.
 //!
-//! # Transition note (skeleton, superseded by this task)
+//! # Transition note
 //!
-//! The skeleton (task 10) routed this page through the navigator's normal
-//! (opaque) transition, deferring a slide-down top-drawer transition to Phase
-//! C: "the framework has no `SlideDown` preset — the transparent push
-//! arrives instantly, your panel animates itself in." This task delivers
-//! that: the panel drives its own entrance via an app-level
+//! The navigator has no `SlideDown` transition preset, so a page pushed onto
+//! it arrives instantly via its normal (opaque) transition rather than
+//! sliding down. This panel instead drives its own entrance via an app-level
 //! [`AnimationController`] (see [`entrance_progress`]) rather than a
 //! navigator `TransitionSpec`, independent of whatever transition (or none)
 //! the page arrives under.
@@ -29,11 +27,11 @@
 //! rather than staying perfectly square at the window edge — both accepted,
 //! documented simplifications of the real thing.
 //!
-//! # Drag-up-to-dismiss (task 21)
+//! # Drag-up-to-dismiss
 //!
-//! Since Home's task 21 already re-added a `frust-core` production
-//! dependency to this crate (`ui/swipeable.rs`, `screens/home.rs`'s escape
-//! hatches, and `ui/sheet.rs`'s bottom sheet — see this crate's `Cargo.toml`),
+//! Since Home already carries a `frust-core` production dependency in this
+//! crate (`ui/swipeable.rs`, `screens/home.rs`'s escape hatches, and
+//! `ui/sheet.rs`'s bottom sheet — see this crate's `Cargo.toml`),
 //! the panel now also wraps in [`crate::ui::sheet::drag_up_dismiss`]: a
 //! vertical drag upward past a threshold pops the route, mirroring
 //! [`SheetView`](crate::ui::sheet::SheetView)'s downward drag-dismiss with the
@@ -42,7 +40,7 @@
 //!
 //! # Rounded bottom corners
 //!
-//! The spec calls for a panel with rounded *bottom* corners only. The public
+//! The intended design has rounded *bottom* corners only. The public
 //! `Card` widgets only expose a uniform radius on all four corners (no
 //! per-corner override), so the panel below is a uniformly-rounded card, not
 //! a bottom-only one — the same kind of simplification as the scrim's, for
@@ -63,8 +61,8 @@ use crate::ui::sheet::drag_up_dismiss;
 
 /// One row in the switcher: an initials tile, a name, and an unread/active
 /// hint. Mock data local to this screen — there is no "workspace" concept in
-/// the shared [`crate::data::store`] dataset (a single-workspace app per
-/// PLAN.md), so multi-workspace switching here is mock-only (see
+/// the shared [`crate::data::store`] dataset (huddle is a single-workspace
+/// app by design), so multi-workspace switching here is mock-only (see
 /// [`workspace_row`]'s tap handler): no real multi-workspace state exists
 /// anywhere else in the app.
 struct Workspace {
@@ -122,14 +120,13 @@ thread_local! {
     /// value instead of restarting it from zero every frame. `RwSignal` is a
     /// cheap `Copy` handle, so a `Cell` is enough (no `RefCell` needed).
     ///
-    /// **Self-healing (task 22 hardening):** an `RwSignal` is owned by the
+    /// **Self-healing:** an `RwSignal` is owned by the
     /// reactive `Owner` live when it was created; a headless test that disposes
     /// its ambient owner and then re-enters (or a reused test thread) leaves this
     /// cache holding a *disposed* signal whose next `get`/`set` panics. So
     /// [`entrance_progress`] validates the cached handle with
     /// `try_get_untracked()` and recreates it when disposal is detected, rather
-    /// than trusting the cache blindly. This is the flake task 21's report
-    /// flagged.
+    /// than trusting the cache blindly.
     static ENTRANCE: Cell<Option<RwSignal<f64>>> = const { Cell::new(None) };
 }
 
@@ -191,7 +188,7 @@ pub fn workspace_drawer_screen() -> AnyView<HuddleState> {
         }));
 
     let rows: Vec<AnyView<HuddleState>> = WORKSPACES.iter().map(workspace_row).collect();
-    // Drag-up-to-dismiss (task 21): a vertical drag upward on the panel past
+    // Drag-up-to-dismiss: a vertical drag upward on the panel past
     // its own threshold pops the route, mirroring the scrim tap below —
     // `ui::sheet::drag_up_dismiss` is the sheet's downward drag-dismiss
     // mechanics inverted (see its doc comment).

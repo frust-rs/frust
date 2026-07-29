@@ -1,6 +1,6 @@
-//! The shape-aware scroll-sync tail (camera task 12): the regime-gated,
+//! The shape-aware scroll-sync tail: the regime-gated,
 //! timeline-derived hold that sits **on top of** the frame-id release gate
-//! (camera task 01) for a platform-view geometry batch.
+//! for a platform-view geometry batch.
 //!
 //! # Why a tail exists at all
 //!
@@ -13,15 +13,15 @@
 //! ~3.5-display-frame residual, flat across a 5× velocity range; on a
 //! submit-bound device (OnePlus 9: `acquire ≈ 0.1 ms`, no queue) the gate alone
 //! already lands a **median-zero** band and what remains is a p90 *tail of the
-//! distribution*, not an offset (SPIKE-SYNC §2.5/§2.6/§2.6.1).
+//! distribution*, not an offset.
 //!
 //! # Why the correction is regime-gated, not scalar
 //!
 //! Every scalar form is CLOSED by measurement: any fixed or derived-but-always-on
 //! delay that closes cupid's constant residual overcorrects the OnePlus 9's
 //! already-aligned majority and converts a lead into a *worse* lag (measured:
-//! tail 0 → lead p90 5.24; tail 2 → lag p90 6.28; tail 4 → lag p90 7.12 —
-//! SPIKE-SYNC §2.6.1). The correction is therefore applied **only in the regime
+//! tail 0 → lead p90 5.24; tail 2 → lag p90 6.28; tail 4 → lag p90 7.12).
+//! The correction is therefore applied **only in the regime
 //! that produces a constant-shaped residual**: a deep swapchain queue, whose
 //! app-visible proxy is the render tail's acquire wait. That single signal
 //! separates the two measured devices by two orders of magnitude and is the
@@ -59,10 +59,10 @@
 //! [`ScrollSyncTail::clear`] releases the whole hold at once for the lifecycle
 //! edges where no further frame will be presented (backgrounding, surface loss).
 //!
-//! # Gesture onset (camera task 12b)
+//! # Gesture onset
 //!
-//! Task 12's steady state is clean (band median 0 px at every velocity,
-//! SPIKE-SYNC §2.7), but the *first* frames of a gesture were not: the
+//! This correction's steady state is clean (band median 0 px at every velocity),
+//! but the *first* frames of a gesture were not: the
 //! correction could not exist until the acquire EWMA had risen under the new
 //! load, been confirmed for a whole confirm window, and then been ramped in one
 //! frame per tick. Three additive delays, all measured in display frames, all
@@ -92,8 +92,7 @@
 //! actually loaded, i.e. the clock on (1) does not start at the first moved
 //! pixel — is **not** addressed here. Closing it needs a speculative arm driven
 //! by a touch-down signal pushed from Kotlin, which is only justified by a
-//! measurement showing (1)+(2) fall short; see this task's summary and
-//! SPIKE-SYNC §2.8 for the bar that would justify it.
+//! measurement showing (1)+(2) fall short.
 //!
 //! Everything here is pure logic driven by two scalars per tick — no clock, no
 //! JNI, no platform types — so it compiles and unit-tests on the host even
@@ -131,14 +130,13 @@ const REGIME_ENTER_CONFIRM_FRAMES: u32 = 2;
 /// before it stands down (~65 ms at 120 Hz). Deliberately four times the entry
 /// window: leaving late costs nothing visible (the queue is draining, the hold
 /// drains with it one frame per tick), while leaving early re-opens the desync
-/// mid-gesture. This is task 12's original value, unchanged.
+/// mid-gesture. This is the correction's original value, unchanged.
 const REGIME_EXIT_CONFIRM_FRAMES: u32 = 8;
 
 /// Latch margin subtracted from the frame-timeline delta before it is converted
 /// to a depth (~half a 120 Hz period). The batch must be applied by the *start*
 /// of the display frame that shows the matching frust content, not during it —
-/// measured as the value that locks cupid's depth at a steady 4 (SPIKE-SYNC
-/// §2.6).
+/// measured as the value that locks cupid's depth at a steady 4.
 const LATCH_MARGIN_MS: f64 = 4.0;
 
 /// Upper bound on the derived depth. A timeline delta implying more than this is
@@ -149,7 +147,7 @@ const MAX_TAIL_DEPTH: u32 = 8;
 /// The unconditional landing guarantee: a held batch is released after this many
 /// display frames no matter what the depth says. The mobile frame gate skips
 /// whole frames at rest and a regime can change under a held batch — neither may
-/// ever strand a slot's final resting geometry (SPIKE-SYNC §2.4's settle bar).
+/// ever strand a slot's final resting geometry.
 const MAX_HOLD_FRAMES: u64 = 16;
 
 /// Hard bound on tracked holds. One entry is created per display frame at worst,
@@ -221,13 +219,12 @@ enum Regime {
 
 /// One tick's diagnostic read-out, returned by [`ScrollSyncTail::tick`] on the
 /// ticks where the depth or the regime actually changed, **plus** at least
-/// once every [`DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES`] regardless (g2, C3) — a
+/// once every [`DIAGNOSTIC_INTERVAL_DISPLAY_FRAMES`] regardless — a
 /// handful of lines per gesture instead of one per frame, and the only
 /// on-device read-out of what the regime decided, including the "it never
 /// latched" case a change-only trace cannot show. `display_frame` is what
 /// makes an onset measurable: subtract the frame stamped on the gesture's
-/// `Down` from the frame the depth reached its target (camera task 12b,
-/// SPIKE-SYNC §2.8).
+/// `Down` from the frame the depth reached its target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TailTrace {
     /// The hold depth now in force, in display frames (`0` = gate-only).
@@ -434,7 +431,7 @@ impl ScrollSyncTail {
     /// This tail's monotonic display-frame counter — the clock every onset
     /// measurement counts in. The shell stamps it on a gesture's `Down` so the
     /// frames between the first touch and the depth reaching its target can be
-    /// read straight out of a trace (camera task 12b, SPIKE-SYNC §2.8).
+    /// read straight out of a trace.
     pub(crate) fn display_frame(&self) -> u64 {
         self.display_frame
     }
@@ -526,7 +523,7 @@ mod tests {
     const PERIOD_NANOS: i64 = 8_333_333; // 120 Hz
 
     /// cupid (Xiaomi 12), as measured: acquire-bound with a rock-stable 37.7 ms
-    /// frame-timeline delta (SPIKE-SYNC §2.6/§2.6.1).
+    /// frame-timeline delta.
     fn cupid_signals(frame: i64) -> TailSignals {
         TailSignals {
             frame_time_nanos: frame * PERIOD_NANOS,
@@ -729,7 +726,7 @@ mod tests {
         assert_eq!(tail.depth(), 0);
 
         // The gesture starts: the swapchain queue fills and each frame now waits
-        // ~14 ms in acquire (cupid, SPIKE-SYNC §2.5). Count the display frames
+        // ~14 ms in acquire (cupid). Count the display frames
         // from the first loaded frame to the hold reaching its full depth.
         let mut onset_frames = 0;
         for frame in 31..=60 {

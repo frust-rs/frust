@@ -1,4 +1,4 @@
-//! Box-constraint layout model (spec §6.2).
+//! Box-constraint layout model.
 //!
 //! Constraints flow *down* the widget tree; sizes flow *up*. This is the
 //! Flutter/Masonry box model — not full CSS. A parent hands each child a

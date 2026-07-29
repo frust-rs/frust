@@ -1,7 +1,7 @@
-//! The app-facing `api` feature (native-widgets Phase 1, p1-06): builders
+//! The app-facing `api` feature: builders
 //! returning `impl View<State>` compositions over the platform-agnostic
 //! `controls`/`runtime`/`events` machinery `crate` already carries — the
-//! facade-glue half PLAN 3.1 sanctions depending on `frust`.
+//! facade-glue half of this crate that sanctions depending on `frust`.
 //!
 //! # Feature-gated, not the crate's default shape
 //!
@@ -20,9 +20,9 @@
 //! Every builder in [`builders`] is a plain data struct implementing
 //! [`frust_core::Component`] (`frust-core`'s retained-local-state seam) —
 //! never the crate's own `pub(crate)` [`crate::runtime::NativeWidget`] trait,
-//! which stays internal permanently (p3-01's public-surface decision).
+//! which stays internal permanently.
 //!
-//! Phase 3 answered what the *public* form is, and it is a different trait:
+//! The public form is a different trait entirely:
 //! [`crate::component::NativeComponent`], with `&self` methods, already-typed
 //! `Props` the app constructs directly, no `decode_props` step and no `Result`
 //! returns. The six builders here keep riding the internal trait's wire
@@ -41,7 +41,7 @@
 //! It is what closes *define → register → mount*; the six are deliberately
 //! not rewritten to route through it (see `src/api/mount.rs`'s module doc).
 //!
-//! # One `platform_view` slot per control (PLAN 3.1)
+//! # One `platform_view` slot per control
 //!
 //! Each builder composes exactly one `frust::platform_view` slot resolving to
 //! this crate's one Android factory
@@ -49,7 +49,7 @@
 //! — N controls = N slots, within the differ's design envelope (a
 //! shared-container optimization is future work).
 //!
-//! # Theme ladder L2 (p1-07)
+//! # Theme ladder L2
 //!
 //! Each builder's `Component::build` reads the active theme
 //! (`use_context::<Theme>()`) and folds it, via [`theme::resolve`], into the
@@ -94,17 +94,17 @@ pub fn ensure_native_factory_registered() {
 /// The number of native controls this crate's internal runtime currently
 /// retains — the leak bar `registry::Registry::live_count`'s own doc comment
 /// describes ("the number the leak bar every create/dispose cycle must
-/// return to `0`"), surfaced app-side for exactly one reason: task
-/// p1-11's device-gate harness (a mount/unmount cycler plus a 50-slot stress
+/// return to `0`"), surfaced app-side for exactly one reason: a
+/// device-gate harness (a mount/unmount cycler plus a 50-slot stress
 /// toggle, `examples/glyph-catalog/src/pages/native_widgets.rs`'s GATE
-/// HARNESS section) needs an in-app readout to prove the p1-09 teardown-retire
+/// HARNESS section) needs an in-app readout to prove the teardown-retire
 /// path disposes promptly rather than waiting out the differ's
 /// missing-streak backstop (`crate::registry`'s module doc's Idle-deferred
 /// dispose finding).
 ///
 /// **Diagnostics/gate accessor, not a supported production API.** It leaks
 /// no registry type, no `NativeWidget` trait, and no handle — just a plain
-/// count. Phase 3's public-surface decision (p3-01) kept it exactly as it is,
+/// count. This crate's public-surface decision kept it exactly as it is,
 /// for exactly that reason: it says nothing about the runtime's shape, so
 /// nothing about it constrains the public
 /// [`NativeComponent`](crate::component::NativeComponent) surface. It still

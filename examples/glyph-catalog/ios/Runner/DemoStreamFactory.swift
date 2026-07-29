@@ -8,9 +8,8 @@ import FrustEmbedding
 // that ticks its own counter at ~20Hz on a plain `Timer` — deliberately not
 // the template's debug `FrustTestLabelFactory` (which ticks at 2Hz): this
 // factory exists specifically to prove the zero-frust-frames self-update
-// property (platform-views task 11's device trace) with an update cadence
-// visibly independent of both the display refresh rate and the frust frame
-// loop.
+// property with an update cadence visibly independent of both the display
+// refresh rate and the frust frame loop.
 //
 // `@objc(DemoStreamFactory)` fixes the ObjC runtime name `FrustViewHost`
 // resolves via `NSClassFromString` — see `FrustPlatformViewFactory.swift`'s

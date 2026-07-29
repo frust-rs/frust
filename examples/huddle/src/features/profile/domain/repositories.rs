@@ -1,9 +1,8 @@
-//! `profile` domain — the repository seam over the shared dataset (huddle
-//! clean-architecture refactor, task 05).
+//! `profile` domain — the repository seam over the shared dataset.
 //!
-//! **Synchronous, infallible** (PLAN Design Decision 8): the profile feature
-//! has no `ControllerCore`/`HuddleFailure` spine — there is no async work
-//! here and nothing that can fail — so this trait mirrors the former
+//! **Synchronous, infallible**: the profile feature has no
+//! `ControllerCore`/`HuddleFailure` spine — there is no async work here and
+//! nothing that can fail — so this trait mirrors the former
 //! `mock`-shim accessors' exact shape rather than the
 //! `async fn ... -> Result<_, HuddleFailure>` shape the four fallible
 //! features use. Shaped by what

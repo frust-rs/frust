@@ -1,8 +1,7 @@
-//! The M3 `FloatingActionButton` (Phase 6c, PLAN.md D5, task 08): regular
-//! (56dp) / small (40dp, not deprecated per ledger C10) / large (96dp)
-//! container sizes plus an extended variant, with size-scaled icon dimensions
-//! (24/24/32dp, ledger R9) and the shared [`super::state_layer`] interaction
-//! overlay.
+//! The M3 `FloatingActionButton`: regular (56dp) / small (40dp, not
+//! deprecated) / large (96dp) container sizes plus an extended variant, with
+//! size-scaled icon dimensions (24/24/32dp) and the shared
+//! [`super::state_layer`] interaction overlay.
 //!
 //! [`fab`] produces an icon-only FAB (a fixed square, painted centered icon);
 //! [`extended_fab`] produces the pill-shaped extended variant (56dp fixed
@@ -13,12 +12,11 @@
 //!
 //! # Colors
 //!
-//! Container/content roles are `primaryContainer`/`onPrimaryContainer` (per
-//! the task spec), resolved via [`resolve_colors`]. The extended FAB's
-//! visible label is tagged [`crate::text::ThemeTextColor::OnPrimaryContainer`]
-//! (a text.rs role addition this task makes, mirroring task 09's
-//! `OnSurfaceVariant` addition — see `docs/CODE_STANDARDS.md`'s
-//! explicit/theme/fallback precedence).
+//! Container/content roles are `primaryContainer`/`onPrimaryContainer`,
+//! resolved via [`resolve_colors`]. The extended FAB's visible label is
+//! tagged [`crate::text::ThemeTextColor::OnPrimaryContainer`] (a text.rs role
+//! addition mirroring the `OnSurfaceVariant` role — see
+//! `docs/CODE_STANDARDS.md`'s explicit/theme/fallback precedence).
 //!
 //! # Elevation
 //!
@@ -35,17 +33,17 @@
 //! 12dp (`shape.medium`), regular 16dp (`shape.large`), large 28dp
 //! (`shape.extra_large`) — all from the standard M3 FAB spec
 //! (m3.material.io/components/floating-action-button/specs). The optional
-//! medium size (Expressive-only, ledger C10/R9) has no independently-verified
-//! shape citation in the research ledger; its 20dp radius
-//! (`shape.large_increased`) is a **documented v1 approximation** following
-//! the established small→regular→large scaling pattern, not a fabricated
-//! guess from nothing — flagged per `docs/CODE_STANDARDS.md`'s "platform
-//! value with no published spec" convention.
+//! medium size (Expressive-only) has no independently-verified published
+//! shape spec; its 20dp radius (`shape.large_increased`) is a **documented v1
+//! approximation** following the established small→regular→large scaling
+//! pattern, not a fabricated guess from nothing — flagged per
+//! `docs/CODE_STANDARDS.md`'s "platform value with no published spec"
+//! convention.
 //!
-//! Extended-FAB padding/gap constants ([`EXTENDED_PAD_ICON_SIDE`] etc.) are
-//! likewise not individually cited in the research ledger; they are a
-//! documented v1 approximation of the common M3 extended-FAB spacing, in the
-//! same spirit as [`super::navbar`]'s hardcoded label type-scale constants.
+//! Extended-FAB padding/gap constants ([`EXTENDED_PAD_ICON_SIDE`] etc.)
+//! likewise have no individually published spec; they are a documented v1
+//! approximation of the common M3 extended-FAB spacing, in the same spirit as
+//! [`super::navbar`]'s hardcoded label type-scale constants.
 
 use std::rc::Rc;
 
@@ -62,26 +60,25 @@ use super::state_layer::StateLayer;
 use crate::text::{self, ThemeTextColor};
 
 /// Container size for the small FAB, in logical px (androidx
-/// `FabSmallTokens.ContainerWidth`, ledger R9/C10 — not deprecated).
+/// `FabSmallTokens.ContainerWidth` — not deprecated).
 const SMALL_CONTAINER: f64 = 40.0;
 /// Container size for the regular FAB, in logical px (androidx
-/// `FabBaselineTokens.ContainerWidth`, ledger R9).
+/// `FabBaselineTokens.ContainerWidth`).
 const REGULAR_CONTAINER: f64 = 56.0;
 /// Container size for the optional medium FAB (Expressive addition), in
-/// logical px (androidx `FabMediumTokens.ContainerWidth`, ledger R9/C10).
+/// logical px (androidx `FabMediumTokens.ContainerWidth`).
 const MEDIUM_CONTAINER: f64 = 80.0;
 /// Container size for the large FAB, in logical px (androidx
-/// `FabLargeTokens.ContainerWidth`, ledger R9).
+/// `FabLargeTokens.ContainerWidth`).
 const LARGE_CONTAINER: f64 = 96.0;
 
-/// Icon size for the small FAB, in logical px (ledger R9: small = 24dp).
+/// Icon size for the small FAB, in logical px (small = 24dp).
 const SMALL_ICON: f64 = 24.0;
-/// Icon size for the regular FAB, in logical px (ledger R9: regular = 24dp).
+/// Icon size for the regular FAB, in logical px (regular = 24dp).
 const REGULAR_ICON: f64 = 24.0;
-/// Icon size for the optional medium FAB, in logical px (ledger R9: medium =
-/// 28dp).
+/// Icon size for the optional medium FAB, in logical px (medium = 28dp).
 const MEDIUM_ICON: f64 = 28.0;
-/// Icon size for the large FAB, in logical px (ledger R9: large = 32dp).
+/// Icon size for the large FAB, in logical px (large = 32dp).
 const LARGE_ICON: f64 = 32.0;
 /// Icon size inside an extended FAB, in logical px — fixed regardless of the
 /// (ignored) `size` field, matching the M3 extended-FAB spec.
@@ -132,8 +129,8 @@ const FALLBACK_SHADOW_BLUR: f64 = 6.0;
 /// `0.3` alpha).
 const FALLBACK_SHADOW_COLOR: Color = Color::new([0.0, 0.0, 0.0, 0.3]);
 
-/// The FAB container size tier (ledger R9/C10 — small is not deprecated;
-/// medium is the optional Expressive addition).
+/// The FAB container size tier (small is not deprecated; medium is the
+/// optional Expressive addition).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FabSize {
     Small,

@@ -7,7 +7,7 @@
 //! lives in the [`MessagesController`](crate::features::messages) this
 //! screen sources via
 //! [`MessagesController::for_channel`](crate::features::messages::MessagesController::for_channel)
-//! — the shared per-channel-id registry (task 19) that lets a reply composed
+//! — the shared per-channel-id registry that lets a reply composed
 //! in an open [`thread`](super::thread) update this same screen's rendered
 //! reply count, and vice versa.
 //!
@@ -32,10 +32,10 @@
 //!
 //! This example crate depends on the `frust` facade **alone** (see
 //! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions), so a couple of
-//! the task's visual items are expressed with the widgets the facade ships
+//! the design's visual items are expressed with the widgets the facade ships
 //! rather than a bespoke `Widget`:
 //!
-//! - **Feed container.** The task named `ListView` + `on_near_start`, but
+//! - **Feed container.** The original design named `ListView` + `on_near_start`, but
 //!   `ListView` requires a single uniform `item_extent` ("variable-extent lazy
 //!   layout is deferred" — its own module docs) and reconciles by raw index,
 //!   which cannot render variable-height chat bubbles nor preserve the keyed
@@ -52,10 +52,10 @@
 //!   the "being typed" affordance uses the facade's self-animating
 //!   [`loading_indicator`](frust::loading_indicator) /
 //!   [`cupertino_activity_indicator`](frust::cupertino_activity_indicator)
-//!   as a live animation. Message rows are FLAT (no `Card` wrapper) as of
-//!   device-parity-round2 task R2 — the `filled_card`/`elevated_card` bubble
+//!   as a live animation. Message rows are FLAT (no `Card` wrapper) — the
+//!   `filled_card`/`elevated_card` bubble
 //!   backgrounds were removed because the card's hardcoded 16px inset inflated
-//!   the whole feed (BUG.md B2); own-vs-others is carried by row layout (own
+//!   the whole feed; own-vs-others is carried by row layout (own
 //!   right-aligned, others left with an avatar), not a background tint.
 
 use std::cell::RefCell;
@@ -81,17 +81,17 @@ use crate::ui::swipeable::{SwipeMarker, press_pop, swipeable_row};
 /// "load older" trigger fires — the infinite-scroll edge for `#firehose`.
 const NEAR_START_PX: f64 = 96.0;
 
-/// Swipe-to-reply strip accent — a Slack-familiar blue (task 22).
+/// Swipe-to-reply strip accent — a Slack-familiar blue.
 const REPLY_COLOR: Color = Color::from_rgb8(0x1E, 0x88, 0xE5);
 
 // ---------------------------------------------------------------------------
-// Flat-row metrics (device-parity-round2 task R2 / BUG.md B2) — the numeric
+// Flat-row metrics — the numeric
 // contract that de-cards the feed off `filled_card`'s 16px inset driver.
 // ---------------------------------------------------------------------------
 
-/// Chat-row avatar tile side length (36–40 per RESEARCH.md's chat-row table);
+/// Chat-row avatar tile side length (36–40 per the chat-row sizing table);
 /// a full circle at [`AVATAR_RADIUS`]. Replaces the old ~62px `filled_card`
-/// avatar (BUG.md B2: 40 total).
+/// avatar (40 total).
 const AVATAR_SIZE: f64 = 40.0;
 /// Avatar corner radius: a full circle at [`AVATAR_SIZE`].
 const AVATAR_RADIUS: f64 = AVATAR_SIZE / 2.0;
@@ -100,7 +100,7 @@ const AVATAR_MONOGRAM_SIZE: f32 = 15.0;
 
 /// Composer attach/emoji tap-tile side length (24 glyph in a 44 tile — the
 /// Material min-touch target). Replaces the old ~72px `filled_card` button
-/// (BUG.md B2: 44 total, 24 glyph).
+/// (44 total, 24 glyph).
 const COMPOSER_TILE: f64 = 44.0;
 /// Composer tile corner radius — a rounded square, not the avatar's full circle.
 const COMPOSER_TILE_RADIUS: f64 = 12.0;
@@ -129,13 +129,13 @@ fn avatar_color(user_id: u32) -> Color {
 /// Skeleton placeholder-bar fill (a neutral grey).
 const SKELETON_FILL: Color = Color::from_rgb8(0xE0, 0xE0, 0xE0);
 /// Skeleton placeholder-bar height; wrapped in 6px vertical padding it makes a
-/// ~52px flat row (BUG.md B2: skeleton ~52, down from the old 92px card row).
+/// ~52px flat row (down from the old 92px card row).
 const SKELETON_HEIGHT: f64 = 40.0;
 /// How many skeleton bars the loading state shows.
 const SKELETON_COUNT: usize = 6;
 
 /// A quick-react emoji offered under every bubble (the "add reaction"
-/// affordance). Real color-glyph rendering, verified in wave A.
+/// affordance). Real color-glyph rendering, already verified to render.
 const QUICK_REACT: &str = "\u{1F44D}";
 
 /// Gets (or creates) the thread-local composer text for `channel_id` — see
@@ -150,7 +150,7 @@ fn composer_for(channel_id: &str) -> RwSignal<String> {
             RefCell::new(HashMap::new());
     }
     COMPOSERS.with(|cell| {
-        // Self-heal (task 22 hardening): the cached signal is owned by whatever
+        // Self-heal: the cached signal is owned by whatever
         // reactive `Owner` was live when it was created; a headless test that
         // disposes its owner and re-enters (or a reused test thread) leaves a
         // *disposed* signal here whose next get/set panics. `try_get_untracked`
@@ -166,8 +166,8 @@ fn composer_for(channel_id: &str) -> RwSignal<String> {
     })
 }
 
-/// Which message-action sheet (if any) is open over the feed — the Phase D
-/// long-press menu / emoji picker / attachment sheet (task 20). Screen-local
+/// Which message-action sheet (if any) is open over the feed — the
+/// long-press menu / emoji picker / attachment sheet. Screen-local
 /// state, cached across rebuilds behind [`sheet_for`] exactly like the composer
 /// text, since this screen is a plain function with no `Component` state.
 #[derive(Clone, PartialEq)]
@@ -201,7 +201,7 @@ fn sheet_for(channel_id: &str) -> RwSignal<FeedSheet> {
             RefCell::new(HashMap::new());
     }
     SHEETS.with(|cell| {
-        // Same disposed-signal self-heal as `composer_for` above (task 22).
+        // Same disposed-signal self-heal as `composer_for` above.
         if let Some(sig) = cell.borrow().get(channel_id).copied()
             && sig.try_get_untracked().is_some()
         {
@@ -341,9 +341,8 @@ fn feed_app_bar(
     let back = frust::GestureDetector(icon(icons::ARROW_BACK).size(24.0))
         .on_tap(move |_st: &mut HuddleState| navigator.pop());
 
-    // Clears the top status-bar/cutout inset (device-parity task 14, item 1)
-    // — see `shell::bottom_bar`'s doc for the matching known v1 background-
-    // extension gap.
+    // Clears the top status-bar/cutout inset — see `shell::bottom_bar`'s doc
+    // for the matching known v1 background-extension gap.
     any(safe_area(
         app_bar::<HuddleState>(title).leading(any(Padding(EdgeInsets::symmetric(4.0, 0.0), back))),
     )
@@ -366,7 +365,7 @@ fn feed_body(
     let typing = controller.typing.get();
 
     // Empty conversation (e.g. a DM with no messages): a real empty state
-    // rather than a blank scroll area (task 22's empty-states audit).
+    // rather than a blank scroll area.
     if messages.is_empty() && !loading_older && !typing {
         return empty_feed_state();
     }
@@ -391,7 +390,7 @@ fn feed_body(
 
     let pager = Arc::clone(controller);
     any(
-        // Flat-row outer HORIZONTAL padding is 8px (BUG.md B2), down from the
+        // Flat-row outer HORIZONTAL padding is 8px, down from the
         // old 12 — the message rows themselves add no card inset any more; the
         // vertical scroll inset stays 12.
         scroll_view(Padding(EdgeInsets::symmetric(8.0, 12.0), column)).on_scroll(
@@ -414,7 +413,7 @@ fn feed_body(
 /// avatar), inside horizontal breathing room. An other-user's row is wrapped in
 /// a swipe-to-reply [`swipeable_row`]: a swipe right reveals the reply
 /// affordance and, on commit, opens the message's thread (`/thread/:id`) —
-/// Slack-familiar (task 22). It composes with the bubble's own long-press + tap
+/// Slack-familiar. It composes with the bubble's own long-press + tap
 /// exactly as the Home rows compose swipe + long-press (see
 /// `screens::home`): the swipeable forwards every pointer event to its child
 /// until a horizontal drag crosses the slop, so the bubble's long-press menu and
@@ -458,9 +457,9 @@ fn message_row(
 }
 
 /// The flat message content: author line (others only), body, reaction chips,
-/// and the thread affordance, in a plain padded column (no card — task R2).
+/// and the thread affordance, in a plain padded column (no card).
 /// Wrapped in a [`GestureDetector`] whose long-press opens the message's
-/// context menu (task 20); the detector is transparent, so the reaction chips
+/// context menu; the detector is transparent, so the reaction chips
 /// and thread affordance inside still tap through.
 fn message_bubble(
     controller: &Arc<MessagesController>,
@@ -473,8 +472,8 @@ fn message_bubble(
         && let Some(user) = controller.user(msg.author_id)
     {
         // Sender + timestamp on one line: 13 (a combined meta line between the
-        // table's sender-15 and timestamp-12 roles — `Text` has no mixed-run
-        // weight/size, so it's one size, per RESEARCH.md's chat-row conventions).
+        // sizing table's sender-15 and timestamp-12 roles — `Text` has no
+        // mixed-run weight/size, so it's one size, per the chat-row conventions).
         lines.push(any(text(format!("{}  ·  9:41 AM", user.name)).size(13.0)));
     }
 
@@ -489,7 +488,7 @@ fn message_bubble(
         lines.push(thread_affordance(msg));
     }
 
-    // FLAT ROW (device-parity-round2 task R2 / BUG.md B2): no `filled_card`/
+    // FLAT ROW: no `filled_card`/
     // `elevated_card` wrapper — that card's hardcoded 16px inset was the size
     // driver the previous restyle failed to escape. A message is now a plain
     // padded content column (12h / 6v), Slack-flat. Own-vs-others is carried by
@@ -517,10 +516,10 @@ fn message_bubble(
 fn message_body(msg: &FeedMessage) -> AnyView<HuddleState> {
     match &msg.body {
         FeedBody::Text(t) => any(text(t.clone()).size(15.0)),
-        // Attachment tiles keep a boxed look but COMPACT (task R2 item 5):
+        // Attachment tiles keep a boxed look but COMPACT:
         // `filled_box(radius 8) + Padding(10)`, not a `filled_card`/
         // `outlined_card` (whose 16px inset would balloon the tile like it did
-        // the whole feed — BUG.md B2).
+        // the whole feed).
         FeedBody::Link { url, title } => any(filled_box(
             Padding(
                 EdgeInsets::all(10.0),
@@ -630,13 +629,14 @@ fn thread_affordance(msg: &FeedMessage) -> AnyView<HuddleState> {
     ))
 }
 
-/// A 40px circular initials avatar (chat-row avatar 36–40, RESEARCH.md table),
+/// A 40px circular initials avatar (chat-row avatar 36–40, per the sizing
+/// table),
 /// built off the direct-sized [`fill_box`] disc + the `SizedBox+Align` monogram
 /// idiom (`screens::home::channel_circle` / `profile.rs`) rather than a
-/// `filled_card`, whose 16px inset ballooned the old tile to ~62px (BUG.md B2).
+/// `filled_card`, whose 16px inset ballooned the old tile to ~62px.
 /// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap that opens
 /// the author's profile (`/user/:id`) — completing the "avatar tap anywhere"
-/// matrix row alongside Home/Search/Activity (task 22).
+/// matrix row alongside Home/Search/Activity.
 fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<HuddleState> {
     let initials = controller
         .user(author_id)
@@ -680,7 +680,7 @@ fn empty_feed_state() -> AnyView<HuddleState> {
 fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
     let spinner: AnyView<HuddleState> = match design {
         DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
-        // Glyph has no spinner chrome baseline yet (task 28 replaces this) —
+        // Glyph has no spinner chrome baseline yet —
         // falls through to the Material3 arm for now.
         DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
     };
@@ -702,7 +702,7 @@ fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
 fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
     let spinner: AnyView<HuddleState> = match design {
         DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
-        // Glyph has no spinner chrome baseline yet (task 28 replaces this) —
+        // Glyph has no spinner chrome baseline yet —
         // falls through to the Material3 arm for now.
         DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
     };
@@ -726,8 +726,8 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
 /// The loading skeleton: a column of flat grey placeholder bars. Each bar is a
 /// stretched [`fill_box`] (full row width, [`SKELETON_HEIGHT`] tall) in 6px
 /// vertical padding — a ~52px flat row, down from the old 92px `filled_card`
-/// row whose 16px inset was the size driver (device-parity-round2 task R2 /
-/// BUG.md B2). Under `CrossAxisAlignment::Stretch` the fill_box's nominal width
+/// row whose 16px inset was the size driver.
+/// Under `CrossAxisAlignment::Stretch` the fill_box's nominal width
 /// is overridden by the tight cross-axis constraint, so it fills the row.
 fn skeletons() -> AnyView<HuddleState> {
     let mut rows: Vec<AnyView<HuddleState>> = Vec::new();
@@ -757,8 +757,8 @@ fn composer_bar(
     let value = composer.get(); // tracked
     let has_text = !value.trim().is_empty();
 
-    // Always-visible attach + emoji affordance buttons (task 20 wired them; they
-    // were inert placeholders in task 12). Each opens its Phase D sheet.
+    // Always-visible attach + emoji affordance buttons (originally inert
+    // placeholders, now wired). Each opens its own sheet.
     let attach_btn = affordance_button(icons::ATTACH_FILE, move |_st: &mut HuddleState| {
         sheet_sig.set(FeedSheet::Attach);
     });
@@ -781,7 +781,7 @@ fn composer_bar(
     let send_ctrl = Arc::clone(controller);
     let send_icon = icon(icons::SEND).size(24.0);
     let send_btn: AnyView<HuddleState> = if has_text {
-        // press_pop adds the pressed-state scale dip (task 22 micro-interaction).
+        // press_pop adds the pressed-state scale dip.
         any(press_pop(frust::GestureDetector(send_icon).on_tap(
             move |_st: &mut HuddleState| {
                 let text = composer.get_untracked();
@@ -793,9 +793,9 @@ fn composer_bar(
         any(send_icon)
     };
 
-    // Rides above the on-screen keyboard (device-parity task 14, item 2): the
+    // Rides above the on-screen keyboard: the
     // composer sits at the window bottom under edge-to-edge + `adjustResize`
-    // (see `templates/app/android.tmpl` / `examples/huddle/android`'s task-08
+    // (see `templates/app/android.tmpl` / `examples/huddle/android`'s
     // wiring), so it must consume the raw IME occlusion itself rather than
     // relying on a window resize. `avoid_keyboard` pads by the live
     // `WindowInsets::view_insets.bottom` — the same raw inset `ui::sheet`'s
@@ -819,8 +819,8 @@ fn composer_bar(
 }
 
 /// One composer affordance icon button (attach / emoji): a 44×44 [`fill_box`]
-/// tile with a centered 24px icon (device-parity-round2 task R2 / BUG.md B2:
-/// 44 total, 24 glyph — down from the old ~72px `filled_card` button). Uses the
+/// tile with a centered 24px icon (44 total, 24 glyph — down from the old
+/// ~72px `filled_card` button). Uses the
 /// Home tile idiom (`fill_box` disc + `SizedBox+Align` centered glyph) so the
 /// tile is exactly [`COMPOSER_TILE`] rather than the card's 24-inset-driven
 /// size; a headless test still locates its rounded chrome (the fill_box).

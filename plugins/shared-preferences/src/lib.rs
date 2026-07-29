@@ -4,8 +4,9 @@
 //!
 //! # Charter: a platform plugin
 //!
-//! Per `docs/spec.md`'s plugin-system Design Decision 1, this is a
-//! **platform plugin**: it depends on [`frust_plugin`] plus FFI crates only,
+//! This is a
+//! **platform plugin** (see `docs/ARCHITECTURE.md`'s Module Structure): it
+//! depends on [`frust_plugin`] plus FFI crates only,
 //! and — like `frust-plugin` itself — carries **no other `frust-*`
 //! framework dependency**. An app adds this crate to its own `Cargo.toml`
 //! alongside `frust`, the same way a Flutter app adds a pub package; the
@@ -13,7 +14,7 @@
 //!
 //! # Value model
 //!
-//! Five value types (Design Decision 4 of the plugin-system plan — Flutter's
+//! Five value types (matching Flutter's
 //! own `shared_preferences` set): `bool`, `i64`, `f64`, `String`,
 //! `Vec<String>`. On-disk/on-platform-store Flutter compatibility is a
 //! **non-goal** — every backend uses its own storage encoding (documented
@@ -24,7 +25,7 @@
 //! Every platform store this wraps (`NSUserDefaults`, Android
 //! `SharedPreferences`, this crate's own file backend) is documented
 //! thread-safe with no main-thread requirement, and calls are cheap — so
-//! v1 exposes a plain synchronous API (Design Decision 3), matching the
+//! v1 exposes a plain synchronous API, matching the
 //! `frust-shell-common::theme_override` precedent. A reactive
 //! `use_preference`-style wrapper is a future facade-glue addition, not
 //! part of this crate.
@@ -48,7 +49,7 @@
 //! `SharedPreferences`) every key this crate writes is prefixed with
 //! [`KEY_PREFIX`] (`"frust."`) so a plugin key can never collide with —
 //! nor [`SharedPreferences::clear`] ever remove — another app/library's
-//! entry sharing the same store (Design Decision 4). [`SharedPreferences::keys`]
+//! entry sharing the same store. [`SharedPreferences::keys`]
 //! strips the prefix on return. The file backend owns its file exclusively
 //! and needs no such prefix.
 
@@ -124,8 +125,7 @@ pub(crate) enum PrefValue {
     StrList(Vec<String>),
 }
 
-/// One backend implementation ([`file`], and — once task 06 lands them —
-/// `android`/`apple`).
+/// One backend implementation ([`file`], `android`, or `apple`).
 ///
 /// Crate-private and deliberately minimal: [`SharedPreferences`]'s public
 /// API translates to/from [`PrefValue`] at this seam, so a backend only

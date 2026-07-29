@@ -1,8 +1,8 @@
-//! Glyph top AppBar — core (task 04, glyph-refinements): the compact
-//! terminal-native top bar per `research/glyph-appbar.html` sections 01/03/05,
+//! Glyph top AppBar — core: the compact
+//! terminal-native top bar per the Glyph design system's sections 01/03/05,
 //! retrieved 2026-07-22.
 //!
-//! # Anatomy (§01)
+//! # Anatomy
 //!
 //! A `52px` content bar of three zones — **leading** (a back arrow / brand mark
 //! / nothing, an app-supplied [`AnyView`]), **title** (a title string plus an
@@ -18,14 +18,14 @@
 //! bar. Content beneath a Glyph AppBar therefore never needs a top `SafeArea`
 //! edge — exactly Flutter's `AppBar` behavior.
 //!
-//! # Elevation (§01)
+//! # Elevation
 //!
 //! [`AppBarView::elevated`] is an app-fed flag (the app toggles it off its own
 //! `on_scroll`, the same way the HTML flips `.elevated` at `y > 4`): a
 //! transparent bottom border animates to `outline` + a drop shadow over
 //! `~250ms`, collapsing instantly under `reduce_motion`.
 //!
-//! # Title crossfade (§03)
+//! # Title crossfade
 //!
 //! When the title string changes across rebuilds, the bar stages the old and
 //! new runs with a directional shift (`±14px` x-offset + fade over `~220ms`),
@@ -34,7 +34,7 @@
 //! `PatternSwitcher`). Direction is forward (new slides in from the right) by
 //! default; [`AppBarView::title_direction`] flips it to back-nav.
 //!
-//! # Selection mode (§05)
+//! # Selection mode
 //!
 //! [`AppBarView::selection`]`(Some(`[`SelectionBar`]`))` morphs the bar into a
 //! selection face: the surface tints with a `primary_container`-family wash, the
@@ -77,7 +77,7 @@ use peniko::{Brush, Color};
 use crate::Timing;
 use crate::nav::transition::{TransitionDriver, make_driver};
 
-// ---- Metrics (`glyph-appbar.html` §01, retrieved 2026-07-22) ---------------
+// ---- Metrics (compact bar, retrieved 2026-07-22) ---------------------------
 
 /// Compact content-bar height, logical px (`.appbar{height:52px}`). The top
 /// inset is added on top of this (see the [module docs](self)).
@@ -95,24 +95,25 @@ const TITLE_SIZE: f32 = 13.0;
 const SUBTITLE_SIZE: f32 = 10.0;
 /// Selection count font size, logical px (`.sel-count{font-size:13px}`).
 const COUNT_SIZE: f32 = 13.0;
-/// Vertical gap between the title and subtitle rows, logical px (this task's
-/// own choice — a tight 1px separation matching the HTML's stacked rows).
+/// Vertical gap between the title and subtitle rows, logical px (an
+/// original, hand-picked value — a tight 1px separation matching the
+/// design system's stacked rows).
 const SUBTITLE_GAP: f64 = 1.0;
 
-/// Title-crossfade x-shift, logical px (`.bn-title-a{translateX(-14px)}`, §03).
+/// Title-crossfade x-shift, logical px (`.bn-title-a{translateX(-14px)}`).
 const TITLE_SHIFT: f64 = 14.0;
-/// Selection-morph y-shift, logical px (`.sel-normal{translateY(-6px)}`, §05).
+/// Selection-morph y-shift, logical px (`.sel-normal{translateY(-6px)}`).
 const SELECTION_SHIFT: f64 = 6.0;
 /// Selection wash alpha over the surface (`--amber-faint` = accent at 12%; here
 /// sourced from the `primary_container` fill role per the accent-role split).
 const SELECTION_WASH_ALPHA: f32 = 0.12;
 
-/// Elevation animation duration (`.appbar{transition:...box-shadow .25s}`, §01).
+/// Elevation animation duration (`.appbar{transition:...box-shadow .25s}`).
 const ELEVATION_DURATION: Duration = Duration::from_millis(250);
 /// Selection-morph animation duration (`durations.base` — the same 220ms the
 /// toast/dialog enter uses).
 const SELECTION_DURATION: Duration = Duration::from_millis(220);
-/// Title-crossfade duration (§03's "small directional shift", `durations.base`).
+/// Title-crossfade duration (the design system's "small directional shift", `durations.base`).
 const TITLE_DURATION: Duration = Duration::from_millis(220);
 /// Title-crossfade easing (the HTML's `--ease-out` cubic).
 const TITLE_CURVE: Curve = Curve::Cubic(0.16, 1.0, 0.3, 1.0);
@@ -121,12 +122,12 @@ const TITLE_CURVE: Curve = Curve::Cubic(0.16, 1.0, 0.3, 1.0);
 const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 
 /// Elevated drop-shadow recipe (`.appbar.elevated{box-shadow:0 6px 16px
-/// rgba(0,0,0,0.28)}`, §01).
+/// rgba(0,0,0,0.28)}`).
 const SHADOW_Y: f64 = 6.0;
 const SHADOW_BLUR: f64 = 16.0;
 const SHADOW_ALPHA: f32 = 0.28;
 
-// ---- Large-variant metrics (`glyph-appbar.html` §02, retrieved 2026-07-22) --
+// ---- Large-variant metrics (retrieved 2026-07-22) --------------------------
 
 /// Large-bar top padding at rest, logical px (`.appbar-large{padding-top:6px}`),
 /// interpolated `6→0` by collapse progress (`paddingTop = 6 - 6*progress`).
@@ -154,7 +155,7 @@ const META_HEIGHT: f64 = 20.0;
 /// Meta-row horizontal padding, logical px (`.ab-meta-row{padding:0 12px}`).
 const META_PAD_X: f64 = 12.0;
 
-// ---- Connection-banner metrics (`glyph-appbar.html` §06) --------------------
+// ---- Connection-banner metrics ------------------------------------------
 
 /// Banner strip height when fully open, logical px
 /// (`.conn-banner.show{max-height:40px}`).
@@ -288,7 +289,7 @@ fn mono_family() -> FontFamily {
 }
 
 /// The Glyph `display` (Space Mono) font stack the large-variant big title
-/// shapes against (`.ab-big-title{font-family:var(--font-display)}`, §02).
+/// shapes against (`.ab-big-title{font-family:var(--font-display)}`).
 fn display_family() -> FontFamily {
     FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace)
 }
@@ -346,7 +347,7 @@ fn title_timing(reduce_motion: bool) -> Timing {
     }
 }
 
-/// Direction the title crossfade shifts on a title change (§03).
+/// Direction the title crossfade shifts on a title change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TitleDirection {
     /// The new title slides in from the right (default, forward navigation).
@@ -414,7 +415,7 @@ struct TitleStage {
 /// A view-held selection callback (`Fn(&mut State)`).
 type OnClose<State> = Rc<dyn Fn(&mut State)>;
 
-/// The selection-mode configuration (§05): a count, a close callback, and the
+/// The selection-mode configuration: a count, a close callback, and the
 /// bulk-action views that replace the normal trailing actions.
 pub struct SelectionBar<State: 'static> {
     count: usize,
@@ -450,7 +451,7 @@ fn count_text(count: usize) -> String {
     format!("{count} selected")
 }
 
-/// Which tint a [`BannerSpec`] paints (§06): the connection-loss warning strip
+/// Which tint a [`BannerSpec`] paints: the connection-loss warning strip
 /// or the `recovered` success flash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BannerVariant {
@@ -461,7 +462,7 @@ pub enum BannerVariant {
     Success,
 }
 
-/// A connection-loss banner strip (§06): a caller-supplied `text` line under a
+/// A connection-loss banner strip: a caller-supplied `text` line under a
 /// `variant` tint. The countdown/text content is app-driven (re-rendered per
 /// rebuild); auto-dismiss timing is app-side, never baked in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -478,7 +479,7 @@ pub fn banner_spec(text: impl Into<String>, variant: BannerVariant) -> BannerSpe
     }
 }
 
-/// The large scroll-collapse configuration (§02): a `big_title` shown at 19px
+/// The large scroll-collapse configuration: a `big_title` shown at 19px
 /// display font over a caller-supplied `meta` row (heartbeat/latency
 /// compositions come from the app). Collapse is driven by
 /// [`AppBarView::collapse_progress`], not this struct.
@@ -564,22 +565,22 @@ impl<State: 'static> AppBarView<State> {
         self
     }
 
-    /// Set the title-crossfade direction for the next title change (§03).
+    /// Set the title-crossfade direction for the next title change.
     pub fn title_direction(mut self, direction: TitleDirection) -> Self {
         self.title_direction = direction;
         self
     }
 
-    /// Enter/leave selection mode (§05). `Some` morphs the bar into its
+    /// Enter/leave selection mode. `Some` morphs the bar into its
     /// selection face; `None` (the default) is the normal face.
     pub fn selection(mut self, selection: Option<SelectionBar<State>>) -> Self {
         self.selection = selection;
         self
     }
 
-    /// Enable the large scroll-collapse variant (§02): a big display-font title
+    /// Enable the large scroll-collapse variant: a big display-font title
     /// over an app-supplied meta row. Drive its collapse with
-    /// [`Self::collapse_progress`]. Selection mode (§05) takes precedence — a
+    /// [`Self::collapse_progress`]. Selection mode takes precedence — a
     /// bar that is both `large` and in `selection` renders the compact
     /// selection face.
     pub fn large(mut self, config: LargeConfig<State>) -> Self {
@@ -587,7 +588,7 @@ impl<State: 'static> AppBarView<State> {
         self
     }
 
-    /// Set the large variant's collapse progress `0.0..=1.0` (§02). The app
+    /// Set the large variant's collapse progress `0.0..=1.0`. The app
     /// computes this from its own scroll offset (`min(1, offset/60)` in the
     /// research HTML); the bar interpolates its padding, big-title size, and
     /// meta-row height/fade from it. No-op unless [`Self::large`] is set.
@@ -596,8 +597,8 @@ impl<State: 'static> AppBarView<State> {
         self
     }
 
-    /// Attach (or clear) the connection-loss banner strip beneath the bar
-    /// (§06). `Some` animates the strip open across rebuilds; `None` animates it
+    /// Attach (or clear) the connection-loss banner strip beneath the bar.
+    /// `Some` animates the strip open across rebuilds; `None` animates it
     /// closed. The countdown/text content is app-driven; auto-dismiss timing is
     /// app-side, never baked in.
     pub fn banner(mut self, banner: Option<BannerSpec>) -> Self {
@@ -640,7 +641,7 @@ pub struct AppBarWidget {
     on_close: Option<crate::ErasedCallback>,
     title_direction: TitleDirection,
     elevated_target: bool,
-    // --- large variant (§02) ---
+    // --- large variant ---
     /// Whether the current view carries a [`LargeConfig`] (its layout is only
     /// *active* when not also in selection mode — see `large_active`).
     large_present: bool,
@@ -650,7 +651,7 @@ pub struct AppBarWidget {
     meta: Option<ChildPod>,
     /// Input-driven collapse progress `0.0..=1.0` (not animated internally).
     collapse_progress: f64,
-    // --- connection banner (§06) ---
+    // --- connection banner ---
     banner_present: bool,
     banner_run: ShapedRun,
     banner_text: Option<String>,
@@ -778,7 +779,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
         let mut flags = ChangeFlags::NONE;
         element.title_direction = self.title_direction;
 
-        // Title change → stage a directional crossfade (§03).
+        // Title change → stage a directional crossfade.
         if prev.title != self.title {
             element.title_stage = Some(TitleStage {
                 old: ShapedRun::new(prev.title.clone()),
@@ -858,7 +859,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
                 .map(|s| crate::erase_callback(&s.on_close));
         }
 
-        // Large variant reconcile (§02). Collapse is input-driven — a progress
+        // Large variant reconcile. Collapse is input-driven — a progress
         // change relayouts via dirty flags (no internal animation controller),
         // so mark LAYOUT here rather than driving a paint-time timeline.
         element.collapse_progress = self.collapse_progress;
@@ -893,7 +894,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
         }
         element.large_present = self.large.is_some();
 
-        // Connection banner reconcile (§06). A spec change (presence or
+        // Connection banner reconcile. A spec change (presence or
         // text/variant) restages the show/hide animation; banner height is
         // layout-bound, so its in-flight animation calls `request_layout` from
         // paint (see `AppBarWidget::advance`/`paint`). Clearing to `None` keeps
@@ -1026,8 +1027,8 @@ impl Widget for AppBarWidget {
         self.top_inset = top_inset;
 
         // The bar's own height, laid out either as the large scroll-collapse
-        // variant (§02) or the compact three-zone bar (§01). Selection mode
-        // (§05) takes precedence over `large`.
+        // variant or the compact three-zone bar. Selection mode
+        // takes precedence over `large`.
         let large_active = self.large_present && !self.selection_present;
         let bar_height = if large_active {
             self.layout_large(ctx, &colors, width, top_inset)
@@ -1036,7 +1037,7 @@ impl Widget for AppBarWidget {
         };
         self.bar_height = bar_height;
 
-        // Connection banner strip (§06) beneath the bar. Its height tracks the
+        // Connection banner strip beneath the bar. Its height tracks the
         // eased open/close progress — layout-bound, so paint requests relayout
         // while it animates.
         let banner_height = self.layout_banner(ctx, banner_ink, width, bar_height);
@@ -1060,9 +1061,9 @@ impl Widget for AppBarWidget {
 }
 
 impl AppBarWidget {
-    /// Lay out the compact three-zone bar (§01), returning its total height
-    /// (`top_inset + BAR_HEIGHT`). Unchanged from task 04 — factored out of
-    /// `Widget::layout` so the large variant can slot in beside it.
+    /// Lay out the compact three-zone bar, returning its total height
+    /// (`top_inset + BAR_HEIGHT`). Unchanged from the original bar — factored
+    /// out of `Widget::layout` so the large variant can slot in beside it.
     fn layout_compact(
         &mut self,
         ctx: &mut LayoutCtx,
@@ -1144,7 +1145,7 @@ impl AppBarWidget {
         top_inset + BAR_HEIGHT
     }
 
-    /// Lay out the large scroll-collapse variant (§02), returning its total
+    /// Lay out the large scroll-collapse variant, returning its total
     /// height. Geometry interpolates on `collapse_progress`: paddings `6→0` /
     /// `10→0`, big-title size `19→13`, big-title bottom padding `2→0`, meta-row
     /// height `20→0` + fade. Row 1 (leading + trailing actions) reuses the
@@ -1218,7 +1219,7 @@ impl AppBarWidget {
         bt_bottom + meta_h + pad_bottom
     }
 
-    /// Lay out the connection banner strip (§06) beneath the bar, returning its
+    /// Lay out the connection banner strip beneath the bar, returning its
     /// eased height (`0` when fully closed and absent). The strip's box and the
     /// centered text position are cached in local coordinates.
     fn layout_banner(
@@ -1294,7 +1295,7 @@ impl AppBarWidget {
         }
 
         if large_active {
-            // Large variant (§02): row-1 children (no selection morph fade), the
+            // Large variant: row-1 children (no selection morph fade), the
             // big display title, and the collapse-faded meta row.
             for pod in &mut self.interactive {
                 pod.paint_child(ctx, scene);
@@ -1319,7 +1320,7 @@ impl AppBarWidget {
                 }
             }
         } else {
-            // Compact face (§01/§03/§05).
+            // Compact face.
             // Interactive children (current face), faded by the morph progress.
             let child_alpha = if self.selection_present {
                 self.sel_progress
@@ -1390,7 +1391,7 @@ impl AppBarWidget {
             }
         }
 
-        // Connection banner strip (§06) beneath the bar.
+        // Connection banner strip beneath the bar.
         self.paint_banner(origin, banner_colors, scene);
 
         // The banner is height-animated (layout-bound): while it animates, ask
@@ -1403,7 +1404,7 @@ impl AppBarWidget {
         }
     }
 
-    /// Paint the connection banner strip (§06): a `variant`-tinted fill, a bottom
+    /// Paint the connection banner strip: a `variant`-tinted fill, a bottom
     /// hairline border, and the app-supplied text, all faded together by
     /// `banner_progress`. No-op when the strip is fully closed.
     fn paint_banner(
@@ -1538,7 +1539,7 @@ impl AppBarWidget {
                     }
                 }
                 // The connection banner text joins the container's children while
-                // shown (§06).
+                // shown.
                 if banner_present && let Some(text) = &banner_text {
                     ctx.push_node(Role::Label, |node| node.set_label(text.as_str()));
                 }
@@ -1549,7 +1550,7 @@ impl AppBarWidget {
 
 impl AppBarWidget {
     /// Paint the title zone's normal-face content: either the resting title run
-    /// or the staged old/new crossfade pair (§03).
+    /// or the staged old/new crossfade pair.
     fn paint_title(&mut self, origin: Point, scene: &mut dyn PaintScene) {
         let base = Point::new(origin.x + self.title_pos.x, origin.y + self.title_pos.y);
         match &self.title_stage {
@@ -1707,7 +1708,7 @@ mod tests {
         (rec, animating, pctx.needs_layout())
     }
 
-    // -- Acceptance 1: top-inset consumption (Flutter parity) ---------------
+    // -- Top-inset consumption (Flutter parity) -----------------------------
 
     #[test]
     fn layout_consumes_top_inset_and_offsets_content_below_it() {
@@ -1739,7 +1740,7 @@ mod tests {
         assert!(w.title_pos.y >= 24.0, "title below the inset");
     }
 
-    // -- Acceptance 2: title crossfade staging ------------------------------
+    // -- Title crossfade staging ---------------------------------------------
 
     #[test]
     fn title_change_stages_a_crossfade_and_requests_frames_while_animating() {
@@ -1780,7 +1781,7 @@ mod tests {
         assert!(back_new < 0.0, "back-nav enters from the left");
     }
 
-    // -- Acceptance 3: selection mode morph + close ------------------------
+    // -- Selection mode morph + close ----------------------------------------
 
     #[test]
     fn selection_swaps_the_face_and_close_fires_on_up_inside_only() {
@@ -1856,7 +1857,7 @@ mod tests {
         );
     }
 
-    // -- Acceptance 4: elevation animation + reduce_motion ------------------
+    // -- Elevation animation + reduce_motion ----------------------------------
 
     #[test]
     fn elevation_animates_border_and_shadow_over_time() {
@@ -1925,7 +1926,7 @@ mod tests {
         );
     }
 
-    // -- Acceptance 5: semantics -------------------------------------------
+    // -- Semantics -------------------------------------------------------------
 
     #[test]
     fn semantics_is_a_titlebar_labelled_with_the_title_and_ordered_children() {
@@ -1979,7 +1980,7 @@ mod tests {
         );
     }
 
-    // -- Acceptance 1 (task 13): large scroll-collapse variant (§02) ---------
+    // -- Large scroll-collapse variant ---------------------------------------
 
     fn large_view(progress: f64) -> AppBarView<()> {
         app_bar("host")
@@ -2043,7 +2044,7 @@ mod tests {
         assert_eq!(w.bar_height, BAR_HEIGHT);
     }
 
-    // -- Acceptance 2 (task 13): connection banner open/close (§06) ----------
+    // -- Connection banner open/close ----------------------------------------
 
     #[test]
     fn banner_none_to_some_animates_open_requesting_layout_while_in_flight() {
@@ -2169,7 +2170,7 @@ mod tests {
         );
     }
 
-    // -- Acceptance 4 (task 13): reduce_motion collapses the banner ----------
+    // -- reduce_motion collapses the banner ----------------------------------
 
     #[test]
     fn reduce_motion_snaps_the_banner_open() {
@@ -2188,7 +2189,7 @@ mod tests {
         assert!(!w.banner_animating);
     }
 
-    // -- Semantics (task 13): meta row + banner join the container ----------
+    // -- Semantics: meta row + banner join the container ---------------------
 
     #[test]
     fn large_and_banner_semantics_join_the_titlebar_children() {

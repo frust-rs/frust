@@ -1,7 +1,6 @@
-//! The navigator core (Phase 6b, task 02): a retained page stack with imperative
+//! The navigator core: a retained page stack with imperative
 //! push/pop/replace, per-page result callbacks, opaque-page paint culling, and
-//! test-pinned capture/focus/IME page-switch semantics. Instant switches only —
-//! transitions are task 03.
+//! test-pinned capture/focus/IME page-switch semantics.
 //!
 //! # Shape
 //!
@@ -68,7 +67,7 @@ use super::transition::{
 
 /// Left-edge activation zone width for the interactive pop-swipe, in logical px.
 ///
-/// **Community-approximate** (phase-6b refuted-claims ledger #2): UIKit's
+/// **Community-approximate**: UIKit's
 /// `interactivePopGestureRecognizer` edge zone is not a published constant;
 /// ~20dp is the value the community-reverse-engineered reimplementations
 /// converge on. A `Down` at `x <= EDGE_SWIPE_ZONE_DP` (with a poppable stack)
@@ -143,12 +142,12 @@ impl std::fmt::Debug for PopResult {
 }
 
 /// How a page participates in a back press routed through
-/// [`NavigatorController::request_back`] (Android hardware/gesture back, task
-/// 08's facade wiring). A page declares its policy when pushed via
+/// [`NavigatorController::request_back`] (Android hardware/gesture back, via
+/// the facade's back-press wiring). A page declares its policy when pushed via
 /// [`PushOptions::back`]; every existing push defaults to [`Pop`](Self::Pop).
 ///
 /// This is *internal* routing vocabulary — the user-facing overlay builder is
-/// `dismissable(bool)` (tasks 11/12/16), which maps `true → DismissAnimated` and
+/// `dismissable(bool)`, which maps `true → DismissAnimated` and
 /// `false → Veto` when the overlay pushes its transparent page.
 ///
 /// # The DismissAnimated observation seam
@@ -273,7 +272,7 @@ enum NavOp<State: 'static> {
     /// popped page's pusher-registered callback. A pop *reverses* the popped
     /// page's own stored transition (no override slot).
     Pop { result: PopResult },
-    /// Route a back press through the top page's [`BackPolicy`] (task 02):
+    /// Route a back press through the top page's [`BackPolicy`]:
     /// [`Pop`](BackPolicy::Pop) pops, [`DismissAnimated`](BackPolicy::DismissAnimated)
     /// fires the page's dismiss signal, [`Veto`](BackPolicy::Veto) consumes it.
     RequestBack,
@@ -296,8 +295,8 @@ enum NavOp<State: 'static> {
 pub struct NavigatorController<State: 'static> {
     ops: Rc<RefCell<Vec<NavOp<State>>>>,
     /// The current page-stack **depth**, published by the attached
-    /// [`NavigatorWidget`] on every `build`/`rebuild`/`apply_ops` (device-parity
-    /// task 05). The widget owns the authoritative stack; this shared cell is
+    /// [`NavigatorWidget`] on every `build`/`rebuild`/`apply_ops`. The widget
+    /// owns the authoritative stack; this shared cell is
     /// the read seam [`depth`](Self::depth)/[`can_pop`](Self::can_pop) expose so
     /// the facade's back handler (and app code) can ask "would a pop do
     /// anything?" without reaching into the widget. `0` until a widget attaches.
@@ -307,11 +306,11 @@ pub struct NavigatorController<State: 'static> {
     /// note in `frust-reactive::back`).
     depth: Rc<Cell<usize>>,
     /// Whether a back press should be *claimed* by the navigator ahead-of-time
-    /// (predictive-back parity, task 02) — published by the attached
+    /// (predictive-back parity) — published by the attached
     /// [`NavigatorWidget`] alongside [`depth`](Self::depth). `true` iff the stack
     /// is poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
     /// [`Pop`](BackPolicy::Pop) (a dismissable/veto overlay claims back even at
-    /// the root). This is the signal task 08's facade back handler computes
+    /// the root). This is the signal the facade's back handler computes
     /// `handles_back` from — it differs from [`can_pop`](Self::can_pop) exactly
     /// in the depth-1-with-overlay case, where a raw pop would do nothing but the
     /// overlay still owns the press. Same plain `Rc<Cell<_>>` (reactive-free)
@@ -347,7 +346,7 @@ impl<State: 'static> NavigatorController<State> {
 
     /// The current page-stack depth of the navigator this controller drives, as
     /// last published by that navigator's `build`/`rebuild`, or `0` if no
-    /// navigator is attached yet (device-parity task 05).
+    /// navigator is attached yet.
     ///
     /// **Advisory**: this reflects the depth at the last rebuild, so a query
     /// racing a same-frame stack change sees the previous value (the
@@ -360,7 +359,7 @@ impl<State: 'static> NavigatorController<State> {
     /// Whether a [`pop`](Self::pop) would actually remove a page — `true` iff
     /// the navigator has more than one page ([`depth`](Self::depth)` > 1`).
     ///
-    /// **Advisory**, for exactly the Android back contract (RESEARCH.md): the
+    /// **Advisory**, for exactly the Android back contract: the
     /// facade's back handler reads this to decide whether a back press pops or
     /// bubbles to the platform, and publishes it as
     /// `frust-reactive::set_handles_back`. The authoritative guard stays the
@@ -372,9 +371,9 @@ impl<State: 'static> NavigatorController<State> {
     }
 
     /// Whether the navigator claims the next back press ahead-of-time
-    /// (predictive-back parity, task 02) — `true` iff the stack is poppable
+    /// (predictive-back parity) — `true` iff the stack is poppable
     /// **or** the top page declares a non-[`Pop`](BackPolicy::Pop) policy (a
-    /// dismissable/veto overlay). Task 08's facade back handler reads this
+    /// dismissable/veto overlay). The facade's back handler reads this
     /// (in preference to [`can_pop`](Self::can_pop)) to compute the shell's
     /// `handles_back`, so a dismissable overlay at the root still consumes back
     /// rather than exiting the app.
@@ -460,7 +459,7 @@ impl<State: 'static> NavigatorController<State> {
     /// carrying a back-press [`BackPolicy`] (and, for a
     /// [`DismissAnimated`](BackPolicy::DismissAnimated) overlay, its dismiss
     /// signal) alongside opacity/transition/result. The dismissable-overlay
-    /// helpers (tasks 11/12/16) push through this; every other `push*` method
+    /// helpers push through this; every other `push*` method
     /// pushes with [`BackPolicy::Pop`].
     pub fn push_with_options(
         &self,
@@ -513,8 +512,8 @@ impl<State: 'static> NavigatorController<State> {
         self.enqueue(NavOp::Pop { result });
     }
 
-    /// Route a back press through the top page's [`BackPolicy`] (task 02, the
-    /// entry task 08's facade back handler drives instead of a bare
+    /// Route a back press through the top page's [`BackPolicy`] (the
+    /// entry the facade's back handler drives instead of a bare
     /// [`pop`](Self::pop)):
     ///
     /// - [`Pop`](BackPolicy::Pop) → a normal pop (transitions preserved; a safe
@@ -571,10 +570,9 @@ pub struct NavigatorView<State: 'static> {
     controller: NavigatorController<State>,
     initial: PageBuilder<State>,
     /// The transition applied to a push/replace that supplies no per-op override.
-    /// Defaults to [`TransitionSpec::NONE`] (instant switches — the task-02
-    /// behavior).
+    /// Defaults to [`TransitionSpec::NONE`] (instant switches).
     default_transition: TransitionSpec,
-    /// Explicit override for the interactive edge-swipe back gesture (task 05).
+    /// Explicit override for the interactive edge-swipe back gesture.
     /// `None` derives it from the default transition preset — on for
     /// [`PageTransition::IosPush`], off otherwise.
     pop_swipe: Option<bool>,
@@ -589,8 +587,8 @@ impl<State: 'static> NavigatorView<State> {
         self
     }
 
-    /// Explicitly enable or disable the interactive edge-swipe back gesture
-    /// (task 05), overriding the preset-derived default (on for
+    /// Explicitly enable or disable the interactive edge-swipe back gesture,
+    /// overriding the preset-derived default (on for
     /// [`PageTransition::IosPush`], off otherwise). The gesture pops the top page
     /// with a left-edge drag: drag progress reverses the popped page's transition,
     /// and release completes or cancels the pop by progress/velocity.
@@ -636,8 +634,8 @@ struct PageEntry<State: 'static> {
     /// backwards, Flutter-parity: a route carries its transition).
     transition: TransitionSpec,
     /// How a back press routed through
-    /// [`request_back`](NavigatorController::request_back) treats this page
-    /// (task 02). Pushed pages set it via [`PushOptions::back`]; the root and
+    /// [`request_back`](NavigatorController::request_back) treats this page.
+    /// Pushed pages set it via [`PushOptions::back`]; the root and
     /// replaced pages default to [`BackPolicy::Pop`].
     back: BackPolicy,
     /// The shared generation cell a
@@ -668,8 +666,8 @@ struct ActiveTransition<State: 'static> {
     /// Set by paint when the driver reaches rest; the next rebuild finalizes the
     /// transition (tears down `stashed`, resumes culling).
     settled: bool,
-    /// This transition is being driven by an interactive edge-swipe (task 05):
-    /// its progress is `Held` by the drag, then settled on release. An
+    /// This transition is being driven by an interactive edge-swipe: its
+    /// progress is `Held` by the drag, then settled on release. An
     /// interactive pop stashed the top page *without* queuing its result
     /// callback (a swipe may still cancel), so finalize does the completion
     /// bookkeeping the [`NavOp::Pop`] path did eagerly.
@@ -678,7 +676,7 @@ struct ActiveTransition<State: 'static> {
     /// pushes the stashed page back onto the stack instead of tearing it down (the
     /// page was never really popped). See [`NavigatorWidget::finalize_transition`].
     restore_on_finalize: bool,
-    /// Shared-element ("hero") state (task 07). Page-local rects of the tagged
+    /// Shared-element ("hero") state. Page-local rects of the tagged
     /// heroes discovered on the **leaving** page during the previous transition
     /// paint, keyed by tag. `layout`/`paint` capture these each frame; the next
     /// frame reads them to place the morph overlay. Empty until the first paint
@@ -705,7 +703,7 @@ struct ActiveTransition<State: 'static> {
     pending_spec: Option<TransitionSpec>,
 }
 
-/// The interactive edge-swipe gesture state (task 05). Mirrors
+/// The interactive edge-swipe gesture state. Mirrors
 /// [`ScrollWidget`](crate::ScrollWidget)'s arm/steal model: `armed` on a
 /// left-edge `Down`, promoted to `active` (an interactive pop in flight) once a
 /// decisive horizontal drag steals the gesture from the page.
@@ -746,35 +744,35 @@ pub struct NavigatorWidget<State: 'static> {
     /// The navigator's default transition (per-op overrides win). Refreshed from
     /// the view on rebuild so an app can change it live.
     default_transition: TransitionSpec,
-    /// The single in-flight transition, if any (task 03). `None` between
+    /// The single in-flight transition, if any. `None` between
     /// transitions — the common case, where paint/layout cull normally.
     transition: Option<ActiveTransition<State>>,
-    /// Whether the interactive edge-swipe back gesture is enabled (task 05).
+    /// Whether the interactive edge-swipe back gesture is enabled.
     /// Resolved from the view each rebuild — default-on for the iOS-push preset,
     /// or explicitly via [`NavigatorView::pop_swipe`].
     pop_swipe_enabled: bool,
-    /// The in-progress edge-swipe gesture state (task 05).
+    /// The in-progress edge-swipe gesture state.
     edge: EdgeSwipe,
     /// The most recent frame time seen during [`paint`](NavigatorWidget::paint),
     /// reused as the event-pass timestamp for velocity tracking — the event pass
-    /// carries no clock of its own (spec §8 provides time only at paint). The
+    /// carries no clock of its own (time is provided only at paint). The
     /// same seam [`ScrollWidget`](crate::ScrollWidget) uses.
     last_frame_time: FrameTime,
     /// The shared depth slot published to the [`NavigatorController`] every
-    /// `build`/`rebuild` (device-parity task 05). A clone of the controller's
+    /// `build`/`rebuild`. A clone of the controller's
     /// `Rc<Cell<usize>>`, updated by [`publish_state`](Self::publish_state)
     /// after every stack mutation so `NavigatorController::can_pop` reads the
     /// authoritative page count.
     depth: Rc<Cell<usize>>,
     /// The shared back-interest slot published to the [`NavigatorController`]
-    /// alongside `depth` (task 02). A clone of the controller's
+    /// alongside `depth`. A clone of the controller's
     /// `Rc<Cell<bool>>`, recomputed by [`publish_state`](Self::publish_state)
     /// from the current depth + top-page [`BackPolicy`] after every stack
     /// mutation so `NavigatorController::back_interest` is authoritative.
     back_interest: Rc<Cell<bool>>,
 }
 
-/// Whether the navigator should claim a back press ahead-of-time (task 02): the
+/// Whether the navigator should claim a back press ahead-of-time: the
 /// stack is poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
 /// [`Pop`](BackPolicy::Pop). Pure so it is unit-testable directly, including the
 /// depth-1-with-overlay case a raw `can_pop` cannot express.
@@ -784,8 +782,7 @@ fn compute_back_interest(depth: usize, top_policy: BackPolicy) -> bool {
 
 impl<State: 'static> NavigatorWidget<State> {
     /// Publish the current page-stack depth **and** back-interest to the shared
-    /// controller slots (task 02, extending device-parity task 05's depth
-    /// publish). Called after every stack mutation — at the end of `apply_ops`,
+    /// controller slots. Called after every stack mutation — at the end of `apply_ops`,
     /// and at the end of `build`/`rebuild` (so a transition finalize that changed
     /// the stack is reflected too) — so `NavigatorController::depth`/`can_pop`/
     /// `back_interest` read authoritative values.
@@ -912,10 +909,11 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
-    /// Task 05 seam: pin the active transition's progress to `p` (an edge-swipe
-    /// drag holds it here between frames). No-op if no transition is active.
+    /// Interactive-edge-swipe seam: pin the active transition's progress to `p`
+    /// (an edge-swipe drag holds it here between frames). No-op if no
+    /// transition is active.
     ///
-    /// The gesture that drives this lives in task 05; the navigator supplies the
+    /// The gesture that drives this lives in `event`; the navigator supplies the
     /// held-progress driver state a swipe manipulates.
     pub fn set_transition_progress(&mut self, p: f64) {
         if let Some(t) = self.transition.as_mut() {
@@ -924,12 +922,14 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
-    /// Task 05 seam: release the active transition into a spring settle toward
-    /// `1.0` (non-negative `velocity`) or `0.0` (negative). No-op if no transition.
+    /// Interactive-edge-swipe seam: release the active transition into a spring
+    /// settle toward `1.0` (non-negative `velocity`) or `0.0` (negative). No-op
+    /// if no transition.
     ///
     /// Note: a settle toward `0.0` runs the *visual* reversal, but restoring the
-    /// stack (un-popping the retained page on a cancelled pop) is task 05's
-    /// responsibility — this seam only drives the progress driver.
+    /// stack (un-popping the retained page on a cancelled pop) is the
+    /// finalize path's responsibility — this seam only drives the progress
+    /// driver.
     pub fn settle_transition(&mut self, velocity: f64) {
         if let Some(t) = self.transition.as_mut() {
             let from = t.driver.value();
@@ -946,7 +946,7 @@ impl<State: 'static> NavigatorWidget<State> {
         self.last_frame_time.as_secs_f64() * 1000.0
     }
 
-    /// Steal the gesture from the top page into an interactive pop (task 05).
+    /// Steal the gesture from the top page into an interactive pop.
     ///
     /// Mirrors the [`NavOp::Pop`] animated-pop structure but built entirely in the
     /// event pass (no `BuildCtx`): the top page's in-flight capture is
@@ -1013,7 +1013,7 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
-    /// Drive an in-progress interactive edge-swipe from a pointer event (task 05):
+    /// Drive an in-progress interactive edge-swipe from a pointer event:
     /// `Move` maps drag-x to held progress; `Up` settles by progress/velocity;
     /// `Cancel` (system gesture steal) cancels the pop with no state mutation.
     ///
@@ -1048,7 +1048,7 @@ impl<State: 'static> NavigatorWidget<State> {
                     .map(|t| t.driver.value())
                     .unwrap_or(0.0);
                 // Complete if dragged past the commit point, or flicked rightward
-                // fast enough — the low-progress high-velocity case (criterion 1e).
+                // fast enough — the low-progress high-velocity case.
                 let complete =
                     progress > EDGE_SWIPE_COMMIT_PROGRESS || finger_v > EDGE_SWIPE_FLING_VELOCITY;
                 // The spring drives *progress*, so convert the px/s finger velocity
@@ -1095,7 +1095,7 @@ impl<State: 'static> NavigatorWidget<State> {
         if self.edge.active {
             return self.drive_edge_swipe(ctx, event, t_ms);
         }
-        // Input-blocking contract (task 03): while a non-interactive transition is
+        // Input-blocking contract: while a non-interactive transition is
         // in flight, suppress ALL routing to pages.
         if self.transition.is_some() {
             return EventResult::Ignored;
@@ -1203,7 +1203,7 @@ impl<State: 'static> NavigatorWidget<State> {
         flags
     }
 
-    /// Route a back press through the top page's [`BackPolicy`] (task 02):
+    /// Route a back press through the top page's [`BackPolicy`]:
     ///
     /// - [`Pop`](BackPolicy::Pop) → a normal [`apply_pop`](Self::apply_pop) (the
     ///   existing path, transitions preserved; a no-op at the root);
@@ -1336,7 +1336,7 @@ impl<State: 'static> NavigatorWidget<State> {
         }
         // Publish the (possibly changed) stack depth + back-interest so
         // `NavigatorController::can_pop`/`back_interest` reflect this batch of
-        // ops (device-parity task 05 / back-request task 02).
+        // ops.
         self.publish_state();
         flags
     }
@@ -1625,7 +1625,7 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 /// `push_transform` scale (about the page's paint-area centre) and a `push_layer`
 /// opacity when either differs from the identity — strict LIFO (transform outer,
 /// opacity inner). The scale realises M3 fade-through's `0.92 → 1.0` incoming
-/// scale-up (research §7.3, [`Layer::scale`](super::transition::Layer::scale));
+/// scale-up ([`Layer::scale`](super::transition::Layer::scale));
 /// every other preset leaves `scale == 1.0`, so the transform is skipped. Mirrors
 /// `motion::switcher`'s `paint_staged_child`.
 fn paint_page_layer(
@@ -1692,7 +1692,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         }
         // Publish the initial (post-any-queued-ops) depth + back-interest so
         // `can_pop`/`back_interest` are authoritative from the first frame, even
-        // if no ops ran (device-parity task 05 / back-request task 02).
+        // if no ops ran.
         widget.publish_state();
         widget
     }
@@ -1734,10 +1734,9 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             entry.view = next_view;
         }
         // Republish depth + back-interest at rebuild time — the rebuild-time
-        // refresh contract the back handler relies on (device-parity task 05 /
-        // back-request task 02). A settled-transition finalize (step 1b) above
-        // can change the stack, so publish once more here after `apply_ops`
-        // already did.
+        // refresh contract the back handler relies on. A settled-transition
+        // finalize (step 1b) above can change the stack, so publish once more
+        // here after `apply_ops` already did.
         element.publish_state();
         flags
     }
@@ -1972,7 +1971,7 @@ mod tests {
         })
     }
 
-    // --- Criterion 1: retained per-page widget state across push → pop. ---
+    // --- Retained per-page widget state across push → pop. ---
 
     #[test]
     fn push_pop_preserves_page_widget_state() {
@@ -2020,8 +2019,8 @@ mod tests {
         assert_eq!(observed.get(), 1, "page A's widget state survived push→pop");
     }
 
-    // --- Device-parity task 05: the controller's depth slot tracks the stack
-    //     through rebuilds, and `can_pop` mirrors it. ---
+    // --- The controller's depth slot tracks the stack through rebuilds, and
+    //     `can_pop` mirrors it. ---
 
     #[test]
     fn controller_depth_and_can_pop_track_the_stack() {
@@ -2079,7 +2078,7 @@ mod tests {
         assert!(!controller.can_pop());
     }
 
-    // --- Criterion 2: a pop result reaches the on_result callback with state. ---
+    // --- A pop result reaches the on_result callback with state. ---
 
     #[derive(Default)]
     struct ResultState {
@@ -2181,7 +2180,7 @@ mod tests {
         assert_eq!(state.received, Some(7));
     }
 
-    // --- Criterion 3: opaque-page paint culling. ---
+    // --- Opaque-page paint culling. ---
 
     fn drive_paint(root: &mut RenderRoot<(), NavigatorView<()>>) -> Vec<(Point, Size)> {
         root.layout(Size::new(100.0, 100.0));
@@ -2240,7 +2239,7 @@ mod tests {
         );
     }
 
-    // --- Criterion 4a: a captured drag on the top page is cancelled on push. ---
+    // --- A captured drag on the top page is cancelled on push. ---
 
     struct CaptureLeaf {
         cancelled: Rc<Cell<bool>>,
@@ -2330,7 +2329,7 @@ mod tests {
         );
     }
 
-    // --- Criterion 4b: a focused field's IME surface is cleared on push. ---
+    // --- A focused field's IME surface is cleared on push. ---
 
     struct EditableLeaf;
     struct EditableLeafWidget;
@@ -2417,7 +2416,7 @@ mod tests {
         assert!(ime.editing.text.is_empty());
     }
 
-    // --- Criterion 5 / replace: an example-style stack driven through the facade
+    // --- An example-style stack driven through the facade
     //     API (counter pattern), proving replace swaps the top in place. ---
 
     #[test]
@@ -2461,10 +2460,10 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Task 02: back-request routing + per-page dismiss policy.
+    // Back-request routing + per-page dismiss policy.
     // ---------------------------------------------------------------------
 
-    // --- Criterion 4 (pure): back_interest is depth>1 OR a non-Pop top policy.
+    // --- Pure: back_interest is depth>1 OR a non-Pop top policy.
     //     Tested directly so the depth-1-with-overlay case (which `can_pop`
     //     cannot express) is covered without needing a depth-1 overlay through
     //     the push API. ---
@@ -2481,7 +2480,7 @@ mod tests {
         assert!(compute_back_interest(1, BackPolicy::DismissAnimated));
     }
 
-    // --- Criterion 4 (integration): the controller publishes back_interest
+    // --- The controller publishes back_interest
     //     through a real rebuild for the reachable cases. ---
     #[test]
     fn back_interest_publishes_through_the_controller() {
@@ -2517,7 +2516,7 @@ mod tests {
         );
     }
 
-    // --- Criterion 1: request_back on a plain (Pop-policy) stack pops one page,
+    // --- request_back on a plain (Pop-policy) stack pops one page,
     //     and the pop transition is preserved (routes through the same animated
     //     pop path as `pop()`). ---
     #[test]
@@ -2565,7 +2564,7 @@ mod tests {
         assert_eq!(controller.depth(), 1, "request_back popped one page");
     }
 
-    // --- Criterion 1b: request_back at the root (Pop policy, depth 1) is a safe
+    // --- request_back at the root (Pop policy, depth 1) is a safe
     //     no-op. ---
     #[test]
     fn request_back_at_root_is_a_noop() {
@@ -2584,7 +2583,7 @@ mod tests {
         assert_eq!(controller.depth(), 1, "root back does not pop the root");
     }
 
-    // --- Criterion 2: a DismissAnimated top page leaves the stack unchanged and
+    // --- A DismissAnimated top page leaves the stack unchanged and
     //     fires its observable dismiss signal exactly once per request. ---
     #[test]
     fn request_back_dismiss_animated_fires_signal_once_no_pop() {
@@ -2623,7 +2622,7 @@ mod tests {
         assert_eq!(signal.get(), 2, "signal fired once per request");
     }
 
-    // --- Criterion 3: a Veto top page consumes the press without changing the
+    // --- A Veto top page consumes the press without changing the
     //     stack and without firing any signal. ---
     #[test]
     fn request_back_veto_consumes_without_change() {
@@ -2655,7 +2654,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Task 03: page-transition machinery.
+    // Page-transition machinery.
     // ---------------------------------------------------------------------
 
     use super::super::transition::{PageTransition, Timing, TransitionSpec};
@@ -2691,7 +2690,7 @@ mod tests {
 
     /// Run one full frame (rebuild → layout → paint) at `time`, returning the
     /// recorded fills and whether another frame was requested. Generic over
-    /// `State` so a result-carrying transition test (task 06) can share it too.
+    /// `State` so a result-carrying transition test can share it too.
     fn full_frame<State: 'static>(
         root: &mut RenderRoot<State, NavigatorView<State>>,
         app: &mut impl FnMut(&mut State) -> NavigatorView<State>,
@@ -2714,7 +2713,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no fill with height {h} in {fills:?}"))
     }
 
-    // --- Criterion 1: push animates both pages with moving origins, settling at
+    // --- Push animates both pages with moving origins, settling at
     //     final geometry; controller disposed after settle. ---
 
     #[test]
@@ -2767,7 +2766,7 @@ mod tests {
         assert_eq!(f3[0].1, Size::new(100.0, 80.0), "the surviving page is B");
     }
 
-    // --- Criterion 2: input is blocked mid-transition; no page receives the Down
+    // --- Input is blocked mid-transition; no page receives the Down
     //     and no stale capture is left; routing resumes after settle. ---
 
     #[test]
@@ -2820,7 +2819,7 @@ mod tests {
         assert!(!root.is_pointer_captured());
     }
 
-    // --- Criterion 3: the below page's secondary animation (iOS push parallax +
+    // --- The below page's secondary animation (iOS push parallax +
     //     dim). ---
 
     #[test]
@@ -2858,7 +2857,7 @@ mod tests {
         assert!(a.2 < 1.0, "below page is dimmed (alpha {})", a.2);
     }
 
-    // --- Criterion 4: a spatial spring overshoots position, never opacity. ---
+    // --- A spatial spring overshoots position, never opacity. ---
 
     #[test]
     fn spring_spatial_overshoots_position_but_not_opacity() {
@@ -2994,11 +2993,11 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Followup gf1: ThemeDefault / reduce_motion / Layer::scale wiring through
-    // the REAL navigator (the task-13 machinery the navigator now honors).
+    // ThemeDefault / reduce_motion / Layer::scale wiring through the REAL
+    // navigator.
     // ---------------------------------------------------------------------
 
-    // --- gf1(a): a `ThemeDefault` Glyph push resolves the *enter duration* from
+    // --- A `ThemeDefault` Glyph push resolves the *enter duration* from
     //     the active MotionScheme (m3_baseline's `slow` = 500ms), not the 300ms
     //     unthemed M3 fallback. Proven by the transition still running at 340ms
     //     under the theme, where the unthemed control has already finalized. ---
@@ -3050,7 +3049,7 @@ mod tests {
         );
     }
 
-    // --- gf1(b): a Glyph push under a `reduce_motion` MotionScheme collapses per
+    // --- A Glyph push under a `reduce_motion` MotionScheme collapses per
     //     `resolve_spec`'s contract — the 16px directional Glyph slide becomes the
     //     non-directional M3 fade-through crossfade (no slide). ---
 
@@ -3079,7 +3078,7 @@ mod tests {
             "reduce_motion collapses the 16px Glyph slide to a non-directional crossfade"
         );
 
-        // Round-1 review scale-leak guard: the reduced crossfade must also paint
+        // Scale-leak guard: the reduced crossfade must also paint
         // ZERO scale transforms mid-transition — a reduce_motion user never sees
         // the fade-through 0.92→1.0 zoom.
         root.rebuild(&mut app, &mut state);
@@ -3093,8 +3092,8 @@ mod tests {
         );
     }
 
-    // --- gf1(c): a mid-transition M3 fade-through paint brackets the incoming
-    //     page with a `push_transform` scale < 1.0 (research §7.3's 0.92 → 1.0
+    // --- A mid-transition M3 fade-through paint brackets the incoming
+    //     page with a `push_transform` scale < 1.0 (the 0.92 → 1.0
     //     scale-up), balanced LIFO; the leaving page (scale 1.0) pushes none. ---
 
     #[test]
@@ -3138,7 +3137,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Task 06: SlideUp preset + push_transparent_for_result.
+    // SlideUp preset + push_transparent_for_result.
     // ---------------------------------------------------------------------
 
     // --- SlideUp paint sequence: the entering sheet's origin moves bottom→top
@@ -3341,7 +3340,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Task 05: interactive edge-swipe back gesture.
+    // Interactive edge-swipe back gesture.
     // ---------------------------------------------------------------------
 
     /// Downcast the root widget to a `&NavigatorWidget` so a gesture test can
@@ -3421,7 +3420,7 @@ mod tests {
 
     /// Drive one shell-style frame (rebuild → layout → paint) at `time`, returning
     /// the alpha-tagged fills and whether another frame was requested. Sharing the
-    /// task-03 `TransitionScene`/`full_frame`/`fill_h`/`ft` helpers above.
+    /// `TransitionScene`/`full_frame`/`fill_h`/`ft` helpers above.
     /// Run frames until the tree stops requesting them (a settle finishes and the
     /// transition finalizes), returning the last frame's fills.
     fn run_until_settled(
@@ -3440,7 +3439,7 @@ mod tests {
         panic!("transition failed to settle");
     }
 
-    // --- Criterion 1a: an edge drag past slop steals from a capturing child. ---
+    // --- An edge drag past slop steals from a capturing child. ---
 
     #[test]
     fn edge_drag_steals_from_capturing_child() {
@@ -3497,7 +3496,7 @@ mod tests {
         );
     }
 
-    // --- Criterion 1b: drag moves pages, origins tracking progress. ---
+    // --- Drag moves pages, origins tracking progress. ---
 
     #[test]
     fn edge_drag_moves_pages_tracking_progress() {
@@ -3540,7 +3539,7 @@ mod tests {
         );
     }
 
-    // --- Criterion 1c: release past the halfway point completes the pop. ---
+    // --- Release past the halfway point completes the pop. ---
 
     #[test]
     fn release_past_half_completes_pop() {
@@ -3586,7 +3585,7 @@ mod tests {
         );
     }
 
-    // --- Criterion 1c (result path): a completed swipe delivers the pop result. ---
+    // --- A completed swipe delivers the pop result. ---
 
     #[derive(Default)]
     struct SwipeResultState {
@@ -3650,7 +3649,7 @@ mod tests {
         assert!(state.popped, "the completed swipe delivered its pop result");
     }
 
-    // --- Criterion 1d: release below threshold cancels; page restored exactly. ---
+    // --- Release below threshold cancels; page restored exactly. ---
 
     #[test]
     fn release_below_threshold_cancels_and_restores() {
@@ -3698,7 +3697,7 @@ mod tests {
         );
     }
 
-    // --- Criterion 1e: a low-progress high-velocity release completes the pop. ---
+    // --- A low-progress high-velocity release completes the pop. ---
 
     #[test]
     fn low_progress_high_velocity_release_completes() {
@@ -3788,7 +3787,7 @@ mod tests {
         assert_eq!(nav_widget(&root).pages.len(), 2, "the stack is unchanged");
     }
 
-    // --- Criterion 2 (a): a non-edge drag never arms the gesture. ---
+    // --- A non-edge drag never arms the gesture. ---
 
     #[test]
     fn non_edge_down_never_arms() {
@@ -3823,7 +3822,7 @@ mod tests {
         );
     }
 
-    // --- Criterion 2 (b): a vertical drag starting in the edge zone stays with the
+    // --- A vertical drag starting in the edge zone stays with the
     //     page (a ScrollView child scrolls normally). ---
 
     #[test]
@@ -3868,7 +3867,7 @@ mod tests {
         assert!(nav_widget(&root).transition.is_none());
     }
 
-    // --- Criterion 3: a depth-1 stack disables the gesture. ---
+    // --- A depth-1 stack disables the gesture. ---
 
     #[test]
     fn depth_one_stack_disables_gesture() {
@@ -3895,7 +3894,7 @@ mod tests {
         );
     }
 
-    // --- Regression (F1): a programmatic instant pop between an edge-swipe arm
+    // --- Regression: a programmatic instant pop between an edge-swipe arm
     //     and its steal must not empty the page stack. The arm is captured at
     //     depth 2; a default (non-animated) pop applied at the next rebuild
     //     shrinks the stack to the root page and never runs a transition (so the
@@ -3962,7 +3961,7 @@ mod tests {
         );
     }
 
-    // --- Criterion 4 / config: pop-swipe defaults on for the iOS-push preset. ---
+    // --- Pop-swipe defaults on for the iOS-push preset. ---
 
     #[test]
     fn pop_swipe_defaults_on_for_ios_preset() {
@@ -3999,7 +3998,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Task 07: shared-element ("hero") transitions.
+    // Shared-element ("hero") transitions.
     // ---------------------------------------------------------------------
 
     use kurbo::Affine;

@@ -1,5 +1,5 @@
 //! `adb install`/`am start`/`pidof`/`logcat` command construction and
-//! execution (spec §12.4 steps 5-7).
+//! execution.
 
 use std::time::Duration;
 
@@ -7,18 +7,18 @@ use anyhow::{Result, bail};
 
 use crate::process::{Output, ProcessRunner};
 
-/// `adb -s <id> install -r <apk>` (spec §12.4 step 5).
+/// `adb -s <id> install -r <apk>`.
 pub fn install(runner: &dyn ProcessRunner, device_id: &str, apk_path: &str) -> Result<Output> {
     runner.run("adb", &["-s", device_id, "install", "-r", apk_path])
 }
 
 /// Fallback ABI when the device doesn't report a usable one — the same
-/// `arm64-v8a` the Gradle template previously built implicitly by default
-/// (task 66), made explicit.
+/// `arm64-v8a` the Gradle template previously built implicitly by default,
+/// made explicit.
 pub const DEFAULT_ABI: &str = "arm64-v8a";
 
 /// Queries the connected device/emulator's primary ABI via `adb -s <id>
-/// shell getprop ro.product.cpu.abi` (task 66's mode-aware run pipeline
+/// shell getprop ro.product.cpu.abi` (the mode-aware Android run pipeline
 /// needs the real device ABI, not an assumed `arm64-v8a`, to pass
 /// `-Pfrust.targetPlatforms`) — a physical device reports `arm64-v8a` (or
 /// occasionally `armeabi-v7a`), an x86_64 emulator reports `x86_64`. Falls
@@ -41,8 +41,9 @@ pub fn device_abi(runner: &dyn ProcessRunner, device_id: &str) -> String {
     }
 }
 
-/// `adb -s <id> shell am start -n <appId>/.MainActivity` (spec §12.4 step 6;
-/// `MainActivity` lives in the app's own package, per task 22's template).
+/// `adb -s <id> shell am start -n <appId>/.MainActivity`
+/// (`MainActivity` lives in the app's own package, per the scaffolded
+/// template).
 ///
 /// `app_id` is interpolated into a device-shell command line
 /// (`adb shell am start -n <id>/…`), so it must already be a
@@ -64,10 +65,10 @@ pub const PID_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// The real number of `pidof` attempts before giving up.
 pub const PID_RETRY_ATTEMPTS: u32 = 10;
 
-/// Resolves the launched app's pid via `adb shell pidof` (spec §12.4 step
-/// 7), retrying up to `max_attempts` times since app start isn't
-/// instantaneous. `sleep` is called between attempts (not after the last)
-/// — injected so tests don't block on a real clock.
+/// Resolves the launched app's pid via `adb shell pidof`, retrying up to
+/// `max_attempts` times since app start isn't instantaneous. `sleep` is
+/// called between attempts (not after the last) — injected so tests don't
+/// block on a real clock.
 ///
 /// Same validated-at-source invariant as [`launch`]: `app_id` is
 /// interpolated into `adb shell pidof <id>` and must already be
@@ -93,9 +94,8 @@ pub fn resolve_pid(
     bail!("`{app_id}` did not report a pid within the retry window (adb shell pidof empty)");
 }
 
-/// Streams `adb -s <id> logcat --pid <pid>` to `on_line` (spec §12.4 step
-/// 7) until the child exits — normally via Ctrl-C killing it, see
-/// `commands::run`.
+/// Streams `adb -s <id> logcat --pid <pid>` to `on_line` until the child
+/// exits — normally via Ctrl-C killing it, see `commands::run`.
 pub fn stream_logcat(
     runner: &dyn ProcessRunner,
     device_id: &str,

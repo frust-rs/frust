@@ -1,5 +1,5 @@
-//! L1 of the theme ladder (native-widgets Phase 1, p1-07): the
-//! night-qualified `Context` control creation builds every view against,
+//! L1 of the theme ladder: the night-qualified `Context` control creation
+//! builds every view against,
 //! plus the one Android-only primitive L2's `Setter::ThemedBackground`
 //! needs (`dp_to_px`). See [`crate::api::theme`] for L2's platform-neutral
 //! token resolution — the module split is deliberate: that one is
@@ -29,16 +29,15 @@
 //!
 //! The wrapped Context only affects a view at the moment `new
 //! Button(context)`/etc. runs. A live in-place brightness toggle (the
-//! catalog's demo row, p1-07's acceptance criterion) does NOT recreate the
+//! catalog's demo row) does NOT recreate the
 //! view, so L1's platform-chrome effect stays fixed at whichever brightness
 //! the control was first created under — only L2's own explicit setters
 //! (tint lists, text/background colours, corner radius) actually re-paint
 //! live on a later `update`, because those ride the ordinary
 //! Props-diff-then-setter path every other property already uses. This is a
-//! documented approximation (PLAN.md's Theme-mismatch risk row: "recorded as
-//! approximation"), not a bug: a fully brightness-correct chrome swap needs
-//! recreating the control, which the "live re-theme without remount"
-//! acceptance criterion deliberately does not ask this task to do.
+//! documented approximation, not a bug: a fully brightness-correct chrome
+//! swap needs recreating the control, which "live re-theme without remount"
+//! deliberately rules out for this module.
 
 use std::sync::OnceLock;
 

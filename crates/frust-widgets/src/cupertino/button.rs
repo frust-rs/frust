@@ -1,9 +1,9 @@
-//! `CupertinoButton` (Phase 6f, PLAN.md Phase C item 3, task 12): the iOS-27
+//! `CupertinoButton`: the iOS-27
 //! capsule pressable — the Cupertino-styled counterpart to [`crate::Button`]
 //! (which is Material-styled). Three kit-mined size classes
 //! ([`CupertinoButtonSize`]) and three styles
 //! ([`CupertinoButtonStyle`]): `Filled` (tinted accent), `Gray` (secondary
-//! fill), and `Glass` (reads [`Theme`]'s wave-1 glass tokens).
+//! fill), and `Glass` (reads [`Theme`]'s glass tokens).
 //!
 //! [`cupertino_button`] is the declarative view-fn; it produces a
 //! [`CupertinoButtonView`] carrying the label and a typed `on_press` closure,
@@ -15,9 +15,9 @@
 //!
 //! # Size classes (kit-mined metrics)
 //!
-//! Source: `research/kit-colors-type-metrics.json`'s
-//! `component_metrics.Buttons` table (266 mined button variants, per the
-//! research doc). The text-label button's frame **height** is identical
+//! Source: a community-mined survey of iOS system UI kit screenshots (266
+//! button variants across styles/themes/states). The text-label button's
+//! frame **height** is identical
 //! across the kit's `Bordered`/`Bordered Prominent` styles, both themes, and
 //! the `Idle` state at a given size class — a clean, unambiguous record per
 //! class:
@@ -44,8 +44,7 @@
 //! | [`CupertinoButtonSize::Medium`] | 34 | 8.5  | 8.0  |
 //! | [`CupertinoButtonSize::Large`]  | 50 | 16.5 | 16.0 |
 //!
-//! **Caveat** (per this task's explicit fall-back-if-unclean instruction):
-//! the `Label` record is a single shared frame name reused across the kit's
+//! **Caveat**: the `Label` record is a single shared frame name reused across the kit's
 //! Figma-exported artboards, so its 39×18 size is an indicative single-line
 //! reference, not an independently-verified per-size-class measurement. The
 //! three **heights** above are the load-bearing citation; the derived
@@ -62,21 +61,20 @@
 //!   [`ThemeTextColor::OnSurface`] (identical to `on_secondary_container` in
 //!   both `ColorScheme::cupertino_light`/`cupertino_dark` — see
 //!   `frust-theme::color`'s Cupertino mapping) — mirrors `.bordered`.
-//! * [`CupertinoButtonStyle::Glass`]: reads `Theme::glass.control` (wave-1
-//!   token, task 6f-01; kit `radius 15` no-fill tier — see
+//! * [`CupertinoButtonStyle::Glass`]: reads `Theme::glass.control` (kit
+//!   `radius 15` no-fill tier — see
 //!   `frust-theme::glass`'s module docs). On a translucent (iOS-27) glass
 //!   material this paints only that tier's `fills_light`/`fills_dark` washes
 //!   (empty for `control` — a pure lens, per the token's own docs — so
 //!   nothing but a specular hairline and a soft drop shadow renders; real
-//!   backdrop blur is deferred to the 6f-16 spike, so "translucent" here
+//!   backdrop blur is not yet implemented, so "translucent" here
 //!   means alpha-composited washes, not a blurred backdrop). On an opaque
 //!   ([`GlassMaterial::is_opaque`]) glass material — the Material design
 //!   language's degrade path via
 //!   [`frust_theme::GlassScale::opaque_material`] — it paints
 //!   an opaque `colors.surface_container_highest` fill instead and skips the
 //!   hairline (`hairline_alpha` is `0.0` on that path), so one widget API
-//!   renders correctly under either design language (wave-1 task 01's single-
-//!   API design).
+//!   renders correctly under either design language.
 //!
 //! # Press feedback
 //!
@@ -249,7 +247,7 @@ pub enum CupertinoButtonStyle {
 }
 
 /// The unthemed-fallback glass-control material for [`CupertinoButtonStyle::Glass`],
-/// matching `GlassScale::ios27().control` exactly (task 6f-01) — duplicated
+/// matching `GlassScale::ios27().control` exactly — duplicated
 /// here rather than constructed via `GlassScale::ios27()` so this module has
 /// no runtime dependency on that constructor's shape, mirroring every other
 /// `cupertino::*` widget's unthemed-fallback-constant convention. A

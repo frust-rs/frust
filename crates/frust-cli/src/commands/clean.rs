@@ -1,4 +1,4 @@
-//! `frust clean` (spec §12.1 table): removes cargo's build output plus
+//! `frust clean`: removes cargo's build output plus
 //! the generated Gradle/Xcode build directories. A no-op-with-message
 //! outside a Frust project (no `frust.toml`).
 
@@ -15,8 +15,8 @@ use frust_drive::process::ProcessRunner;
 /// Gradle root-project build dir (where the generated
 /// `android/settings.gradle.kts` redirects the `:frust-embedding` embedding
 /// module's output, keeping the shared frust checkout pristine), the
-/// project-local Gradle cache, and `build/` (covers `build/ios`, spec
-/// §12.6's `-derivedDataPath`/archive output).
+/// project-local Gradle cache, and `build/` (covers `build/ios`, the
+/// `-derivedDataPath`/archive output).
 /// Keep in sync with `templates/app/.gitignore`'s build-output patterns.
 const REMOVED_DIRS: &[&str] = &[
     "android/app/build",

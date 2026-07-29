@@ -12,7 +12,7 @@
 //! The tab roots fade into each other: the shell's [`navigator`] runs an M3
 //! fade-through transition, so selecting a tab (`router.go(tab.route())`)
 //! cross-fades the tab roots. Detail pushes (channel/thread/settings) ride the
-//! same navigator; per-push slide transitions are a Phase C refinement.
+//! same navigator, with per-push slide transitions.
 
 use std::rc::Rc;
 
@@ -73,7 +73,7 @@ impl Tab {
         }
     }
 
-    /// This tab's Glyph bottom-nav icon (task 28) — standing in for
+    /// This tab's Glyph bottom-nav icon — standing in for
     /// [`Tab::icon`]'s Material Symbols path on the Glyph design
     /// language, matching the reference build's
     /// `.bottom-nav-glyph` geometric shapes (▣ ◎ ◆ ◉) — drawn as vector
@@ -164,14 +164,14 @@ impl Tab {
 /// destination records it in `tab` (the highlight) and drives the router to
 /// that tab's route.
 ///
-/// Wrapped in [`safe_area`] (device-parity task 14, item 1) so the bar's
+/// Wrapped in [`safe_area`] so the bar's
 /// bottom edge clears the system gesture/nav bar — `top` stays unpadded (the
 /// bar already sits directly under the tab-shell's own content) while
 /// `left`/`right` stay enabled for a landscape display cutout. This is a
 /// huddle-side composition, not a `frust-widgets` change: the bar's own
 /// background still only fills its un-padded content height (it does not
 /// extend a themed fill under the inset the way a native edge-to-edge bar
-/// would) — a known v1 gap, see this task's completion summary.
+/// would) — a known v1 gap.
 pub fn bottom_bar(
     design: DesignLanguage,
     nav: Rc<RouterDeepLinks<HuddleState>>,
@@ -193,7 +193,7 @@ pub fn bottom_bar(
         )),
         // `glyph_nav_bar`'s (items, selected, on_select(index)) shape is the
         // same controlled-index contract `navigation_bar`/`cupertino_tab_bar`
-        // use above, so it fits this shell's tab model directly (task 28).
+        // use above, so it fits this shell's tab model directly.
         DesignLanguage::Glyph => any(glyph_nav_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()

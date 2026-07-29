@@ -1,6 +1,5 @@
 //! `activity` domain — entities, the derived row model, the repository
-//! contract, and the use cases (huddle clean-architecture refactor: entities
-//! landed in task 01; models/repositories/use_cases in task 04).
+//! contract, and the use cases (huddle clean-architecture refactor).
 
 pub mod entities;
 pub mod models;

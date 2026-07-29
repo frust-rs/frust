@@ -1,5 +1,5 @@
-//! The desktop shell's frame executor — the render-path half of the frame loop
-//! (plan phase 11.B, rollout 1/3), split out of [`app_handler`](crate::app_handler)
+//! The desktop shell's frame executor — the render-path half of the frame loop,
+//! split out of [`app_handler`](crate::app_handler)
 //! so the two-thread and single-thread paths share one encode→present tail.
 //!
 //! # The split
@@ -12,7 +12,7 @@
 //!
 //! - [`FrameExecutor::Split`] (default): a dedicated `frust-render` thread owns
 //!   the [`RenderContext`] + [`SurfaceRenderer`] wholesale (both `Send` —
-//!   verified in RESEARCH.md, *not* designed around any wgpu-`!Send` myth) and
+//!   *not* designed around any wgpu-`!Send` myth) and
 //!   runs [`render_loop`]. The UI thread hands it finished frames across the
 //!   depth-1 latest-wins [`render_channel`](frust_shell_common::render_channel)
 //!   and drives surface lifecycle through owned [`RenderCommand`]s (with acks on
@@ -22,7 +22,7 @@
 //! - [`FrameExecutor::Inline`]: the pre-split fallback — the same
 //!   [`RenderContext`]/[`SurfaceRenderer`] live on the UI thread and the
 //!   encode→present tail runs synchronously inside `RedrawRequested`. Kept
-//!   working (it is the fallback until 11.E validates the split); it shares
+//!   working (it is the fallback for comparison against the split); it shares
 //!   [`render_frame`] and the pipeline-cache helpers with the split path so the
 //!   frame-pipeline logic is not forked.
 //!
@@ -95,7 +95,7 @@ pub(crate) struct PaintedScene {
 }
 
 /// The `SurfaceCreated` payload the UI thread hands the render thread — the `W`
-/// type parameter of the [`render_channel`] (task 07's channel is generic over
+/// type parameter of the [`render_channel`] (the channel is generic over
 /// `W` precisely so each shell picks its own window payload; mobile shells pass
 /// their raw `ANativeWindow`/`CAMetalLayer` pointer instead). Desktop pairs the
 /// [`DetachedSurface`] the UI thread created (installed render-side) with the
@@ -133,8 +133,8 @@ impl FrameExecutor {
     /// The running count of frames the render side has actually presented
     /// (`FrameOutcome::Rendered`). The UI thread loads this once per frame and
     /// pushes it into `RenderRoot::set_presented_frames` before paint, so a
-    /// widget measuring FPS reports the presented rate, not its paint cadence
-    /// (task 10). Both variants share the counter with their render side via an
+    /// widget measuring FPS reports the presented rate, not its paint cadence.
+    /// Both variants share the counter with their render side via an
     /// `Arc<AtomicU64>` — the split's other clone lives on the render thread.
     pub(crate) fn presented_frames(&self) -> u64 {
         match self {
@@ -211,10 +211,10 @@ impl FrameExecutor {
     }
 
     /// Hand one finished frame to the executor. Inline runs the encode→present
-    /// tail synchronously (borrowing `scene`, so it is reused next frame — spec
-    /// §7); the split moves the scene out into a [`SceneFrame`] and sends it
+    /// tail synchronously (borrowing `scene`, so it is reused next frame);
+    /// the split moves the scene out into a [`SceneFrame`] and sends it
     /// across the channel (latest-wins), replacing it with a scene reclaimed off
-    /// the render thread's give-back channel (review finding F5) — `reset()`,
+    /// the render thread's give-back channel — `reset()`,
     /// so its buffer is reused rather than reallocated — falling back to
     /// `Scene::new()` only when none is available yet (cold start, or the
     /// render thread hasn't given one back). `frame_time` and `size` populate
@@ -244,8 +244,8 @@ impl FrameExecutor {
     }
 }
 
-/// Spawn the render thread and return the [`SplitExecutor`] handle to it (plan
-/// phase 11.B). The [`RenderContext`] is created here on the UI thread so its
+/// Spawn the render thread and return the [`SplitExecutor`] handle to it.
+/// The [`RenderContext`] is created here on the UI thread so its
 /// [`SurfaceFactory`] (which the UI thread keeps for on-main-thread surface
 /// creation) shares the same wgpu instance as the context the render thread
 /// renders with; the context itself (`Send`) is then moved onto the thread.
@@ -254,7 +254,7 @@ pub(crate) fn spawn_render_thread(proxy: EventLoopProxy<ShellUserEvent>) -> Spli
     let factory = render_cx.surface_factory();
     let (sender, receiver) = render_channel::<PaintedScene, DesktopSurface>();
     let (scene_return_tx, scene_return_rx) = scene_return_channel::<Scene>();
-    // Presented-frame counter (task 10): one clone drives into the render thread
+    // Presented-frame counter: one clone drives into the render thread
     // (bumped on each `FrameOutcome::Rendered`), one stays in the `SplitExecutor`
     // for the UI thread to read before paint.
     let presented = Arc::new(AtomicU64::new(0));
@@ -291,7 +291,7 @@ pub(crate) struct InlineExecutor {
     first_rebuild_recorded: bool,
     first_encode_recorded: bool,
     first_frame_recorded: bool,
-    /// Running count of presented frames (task 10). Inline renders on the UI
+    /// Running count of presented frames. Inline renders on the UI
     /// thread, so this is bumped and read on the same thread — the `Arc<Atomic>`
     /// shape matches the split's cross-thread counter so `FrameExecutor` reads
     /// both variants uniformly.
@@ -378,7 +378,7 @@ impl InlineExecutor {
                 }
             }
             // A presented frame: bump the shared counter the UI thread reads
-            // before paint (task 10). `Skipped` presents nothing, so it doesn't.
+            // before paint. `Skipped` presents nothing, so it doesn't.
             Ok(FrameOutcome::Rendered) => {
                 self.presented.fetch_add(1, Ordering::Relaxed);
             }
@@ -410,8 +410,8 @@ pub(crate) struct SplitExecutor {
     surface_requested: bool,
     /// Monotonically increasing per-frame id stamped into [`FrameMeta`].
     frame_id: u64,
-    /// The UI-side half of the render thread's give-back channel (review
-    /// finding F5): polled once per [`Self::submit_frame`] for a scene the
+    /// The UI-side half of the render thread's give-back channel:
+    /// polled once per [`Self::submit_frame`] for a scene the
     /// render thread has finished with, so its buffer is reused instead of
     /// reallocating a fresh `Scene` every frame.
     scene_return: SceneReturnReceiver<Scene>,
@@ -421,7 +421,7 @@ pub(crate) struct SplitExecutor {
     /// [`Self::scene_return`] on the next [`Self::take_reusable_scene`] call
     /// so that buffer is reused too, rather than dropped.
     spare_scene: Option<Scene>,
-    /// Running count of presented frames (task 10): one clone here (read by the
+    /// Running count of presented frames: one clone here (read by the
     /// UI thread before paint via `FrameExecutor::presented_frames`), one on the
     /// render thread ([`render_loop`], which bumps it on each
     /// `FrameOutcome::Rendered`). A plain `Arc<AtomicU64>` — no channel/protocol,
@@ -449,8 +449,8 @@ impl SplitExecutor {
         }
     }
 
-    /// Reclaim a reusable, empty `Scene` for the next frame (review finding
-    /// F5): prefer a scene already reclaimed from a stale [`Self::submit_frame`]
+    /// Reclaim a reusable, empty `Scene` for the next frame: prefer a scene
+    /// already reclaimed from a stale [`Self::submit_frame`]
     /// give-back ([`Self::spare_scene`]), else poll the render thread's
     /// give-back channel ([`Self::scene_return`]), else allocate a fresh one.
     /// Either reclaimed scene is [`Scene::reset`] before being handed out —
@@ -532,7 +532,7 @@ impl SplitExecutor {
             });
             // The UI thread outran the render thread: the just-overwritten,
             // never-rendered stale frame's scene is still perfectly reusable —
-            // reclaim its buffer instead of letting it drop (review finding F5).
+            // reclaim its buffer instead of letting it drop.
             if let Some(stale_frame) = stale {
                 let mut reclaimed = stale_frame.scene.scene;
                 reclaimed.reset();
@@ -556,7 +556,7 @@ impl Drop for SplitExecutor {
     }
 }
 
-/// The dedicated render thread's loop (plan phase 11.B): own the
+/// The dedicated render thread's loop: own the
 /// [`RenderContext`] + [`SurfaceRenderer`] wholesale, install surfaces handed
 /// over from the UI thread, drain lifecycle commands and the freshest scene from
 /// the channel, and run encode→acquire→submit for each frame — the single perf
@@ -681,7 +681,7 @@ fn render_loop(
                         let _ = proxy.send_event(ShellUserEvent::RenderRecreateSurface);
                     }
                     // A presented frame: bump the shared counter the UI thread
-                    // reads before paint (task 10). `Skipped` presents nothing.
+                    // reads before paint. `Skipped` presents nothing.
                     Ok(FrameOutcome::Rendered) => {
                         presented.fetch_add(1, Ordering::Relaxed);
                     }
@@ -689,8 +689,8 @@ fn render_loop(
                     Err(err) => log::error!("frust: render error: {err}"),
                 }
             }
-            // Give the drained scene back for the UI thread to reclaim (review
-            // finding F5) — whether it was actually rendered above, phase-gated
+            // Give the drained scene back for the UI thread to reclaim —
+            // whether it was actually rendered above, phase-gated
             // out (`Paused`/`NoSurface`), or the window wasn't ready yet; `encode`
             // has already fully consumed the scene's commands by this point, so
             // its buffer is safe to reuse. Never silently dropped.
@@ -825,7 +825,7 @@ fn render_frame(
     };
     let submit_dur = submit_start.elapsed();
 
-    // One folded frame record through the single emitter (plan phase 11.B.3):
+    // One folded frame record through the single emitter:
     // the UI thread's rebuild/layout/paint + this thread's encode/acquire/submit.
     frame_stats.record(FramePasses::from_split(
         ui_spans,

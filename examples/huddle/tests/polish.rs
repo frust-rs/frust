@@ -1,7 +1,7 @@
-//! Task 22 "polish" integration tests: swipe-to-reply opens a message's thread,
+//! Polish integration tests: swipe-to-reply opens a message's thread,
 //! a feed avatar tap opens the author's profile, an empty DM shows the
 //! empty-conversation state, and the workspace drawer's entrance self-heals
-//! across a disposed reactive owner (the flake task 21's report flagged).
+//! across a disposed reactive owner (a previously reported flake).
 //!
 //! Like `tests/actions.rs`/`tests/feed.rs` these drive the whole mounted
 //! [`HuddleApp`] through its real navigator and assert black-box against
@@ -252,7 +252,7 @@ fn empty_dm_shows_the_empty_state() {
 /// The workspace drawer's `entrance_progress` thread-local self-heals: mounting
 /// the drawer, disposing the reactive owner, then re-mounting on the *same*
 /// thread under a fresh owner must not panic on the now-disposed cached signal
-/// (the flake task 21's report flagged — task 22 hardening).
+/// (a previously reported flake, hardened here).
 #[test]
 fn drawer_entrance_survives_a_disposed_owner() {
     let _g = serial();

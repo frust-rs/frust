@@ -1,4 +1,4 @@
-//! Surface lifecycle state machine (spec §8.1).
+//! Surface lifecycle state machine.
 //!
 //! Android destroys and recreates the GPU surface on rotation and
 //! backgrounding — `wgpu` surfaces raise `ERROR_SURFACE_LOST_KHR` and panic on
@@ -38,7 +38,7 @@ use core::ptr::NonNull;
 
 use anyhow::{Result, anyhow};
 
-/// Which lifecycle state the surface is in (spec §8.1).
+/// Which lifecycle state the surface is in.
 ///
 /// Rendering only happens in [`SurfacePhase::SurfaceReady`]; the other two
 /// phases mean there is no usable swapchain and frames are skipped.
@@ -57,7 +57,7 @@ impl SurfacePhase {
     /// Whether a frame may be rendered in this phase.
     ///
     /// Only [`SurfacePhase::SurfaceReady`] can render; the machine drops frames
-    /// in every other phase rather than queueing them (spec §8.1).
+    /// in every other phase rather than queueing them.
     pub(crate) fn can_render(self) -> bool {
         matches!(self, SurfacePhase::SurfaceReady)
     }
@@ -77,7 +77,7 @@ pub(crate) enum SurfaceEvent {
     Lost,
 }
 
-/// Pure phase-transition table (spec §8.1).
+/// Pure phase-transition table.
 ///
 /// Transitions are total by design: `Created` always lands in `SurfaceReady`
 /// (creating or recreating), `Destroyed` always in `NoSurface`, and `Lost`
@@ -120,8 +120,8 @@ pub(crate) enum AcquireAction {
     /// Blit and present the acquired texture; report [`FrameOutcome::Rendered`].
     Present,
     /// Reconfigure the surface and ask the shell to redraw
-    /// ([`FrameOutcome::Redraw`]) — fixes the Phase-0/1 deferred bug where the
-    /// `Outdated` path never requested a redraw.
+    /// ([`FrameOutcome::Redraw`]) — an `Outdated` acquire must still request a
+    /// redraw after reconfiguring, not silently reconfigure and stall.
     Reconfigure,
     /// Drop the surface, transition to `SurfaceLost`, report
     /// [`FrameOutcome::SurfaceLost`] so the shell can recreate it.
@@ -134,7 +134,7 @@ pub(crate) enum AcquireAction {
 /// gives up and transitions to [`SurfacePhase::SurfaceLost`].
 ///
 /// Mirrors `frust-shell-ios::ffi_support::MAX_RECREATE_ATTEMPTS`'s style and
-/// rationale (same spec §8.1 phase, applied one step earlier): without a cap, a
+/// rationale, applied one step earlier in the lifecycle: without a cap, a
 /// persistently-`Invalid` swapchain would retry a reconfigure every frame,
 /// forever. At the cap the existing per-shell `SurfaceLost` recovery paths take
 /// over instead — desktop recreates on the next resize/redraw, iOS's own
@@ -142,7 +142,7 @@ pub(crate) enum AcquireAction {
 /// — so no shell code needs to change for this to be honoured.
 pub(crate) const MAX_INVALID_RECONFIGURES: u8 = 3;
 
-/// Pure acquire-error policy (spec §8.1).
+/// Pure acquire-error policy.
 ///
 /// `consecutive_invalid` is the number of `Invalid` acquires already retried
 /// (via `Reconfigure`) since the last successful acquire; only the `Invalid`
@@ -220,7 +220,7 @@ pub enum FrameOutcome {
 /// phase of the two-phase render seam ([`crate::SurfaceRenderer::encode`] +
 /// [`crate::SurfaceRenderer::present`]).
 ///
-/// A shell that times encode and present separately (Phase 10.A attribution)
+/// A shell that times encode and present separately
 /// branches on this to decide whether presenting is worthwhile: an
 /// [`EncodeOutcome::Skipped`] frame laid no pixels into the intermediate target
 /// (no renderable surface), so there is nothing to present.
@@ -237,7 +237,7 @@ pub enum EncodeOutcome {
 /// The outcome of a single [`crate::SurfaceRenderer::acquire`] call — the first
 /// half of the two-phase present seam ([`crate::SurfaceRenderer::acquire`] +
 /// [`crate::SurfaceRenderer::submit`]), itself the second phase of the render
-/// pipeline after [`crate::SurfaceRenderer::encode`] (Phase 11.A).
+/// pipeline after [`crate::SurfaceRenderer::encode`].
 ///
 /// A shell that times the swapchain **acquire** (the blocking vsync/present
 /// wait) separately from the **submit** (blit + queue-submit + present) branches

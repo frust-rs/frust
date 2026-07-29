@@ -1,13 +1,11 @@
-//! Filled by task 25-glyph-term-tooltip (Tooltip).
-//!
 //! [`tooltip`]/[`TooltipView`]: a transparent long-press-to-peek label bubble
-//! wrapper — `research/glyph-design-system-light.html`'s `.tooltip-bubble`
+//! wrapper — the Glyph design system's light-page `.tooltip-bubble`
 //! rule (retrieved 2026-07-21): a small dark bubble, centered 8px above the
 //! wrapped child, shown while the child is held past the shared long-press
 //! threshold and dismissed on release. Like `crate::glyph::term_block`, every
 //! painted color here is a [`GlyphInk`] field or a literal fallback constant
-//! — never a brightness-swapped `ColorScheme` role (RESEARCH §1.1b(c): "a
-//! tooltip is a floating overlay, not page content"). The reference build's
+//! — never a brightness-swapped `ColorScheme` role ("a
+//! tooltip is a floating overlay, not page content"). The design system's
 //! own light-page CSS override for `.tooltip-bubble` (border/shadow spelled
 //! out as literal `rgba(255,255,255,.1)`/`rgba(34,29,18,.25)`, distinct from
 //! the dark page's `var(--border-bright)`/black-shadow rule) is exactly what
@@ -50,7 +48,8 @@
 //! gap, unclamped to any ancestor's bounds — the layout protocol gives a
 //! widget no visibility into ancestor bounds to clamp against, so a tooltip
 //! near a screen edge can paint partially off-screen. Documented, not fixed,
-//! per the task's own "v1: above-center, note constraints".
+//! as a v1 limitation: above-center placement only, no ancestor-bounds
+//! clamping.
 //!
 //! # Why this widget doesn't nest `Text` for the bubble
 //!
@@ -63,8 +62,8 @@
 //! # Semantics
 //!
 //! A `Role::Group` container node wraps the child, its `description` set to
-//! the tooltip text — a best-effort described-by-style augmentation (the
-//! task's own phrasing: "where the semantics vocabulary allows"). This is
+//! the tooltip text — a best-effort described-by-style augmentation (limited
+//! to where the semantics vocabulary allows). This is
 //! always attached, not only while the bubble is visually shown, matching
 //! how a platform `aria-describedby` relationship is a static accessibility
 //! fact independent of the tooltip's current visibility.
@@ -96,7 +95,7 @@ use crate::nav::transition::{TransitionDriver, make_driver};
 /// full citation) — duplicated here since that constant is private.
 const LONG_PRESS_MS: f64 = 500.0;
 
-// ---- Bubble geometry (`.tooltip-bubble`, this task's own literal values) --
+// ---- Bubble geometry (`.tooltip-bubble` design-system values) -------------
 
 /// Gap between the child's top edge and the bubble's bottom edge
 /// (`bottom:calc(100% + 8px)`).
@@ -108,7 +107,7 @@ const PAD_Y: f64 = 6.0;
 /// Bubble font size (`.tooltip-bubble{font-size:10.5px}`).
 const FONT_SIZE: f32 = 10.5;
 /// Single-line label height multiplier — no line-height is specified for a
-/// `white-space:nowrap` single-line bubble; this task's own choice.
+/// `white-space:nowrap` single-line bubble; an original, hand-picked value.
 const LINE_HEIGHT: f32 = 1.3;
 /// Border stroke width.
 const BORDER_WIDTH: f64 = 1.0;
@@ -132,7 +131,7 @@ const TOOLTIP_SHADOW_BLUR: f64 = 20.0;
 const TOOLTIP_SHADOW_ALPHA: f32 = 0.25;
 const TOOLTIP_SHADOW_BASE: Color = Color::from_rgb8(0x22, 0x1d, 0x12);
 
-// ---- Motion (this task's own literal values — see the module docs) -------
+// ---- Motion (design-system values — see the module docs) -----------------
 
 /// Enter duration (`durations.fast`, exact Glyph source value).
 const ENTER_DURATION: Duration = Duration::from_millis(150);
@@ -588,7 +587,7 @@ mod tests {
         w.event(&mut ctx, event);
     }
 
-    // ---- Long-press timeline (acceptance criterion 3) --------------------
+    // ---- Long-press timeline ----------------------------------------------
 
     #[test]
     fn quick_tap_never_shows_the_bubble() {
@@ -676,7 +675,7 @@ mod tests {
         );
     }
 
-    // ---- Rendering (acceptance criteria 1 and 4) --------------------------
+    // ---- Rendering ---------------------------------------------------------
 
     #[derive(Default)]
     struct Recorder {
@@ -746,7 +745,7 @@ mod tests {
 
     #[test]
     fn brightness_invariance_recording_scene_identical_dark_vs_light() {
-        // Acceptance criterion 1: identical paint under Light and Dark
+        // Identical paint under Light and Dark
         // glyph_baseline() brightness.
         let dark = Theme::glyph_baseline();
         let light = dark.clone().with_brightness(frust_theme::Brightness::Light);

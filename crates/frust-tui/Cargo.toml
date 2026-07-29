@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 # A library + a standalone binary. `frust-cli` gains a `frust tui` subcommand
-# (task 04) that calls into the library; users also get the `frust-tui` binary
+# that calls into the library; users also get the `frust-tui` binary
 # directly. Neither depends on the framework crates (same isolation charter as
 # `frust-cli`/`frust-drive` — see docs/ARCHITECTURE.md).
 [lib]
@@ -18,23 +18,23 @@ name = "frust-tui"
 path = "src/main.rs"
 
 [dependencies]
-# Shared drive pipelines (devices/doctor/run/build/scaffold). Declared now so
-# Phase 2's project detection / session supervision consume the same pipelines
-# the `frust` CLI does; the skeleton links it but does not yet drive it.
+# Shared drive pipelines (devices/doctor/run/build/scaffold) — project
+# detection and session supervision consume the same pipelines the `frust`
+# CLI does.
 frust-drive = { path = "../frust-drive" }
 anyhow.workspace = true
 # `thiserror` backs the supervisor's matched `LaunchError` (CODE_STANDARDS'
 # "errors callers match on" rule); already a workspace dependency.
 thiserror.workspace = true
 ratatui.workspace = true
-# ANSI-aware log rendering for the session log view (PLAN.md D5) — parses a
+# ANSI-aware log rendering for the session log view — parses a
 # process's ANSI/SGR output into styled ratatui `Text`. Pin lives in the root
 # manifest (Version-Pin Policy).
 ansi-to-tui.workspace = true
 # `event-stream` gives the async `EventStream` the tokio `select!` loop polls.
 crossterm = { workspace = true, features = ["event-stream"] }
-# Format-preserving recent-projects store (`~/.config/frust/tui.toml`, PLAN.md
-# D6b's project switcher) — pin lives in the root manifest (Version-Pin Policy).
+# Format-preserving recent-projects store (`~/.config/frust/tui.toml`, the
+# project switcher) — pin lives in the root manifest (Version-Pin Policy).
 toml_edit.workspace = true
 # The workspace `tokio` pin is `default-features = false`; the TUI crate enables
 # exactly the features its async event loop needs (nothing reaches the

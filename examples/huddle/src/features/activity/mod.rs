@@ -1,6 +1,6 @@
 //! Activity feature — the mentions feed's async load + local read-state
-//! controller (huddle clean-architecture refactor, task 04: sliced into
-//! `domain`/`data`/`presentation` following task 02's established pattern).
+//! controller (huddle clean-architecture refactor: sliced into
+//! `domain`/`data`/`presentation`, mirroring `channels`' established pattern).
 //!
 //! See [`domain::repositories::ActivityRepository`] for the data seam,
 //! [`data::repositories::StoreActivityRepository`] for its store-backed

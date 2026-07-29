@@ -1,13 +1,13 @@
-//! The titlebar project-switcher dropdown (PLAN.md D6b / F5): a popup
+//! The titlebar project-switcher dropdown: a popup
 //! overlaying the sidebar's PROJECTS section (same column range — full
 //! sidebar width, flush with its left edge — so it never bleeds a stray
 //! sliver of the section it's replacing on either side), listing every
 //! detected/recent project. Opened via the titlebar `▾` chevron or
 //! `Ctrl+O`/`p`; the base workbench layer renders with a *suppressed*
-//! `MouseCtx` while this is open (see `crate::ui::render`) — the same D4
+//! `MouseCtx` while this is open (see `crate::ui::render`) — the same
 //! base-layer suppression the run-config modal uses.
 //!
-//! Layering (D2): renders `&AppState` and only *registers* interaction (item
+//! Layering: renders `&AppState` and only *registers* interaction (item
 //! clicks); it never mutates the engine.
 
 use ratatui::Frame;

@@ -10,16 +10,12 @@
 //!
 //! `titleLarge` is weight 400 (Regular) per m3.material.io; a secondary
 //! source claims 500 — this module follows m3.material.io as the primary,
-//! more authoritative source (see
-//! `workflow/plans/features/frust-phase-6a-foundations/tasks/03-theme-crate-tokens.md`).
+//! more authoritative source.
 //!
 //! # Cupertino (iOS) mapping
 //!
 //! [`TypeScale::cupertino`] maps Apple's 11 SF Pro semantic text styles onto
-//! the same 15 M3-named `TypeScale` slots above, per
-//! `workflow/plans/features/frust-phase-6c-widget-catalog/research/RESEARCH.md`'s
-//! `cupertino-tokens-idioms` claims and its R19/R20 refuted-claims
-//! corrections (retrieved 2026-07-17):
+//! the same 15 M3-named `TypeScale` slots above (retrieved 2026-07-17):
 //!
 //! - **Sizes** (pt, treated 1:1 as logical px like the M3 scale's sp): Large
 //!   Title 34, Title 1 28, Title 2 22, Title 3 20, Headline 17, Body 17,
@@ -91,11 +87,9 @@
 //! baseline role, 30 slots total), filled by [`TypeScale::m3`]/
 //! [`TypeScale::cupertino`] alongside the baseline 15.
 //!
-//! **Role-count resolution:** this phase's research sweep flagged "15
-//! baseline + 15 emphasized (30 total), applied to Display/Headline/Title
-//! roles" as a REFUTED/contested claim (see
-//! `workflow/plans/features/frust-phase-6f-design-modernization/research/RESEARCH.md`'s
-//! REFUTED-claims section) — the "30 total" count was right but the
+//! **Role-count resolution:** an earlier belief that emphasized variants were
+//! "15 baseline + 15 emphasized (30 total), applied to Display/Headline/Title
+//! roles" was contested — the "30 total" count was right but the
 //! "Display/Headline/Title only" scope was wrong. Verified directly against
 //! the primary source: Jetpack Compose Material3's generated token file
 //! (`androidx.compose.material3.tokens.TypographyTokens`/`TypeScaleTokens`,
@@ -120,8 +114,8 @@
 //! (0.5px baseline → 0.15px emphasized, matching the source's
 //! `BodyLargeEmphasizedTracking`).
 //!
-//! **Cupertino mapping:** per this task's inputs (SF Pro weights mined into
-//! `research/kit-colors-type-metrics.json`'s `text_styles` — only Regular and
+//! **Cupertino mapping:** SF Pro weights mined from the Apple iOS UI Kit
+//! (`text_styles` — only Regular and
 //! Semibold appear), [`TypeScale::cupertino`]'s emphasized slots reuse the
 //! same size/line-height/family as their baseline counterpart and force
 //! weight to Semibold — including `title_large`/`title_medium` (mapped from

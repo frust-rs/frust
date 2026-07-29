@@ -1,7 +1,7 @@
-//! Drives `./gradlew assemble<Flavor><Mode>` in `<app>/android/` (spec
-//! §12.4 step 4, mode-aware since task 66). The generated Gradle project's
-//! cargo-ndk task does the actual Rust `.so` build; this module only shells
-//! out to Gradle and streams its output.
+//! Drives `./gradlew assemble<Flavor><Mode>` in `<app>/android/`, mode/flavor
+//! aware. The generated Gradle project's cargo-ndk task does the actual Rust
+//! `.so` build; this module only shells out to Gradle and streams its
+//! output.
 
 use std::path::{Path, PathBuf};
 
@@ -12,8 +12,8 @@ use crate::build_info::BuildMode;
 use crate::process::{Output, ProcessRunner};
 
 /// Runs `./gradlew <task> [-P...]` in `android_dir` — `task` and `props` are
-/// `android_build::tasks::task_name`/`gradle_properties`' output (task 64),
-/// reused rather than duplicated here so the run and build pipelines compute
+/// `android_build::tasks::task_name`/`gradle_properties`' output, reused
+/// rather than duplicated here so the run and build pipelines compute
 /// a variant's task name and `-P` properties from exactly one place.
 /// Streams each line of output through `on_line` (prefixed `[gradle] `) and
 /// exports `JAVA_HOME=java_home` for the child process only.
@@ -45,8 +45,8 @@ pub fn assemble(
 
 /// Resolves the single APK a non-split `assemble<Flavor><Mode>` build should
 /// have produced, reusing `android_build::artifacts`' directory + glob +
-/// expected-count discovery (tasks 64, followup F2) rather than guessing
-/// AGP's exact output filename or re-checking the count here — the
+/// expected-count discovery rather than guessing AGP's exact output
+/// filename or re-checking the count here — the
 /// output-naming/count-guard logic lives in exactly one place. `frust
 /// run` always builds a single-ABI, non-split APK (it installs on one
 /// connected device), so `discover` itself now errors on anything but
@@ -74,8 +74,8 @@ pub fn apk_output_path(
 
 /// Best-effort check for whether Gradle's wrapper distribution is already
 /// cached under `<gradle_user_home>/wrapper/dists/` — used only to print a
-/// one-time note that the first run downloads Gradle (spec §12.4 step 4),
-/// never to gate the build.
+/// one-time note that the first run downloads Gradle, never to gate the
+/// build.
 pub fn wrapper_dist_cached(gradle_user_home: &Path) -> bool {
     gradle_user_home
         .join("wrapper")

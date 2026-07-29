@@ -1,4 +1,4 @@
-//! `BuildInfo` funnel between build flags and platform builders (spec §12.1/12.2).
+//! `BuildInfo` funnel between build flags and platform builders.
 //!
 //! `run` (debug-default) and `build` (release-default) both resolve their
 //! flags into a plain [`BuildArgs`] and call [`BuildInfo::from_args`] with
@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-/// The three user-facing build modes (spec §12.2).
+/// The three user-facing build modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildMode {
     Debug,
@@ -20,8 +20,8 @@ pub enum BuildMode {
 impl BuildMode {
     /// The `cargo build`/`cargo ndk` flag(s) selecting this mode's profile:
     /// `[]` (default `dev` profile) / `["--profile", "profile"]` /
-    /// `["--release"]`. Shared by `android_build`/`ios_build` (tasks 64/65)
-    /// so the mode → cargo-profile mapping has one source.
+    /// `["--release"]`. Shared by `android_build`/`ios_build` so the mode →
+    /// cargo-profile mapping has one source.
     pub fn cargo_profile_arg(&self) -> &'static [&'static str] {
         match self {
             BuildMode::Debug => &[],
@@ -30,8 +30,8 @@ impl BuildMode {
         }
     }
 
-    /// The Gradle build-type infix used in a task name (spec §12.5's
-    /// `assemble<Flavor><Mode>`/`bundle<Flavor><Mode>`), e.g.
+    /// The Gradle build-type infix used in a task name
+    /// (`assemble<Flavor><Mode>`/`bundle<Flavor><Mode>`), e.g.
     /// `assemble{flavor}{Debug,Profile,Release}`.
     pub fn gradle_infix(&self) -> &'static str {
         match self {
@@ -41,8 +41,8 @@ impl BuildMode {
         }
     }
 
-    /// The Xcode `-configuration` value for this mode (spec §12.6), before
-    /// any flavor/scheme suffix (`<Mode>-<Scheme>`) is appended.
+    /// The Xcode `-configuration` value for this mode, before any
+    /// flavor/scheme suffix (`<Mode>-<Scheme>`) is appended.
     pub fn xcode_configuration(&self) -> &'static str {
         match self {
             BuildMode::Debug => "Debug",
@@ -52,8 +52,8 @@ impl BuildMode {
     }
 
     /// The cargo `--features` this mode selects when building a generated app
-    /// (release-lean plan, task 04 — Flutter-mode parity): the single source
-    /// the desktop/`cargo run`, Android (`-Pfrust.cargoFeatures`), and iOS
+    /// (Flutter-mode log-level parity): the single source the
+    /// desktop/`cargo run`, Android (`-Pfrust.cargoFeatures`), and iOS
     /// (`FRUST_FEATURES`) seams all thread through.
     ///
     /// - **debug / profile** → `["frust/perf-trace"]`: instrumentation
@@ -61,8 +61,7 @@ impl BuildMode {
     ///   compiled IN. Profile keeps it via THIS feature, never via a log
     ///   level — `release_max_level_*` keys off `debug_assertions`, which the
     ///   `[profile.profile]` inherits-release profile has OFF, so a log-level
-    ///   ceiling would wrongly silence profile perf lines (task 01's binding
-    ///   sink decision).
+    ///   ceiling would wrongly silence profile perf lines.
     /// - **release** → `["lean"]`: the generated app's own `lean` feature,
     ///   which forwards to `log/release_max_level_warn` — stray info/debug log
     ///   lines are constant-folded out while warn/error crash diagnostics
@@ -129,8 +128,8 @@ impl BuildInfo {
     /// its own default, e.g. `run` → debug, `build *` → release).
     ///
     /// When mode is [`BuildMode::Profile`], automatically injects
-    /// `FRUST_TRACE=1` into the defines (spec §14 "--profile mode tracing")
-    /// unless the user already provided a `FRUST_TRACE` define.
+    /// `FRUST_TRACE=1` into the defines unless the user already provided a
+    /// `FRUST_TRACE` define.
     pub fn from_args(args: BuildArgs, default_mode: BuildMode) -> Result<Self, BuildInfoError> {
         let flags = [args.debug, args.profile, args.release];
         if flags.iter().filter(|set| **set).count() > 1 {
@@ -333,7 +332,7 @@ mod tests {
     #[test]
     fn cargo_features_matches_each_mode() {
         // debug/profile compile instrumentation IN; release swaps to the
-        // `lean` log ceiling and carries no `perf-trace` (release-lean plan).
+        // `lean` log ceiling and carries no `perf-trace`.
         assert_eq!(BuildMode::Debug.cargo_features(), &["frust/perf-trace"]);
         assert_eq!(BuildMode::Profile.cargo_features(), &["frust/perf-trace"]);
         assert_eq!(BuildMode::Release.cargo_features(), &["lean"]);

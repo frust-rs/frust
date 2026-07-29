@@ -12,14 +12,14 @@ publish = false
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary (spec §12.9).
+# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
+# library for the desktop `main.rs` preview binary.
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # NOTE: temporary path dependency pointing at the Frust repo checkout
-# that generated this project (spec §12.3: "frust_path" mechanism is
+# that generated this project (the `frust_path` mechanism is
 # explicitly temporary). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead. The default
 # `glyph-fonts` feature is left ON — this catalog showcases the Glyph
@@ -40,11 +40,11 @@ frust = { path = "../../crates/frust" }
 # `frust-perf` output. Mirrors `examples/huddle/Cargo.toml`'s block.
 log = "0.4"
 
-# Low-level escape hatch (glyph-refinements task 20): the AppBar section's
+# Low-level escape hatch: the AppBar section's
 # overflow-menu demo anchors `frust::glyph::show_glyph_menu` at the kebab
-# icon's own painted window-coordinate rect — task 16's documented "caller
+# icon's own painted window-coordinate rect — a documented "caller
 # reports its own rect" contract (`crates/frust-widgets/src/glyph/menu.rs`'s
-# module docs literally name this "task 20's own wiring": no
+# module docs name this the anchor's own wiring): no
 # ancestor-bounds query exists, so the anchor icon must capture its own
 # bounds during paint). No facade widget reports a child's painted bounds,
 # so this is a genuine gap — the same shape `examples/huddle`'s
@@ -57,22 +57,21 @@ log = "0.4"
 frust-core = { path = "../../crates/frust-core" }
 kurbo = "0.13.1"
 
-# frust-camera (frust-camera task 11): the device-gate vehicle for the whole
+# frust-camera: the device-gate vehicle for the whole
 # feature — see `src/pages/camera.rs`. Path dep out of this checkout, the
 # same in-repo shape `examples/huddle` uses for `clean-signals-frust`
 # (`docs/DEVELOPMENT.md`'s Version-Pin Policy) — not yet a `frust tui` Add
-# Plugin contribution (task 10, not landed at this task's authoring time), so
-# hand-added exactly as the applier would add it.
+# Plugin contribution, so hand-added exactly as the applier would add it.
 frust-camera = { path = "../../plugins/camera" }
 
-# frust-native-widgets (native-widgets p1-06): the device-gate vehicle for the
+# frust-native-widgets: the device-gate vehicle for the
 # "Native Widgets" catalog section — `src/pages/native_widgets.rs`. Same
 # hand-added-path-dep shape as `frust-camera` above (not yet a `frust tui` Add
-# Plugin contribution — that registry entry is Phase 3's packaging work).
+# Plugin contribution — that registry entry is future packaging work).
 # Default features on: this catalog wants the `frust-api` builders
 # (`native_button`/etc.), not just the bare platform plugin.
 #
-# `demo-components` (native-widgets p3-08) is the plugin's NON-default demo
+# `demo-components` is the plugin's NON-default demo
 # feature: `DemoCard`, one `NativeComponent` owning a real native subtree. It
 # ships inside the plugin rather than here because implementing that trait needs
 # `jni::objects::JObject` (Android) / `objc2-ui-kit` (iOS) in the *implementing*
@@ -107,11 +106,10 @@ peniko = "0.6.1"
 lean = ["log/release_max_level_warn"]
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
-# (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
+# store distribution. `lto = "fat"` + `codegen-units = 1`
+# (measured 2026-07-18 against the now-deleted `catalog`
 # example's release arm64-v8a `.so` via `scripts/size-report.sh` in the
-# Frust repo — see `workflow/plans/features/frust-phase-7-performance/
-# research/BASELINE.md`): fat LTO + cgu=1 alone (opt-level 3, the default —
+# Frust repo): fat LTO + cgu=1 alone (opt-level 3, the default —
 # no override needed) shrank the prior baseline (lto="thin", no cgu
 # override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
 # unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
@@ -119,7 +117,7 @@ lean = ["log/release_max_level_warn"]
 # the config that would actually ship, since sacrificing encode-path CPU
 # perf isn't acceptable — and under that carve-out "s" measured 7.36MB
 # (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
-# neither clears the task's ">5% meaningfully wins" bar once the carve-out
+# neither clears a >5%-meaningful-win bar once the carve-out
 # that protects render-path perf is in place, so `opt-level` stays at its
 # default (3) and no carve-out is needed. This block and its
 # `[profile.profile]` counterpart are hand-synced with Frust's own root
@@ -131,21 +129,21 @@ strip = "symbols"
 panic = "abort"
 
 # `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement (spec §12.2). Artifacts land in
+# on-device performance measurement. Artifacts land in
 # `target/<triple>/profile/` (custom-profile name, verified legal).
 [profile.profile]
 inherits = "release"
 debug = true
 strip = "none"
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack
-# (6e Finding 5 / 6e-fix-1 task 03): vello/wgpu/naga's shader-pipeline
+# `[profile.dev]` per-package overrides for the render/shader-compile stack:
+# vello/wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
 # physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes. This app's
 # own code stays at the default dev opt-level (fast incremental rebuilds) —
-# only these dependencies are bumped. `docs/spec.md` §12.9 documents
-# `opt-level = 1` for deps generally; `opt-level = 2` is used here for the
+# only these dependencies are bumped. Deps generally build at
+# `opt-level = 1` (see the wildcard override below); `opt-level = 2` is used here for the
 # shader-compile-heavy crates specifically (see frust's own root
 # `Cargo.toml` for the full rationale — the same override, kept in sync).
 [profile.dev.package.vello]
@@ -169,7 +167,7 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-# Debug dep opt widening (phase 7 task 11): non-workspace-member dependencies
+# Debug dep opt widening: non-workspace-member dependencies
 # build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
 # workspace members and the profile's own package — verified against Cargo's
 # profile-override docs); this app's own code stays at the fast default dev

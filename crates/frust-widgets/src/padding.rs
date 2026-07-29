@@ -1,4 +1,4 @@
-//! Padding layout container (spec §6.2): insets a single child.
+//! Padding layout container: insets a single child.
 //!
 //! [`PaddingView`]/[`PaddingWidget`] deflate the incoming constraints by the
 //! [`EdgeInsets`], lay the child out in the reduced space, offset it by the

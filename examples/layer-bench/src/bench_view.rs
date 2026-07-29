@@ -149,7 +149,7 @@ impl BenchViewWidget {
     }
 
     /// Total offscreen texture memory of the composite scenes (0 until content
-    /// is built) — surfaced for the on-screen HUD / SPIKE.md table.
+    /// is built) — surfaced for the on-screen HUD.
     pub fn texture_memory_bytes(&self) -> u64 {
         self.content.as_ref().map_or(0, |c| c.memory_bytes)
     }

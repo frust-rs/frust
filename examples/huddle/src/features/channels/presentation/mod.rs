@@ -1,4 +1,4 @@
-//! `channels` presentation layer (huddle clean-architecture refactor, task 02):
+//! `channels` presentation layer (huddle clean-architecture refactor):
 //! the roster [`ChannelsController`](controllers::ChannelsController) and the
 //! Home tab's pages ([`home`](pages::home), [`workspace_drawer`](pages::workspace_drawer)).
 //! Imports domain only — never `data/`.

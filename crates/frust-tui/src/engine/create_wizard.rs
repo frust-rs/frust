@@ -1,4 +1,4 @@
-//! The create-project wizard state machine (PLAN.md D6b): name → directory →
+//! The create-project wizard state machine: name → directory →
 //! architecture → off-thread scaffold → open-in-place.
 //!
 //! Everything here is plain data + pure transitions — no filesystem, no
@@ -76,7 +76,7 @@ pub enum WizardAdvance {
     Blocked,
 }
 
-/// The create-project wizard state (PLAN.md D6b).
+/// The create-project wizard state.
 #[derive(Debug, Clone)]
 pub struct CreateWizard {
     /// Which step is showing.

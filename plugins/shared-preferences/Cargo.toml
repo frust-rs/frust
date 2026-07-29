@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-# The Android platform-handle substrate this crate's Android backend will
-# call through (task 06); the only `frust-*` dependency this crate is
+# The Android platform-handle substrate this crate's Android backend
+# calls through; the only `frust-*` dependency this crate is
 # allowed (platform-plugin charter — see `frust-plugin`'s crate doc).
 frust-plugin = { path = "../../crates/frust-plugin" }
 # Shared data-dir resolution + atomic write for the `file` backend — a
@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 # The file backend's on-disk JSON map encoding.
 serde_json = { workspace = true }
 
-# Android's real SharedPreferences backend (task 06) calls through
+# Android's real SharedPreferences backend calls through
 # frust-plugin::android::with_jni_env, which already carries the `jni` dep;
 # this crate depends on it directly too so its own JNI signature calls
 # (Context.getSharedPreferences, edit()/put*/apply()) don't need to go
@@ -28,9 +28,9 @@ serde_json = { workspace = true }
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
 
-# The Apple NSUserDefaults backend (task 06) — objc2/objc2-foundation with an
+# The Apple NSUserDefaults backend — objc2/objc2-foundation with an
 # explicit, minimal feature list rather than objc2-foundation's large default
-# set. Declared now (Phase 2 step 2 of the plugin-system plan) so task 06
+# set. Declared up front so the real backend
 # only has to write source, not chase feature-resolution errors.
 #
 # `NSValue` gates `NSNumber` (the type lives in the generated `NSValue.rs`,

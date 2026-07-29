@@ -3,8 +3,8 @@
 //!
 //! `any_spawner`'s built-in `init_tokio()` is unusable here: its `spawn_local`
 //! calls `tokio::task::spawn_local`, which panics unless the current thread is
-//! inside a `LocalSet` — and the UI thread has none (see the phase-5.5 research
-//! doc §2). This module is the fix: `spawn` hands `Send` futures to the
+//! inside a `LocalSet` — and the UI thread has none. This module is the fix:
+//! `spawn` hands `Send` futures to the
 //! background runtime, while `spawn_local` pushes `!Send` futures onto a
 //! `thread_local!` [`LocalPool`] that the shell drains via
 //! [`ReactiveRuntime::pump_local`](crate::ReactiveRuntime::pump_local).
@@ -83,7 +83,7 @@ pub(crate) fn run_until_stalled() {
 /// thread. When the timer fires it wakes only the `LocalPool` waker, marking the
 /// task ready in the pool's internal queue — but nothing tells the shell to
 /// actually *run* [`ReactiveRuntime::pump_local`], so a parked desktop
-/// `ControlFlow::Wait` loop never drains the ready task (see ../BUG.md B1).
+/// `ControlFlow::Wait` loop never drains the ready task.
 ///
 /// [`WakeBridge`] substitutes this composite waker for the pool's own before
 /// polling the inner future, so a re-wake from any source both (a) keeps the
@@ -139,8 +139,8 @@ impl Wake for CompositeWaker {
 }
 
 /// Wraps a `spawn_local` future so every poll swaps the `LocalPool`'s task waker
-/// for a [`CompositeWaker`]. This is the seam that closes the desktop wake gap
-/// (../BUG.md B1): whatever the inner future clones out of the poll `Context`
+/// for a [`CompositeWaker`]. This is the seam that closes the desktop wake gap:
+/// whatever the inner future clones out of the poll `Context`
 /// and hands to its re-wake source is the composite waker, so a later re-wake
 /// fires the [`FrameWaker`](crate::FrameWaker) too, not just the pool's own.
 struct WakeBridge {
@@ -202,8 +202,8 @@ impl CustomExecutor for ForgeExecutor {
         // Wrap the future so each poll installs a composite waker: a later
         // re-wake (e.g. the tokio timer driver completing a `sleep` the future
         // awaits) then fires the FrameWaker too, not just the LocalPool's own
-        // waker — closing the desktop wake gap (see [`WakeBridge`] / ../BUG.md
-        // B1). Without this, only the spawn-time `wake()` below ever nudges the
+        // waker — closing the desktop wake gap (see [`WakeBridge`]).
+        // Without this, only the spawn-time `wake()` below ever nudges the
         // shell, so a parked desktop loop never pumps the completion.
         let fut = WakeBridge { inner: fut };
         LOCAL_SPAWNER.with(|spawner| {
@@ -245,7 +245,7 @@ mod tests {
         (waker, seen)
     }
 
-    /// The exact broken link from ../BUG.md B1: a spawned local future that
+    /// The exact broken link this test guards against: a spawned local future that
     /// returns `Pending` awaiting a `tokio::time::sleep` is re-woken by the
     /// background runtime's timer driver *from a tokio worker thread*. That
     /// re-wake must fire the FrameWaker so a parked shell pumps — pre-fix it

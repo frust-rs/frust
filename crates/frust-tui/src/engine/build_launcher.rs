@@ -1,10 +1,11 @@
-//! The build-launcher modal (PLAN D6 "build launcher"): artifact type
+//! The build-launcher modal: artifact type
 //! (`apk`/`appbundle`/`ios`/`ipa`, iOS kinds only where host-appropriate) +
 //! the `BuildInfo` funnel (mode/flavor/defines) plus artifact-specific flags
 //! (split-per-ABI, iOS simulator/codesign, `.ipa` export method), resolving
 //! into a [`BuildSpec`] the runner drives directly through `frust-drive`'s
 //! `android_build`/`ios_build` pipelines (never shelling out itself) as a
-//! session reusing TUI2-03's tab/log-view machinery — see `crate::runner`'s
+//! session reusing the same tab/log-view machinery every other session
+//! uses — see `crate::runner`'s
 //! `Effect::LaunchBuild` enactment.
 //!
 //! Everything here is plain data + pure transitions — no threads, no
@@ -15,8 +16,8 @@ use std::path::PathBuf;
 
 use frust_drive::build_info::{BuildArgs, BuildInfo, BuildMode};
 
-/// Android ABI names `frust build apk`'s `--target-platform` maps to (spec
-/// §12.5) — `frust-drive`'s own copy (`android_build::tasks::ALL_ABIS`) is
+/// Android ABI names `frust build apk`'s `--target-platform` maps to —
+/// `frust-drive`'s own copy (`android_build::tasks::ALL_ABIS`) is
 /// crate-private, so this is a deliberate by-value duplicate, the same
 /// duplication `frust-cli`'s `commands/build.rs` already carries as its own
 /// local `TARGET_PLATFORMS` table.
@@ -26,7 +27,7 @@ const ALL_ABIS: &[&str] = &["arm64-v8a", "armeabi-v7a", "x86_64"];
 /// of the most common method as the modal's starting value).
 const DEFAULT_EXPORT_METHOD: &str = "app-store-connect";
 
-/// The artifact type the build launcher targets (spec §12.5/12.6).
+/// The artifact type the build launcher targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactKind {
     /// An Android APK (`assemble<Flavor><Mode>`).

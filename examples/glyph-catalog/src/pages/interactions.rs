@@ -1,32 +1,32 @@
-//! Interactions section (glyph-refinements tasks 19 + 21): all eight moments
+//! Interactions section: all eight moments
 //! tied to actual muxr events — a connection heartbeat, a session-attach card
 //! morph, a new-session boot sequence, a token-revoke character scramble, a
 //! long-press charge ring, a pull-to-refresh rain burst, a live-output
-//! waveform, and a copy-to-clipboard burst — reproducing
-//! `../../glyph-design-system/research/glyph-interactions.html` §01-§08.
-//! Task 19 landed §01/§02/§03/§07/§08 (composition-only, no new primitives);
-//! task 21 (this addendum, §04/§05/§06) leans on task 15's
+//! waveform, and a copy-to-clipboard burst. The heartbeat/session-attach/
+//! boot/waveform/clipboard-burst moments landed first (composition-only, no
+//! new primitives); the scramble/charge-ring/rain-burst moments (this
+//! addendum) lean on
 //! `GestureDetector::on_hold_progress`/`hold_threshold_ms` for the charge ring
 //! and `ScrollView::on_refresh_release` for the rain burst.
 //!
 //! # No new framework primitives
 //!
-//! Every moment composes existing facade widgets only (research §7's survey).
-//! Two deliberate substitutions from the task's suggested mapping, both
-//! because the "obvious" primitive isn't reachable without a manifest change
-//! this task's acceptance criteria rule out (`cargo build` catalog deps must
-//! stay unchanged):
+//! Every moment composes existing facade widgets only. Two deliberate
+//! substitutions from the original design's suggested mapping, both because
+//! the "obvious" primitive isn't reachable without a manifest change
+//! (`cargo build` catalog deps must stay unchanged):
 //!
-//! - **§02 session attach** uses [`SharedAxis::Scaled`] instead of
+//! - **Session attach** uses [`SharedAxis::Scaled`] instead of
 //!   `TransitionPattern::ContainerTransform`: `ContainerTransform::new`/
 //!   `from_source` takes a `kurbo::Rect`, and `kurbo` is not reachable from
 //!   this crate's non-test code (only a `[dev-dependencies]` entry, used by
 //!   `tests/smoke.rs`'s headless harness) — promoting it to a real
-//!   `[dependencies]` edge would be exactly the "catalog deps unchanged"
-//!   violation this task's Acceptance Criteria #2 forbids. `SharedAxis::Scaled`
+//!   `[dependencies]` edge would be exactly the catalog-deps change this
+//!   crate avoids. `SharedAxis::Scaled`
 //!   (incoming 0.80→1.0 scale + fade-through, no `Rect` needed) reads as the
 //!   same "grows to fill" morph without it.
-//! - **Per-frame demo state (§01/§03/§07/§08) reads a wall clock, not a
+//! - **Per-frame demo state (heartbeat/boot/waveform/clipboard-burst) reads
+//!   a wall clock, not a
 //!   timer signal.** `frust::spawn_local` + `tokio::time::sleep` is the
 //!   framework's blessed interval idiom (`examples/huddle`'s
 //!   `clean_signals::time::sleep` precedent), but that sleep helper lives in
@@ -43,24 +43,24 @@
 //!   unconditional `PaintCtx::request_frame` call in its own `paint` — to
 //!   keep this page's `build` re-invoked every frame while an animation needs
 //!   to keep advancing. **This replaces an earlier `pump()`**
-//!   (catalog-animation-performance bug, task 03): an invisible
+//!   (a since-fixed bug): an invisible
 //!   `AnimatedOpacity(0.0)` wrapping an Indeterminate `circular_progress`,
 //!   riding *that* unrelated widget's own always-request-frame paint
 //!   behavior as a side effect instead of declaring the need directly.
-//!   Mounting [`frame_ticker`] is the same per-frame-rebuild idiom the task
-//!   cites (`frust_bench`'s `s6_text` `WidthPulse` pattern), adapted to a
+//!   Mounting [`frame_ticker`] is the same per-frame-rebuild idiom
+//!   `frust_bench`'s `s6_text` `WidthPulse` pattern uses, adapted to a
 //!   page fn with no `Component`/`PaintCtx` of its own — now via a widget
 //!   that says what it's doing instead of exploiting one that doesn't.
 //!
-//! Task 21 adds three more, one further substitution and two implementation
-//! choices left to the implementor's call (documented per the task):
+//! This addendum adds three more moments, one further substitution and two
+//! implementation choices:
 //!
-//! - **§04 scramble's noise source is a tiny LCG** ([`lcg_next`]), not
+//! - **The scramble moment's noise source is a tiny LCG** ([`lcg_next`]), not
 //!   `Math.random()` — deterministic per `(frame, char index)` so the same
 //!   hold/frame always renders the same glitch text (reproducible in a test,
-//!   unlike a true RNG), per the task's own "no `Math.random` analog needed"
-//!   guidance.
-//! - **§05's "shadow" is an amber wash layer, not `PaintScene::draw_shadow`.**
+//!   unlike a true RNG); no `Math.random` analog is needed here.
+//! - **The charge-ring moment's "shadow" is an amber wash layer, not
+//!   `PaintScene::draw_shadow`.**
 //!   That call is a `PaintCtx`/`Widget::paint` primitive with no facade
 //!   equivalent reachable from application code (every demo *view* in this
 //!   file composes existing facade widgets only — the sole exception is
@@ -69,22 +69,23 @@
 //!   behind the row (the same `solid_source` technique
 //!   [`demo_copy_burst`]'s flash uses) reads as a comparable "lift" cue
 //!   without it.
-//! - **§06's rain is per-frame positioned glyph views on a fixed column
-//!   grid** (the task's "honest-composition route"), not a `draw_shader` WGSL
-//!   quad — consistent with every other demo on this page staying inside the
-//!   plain widget-composition surface (no `frust_scene`/shader dependency to
-//!   add to this crate's manifest, mirroring the §02 substitution's
-//!   deps-unchanged constraint above). The column count is fixed rather than
-//!   measured-width-derived (application code has no layout-pass access to
-//!   its own resolved size), so the refresh zone itself is a fixed-width
+//! - **The rain moment's rain is per-frame positioned glyph views on a
+//!   fixed column grid** — an honest-composition route, not a `draw_shader`
+//!   WGSL quad — consistent with every other demo on this page staying
+//!   inside the plain widget-composition surface (no `frust_scene`/shader
+//!   dependency to add to this crate's manifest, mirroring the
+//!   session-attach substitution's deps-unchanged constraint above). The
+//!   column count is fixed rather than measured-width-derived (application
+//!   code has no layout-pass access to its own resolved size), so the
+//!   refresh zone itself is a fixed-width
 //!   [`SizedBox`] ([`RAIN_ZONE_W`]) rather than filling the available width.
 //!
 //! # Reduced motion
 //!
 //! Every clock-driven demo checks a local `reduce` flag directly —
 //! `state.reduce_motion.get() || !state.animations_enabled.get()`, ORing the
-//! header animations-off toggle (catalog-animation-performance bug task 10)
-//! into the same check rather than adding a second gating flag (see
+//! header animations-off toggle into the same check rather than adding a
+//! second gating flag (see
 //! `crate::CatalogState::animations_enabled`'s doc comment) — because the
 //! `pattern_switcher`/`AnimatedOpacity`/`AnimatedScale` wrappers only
 //! auto-collapse when resolving a *theme-default* timing, which these
@@ -93,21 +94,22 @@
 //! and skips the animated portion outright rather than fighting the built-in
 //! collapse: the heartbeat ring/latency-roll, waveform bars, and copy-burst
 //! particles all render their settled end-state instead, matching
-//! `motion.rs`'s reduced-motion note ("every demo below collapses"). §04/§06
-//! (also wall-clock-driven) follow the same rule — a revoke jumps straight to
-//! the collapsed row, a refresh straight to "last updated just now", no
-//! scramble/rain frames rendered. §05 is the one exception on this page: its
+//! `motion.rs`'s reduced-motion note ("every demo below collapses"). The
+//! scramble/rain moments (also wall-clock-driven) follow the same rule — a
+//! revoke jumps straight to the collapsed row, a refresh straight to "last
+//! updated just now", no scramble/rain frames rendered. The charge-ring
+//! moment is the one exception on this page: its
 //! progress comes from `GestureDetectorView::on_hold_progress`, an
 //! event-delivered (not wall-clock) observation with no theme-default timing
 //! to bypass, so it needs no `ZERO`-timing workaround — reduced motion there
 //! only drops the ring/scale visuals, not the underlying gesture contract.
 //!
-//! # Tap-to-play (catalog-animation-performance bug, task 11)
+//! # Tap-to-play
 //!
-//! §01's heartbeat ping/rolling-latency was originally the page's one
-//! self-driving exception — it auto-repeated forever with no input, the
-//! research footer's documented exception to "every demo starts idle". Task
-//! 11 removes that exception: combined with task 07's visible-rect culling,
+//! The heartbeat moment's ping/rolling-latency was originally the page's one
+//! self-driving exception — it auto-repeated forever with no input, the one
+//! documented exception to "every demo starts idle". This page removes that
+//! exception: combined with the scroll view's visible-rect paint culling,
 //! nothing on this page should burn frames while unseen, and an
 //! always-running demo defeats that even while it IS seen but nobody's
 //! looking at it. `hb_active_sig` (mirroring every other demo's own
@@ -115,13 +117,13 @@
 //! first latency sample with the ping ring hidden, no [`frame_ticker`]
 //! mounted — and a [`GestureDetector`] wrapping the row (this page's "tap
 //! the demo card" affordance; a card-shaped tap target reads more naturally
-//! here than a button, unlike §07's existing `Toggle build-watch activity`
-//! button, which already satisfied the same play/stop contract before this
-//! task and is left as-is) starts/stops the wall-clock loop on tap,
+//! here than a button, unlike the waveform moment's existing `Toggle
+//! build-watch activity` button, which already satisfied the same play/stop
+//! contract and is left as-is) starts/stops the wall-clock loop on tap,
 //! resetting the clock on each (re)start so a cycle always begins at the
-//! ping. §03's boot demo and §04/§05/§06/§08's demos were already
-//! tap-triggered and self-stopping (this task's Scope: "unchanged beyond
-//! the task-03/12 reworks") and need no change here.
+//! ping. The boot demo and the scramble/charge-ring/rain/clipboard-burst
+//! demos were already tap-triggered and self-stopping and need no change
+//! here.
 //!
 //! Structure mirrors `motion.rs`: `pub fn page(state)` + one `demo_*` fn per
 //! moment inside `block(...)` scaffolds, thread-local demo state via the same
@@ -358,7 +360,8 @@ local_clock!(hb_elapsed_ms, hb_reset_clock);
 
 /// Full cycle length: the ping ring fires, then latency rolls, then idles
 /// until the next cycle — matching the reference's "runs automatically every
-/// 3s" caption, now gated behind [`hb_active_sig`] (task 11's module docs).
+/// 3s" caption, now gated behind [`hb_active_sig`] (see this module's
+/// "Tap-to-play" docs above).
 const HB_CYCLE_MS: f64 = 3000.0;
 /// Ping-ring animation length (reference: 1.6s `pingRing` keyframe).
 const HB_RING_MS: f64 = 1600.0;
@@ -379,9 +382,8 @@ const HB_RING_SCALE_MAX: f64 = 2.8;
 /// strokes its full circle into, matching the original `SizedBox(18, 18)`.
 const HB_RING_DIAMETER: f64 = 18.0;
 
-/// Paint headroom for the ping ring (catalog-animation-performance bug 2 /
-/// task 12 — see `workflow/plans/bugs/catalog-animation-performance/research/RESEARCH.md`'s
-/// finding 9): [`AnimatedOpacity`] composites its child under
+/// Paint headroom for the ping ring: [`AnimatedOpacity`] composites its child
+/// under
 /// [`PaintScene::push_layer`], which records ITS OWN (unscaled) layout rect
 /// as the layer's clip — captured *before* a nested [`AnimatedScale`] has
 /// pushed its scale transform, since `AnimatedOpacity` paints outermost. A
@@ -389,8 +391,7 @@ const HB_RING_DIAMETER: f64 = 18.0;
 /// ring to an 18×18 square the instant it scales past 1.0× — confirmed by
 /// this module's `heartbeat_ring_stays_within_its_headroom_slot_at_max_extent`
 /// recording-fake test, which found the cut is a real `push_layer` clip
-/// rect (not merely a layout-allocation illusion — the two candidate
-/// mechanisms the research doc's finding 9 left contested). The fix widens
+/// rect, not merely a layout-allocation illusion. The fix widens
 /// the *outer* slot the `AnimatedOpacity` itself lays out at (this constant,
 /// `>= HB_RING_DIAMETER * HB_RING_SCALE_MAX` — `18.0 * 2.8 = 50.4`, plus a
 /// small rounding margin) and centers the small unscaled ring inside it via
@@ -401,7 +402,7 @@ const HB_RING_SLOT: f64 = 52.0;
 /// Pure ping-ring geometry at `elapsed_in_cycle` ms into [`demo_heartbeat`]'s
 /// per-cycle clock (`reduce` suppresses the ping outright, matching
 /// `demo_heartbeat`'s own reduced-motion branch) — split out from
-/// `demo_heartbeat` so this module's effect-slot-headroom tests (task 12) can
+/// `demo_heartbeat` so this module's effect-slot-headroom tests can
 /// drive exact start/mid/max-extent timestamps directly instead of depending
 /// on [`hb_elapsed_ms`]'s wall clock. Returns `(ring_opacity, ring_scale)`.
 fn heartbeat_ring_state(elapsed_in_cycle: f64, reduce: bool) -> (f64, f64) {
@@ -445,22 +446,22 @@ fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogSta
 /// 01 connection heartbeat: a radar-ping ring (a full-circle
 /// [`circular_progress`] stroke under [`AnimatedOpacity`]/[`AnimatedScale`],
 /// driven by a wall-clock read — no per-widget custom paint needed) plus a
-/// rolling (not snapping) latency readout. Tap-to-play (task 11's module
-/// docs): stopped by default, rendering the settled first latency sample
+/// rolling (not snapping) latency readout. Tap-to-play: stopped by default,
+/// rendering the settled first latency sample
 /// with the ring hidden; tapping the row starts the wall-clock loop, and
 /// tapping again (or the header's animations-off toggle) stops it.
 fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
     // ORs the header animations-off toggle into the same local `reduce`
     // check every wall-clock demo already gates on — the "cheapest sound
-    // wiring" `CatalogState::animations_enabled`'s doc comment describes
-    // (catalog-animation-performance bug task 10), not a second flag.
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes,
+    // not a second flag.
     let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let active_sig = hb_active_sig();
-    // The task-10 global toggle force-stops this demo like every other one
-    // on the page even while `hb_active_sig` itself is still `true`
-    // underneath — flipping animations back on resumes the same
-    // never-reset wall clock rather than restarting the cycle (task 11's
-    // module docs).
+    // The global animations-off toggle force-stops this demo like every
+    // other one on the page even while `hb_active_sig` itself is still
+    // `true` underneath — flipping animations back on resumes the same
+    // never-reset wall clock rather than restarting the cycle (see this
+    // module's "Tap-to-play" docs above).
     let active = active_sig.get() && !reduce;
 
     let (t, cycle) = if active {
@@ -477,8 +478,8 @@ fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
     let to_latency = HB_LATENCIES[(cycle + 1) % HB_LATENCIES.len()];
     let rolling = active && t < HB_ROLL_MS;
     let latency = if !active {
-        // Stopped: the settled "nothing has happened yet" reading —
-        // Acceptance Criteria #1's "representative settled frame".
+        // Stopped: the settled "nothing has happened yet" reading — a
+        // representative settled frame rather than a blank/zero value.
         HB_LATENCIES[0]
     } else if rolling {
         from_latency + (to_latency - from_latency) * (t / HB_ROLL_MS)
@@ -492,12 +493,12 @@ fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
     // `heartbeat_ping_headroom_does_not_stretch_sibling_row_content` test
     // caught corrupting this row's *sibling* (post-ring) layout the instant
     // `reduce_motion` forces that exact (0.0, HB_RING_SCALE_MAX) pair — a
-    // pre-existing `AnimatedScale`/`Flex` interaction defect outside this
-    // task's file scope (`examples/glyph-catalog/src/pages/interactions.rs`
-    // only), reproduced identically against the unmodified pre-task-11 code
-    // by forcing `reduce_motion` on that same test. `HB_RING_SCALE_MIN` (the
-    // ring's cycle-start pose) renders identically invisible at
-    // `ring_opacity == 0.0` and avoids the defect entirely.
+    // pre-existing `AnimatedScale`/`Flex` interaction defect outside the
+    // scope of this file (`examples/glyph-catalog/src/pages/interactions.rs`
+    // only), reproduced identically against the code as it existed before
+    // the tap-to-play rework by forcing `reduce_motion` on that same test.
+    // `HB_RING_SCALE_MIN` (the ring's cycle-start pose) renders identically
+    // invisible at `ring_opacity == 0.0` and avoids the defect entirely.
     let (ring_opacity, ring_scale) = if active {
         heartbeat_ring_state(t, false)
     } else {
@@ -522,9 +523,10 @@ fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
     )
     .cross_axis(CrossAxisAlignment::Center);
 
-    // The tap-to-play affordance (task 11's module docs) — tapping the row
-    // toggles `hb_active_sig`, resetting the wall clock on each (re)start so
-    // a cycle always begins at the ping rather than resuming mid-cycle.
+    // The tap-to-play affordance (see this module's "Tap-to-play" docs
+    // above) — tapping the row toggles `hb_active_sig`, resetting the wall
+    // clock on each (re)start so a cycle always begins at the ping rather
+    // than resuming mid-cycle.
     let tappable_row: AnyView<CatalogState> =
         any(GestureDetector(row).on_tap(move |_s: &mut CatalogState| {
             if active_sig.get_untracked() {
@@ -702,7 +704,7 @@ fn demo_boot() -> FlexChild<CatalogState> {
 }
 
 // ---------------------------------------------------------------------------
-// Shared PRNG (task 21 — §04/§06)
+// Shared PRNG (used by §04/§06)
 // ---------------------------------------------------------------------------
 
 /// One step of a small linear-congruential generator (Numerical Recipes'
@@ -757,8 +759,8 @@ fn scramble_char(original: char, frame: u32, idx: u32) -> char {
 
 /// The full scrambled string at `frame` (0..=14): the left `lock_ratio*40%`
 /// of characters are locked to `·`, the rest noisy — mirrors the reference's
-/// per-character loop. The frame's one allocation (Acceptance Criteria #1:
-/// "no per-frame allocations beyond the rebuilt string").
+/// per-character loop. The frame's one allocation is the rebuilt string
+/// itself — nothing else allocates per frame.
 fn scramble_text(frame: u32) -> String {
     let lock_ratio = frame as f64 / SCRAMBLE_MAX_FRAMES;
     let len = SCRAMBLE_TOKEN.chars().count();
@@ -793,8 +795,8 @@ fn token_name_view(rendered: String, glitching: bool) -> AnyView<CatalogState> {
 fn demo_token_scramble(state: &CatalogState) -> FlexChild<CatalogState> {
     // ORs the header animations-off toggle into the same local `reduce`
     // check every wall-clock demo already gates on — the "cheapest sound
-    // wiring" `CatalogState::animations_enabled`'s doc comment describes
-    // (catalog-animation-performance bug task 10), not a second flag.
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes,
+    // not a second flag.
     let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let active_sig = token_active_sig();
     let active = active_sig.get();
@@ -890,25 +892,24 @@ const CHARGE_ICON_SIZE: f64 = 26.0;
 const CHARGE_RING_SIZE: f64 = 34.0;
 /// The row's fixed height, in logical px.
 const CHARGE_ROW_H: f64 = 56.0;
-/// The float glow/shadow wash's alpha (catalog-animation-performance bug 3 /
-/// task 12): bumped up from an earlier `0.10` for contrast on the Glyph dark
-/// baseline (research finding 9's "check the shadow also has visible
-/// contrast on the dark theme" note) — matches [`demo_charge_ring`]'s own
-/// floated `icon_bg` wash alpha (`0.18`) just below, a value already proven
-/// legible on this page.
+/// The float glow/shadow wash's alpha: bumped up from an earlier `0.10` for
+/// contrast on the Glyph dark baseline (the shadow needs visible contrast on
+/// the dark theme too) — matches [`demo_charge_ring`]'s own floated
+/// `icon_bg` wash alpha (`0.18`) just below, a value already proven legible
+/// on this page.
 const CHARGE_GLOW_ALPHA: f32 = 0.18;
 
 /// 05 long-press → float: holding the row past [`CHARGE_HOLD_MS`] fills a
 /// charge ring ([`circular_progress`]'s stroked-arc sweep, the same primitive
 /// the heartbeat ping ring uses) via
-/// `GestureDetectorView::on_hold_progress`/`GestureDetectorView::hold_threshold_ms`
-/// (task 15); reaching the threshold "floats" the row (scale 1.03 + an amber
+/// `GestureDetectorView::on_hold_progress`/`GestureDetectorView::hold_threshold_ms`;
+/// reaching the threshold "floats" the row (scale 1.03 + an amber
 /// wash standing in for the reference's box-shadow — see the [module
 /// docs](self)'s substitution note — + a chip); an early lift or slop-break
 /// resets the ring to empty (the widget's own final-`0.0` contract). Tapping
 /// a floated row drops it back down.
 ///
-/// **Reset idiom (followup f2)**: `on_hold_progress`'s Cancel staleness gap
+/// **Reset idiom**: `on_hold_progress`'s Cancel staleness gap
 /// (`frust_widgets::gesture`'s module docs) means a platform `Cancel`
 /// mid-hold delivers no final observation, so a naive consumer could be left
 /// showing a stale, frozen ring from an interrupted hold. This demo's
@@ -921,8 +922,8 @@ const CHARGE_GLOW_ALPHA: f32 = 0.18;
 fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     // ORs the header animations-off toggle into the same local `reduce`
     // check every wall-clock demo already gates on — the "cheapest sound
-    // wiring" `CatalogState::animations_enabled`'s doc comment describes
-    // (catalog-animation-performance bug task 10), not a second flag.
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes,
+    // not a second flag.
     let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let progress_sig = charge_progress_sig();
     let floated_sig = charge_floated_sig();
@@ -987,16 +988,15 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     // application code (see the module docs' substitution note) — an
     // opacity-faded amber wash behind the row approximates it.
     //
-    // Effect-slot-headroom fix (catalog-animation-performance bug 3 / task
-    // 12): a bare `SizedBox(None, Some(CHARGE_ROW_H))` leaves its WIDTH axis
-    // unconstrained, so under this `Stack` layer's loosened-but-bounded
-    // constraint (`min` relaxed to `0`, `max` still the row's real width)
-    // `Image`'s layout falls back to its *natural* size — the 1×1 solid
-    // source — clamped to `(1px, CHARGE_ROW_H)`: a vertical hairline, not a
-    // row-wide wash (confirmed by this module's
+    // Effect-slot-headroom fix: a bare `SizedBox(None, Some(CHARGE_ROW_H))`
+    // leaves its WIDTH axis unconstrained, so under this `Stack` layer's
+    // loosened-but-bounded constraint (`min` relaxed to `0`, `max` still the
+    // row's real width) `Image`'s layout falls back to its *natural* size —
+    // the 1×1 solid source — clamped to `(1px, CHARGE_ROW_H)`: a vertical
+    // hairline, not a row-wide wash (confirmed by this module's
     // `charge_ring_glow_fills_its_row_width` recording-fake test; NOT the
-    // scale-clip mechanism this bug's research note first suspected — see
-    // that test's doc comment). `Flex`'s own `flexible(1, ..)` share
+    // scale-clip mechanism first suspected — see that test's doc comment).
+    // `Flex`'s own `flexible(1, ..)` share
     // computation is what actually forces a TIGHT (not just bounded) width
     // in this widget set with no dedicated "fill" primitive, so the fix
     // wraps the wash in a single-child horizontal `flexible(1, ..)` row:
@@ -1071,7 +1071,7 @@ local_clock!(rain_elapsed_ms, rain_reset_clock);
 /// measured-width-derived).
 const RAIN_ZONE_W: f64 = 260.0;
 const RAIN_ZONE_H: f64 = 56.0;
-/// Column count across [`RAIN_ZONE_W`] (the task's "~W/13" guidance, rounded).
+/// Column count across [`RAIN_ZONE_W`] (roughly `W/13`, rounded).
 const RAIN_COLUMNS: u32 = 20;
 /// Total burst length (reference: "~650ms").
 const RAIN_BURST_MS: f64 = 650.0;
@@ -1097,7 +1097,7 @@ fn rain_stagger(col: u32) -> f64 {
 }
 
 /// 06 pull to refresh — rain burst: a 56px zone (a small [`ScrollView`] whose
-/// [`ScrollView::on_refresh_release`] — task 15/scroll's pull-to-refresh
+/// [`ScrollView::on_refresh_release`] — the pull-to-refresh
 /// trigger — fires the same handler as the "trigger refresh" button, since
 /// the gesture needs a real touch/mouse drag past the top edge to verify on
 /// desktop) bursts a fixed grid of falling glyph columns
@@ -1109,8 +1109,8 @@ fn rain_stagger(col: u32) -> f64 {
 fn demo_rain_burst(state: &CatalogState) -> FlexChild<CatalogState> {
     // ORs the header animations-off toggle into the same local `reduce`
     // check every wall-clock demo already gates on — the "cheapest sound
-    // wiring" `CatalogState::animations_enabled`'s doc comment describes
-    // (catalog-animation-performance bug task 10), not a second flag.
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes,
+    // not a second flag.
     let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let active_sig = rain_active_sig();
     let active = active_sig.get();
@@ -1264,15 +1264,15 @@ fn wave_row(name: &str, live: bool, reduce: bool, t: f64) -> AnyView<CatalogStat
 }
 
 /// 07 live output indicator: three panes, one toggleable — a small waveform
-/// pulse on the pane currently "producing output" (paint-driven while active,
-/// idle everywhere else — Acceptance Criteria #3).
+/// pulse on the pane currently "producing output" (paint-driven while
+/// active, idle everywhere else).
 fn demo_waveform(state: &CatalogState) -> FlexChild<CatalogState> {
     let live_sig = wave_live_sig();
     let live = live_sig.get();
     // ORs the header animations-off toggle into the same local `reduce`
     // check every wall-clock demo already gates on — the "cheapest sound
-    // wiring" `CatalogState::animations_enabled`'s doc comment describes
-    // (catalog-animation-performance bug task 10), not a second flag.
+    // wiring" `CatalogState::animations_enabled`'s doc comment describes,
+    // not a second flag.
     let reduce = state.reduce_motion.get() || !state.animations_enabled.get();
     let t = wave_elapsed_ms();
 
@@ -1322,8 +1322,9 @@ const COPY_TOAST_MS: f64 = 1100.0;
 /// 08 copy burst: clicking the field flashes it, sends a few characters
 /// drifting up off the field, and shows a small inline "copied" toast — a
 /// composition of [`AnimatedOpacity`]/[`Align`]/a local
-/// [`badge`](frust::glyph::badge) rather than the global `toast_host`
-/// (per the task's Details: "NOT the global host").
+/// [`badge`](frust::glyph::badge) rather than the global `toast_host` — this
+/// demo's toast is deliberately scoped to the field, not the app-wide
+/// overlay.
 fn demo_copy_burst() -> FlexChild<CatalogState> {
     let active_sig = copy_active_sig();
     let active = active_sig.get();
@@ -1406,7 +1407,7 @@ fn demo_copy_burst() -> FlexChild<CatalogState> {
 /// doc comment on that helper): starts §01's heartbeat demo directly, the way
 /// `pages::interactions::tests`' own in-file tests poke [`hb_active_sig`]
 /// straight, letting a cross-crate integration test (`tests/smoke.rs`, which
-/// only sees `pub` items) exercise task 11's tap-to-play resume contract
+/// only sees `pub` items) exercise the tap-to-play resume contract
 /// without needing a real pointer-event dispatch through the whole page.
 /// Not part of the page-fn contract (`pages/mod.rs`'s module docs) — never
 /// called from `build`.
@@ -1414,11 +1415,11 @@ pub fn start_heartbeat_for_test() {
     hb_active_sig().set(true);
 }
 
-/// [`start_heartbeat_for_test`]'s twin for §07 live output — this task's
-/// Acceptance Criteria #2 ("smoke sweep green ... in both stopped/playing
-/// states for at least two demos") needs a second already-tap-to-play demo
-/// to sweep alongside the heartbeat; §07's `Toggle build-watch activity`
-/// button already flips [`wave_live_sig`] the same way a real tap would.
+/// [`start_heartbeat_for_test`]'s twin for §07 live output — the smoke sweep
+/// exercises at least two demos in both stopped/playing states, so a second
+/// already-tap-to-play demo is needed alongside the heartbeat; §07's
+/// `Toggle build-watch activity` button already flips [`wave_live_sig`] the
+/// same way a real tap would.
 pub fn start_waveform_for_test() {
     wave_live_sig().set(true);
 }
@@ -1449,11 +1450,11 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
 
 #[cfg(test)]
 mod tests {
-    //! T1 headless test for the `pump()` removal (catalog-animation-performance
-    //! bug, task 03) — drives this page through the real
-    //! `RenderRoot::rebuild`/`layout_with_text`/`paint` seam (mirrors
-    //! `tests/smoke.rs`'s harness shape at module scope, since this task's
-    //! scope is this file only) and asserts `PaintOutcome::needs_frame`.
+    //! Headless test for the removed `pump()` widget — drives this page
+    //! through the real `RenderRoot::rebuild`/`layout_with_text`/`paint` seam
+    //! (mirrors `tests/smoke.rs`'s harness shape at module scope, kept local
+    //! since these tests only cover this file) and asserts
+    //! `PaintOutcome::needs_frame`.
 
     use std::any::Any;
 
@@ -1508,8 +1509,7 @@ mod tests {
         root.paint(&mut scene, FrameTime::ZERO).needs_frame
     }
 
-    /// Task 11 (catalog-animation-performance bug, this task's Acceptance
-    /// Criteria #1): at the demos' initial (nothing-tapped-yet) state, every
+    /// At the demos' initial (nothing-tapped-yet) state, every
     /// `local_sig!` bool defaults `false` — including
     /// [`super::hb_active_sig`] now that §01 connection heartbeat is
     /// tap-to-play like every other demo on this page (previously the page's
@@ -1530,13 +1530,13 @@ mod tests {
         );
     }
 
-    /// Task 11's core tap-to-play contract, exercised directly against
+    /// The core tap-to-play contract, exercised directly against
     /// [`super::hb_active_sig`] (the signal the row's tap handler flips):
     /// starting the heartbeat demo requests a frame, and stopping it again
     /// returns to zero — the load-bearing regression guard for the deleted
-    /// `pump()` (task 03) now extended to task 11's play/stop affordance:
-    /// neither hack nor auto-repeat can leave `needs_frame` stuck `true`
-    /// once the demo is stopped.
+    /// `pump()`, now extended to the play/stop affordance: neither hack nor
+    /// auto-repeat can leave `needs_frame` stuck `true` once the demo is
+    /// stopped.
     #[test]
     fn heartbeat_tap_to_play_starts_and_stops_frame_requests() {
         let _owner = setup();
@@ -1594,12 +1594,12 @@ mod tests {
         super::hb_active_sig().set(false);
     }
 
-    /// The header animations-off toggle's counterpart to the test above
-    /// (catalog-animation-performance bug task 10): with `reduce_motion`
-    /// left OFF but `animations_enabled` turned OFF, a started heartbeat's
-    /// ticker must still unmount — proving the two flags OR together in the
-    /// same `reduce` check (`crate::CatalogState::animations_enabled`'s doc
-    /// comment) rather than the toggle needing `reduce_motion` set too.
+    /// The header animations-off toggle's counterpart to the test above:
+    /// with `reduce_motion` left OFF but `animations_enabled` turned OFF, a
+    /// started heartbeat's ticker must still unmount — proving the two
+    /// flags OR together in the same `reduce` check
+    /// (`crate::CatalogState::animations_enabled`'s doc comment) rather than
+    /// the toggle needing `reduce_motion` set too.
     /// Flipping `animations_enabled` back on with `reduce_motion` still off
     /// restores the ticker, proving the toggle actually resumes animation
     /// rather than latching off.
@@ -1634,7 +1634,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Task 12 — effect-slot headroom (catalog-animation-performance bugs 2/3)
+    // Effect-slot headroom (heartbeat ring headroom clip, charge-ring glow width)
     // -----------------------------------------------------------------------
 
     use kurbo::{Affine, Shape};
@@ -1674,9 +1674,9 @@ mod tests {
         /// shape).
         image_rects: Vec<Rect>,
         /// Every `fill_rounded_rect` rect (e.g. `badge`'s background/dot) —
-        /// used by the Acceptance Criteria #2 layout-stability test to prove
-        /// a sibling's own size stays small rather than stretching to a
-        /// widened effect slot.
+        /// used by the layout-stability test below to prove a sibling's own
+        /// size stays small rather than stretching to a widened effect
+        /// slot.
         rounded_rects: Vec<Rect>,
     }
 
@@ -1764,8 +1764,7 @@ mod tests {
     }
 
     /// [`heartbeat_ring_state`]'s pure math at three fixed timestamps (T0
-    /// start / T1 mid / T2 max extent — this task's Testing note) — no wall
-    /// clock, no rendering.
+    /// start / T1 mid / T2 max extent) — no wall clock, no rendering.
     #[test]
     fn heartbeat_ring_state_start_mid_max_extent() {
         let (op0, scale0) = heartbeat_ring_state(0.0, false);
@@ -1799,13 +1798,13 @@ mod tests {
         );
     }
 
-    /// The load-bearing regression guard for bug 2 (catalog-animation-performance):
-    /// at T2 max extent (`ring_scale == HB_RING_SCALE_MAX`), the ring's stroked
-    /// circle — resolved through the SAME `push_layer`(`AnimatedOpacity`) /
+    /// The load-bearing regression guard: at T2 max extent
+    /// (`ring_scale == HB_RING_SCALE_MAX`), the ring's stroked circle —
+    /// resolved through the SAME `push_layer`(`AnimatedOpacity`) /
     /// `push_transform`(`AnimatedScale`) composition the real paint pass uses
     /// (see [`SlotRecorder`]'s doc comment) — must stay fully inside the
-    /// `AnimatedOpacity`'s own recorded clip rect. Before this task's fix (an
-    /// 18×18 `AnimatedOpacity` slot with the scale applied *inside* it) this
+    /// `AnimatedOpacity`'s own recorded clip rect. With just an 18×18
+    /// `AnimatedOpacity` slot and the scale applied *inside* it, this
     /// assertion fails: the clip rect stays fixed at 18×18 absolute while the
     /// circle's recorded transform grows with it, so the circle's bbox
     /// overflows the clip on every edge once `ring_scale > 1.0x`.
@@ -1830,7 +1829,7 @@ mod tests {
         );
 
         // The outermost (largest) layer rect is the AnimatedOpacity's own
-        // paint-time slot — the headroom this task allocates.
+        // paint-time slot — the headroom `HB_RING_SLOT` allocates.
         let slot = recorder
             .layer_rects
             .iter()
@@ -1853,8 +1852,7 @@ mod tests {
         }
     }
 
-    /// Acceptance Criteria #2 ("layout shift bounded: surrounding rows
-    /// visually stable, sizes asserted"): the ping ring's headroom fix grows
+    /// Layout stability: the ping ring's headroom fix grows
     /// ONLY the ring's own layout slot (`HB_RING_DIAMETER` → `HB_RING_SLOT`,
     /// `18px` → `52px`) — its `01 Connection heartbeat` row's
     /// `CrossAxisAlignment::Center` keeps every sibling (the "connected"

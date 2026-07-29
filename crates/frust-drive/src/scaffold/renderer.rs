@@ -1,7 +1,7 @@
-//! Content rendering and path-segment placeholder substitution (spec
-//! §12.3). Flutter's Mustache-style engine is content-rendering only;
-//! path templating (`androidIdentifier` → `com/example/app`) is bespoke
-//! to Frust, implemented here as a generic segment walker.
+//! Content rendering and path-segment placeholder substitution.
+//! Flutter's Mustache-style engine is content-rendering only; path
+//! templating (`androidIdentifier` → `com/example/app`) is bespoke to
+//! Frust, implemented here as a generic segment walker.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -25,9 +25,8 @@ pub fn render(template: &str, vars: &BTreeMap<&str, String>) -> Result<String> {
 /// A path segment that exactly matches a key in `vars` is replaced by that
 /// key's value; a dotted value (`com.example.app`) expands into nested
 /// directory segments (`com/example/app`) — this is the mechanism the
-/// spec Phase 2/3 Android/iOS templates need for `androidIdentifier` /
-/// `iosIdentifier`. Segments that don't match any key pass through
-/// unchanged.
+/// Android/iOS templates need for `androidIdentifier` / `iosIdentifier`.
+/// Segments that don't match any key pass through unchanged.
 pub fn expand_path(relative: &Path, vars: &BTreeMap<&str, String>) -> PathBuf {
     let mut out = PathBuf::new();
     for component in relative.components() {
@@ -54,10 +53,10 @@ pub fn expand_path(relative: &Path, vars: &BTreeMap<&str, String>) -> PathBuf {
 ///
 /// This lets an entire template source tree carry a `.tmpl` suffix on its
 /// root directory as a purely organizational marker in `templates/app/`
-/// (spec Phase 2 task 22's `android.tmpl/` — mirrored by `templates/app/`
-/// itself not needing the suffix since it's the manifest root, and future
-/// `ios.tmpl/`) without that suffix leaking into the generated project's
-/// directory name (`android.tmpl/` → `android/`).
+/// (`android.tmpl/` — mirrored by `templates/app/` itself not needing the
+/// suffix since it's the manifest root, and future `ios.tmpl/`) without
+/// that suffix leaking into the generated project's directory name
+/// (`android.tmpl/` → `android/`).
 pub fn strip_tmpl_dir_suffixes(relative: &Path) -> PathBuf {
     let mut components: Vec<Component> = relative.components().collect();
     let Some(file_component) = components.pop() else {

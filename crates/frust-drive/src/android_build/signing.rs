@@ -1,9 +1,9 @@
-//! Release-signing gate (spec §12.5, PLAN.md decision 2): `frust build`
-//! refuses to produce an unsigned/debug-signed release artifact — unlike
-//! the Gradle template's own fallback (task 62), which debug-signs with a
-//! warning so Android-Studio-driven builds stay usable, the CLI pipeline
-//! makes a missing `android/key.properties` a hard error with guided
-//! keytool/key.properties instructions.
+//! Release-signing gate: `frust build` refuses to produce an
+//! unsigned/debug-signed release artifact — unlike the Gradle template's own
+//! fallback, which debug-signs with a warning so Android-Studio-driven
+//! builds stay usable, the CLI pipeline makes a missing
+//! `android/key.properties` a hard error with guided keytool/key.properties
+//! instructions.
 
 use std::path::Path;
 

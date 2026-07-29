@@ -1,5 +1,4 @@
-//! A bounded, width-independent shape cache for laid-out text (spec §10.3,
-//! phase 10.B).
+//! A bounded, width-independent shape cache for laid-out text.
 //!
 //! Adapts SkParagraph's separation of **shaping** (font matching + glyph
 //! selection, width-independent) from **line-breaking** (width-dependent) to
@@ -23,7 +22,7 @@ use crate::style::{FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, T
 pub(crate) const DEFAULT_CAPACITY: usize = 128;
 
 /// Instrumentation counters for the shape cache — the observable hook the
-/// phase-10 acceptance tests assert against, and a perf signal otherwise.
+/// shape-cache tests assert against, and a perf signal otherwise.
 ///
 /// Plain scalar data (no `parley`/`vello`/`wgpu` leak), safe to expose from
 /// [`crate::TextContext::shape_cache_stats`].

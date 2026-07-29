@@ -1,4 +1,4 @@
-//! Android platform shell: the Rust half of the JNI bridge (spec §10.1).
+//! Android platform shell: the Rust half of the JNI bridge.
 //!
 //! This crate is the Android counterpart to `frust-shell-desktop`. Where the
 //! desktop shell owns a `winit` event loop, the Android shell is *driven* by the
@@ -23,7 +23,7 @@
 //!
 //! # Unsafe
 //!
-//! This crate is a sanctioned `unsafe` zone (spec §10.1): the framework crates
+//! This crate is a sanctioned `unsafe` zone: the framework crates
 //! stay `unsafe`-free, but a platform shell must cross the FFI boundary. The
 //! crate's `unsafe` surface is [`jni_glue`]'s `unsafe` code — the
 //! `ANativeWindow_fromSurface` call, `Box::into_raw`/`from_raw` for the opaque
@@ -39,7 +39,7 @@
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod ffi_support;
 
-// The shape-aware scroll-sync tail (camera task 12): pure logic — two scalars
+// The shape-aware scroll-sync tail: pure logic — two scalars
 // per display frame in, a hold depth out — deliberately kept out of the
 // Android-only modules below so its regime state machine and hold aging are
 // unit-testable on the host (the same "platform-agnostic brain" split the
@@ -84,36 +84,36 @@ pub mod __jni {
 }
 
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
-/// (spec §10.1, Makepad `app_main!` precedent).
+/// (a Makepad `app_main!` precedent).
 ///
 /// Stamps out the twenty `Java_dev_frust_FrustSurfaceView_native*` symbols
 /// the Kotlin `FrustSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
 /// opaque `jlong` handle. The three IME exports (`nativeImeApply`,
-/// `nativeImeState`, `nativeImeAction`) carry the Phase 4B soft-keyboard
-/// state-sync contract (spec §14 Phase 4): Kotlin pushes a whole editing state in
+/// `nativeImeState`, `nativeImeAction`) carry the soft-keyboard
+/// state-sync contract: Kotlin pushes a whole editing state in
 /// (`nativeImeApply`), pulls the reconciled state back out (`nativeImeState`), and
 /// forwards an editor action (Enter) via `nativeImeAction`. `nativeSetAppearance`
-/// (task 08) flips the app's theme brightness from the platform's dark-mode
-/// preference. `nativeOnDeepLink` (task 07) delivers a cold-start/running
+/// flips the app's theme brightness from the platform's dark-mode
+/// preference. `nativeOnDeepLink` delivers a cold-start/running
 /// platform deep link into the process-wide deep-link source.
-/// `nativeInitAccessibility` (phase 6d, task 04) attaches the accesskit Android
-/// adapter to the host view. The two device-parity exports (task 06):
+/// `nativeInitAccessibility` attaches the accesskit Android
+/// adapter to the host view. Two more exports:
 /// `nativeOnInsetsChanged` delivers the platform window insets (SafeArea), and
 /// `nativeOnBackPress` routes a hardware/gesture back press through the framework
 /// (returning whether it consumed it). `nativeOnSurfaceChanged` also gained a
-/// trailing `density` argument in the same task. `nativeSystemUiState` (task
-/// 09) returns the app-facing `frust::set_system_ui_mode` override slot's
+/// trailing `density` argument alongside these. `nativeSystemUiState`
+/// returns the app-facing `frust::set_system_ui_mode` override slot's
 /// packed `(generation, mode)` state for a per-frame Kotlin poll. Two more,
-/// additive over those seventeen (platform-views task 05): `nativeSetSurfaceMode`
+/// additive over those seventeen: `nativeSetSurfaceMode`
 /// latches a translucent GPU surface pre-init (a one-way opt-in — see
 /// `frust_shell_common::surface_mode`'s module docs), and
 /// `nativePlatformViewCommands` returns the native-sibling-compositor command
-/// backlog (task 03's differ) as JSON for Kotlin's own per-frame poll, mirroring
-/// `nativeSystemUiState`'s generation-gated shape but JSON-encoded (task 03's
-/// `ViewCommand` vocabulary) rather than packed into a `jlong`. One more
-/// (camera task 12): `nativeSetFrameTimeline` pushes the Choreographer frame
+/// backlog (the differ) as JSON for Kotlin's own per-frame poll, mirroring
+/// `nativeSystemUiState`'s generation-gated shape but JSON-encoded (the
+/// `ViewCommand` vocabulary) rather than packed into a `jlong`. One more:
+/// `nativeSetFrameTimeline` pushes the Choreographer frame
 /// timeline's `expectedPresentationTimeNanos − frameTimeNanos` (API 33+, the
 /// one signal only the JVM side can read) into the scroll-sync tail — additive
 /// and optional, `0`/never-called leaves the platform-view release path
@@ -151,7 +151,7 @@ macro_rules! android_app {
     ($state_ty:ty, $state_init:expr, $app_logic:expr $(,)?) => {
         /// JNI `nativeInit`: create the native handle for one surface.
         ///
-        /// `cache_dir` is the app's `context.cacheDir.absolutePath` (task 13),
+        /// `cache_dir` is the app's `context.cacheDir.absolutePath`,
         /// used to persist the wgpu pipeline cache across launches so a warm
         /// start skips Vulkan shader-pipeline compilation. Same export name as
         /// before — the mangled JNI symbol does not encode Java-side params — but
@@ -172,10 +172,10 @@ macro_rules! android_app {
 
         /// JNI `nativeOnSurfaceChanged`: (re)create or resize the surface.
         ///
-        /// `density` (task 06) is the display's `displayMetrics.density` for this
+        /// `density` is the display's `displayMetrics.density` for this
         /// configuration — a **breaking** signature change from the pre-parity
         /// export (the Kotlin `external` declaration gains the trailing argument
-        /// in the same phase, task 08) so a density-altering config change
+        /// alongside it) so a density-altering config change
         /// re-sanitizes the stored scale used for layout/paint/insets.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnSurfaceChanged<'local>(
@@ -204,7 +204,7 @@ macro_rules! android_app {
 
         /// JNI `nativeOnFrame`: run one Choreographer-driven frame.
         ///
-        /// Returns `jboolean` (phase-11 fix F2): `false` = a fatal render-thread
+        /// Returns `jboolean`: `false` = a fatal render-thread
         /// failure (first-surface install could not succeed), on which Kotlin's
         /// `doFrame` stops the Choreographer loop. The JNI symbol name is
         /// unchanged; the Kotlin `external` declaration gains the `Boolean` return
@@ -219,7 +219,7 @@ macro_rules! android_app {
             $crate::jni_glue::native_on_frame(handle, frame_time_nanos)
         }
 
-        /// JNI `nativeOnTouch`: deliver one touch contact (spec §9).
+        /// JNI `nativeOnTouch`: deliver one touch contact.
         ///
         /// `action` is the normalised phase code (`0`=down, `1`=move, `2`=up,
         /// `3`=cancel — an ABI shared with the Kotlin `FrustSurfaceView`);
@@ -267,7 +267,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeImeApply`: push a whole platform editing state into the
-        /// focused widget (the mobile IME state-sync path, spec §14 Phase 4).
+        /// focused widget (the mobile IME state-sync path).
         ///
         /// `text` is the Kotlin mirror `Editable`'s content; the four indices are
         /// **UTF-16 code units** (Java-native) and cross the seam unchanged — the
@@ -316,7 +316,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeSetAppearance`: flip the app's theme brightness (config/
-        /// uiMode change) between light and dark (task 08).
+        /// uiMode change) between light and dark.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeSetAppearance<'local>(
             _env: $crate::__jni::EnvUnowned<'local>,
@@ -328,7 +328,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeOnDeepLink`: deliver a platform deep link (cold-start or
-        /// running — task 07) into the process-wide deep-link source.
+        /// running) into the process-wide deep-link source.
         ///
         /// `url` is the Kotlin `Intent.data` `Uri`'s `toString()`.
         #[unsafe(no_mangle)]
@@ -342,7 +342,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeInitAccessibility`: attach the accesskit Android adapter to
-        /// the host `FrustSurfaceView` (spec §9, phase 6d — task 04).
+        /// the host `FrustSurfaceView`.
         ///
         /// `view` is the host `View` (`this`); called once by Kotlin's
         /// `surfaceCreated` right after `nativeInit`. Best-effort and isolated in
@@ -358,7 +358,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeOnInsetsChanged`: deliver the platform window insets
-        /// (device px, task 06 — RESEARCH.md "Insets / SafeArea").
+        /// (device px).
         ///
         /// The eight `jfloat`s are `view_padding` (`vp_*`: system-bar/cutout
         /// occlusion) then `view_insets` (`vi_*`: the IME area), each l/t/r/b.
@@ -384,8 +384,8 @@ macro_rules! android_app {
             )
         }
 
-        /// JNI `nativeOnBackPress`: the Android back contract (task 06 —
-        /// RESEARCH.md "Android back"). Returns `JNI_TRUE` when the framework
+        /// JNI `nativeOnBackPress`: the Android back contract. Returns
+        /// `JNI_TRUE` when the framework
         /// consumed the press (it will pop on the next rebuild — Kotlin must not
         /// finish the activity), `JNI_FALSE` when it should fall through to the
         /// default `OnBackPressedDispatcher` (activity finish). The generated
@@ -407,10 +407,10 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeSystemUiState`: return the process-wide system-UI
-        /// override slot's packed `(generation, mode)` state (task 09) for
+        /// override slot's packed `(generation, mode)` state for
         /// Kotlin's `doFrame` to poll each frame, generation-gated like
         /// `nativeImeState`'s established per-frame-poll idiom, and apply via
-        /// `WindowInsetsControllerCompat` on change (task 14 wires the Kotlin
+        /// `WindowInsetsControllerCompat` on change (the Kotlin
         /// decoder). Additive: older generated Kotlin that never calls this is
         /// unaffected.
         #[unsafe(no_mangle)]
@@ -423,9 +423,9 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeSetSurfaceMode`: latch a translucent (alpha-channel) GPU
-        /// surface before it is created (platform-views task 05). Takes no
+        /// surface before it is created. Takes no
         /// handle — a process-wide, pre-init-only opt-in the generated glue
-        /// calls BEFORE `nativeInit` (template task 08); a call after a
+        /// calls BEFORE `nativeInit`; a call after a
         /// surface already exists in this process is logged and has no
         /// effect on it.
         #[unsafe(no_mangle)]
@@ -438,8 +438,8 @@ macro_rules! android_app {
         }
 
         /// JNI `nativePlatformViewCommands`: return the native-sibling-
-        /// compositor command backlog (task 03's differ) as JSON for
-        /// Kotlin's per-frame poll (platform-views task 05).
+        /// compositor command backlog (the differ) as JSON for
+        /// Kotlin's per-frame poll.
         /// `ack_generation` round-trips the generation Kotlin's own last
         /// poll returned (`0` on the first call); returns `null` on the
         /// no-change fast path or a missing handle.
@@ -457,8 +457,8 @@ macro_rules! android_app {
 
         /// JNI `nativeSetFrameTimeline`: push this tick's Choreographer
         /// frame-timeline delta (`expectedPresentationTimeNanos −
-        /// frameTimeNanos`, API 33+) into the scroll-sync tail (camera task
-        /// 12). `0` means "no sample" — below API 33, or no platform view is
+        /// frameTimeNanos`, API 33+) into the scroll-sync tail.
+        /// `0` means "no sample" — below API 33, or no platform view is
         /// hosted, in which case Kotlin never samples the timeline at all —
         /// and leaves the platform-view release path gate-only. The value is
         /// only ever a hold *depth* input; nothing about correctness depends

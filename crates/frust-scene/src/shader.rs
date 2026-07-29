@@ -13,13 +13,11 @@ static NEXT_SHADER_PROGRAM_ID: AtomicU64 = AtomicU64::new(1);
 /// source is carried here as an opaque string (precedent:
 /// `frust_theme::GlassMaterial::blur_radius_intent`, a future-backend
 /// contract that is likewise plain data rather than a compiled resource) —
-/// only `frust-render` compiles it into a GPU pipeline
-/// (`workflow/plans/features/frust-shader-showcase/tasks/03-render-shader-effects.md`).
+/// only `frust-render` compiles it into a GPU pipeline.
 ///
-/// **v1 contract**: the shader MUST write opaque output (alpha = 1.0) — see
-/// `workflow/plans/features/frust-shader-showcase/research/RESEARCH.md` §Q1
-/// (vello's image-override copy is bit-for-bit, and Frust's render target is
-/// premultiplied; the conventions only coincide at alpha = 1.0).
+/// **v1 contract**: the shader MUST write opaque output (alpha = 1.0) —
+/// vello's image-override copy is bit-for-bit, and Frust's render target is
+/// premultiplied; the conventions only coincide at alpha = 1.0.
 #[derive(Clone, Debug)]
 pub struct ShaderProgram {
     /// Process-unique id, minted fresh by [`ShaderProgram::new`] and shared
@@ -29,7 +27,7 @@ pub struct ShaderProgram {
     /// WGSL fragment source. `Arc<str>` keeps a clone cheap (a handle copy,
     /// not a string copy) and `Send` (no `Sync` requirement) — the Scene:
     /// Send tripwire (`lib.rs`) this payload must satisfy for the
-    /// render-thread split (RESEARCH.md §Q2).
+    /// render-thread split.
     source: Arc<str>,
 }
 

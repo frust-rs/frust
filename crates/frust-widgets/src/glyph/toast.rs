@@ -1,4 +1,4 @@
-//! Glyph toast + host/queue (task 21, glyph-design-system): a status-dot +
+//! Glyph toast + host/queue: a status-dot +
 //! message bubble ([`Toast`]), and [`ToastHost`] — the retained overlay
 //! widget that plays a queue of toast requests one at a time with authored
 //! enter/hold/exit motion and a 2.4s auto-dismiss.
@@ -7,16 +7,16 @@
 //!
 //! [`ToastView`]/[`ToastWidget`]: a status dot + message row painted on the
 //! Glyph "overlay" surface role (`colors.surface_container_highest` — the
-//! same `bg-overlay` token [`super::progress`]'s track uses; RESEARCH §1.1
+//! same `bg-overlay` token [`super::progress`]'s track uses; the Glyph source
 //! doesn't name toast explicitly, but it *is* an overlay surface, so this
 //! reuses the role rather than inventing a new one), `shape.medium` corner
-//! radius (Glyph's canonical `--radius-md` = 10px — this task's own literal
-//! "radius-md"), and the Glyph toast elevation recipe
+//! radius (Glyph's canonical `--radius-md` = 10px), and the Glyph toast
+//! elevation recipe
 //! (`elevation.level4.shadow(brightness)` — exactly `0 12px 32px` dark /
-//! `rgba(...,.12)` light, RESEARCH §1.1b/§1.3's cited toast shadow). The dot
+//! `rgba(...,.12)` light, the cited toast shadow). The dot
 //! color follows [`ToastVariant`]: `Plain` (default) is the accent
 //! (`colors.primary`); `Info`/`Success`/`Warning` resolve `StatusPalette`
-//! (Glyph's success/warning/info extension, task 15); `Error` resolves
+//! (Glyph's success/warning/info extension); `Error` resolves
 //! `colors.error` (a first-class `ColorScheme` role). Message color is
 //! `colors.on_surface` — the same label-color simplification
 //! `material::chips` documents (not the more precise
@@ -69,7 +69,7 @@
 //! easing (`Cubic(0.34, 1.35, 0.64, 1.0)` — an authored overshoot); a
 //! vertical slide from [`ENTER_OFFSET_FRACTION`] (140%) of the toast's own
 //! height above its resting position, plus a fade. Hold: exactly
-//! [`HOLD_DURATION`] (2.4s — RESEARCH §1.4 pattern 08's authored
+//! [`HOLD_DURATION`] (2.4s — the Glyph source's authored
 //! auto-dismiss value), advanced via **`FrameTime` differencing, never
 //! `Instant::now()`** (`docs/CODE_STANDARDS.md`'s No-`Instant::now()` rule).
 //! Exit: 150ms (`durations.fast`) with the Glyph exit easing
@@ -78,9 +78,9 @@
 //! (no slide) — the Details' "toast becomes fast crossfade" rule, mirroring
 //! `nav::transition::resolve_spec`'s reduce-motion collapse.
 //!
-//! All three durations/easings are **exact source values** (`MotionScheme::glyph`'s
-//! doc comment; RESEARCH §1.4), not approximations — only
-//! [`ENTER_OFFSET_FRACTION`] (the slide distance) is this task's own choice.
+//! All three durations/easings are **exact source values** (see
+//! `MotionScheme::glyph`'s doc comment), not approximations — only
+//! [`ENTER_OFFSET_FRACTION`] (the slide distance) is this widget's own choice.
 
 use std::time::Duration;
 
@@ -113,16 +113,16 @@ pub enum ToastVariant {
 }
 
 /// The row height floor, in logical px (a one-line toast never shrinks below
-/// this). This task's own choice.
+/// this). An original, hand-picked value.
 const MIN_HEIGHT: f64 = 44.0;
-/// Horizontal padding around the content row. This task's own choice.
+/// Horizontal padding around the content row. An original, hand-picked value.
 const PAD_X: f64 = 14.0;
 /// Vertical padding above/below the content when the message wraps taller
-/// than [`MIN_HEIGHT`] would otherwise need. This task's own choice.
+/// than [`MIN_HEIGHT`] would otherwise need. An original, hand-picked value.
 const PAD_Y: f64 = 10.0;
-/// Gap between the status dot and the message text. This task's own choice.
+/// Gap between the status dot and the message text. An original, hand-picked value.
 const DOT_GAP: f64 = 10.0;
-/// Status-dot diameter. This task's own choice.
+/// Status-dot diameter. This widget's own choice.
 const DOT_DIAMETER: f64 = 8.0;
 
 /// Unthemed corner-radius fallback — Glyph's canonical `--radius-md` (10px).
@@ -131,14 +131,14 @@ const FALLBACK_RADIUS: f64 = 10.0;
 /// same role [`super::progress`]'s track uses.
 const FALLBACK_SURFACE: Color = Color::from_rgb8(0x27, 0x2d, 0x3d);
 /// Unthemed dot fallbacks, one per [`ToastVariant`] — Glyph dark's amber
-/// accent / cyan info / success / warning / error tokens (RESEARCH §1.1).
+/// accent / cyan info / success / warning / error tokens.
 const FALLBACK_PLAIN: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
 const FALLBACK_INFO: Color = Color::from_rgb8(0x5e, 0xc8, 0xd8);
 const FALLBACK_SUCCESS: Color = Color::from_rgb8(0x5f, 0xd8, 0x8f);
 const FALLBACK_WARNING: Color = Color::from_rgb8(0xf5, 0xc8, 0x60);
 const FALLBACK_ERROR: Color = Color::from_rgb8(0xff, 0x6b, 0x6b);
 /// Unthemed shadow fallbacks — Glyph dark's exact toast recipe (`0 12px 32px
-/// rgba(0,0,0,.4)`, RESEARCH §1.3).
+/// rgba(0,0,0,.4)`).
 const FALLBACK_SHADOW_Y: f64 = 12.0;
 const FALLBACK_SHADOW_BLUR: f64 = 32.0;
 const FALLBACK_SHADOW_ALPHA: f32 = 0.40;
@@ -372,15 +372,15 @@ const ENTER_CURVE: Curve = Curve::Cubic(0.34, 1.35, 0.64, 1.0);
 const EXIT_DURATION: Duration = Duration::from_millis(150);
 /// Exit easing (Glyph's `exit` cubic-bezier, exact source value).
 const EXIT_CURVE: Curve = Curve::Cubic(0.4, 0.0, 1.0, 1.0);
-/// Hold duration: exactly 2.4s (RESEARCH §1.4 pattern 08's authored
+/// Hold duration: exactly 2.4s (the Glyph source's authored
 /// auto-dismiss value).
 const HOLD_DURATION: Duration = Duration::from_millis(2400);
 /// `reduce_motion`'s collapsed crossfade duration (mirrors
 /// `nav::transition::REDUCE_MOTION_DURATION`).
 const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 /// The enter slide's starting offset above the resting position, as a
-/// fraction of the toast's own height ("from -140%" — the task's phrasing).
-/// This task's own choice.
+/// fraction of the toast's own height ("from -140%").
+/// An original, hand-picked value.
 const ENTER_OFFSET_FRACTION: f64 = 1.4;
 
 /// The `(enter, exit)` [`Timing`]s for the current `reduce_motion` state:
@@ -457,9 +457,9 @@ impl ToastAnchor {
 }
 
 /// Margin from the anchored edge(s), in logical px — matches the glyph
-/// catalog's pre-this-task top margin (`lib.rs`'s `EdgeInsets { top: 10.0,
-/// .. }` wrapper this task's host-side anchoring supersedes). This task's own
-/// choice, additionally widened by [`frust_core::WindowInsets::padding`] on
+/// catalog's earlier top margin (`lib.rs`'s `EdgeInsets { top: 10.0,
+/// .. }` wrapper this host-side anchoring supersedes). An original,
+/// hand-picked value, additionally widened by [`frust_core::WindowInsets::padding`] on
 /// the anchored edges (see the [module docs](self)'s Anchoring section).
 const EDGE_MARGIN: f64 = 10.0;
 
@@ -947,7 +947,7 @@ mod tests {
         assert_eq!(active.phase, ToastPhase::Enter);
     }
 
-    // -- ToastHost: rebuild flags (the bug this task fixes — a structural
+    // -- ToastHost: rebuild flags (a structural
     // queue change (start or teardown of the active pod) MUST report LAYOUT,
     // or a layout-skip shell (Android) leaves a fresh/torn-down child pod
     // unlaid-out — see the module's diagnosis doc comment) -----------------
@@ -1197,7 +1197,7 @@ mod tests {
         );
     }
 
-    // -- ToastHost: anchoring (task 07, framework-side positioning) -----
+    // -- ToastHost: anchoring (framework-side positioning) -------------------
 
     /// Lay `host` out under `bc` with a fresh (empty) `TextContext` — every
     /// active toast contains a `Text` child needing one threaded (mirrors

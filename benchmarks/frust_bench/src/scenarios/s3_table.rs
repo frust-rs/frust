@@ -6,8 +6,8 @@
 //! `s3-update`, `s3-swap`, `s3-clear`) so the harness times build/diff/
 //! reconcile throughput per op — the frust side of the head-to-head against the
 //! Flutter bench's `s3_table.dart`, whose op sequence, row labels, and
-//! sub-marker names this file mirrors byte-for-byte (the PLAN 9.E fairness
-//! gate; the addendum's "datasets.dart wins" rule does not reach here — S3's
+//! sub-marker names this file mirrors byte-for-byte (the fairness
+//! gate; a "datasets.dart wins" rule does not reach here — S3's
 //! op-sequence contract lives in `s3_table.dart`, mirrored here; the
 //! continuous-cycling constant below is canonically homed in `datasets.dart`'s
 //! `s3SettleGapMs`).

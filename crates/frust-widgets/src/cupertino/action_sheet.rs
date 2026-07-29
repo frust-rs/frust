@@ -1,8 +1,8 @@
-//! `CupertinoActionSheet` (Phase 6c, PLAN.md D3/D5, task 13): the iOS action
+//! `CupertinoActionSheet`: the iOS action
 //! sheet — a bottom-anchored list of action rows plus a separate cancel block,
 //! over a dimming scrim.
 //!
-//! It is pushed as a **transparent** navigator page (task 06) via the
+//! It is pushed as a **transparent** navigator page via the
 //! [`show_action_sheet`] convenience, entering with the
 //! [`PageTransition::SlideUp`](crate::PageTransition::SlideUp) preset — the
 //! whole page (scrim included) translates up from the bottom, so the scrim is
@@ -18,10 +18,9 @@
 //! # Safe area
 //!
 //! The sheet anchors to a fixed bottom margin. The home-indicator safe-area
-//! inset a real iOS sheet respects is **shell-future work** (documented,
-//! PLAN.md D5).
+//! inset a real iOS sheet respects is **shell-future work**, not yet wired.
 //!
-//! # Keyboard operability (task 07, 6d)
+//! # Keyboard operability
 //!
 //! **Escape-to-dismiss now works, once the action sheet has focus.** A `Down`
 //! anywhere in the sheet (scrim, panel background, cancel row, or an action
@@ -31,19 +30,18 @@
 //! `controller.pop()` dismiss path as a scrim tap or the cancel row. **There
 //! is still no hook to focus the sheet on appear** (auto-focus-on-appear) — a
 //! caller must complete one pointer interaction with the sheet before Escape
-//! does anything; that gap is deferred to a future focus-manager work item,
-//! not this task.
+//! does anything; that gap is deferred to future focus-manager work.
 //!
 //! Its semantics node is a [`Role::Menu`] container with **no** accesskit
 //! modal flag, so there is no modal-audience concern to reconcile.
 //!
-//! # State layer (task 07, 6d)
+//! # State layer
 //!
 //! This action sheet has no `StateLayer` surface of its own (the scrim,
 //! panels, and rows are plain fills/hairlines, not an M3 interactive surface)
 //! — there is nothing here for `StateLayer::set_focused` to wire into.
 //!
-//! # Liquid Glass panels (task 6f-14)
+//! # Liquid Glass panels
 //!
 //! When a [`Theme`] is threaded and its `glass.chrome` recipe is not the
 //! opaque-material path ([`frust_theme::GlassMaterial::is_opaque`] — true
@@ -56,14 +54,14 @@
 //! [`super::alert_dialog`]'s identical Liquid Glass panel section for the
 //! full rationale, shared verbatim here). No theme, or an opaque-chrome
 //! theme, falls back to the pre-26 single flat fill + hairline-separator-row
-//! layout this widget always painted. Real background blur is out of scope
-//! (spike 16).
+//! layout this widget always painted. Real background blur is out of scope.
 //!
-//! Kit sizing evidence (RESEARCH.md:262, **partially-verified**, cited as
-//! guidance only): mined action-sheet containers ran 260×424-524px, action
-//! rows 232×48px. This widget keeps its established [`ROW_H`]/margin
-//! geometry (task 07) rather than matching those figures exactly — only the
-//! *material* and *corner radii* are re-skinned here, not the sizing.
+//! Kit sizing evidence (community-mined from iOS system UI screenshots,
+//! **partially-verified**, cited as guidance only): action-sheet containers
+//! ran roughly 260×424-524px, action rows roughly 232×48px. This widget
+//! keeps its established [`ROW_H`]/margin geometry rather than matching
+//! those figures exactly — only the *material* and *corner radii* are
+//! re-skinned here, not the sizing.
 
 use frust_core::accesskit::Role;
 use frust_core::{
@@ -607,7 +605,7 @@ mod tests {
 
     /// Records filled rounded rects, shadows, and stroked paths — enough to
     /// assert both glass panels' fill stacks, hairlines, and nested
-    /// concentric-radius button capsules reach paint (task 6f-14).
+    /// concentric-radius button capsules reach paint.
     #[derive(Default)]
     struct Recorder {
         rrects: Vec<(Point, Size, f64, Color)>,
@@ -903,7 +901,7 @@ mod tests {
         assert_eq!(h.state.received, None);
     }
 
-    // --- Focus + Escape opt-in (task 07, 6d). ---
+    // --- Focus + Escape opt-in. ---
 
     #[test]
     fn escape_after_a_press_claims_focus_and_dismisses() {

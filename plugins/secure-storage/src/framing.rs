@@ -7,7 +7,7 @@
 //! imports the Android-only `jni` crate, so it cannot compile — and its unit
 //! tests cannot run — on the CI host (macOS/Linux). These three helper
 //! families carry no JNI dependency, so they live here where they compile and
-//! are **host-tested** (task S03 requirement 6: "Pure-Rust helpers unit tested
+//! are **host-tested** ("Pure-Rust helpers unit tested
 //! on the host; on-device round-trip is a recorded manual gate"). The module
 //! is compiled only where it is actually used or tested
 //! (`#[cfg(any(target_os = "android", test))]` on its `lib.rs` declaration),
@@ -132,8 +132,8 @@ pub(crate) fn unframe(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// The per-store identifier `frust.ss.<sanitized-name>` used for **both** the
-/// `AndroidKeyStore` key alias and the `SharedPreferences` file name (task
-/// S03 requirements 1 and 2). Baking the store name into the prefs file name
+/// `AndroidKeyStore` key alias and the `SharedPreferences` file name.
+/// Baking the store name into the prefs file name
 /// gives store-name isolation the same way the [`crate::file`] backend's
 /// per-store filename does, and the `frust.ss.` namespace
 /// ([`crate::KEY_NAMESPACE_PREFIX`]) keeps a store from ever colliding with

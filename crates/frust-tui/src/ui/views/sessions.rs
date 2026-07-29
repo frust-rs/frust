@@ -1,8 +1,8 @@
-//! The session tab bar and the ANSI-aware log view (PLAN.md D5): tabs grouped
+//! The session tab bar and the ANSI-aware log view: tabs grouped
 //! by project, per-session follow-tail / scroll / wrap / search-filter, level
 //! colorize, and a copy-while-scrolling selection highlight.
 //!
-//! Layering (D2): every function here renders `&AppState` and only *registers*
+//! Layering: every function here renders `&AppState` and only *registers*
 //! interaction (tab clicks, the log scroll region) through the [`MouseCtx`] —
 //! it never mutates the engine. The scroll/wrap/window math is factored into
 //! pure helpers (`hard_wrap`, `display_window`) unit-tested below without a TTY.
@@ -34,7 +34,7 @@ pub fn render_main(
     theme: &Theme,
     mouse: &mut MouseCtx,
 ) {
-    // The perf sparkline panel (T05 / D6 — "the unique Frust advantage")
+    // The perf sparkline panel
     // renders only once its session has actually seen a `frust-perf` line
     // *and* the tab has toggled it open (`t`) — zero-noise otherwise.
     let active_session = state.active_session();
@@ -243,7 +243,7 @@ fn render_log(
     render_scrollbar(frame, area, session, &vis, theme, mouse);
 }
 
-/// Draw the log-view scrollbar thumb and register its drag region (T04 / D4).
+/// Draw the log-view scrollbar thumb and register its drag region.
 ///
 /// Only shown when the visible line count overflows the viewport (a zero-noise
 /// affordance on a short log). The thumb marks the bottom-anchored line's
@@ -396,7 +396,7 @@ fn perf_panel_height(session: &SessionView) -> u16 {
     base + u16::from(session.perf.last_startup.is_some())
 }
 
-/// The perf sparkline panel (T05 / D6 — "the unique Frust advantage"):
+/// The perf sparkline panel:
 /// recent frame totals as a sparkline (only present once `FRUST_TRACE_RAW`
 /// has produced per-frame samples), a p50/p95/p99 stats line from the latest
 /// periodic summary, and the one-shot startup-span line when seen.

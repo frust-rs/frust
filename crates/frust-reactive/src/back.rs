@@ -1,5 +1,5 @@
 //! Process-wide Android **back-press** source + a "framework handles back"
-//! flag (device-parity task 05, RESEARCH.md "Android back"): a shell delivers
+//! flag: a shell delivers
 //! a hardware/gesture back press via [`push_back_press`]; app/facade glue
 //! reads the resulting event through [`back_presses`]/[`BackPresses`] and
 //! publishes, via [`set_handles_back`], whether the framework wants to consume
@@ -22,8 +22,8 @@
 //!
 //! # `handles_back`: default false
 //!
-//! [`handles_back`] backs a shell's `setFrameworkHandlesBack`-style decision
-//! (RESEARCH.md): the framework pre-registers whether it will consume the next
+//! [`handles_back`] backs a shell's `setFrameworkHandlesBack`-style decision:
+//! the framework pre-registers whether it will consume the next
 //! back. It is a process-global [`AtomicBool`] (the `theme_override` polling
 //! precedent — a plain flag a shell reads, no reactive tracking), and it
 //! **defaults to `false`**: an app with no navigator (nothing to pop) must let
@@ -239,7 +239,7 @@ pub fn set_handles_back(handles: bool) {
 /// more than one live `BackHandler` is therefore unsupported today — the
 /// replaced handler stops influencing [`handles_back`] immediately, and its
 /// later cleanup no-ops (token-guarded) rather than clearing the newer
-/// registration. A future back-intercept/stacked design (ACTION_ITEMS A8)
+/// registration. A future back-intercept/stacked design
 /// must widen this slot to a stack instead of registering a second provider.
 ///
 /// # Panics
@@ -444,7 +444,7 @@ mod tests {
 
     /// The single-registrant invariant's token guard: a REPLACED registration's
     /// cleanup must never clear the newer provider out from under it — the
-    /// exact out-of-order-teardown hazard the round-1 review flagged (a stale
+    /// exact out-of-order-teardown hazard this guard exists to prevent (a stale
     /// `on_cleanup` firing after a second `BackHandler` registered would
     /// silently revert `handles_back` to the polled fallback).
     #[test]

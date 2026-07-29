@@ -1,6 +1,6 @@
-//! The messages feature's use cases (huddle clean-architecture refactor,
-//! task 03) — moved from the former flat `features/messages/mod.rs`, now behind
-//! the [`MessageRepository`](super::repositories::MessageRepository) seam.
+//! The messages feature's use cases — moved from the former flat
+//! `features/messages/mod.rs`, now behind the
+//! [`MessageRepository`](super::repositories::MessageRepository) seam.
 //!
 //! - [`LoadMessages`] — the async message-load use case (takes the repo `Arc`,
 //!   the team-demo `LoadTeam` shape). Sends / reactions / thread replies /

@@ -1,4 +1,4 @@
-//! The `Image` widget (spec §6.4): decode-once PNG/JPEG bitmaps painted
+//! The `Image` widget: decode-once PNG/JPEG bitmaps painted
 //! through the scene's [`Command::Image`](frust_scene::Command::Image).
 //!
 //! [`ImageSource`] is the decode-once, cheaply-clonable handle app code holds

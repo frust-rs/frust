@@ -1,7 +1,7 @@
-//! Preflight checks for `frust run`'s Android path (spec §12.4 step 3).
-//! Each check fails fast with a single, actionable message (the exact fix
-//! command) rather than accumulating a report — `frust run` should stop
-//! at the first thing standing between the user and a working build.
+//! Preflight checks for `frust run`'s Android path. Each check fails fast
+//! with a single, actionable message (the exact fix command) rather than
+//! accumulating a report — `frust run` should stop at the first thing
+//! standing between the user and a working build.
 
 use crate::doctor::EnvLookup;
 use crate::process::ProcessRunner;
@@ -34,9 +34,9 @@ pub fn run(ctx: &PreflightCtx) -> Result<PreflightOutcome, String> {
 }
 
 /// Like [`run`], but skips [`check_adb`] — used by `frust build`'s
-/// Android pipeline (`android_build`, task 64), which drives Gradle directly
-/// and never talks to a connected device/emulator, so requiring `adb` would
-/// be an unrelated hard blocker for a CI/headless release build.
+/// Android pipeline (`android_build`), which drives Gradle directly and
+/// never talks to a connected device/emulator, so requiring `adb` would be
+/// an unrelated hard blocker for a CI/headless release build.
 pub fn run_without_device_checks(ctx: &PreflightCtx) -> Result<PreflightOutcome, String> {
     check_rust_target(ctx)?;
     check_cargo_ndk(ctx)?;
@@ -69,8 +69,7 @@ fn check_cargo_ndk(ctx: &PreflightCtx) -> Result<(), String> {
 /// (macOS only) to Android Studio's bundled JBR.
 ///
 /// `pub(crate)`: also the JDK probe `doctor::report`'s component-level
-/// report reuses (Plan D6a) rather than re-implementing Java-version
-/// detection.
+/// report reuses, rather than re-implementing Java-version detection.
 pub(crate) fn check_java(ctx: &PreflightCtx) -> Result<String, String> {
     if let Some(home) = ctx.env.get("JAVA_HOME")
         && java_at_least_17(ctx.runner, &home)

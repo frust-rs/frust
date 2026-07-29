@@ -1,5 +1,5 @@
 //! Headless interaction proof for text input / IME / keyed-children / image
-//! wiring (spec §14) — ported from the (now-deleted) `examples/notes` demo so
+//! wiring — ported from the (now-deleted) `examples/notes` demo so
 //! the unconditional workspace gate keeps this coverage.
 //!
 //! Desktop UI automation (osascript/cliclick) is unavailable on this host, so
@@ -11,7 +11,7 @@
 //! assertion is deterministic and this doubles as a permanent regression gate
 //! for `TextInput` / keyed-list / `Image` wiring.
 //!
-//! Coverage (the acceptance matrix): the logo renders and the placeholder is
+//! Coverage: the logo renders and the placeholder is
 //! visible; focusing the field and typing fires `on_change` once per keystroke;
 //! Enter submits a keyed note and clears the draft; select-all + type replaces
 //! the whole field; the arrow/backspace editing matrix; the IME compose→commit
@@ -67,12 +67,12 @@ fn logo_decode_count() -> usize {
     LOGO_DECODES.load(Ordering::Relaxed)
 }
 
-/// Notes demo state (spec §5 `app_logic` model).
+/// Notes demo state (the `app_logic` model).
 ///
 /// The view is a pure function of these fields. `draft` is the controlled
 /// [`text_input`]'s current text; `notes` is the submitted list, each entry a
-/// `(stable id, text)` pair so the keyed rows survive a middle-of-list delete
-/// (spec §6.3); `next_id` hands out the ids.
+/// `(stable id, text)` pair so the keyed rows survive a middle-of-list delete;
+/// `next_id` hands out the ids.
 struct AppState {
     /// The in-progress note text bound to the field (controlled component).
     draft: String,
@@ -129,7 +129,7 @@ impl Component for NotesApp {
         AppState::new()
     }
 
-    /// Pure view function: renders `AppState` into the notes screen (spec §5).
+    /// Pure view function: renders `AppState` into the notes screen.
     /// Re-run every frame, so it is cheap by construction — the only non-trivial
     /// resource, the decoded logo, is an `Arc` clone, never a re-decode.
     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
@@ -138,7 +138,7 @@ impl Component for NotesApp {
 
         // The submitted notes, each a keyed row: the note text plus a Delete button
         // that removes *this* id. The stable key means deleting the middle row drops
-        // the middle row's widget, not whatever now sits at that index (spec §6.3).
+        // the middle row's widget, not whatever now sits at that index.
         let rows: Vec<frust::FlexChild<AppState>> = state
             .notes
             .iter()

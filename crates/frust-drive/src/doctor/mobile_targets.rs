@@ -1,19 +1,18 @@
 use super::{DoctorCtx, Status, Validation, Validator};
 use std::collections::HashSet;
 
-/// Required Rust compile targets for Android builds (spec §12.7) — checked
-/// on every platform, since `cargo-ndk`/Gradle cross-compile Android from
-/// any host.
+/// Required Rust compile targets for Android builds — checked on every
+/// platform, since `cargo-ndk`/Gradle cross-compile Android from any host.
 ///
 /// `pub(crate)`: also read by `doctor::report`'s per-area Android/iOS
-/// target breakdown (Plan D6a), sharing this list rather than duplicating it.
+/// target breakdown, sharing this list rather than duplicating it.
 pub(crate) const ANDROID_TARGETS: &[&str] = &[
     "aarch64-linux-android",
     "armv7-linux-androideabi",
     "x86_64-linux-android",
 ];
 
-/// Required Rust compile targets for iOS builds (task 35). Checked only on
+/// Required Rust compile targets for iOS builds. Checked only on
 /// macOS: `xcodebuild`/the simulator toolchain don't exist elsewhere, so
 /// flagging these as missing on a non-macOS host would be a false negative
 /// the user can't act on.
@@ -22,7 +21,7 @@ pub(crate) const IOS_TARGETS: &[&str] = &["aarch64-apple-ios", "aarch64-apple-io
 /// Runs `rustup target list --installed` and returns the installed-target
 /// set, or `None` if `rustup` itself couldn't be run — the shared probe
 /// [`MobileTargetsValidator`] and `doctor::report`'s per-area target
-/// components (Plan D6a) both build on, so the check is never duplicated.
+/// components both build on, so the check is never duplicated.
 pub(crate) fn probe_installed_targets(ctx: &DoctorCtx) -> Option<HashSet<String>> {
     match ctx.runner.run("rustup", &["target", "list", "--installed"]) {
         Ok(out) if out.success => Some(

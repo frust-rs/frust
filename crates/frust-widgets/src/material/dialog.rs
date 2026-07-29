@@ -1,11 +1,11 @@
-//! The basic M3 `Dialog` (Phase 6c, PLAN.md D3/D5, task 11): a full-area
-//! widget = **scrim** (32% scrim-color fill; tap outside the panel dismisses) +
-//! a **centered panel** (extra-large 28dp shape, `surfaceContainerHigh`, 24dp
-//! padding all around — ledger R15), pushed as a transparent navigator page via
+//! The basic M3 `Dialog`: a full-area widget = **scrim** (32% scrim-color
+//! fill; tap outside the panel dismisses) + a **centered panel** (extra-large
+//! 28dp shape, `surfaceContainerHigh`, 24dp padding all around), pushed as a
+//! transparent navigator page via
 //! [`NavigatorController::push_transparent_for_result`] and entering via the
 //! existing [`PageTransition::M3FadeThrough`] preset.
 //!
-//! # Navigator-modal architecture (D3)
+//! # Navigator-modal architecture
 //!
 //! The navigator provides **no scrim** and routes input only to the top page
 //! (verified) — so the scrim is part of *this* widget, not the navigator. A
@@ -24,10 +24,10 @@
 //! modal barrier), so a tap on the panel background neither dismisses nor leaks
 //! through to whatever is below.
 //!
-//! # Panel anatomy (ledger R15)
+//! # Panel anatomy
 //!
 //! 24dp padding on all four edges; `title` in the M3 `headlineSmallEmphasized`
-//! type role (`onSurface`; task 6f-10's emphasized-type consumption — same
+//! type role (`onSurface`; the emphasized-type consumption — same
 //! size/line-height as `headlineSmall`, weight stepped to Medium), `body` in
 //! `bodyMedium` (`onSurfaceVariant`), and a trailing,
 //! right-aligned row of app-provided action buttons. Internal spacing follows
@@ -41,8 +41,8 @@
 //! scrim is still its own — `Stack` hit-tests topmost-first, so a dialog on top
 //! of a stack is modal over the children below it). The navigator path is the
 //! primary, documented one (Flutter precedent: dialogs are routes). This module
-//! does **not** edit any nav file — task 06 owns those; the modal API it relies
-//! on ([`push_transparent_for_result`](NavigatorController::push_transparent_for_result))
+//! does **not** edit any nav file; the modal API it relies on
+//! ([`push_transparent_for_result`](NavigatorController::push_transparent_for_result))
 //! is consumed read-only here.
 //!
 //! # Semantics
@@ -52,7 +52,7 @@
 //! dialog box), labelled with the title text; the title, body, and each action
 //! become its accesskit children.
 //!
-//! # Keyboard operability (task 07, 6d)
+//! # Keyboard operability
 //!
 //! **Escape-to-dismiss now works, once the dialog has focus.** A `Down`
 //! anywhere in the dialog (scrim, panel background, or an action) claims
@@ -62,14 +62,14 @@
 //! scrim tap (`on_dismiss`). **There is still no hook to focus the dialog on
 //! appear** (auto-focus-on-appear) — a caller must complete one pointer
 //! interaction with the dialog before Escape does anything; that gap is
-//! deferred to a future focus-manager work item, not this task.
+//! deferred to a future focus-manager work item.
 //!
 //! The accesskit **modal** flag set above is nonetheless **kept deliberately**,
 //! not dropped. No platform `accesskit_*` adapter is wired yet (see
 //! `docs/ARCHITECTURE.md`'s Semantics pass), so there is no live assistive-tech
 //! audience the flag could currently mislead.
 //!
-//! # State layer (task 07, 6d)
+//! # State layer
 //!
 //! This dialog has no `StateLayer` surface of its own (the scrim and panel are
 //! plain fills, not an M3 interactive surface) — there is nothing here for
@@ -93,22 +93,22 @@ use crate::nav::navigator::{NavigatorController, PopResult};
 use crate::nav::transition::{PageTransition, TransitionSpec};
 use crate::text::{ThemeTextColor, text};
 
-/// Scrim opacity behind a modal dialog (M3 spec: 32%, ledger R15).
+/// Scrim opacity behind a modal dialog (M3 spec: 32%).
 const SCRIM_ALPHA: f32 = 0.32;
-/// Panel padding on all four edges, in logical px (M3 basic-dialog spec, R15).
+/// Panel padding on all four edges, in logical px (M3 basic-dialog spec).
 const DIALOG_PADDING: f64 = 24.0;
-/// Vertical spacing between the title and body (M3 basic-dialog spec, R15).
+/// Vertical spacing between the title and body (M3 basic-dialog spec).
 const TITLE_BODY_GAP: f64 = 16.0;
-/// Vertical spacing between the body and the action row (M3 spec, R15).
+/// Vertical spacing between the body and the action row (M3 spec).
 const BODY_ACTIONS_GAP: f64 = 24.0;
-/// Horizontal spacing between adjacent action buttons (M3 spec, R15).
+/// Horizontal spacing between adjacent action buttons (M3 spec).
 const ACTION_GAP: f64 = 8.0;
 /// Minimum dialog panel width, in logical px (M3 dialog spec).
 const MIN_WIDTH: f64 = 280.0;
 /// Maximum dialog panel width, in logical px (M3 dialog spec).
 const MAX_WIDTH: f64 = 560.0;
 /// Unthemed-fallback panel corner radius (a theme resolves this from
-/// `shape.extra_large`, ledger R12's 28dp token).
+/// `shape.extra_large`, a 28dp token).
 const RADIUS: f64 = 28.0;
 
 /// Title type-scale token (M3 `headlineSmallEmphasized` — matches
@@ -118,9 +118,9 @@ const RADIUS: f64 = 28.0;
 /// `Text` has no layout-time-deferred *size/weight* resolution seam (only a
 /// *color* role can be resolved after `View::build` — see
 /// `docs/CODE_STANDARDS.md`'s Theming conventions), the same precedent
-/// [`crate::material::appbar`] follows. The emphasized weight is task
-/// 6f-10's addition — the title previously rendered at the default `Text`
-/// weight (`REGULAR`), matching the baseline `headlineSmall` token.
+/// [`crate::material::appbar`] follows. The emphasized weight is stepped up
+/// from the default `Text` weight (`REGULAR`), which matches the baseline
+/// `headlineSmall` token.
 const TITLE_SIZE: f32 = 24.0;
 const TITLE_LINE_HEIGHT: f32 = 32.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::MEDIUM;
@@ -129,7 +129,7 @@ const BODY_SIZE: f32 = 14.0;
 const BODY_LINE_HEIGHT: f32 = 20.0;
 
 /// Unthemed-fallback panel container fill (a theme resolves this from
-/// `colors.surface_container_high`, ledger R15).
+/// `colors.surface_container_high`).
 const CONTAINER: Color = Color::from_rgb8(0xEC, 0xE6, 0xF0);
 /// Unthemed-fallback scrim base color (a theme resolves this from
 /// `colors.scrim`); applied at [`SCRIM_ALPHA`].
@@ -981,7 +981,7 @@ mod tests {
         );
     }
 
-    // --- Focus + Escape opt-in (task 07, 6d). ---
+    // --- Focus + Escape opt-in. ---
 
     #[test]
     fn escape_after_a_press_claims_focus_and_dismisses_via_navigator() {

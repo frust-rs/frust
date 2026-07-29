@@ -1,4 +1,4 @@
-//! End-to-end Android build gate (task 68): `frust create` → generate a
+//! End-to-end Android build gate: `frust create` → generate a
 //! throwaway upload keystore → `frust build apk --release` produces a
 //! release-signed APK.
 //!

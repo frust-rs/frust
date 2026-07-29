@@ -79,8 +79,8 @@ struct DevicectlDevice {
 struct DevicectlDeviceProperties {
     name: String,
     /// The device's OS version (e.g. `"17.5.1"`), gating `ios_run::run_physical`'s
-    /// devicectl-requires-iOS-17+ check (task 67). Absent on older `devicectl`
-    /// output shapes, so this stays optional rather than a hard parse failure.
+    /// devicectl-requires-iOS-17+ check. Absent on older `devicectl` output
+    /// shapes, so this stays optional rather than a hard parse failure.
     #[serde(rename = "osVersionNumber", default)]
     os_version_number: Option<String>,
 }
@@ -107,10 +107,11 @@ fn parse_devicectl_output(content: &str) -> Result<DiscoveryResult> {
         // "connected" OR "disconnected": CoreDevice establishes the tunnel
         // LAZILY on the first install/launch, so a paired, USB-plugged,
         // idle iPhone normally lists as "disconnected" and is fully
-        // targetable (verified on-device — see
-        // workflow/plans/bugs/ios-device-discovery-tunnelstate/BUG.md).
-        // Only "unavailable" (known to CoreDevice but not currently
-        // reachable) and explicitly non-paired devices are skipped.
+        // targetable (verified on-device: a paired, USB-connected iPhone
+        // SE listed as "disconnected" while `xcrun devicectl device
+        // install` against it still succeeded immediately). Only
+        // "unavailable" (known to CoreDevice but not currently reachable)
+        // and explicitly non-paired devices are skipped.
         if let Some(pairing) = conn.pairing_state.as_deref()
             && pairing != "paired"
         {

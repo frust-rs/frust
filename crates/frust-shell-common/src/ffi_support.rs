@@ -11,7 +11,7 @@ use frust_core::insets::{EdgeInsets, WindowInsets};
 /// Sanitize a raw density (e.g. a JNI `jfloat`) into a scale safe to divide or
 /// multiply by: finite and strictly positive, else the `1.0` fallback.
 ///
-/// The platform-supplied `density` is untrusted input (spec §8.1's surface state
+/// The platform-supplied `density` is untrusted input (the surface state
 /// machine assumes a well-behaved platform, but density arrives through a
 /// separate, unchecked scalar argument); a bogus value here must never propagate
 /// into a `NaN`/infinite or zero-divide layout or paint transform.
@@ -30,7 +30,7 @@ pub fn sanitize_scale(raw: f32) -> f64 {
 
 /// Logical (density-independent) size from a physical pixel size and an
 /// already-[`sanitize_scale`]d scale factor, mirroring the desktop shell's
-/// HiDPI math (spec task 08): lay out in logical pixels, then scale the scene
+/// HiDPI math: lay out in logical pixels, then scale the scene
 /// by `scale` so glyphs re-rasterise sharp at physical resolution.
 #[inline]
 pub fn logical_size(physical_width: u32, physical_height: u32, scale: f64) -> (f64, f64) {
@@ -61,7 +61,7 @@ pub fn logical_size(physical_width: u32, physical_height: u32, scale: f64) -> (f
 /// mirroring [`logical_size`]'s HiDPI math and [`sanitize_scale`]'s defensive
 /// posture. A platform-supplied inset must never propagate non-finite or negative
 /// into the layout/paint passes. The framework receives insets in the same
-/// logical space it lays out in (spec §10.3's logical-coordinate contract — the
+/// logical space it lays out in (the logical-coordinate contract — the
 /// same discipline pointer events follow).
 ///
 /// `scale` must already have passed through [`sanitize_scale`] (finite,

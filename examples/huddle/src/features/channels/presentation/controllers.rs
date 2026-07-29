@@ -1,5 +1,5 @@
 //! [`ChannelsController`] — the Home tab's roster view model (huddle
-//! clean-architecture refactor, task 02; moved verbatim apart from repo
+//! clean-architecture refactor; moved verbatim apart from repo
 //! threading from the former flat `features/channels/mod.rs`).
 //!
 //! Mirrors [`crate::features::settings`]'s clean-signals shape: it embeds a
@@ -198,8 +198,8 @@ mod tests {
     /// The test-wiring composition root: the real store-backed repository behind
     /// the domain trait object. `#[cfg(test)]`-only wiring, so it is the sole
     /// place the presentation layer touches `data/` — exactly as the production
-    /// composition root (`crate::HuddleApp::init`) is (see the completion
-    /// summary's pattern note; production presentation imports no `data/`).
+    /// composition root (`crate::HuddleApp::init`) is (production presentation
+    /// imports no `data/`).
     fn store_repo() -> Arc<dyn ChannelRepository + Send + Sync> {
         Arc::new(StoreChannelRepository::new())
     }
@@ -212,7 +212,7 @@ mod tests {
         let state = controller.data.get_untracked();
         let data = state.value().expect("loaded cleanly on the first attempt");
         assert_eq!(data.channels.len(), 6, "6 channels");
-        assert_eq!(data.dms.len(), 9, "9 DMs (one an empty DM — task 22)");
+        assert_eq!(data.dms.len(), 9, "9 DMs (one an empty DM)");
         assert!(
             data.channels.iter().filter(|c| c.private).count() == 1,
             "exactly one private channel",

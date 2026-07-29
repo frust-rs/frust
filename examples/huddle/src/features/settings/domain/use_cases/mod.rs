@@ -1,4 +1,4 @@
-//! `settings` use cases (huddle clean-architecture refactor, task 05).
+//! `settings` use cases.
 
 pub mod set_theme;
 

@@ -1,6 +1,5 @@
-//! The Material 3 Expressive **connected button group** (Phase 6f, PLAN.md
-//! Phase B item 4): a horizontal row of connected, single-select (segmented)
-//! buttons.
+//! The Material 3 Expressive **connected button group**: a horizontal row of
+//! connected, single-select (segmented) buttons.
 //!
 //! [`button_group`] takes the member labels, the currently-`selected` index,
 //! and an `on_select` callback. It is a **controlled component** (see
@@ -37,12 +36,12 @@
 //!
 //! # Scope
 //!
-//! Single-select (segmented) only; multi-select is out of scope for v1 (the
-//! optional flag the plan permits). The member labels use the
+//! Single-select (segmented) only; multi-select is out of scope for v1 (an
+//! optional M3 variant this module does not implement). The member labels use the
 //! [`ThemeTextColor::OnSurface`] role uniformly — selection is conveyed by the
 //! member's container fill (`secondary_container`), not a distinct label color,
 //! to avoid adding an `on_secondary_container` text role in `text.rs` (a file
-//! this task does not own). Semantics expose a [`Role::RadioGroup`] of
+//! outside this module's scope). Semantics expose a [`Role::RadioGroup`] of
 //! per-member [`Role::RadioButton`] nodes; their bounds are the whole group's
 //! (v1 — `SemanticsCtx` exposes no public per-sub-rect descent), so linear
 //! (by-label) screen-reader navigation is correct while spatial is approximate.

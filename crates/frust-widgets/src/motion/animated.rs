@@ -1,5 +1,5 @@
-//! Declarative single-child implicit-animation wrappers (glyph-design-system
-//! task 12): [`AnimatedOpacity`]/[`AnimatedScale`].
+//! Declarative single-child implicit-animation wrappers:
+//! [`AnimatedOpacity`]/[`AnimatedScale`].
 //!
 //! # Shape
 //!
@@ -20,7 +20,7 @@
 //! [`ImplicitAnim`] is the shared retarget driver both wrappers use. A
 //! target change captures the *exact currently-painted value* as the new
 //! [`Tween`]'s `begin`, then launches a fresh `0..1` progress
-//! [`crate::nav::transition::TransitionDriver`] (reusing task 07's
+//! [`crate::nav::transition::TransitionDriver`] (reusing the
 //! duration/spring [`Timing`] progress driver — the same vocabulary a page
 //! transition's progress is driven by, just mapped onto an arbitrary value
 //! range via `Tween` instead of a page's own `0..1` transition progress) via
@@ -43,8 +43,8 @@
 //! *unscaled* layout geometry. This wrapper's `event`/layout never apply the
 //! animation, so a child under [`AnimatedScale`] mid-shrink is still hit at
 //! its full laid-out bounds — the same v1 rule huddle's `PressPop` precedent
-//! established (see `push_transform`'s own doc). A future task may add a
-//! scaled-hit-test opt-in; this task deliberately does not.
+//! established (see `push_transform`'s own doc). A future addition may add a
+//! scaled-hit-test opt-in; this module deliberately does not.
 
 use std::time::Duration;
 
@@ -148,8 +148,8 @@ struct ImplicitAnim {
     /// `begin` is the value at the instant the current retarget started,
     /// `end` is `driving_target`.
     tween: Tween<f64>,
-    /// The `0..1` progress driver (task 07's page-transition driver, reused
-    /// here — see the [module docs](self)).
+    /// The `0..1` progress driver (the page-transition driver, reused here —
+    /// see the [module docs](self)).
     driver: TransitionDriver,
 }
 

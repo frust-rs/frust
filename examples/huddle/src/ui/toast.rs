@@ -1,4 +1,4 @@
-//! The overlay toast/snackbar service (PLAN.md's "Toasts/snackbars + undo").
+//! The overlay toast/snackbar service.
 //!
 //! [`ToastController`] is a cheap, cloneable, `Send + Sync` handle — the same
 //! shape as `NavigatorController`: callers only *record* a request (via
@@ -18,7 +18,7 @@
 //! delay is configurable ([`ToastController::with_dismiss_after`]) so the
 //! headless suite can drive a short-lived toast deterministically.
 //!
-//! # Entrance animation (task 22)
+//! # Entrance animation
 //!
 //! Each toast card is wrapped in [`toast_entrance`], a small paint-driven
 //! escape-hatch `View`/`Widget` (built directly on `frust-core`, the same
@@ -238,7 +238,7 @@ fn toast_card(entry: ToastEntry) -> AnyView<ToastOverlayState> {
 }
 
 // ---------------------------------------------------------------------------
-// Entrance animation (task 22) — a paint-driven slide-up + fade wrapper
+// Entrance animation — a paint-driven slide-up + fade wrapper
 // ---------------------------------------------------------------------------
 
 /// Entrance duration (Material snackbar-ish quick slide).

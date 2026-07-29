@@ -1,4 +1,4 @@
-//! Router ⇄ deep-link glue (Phase 6b, task 08): the facade is the ONLY crate
+//! Router ⇄ deep-link glue: the facade is the ONLY crate
 //! that sees both `frust-widgets`' [`Router`] and `frust-reactive`'s
 //! deep-link source together — `frust-widgets` stays reactive-free (see
 //! `Router::handle_location`'s doc) and `frust-reactive` stays router-free
@@ -31,8 +31,8 @@ use frust_reactive::{DeepLink, deep_links};
 use frust_widgets::Router;
 use reactive_graph::traits::Get;
 
-/// Normalize a raw deep-link source string into a router-ready path (Finding
-/// 8, 6e-fix-1 task 04). Platform shells push the RAW URL as delivered by the
+/// Normalize a raw deep-link source string into a router-ready path.
+/// Platform shells push the RAW URL as delivered by the
 /// OS (`fktest://item/7`, or `https://host/item/7`) into the deep-link
 /// source, but the router only understands bare paths —
 /// `frust_widgets::nav::path::Location::parse` splits on `/` with no
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(warm.track_and_paint(), ERROR);
     }
 
-    // --- `normalize_deep_link` (Finding 8, 6e-fix-1 task 04): one rule
+    // --- `normalize_deep_link`: one rule
     // branch per test, mirroring `path.rs`'s test-heavy style for its own
     // hand-rolled parser.
 

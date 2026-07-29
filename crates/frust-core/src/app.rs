@@ -1,4 +1,4 @@
-//! The render root: the object the shell (task 08) drives each frame.
+//! The render root: the object each platform shell drives each frame.
 //!
 //! It owns the widget [`WidgetTree`] and the previous [`View`], and exposes the
 //! three framework passes in Masonry order (the subset relevant to v0):
@@ -11,7 +11,7 @@
 //!
 //! v0 is single-root: `app_logic` returns one `impl View<State>` whose concrete
 //! type is fixed, so the root's previous view and element are stored typed.
-//! ViewSequence / multiple children are explicitly out of scope (task 08+).
+//! ViewSequence / multiple children are explicitly out of scope for now.
 
 use std::any::Any;
 use std::cell::Cell;
@@ -64,7 +64,7 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// REPLACED wholesale every pass (never merged with the previous one), so
     /// a pass that publishes none yields an empty `Vec` — a culled/removed
     /// slot from the prior frame does not linger as a stale frame. Core stays
-    /// dumb here: task 03's differ owns absent-means-hide/dispose semantics.
+    /// dumb here: the shell's differ owns absent-means-hide/dispose semantics.
     platform_view_frames: Vec<PlatformViewFrame>,
     /// The z-shield rects the tree reported during the most recent
     /// [`RenderRoot::paint`] (via [`crate::widget::PaintCtx::report_input_shield`]),
@@ -116,7 +116,7 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// on a translucent surface (see `frust-widgets`' `PlatformViewWidget`).
     surface_translucent: bool,
     /// The persistent, never-reused per-pod semantics base-id allocator's next
-    /// value (phase-6d D1). Seeded at `2` (ids `0`/`1` reserved: `0` keeps
+    /// value. Seeded at `2` (ids `0`/`1` reserved: `0` keeps
     /// `NonZeroU64` valid, `1` is the [`ROOT_NODE_ID`] window node), advanced as
     /// [`ChildPod`](crate::widget::ChildPod)s are assigned bases on their first
     /// semantics visit, and carried across passes so a pod that first appears on a
@@ -129,7 +129,7 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     root_semantics_id: Cell<Option<NonZeroU64>>,
     /// A monotonically-increasing generation bumped whenever a rebuild or theme
     /// swap could have changed the semantics tree, so a shell can cheaply skip
-    /// re-pulling + re-pushing an unchanged accessibility tree (phase-6d D1's
+    /// re-pulling + re-pushing an unchanged accessibility tree (the semantics
     /// dirty gate — see [`RenderRoot::semantics_if_changed`]). v1 recompute is
     /// acceptable; this is the seam a shell gates on.
     semantics_gen: u64,
@@ -238,7 +238,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// a needless relayout, and — critically — on the mobile shells a
     /// monotonically ticking counter would keep the frame gate's pending-flags
     /// input perpetually true, so the menu would never idle (the 32s-idle
-    /// behavior verified in task 08 must survive). Keeping this setter dirt-free
+    /// behavior must survive). Keeping this setter dirt-free
     /// is exactly what keeps the frame gate unaware of it (see
     /// `docs/ARCHITECTURE.md`'s Frame gate).
     pub fn set_presented_frames(&mut self, presented: u64) {
@@ -362,7 +362,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// bit is pending, without clearing it.
     ///
     /// Complements [`take_change_flags`](RenderRoot::take_change_flags) for a
-    /// shell frame gate (spec §14 phase 7): the gate reads this as one of its
+    /// shell frame gate: the gate reads this as one of its
     /// "should this frame run" inputs *before* deciding, so a frame it chooses
     /// to skip leaves `pending` intact for the next non-skipped frame to drain
     /// and act on. Draining stays the job of `take_change_flags`, called only
@@ -385,7 +385,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Run `app_logic`, then build (first call) or rebuild (subsequent calls)
     /// the root widget, returning what changed.
     ///
-    /// `app_logic` is expected to be cheap and re-entrant (spec §5): it is
+    /// `app_logic` is expected to be cheap and re-entrant: it is
     /// re-run in full every rebuild.
     pub fn rebuild(
         &mut self,
@@ -454,7 +454,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// Lay out the root widget, threading a shared text-shaping context down to
-    /// text widgets (spec §10.3).
+    /// text widgets.
     ///
     /// `text_ctx` is the shell-owned `frust_text::TextContext`, passed
     /// type-erased so this crate needs no `frust-text` dependency. Text
@@ -510,8 +510,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// animation is in flight. It is also surfaced on the returned
     /// [`PaintOutcome::needs_layout`].
     ///
-    /// `frame_time` is the shell's shared monotonic clock for this frame (spec §8:
-    /// time enters `frust-core` from the shell, never `Instant::now()` here). It
+    /// `frame_time` is the shell's shared monotonic clock for this frame
+    /// (time enters `frust-core` from the shell, never `Instant::now()` here). It
     /// is seeded onto the root [`PaintCtx`] and threaded unchanged to every child
     /// ([`crate::widget::ChildPod::paint_child`]), so an animating widget advances
     /// against one consistent timestamp — see [`PaintCtx::frame_time`].
@@ -590,7 +590,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 needs_layout,
                 // Aggregate tick class: paced-only iff a frame was requested and
                 // every request was CosmeticLoop-class. The mobile frame gate
-                // (task 06) may throttle such a frame; any Transition request
+                // may throttle such a frame; any Transition request
                 // (including the LAYOUT-implying `request_layout` above) leaves
                 // this false so the frame runs every vsync.
                 needs_frame_paced_only: ctx.needs_frame_paced_only(),
@@ -600,9 +600,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         }
     }
 
-    /// Collect the accessibility tree for the current frame (spec §9, phase-6c
-    /// D1), returning a [`SemanticsUpdate`] a platform adapter (`accesskit_*`,
-    /// phase 6d) can consume.
+    /// Collect the accessibility tree for the current frame,
+    /// returning a [`SemanticsUpdate`] a platform adapter (`accesskit_*`)
+    /// can consume.
     ///
     /// Pull-based and stateless: the shell calls this when a platform a11y client
     /// asks for the tree (or after a change), *never* per frame — this crate owns
@@ -661,7 +661,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// The current semantics generation — bumped by every rebuild/theme swap that
-    /// could have changed the accessibility tree (phase-6d D1's dirty gate).
+    /// could have changed the accessibility tree (the semantics dirty gate).
     ///
     /// A shell records the value it last pushed and compares; see
     /// [`RenderRoot::semantics_if_changed`].
@@ -670,7 +670,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// Pull a fresh [`SemanticsUpdate`] **only if** the semantics tree may have
-    /// changed since generation `last_seen` (phase-6d D1).
+    /// changed since generation `last_seen`.
     ///
     /// Returns `None` when nothing relevant changed, letting a shell skip both the
     /// tree walk and the platform `accesskit_*` push. Call it post-layout (bounds
@@ -692,7 +692,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ///
     /// Root capture bookkeeping mirrors the per-container `active`-child model: a
     /// `Down` whose dispatch requested capture marks a gesture in flight; `Up`
-    /// and `Cancel` release it (never a window-leave — see `research/RESEARCH.md`).
+    /// and `Cancel` release it (never a window-leave).
     ///
     /// # Reentrancy
     ///
@@ -776,7 +776,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         }
     }
 
-    /// Perform a platform accessibility action (phase-6d D2), returning the same
+    /// Perform a platform accessibility action, returning the same
     /// [`EventOutcome`] the synthesized input produced.
     ///
     /// A platform `accesskit_*` adapter delivers an `ActionRequest(node_id,
@@ -809,8 +809,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         action: accesskit::Action,
     ) -> EventOutcome {
         // Recover the node's absolute bounds from a fresh semantics pass (the
-        // id → absolute-bounds map D2 calls for; recomputing keeps it in step with
-        // the live tree without a stored cache).
+        // id → absolute-bounds map this action routing needs; recomputing keeps
+        // it in step with the live tree without a stored cache).
         let update = self.semantics();
         let Some(bounds) = update
             .nodes
@@ -1062,7 +1062,7 @@ mod tests {
     /// A root widget owning two independently toggleable [`ChildPod`]s (a
     /// minimal two-slot container) so a rebuild can flip either slot's
     /// `should_publish` — the fixture the "two slots in one pass" and
-    /// "empty-pass clears stale frames" acceptance criteria need.
+    /// "empty-pass clears stale frames" tests below need.
     struct PlatformViewRootWidget {
         a: crate::widget::ChildPod,
         b: crate::widget::ChildPod,
@@ -1180,8 +1180,8 @@ mod tests {
 
     #[test]
     fn input_shields_arrive_in_order_and_clear_on_empty_pass() {
-        // The shield channel's half of the contract above (native-widgets
-        // p1-09): two shields reported in one pass both survive (the `Vec`
+        // The shield channel's half of the contract above:
+        // two shields reported in one pass both survive (the `Vec`
         // extend, not an `Option` overwrite), and a pass that reports none
         // replaces the collection rather than merging — a stale shield must
         // never keep stealing input from an interactive slot.
@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn retired_platform_views_drain_exactly_once() {
-        // The prompt-teardown channel (native-widgets p1-09): a reported slot
+        // The prompt-teardown channel: a reported slot
         // id is handed to the shell once and then gone, mirroring
         // `take_change_flags`. Serialized against the other test touching the
         // process-wide list (see `RETIRE_TEST_LOCK`).
@@ -1428,7 +1428,7 @@ mod tests {
         };
 
         // A paced-only root surfaces `needs_frame_paced_only` on the outcome so
-        // the mobile frame gate (task 06) may throttle its cadence.
+        // the mobile frame gate may throttle its cadence.
         let mut paced: RenderRoot<AppState, PacedFrameView> = RenderRoot::new();
         paced.rebuild(&mut |_s: &mut AppState| PacedFrameView, &mut state);
         paced.layout(Size::new(100.0, 100.0));
@@ -1739,7 +1739,7 @@ mod tests {
 
     #[test]
     fn has_pending_change_flags_peeks_without_draining() {
-        // The frame-gate peek (phase 7): observe pending dirtiness without
+        // The frame-gate peek: observe pending dirtiness without
         // clearing it, so a skipped frame preserves the flags for the next
         // frame that actually runs.
         let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
@@ -1971,7 +1971,7 @@ mod tests {
         // Unlike `set_theme`/`set_insets`, a presented-count push is a paint-only
         // observation — it must dirty NOTHING, so a monotonically ticking counter
         // never forces a relayout or (on mobile) keeps the frame gate perpetually
-        // "Run" (the menu-idle behavior from task 08 depends on this).
+        // "Run" (the menu-idle behavior depends on this).
         let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
         let gen_before = root.semantics_generation();
         root.set_presented_frames(1);
@@ -2083,7 +2083,7 @@ mod tests {
         assert!(root.ime_state().is_none());
     }
 
-    // --- Semantics: stable ids + accessibility action routing (phase-6d D1/D2) --
+    // --- Semantics: stable ids + accessibility action routing ---
     //
     // Fixtures: an accessibility-visible button (fire-on-up-inside, contributes a
     // `Role::Button` node) and a checkbox variant (`Role::CheckBox`), plus a

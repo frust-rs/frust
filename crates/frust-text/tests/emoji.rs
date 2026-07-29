@@ -1,9 +1,8 @@
-//! Regression test (huddle-showcase task 01): color emoji renders end-to-end
+//! Regression test: color emoji renders end-to-end
 //! through the pinned parley/fontique/vello stack with **no changes to the
 //! render path** (`frust-render`/`frust-scene`).
 //!
-//! Verified capability (`workflow/plans/features/huddle-showcase/research/RESEARCH.md`
-//! §1): vello 0.9.0's `Scene::draw_glyphs(...).draw(...)` natively renders
+//! Verified capability: vello 0.9.0's `Scene::draw_glyphs(...).draw(...)` natively renders
 //! COLR v0/v1+CPAL and bitmap-strike (sbix) color glyphs straight from a
 //! font's own color tables — `frust-render`'s `draw_glyph_run`
 //! (`crates/frust-render/src/convert.rs`) already calls that API

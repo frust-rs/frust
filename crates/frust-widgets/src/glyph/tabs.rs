@@ -1,8 +1,6 @@
-//! Filled by task 23-glyph-nav-chrome (Tabs).
-//!
 //! [`tabs`]/[`TabsView`]: a horizontal tab strip with one moving 2px underline
 //! indicator that animates its position/width to the active tab
-//! (`research/glyph-design-system.html`'s `.tabs`/`.tab`/`.tab.active` rules,
+//! (the Glyph design system's `.tabs`/`.tab`/`.tab.active` rules,
 //! retrieved 2026-07-21).
 //!
 //! # Controlled selection (never self-mutating)

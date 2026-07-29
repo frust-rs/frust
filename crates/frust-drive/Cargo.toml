@@ -26,5 +26,6 @@ include_dir.workspace = true
 # Shared with `frust-tui`'s recent-projects store (workspace pin 0.25).
 toml_edit.workspace = true
 # `frust run`'s Android/desktop log-streaming path needs a clean Ctrl-C →
-# exit-0 hook (default SIGINT disposition exits 130, spec §12.4 wants 0).
+# exit-0 hook (default SIGINT disposition exits 130; a streamed run should
+# exit 0 instead).
 ctrlc.workspace = true

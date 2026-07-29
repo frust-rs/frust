@@ -1,4 +1,4 @@
-//! `frust run` (spec §12.4): Android drive pipeline, with a `cargo run`
+//! `frust run`: Android drive pipeline, with a `cargo run`
 //! desktop-preview fallback when no Android device is available.
 
 use std::io::{BufRead, Write};
@@ -59,7 +59,7 @@ fn run_in_with_hooks(
     verbose: bool,
     hooks: WatchHooks,
 ) -> Result<u8> {
-    // `--watch` (PLAN.md Phase 9.D step 2) is desktop-preview only — its
+    // `--watch` is desktop-preview only — its
     // kill/rebuild/relaunch loop only knows how to drive a local `cargo
     // run` child, not an installed device app. Reject the combination up
     // front rather than silently ignoring `--watch` or `-d`.
@@ -120,8 +120,7 @@ fn warn_render_tier_not_plumbed(render_tier: Option<RenderTierArg>) {
 }
 
 /// Dispatches a resolved [`Device`] to its platform's mode/flavor-aware
-/// drive pipeline (spec §12.4's Android path, task 66's mode-aware Android
-/// and iOS-simulator paths, task 67's signed physical-iOS-device path).
+/// drive pipeline.
 fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) -> Result<u8> {
     match (device.platform, device.kind) {
         (Platform::Android, _) => run_android(runner, device, info),
@@ -139,8 +138,8 @@ fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) 
     }
 }
 
-/// Runs the desktop preview shell exactly like a bare `cargo run` (spec
-/// §12.9's dev loop), streaming its output rather than buffering it until
+/// Runs the desktop preview shell exactly like a bare `cargo run`,
+/// streaming its output rather than buffering it until
 /// exit. Reached either because no Android device is connected and no `-d`
 /// was passed (the `DeviceSelection::Desktop` arm below), or because
 /// `run_in` short-circuited here directly on seeing `--watch` — which
@@ -166,7 +165,7 @@ fn run_desktop_fallback(
 ) -> Result<u8> {
     println!("No Android device connected; falling back to `cargo run` (desktop preview).");
     let cwd = std::env::current_dir().context("reading current directory")?;
-    // Release-lean preflight (followup F2): a legacy app (no declared `lean`)
+    // Release-lean preflight: a legacy app (no declared `lean`)
     // has it dropped here — with a one-time warning to stdout (the CLI
     // front-end owns printing) — so the desktop `cargo run` never carries an
     // undeclared `--features lean` and cargo's opaque hard error. The `frust`
@@ -246,7 +245,8 @@ impl WatchHooks {
 /// function is reached only through [`WatchHooks::real`], which
 /// [`run_desktop_watch`] calls exactly once per production `--watch`
 /// invocation; a test must go through [`WatchHooks::fake`] instead of ever
-/// calling this directly (see [`run_in_with_hooks`]'s F4 regression test).
+/// calling this directly (see
+/// `run_in_with_watch_skips_device_discovery_even_when_a_device_is_present`).
 fn install_real_ctrlc_handler(current: Arc<Mutex<Option<StreamHandle>>>) -> Result<()> {
     ctrlc::set_handler(move || {
         if let Some(mut handle) = current
@@ -274,8 +274,8 @@ const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// relaunch, not several.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// `frust run --watch`'s desktop-only file-watch → rebuild → relaunch loop
-/// (PLAN.md Phase 9.D step 2). Watches `<root>/src` (recursive) and
+/// `frust run --watch`'s desktop-only file-watch → rebuild → relaunch loop.
+/// Watches `<root>/src` (recursive) and
 /// `<root>/Cargo.toml` via `hooks.spawn_watcher`, wiring its every raw event
 /// straight into [`watch_loop`], the testable core that owns debouncing,
 /// spawning, and kill+relaunch; `hooks.install_ctrlc` installs the Ctrl-C
@@ -492,7 +492,7 @@ fn drain_available_lines(
 /// a `frust run --release`/`--profile` desktop preview builds in the
 /// requested profile instead of always debug, plus the resolved cargo
 /// `features` (`--features frust/perf-trace` for debug/profile, `--features
-/// lean` for release — release-lean plan, task 04) so the desktop preview
+/// lean` for release) so the desktop preview
 /// matches the device pipelines: instrumentation compiled IN for debug/profile,
 /// the log ceiling for release.
 ///
@@ -500,7 +500,7 @@ fn drain_available_lines(
 /// (`frust_drive::cargo_manifest::resolve_release_features`): a legacy app
 /// whose manifest lacks `lean` arrives here with it already dropped, so the
 /// argv simply omits `--features lean` rather than passing an undeclared
-/// feature to `cargo run` (followup F2).
+/// feature to `cargo run`.
 fn desktop_cargo_run_args_with(info: &BuildInfo, features: &[&'static str]) -> Vec<&'static str> {
     let mut args = vec!["run"];
     args.extend_from_slice(info.mode.cargo_profile_arg());
@@ -573,8 +573,8 @@ fn select_from_prompt(
     run_on_device(runner, &candidates[index], info)
 }
 
-/// Drives the full, mode/flavor-aware Android pipeline (spec §12.4 steps
-/// 3-7; task 66) on `device` — delegates to `android_run::run`, which owns
+/// Drives the full, mode/flavor-aware Android pipeline on `device` —
+/// delegates to `android_run::run`, which owns
 /// the pipeline body (mirroring `ios_run::run`'s shape).
 fn run_android(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) -> Result<u8> {
     let cwd = std::env::current_dir().context("reading current directory")?;
@@ -613,13 +613,12 @@ mod tests {
         .unwrap()
     }
 
-    /// The Phase-5 sentinel `run_on_device` used to bail a physical iOS
-    /// device with is gone (task 67 wires `ios_run::run_physical` in
-    /// instead). The test process's cwd is the `frust-cli` crate root,
-    /// not a generated Frust project, so `run_on_device` now fails at
+    /// A physical iOS device dispatches to `ios_run::run_physical` rather
+    /// than bailing out. The test process's cwd is the `frust-cli` crate root,
+    /// not a generated Frust project, so `run_on_device` fails at
     /// `ios_run::run_physical`'s own `project::detect` step instead —
-    /// proving dispatch reaches the real pipeline rather than the removed
-    /// sentinel. The pipeline's own behavior (iOS-17+ gate, build/install/
+    /// proving dispatch reaches the real pipeline rather than bailing early.
+    /// The pipeline's own behavior (iOS-17+ gate, build/install/
     /// launch argv, failure hints) is covered by `ios_run::mod`'s tests
     /// against a fixture project directory.
     #[test]
@@ -655,8 +654,8 @@ mod tests {
         );
     }
 
-    /// Regression for the verified desktop-fallback gap (PLAN.md Phase 1
-    /// step 1): a `--profile` desktop preview must (a) build in the profile
+    /// Regression for the verified desktop-fallback gap: a `--profile`
+    /// desktop preview must (a) build in the profile
     /// cargo profile and (b) receive the auto-injected `FRUST_TRACE=1` as an
     /// environment variable, not silently drop both.
     #[test]
@@ -679,7 +678,7 @@ mod tests {
     #[test]
     fn desktop_cargo_run_args_default_debug_carries_perf_trace_feature() {
         // Debug desktop preview compiles instrumentation in via
-        // `--features frust/perf-trace` (release-lean plan, task 04).
+        // `--features frust/perf-trace`.
         assert_eq!(
             desktop_cargo_run_args(&debug_info()),
             vec!["run", "--features", "frust/perf-trace"]
@@ -703,7 +702,7 @@ mod tests {
         );
     }
 
-    /// Followup F2, legacy direction: a release desktop preview whose
+    /// Legacy direction: a release desktop preview whose
     /// preflight resolved to an EMPTY feature list (a legacy app that dropped
     /// `lean`) must produce argv with `--release` but no `--features` at all —
     /// never an undeclared `--features lean` cargo would reject.
@@ -724,8 +723,9 @@ mod tests {
         );
     }
 
-    /// Followup F2, declaring direction: a declaring app resolves to
-    /// `["lean"]`, giving byte-identical argv to the pre-F2 pure mapping.
+    /// Declaring direction: a declaring app resolves to
+    /// `["lean"]`, giving byte-identical argv to the pure mode → argv
+    /// mapping above.
     #[test]
     fn desktop_cargo_run_args_with_declared_lean_matches_pure_mapping() {
         let info = BuildInfo::from_args(
@@ -790,7 +790,7 @@ mod tests {
         assert!(message.contains("device"), "{message}");
     }
 
-    /// F4 regression: `--watch` must short-circuit to the desktop preview
+    /// `--watch` must short-circuit to the desktop preview
     /// *before* device discovery runs, so an attached-but-unselected device
     /// never changes what `--watch` does. `adb devices -l` is scripted to
     /// report a connected emulator — device discovery WOULD select it if it
@@ -836,8 +836,8 @@ mod tests {
     }
 
     /// A raw change tick kills the running child and relaunches a fresh
-    /// `cargo run` — the core change→kill→rebuild→relaunch sequence
-    /// (acceptance criterion 2). The hanging stream's one scripted line is
+    /// `cargo run` — the core change→kill→rebuild→relaunch sequence.
+    /// The hanging stream's one scripted line is
     /// replayed from scratch on every spawn, so seeing it exactly twice
     /// proves two genuinely separate spawns happened (the initial one, and
     /// a real relaunch after the kill) rather than the first process simply
@@ -880,7 +880,7 @@ mod tests {
     }
 
     /// Several raw ticks arriving within the debounce window collapse into a
-    /// single relaunch (acceptance criterion 2's debounce case) — only one
+    /// single relaunch — only one
     /// "Change detected" status line for a burst of 5 ticks sent 5ms apart
     /// under a 50ms debounce window.
     #[test]
@@ -922,9 +922,8 @@ mod tests {
     }
 
     /// A `cargo run` that exits non-zero on its own (a build failure) is
-    /// reported but keeps the loop watching rather than ending it
-    /// (acceptance criterion 2's build-failure case) — a subsequent change
-    /// tick still triggers a fresh relaunch attempt.
+    /// reported but keeps the loop watching rather than ending it — a
+    /// subsequent change tick still triggers a fresh relaunch attempt.
     #[test]
     fn watch_loop_survives_a_build_failure_and_keeps_watching() {
         let runner = FakeProcessRunner::new().with_stream("cargo run", ["error[E0000]"], false);

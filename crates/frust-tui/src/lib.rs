@@ -1,13 +1,13 @@
 //! `frust-tui`: a mouse-first ratatui terminal UI for driving Frust apps.
 //!
-//! Phase 1 (this crate's skeleton) ships the plumbing: the TEA [`engine`]
-//! (model + messages + pure `update` + the message channel), the [`ui`] render
-//! layer (brand [`ui::theme`], per-frame [`ui::mouse`] region registry with
-//! hover, layout shell, welcome + workbench screens), and the [`runner`]
-//! terminal lifecycle + tokio event loop. Project detection, session
-//! supervision, and the create/bootstrap wizards land in later phases.
+//! The TEA [`engine`] (model + messages + pure `update` + the message
+//! channel) drives the [`ui`] render layer (brand [`ui::theme`], per-frame
+//! [`ui::mouse`] region registry with hover, layout shell, welcome +
+//! workbench screens, every modal/overlay) and is fed by [`supervise`]
+//! (project detection, session supervision) via [`runner`]'s terminal
+//! lifecycle + tokio event loop.
 //!
-//! # Layering (PLAN.md D2)
+//! # Layering
 //!
 //! `engine::update` is pure and terminal-free (unit-tested without a TTY) —
 //! `AppState::new`/`detect` do bounded filesystem I/O by design (project

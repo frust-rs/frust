@@ -1,13 +1,12 @@
-//! Integration test (bug plan `catalog-animation-performance`, task 09):
-//! proves task 04's `TickClass` aggregation and task 07's paint-time
+//! Integration test: proves the `TickClass` aggregation and the paint-time
 //! visible-rect culling compose correctly through a *real* `Flex` — an
 //! offscreen paced loop's `request_frame_class` never bubbles out of the
 //! container's `PaintCtx` at all (not merely "gets paced"), and scrolling it
 //! back into the viewport resumes the bubble on the very next paint.
 //!
 //! `crates/frust-shell-common/tests/pacing_integration.rs` is the companion
-//! half of this task: it composes the resulting `PaintOutcome` aggregation
-//! with `FrameGate` (task 06) at the shell layer, treating "offscreen
+//! piece: it composes the resulting `PaintOutcome` aggregation
+//! with `FrameGate` at the shell layer, treating "offscreen
 //! (culled)" as the fact this file proves — no request bubbles at all.
 
 use std::cell::{Cell, RefCell};
@@ -220,7 +219,7 @@ fn onscreen_paced_loops_bubble_a_cosmetic_loop_request() {
 
 #[test]
 fn fully_offscreen_column_bubbles_no_frame_request_at_all() {
-    // The frame-suppression case task 07 exists for: a perpetual animator
+    // The frame-suppression case this file exists for: a perpetual animator
     // entirely below the fold must leave the root `PaintOutcome` with no
     // frame request whatsoever — not "paced to zero", but genuinely none.
     let (mut w, counts) = build_column(all_cosmetic());
@@ -263,7 +262,7 @@ fn scrolling_back_into_view_resumes_the_bubbled_request_on_the_very_next_paint()
 #[test]
 fn a_concurrent_onscreen_transition_dominates_an_onscreen_paced_loop() {
     // Row 0 is a CosmeticLoop, row 1 is a Transition, both within the warm
-    // band — the aggregate must be Transition (task 04's max-lattice), i.e.
+    // band — the aggregate must be Transition (the max-lattice rule), i.e.
     // never paced, exactly like a page transition playing over a shimmering
     // skeleton row.
     let mut classes = all_cosmetic();
@@ -283,13 +282,13 @@ fn a_concurrent_onscreen_transition_dominates_an_onscreen_paced_loop() {
 
 #[test]
 fn a_hero_transition_in_flight_exempts_every_child_from_culling() {
-    // Task f3 Problem B: a hero-tagged descendant scrolled past the warm band
+    // A hero-tagged descendant scrolled past the warm band
     // stops reporting its morph bounds (`report_hero`) if culled. While a hero
     // transition is in flight (a reporter installed over the subtree), `Flex`
     // exempts EVERY child from culling — so the far-offscreen rows that
     // `fully_offscreen_column_bubbles_no_frame_request_at_all` proves are culled
-    // *without* a hero all paint again here. This bypasses task 07's
-    // offscreen-animator suppression BY DESIGN, and only for the brief transition.
+    // *without* a hero all paint again here. This bypasses the
+    // offscreen-animator suppression above BY DESIGN, and only for the brief transition.
     let (mut w, counts) = build_column(all_cosmetic());
     let outcome = w.paint_at_with_hero(Some(far_away_viewport()));
 

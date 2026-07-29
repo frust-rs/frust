@@ -1,8 +1,8 @@
-//! `CupertinoActivityIndicator` (Phase 6c, PLAN.md D2b/D5, task 13): the iOS
+//! `CupertinoActivityIndicator`: the iOS
 //! spinner — 20pt, eight radial "spoke" segments whose opacity falls off around
 //! the ring, rotating continuously.
 //!
-//! Each spoke is a short, round-capped stroked line drawn with the task-05
+//! Each spoke is a short, round-capped stroked line drawn with the
 //! [`PaintScene::stroke_path`] primitive (the same seam
 //! [`crate::material::progress`]'s circular arc uses). The indeterminate loop is
 //! advanced during [`Widget::paint`] and re-requested via
@@ -201,8 +201,7 @@ impl Widget for CupertinoActivityIndicatorWidget {
 
         if self.animating && !reduce_motion {
             // The rotating spoke ring is a decorative loop — its exact
-            // cadence is imperceptible, so the mobile frame gate may pace it
-            // (task 08).
+            // cadence is imperceptible, so the mobile frame gate may pace it.
             ctx.request_frame_paced();
         }
     }

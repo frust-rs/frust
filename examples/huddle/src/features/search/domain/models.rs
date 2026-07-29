@@ -1,6 +1,5 @@
-//! Search domain — the sectioned filter-result model (huddle
-//! clean-architecture refactor, task 04). Moved verbatim from the former flat
-//! `features/search/mod.rs`.
+//! Search domain — the sectioned filter-result model. Moved verbatim from
+//! the former flat `features/search/mod.rs`.
 
 use crate::features::channels::domain::Channel;
 use crate::features::profile::domain::User;
@@ -63,7 +62,7 @@ impl SearchResults {
     }
 }
 
-/// Message-hit cap (spec: "cap message hits at ~20") — the dataset's 160
-/// messages (40 authored + the 120-message `#firehose`) could otherwise flood
-/// a broad query's result list.
+/// Message-hit cap (~20) — the dataset's 160 messages (40 authored + the
+/// 120-message `#firehose`) could otherwise flood a broad query's result
+/// list.
 pub const MAX_MESSAGE_HITS: usize = 20;

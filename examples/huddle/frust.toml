@@ -4,8 +4,9 @@ org = "it.f0x"
 description = "A new Frust application."
 
 # Deep-link scheme registered in the generated Android manifest / iOS
-# Info.plist (task 08 — task 02 wired the app-side `router_with_deep_links`
-# but deferred the platform manifest scheme to this task). Informational
+# Info.plist — separate from the app-side `router_with_deep_links` wiring,
+# which reads the resulting platform-delivered link but never touches the
+# manifest/Info.plist itself. Informational
 # here — Frust tooling doesn't parse this section; it documents what
 # `frust create --deeplink-scheme` baked into the platform templates.
 # Editing it does NOT re-render the manifest/Info.plist — re-run

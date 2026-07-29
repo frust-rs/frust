@@ -7,11 +7,10 @@ license.workspace = true
 
 [dependencies]
 # reactive_graph has no default features, so no `features`/`default-features`
-# needed here. Do NOT add the `effects` feature (see docs/DEVELOPMENT.md /
-# phase-5.5 research doc).
+# needed here. Do NOT add the `effects` feature (see docs/DEVELOPMENT.md's
+# Version-Pin Policy): the frame path is a custom subscriber, not `RenderEffect`.
 reactive_graph = { workspace = true }
 any_spawner = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
-# Not yet a workspace dependency; pinned directly here for later tasks that
-# need it (pre-wired per task 01's overlap policy).
+# Not yet a workspace dependency; pinned directly here for future use.
 futures = "0.3"

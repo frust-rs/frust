@@ -1,5 +1,5 @@
-//! `ListItem` rows (Phase 6c, PLAN.md D4/D5, task 12): 1/2/3-line variants at
-//! 56/72/88dp heights, meant to pair with [`super::list_view`].
+//! `ListItem` rows: 1/2/3-line variants at 56/72/88dp heights, meant to pair
+//! with [`super::list_view`].
 //!
 //! # Anatomy
 //!
@@ -8,11 +8,11 @@
 //! and the text column. The `headline` and optional `supporting` text are child
 //! [`crate::text`] widgets (M3 `on_surface` / `on_surface_variant` roles) laid
 //! out during the layout pass — [`frust_core::PaintCtx`] has no text-shaping
-//! context, so all text sizing happens at layout time (C1 in PLAN.md). The
+//! context, so all text sizing happens at layout time. The
 //! `leading`/`trailing` slots are arbitrary [`frust_core::AnyView`]s (an
 //! icon, avatar, switch, …), vertically centered.
 //!
-//! # Height (ledger-verified)
+//! # Height
 //!
 //! | Variant | Height | Constructed by |
 //! |---|---|---|

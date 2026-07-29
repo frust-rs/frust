@@ -1,4 +1,4 @@
-//! Activity use cases (huddle clean-architecture refactor, task 04).
+//! Activity use cases (huddle clean-architecture refactor).
 
 pub mod load_activity;
 pub mod mark_all_read;

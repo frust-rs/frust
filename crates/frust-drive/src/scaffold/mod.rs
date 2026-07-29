@@ -1,5 +1,5 @@
-//! Data-driven project scaffolding (spec §12.3), modeled on Flutter's
-//! `templates/` mechanism: a manifest-listed file tree rendered against a
+//! Data-driven project scaffolding, modeled on Flutter's `templates/`
+//! mechanism: a manifest-listed file tree rendered against a
 //! [`TemplateContext`].
 
 pub mod context;
@@ -28,8 +28,8 @@ static EMBEDDED_APP_TEMPLATE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../
 /// generated project.
 const MANIFEST_FILE: &str = "template_manifest.json";
 
-/// `frust create --arch` tags recognized by [`generate`] (task 09). A
-/// manifest entry whose mode-stripped logical path ends in `.<tag>` (e.g.
+/// `frust create --arch` tags recognized by [`generate`]. A manifest entry
+/// whose mode-stripped logical path ends in `.<tag>` (e.g.
 /// `src/lib.rs.clean-signals.tmpl`, logical `src/lib.rs.clean-signals`) is
 /// an **arch-scoped variant**: rendered in place of (or, for a filename
 /// with no base counterpart, in addition to) the default template's output
@@ -40,8 +40,8 @@ const MANIFEST_FILE: &str = "template_manifest.json";
 /// Only one tag exists today; a future variant adds another entry here plus
 /// a matching `frust-cli` `--arch` value arm and template files.
 ///
-/// Public so a front-end (the `frust-tui` create wizard, PLAN.md D6b) can
-/// enumerate the available architectures without hardcoding them — a new
+/// Public so a front-end (the `frust-tui` create wizard) can enumerate the
+/// available architectures without hardcoding them — a new
 /// variant appears in the UI with no front-end change.
 pub const KNOWN_ARCHES: &[&str] = &["clean-signals"];
 
@@ -56,8 +56,7 @@ pub fn split_arch_tag(logical: &str) -> Option<(&str, &str)> {
     })
 }
 
-/// How a manifest entry's content should be handled (spec §12.3 extension
-/// conventions).
+/// How a manifest entry's content should be handled.
 enum FileMode {
     /// `<file>.tmpl` → minijinja-render, strip `.tmpl`.
     Render,
@@ -119,8 +118,8 @@ impl Source<'_> {
 /// written, in manifest order. Refuses a non-empty `dest` unless
 /// `overwrite` is set.
 ///
-/// `arch` selects an opt-in template variant (task 09; `None` for the
-/// default template, provably untouched by this parameter — see
+/// `arch` selects an opt-in template variant (`None` for the default
+/// template, provably untouched by this parameter — see
 /// [`KNOWN_ARCHES`]'s doc for the manifest convention an arch-scoped entry
 /// follows). `Some` value not in [`KNOWN_ARCHES`] is rejected before any
 /// file is written.
@@ -142,8 +141,8 @@ pub fn generate(
         );
     }
 
-    // Fail fast (spec Phase 3 task 34): a grammatically invalid derived iOS
-    // bundle identifier is rejected before any file is written, rather than
+    // Fail fast: a grammatically invalid derived iOS bundle identifier is
+    // rejected before any file is written, rather than
     // emitting an Xcode project that `xcodebuild` would later refuse.
     ctx.validate_ios_identifier().map_err(|err| {
         anyhow!("invalid iOS bundle identifier derived from `org` + project name: {err}")
@@ -161,14 +160,14 @@ pub fn generate(
     for entry in &manifest {
         let (mode, logical) = classify(entry);
 
-        // Arch-tag resolution (task 09): an entry whose logical path carries
-        // a recognized `.{arch}` suffix only renders when that tag is the
+        // Arch-tag resolution: an entry whose logical path carries a
+        // recognized `.{arch}` suffix only renders when that tag is the
         // selected `arch` (skipped entirely otherwise), landing at the
         // un-tagged logical path; an untagged (default) entry is skipped
         // only when a same-arch-tagged variant overrides its exact logical
         // path — see `KNOWN_ARCHES`'s doc. `arch == None` never skips an
         // untagged entry and never matches a tagged one, so the default
-        // render path (this whole branch) is unchanged from before task 09.
+        // render path (this whole branch) is unaffected by arch selection.
         let target_logical: String = if let Some((base, tag)) = split_arch_tag(logical) {
             if Some(tag) != arch {
                 continue;
@@ -224,8 +223,8 @@ pub fn generate(
 /// no permission metadata to read back from the embedded copy, so
 /// "preserve the original mode" isn't available and this has to be a
 /// filename allowlist instead. Currently only the Gradle wrapper script
-/// (spec Phase 2 task 22, `android.tmpl/gradlew`); its Windows counterpart
-/// (`gradlew.bat`) doesn't need a Unix exec bit.
+/// (`android.tmpl/gradlew`); its Windows counterpart (`gradlew.bat`)
+/// doesn't need a Unix exec bit.
 const EXECUTABLE_FILENAMES: &[&str] = &["gradlew"];
 
 /// Sets the Unix executable bit (`0o755`) on `path` if its file name is in
@@ -312,8 +311,8 @@ mod tests {
         let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
         assert!(cargo_toml.contains("my_app"), "{cargo_toml}");
         // The app crate builds the Android `cdylib` (JNI bridge), the iOS
-        // `staticlib` (C-ABI bridge, task 33), and an `rlib` for the desktop
-        // preview binary (task 24).
+        // `staticlib` (C-ABI bridge), and an `rlib` for the desktop preview
+        // binary.
         assert!(
             cargo_toml.contains("crate-type = [\"cdylib\", \"staticlib\", \"rlib\"]"),
             "{cargo_toml}"
@@ -323,15 +322,15 @@ mod tests {
 
         assert!(dest.join("src/lib.rs").exists());
         // The generated app's sole entry point is the canonical `Component` +
-        // `app!` shape (spec §5.5): no hand-written `android_app!`/`ios_app!`
-        // invocation or `App::new` survives in a fresh scaffold.
+        // `app!` shape: no hand-written `android_app!`/`ios_app!` invocation
+        // or `App::new` survives in a fresh scaffold.
         let lib_rs = fs::read_to_string(dest.join("src/lib.rs")).unwrap();
         assert!(!lib_rs.contains("android_app!"), "{lib_rs}");
         assert!(!lib_rs.contains("ios_app!"), "{lib_rs}");
         assert!(!lib_rs.contains("App::new"), "{lib_rs}");
         assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
         assert!(lib_rs.contains("frust::app!(MyAppApp)"), "{lib_rs}");
-        // The generated demo is the Phase 4B notes app: an embedded logo Image, a
+        // The generated demo is a notes app: an embedded logo Image, a
         // controlled TextInput whose submit appends a keyed note row (each with a
         // Delete button), inside a scroll view. The `app_logic` keeps the
         // `-> impl View<AppState> + use<>` shape so a fresh scaffold compiles for
@@ -370,7 +369,7 @@ mod tests {
         assert!(!dest.join("template_manifest.json").exists());
         assert!(!dest.join("Cargo.toml.tmpl").exists());
 
-        // Task 29: README.md generated with theme/font docs and examples
+        // README.md generated with theme/font docs and examples
         let readme = fs::read_to_string(dest.join("README.md")).unwrap();
         assert!(readme.contains("Glyph design system"), "{readme}");
         assert!(
@@ -460,10 +459,10 @@ mod tests {
             main_activity.contains(&format!("package {}", ctx.android_identifier())),
             "{main_activity}"
         );
-        // Embedding extraction (task 04): the generated `MainActivity` is a
-        // near-empty subclass of the framework-owned `dev.frust.FrustActivity`
-        // — every lifecycle/deep-link/back/IME behavior it used to carry inline
-        // now lives in `platform/android/frust-embedding` (covered by that
+        // The generated `MainActivity` is a near-empty subclass of the
+        // framework-owned `dev.frust.FrustActivity` — every
+        // lifecycle/deep-link/back/IME behavior it used to carry inline now
+        // lives in `platform/android/frust-embedding` (covered by that
         // module's own compile gate and the on-device run, not by this test).
         assert!(
             main_activity.contains("import dev.frust.FrustActivity"),
@@ -589,10 +588,10 @@ mod tests {
         );
         assert!(!info_plist.contains("{{"), "{info_plist}");
 
-        // Embedding extraction (task 05): `ios/Runner/` ships exactly four
-        // things — the two thin delegates, the Info.plist and the asset
-        // catalog. Every framework Swift source (and the bridging header)
-        // now lives in the `platform/ios/FrustEmbedding` Swift package.
+        // `ios/Runner/` ships exactly four things — the two thin delegates,
+        // the Info.plist and the asset catalog. Every framework Swift
+        // source (and the bridging header) now lives in the
+        // `platform/ios/FrustEmbedding` Swift package.
         let mut runner_entries: Vec<String> = fs::read_dir(dest.join("ios/Runner"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -721,9 +720,9 @@ mod tests {
             .to_string()
     }
 
-    /// Embedding extraction (task 05), retargeted from the platform-view
-    /// host-file registration this test originally guarded: the generated
-    /// iOS project must wire the `FrustEmbedding` Swift package consistently
+    /// Retargeted from the platform-view host-file registration this test
+    /// originally guarded: the generated iOS project must wire the
+    /// `FrustEmbedding` Swift package consistently
     /// across **all five** sections that have to mention it
     /// (`PBXProject.packageReferences`, the `XCLocalSwiftPackageReference`,
     /// `PBXNativeTarget.packageProductDependencies`, the
@@ -786,7 +785,8 @@ mod tests {
         );
 
         // (5) …and linked by a `PBXBuildFile { productRef = … }` in the
-        // Frameworks build phase (all five pieces are required — s1's spike).
+        // Frameworks build phase (all five pieces are required for Xcode to
+        // link the package in).
         let build_file_id = pbx_definition_id(
             &pbxproj,
             "/* FrustEmbedding in Frameworks */ = {isa = PBXBuildFile;",
@@ -886,12 +886,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 07 acceptance criterion 2: with no `[deeplink]` config, the
-    /// rendered Android manifest must be byte-identical to the pre-task
-    /// rendering (no `android:launchMode`, no second `<intent-filter>`).
-    /// The baseline gained the `dev.frust.nativeLibrary` `<meta-data>` element
-    /// with the embedding extraction (task 04) — `FrustActivity` reads it to
-    /// resolve the app's Rust library name.
+    /// With no `[deeplink]` config, the rendered Android manifest must be
+    /// byte-identical to its pre-deep-link-support rendering (no
+    /// `android:launchMode`, no second `<intent-filter>`). The baseline
+    /// carries the `dev.frust.nativeLibrary` `<meta-data>` element —
+    /// `FrustActivity` reads it to resolve the app's Rust library name.
     #[test]
     fn generate_android_manifest_without_deeplink_is_byte_identical_to_pre_task_baseline() {
         let dest = unique_temp_dir("manifest-no-deeplink");
@@ -938,7 +937,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 07: a `[deeplink]` scheme (+ optional host) renders the
+    /// A `[deeplink]` scheme (+ optional host) renders the
     /// `android:launchMode="singleTop"` attribute and a
     /// VIEW/BROWSABLE/DEFAULT `<intent-filter>`.
     #[test]
@@ -981,8 +980,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 07: a scheme with no host omits `android:host` entirely (not an
-    /// empty attribute).
+    /// A scheme with no host omits `android:host` entirely (not an empty
+    /// attribute).
     #[test]
     fn generate_android_manifest_with_deeplink_scheme_only_omits_host_attr() {
         let dest = unique_temp_dir("manifest-deeplink-no-host");
@@ -1002,9 +1001,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 07 acceptance criterion 2 (iOS half): with no `[deeplink]`
-    /// config, the rendered Info.plist has no `CFBundleURLTypes` key and
-    /// stays byte-identical to the pre-task rendering.
+    /// With no `[deeplink]` config, the rendered Info.plist has no
+    /// `CFBundleURLTypes` key and stays byte-identical to its
+    /// pre-deep-link-support rendering.
     #[test]
     fn generate_info_plist_without_deeplink_is_byte_identical_to_pre_task_baseline() {
         let dest = unique_temp_dir("plist-no-deeplink");
@@ -1039,9 +1038,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 07: a `[deeplink]` scheme renders a valid `CFBundleURLTypes`
-    /// entry with the scheme and the derived iOS bundle id as
-    /// `CFBundleURLName`.
+    /// A `[deeplink]` scheme renders a valid `CFBundleURLTypes` entry with
+    /// the scheme and the derived iOS bundle id as `CFBundleURLName`.
     #[test]
     fn generate_info_plist_with_deeplink_renders_cfbundle_url_types() {
         let dest = unique_temp_dir("plist-with-deeplink");
@@ -1063,8 +1061,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 07: `frust.toml` records the `[deeplink]` config when set,
-    /// and omits the section entirely when not.
+    /// `frust.toml` records the `[deeplink]` config when set, and omits the
+    /// section entirely when not.
     #[test]
     fn generate_frust_toml_records_deeplink_section_when_configured() {
         let dest = unique_temp_dir("toml-deeplink");
@@ -1150,11 +1148,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 09 acceptance criterion 2: `arch = None` must render `Cargo.toml`
-    /// and `src/lib.rs` byte-identically to rendering the default template
-    /// files directly — proof the arch-tag machinery (`split_arch_tag`, the
-    /// manifest-loop override check) never engages on the default path,
-    /// independent of any test that merely spot-checks substrings.
+    /// `arch = None` must render `Cargo.toml` and `src/lib.rs`
+    /// byte-identically to rendering the default template files directly —
+    /// proof the arch-tag machinery (`split_arch_tag`, the manifest-loop
+    /// override check) never engages on the default path, independent of
+    /// any test that merely spot-checks substrings.
     #[test]
     fn generate_with_no_arch_renders_default_template_files_byte_identically() {
         let dest = unique_temp_dir("no-arch-byte-identical");
@@ -1182,8 +1180,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 09: an unrecognized `--arch` value is rejected before any file
-    /// is written.
+    /// An unrecognized `--arch` value is rejected before any file is
+    /// written.
     #[test]
     fn generate_rejects_unknown_arch_before_writing_any_file() {
         let dest = unique_temp_dir("unknown-arch");
@@ -1196,10 +1194,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// Task 07 (v2): `--arch clean-signals` renders the variant `Cargo.toml`/
-    /// full `greeting` feature-slice tree in place of the retired
-    /// single-file demo, while every arch-agnostic file (frust.toml,
-    /// assets, android/ios trees) still lands exactly once.
+    /// `--arch clean-signals` renders the variant `Cargo.toml`/full
+    /// `greeting` feature-slice tree in place of the retired single-file
+    /// demo, while every arch-agnostic file (frust.toml, assets, android/ios
+    /// trees) still lands exactly once.
     #[test]
     fn generate_with_clean_signals_arch_renders_variant_content_in_place_of_defaults() {
         let dest = unique_temp_dir("clean-signals-arch");
@@ -1243,8 +1241,8 @@ mod tests {
             "{cargo_toml}"
         );
 
-        // The full `greeting` feature-slice tree lands (task 07 acceptance
-        // criterion 2 — the single-file demo is retired from the manifest).
+        // The full `greeting` feature-slice tree lands — the single-file
+        // demo is retired from the manifest.
         let expected_files = [
             "src/lib.rs",
             "src/failure.rs",

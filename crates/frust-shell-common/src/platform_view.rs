@@ -1,7 +1,7 @@
-//! Platform-agnostic native-sibling compositor logic (task 03): turns the raw,
-//! per-paint-pass [`PlatformViewFrame`] collection (`frust-core`, task 01) into
+//! Platform-agnostic native-sibling compositor logic: turns the raw,
+//! per-paint-pass [`PlatformViewFrame`] collection (`frust-core`) into
 //! an idempotent, generation-stamped command list — [`ViewCommand`] — both
-//! mobile shells' FFI peek getters serve to their platform side (tasks 05/06).
+//! mobile shells' FFI peek getters serve to their platform side.
 //!
 //! # Why this lives in `frust-shell-common`
 //!
@@ -19,7 +19,7 @@
 //! `Vec<PlatformViewFrame>` every paint pass and stays deliberately dumb: a
 //! slot absent from one pass's frames might be culled-but-still-alive,
 //! momentarily not repainting, or genuinely torn down — core has no teardown
-//! hook to tell those apart (task 01's notes). [`PlatformViewState`] is where
+//! hook to tell those apart. [`PlatformViewState`] is where
 //! that ambiguity gets resolved, by watching how long a slot stays missing
 //! (see `missing_streak` below).
 //!
@@ -33,7 +33,7 @@
 //!   free, so a shell can call [`PlatformViewState::commands`] every frame
 //!   with no cost when nothing moved.
 //! - **`params_json` change** (detected via `params_generation`, bumped by the
-//!   widget — task 02 — whenever it edits `params_json`) ⇒
+//!   widget whenever it edits `params_json`) ⇒
 //!   [`ViewCommand::UpdateParams`], independent of the rect/clip/visible
 //!   comparison above.
 //! - **`view_type` change** on a live slot ⇒ [`ViewCommand::Dispose`] followed
@@ -86,7 +86,7 @@
 //!
 //! # Widget teardown detection tradeoff
 //!
-//! `frust-core`'s per-pass frame channel is deliberately dumb (task 01), so
+//! `frust-core`'s per-pass frame channel is deliberately dumb, so
 //! [`PlatformViewState`] cannot tell from `ingest` alone whether a missing
 //! slot's widget was dropped from the tree or merely culled/transiently not
 //! repainting. [`DISPOSE_AFTER_MISSING_FRAMES`] is a heuristic streak
@@ -142,8 +142,7 @@
 //! [`commands`](PlatformViewState::commands) hands the native side the whole
 //! backlog the instant it exists — which is *earlier* than the frust frame that
 //! produced the geometry reaches the screen, so a scrolling hosted view runs
-//! visibly ahead of the frust content it is supposed to be pinned to
-//! (`workflow/plans/features/frust-camera/research/SPIKE-SYNC.md` §1). A shell
+//! visibly ahead of the frust content it is supposed to be pinned to. A shell
 //! that knows which frust frame each batch came from closes that gap by
 //! releasing only the prefix whose frame is already presented:
 //! [`FramePairing`] keeps the `(generation, frame_id)` bookkeeping and
@@ -194,16 +193,16 @@ pub const MAX_PENDING_COMMANDS: usize = 256;
 /// escape hatch. **Required, not defensive**: the UI→render scene channel is
 /// depth-1 latest-wins, so a scene the UI thread submitted may be overtaken and
 /// never rendered at all, and a dropped frame's id never presents. Without this
-/// arm one dropped scene strands every later batch forever (SPIKE-SYNC §2.5's
-/// lesson: a submission counter is not a presented counter).
+/// arm one dropped scene strands every later batch forever — a submission
+/// counter is not a presented counter.
 ///
-/// Measured pipeline depth on the two Phase-0 test devices was 2–4 frames, so
+/// Measured pipeline depth on physical test devices was 2–4 frames, so
 /// 12 sits well above the working range while bounding worst-case staleness to
 /// ~100 ms at 120 Hz.
 pub const MAX_FRAMES_IN_FLIGHT: u64 = 12;
 
 /// One native-sibling-compositor instruction — the differ's whole output
-/// vocabulary. `Clone + PartialEq + Debug` (per the task notes) so a golden
+/// vocabulary. `Clone + PartialEq + Debug` so a golden
 /// test can assert an exact command sequence.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ViewCommand {
@@ -216,7 +215,7 @@ pub enum ViewCommand {
         view_type: String,
         /// Opaque creation params for the native factory (may be empty).
         params_json: String,
-        /// Mode B input forwarding (native-widgets spike 3): whether a
+        /// Mode B input forwarding: whether a
         /// touch-DOWN inside this slot's rect hands the gesture to the
         /// native sibling. Fixed at create in v1 (no live flip).
         interactive: bool,
@@ -233,7 +232,7 @@ pub enum ViewCommand {
         clip: Option<Rect>,
         /// `false` ⇒ hide the native view without disposing it.
         visible: bool,
-        /// The z-shield list (native-widgets spike 3): absolute-coordinate
+        /// The z-shield list: absolute-coordinate
         /// regions where frust content over the slot keeps winning input.
         /// Meaningful only for an interactive slot; empty otherwise.
         shields: Vec<Rect>,
@@ -437,7 +436,7 @@ impl PlatformViewState {
         self.push_batch(batch)
     }
 
-    /// Backgrounding path (platform-views tasks 05/06): synthesize
+    /// Backgrounding path: synthesize
     /// `Update { visible: false }` for every currently-live, currently-visible
     /// slot **immediately**, regardless of its missing streak. A shell calls
     /// this on the platform's backgrounding hook (Android's `onPause`, iOS's
@@ -653,7 +652,7 @@ impl PlatformViewState {
 /// presents are not the same clock — under the measured 120 Hz-submit /
 /// 60 Hz-present regime they diverge by half the frames. Pairing against a
 /// presented *count* over-delays by exactly the dropped frames; pairing against
-/// the id of the frame that actually presented does not (SPIKE-SYNC §2.5). The
+/// the id of the frame that actually presented does not. The
 /// price of the id is that a dropped frame's id never arrives, which is what
 /// [`MAX_FRAMES_IN_FLIGHT`] exists for.
 ///
@@ -1563,7 +1562,7 @@ mod tests {
         );
     }
 
-    // ---- Z-shield auto-collection (native-widgets p1-09) --------------------
+    // ---- Z-shield auto-collection --------------------
 
     #[test]
     fn an_interactive_slot_carries_only_the_intersecting_shields() {
@@ -1667,7 +1666,7 @@ mod tests {
         assert_eq!(last_update_shields(&state), vec![over]);
     }
 
-    // ---- Prompt teardown retire (native-widgets p1-09) -----------------------
+    // ---- Prompt teardown retire -----------------------
 
     #[test]
     fn a_retired_slot_disposes_immediately_and_the_next_ingest_is_quiet() {

@@ -4,11 +4,11 @@
 //! harness shape.
 //!
 //! These tests prove the shell scaffold and every section page (now all
-//! filled by `c02`-`c08`, not stubs) mount, lay out, and paint without
+//! filled in, not stubs) mount, lay out, and paint without
 //! panicking at multiple viewport sizes and both Glyph brightnesses — the
-//! `c09` coverage gate. They assert structural paint output (glyph runs were
+//! coverage gate. They assert structural paint output (glyph runs were
 //! shaped, no panic), not pixel-exact content — see `README.md`'s coverage
-//! table and `research/INVENTORY.md` for the manual/visual gate this test
+//! table for the manual/visual gate this test
 //! suite cannot replace.
 
 use std::any::Any;
@@ -51,12 +51,12 @@ const BRIGHTNESSES: [Brightness; 2] = [Brightness::Dark, Brightness::Light];
 #[derive(Default)]
 struct RecScene {
     glyph_runs: usize,
-    /// Every glyph run's resolved solid brush color — the round-1 review's
+    /// Every glyph run's resolved solid brush color — a
     /// hardcode tripwire: a page whose text colors are theme-resolved paints
     /// DIFFERENT color sets under Dark vs Light; a hardcoded-only page paints
     /// identical sets and fails `page_text_colors_track_brightness`.
     glyph_colors: Vec<peniko::Color>,
-    /// Every glyph run's absolute Y translation, in paint order — task 18's
+    /// Every glyph run's absolute Y translation, in paint order — the
     /// no-double-top-padding regression test
     /// (`root_appbar_consumes_inset_without_double_padding`) diffs this
     /// vector between a zero-inset and a nonzero-top-inset frame.
@@ -161,7 +161,7 @@ fn frame_at<S: 'static, V: View<S>>(
 /// Like [`frame_at`], but pushes a top-edge-only [`WindowInsets`] onto `root`
 /// before the rebuild/layout/paint pass — the seam
 /// `root_appbar_consumes_inset_without_double_padding` uses to prove the root
-/// AppBar (task 18) consumes the top inset exactly once (its own height
+/// AppBar consumes the top inset exactly once (its own height
 /// grows by `top_inset`; the body `SafeArea` below it has `.top(false)`, so it
 /// must NOT pad by `top_inset` a second time).
 fn frame_at_with_top_inset<S: 'static, V: View<S>>(
@@ -199,14 +199,13 @@ fn every_page_mounts_and_paints() {
     }
 }
 
-/// The `c09` coverage gate: every REAL section page (all seven, filled by
-/// `c02`-`c08` — no stubs remain) builds/lays out/paints headless at 2
+/// The coverage gate: every REAL section page (all seven — no stubs remain)
+/// builds/lays out/paints headless at 2
 /// viewport sizes and both Glyph brightnesses, with no GPU. This is the
 /// automated half of the coverage story `README.md`'s table documents; it
 /// proves structural soundness (mounts, lays out, paints real content) at
 /// every combination, not pixel-exact fidelity to the reference builds (that
-/// remains the manual/visual gate — see README.md and this task's Testing
-/// Performed notes).
+/// remains the manual/visual gate — see README.md).
 #[test]
 fn every_page_mounts_at_every_size_and_brightness() {
     for brightness in BRIGHTNESSES {
@@ -347,14 +346,14 @@ fn full_shell_mounts_with_header_tabs_and_body() {
     assert!(scene2.glyph_runs > 0);
 }
 
-/// Task 18's headless no-double-top-padding regression test: the root
+/// A headless no-double-top-padding regression test: the root
 /// [`glyph::app_bar`](frust::glyph::app_bar) consumes the top window inset
 /// itself (grows its own height by it), and the body `safe_area(...).top(false)`
 /// must NOT pad by that same inset a second time. Every painted glyph run's
 /// absolute Y translation should shift by exactly `top_inset` between a
 /// zero-inset and a `top_inset`-pushed frame — a run shifting by
-/// `2 * top_inset` would mean the body is ALSO padding its top edge (the bug
-/// this task fixes), and a run shifting by `0` would mean the inset isn't
+/// `2 * top_inset` would mean the body is ALSO padding its top edge (a
+/// double-padding bug), and a run shifting by `0` would mean the inset isn't
 /// reaching the AppBar at all.
 #[test]
 fn root_appbar_consumes_inset_without_double_padding() {
@@ -374,7 +373,7 @@ fn root_appbar_consumes_inset_without_double_padding() {
 
     // The AppBar consumes the inset, so the body ScrollView's viewport is
     // TOP_INSET shorter in the pushed frame — paint-time visible-rect culling
-    // (task 07) may therefore skip a few extra bottom-of-scroll runs there.
+    // may therefore skip a few extra bottom-of-scroll runs there.
     // Painted runs keep traversal order, so the pushed frame's runs are a
     // prefix-aligned subset of the zero-inset frame's; compare that prefix.
     // (More runs after the push would still be a reshape bug.)
@@ -398,7 +397,7 @@ fn root_appbar_consumes_inset_without_double_padding() {
     }
 }
 
-/// Task 02-foundations-static-specimens: the foundations page must render
+/// The foundations page must render
 /// ZERO frames at rest — its Radius scale specimens are static rounded rects,
 /// not animated skeletons. This test drives the foundations page through
 /// rebuild→layout→paint and asserts `PaintOutcome::needs_frame == false`.
@@ -423,22 +422,22 @@ fn foundations_page_requests_no_frames_at_rest() {
 /// a fixed wall-clock span *regardless* of `reduce_motion`, which only
 /// desyncs the per-line cascade into a single fast fade rather than
 /// eliminating the reveal — see `term_block`'s module docs; the longest
-/// instance here is 5 lines, ≈510ms). "Settled state" (Acceptance Criterion
-/// #1) means at-rest AFTER any such mount-time reveal has finished, not on
-/// the very first post-mount paint.
+/// instance here is 5 lines, ≈510ms). "Settled state" means at-rest AFTER
+/// any such mount-time reveal has finished, not on the very first
+/// post-mount paint.
 const SETTLE_MS: u64 = 5000;
 
-/// catalog-animation-performance bug task 10's header animations-off toggle:
-/// the coverage-sweep half of Acceptance Criterion #1 — "toggle off: headless
-/// paint of every section reports zero frame requests". Mirrors what the real
-/// toggle handler does (`lib.rs`'s `apply_theme`/`effective_reduce_motion`):
+/// The header's animations-off toggle: verifies that with animations off,
+/// headless paint of every section reports zero frame requests. Mirrors
+/// what the real toggle handler does (`lib.rs`'s
+/// `apply_theme`/`effective_reduce_motion`):
 /// force `MotionScheme::reduce_motion` through the threaded theme (the "every
 /// convention-following widget collapses" half) AND flip
 /// `CatalogState::animations_enabled` off (the half `pages::interactions`'
 /// wall-clock demos gate on directly) — every section, both brightnesses,
 /// must then paint its settled state ([`SETTLE_MS`] after mount) with zero
-/// frame requests. Interactions' heartbeat (until catalog-animation-performance
-/// bug task 11, the catalog's one demo documented to auto-repeat without
+/// frame requests. Interactions' heartbeat (once
+/// the catalog's one demo documented to auto-repeat without
 /// input — now tap-to-play and stopped by default like every other demo, see
 /// `pages::interactions`'s module docs' Tap-to-play note) was the
 /// load-bearing case this regressed if the toggle was wired to only one of
@@ -466,7 +465,7 @@ fn every_section_requests_no_frames_with_animations_disabled() {
             // First frame: mount (any one-shot entrance reveal starts here).
             let _ = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
             // Second frame, well past SETTLE_MS: the section's true at-rest
-            // state, the one Acceptance Criterion #1 actually targets.
+            // state, the one this test actually targets.
             let (_scene, outcome) =
                 frame_at(&mut root, &mut logic, &mut state, &mut tcx, SETTLE_MS);
             assert!(
@@ -478,10 +477,10 @@ fn every_section_requests_no_frames_with_animations_disabled() {
     }
 }
 
-/// The toggle's other half — updated for catalog-animation-performance bug
-/// task 11 (`pages::interactions`'s own module docs' Tap-to-play note): the
-/// heartbeat demo, like every other demo on the page, now starts STOPPED
-/// (task 11's Acceptance Criteria #1), so a fresh Interactions mount must
+/// The toggle's other half (`pages::interactions`'s own module docs'
+/// Tap-to-play note): the
+/// heartbeat demo, like every other demo on the page, now starts STOPPED,
+/// so a fresh Interactions mount must
 /// request zero frames regardless of the toggle. Starting the heartbeat via
 /// [`pages::interactions::start_heartbeat_for_test`] (the `pub` test seam
 /// that fn's own doc comment describes, mirroring `appbar::open_*`'s
@@ -504,7 +503,7 @@ fn interactions_heartbeat_resumes_with_animations_enabled() {
     let (_scene, outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
     assert!(
         !outcome.needs_frame,
-        "task 11: every demo (including the heartbeat) starts stopped — a fresh Interactions \
+        "every demo (including the heartbeat) starts stopped — a fresh Interactions \
          mount must request zero frames",
     );
 
@@ -517,8 +516,8 @@ fn interactions_heartbeat_resumes_with_animations_enabled() {
     );
 }
 
-/// Task 11's Acceptance Criteria #2: "smoke sweep green across
-/// sizes/brightness in both stopped/playing states for at least two demos".
+/// A smoke sweep across
+/// sizes/brightness in both stopped/playing states for at least two demos.
 /// `every_page_mounts_at_every_size_and_brightness` above already sweeps
 /// every section — including Interactions — in its default (now STOPPED)
 /// state; this test sweeps the same size/brightness matrix again with two
@@ -568,7 +567,7 @@ fn interactions_playing_demos_mount_at_every_size_and_brightness() {
     }
 }
 
-/// Task 14's six `appbar::open_*` fns, in [`glyphcatalog::pages::appbar`]'s
+/// The six `appbar::open_*` fns, in [`glyphcatalog::pages::appbar`]'s
 /// `VARIATIONS` launcher-list order — shared by both regression tests below.
 /// `pub` on the `open_*` fns exists exactly for this seam (see their own doc
 /// comments): a headless test calls them directly, mirroring how
@@ -602,7 +601,7 @@ fn mount_appbar_launcher() -> (
     (RenderRoot::new(), controller, state)
 }
 
-/// Task 14, acceptance criterion 1: every one of the six variation pages
+/// Every one of the six variation pages
 /// pushes onto the section's navigator (depth 1 → 2) and pops cleanly back
 /// (depth 2 → 1), painting real content at every step — the launcher list
 /// itself, the pushed variation page, and the launcher list again after back.
@@ -643,7 +642,7 @@ fn appbar_variation_pages_push_and_pop() {
     }
 }
 
-/// Task 14, acceptance criterion 2: extend the coverage sweep
+/// Extend the coverage sweep
 /// (`every_page_mounts_at_every_size_and_brightness`'s shape) to every
 /// variation page — each must mount, lay out, and paint with no panic across
 /// both viewport sizes and both Glyph brightnesses once pushed.
@@ -690,7 +689,7 @@ fn appbar_variation_pages_mount_at_every_size_and_brightness() {
 }
 
 // ---------------------------------------------------------------------------
-// Task f5: variation-page scroll — headless repro of the device 0px-scroll bug
+// Variation-page scroll — headless repro of the device 0px-scroll bug
 // ---------------------------------------------------------------------------
 //
 // The device symptom (Xiaomi 12, build 67c334d): a pushed AppBar *variation*
@@ -772,7 +771,7 @@ fn drag_up<S: 'static, V: View<S>>(root: &mut RenderRoot<S, V>, state: &mut S, x
     root.event(state, &pointer(PointerPhase::Up, x, 400.0));
 }
 
-/// f5 acceptance criterion 1 (the missing regression test): a real drag on a
+/// The missing regression test: a real drag on a
 /// **pushed** variation page — under the catalog's exact navigator config
 /// (`TransitionSpec::glyph()`, edge-swipe therefore OFF, since `pop_swipe`
 /// derives on only for the iOS-push preset) — must move the page's `ScrollView`
@@ -783,7 +782,7 @@ fn drag_up<S: 'static, V: View<S>>(root: &mut RenderRoot<S, V>, state: &mut S, x
 /// **Result: this PASSES** — the headless drag scrolls. The event path is
 /// sound: the settled navigator routes the whole Down/Move/Up stream to the top
 /// page, and its `ScrollView` takes the gesture over past slop exactly as the
-/// root page's does. See this task's findings report for what that localizes.
+/// root page's does.
 #[test]
 fn pushed_variation_page_drag_scrolls_its_scrollview() {
     let (_owner, theme) = setup_with_theme(Brightness::Dark);
@@ -836,7 +835,7 @@ fn pushed_variation_page_drag_scrolls_its_scrollview() {
     );
 }
 
-/// f5 acceptance criteria 2 + 4 (edge-swipe-zone vertical-drag guard): a
+/// Edge-swipe-zone vertical-drag guard: a
 /// vertical drag whose `Down` lands INSIDE the left `EDGE_SWIPE_ZONE_DP` (20dp)
 /// on a pushed page — with the interactive edge-swipe pop gesture ENABLED
 /// (`.pop_swipe(true)`, the config the swipe's own investigation flagged as the
@@ -852,7 +851,7 @@ fn edge_zone_vertical_drag_still_scrolls_pushed_page() {
     root.set_theme(Box::new(theme));
     let ctrl = controller.clone();
     // Edge-swipe explicitly ENABLED over the Glyph transition — the arm/steal
-    // machinery the task's hypothesis suspected for drags starting in the zone.
+    // machinery suspected for drags starting in the zone.
     let mut logic = move |_s: &mut CatalogState| {
         any(
             navigator(&ctrl, || pages::appbar::page(&CatalogState::new()))

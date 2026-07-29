@@ -1,14 +1,11 @@
-//! Filled by task 20-glyph-status-feedback (Badge).
-//!
 //! [`badge`]/[`BadgeView`]: a small, lowercase, pill-shaped status indicator —
 //! "connected"/"degraded"/"offline"/"read-only"/"v0.44.1" in the Glyph
-//! reference build (`research/glyph-design-system.html` `.badge*` rules,
-//! retrieved 2026-07-21) — with five semantic variants and an optional
-//! leading dot.
+//! design system's `.badge*` rules (retrieved 2026-07-21) — with five
+//! semantic variants and an optional leading dot.
 //!
 //! # Color resolution (documented three-tier precedence)
 //!
-//! Not every variant has all three tiers, since `ColorScheme` (spec's M3
+//! Not every variant has all three tiers, since `ColorScheme` (the M3
 //! baseline) carries no `success`/`warning` roles at all (see
 //! `frust_theme::extensions`' module docs):
 //!
@@ -41,8 +38,8 @@
 //! time — but `BuildCtx` (unlike `LayoutCtx`/`PaintCtx`) carries no theme, so a
 //! nested `Text` view could never resolve an arbitrary per-variant color
 //! (success green, warning amber, …) that isn't one of those four roles.
-//! Rather than widen `TextView`'s internal role enum (out of this task's
-//! scope — the plan's file list is this module alone), `BadgeWidget` shapes
+//! Rather than widen `TextView`'s internal role enum (a change scoped
+//! beyond this module), `BadgeWidget` shapes
 //! and paints its own label glyph run directly via `frust_text`, mirroring
 //! `crate::text::TextWidget`'s own shape (lazy shape-on-layout, glyph-run
 //! paint) but resolving color from the variant/theme itself.

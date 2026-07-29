@@ -1,4 +1,4 @@
-//! Channel-feed integration tests (Phase C task 12).
+//! Channel-feed integration tests.
 //!
 //! Two layers:
 //!

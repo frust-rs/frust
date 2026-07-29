@@ -27,13 +27,13 @@ use kurbo::Size;
 /// with the app's types and stores the result as a `Box<dyn AppTree>` inside the
 /// handle.
 pub trait AppTree {
-    /// Re-run `app_logic` and reconcile the retained tree (spec §5).
+    /// Re-run `app_logic` and reconcile the retained tree.
     fn rebuild(&mut self);
 
     /// Take (and clear) the layout/paint dirtiness accumulated since the last
     /// call (delegates to [`RenderRoot::take_change_flags`]).
     ///
-    /// The frame-gate seam (spec §14 phase 7): a shell drives the layout-skip
+    /// The frame-gate seam: a shell drives the layout-skip
     /// decision off this — run [`AppTree::rebuild`], then run [`AppTree::layout`]
     /// only if the drained flags [`ChangeFlags::needs_layout`] (or it's the
     /// first frame, or the surface resized), then always [`AppTree::paint`].
@@ -57,7 +57,7 @@ pub trait AppTree {
     /// Whether a captured pointer gesture is currently in flight (delegates to
     /// [`RenderRoot::is_pointer_captured`]).
     ///
-    /// A frame-gate input (spec §14 phase 7): a mid-drag captured widget may
+    /// A frame-gate input: a mid-drag captured widget may
     /// track/animate the pointer, so the mobile shells feed this into
     /// [`crate::FrameInputs::pointer_capture_active`] to keep producing frames
     /// while a gesture is live rather than skipping it.
@@ -66,28 +66,28 @@ pub trait AppTree {
     /// Whether some widget in the tree currently holds keyboard/IME focus
     /// (delegates to [`RenderRoot::is_focus_active`]).
     ///
-    /// A frame-gate input (spec §14 phase 7): a focused field's caret/selection
+    /// A frame-gate input: a focused field's caret/selection
     /// chrome may need repainting, so the mobile shells feed this into
     /// [`crate::FrameInputs::focus_or_ime_active`].
     fn is_focus_active(&self) -> bool;
 
     /// Lay the tree out against a logical (density-independent) size, threading
-    /// the shell-owned `TextContext` down type-erased (spec §10.3).
+    /// the shell-owned `TextContext` down type-erased.
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any);
     /// Paint the tree into a scene builder at the shell-provided `frame_time`.
     ///
     /// `frame_time` is the shell's shared monotonic clock for this frame, threaded
     /// through to every animating widget as [`frust_core::widget::PaintCtx::frame_time`]
-    /// (spec §8: time enters from the shell, never `Instant::now()` inside the
+    /// (time enters from the shell, never `Instant::now()` inside the
     /// framework).
     ///
     /// Returns a [`PaintOutcome`] whose `needs_frame` is set when a widget
-    /// advanced animation state during paint and wants another frame (spec's v1
-    /// animation seam). The desktop shell honors it with `window.request_redraw()`;
+    /// advanced animation state during paint and wants another frame, the
+    /// framework's animation seam. The desktop shell honors it with `window.request_redraw()`;
     /// the mobile shells' continuous Choreographer/`CADisplayLink` loops already
     /// produce the next frame and may ignore it.
     fn paint(&mut self, scene: &mut dyn PaintScene, frame_time: FrameTime) -> PaintOutcome;
-    /// Deliver one platform input event to the retained tree (spec §9).
+    /// Deliver one platform input event to the retained tree.
     ///
     /// Delegates to [`RenderRoot::event`], threading the erased `State` the same
     /// way [`AppTree::rebuild`] does. The returned [`EventOutcome`] carries
@@ -117,9 +117,9 @@ pub trait AppTree {
     /// The theme is **type-erased** (`Box<dyn Any>`) so `frust-shell-common`
     /// stays free of a `frust-theme` dependency (it compiles everywhere with
     /// no unsafe/FFI — see `docs/ARCHITECTURE.md`). The concrete `Theme` is
-    /// boxed by the shell that owns the appearance state; the mobile shells wire
-    /// this up in a later task (08). Re-boxing on a live appearance change
-    /// replaces the stored theme.
+    /// boxed by the shell that owns the appearance state; each mobile shell
+    /// wires this into its own appearance-change handling. Re-boxing on a
+    /// live appearance change replaces the stored theme.
     fn set_theme(&mut self, theme: Box<dyn Any>);
 
     /// Store the window's insets ([`WindowInsets`]), threaded into every
@@ -154,8 +154,8 @@ pub trait AppTree {
     /// nothing** — [`RenderRoot::set_presented_frames`] marks no [`ChangeFlags`],
     /// so a monotonically ticking counter never forces a relayout and — the
     /// subtle one — never keeps the mobile [`frame_gate`](crate::frame_gate)'s
-    /// pending-flags input perpetually true, so the menu still idles (the
-    /// task-08-verified behavior). Defaulted to a **no-op** so existing
+    /// pending-flags input perpetually true, so the menu still idles.
+    /// Defaulted to a **no-op** so existing
     /// [`AppTree`] impls compile unchanged; the concrete tree overrides it.
     fn set_presented_frames(&mut self, _presented: u64) {}
 
@@ -166,7 +166,7 @@ pub trait AppTree {
     /// A shell pushes the surface's **resolved** translucency here — what
     /// `frust_render::SurfaceRenderer::surface_resolved_translucent` reports
     /// after an install, NOT the [`crate::SurfaceModeWatcher`] request latch
-    /// (review finding M1: a translucency request the platform refuses must
+    /// (a translucency request the platform refuses must
     /// degrade to the opaque Mode A contract, or the punch presents black
     /// rectangles). Both mobile shells re-read it every frame, so a
     /// render-thread fallback downgrades within one frame. The platform-view
@@ -178,7 +178,7 @@ pub trait AppTree {
     /// [`AppTree::set_insets`]'s default-no-op precedent.
     fn set_surface_translucent(&mut self, _translucent: bool) {}
 
-    /// Collect the accessibility tree for the current frame (spec §9, phase-6d),
+    /// Collect the accessibility tree for the current frame,
     /// for a shell to push into its platform `accesskit_*` adapter. Delegates to
     /// [`RenderRoot::semantics`]; must run **after** [`AppTree::layout`] so node
     /// bounds are valid.
@@ -211,7 +211,7 @@ pub trait AppTree {
     ) -> EventOutcome;
 
     /// The [`PlatformViewFrame`]s the tree published during the most recent
-    /// paint pass (platform-views tasks 05/06; delegates to
+    /// paint pass (delegates to
     /// [`RenderRoot::platform_view_frames`]). A shell's peek-getter path feeds
     /// this into a [`crate::platform_view::PlatformViewState`]'s
     /// [`ingest`](crate::platform_view::PlatformViewState::ingest) after each
@@ -226,7 +226,7 @@ pub trait AppTree {
     }
 
     /// The z-shield rects the tree reported during the most recent paint pass
-    /// (native-widgets p1-09; delegates to [`RenderRoot::input_shields`]) — the
+    /// (delegates to [`RenderRoot::input_shields`]) — the
     /// second argument of the same
     /// [`ingest`](crate::platform_view::PlatformViewState::ingest) call
     /// [`AppTree::platform_view_frames`] feeds.
@@ -239,7 +239,7 @@ pub trait AppTree {
     }
 
     /// Drain the slot ids whose `platform_view` widgets were torn down since the
-    /// last call (native-widgets p1-09; delegates to
+    /// last call (delegates to
     /// [`RenderRoot::take_retired_platform_views`]).
     ///
     /// A shell calls this right after [`AppTree::rebuild`] and retires each id
@@ -268,7 +268,7 @@ where
     Logic: FnMut(&mut State) -> V + 'static,
 {
     fn rebuild(&mut self) {
-        // app_logic is cheap by construction (spec §5). The returned flags are
+        // app_logic is cheap by construction. The returned flags are
         // merged into `RenderRoot::pending` and surfaced to the shell's frame
         // gate via `take_change_flags`/`has_pending_change_flags` below.
         let _flags = self.root.rebuild(&mut self.logic, &mut self.state);
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn app_tree_shield_and_retire_channels_default_to_empty() {
-        // Same additive contract for the two p1-09 channels: an `AppTree` impl
+        // Same additive contract for the two channels: an `AppTree` impl
         // that predates them compiles and reports nothing.
         let mut tree = MinimalTree;
         assert!(tree.input_shields().is_empty());
@@ -546,9 +546,9 @@ mod tests {
         app.rebuild();
     }
 
-    // --- Layout-skip contract (phase 7 frame gate) --------------------------
+    // --- Layout-skip contract (mobile frame gate) --------------------------
     //
-    // The seam tasks 17/18 drive: rebuild -> (layout iff needs_layout / first
+    // The seam the mobile shells drive: rebuild -> (layout iff needs_layout / first
     // frame / resize) -> paint. This proves the `set_theme => LAYOUT|PAINT`
     // correctness anchor: a widget that BAKES its themed value at LAYOUT time
     // (like `Text`'s glyph color) relayouts on a bare theme swap, while a
@@ -683,7 +683,7 @@ mod tests {
         assert_eq!(painted, 9.0, "still correct with the swapped value");
     }
 
-    // --- Root-owner regression test (review F1) -----------------------------
+    // --- Root-owner regression test -----------------------------------------
     //
     // A root component's `init`/`build` run under the shell's ROOT `Owner`
     // (`Owner::with`, the way `create_handle`/`frust::run` now wrap
@@ -810,7 +810,7 @@ mod tests {
         );
     }
 
-    // --- Mobile tracked-rebuild regression test (device-parity task 09b) ----
+    // --- Mobile tracked-rebuild regression test ----
     //
     // The mobile shells (`frust-shell-android`/`-ios`) now wrap their
     // per-frame rebuild as `rt.with_owner(|| scope.track(|| app.rebuild()))` —
@@ -820,8 +820,8 @@ mod tests {
     // screens depend on: a signal read during a `scope.track`-wrapped rebuild
     // subscribes the frame scope, so a later write trips the process-wide
     // `signals_dirty` flag the mobile frame gate drains (`take_signals_dirty` →
-    // `FrameInputs::signals_dirty`). The negative control is the exact bug task 09
-    // diagnosed: a bare `with_owner(|| app.rebuild())` (no `scope.track`) installs
+    // `FrameInputs::signals_dirty`). The negative control is the exact bug this
+    // test guards against: a bare `with_owner(|| app.rebuild())` (no `scope.track`) installs
     // the reactive Owner but NOT the Observer, so the same post-rebuild write
     // subscribes nothing and trips nothing — the gate then skips the frame that
     // would paint the loaded content until a touch forces a Run. Both halves run
@@ -869,7 +869,7 @@ mod tests {
              signals_dirty — the wake the mobile frame gate drains"
         );
 
-        // --- Negative control (the task-09 bug): a bare, untracked rebuild. ---
+        // --- Negative control: a bare, untracked rebuild. ---
         let untracked_signal = rt.with_owner(|| RwSignal::new(0u32));
         let mut untracked_app: Box<dyn AppTree> = new_boxed_app_with(
             || (),

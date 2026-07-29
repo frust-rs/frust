@@ -7,7 +7,7 @@
 /// [s1BubbleCountFor]) so the field settles instead of staying jam-packed —
 /// capped at [s1BubbleCountCap].
 ///
-/// "Perpetual" per PLAN 9.E: the physics steps and the full bubble scene
+/// "Perpetual": the physics steps and the full bubble scene
 /// repaints every frame for the entire run window (the harness controls
 /// duration) — the settle gate the original interactive bubblebench example
 /// (now removed; its workload lives on self-contained in the frust-side

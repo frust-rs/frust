@@ -60,7 +60,7 @@ fn fps_color(fps: f64) -> Color {
 
 /// The menu screen: a title plus one button per registered shader.
 ///
-/// System UI (task 17): the menu was never meant to be immersive — bars stay
+/// System UI: the menu was never meant to be immersive — bars stay
 /// visible here (`EdgeToEdge`), so the screen is wrapped in [`safe_area`] to
 /// keep its content clear of them. Entering a shader flips to
 /// `ImmersiveSticky` (see `running_screen`'s back button, which restores
@@ -148,7 +148,7 @@ fn app_logic(state: &mut AppState) -> AnyView<AppState> {
     }
 }
 
-/// The root [`Component`] (spec §5.5): builds the shader registry once and
+/// The root [`Component`]: builds the shader registry once and
 /// forces the dark M3 theme, matching `benchmarks/frust_bench`'s shell.
 #[derive(Default)]
 pub struct ShadertoyApp;
@@ -172,7 +172,7 @@ impl Component for ShadertoyApp {
     }
 }
 
-// The generated app's sole entry point (spec §5.5/§10): one line binds
+// The generated app's sole entry point: one line binds
 // `ShadertoyApp` to all three platforms — the Android JNI exports
 // (`target_os = "android"` only), the iOS C-ABI exports (unconditional;
 // self-gated to `target_os = "ios"`), and (on desktop) the hidden

@@ -1,4 +1,4 @@
-//! Layer 1: the declarative [`View`] trait (spec §5).
+//! Layer 1: the declarative [`View`] trait.
 //!
 //! Views are cheap, short-lived descriptors produced by a pure `app_logic`
 //! function of application state (`fn app_logic(&mut State) -> impl View<State>`).
@@ -140,7 +140,7 @@ pub trait View<State: 'static>: 'static {
     /// Deliver an event message to this view, mutating application state.
     ///
     /// Stubbed for v0 (no event routing yet); present so the trait shape is
-    /// stable for task 08 and beyond.
+    /// stable as event routing is added later.
     fn message(&self, _element: &mut Self::Element, _state: &mut State) {}
 }
 
@@ -150,7 +150,7 @@ pub trait View<State: 'static>: 'static {
 /// The methods mirror `build`/`rebuild`/`teardown` but drop the associated
 /// `Element` type in favour of a `Box<dyn Widget>`, and add [`ErasedView::as_any`]
 /// so a rebuild can downcast the *previous* erased view to detect a
-/// concrete-type change (the xilem `AnyView` trick — see `research/RESEARCH.md`).
+/// concrete-type change (the xilem `AnyView` trick).
 trait ErasedView<State: 'static>: 'static {
     /// Materialise a fresh boxed widget for this view.
     fn dyn_build(&self, ctx: &mut BuildCtx<'_>) -> Box<dyn Widget>;

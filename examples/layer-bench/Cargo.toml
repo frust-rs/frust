@@ -13,14 +13,14 @@ publish = false
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary (spec §12.9).
+# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
+# library for the desktop `main.rs` preview binary.
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # NOTE: temporary path dependency pointing at the Frust repo checkout
-# that generated this project (spec §12.3: "frust_path" mechanism is
+# that generated this project (the `frust_path` mechanism is
 # explicitly temporary). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead. `default-features =
 # false` drops the ~1MB Glyph bundled fonts — this throwaway bench shapes a
@@ -78,7 +78,7 @@ reactive_graph = "0.2"
 lean = ["log/release_max_level_warn"]
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution (spec §12.2). Hand-synced with Frust's own root
+# store distribution. Hand-synced with Frust's own root
 # `Cargo.toml` and the other standalone examples.
 [profile.release]
 lto = "fat"
@@ -87,7 +87,7 @@ strip = "symbols"
 panic = "abort"
 
 # `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement (spec §12.2) — the mode this whole spike
+# on-device performance measurement — the mode this whole spike
 # runs under (`frust build apk --profile`). Artifacts land in
 # `target/<triple>/profile/`.
 [profile.profile]

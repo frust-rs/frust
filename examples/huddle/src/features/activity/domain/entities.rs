@@ -1,5 +1,5 @@
 //! Activity entities — moved verbatim from the former `mock` module (huddle
-//! clean-architecture refactor, task 01). The shared dataset that
+//! clean-architecture refactor). The shared dataset that
 //! materializes these types now lives in [`crate::data::store`].
 
 /// An item in the Activity tab — a mention derived from the message stream.

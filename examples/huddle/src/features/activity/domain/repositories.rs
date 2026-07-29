@@ -1,5 +1,5 @@
 //! The activity feature's domain repository contract (huddle
-//! clean-architecture refactor, task 04).
+//! clean-architecture refactor).
 //!
 //! [`ActivityRepository`] is the seam between the presentation controller /
 //! its use cases and the data layer: [`LoadActivity`](super::use_cases::LoadActivity)
@@ -14,7 +14,7 @@
 //! headline (the actor's name, the mentioned channel's name) — cross-feature
 //! reference reads routed through this feature's own repository seam, the
 //! same shape `MessageRepository`'s `user`/`channel`/`dms`/`users` methods
-//! establish (task 03's completion-summary refinement 3).
+//! establish.
 
 use crate::failure::HuddleFailure;
 use crate::features::activity::domain::entities::ActivityItem;

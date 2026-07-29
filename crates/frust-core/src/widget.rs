@@ -1,5 +1,4 @@
-//! Layer 2: the retained [`Widget`] trait and its layout/paint contexts
-//! (spec §6).
+//! Layer 2: the retained [`Widget`] trait and its layout/paint contexts.
 //!
 //! Widgets are the long-lived counterpart to [`crate::view::View`]s. A view is
 //! rebuilt every frame; the widget it produced persists in the arena and is
@@ -27,9 +26,9 @@ use crate::semantics::SemanticsCtx;
 
 /// The renderer-agnostic paint target a widget draws into.
 ///
-/// This trait was introduced (task 02) as a **local stand-in** for
-/// `frust_scene::SceneBuilder` while the scene crate was still a stub. Task
-/// 08 reconciles the two *additively*: rather than churn the `Widget::paint`
+/// This trait was introduced as a **local stand-in** for
+/// `frust_scene::SceneBuilder` while the scene crate was still a stub, and the
+/// two were later reconciled *additively*: rather than churn the `Widget::paint`
 /// signature (and every widget/test written against it), `SceneBuilder` now
 /// [implements this trait](#impl-PaintScene-for-SceneBuilder), so widgets keep
 /// painting through `&mut dyn PaintScene` while the shell hands them a real
@@ -70,8 +69,8 @@ pub trait PaintScene {
 
     /// Emit a run of *unshaped* text anchored at `origin`.
     ///
-    /// This records intent only — glyph shaping lives in `frust-text`
-    /// (task 07). Real rendering uses [`PaintScene::draw_glyph_run`]; the
+    /// This records intent only — glyph shaping lives in `frust-text`.
+    /// Real rendering uses [`PaintScene::draw_glyph_run`]; the
     /// `SceneBuilder` implementation treats this as a no-op.
     fn draw_text(&mut self, origin: Point, text: &str);
 
@@ -85,7 +84,7 @@ pub trait PaintScene {
     /// Draw an already-decoded image, scaled from its natural
     /// (`data.width`x`data.height`) size to fill the absolute `dest` rect.
     ///
-    /// A single additive method (task 57, `frust-widgets::Image`) on this
+    /// A single additive method (added for `frust-widgets::Image`) on this
     /// otherwise layer-2 trait — authorized because `Command::Image`'s
     /// `peniko::ImageData` payload has to reach the scene through the same
     /// `&mut dyn PaintScene` seam every other paint call uses. Defaulted to a
@@ -95,7 +94,7 @@ pub trait PaintScene {
 
     /// Draw a fragment-shader-filled rectangle, scaled to fill `dest`.
     ///
-    /// An additive method (task 02, shader showcase) on this otherwise layer-2
+    /// An additive method (added for the shader-showcase feature) on this otherwise layer-2
     /// trait — authorized because the shader program and destination have to
     /// reach the scene through the same `&mut dyn PaintScene` seam every other
     /// paint call uses. `program` carries the WGSL source and process-unique
@@ -209,7 +208,7 @@ pub trait PaintScene {
     ///
     /// `path` is in the widget's local coordinate space; `origin` translates
     /// it into the parent's space, mirroring every other `PaintScene`
-    /// method's origin convention (task 05, PLAN.md D2b). Defaulted to a
+    /// method's origin convention. Defaulted to a
     /// no-op so pre-existing recorder scenes stay valid; the `SceneBuilder`
     /// implementation records a real [`frust_scene::Command::Path`].
     fn fill_path(&mut self, _origin: Point, _path: &BezPath, _brush: &Brush) {}
@@ -240,9 +239,9 @@ pub trait PaintScene {
 }
 
 /// Bridges the provisional [`PaintScene`] boundary onto the real
-/// `frust_scene::SceneBuilder` (task 08 reconciliation).
+/// `frust_scene::SceneBuilder`.
 ///
-/// Widgets paint through `&mut dyn PaintScene`; the desktop shell (task 08)
+/// Widgets paint through `&mut dyn PaintScene`; the desktop shell
 /// hands them a `SceneBuilder`, so filled rectangles and shaped glyph runs land
 /// in the display list under the builder's current transform. Unshaped
 /// [`PaintScene::draw_text`] is intentionally dropped here — text must be shaped
@@ -352,7 +351,7 @@ fn path_at(origin: Point, path: &BezPath) -> BezPath {
 ///
 /// Beyond the (still-empty) container seam, it optionally carries the shared,
 /// heavyweight text-shaping context the render root threads down for text
-/// layout (spec §10.3), plus the app's active theme (spec §11 design tokens).
+/// layout, plus the app's active theme (design tokens).
 /// Both resources are **type-erased** (`&mut dyn Any` / `&dyn Any`) so
 /// `frust-core` stays independent of `frust-text` (and thus of parley)
 /// and of `frust-theme`; text widgets recover the shaping context with
@@ -486,8 +485,8 @@ impl Default for LayoutCtx<'static> {
 /// all leaves the frame as it is today — the class is only meaningful once a
 /// frame was actually requested (see [`PaintCtx::frame_class`]).
 ///
-/// The *gate-side* pacing behavior is implemented separately (the frame gate,
-/// task 06); this type is only the vocabulary a widget uses to declare intent.
+/// The *gate-side* pacing behavior is implemented separately (the mobile frame
+/// gate); this type is only the vocabulary a widget uses to declare intent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TickClass {
     /// A pacable decorative loop (e.g. a skeleton shimmer, an idle pulse) — the
@@ -878,7 +877,7 @@ impl<'a> PaintCtx<'a> {
 
     /// Whether a frame was requested and *every* request this (sub)paint was
     /// [`TickClass::CosmeticLoop`] — the paced-only state the mobile frame gate
-    /// (task 06) may throttle. Convenience for
+    /// may throttle. Convenience for
     /// `frame_class() == Some(TickClass::CosmeticLoop)`.
     pub fn needs_frame_paced_only(&self) -> bool {
         self.needs_frame && !self.frame_unpaced
@@ -937,7 +936,7 @@ impl<'a> PaintCtx<'a> {
         self.ime_state.take()
     }
 
-    /// Publish a platform-view child's paint-time frame (task 02's
+    /// Publish a platform-view child's paint-time frame (a
     /// `PlatformViewSlot`) for this paint pass.
     ///
     /// Pushes onto a `Vec` rather than setting an `Option` — deliberately NOT
@@ -959,8 +958,8 @@ impl<'a> PaintCtx<'a> {
     /// Report an absolute-coordinate region where frust content painted OVER a
     /// platform-view slot must keep winning pointer input (the "z-shield").
     ///
-    /// The auto-collection half of the Mode B input contract (native-widgets
-    /// p1-09): an interactive slot hands a touch-DOWN inside its rect to the
+    /// The auto-collection half of the Mode B input contract: an interactive
+    /// slot hands a touch-DOWN inside its rect to the
     /// native sibling, EXCEPT inside a shield. `frust-widgets`' `shield(child)`
     /// wrapper is the reporter — it paints its child unchanged and reports its
     /// own painted rect here — so an app marks chrome that overlaps a slot
@@ -1226,7 +1225,7 @@ static NEXT_SLOT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Allocate a fresh, stable platform-view slot id.
 ///
-/// Called once per widget instance at construction (task 02's
+/// Called once per widget instance at construction (a
 /// `PlatformViewSlot`) — the same stability class as [`ChildPod`]'s
 /// semantics base id: identity that must survive a tree reorder, so it is
 /// never derived from tree position. A flat process-wide counter rather than
@@ -1292,7 +1291,7 @@ pub fn take_retired_slots() -> Vec<u64> {
 }
 
 /// A platform-view child's paint-time frame — everything a shell's native
-/// compositor (task 03) needs to place, size, clip, and dispose a native
+/// compositor needs to place, size, clip, and dispose a native
 /// sibling view for one paint pass.
 ///
 /// All rects are logical px, **absolute window coordinates** — the same
@@ -1301,7 +1300,7 @@ pub fn take_retired_slots() -> Vec<u64> {
 /// paint-pass-scoped: [`crate::app::RenderRoot::paint`] replaces the whole
 /// collection every pass, so a slot that didn't paint this pass (a culled
 /// subtree) simply has no frame in
-/// [`crate::app::RenderRoot::platform_view_frames`] — task 03's differ owns
+/// [`crate::app::RenderRoot::platform_view_frames`] — the shell's differ owns
 /// absent-means-hide/dispose semantics, not this crate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlatformViewFrame {
@@ -1314,7 +1313,7 @@ pub struct PlatformViewFrame {
     pub view_type: String,
     /// Opaque creation params for the native factory (may be empty).
     pub params_json: String,
-    /// Bumped by the widget (task 02) whenever `params_json` changes; this
+    /// Bumped by the widget whenever `params_json` changes; this
     /// crate only ever carries the number through.
     pub params_generation: u64,
     /// Absolute paint bounds.
@@ -1326,7 +1325,7 @@ pub struct PlatformViewFrame {
     /// `false` ⇒ hidden (offscreen/culled by the widget itself, distinct from
     /// simply being absent from the collection this pass).
     pub visible: bool,
-    /// Mode B input forwarding (native-widgets spike 3 vocabulary): whether
+    /// Mode B input forwarding: whether
     /// the hosted native view should receive pointer input — a touch-DOWN
     /// inside `rect` (and outside every `shields` rect) hands the whole
     /// gesture to the native sibling in the embedding. `false` (the default)
@@ -1365,7 +1364,7 @@ pub struct PlatformViewFrame {
 /// when a frame was requested and *every* request this frame was
 /// [`TickClass::CosmeticLoop`] (a pacable decorative loop), `false` the instant
 /// any [`TickClass::Transition`] request (including any `request_layout`) joined
-/// in. The mobile frame gate (task 06) may throttle such a purely-cosmetic frame
+/// in. The mobile frame gate may throttle such a purely-cosmetic frame
 /// to a lower cadence; a `false` here means the frame runs every vsync as today.
 /// Only meaningful when `needs_frame` is `true`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1406,16 +1405,15 @@ pub trait Widget: Any {
     /// Handle an input event, optionally mutating application state through
     /// `ctx` and reporting whether it was consumed.
     ///
-    /// Defaulted to [`EventResult::Ignored`] so non-interactive widgets (and
-    /// every widget written before Phase 4A) are unaffected. Interactive widgets
-    /// (Button/Checkbox/Slider, task 44) override this; containers forward to
+    /// Defaulted to [`EventResult::Ignored`] so non-interactive widgets are
+    /// unaffected. Interactive widgets
+    /// (Button/Checkbox/Slider) override this; containers forward to
     /// their [`ChildPod`] children via [`ChildPod::event_child`].
     fn event(&mut self, _ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
         EventResult::Ignored
     }
 
-    /// Contribute this widget's accessibility node(s) into `ctx` (spec §9,
-    /// phase-6c D1).
+    /// Contribute this widget's accessibility node(s) into `ctx`.
     ///
     /// Defaulted to a no-op so non-semantic widgets (and every widget written
     /// before this seam) are unaffected — exactly like [`Widget::event`]. A leaf
@@ -1469,12 +1467,12 @@ impl Widget for Box<dyn Widget> {
 /// A container's owned child: a boxed widget plus the layout geometry and
 /// capture bookkeeping the container maintains for it.
 ///
-/// Phase 4A containers own their children directly as `ChildPod`s (a `Vec` for
+/// Containers own their children directly as `ChildPod`s (a `Vec` for
 /// Flex/Stack, named fields for Padding/Align) rather than as arena nodes — the
 /// [`WidgetTree`](crate::tree::WidgetTree) arena stays single-root. This is a
-/// deliberate divergence from the masonry "everything in the arena" model,
-/// recorded in the Phase 4A plan: it needs zero global-id plumbing and no
-/// disjoint-borrow gymnastics for the features 4A ships. Arena-backed children
+/// deliberate divergence from the masonry "everything in the arena" model:
+/// it needs zero global-id plumbing and no
+/// disjoint-borrow gymnastics for the container features this crate ships. Arena-backed children
 /// (for damage tracking / a11y global access) are deferred to a later phase.
 ///
 /// `origin`/`size` are in the **container's** local coordinate space;
@@ -1493,7 +1491,7 @@ pub struct ChildPod {
     /// second recorded path, a mirror of `active`). Maintained by
     /// [`ChildPod::event_child`] on a `focus_requested`/`focus_released` bubble.
     focused: bool,
-    /// This pod's persistent semantics base id (phase-6d D1), lazily assigned on
+    /// This pod's persistent semantics base id, lazily assigned on
     /// the pod's first [`ChildPod::semantics_child`] visit from the
     /// [`RenderRoot`](crate::app::RenderRoot) allocator and reused for the whole
     /// pod lifetime — so the node id a widget contributes is stable across frames
@@ -1680,7 +1678,7 @@ impl ChildPod {
     }
 
     /// This pod's stable semantics base id, assigning one from the allocator on
-    /// the first visit and reusing the cached value thereafter (phase-6d D1) —
+    /// the first visit and reusing the cached value thereafter —
     /// the mechanism that keeps a widget's node id stable across frames and keyed
     /// reorders. See [`ChildPod::semantics_id`].
     fn semantics_base(&self, ctx: &mut SemanticsCtx) -> NonZeroU64 {
@@ -2124,7 +2122,7 @@ mod tests {
     /// A leaf widget that publishes a fixed [`PlatformViewFrame`] on every
     /// paint, unless `should_publish` is false — the `false` arm stands in for
     /// a slot that didn't paint this pass (culled subtree), exercising the
-    /// "no publishers this pass" acceptance criterion at the `RenderRoot`
+    /// "no publishers this pass" behavior at the `RenderRoot`
     /// level (see `app.rs`'s tests).
     struct PlatformViewProbe {
         slot_id: u64,
@@ -2246,7 +2244,7 @@ mod tests {
     #[test]
     fn request_frame_alone_does_not_set_needs_layout() {
         // A paint-only animation (request_frame, no request_layout) must leave
-        // `needs_layout` clear — the phase-10/11 layout-skip win depends on this.
+        // `needs_layout` clear — the mobile intra-frame layout-skip depends on this.
         let mut anim = ChildPod::new(Box::new(Animator));
         let mut lctx = LayoutCtx::new();
         anim.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));

@@ -51,7 +51,7 @@ debug optimization the same way.
 "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, at the default
 `opt-level = 3` — chosen over `"s"`/`"z"` after a smaller-opt-level win didn't clear a
 5% bar against a render-stack CPU-perf carve-out (measured via `scripts/size-report.sh`
-below; full A/B in `workflow/plans/features/frust-phase-7-performance/research/BASELINE.md`).
+below).
 
 **Glyph bundled fonts.** `frust-theme`'s default-on `glyph-fonts` feature embeds Space
 Mono + IBM Plex Mono (~1MB) for the Glyph design language's type scale. An app opts out
@@ -136,8 +136,7 @@ Ctrl-C exit both group-kill on Unix (Windows stays direct-child-only). A **relau
 loop, not state-preserving hot reload** — app state resets every rebuild. `--watch` +
 `-d <device>` is a hard error (device-side watch isn't implemented).
 
-**Measured baseline** (`workflow/plans/features/frust-phase-9-rust-advantage/research/DEVLOOP_BASELINE.md`):
-default-config incremental `cargo build` medians 0.89s; edit-to-first-frame medians
+**Measured baseline**: default-config incremental `cargo build` medians 0.89s; edit-to-first-frame medians
 ~263ms once built. An alternate linker and `cranelift` both measured worse, so **no
 fast-dev template recipe ships** — re-run `scripts/devloop-measure.sh` if that changes.
 
@@ -414,9 +413,7 @@ so a stream's fps reading can be compared against it.
 release `.so` via `cargo ndk`, reporting unstripped/stripped size, an APK/AAB per-ABI
 `.so`+dex breakdown when Gradle output already exists, and a desktop `cargo bloat
 --release -n 20` breakdown when installed — every missing-tool/artifact path degrades to
-a printed note. See
-`workflow/plans/features/frust-phase-7-performance/research/BASELINE.md` for recorded
-baselines.
+a printed note.
 
 ## Version-Pin Policy
 
@@ -425,10 +422,10 @@ not floating. Each row's tripwire must be re-run after touching that pin:
 
 | Pin | Why | Tripwire |
 |---|---|---|
-| `vello 0.9.0` / `wgpu 29.0.3` (resolves 29.0.4) | `vello` requires `wgpu ^29.0.3`; bumping `wgpu` independently (30.x is ecosystem-latest) breaks the build — see `docs/spec.md` §8/§15 | `cargo build --workspace --locked` |
+| `vello 0.9.0` / `wgpu 29.0.3` (resolves 29.0.4) | `vello` requires `wgpu ^29.0.3`; bumping `wgpu` independently (30.x is ecosystem-latest) breaks the build | `cargo build --workspace --locked` |
 | `image =0.25.10` exact (`Image` widget's PNG/JPEG decoder, `png`/`jpeg` only) | Only 0.25.x release whose MSRV equals the workspace `rust-version` (1.88) | fresh MSRV check before bumping, not just `cargo update` |
-| `reactive_graph 0.2` / `any_spawner 0.3` / `tokio 1` (no default features), minor | `frust-reactive` substrate (spec §5.5), pre-1.0 Leptos-ecosystem churn expected; never enable `reactive_graph`'s `effects` feature — the frame path is a custom subscriber, not `RenderEffect` (see ARCHITECTURE's Key Types) | `cargo test -p frust-reactive` |
-| `accesskit 0.24` minor + adapters (`accesskit_winit 0.33`, `accesskit_android 0.7` minor, `accesskit_ios =0.1.2` exact) | `frust-core`'s semantics-pass vocabulary (spec §9); `accesskit_ios` is younger/less proven, compile-gate only (*Test*) | `cargo test -p frust-core semantics` |
+| `reactive_graph 0.2` / `any_spawner 0.3` / `tokio 1` (no default features), minor | `frust-reactive` substrate, pre-1.0 Leptos-ecosystem churn expected; never enable `reactive_graph`'s `effects` feature — the frame path is a custom subscriber, not `RenderEffect` (see ARCHITECTURE's Key Types) | `cargo test -p frust-reactive` |
+| `accesskit 0.24` minor + adapters (`accesskit_winit 0.33`, `accesskit_android 0.7` minor, `accesskit_ios =0.1.2` exact) | `frust-core`'s semantics-pass vocabulary; `accesskit_ios` is younger/less proven, compile-gate only (*Test*) | `cargo test -p frust-core semantics` |
 | `vello_cpu =0.0.9` exact | Experimental CPU render tier (`frust-render`'s non-default `cpu-tier` feature), pre-1.0 unstable API, isolated behind the `SceneSink` encode seam so a breaking bump never reaches the default GPU path | tripwire in *Test* |
 | `ndk-context 0.1` minor | `frust-plugin`'s Android platform-handle slot (written by `nativeInitPlatform`, read by every plugin) | `cargo check --target aarch64-linux-android -p frust-plugin` |
 | `objc2 0.6` / `objc2-foundation 0.3` minor | Apple ObjC bridge (`frust-shared-preferences`'s `NSUserDefaults` backend; `frust-secure-storage`'s apple arm also pulls `objc2-foundation` for `NSString`/`NSError`; `frust-camera`'s apple arm pulls the full `objc2-av-foundation`/`objc2-core-media`/`objc2-core-video`/`objc2-quartz-core`/`dispatch2`/`block2` stack, each pinned `0.3`/`0.6` minor — `objc2-av-foundation 0.3.2` itself permits `objc2 >=0.6.2, <0.8.0`, wider than this workspace's own `0.6` caret) | `cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences && cargo check --target aarch64-apple-ios-sim -p frust-camera` |

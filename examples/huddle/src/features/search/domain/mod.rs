@@ -1,6 +1,5 @@
-//! `search` domain — live filter over channels, people, and messages
-//! (huddle clean-architecture refactor, task 04). **Sync, infallible**
-//! (PLAN Design Decision 8): no `async`, no `HuddleFailure`, no
+//! `search` domain — live filter over channels, people, and messages.
+//! **Sync, infallible**: no `async`, no `HuddleFailure`, no
 //! `ControllerCore`/`UseCase` — see [`repositories`]'s module docs.
 
 pub mod filter;

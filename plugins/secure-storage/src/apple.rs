@@ -49,7 +49,7 @@
 //! existing store requires rewriting (`get` + `set`) every key, not just
 //! reopening the store gated.
 //!
-//! # Biometric gate (S05, Plan Phase 5)
+//! # Biometric gate
 //!
 //! When a store is opened with [`AuthPolicy::Required`](crate::AuthPolicy)
 //! the [`AuthOptions`] travel in as [`AppleStore::auth`]. A gated store's
@@ -88,8 +88,7 @@
 //! A gated LAContext value is an Objective-C object, not a CoreFoundation
 //! type; passing it into the CF keychain query dictionary needs one confined,
 //! `# Safety`-noted pointer bridge ([`as_cf`]) — objc objects are
-//! CFTypeRef-compatible at the ABI level (the "thin confined CF shim" the S05
-//! task budgets).
+//! CFTypeRef-compatible at the ABI level (a thin, confined CF shim).
 //!
 //! # macOS unbundled-preview caveat
 //!
@@ -154,7 +153,7 @@ pub(crate) struct AppleStore {
     /// The `kSecAttrAccessible` posture applied to items this store adds.
     accessibility: Accessibility,
     /// The per-store biometric policy: `None` for a plain store, `Some` for a
-    /// gated one (S05). Held as plain data (a Rust struct of `bool`/`Option`/
+    /// gated one. Held as plain data (a Rust struct of `bool`/`Option`/
     /// `String`s) so [`AppleStore`] stays `Send + Sync` — the `SecAccessControl`
     /// and `LAContext` objects are rebuilt per operation, never held across
     /// calls (mirroring `service`).
@@ -163,7 +162,7 @@ pub(crate) struct AppleStore {
 
 impl AppleStore {
     /// Open the Keychain store `store` with the given [`Accessibility`] and an
-    /// optional biometric [`AuthOptions`] gate (S05).
+    /// optional biometric [`AuthOptions`] gate.
     ///
     /// `store` is the caller's store name; its service attribute is
     /// `frust.ss.<store>`.
@@ -276,8 +275,8 @@ impl Backend for AppleStore {
         if let Some(opts) = &self.auth {
             // `kSecUseOperationPrompt` is deprecated in favor of the
             // `LAContext.localizedReason` we also set, but is kept as the
-            // pre-context-era fallback the S05 task specifies; the scoped allow
-            // covers exactly that one deliberate use.
+            // pre-context-era fallback this backend specifies; the scoped
+            // allow covers exactly that one deliberate use.
             #[allow(deprecated)]
             // SAFETY: reading `extern` Security-framework constant statics.
             let (auth_ctx_k, op_prompt_k) = unsafe {
@@ -602,8 +601,8 @@ fn dict(pairs: &[(&CFType, &CFType)]) -> CFRetained<CFDictionary<CFType, CFType>
 
 /// Borrow an [`LAContext`] (an Objective-C object) as a `&CFType` so it can be
 /// a value in the CoreFoundation keychain query dictionary
-/// (`kSecUseAuthenticationContext`). This is the single confined CF bridge the
-/// S05 task budgets: an Objective-C `id` and a `CFTypeRef` are the same thing
+/// (`kSecUseAuthenticationContext`). This is the single confined CF bridge:
+/// an Objective-C `id` and a `CFTypeRef` are the same thing
 /// at the ABI level, so an `LAContext` pointer *is* a valid `CFType` pointer.
 ///
 /// # Safety
@@ -620,7 +619,7 @@ fn as_cf(context: &LAContext) -> &CFType {
 }
 
 /// The [`SecAccessControlCreateFlags`] for a gated store's [`AuthOptions`]
-/// (see the module doc's *Biometric gate* and the S05 mapping table): a
+/// (see the module doc's *Biometric gate*): a
 /// biometry constraint, current-set (auto-invalidating on re-enrollment) when
 /// [`AuthOptions::invalidate_on_enrollment`] else any-enrollment, widened with
 /// a device-passcode fallback when [`AuthOptions::allow_device_credential`].
@@ -677,13 +676,13 @@ fn la_unavailability(code: LAError) -> Unavailability {
 /// taxonomy for the gate's failure modes. The gated *keychain* path surfaces
 /// these as `OSStatus` codes through [`map_status`] rather than `LAError`, so
 /// this is used where an `LAContext` policy evaluation itself reports an
-/// `NSError` (retained here for completeness and to document the mapping the
-/// S05 task locks in).
+/// `NSError` (retained here for completeness and to document the mapping
+/// this backend locks in).
 ///
 /// Not wired into the gated keychain read path (which surfaces `OSStatus`
 /// through [`map_status`]), so it is dead in a non-test build — kept as the
-/// canonical, test-verified `LAError` taxonomy the task's completion summary
-/// enumerates, hence the explicit allow.
+/// canonical, test-verified `LAError` taxonomy this module enumerates, hence
+/// the explicit allow.
 #[allow(dead_code)]
 fn map_la_error(code: LAError) -> SecureStorageError {
     match code {
@@ -794,7 +793,7 @@ mod tests {
         assert_eq!(backend.get("token").unwrap(), None);
     }
 
-    /// Fix F2 (review M2): a value written while a store is **plain** gets
+    /// Regression test: a value written while a store is **plain** gets
     /// its Keychain protection re-asserted the moment it's overwritten
     /// through a **gated** store opened on the same service — exercising
     /// the `errSecDuplicateItem` arm's gated delete+re-add path. Host-safe:
@@ -902,7 +901,7 @@ mod tests {
         }
     }
 
-    /// The `AuthOptions` → `SecAccessControlCreateFlags` mapping the S05 gate
+    /// The `AuthOptions` → `SecAccessControlCreateFlags` mapping the gate
     /// locks in (pure logic — no Keychain access, runs everywhere). Bit
     /// values per `objc2-security`: BiometryAny = 1<<1, BiometryCurrentSet =
     /// 1<<3, DevicePasscode = 1<<4, Or = 1<<14.
@@ -937,7 +936,7 @@ mod tests {
         );
     }
 
-    /// The `LAError` → availability / error taxonomy the S05 gate locks in
+    /// The `LAError` → availability / error taxonomy the gate locks in
     /// (pure logic — no LocalAuthentication call, runs everywhere).
     #[test]
     fn la_error_mapping() {

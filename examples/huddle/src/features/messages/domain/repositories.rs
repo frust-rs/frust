@@ -1,5 +1,4 @@
-//! The messages feature's domain repository contract (huddle
-//! clean-architecture refactor, task 03).
+//! The messages feature's domain repository contract.
 //!
 //! [`MessageRepository`] is the seam between the feed/thread presentation and
 //! the data layer: the [`LoadMessages`](super::use_cases::LoadMessages) use case
@@ -15,10 +14,10 @@
 //! The signature is shaped by exactly what the controller / use cases / pages
 //! read today (no speculative methods). Only [`messages_for`](MessageRepository::messages_for)
 //! is async + fallible (the loader that a real transport would await); the
-//! reference reads are synchronous, infallible store lookups (PLAN Design
-//! Decision 8 — no `Result`/`async` ceremony for infallible reads). Returning
-//! another feature's domain type ([`Channel`]/[`Dm`]/[`User`]) is a
-//! domain→domain reuse (Design Decision 2), not a layer break.
+//! reference reads are synchronous, infallible store lookups — no
+//! `Result`/`async` ceremony for a read that cannot fail. Returning another
+//! feature's domain type ([`Channel`]/[`Dm`]/[`User`]) is a domain→domain
+//! reuse, not a layer break.
 
 use crate::failure::HuddleFailure;
 use crate::features::channels::domain::{Channel, Dm};

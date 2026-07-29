@@ -1,11 +1,11 @@
-//! [`MessagesController`] — the channel/DM feed view model (huddle
-//! clean-architecture refactor, task 03; moved verbatim apart from repo
-//! threading from the former flat `features/messages/mod.rs`).
+//! [`MessagesController`] — the channel/DM feed view model (moved verbatim
+//! apart from repo threading from the former flat
+//! `features/messages/mod.rs`).
 //!
 //! It owns every signal the feed and thread pages render and drives the
 //! mock-latency load / send / react / thread-reply / pagination operations
-//! through an embedded [`ControllerCore`] (the `templates/AGENTS.md`
-//! controller rule, same shape as [`crate::features::settings`]).
+//! through an embedded [`ControllerCore`] — the same controller-embeds-
+//! `ControllerCore` shape as [`crate::features::settings`].
 //!
 //! # One shared controller per channel
 //!
@@ -79,13 +79,14 @@ const RUNTIME_ID_BASE: u32 = 1_000_000;
 /// `provide_context`, or — when no context is in scope (a standalone
 /// controller-unit test) — a fresh `StoreMessageRepository`. This fallback is
 /// the messages feature's composition-root equivalent for context-less
-/// construction (the analog of task 02's `#[cfg(test)]` `store_repo()`), forced
-/// into production here because `for_channel`/`with_latency` are public
-/// constructors the external integration-test crates call with a channel id
-/// only (behavior-preserving: injected and fallback are the same
-/// `StoreMessageRepository`, so the data — and behavior — are identical either
-/// way). The one presentation→data reference in the slice; flagged for the
-/// task-06 conformance scan.
+/// construction (the same shape as a `#[cfg(test)]`-only `store_repo()`
+/// helper elsewhere in this crate), forced into production here because
+/// `for_channel`/`with_latency` are public constructors the external
+/// integration-test crates call with a channel id only (behavior-preserving:
+/// injected and fallback are the same `StoreMessageRepository`, so the data
+/// — and behavior — are identical either way). The one presentation→data
+/// reference in the slice, allowlisted as such by the crate's
+/// architecture-conformance test.
 fn resolve_repo() -> Arc<dyn MessageRepository + Send + Sync> {
     use_context::<Arc<dyn MessageRepository + Send + Sync>>()
         .unwrap_or_else(|| Arc::new(StoreMessageRepository::new()))
@@ -173,7 +174,7 @@ impl MessagesController {
         }
         let channel_id = channel_id.into();
         REGISTRY.with(|cell| {
-            // Self-heal (task 22 hardening): a cached controller's signals are
+            // Self-heal: a cached controller's signals are
             // owned by the reactive `Owner` live when it was built; a headless
             // test that disposes its owner and re-enters (or a reused test
             // thread) leaves this registry holding a controller whose signals

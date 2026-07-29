@@ -1,8 +1,9 @@
 //! End-to-end test: `frust create`'s iOS output is a well-formed Xcode
-//! project (spec Phase 3 task 34). This does *not* build the app — it only
+//! project. This does *not* build the app — it only
 //! confirms the generated `project.pbxproj` parses (`xcodebuild -list`) and
-//! the rendered `Info.plist` lints (`plutil -lint`). The full simulator
-//! build is task 36's job.
+//! the rendered `Info.plist` lints (`plutil -lint`). A full simulator
+//! build is exercised separately, via `frust build ios`/`frust run`
+//! (`docs/DEVELOPMENT.md`).
 //!
 //! Like `create_e2e`, this drives the compiled `frust` binary via
 //! `CARGO_BIN_EXE_frust` rather than calling `scaffold::generate`
@@ -70,7 +71,7 @@ fn create_ios_project_is_parseable() {
         "`xcodebuild -list` did not report the Runner target/scheme:\n{listing}"
     );
     // Debug/Release/Profile must all be present in the project's configuration
-    // matrix (task 63): the run-script phase and version build settings both
+    // matrix: the run-script phase and version build settings both
     // depend on `Profile` being a real XCBuildConfiguration, not just scheme
     // boilerplate.
     for configuration in ["Debug", "Release", "Profile"] {
@@ -80,7 +81,7 @@ fn create_ios_project_is_parseable() {
         );
     }
 
-    // The shared scheme must be present for headless `-scheme` builds (task 36).
+    // The shared scheme must be present for headless `-scheme` builds.
     assert!(
         xcodeproj
             .join("xcshareddata/xcschemes/Runner.xcscheme")
@@ -101,7 +102,7 @@ fn create_ios_project_is_parseable() {
         String::from_utf8_lossy(&lint.stderr)
     );
 
-    // Versions are sourced from build settings (task 63), not hardcoded into
+    // Versions are sourced from build settings, not hardcoded into
     // the plist.
     let plist_src = std::fs::read_to_string(&plist).expect("reading rendered Info.plist");
     assert!(
@@ -116,7 +117,7 @@ fn create_ios_project_is_parseable() {
     let _ = std::fs::remove_dir_all(&dest);
 }
 
-/// Task 07: a `--deeplink-scheme` project's rendered Info.plist (with its
+/// A `--deeplink-scheme` project's rendered Info.plist (with its
 /// `CFBundleURLTypes` entry) still lints as a well-formed plist.
 #[test]
 #[ignore = "shells out to `plutil` (macOS + Xcode command-line tools only); run explicitly with `--ignored`"]

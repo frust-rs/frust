@@ -1,6 +1,6 @@
 use super::{DoctorCtx, Status, Validation, Validator};
 
-/// Minimum supported Xcode major version (accesskit_ios / xcodebuild floor, spec §12.7).
+/// Minimum supported Xcode major version (accesskit_ios / xcodebuild floor).
 const MIN_XCODE_MAJOR: u32 = 15;
 
 pub struct XcodeValidator;

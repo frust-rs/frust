@@ -1,5 +1,5 @@
 //! Headless interaction proof for the baseline layout/interactive-widget
-//! vocabulary (spec §14) — ported from the (now-deleted) `examples/counter`
+//! vocabulary — ported from the (now-deleted) `examples/counter`
 //! demo so the unconditional workspace gate keeps this coverage.
 //!
 //! Desktop UI automation (osascript/cliclick) is unavailable on this host, so
@@ -39,7 +39,7 @@ const H: f64 = 600.0;
 
 // --- In-test fixture app (ported from examples/counter/src/lib.rs) ---
 
-/// Counter demo state (spec §5 `app_logic` model).
+/// Counter demo state (the `app_logic` model).
 ///
 /// The view is a pure function of these three fields; every interaction
 /// mutates one of them and the next rebuild reflects it.
@@ -125,7 +125,7 @@ impl Component for CounterApp {
     }
 
     /// Pure view function: renders `AppState` into a scrollable counter
-    /// screen (spec §5). Re-run every frame, so it is cheap by construction.
+    /// screen. Re-run every frame, so it is cheap by construction.
     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
         let count = state.count;
         let extra = state.extra_rows;

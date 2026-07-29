@@ -1,5 +1,4 @@
-//! Static plugin registry + idempotent project mutations
-//! (`frust-secure-storage` PLAN.md Phase 6).
+//! Static plugin registry + idempotent project mutations.
 //!
 //! A generated frust project ships **clean** — no plugin code, permissions,
 //! or platform contributions are scaffolded (the template-hygiene decision).
@@ -150,8 +149,9 @@ pub enum Contribution {
     /// root, and some linker-visible properties only hold when the reference
     /// originates there.
     ///
-    /// It exists for exactly one measured reason (frust-camera task 14): a
-    /// `#[unsafe(no_mangle)]` C export that lives in a *dependency* crate and
+    /// It exists for exactly one measured reason (`frust-camera`'s Swift
+    /// integration): a `#[unsafe(no_mangle)]` C export that lives in a
+    /// *dependency* crate and
     /// is called only from Swift is dropped by the release profile's
     /// `lto = "fat"` before the Swift side links, because nothing in Rust
     /// references it. An app that merely *added* the plugin and never calls its

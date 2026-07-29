@@ -7,7 +7,7 @@
 //! [`encode_scene`] entry point is the one place a `vello` type appears in this
 //! crate's API — deliberately, so a shell that owns its own `vello::Renderer`
 //! can reuse Frust's scene encoding (mirrors how `frust-scene` allows
-//! `peniko` types, spec §7).
+//! only `peniko` types in its own public API).
 
 use frust_scene::{Command, GlyphRun, PathStyle, Scene};
 use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Stroke};
@@ -69,8 +69,8 @@ pub(crate) trait SceneSink {
 /// Encodes every command in `scene` into `target` (a reused `vello::Scene`).
 ///
 /// Call `target.reset()` before this to clear the previous frame — the render
-/// path does exactly that (spec §7: rebuild the scene per frame, never
-/// accumulate).
+/// path does exactly that, rebuilding the scene fresh every frame rather than
+/// accumulating draw calls across frames.
 ///
 /// This is the no-shader-map convenience entry the public seam
 /// (`docs/ARCHITECTURE.md`'s scene-layer purity rule) exposes for shells that
@@ -120,8 +120,8 @@ pub(crate) fn encode_into_with_shaders(
     // to the root: a `Compose::Clear` inside a vello layer group only clears
     // that group's own accumulated content — anything painted OUTSIDE the
     // group (an app-root backdrop below a scroll_view's clip) survives the
-    // group composite, defeating the Mode B hole punch (t11-redo defect D4,
-    // pixel-proven in `tests/gpu_smoke.rs`). On `ClearRect` the walk pops
+    // group composite, defeating the Mode B hole punch (pixel-proven in
+    // `tests/gpu_smoke.rs`). On `ClearRect` the walk pops
     // every open group, emits the clear at root — bounded by the intersection
     // of the popped groups' clip bounds so a partially-scrolled slot still
     // clips to its viewport — then re-pushes the same groups and continues.
@@ -237,7 +237,7 @@ pub(crate) fn encode_into_with_shaders(
             } => {
                 // Resolve the program's shader pre-pass output (an offscreen
                 // texture registered with vello as an image override — see
-                // `crate::renderer`'s pre-pass and RESEARCH.md §Q1). A hit
+                // `crate::renderer`'s pre-pass). A hit
                 // lowers to the same `draw_image` path a `Command::Image` uses,
                 // reusing `natural_to_dest_transform`'s natural→dest scaling so
                 // the physical-pixel target lands pixel-for-pixel in `dest`.
@@ -293,7 +293,7 @@ impl SceneSink for vello::Scene {
         radius: f64,
     ) {
         // `kurbo::RoundedRect` implements `Shape`, so it fills through the same
-        // path as a plain rect (task 41 / RESEARCH.md pinned API).
+        // path as a plain rect.
         let rounded = RoundedRect::from_rect(*rect, radius);
         self.fill(style, transform, brush, None, &rounded);
     }
@@ -305,7 +305,7 @@ impl SceneSink for vello::Scene {
 
     fn draw_glyph_run(&mut self, run: &GlyphRun) {
         // `FontHandle` wraps `peniko::FontData`, which is exactly what
-        // `vello::Scene::draw_glyphs` accepts in 0.9 (task 03 rationale).
+        // `vello::Scene::draw_glyphs` accepts in 0.9.
         self.draw_glyphs(run.font.font())
             .font_size(run.font_size)
             .brush(&run.brush)
@@ -340,7 +340,7 @@ impl SceneSink for vello::Scene {
 
     fn draw_image(&mut self, transform: Affine, data: &ImageData, dest: &Rect) {
         // vello's `Scene::draw_image` draws at the image's *natural* pixel
-        // size under the given transform (task 57 / RESEARCH.md §Image); map
+        // size under the given transform; map
         // natural -> dest by scaling then translating to `dest`'s origin,
         // composed under the incoming (widget-position) transform.
         let Some(image_transform) = natural_to_dest_transform(transform, data, dest) else {
@@ -392,8 +392,8 @@ impl SceneSink for vello::Scene {
         // erase pixel-exact at the edges. Deliberately NOT `Compose::Clear`:
         // vello 0.9 applies Clear at 16-px-tile granularity, ignoring the
         // layer's per-pixel clip coverage in boundary tiles, which bleeds the
-        // punch up to 15 px past an unaligned rect edge (t11-redo defect D4;
-        // pixel-proven by `tests/gpu_smoke.rs`'s unaligned-edge probe on Metal
+        // punch up to 15 px past an unaligned rect edge (pixel-proven by
+        // `tests/gpu_smoke.rs`'s unaligned-edge probe on Metal
         // and as a visible ring on cupid). DestOut weights the erase by the
         // source's own alpha, so unpainted pixels in a boundary tile are
         // untouched by construction.
@@ -1075,7 +1075,7 @@ mod tests {
 
     #[test]
     fn mode_a_scene_encodes_no_clear_rect_even_with_a_slot_sized_region() {
-        // Review finding M1's encode-level half: when the surface's RESOLVED
+        // The encode-level half of the Mode A contract: when the surface's RESOLVED
         // translucency is `false` (an opaque swapchain — including a
         // `TranslucentPreferred` request that fell back, see context.rs's
         // `forced_mismatch_translucent_request_resolves_not_translucent`), the
@@ -1085,8 +1085,8 @@ mod tests {
         // native view covers it from on top).
         //
         // Asserted at ENCODE level rather than at the recording-`PaintScene`
-        // level deliberately (the t11-redo D4 lesson: a recording-level test
-        // missed a real defect in this exact punch path).
+        // level deliberately: a recording-level test previously
+        // missed a real defect in this exact punch path.
         let mut scene = Scene::new();
         let mut builder = SceneBuilder::new(&mut scene);
         let backdrop = Rect::new(0.0, 0.0, 200.0, 200.0);
@@ -1112,7 +1112,7 @@ mod tests {
 
     #[test]
     fn clear_rect_punches_beneath_a_backdrop_fill_preserving_order() {
-        // The exact D1 shape: an opaque backdrop fill, then a slot clear over
+        // The exact hole-punch shape: an opaque backdrop fill, then a slot clear over
         // part of it — the clear must encode AFTER the fill so it erases it.
         let mut scene = Scene::new();
         let mut builder = SceneBuilder::new(&mut scene);
@@ -1176,8 +1176,8 @@ mod tests {
     }
 
     /// Encodes into a *real* `vello::Scene` (no GPU) to prove the new commands
-    /// don't panic through the actual `SceneSink` impl — the round-trip
-    /// acceptance criterion, not just the `RecordingSink` structural check.
+    /// don't panic through the actual `SceneSink` impl — a round-trip
+    /// check, not just the `RecordingSink` structural check.
     #[test]
     fn new_commands_encode_into_a_real_vello_scene_without_panicking() {
         let mut scene = Scene::new();
@@ -1191,7 +1191,7 @@ mod tests {
         builder.pop_layer();
         builder.pop_clip();
         // The hole-punch's `Compose::DestOut` layer must round-trip through the
-        // real `vello::Scene` sink without panicking (the acceptance criterion).
+        // real `vello::Scene` sink without panicking.
         builder.clear_rect(Rect::new(2.0, 2.0, 8.0, 8.0));
 
         let mut vello_scene = vello::Scene::new();
@@ -1250,7 +1250,7 @@ mod tests {
 
     /// A widget can paint a stroked arc via `PaintScene`/`SceneBuilder` without
     /// any `frust-render` dependency, and it reaches a real `vello::Scene`
-    /// without panicking — the task 05 acceptance criterion.
+    /// without panicking.
     #[test]
     fn arc_path_fill_and_stroke_encode_into_a_real_vello_scene_without_panicking() {
         let path =

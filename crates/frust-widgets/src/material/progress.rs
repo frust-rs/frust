@@ -1,11 +1,10 @@
-//! M3 progress indicators (Phase 6c, PLAN.md D5, task 10): linear (4dp) and
-//! circular (40dp) variants, both determinate and indeterminate. The circular
-//! variant needs the new `Command::Path`/`fill_path`/`stroke_path` primitive
-//! (PLAN.md D2b, task 05). M3 Expressive **wavy** variants (Phase 6f, task
-//! 06 — `LinearWavyProgressIndicator`/`CircularWavyProgressIndicator`,
-//! `m3.material.io/components/progress-indicators/specs`,
-//! `research/RESEARCH.md:82-83`) are additive and opt-in — see the Wavy
-//! variants note below.
+//! M3 progress indicators: linear (4dp) and circular (40dp) variants, both
+//! determinate and indeterminate. The circular variant needs the
+//! `Command::Path`/`fill_path`/`stroke_path` primitive. M3 Expressive
+//! **wavy** variants (`LinearWavyProgressIndicator`/
+//! `CircularWavyProgressIndicator`,
+//! `m3.material.io/components/progress-indicators/specs`) are additive and
+//! opt-in — see the Wavy variants note below.
 //!
 //! [`LinearProgress`]/[`CircularProgress`] are both **controlled components**
 //! (`docs/CODE_STANDARDS.md`'s Interaction Semantics): the app passes a
@@ -16,13 +15,12 @@
 //! `element`'s stored value to whatever the view says, the same
 //! set-if-different reconciliation `TextInput`'s `value` uses.
 //!
-//! **Track thickness/diameter** (research-cited, see
-//! `research/RESEARCH.md`'s `m3-component-specs-idioms` section): linear
-//! track thickness 4dp, indicator = `colors.primary`, track =
+//! **Track thickness/diameter** (both cited to
+//! `material-components-android`'s `ProgressIndicator.md`): linear track
+//! thickness 4dp, indicator = `colors.primary`, track =
 //! `colors.primary_container`; circular outer diameter 40dp, stroke 4dp,
 //! indicator = `colors.primary`, track = transparent by default (so only the
-//! indicator arc is painted, no ring behind it) — both cited to
-//! `material-components-android`'s `ProgressIndicator.md`.
+//! indicator arc is painted, no ring behind it).
 //!
 //! **Indeterminate motion is a documented approximation, not the real M3
 //! two-segment choreography.** Upstream's indeterminate linear/circular
@@ -30,12 +28,12 @@
 //! spec (`LinearProgressIndicator`'s `firstLineHead`/`firstLineTail`/
 //! `secondLineHead`/`secondLineTail` fractions, `CircularProgressIndicator`'s
 //! rotating-plus-growing/shrinking arc) that is Compose-implementation
-//! internal, not part of the publicly cited component spec this crate's
-//! research ledger covers. This module ships a single-segment approximation
-//! instead (see [`LINEAR_INDETERMINATE_SEGMENT_FRACTION`]/
+//! internal, not part of the publicly cited component spec. This module
+//! ships a single-segment approximation instead (see
+//! [`LINEAR_INDETERMINATE_SEGMENT_FRACTION`]/
 //! [`CIRCULAR_INDETERMINATE_SWEEP`] below) — visually "a segment/arc loops
-//! continuously", not upstream's exact choreography. Revisit if a future
-//! phase needs pixel-accurate parity.
+//! continuously", not upstream's exact choreography. Revisit if
+//! pixel-accurate parity is ever needed.
 //!
 //! # Wavy variants
 //!
@@ -63,9 +61,9 @@
 //!
 //! **Community-approximate**: `m3.material.io/components/progress-indicators/specs`
 //! documents the wavy variant's existence and its `amplitude`/`wavelength`/
-//! `waveSpeed` parameters (`research/RESEARCH.md:82-83`) but not their
-//! default numeric values in a form this crate's research ledger captured;
-//! the three `WAVY_DEFAULT_*` constants below are chosen to read clearly as
+//! `waveSpeed` parameters but not their default numeric values in a
+//! form this crate could verify; the three `WAVY_DEFAULT_*` constants below
+//! are chosen to read clearly as
 //! "a gentle wave" at this module's existing track dimensions (4dp linear
 //! thickness / 40dp circular diameter), not a verified pixel-for-pixel port
 //! of Compose's `WavyProgressIndicatorDefaults`.
@@ -453,7 +451,7 @@ impl Widget for LinearProgressWidget {
                 if !reduce_motion {
                     // The sweeping segment is a decorative loop — its exact
                     // cadence is imperceptible, so the mobile frame gate may
-                    // pace it (task 08).
+                    // pace it.
                     ctx.request_frame_paced();
                 }
             }
@@ -755,7 +753,7 @@ impl Widget for CircularProgressWidget {
                 if !reduce_motion {
                     // The sweeping arc is a decorative loop — its exact
                     // cadence is imperceptible, so the mobile frame gate may
-                    // pace it (task 08).
+                    // pace it.
                     ctx.request_frame_paced();
                 }
             }

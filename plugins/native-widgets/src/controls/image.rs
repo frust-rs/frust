@@ -13,7 +13,7 @@
 //! whole payload every rebuild. So the bytes take a side channel and the
 //! params carry only a change token:
 //!
-//! 1. the api layer (p1-06) calls [`publish_bytes`] with the slot's
+//! 1. the api layer calls [`publish_bytes`] with the slot's
 //!    `Arc<[u8]>` and gets a **revision** back — the same `Arc` published
 //!    again returns the same revision, a different one bumps it;
 //! 2. it writes that revision into the slot's params as [`REV`], which is what
@@ -31,7 +31,7 @@
 //! runtime creates a replacement before disposing what it replaced) from
 //! having the older one delete the newer one's bytes.
 //!
-//! # The counted pair alone is NOT bounded (f2-03)
+//! # The counted pair alone is NOT bounded
 //!
 //! An earlier version of this doc claimed the table was "bounded by the live
 //! image slots." It is not, and the false claim is part of why the leak
@@ -285,7 +285,7 @@ pub(crate) fn publish_bytes(slot: SlotId, bytes: Arc<[u8]>) -> u64 {
 /// An entry that was published but never claimed (a slot whose `Create`
 /// command never ran — the app unmounted it inside a single frame) stays
 /// until the same slot publishes again, or the Component tears down —
-/// [`retire`] (the module doc's f2-03 fix) reaps this case too, not only the
+/// [`retire`] (the module doc's fix, above) reaps this case too, not only the
 /// counted holders-reach-zero path.
 pub(crate) fn claim_bytes(slot: SlotId) {
     PUBLISHED.with(|table| {
@@ -311,7 +311,7 @@ pub(crate) fn release_bytes(slot: SlotId) {
 }
 
 /// Remove `slot`'s published entry unconditionally, whatever its holder count
-/// — the Component-teardown reaper (module doc's f2-03 fix). Registered via
+/// — the Component-teardown reaper (module doc's fix, above). Registered via
 /// `on_cleanup` in `NativeImageView`'s `Component::init` (`api::builders`),
 /// so it runs exactly once per mounted Component regardless of how many
 /// times (if any) the native `create`/`dispose` pair ran on the platform side
@@ -840,7 +840,7 @@ mod tests {
         assert!(decode(908, "").bytes.as_slice().is_none());
     }
 
-    // --- f2-03 regression: the culled-dispose-then-republish leak ----------
+    // --- Regression test: the culled-dispose-then-republish leak -----------
     //
     // The counted `claim_bytes`/`release_bytes` pair alone cannot see this:
     // paint culling can dispose a scrolled-off slot without the widget ever
@@ -891,7 +891,7 @@ mod tests {
             decode(slot, "").bytes.as_slice().is_none(),
             "retire reaps the R2 entry on Component teardown even though \
              nothing native ever claimed it — without `retire`, R2 would \
-             leak for the process lifetime (the shipped f2-03 defect)"
+             leak for the process lifetime (a defect that once shipped)"
         );
     }
 

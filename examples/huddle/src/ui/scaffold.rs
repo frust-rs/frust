@@ -1,13 +1,11 @@
 //! `scaffold`/`placeholder_body` — the shared titled-screen shell: the
 //! screen's own [`app_bar`](frust::app_bar) at the top plus a centered body.
-//! Promoted here from the former `screens` hub (huddle clean-architecture
-//! refactor, task 05 — `src/screens/` is dissolved this task), since it is
+//! Promoted here from the former `screens` hub (now dissolved), since it is
 //! consumed across three feature slices
 //! (`messages::presentation::pages::thread`,
 //! `search::presentation::pages::search`,
 //! `profile::presentation::pages::profile`), not owned by a single screen —
-//! mirrors [`crate::ui::fill_box`]'s promotion precedent
-//! (device-parity-round2 task R2).
+//! mirrors [`crate::ui::fill_box`]'s promotion precedent.
 
 use frust::{
     Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, any, app_bar, flexible,

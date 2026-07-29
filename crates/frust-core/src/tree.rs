@@ -1,4 +1,4 @@
-//! The retained widget tree, backed by `tree_arena` (spec §6.1).
+//! The retained widget tree, backed by `tree_arena`.
 //!
 //! `tree_arena` gives O(1) access to any node with *simultaneous* mutable
 //! access to a node's value and its children — the proven answer to the
@@ -7,7 +7,7 @@
 //! [`WidgetId`]/[`WidgetPod`] terms.
 //!
 //! v0 is single-root (the app has one root widget), but the API is written in
-//! terms of insert-into-list / find so container support (task 08) drops in
+//! terms of insert-into-list / find so container support drops in
 //! without reshaping this layer.
 
 use kurbo::{Point, Size};

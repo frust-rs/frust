@@ -1,4 +1,4 @@
-//! Theme ladder L1's Apple half (native-widgets Phase 2, p2-04): mirrors
+//! Theme ladder L1's Apple half: mirrors
 //! `crate::android::theme`'s L1 (that module's own doc — "why a wrapped
 //! Context" — is the reference account of the *problem* L1 solves; this
 //! module is the same fix through UIKit's own, genuinely different
@@ -52,7 +52,7 @@
 //! from **both** `create_control` and `update_control`.
 //!
 //! This module was originally written the Android way, mirroring that
-//! contract rather than the platform, and **the p2-05 device gate found the
+//! contract rather than the platform, and **an on-device gate run found the
 //! bug that caused**: a control culled off-screen and later RECREATED adopts
 //! whatever brightness is current at recreate time, while its never-culled
 //! siblings keep the one they were born under — so the two diverge. On the
@@ -65,8 +65,8 @@
 //! control pinned to" a function of the CURRENT theme rather than of when the
 //! control happened to be constructed. It also makes an in-place brightness
 //! toggle re-theme platform chrome live on iOS — strictly better than the
-//! Android arm, which is why PLAN.md's Theme-mismatch risk row no longer
-//! applies symmetrically. **Do not "restore symmetry" by reverting this**;
+//! Android arm, whose baked-at-construction approximation has no iOS
+//! counterpart. **Do not "restore symmetry" by reverting this**;
 //! the asymmetry belongs to the platforms, not to a defect.
 
 use objc2_ui_kit::{UIUserInterfaceStyle, UIView};
@@ -89,7 +89,7 @@ pub(crate) fn brightness_is_dark(params_json: &str) -> bool {
 /// `overrideUserInterfaceStyle` — see the module doc for why this is a
 /// per-view property set after construction rather than a `Context` supplied
 /// to one, and why it is called from **both** `create_control` and
-/// `update_control` on this arm (the p2-05 recreate-divergence fix).
+/// `update_control` on this arm (the recreate-divergence fix).
 pub(crate) fn apply_user_interface_style(view: &UIView, dark: bool) {
     let style = if dark {
         UIUserInterfaceStyle::Dark

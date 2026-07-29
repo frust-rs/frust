@@ -19,8 +19,8 @@
 //!    through the **application classloader** once and keeps one global
 //!    reference for the process (camera's `HOST_CLASS` shape); callers get a
 //!    fresh local ref each time, which dies with their frame. A control's own
-//!    hot method ids belong in that control's `OnceLock` table (the spike's
-//!    proven pattern — `JMethodID` is `Send + Sync` precisely so it can be
+//!    hot method ids belong in that control's `OnceLock` table (a proven
+//!    pattern — `JMethodID` is `Send + Sync` precisely so it can be
 //!    cached), seeded from [`NativeCtx::env`].
 //! 3. **Local-frame discipline.** [`NativeCtx::with_frame`] is the wrapper a
 //!    hierarchy loop must run inside: fifty children built without it would
@@ -47,7 +47,7 @@
 //! call that seeded it.
 
 // This module is the *whole* helper surface the six controls, their
-// listeners, and (since p3-02) the public `NativeComponent` surface build on.
+// listeners, and the public `NativeComponent` surface build on.
 // Most of it now has a caller on Android; one item (`set_enabled`) stays
 // genuinely unused until a control needs the checked path rather than the
 // cached one — the attribute stays for that rather than growing per-item
@@ -272,8 +272,8 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
     ///
     /// The signature is compile-time checked (`jni_sig!`); a control setting
     /// the *same* property every frame should cache the `JMethodID` and use
-    /// `Env::call_method_unchecked` from [`Self::env`] instead, which is what
-    /// the spike measured at ~0.14–0.27 µs per crossing.
+    /// `Env::call_method_unchecked` from [`Self::env`] instead, which measured
+    /// at ~0.14–0.27 µs per crossing.
     ///
     /// # Errors
     /// [`NativeWidgetError::Platform`] when the method is missing or throws.
@@ -290,17 +290,15 @@ impl<'local, 'env> NativeCtx<'local, 'env> {
     }
 
     /// `parent.addView(child)` — hierarchy building, the piece no platform
-    /// factory offered before this runtime (RESEARCH-NATIVE-COMPONENT §What
-    /// the codebase already gives us).
+    /// factory offered before this runtime.
     ///
-    /// Load-bearing since p3-02: it is what
-    /// `crate::component::ComponentCtx::add_child` calls, and what Phase 0
-    /// spike 1 built 50 native children in ONE slot with (inside
-    /// [`Self::with_frame`], global refs back to zero after disposal —
-    /// `research/SPIKE.md`). **The platform lays the resulting subtree out**,
+    /// Load-bearing: it is what
+    /// `crate::component::ComponentCtx::add_child` calls, and what an earlier
+    /// device experiment built 50 native children in ONE slot with (inside
+    /// [`Self::with_frame`], global refs back to zero after disposal).
+    /// **The platform lays the resulting subtree out**,
     /// not frust: a `LinearLayout` parent measures and positions its own
-    /// children, and frust still sees one opaque slot with one rect
-    /// (`research/RESEARCH-P3.md` §4).
+    /// children, and frust still sees one opaque slot with one rect.
     ///
     /// The Java parent holds its own strong reference to `child`, so a child
     /// that is merely *attached* needs no global ref at all; a component that

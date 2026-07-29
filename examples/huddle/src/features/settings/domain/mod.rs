@@ -1,9 +1,8 @@
 //! `settings` domain — the design-language + brightness selection spine, the
-//! accent/notification vocabulary, and the [`SetTheme`] use case (huddle
-//! clean-architecture refactor, task 05). No repository trait: nothing here
-//! reads the shared store (verified — `grep -rn "mock::\|data::store"
-//! domain/ presentation/` finds no hits), so this feature has no `data/`
-//! layer.
+//! accent/notification vocabulary, and the [`SetTheme`] use case. No
+//! repository trait: nothing here reads the shared store (verified —
+//! `grep -rn "mock::\|data::store" domain/ presentation/` finds no hits), so
+//! this feature has no `data/` layer.
 
 pub mod accent;
 pub mod models;

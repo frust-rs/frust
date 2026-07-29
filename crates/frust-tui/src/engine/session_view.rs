@@ -17,7 +17,7 @@ use crate::supervise::{SessionId, SessionState};
 /// Ring-buffer cap for a session's retained log lines.
 ///
 /// Aligned by value with `frust-drive`'s `LINE_BUFFER_CAP` (the
-/// `spawn_streaming` producer-side cap added in TUI2-01): the drive already
+/// `spawn_streaming` producer-side cap): the drive already
 /// bounds what it *delivers* to 10_000 lines, and the engine bounds what it
 /// *retains* to the same figure so a long-lived session can never grow
 /// unbounded memory. The drive const is private to that crate, so this is a
@@ -205,8 +205,8 @@ pub struct SessionView {
     /// the log is missing lines the consumer couldn't keep up with, which the
     /// UI can surface. Mirrors `frust_drive::process::LineReceiver::dropped_lines`.
     pub dropped: u64,
-    /// The parsed `frust-perf` sparkline/stats panel for this session (T05 /
-    /// PLAN.md D5/D6) — fed one line at a time from [`Self::push_line`].
+    /// The parsed `frust-perf` sparkline/stats panel for this session —
+    /// fed one line at a time from [`Self::push_line`].
     pub perf: PerfPanel,
 }
 

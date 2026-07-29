@@ -1,7 +1,5 @@
-//! Filled by task 20-glyph-status-feedback (Tag).
-//!
-//! [`tag`]/[`TagView`]: a neutral, removable chip (`research/
-//! glyph-design-system.html`'s `.tag`/`.tag button` rules, retrieved
+//! [`tag`]/[`TagView`]: a neutral, removable chip (the Glyph design
+//! system's `.tag`/`.tag button` rules, retrieved
 //! 2026-07-21) — a raised-surface pill carrying a label and an optional
 //! trailing "×" remove affordance.
 //!

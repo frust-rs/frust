@@ -3,23 +3,25 @@
 // `platform/ios/FrustEmbedding/Sources/CFrustFFI/include/frust_ffi.h`.
 //
 // The symbol below is DECLARED here and DEFINED nowhere in this package: it
-// is a `#[no_mangle] extern "C"` export of `plugins/camera/src/apple.rs`
-// (task 07), linked in from the SAME Rust staticlib the consuming app's
+// is a `#[no_mangle] extern "C"` export of `plugins/camera/src/apple.rs`,
+// linked in from the SAME Rust staticlib the consuming app's
 // "Build Rust staticlib" run-script phase already produces for
 // `CFrustFFI`'s exports — a second C target resolving symbols from one
-// staticlib (task 08's two-package spike; see that task's completion
-// summary for what's proven on this host vs owed to the mac device gate,
-// task 14). An undefined symbol in this target's object file is by design
+// staticlib. This compiles on this host; whether the symbol actually
+// survives dependency-crate stripping through to the app's final Xcode
+// link (as opposed to falling back to the exports macro below) is
+// unverified pending a physical-device build. An undefined symbol in this
+// target's object file is by design
 // (Xcode links a package target to a relocatable `.o`, so it resolves at
 // the app's final link, same as `CFrustFFI`).
 //
 // Signature is fixed by contract — keep it in sync with
 // `plugins/camera/src/apple.rs`'s `frust_camera_session_handle` export.
-// ⚠️ Symbol-survival caveat (task 07's doc, restated here): a
+// ⚠️ Symbol-survival caveat: a
 // dependency-crate `#[no_mangle]` export may be stripped under
 // `lto = "fat"`/`strip = "symbols"`; the fallback is the
 // `frust_camera::ios_exports!()` macro the app crate can invoke instead —
-// which one survives is settled by the device gate (task 14).
+// which one survives is unverified without a physical-device build.
 
 #ifndef FRUST_CAMERA_H
 #define FRUST_CAMERA_H

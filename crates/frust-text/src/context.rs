@@ -1,7 +1,7 @@
 //! [`TextContext`]: the heavyweight, `!Sync` owner of parley's font and layout
 //! state.
 //!
-//! Created once and threaded through the app/render loop (spec §10.3). It holds
+//! Created once and threaded through the app/render loop. It holds
 //! a [`parley::FontContext`] (system font sources, loaded via fontique — Core
 //! Text on macOS with no registration) and a [`parley::LayoutContext`] scratch
 //! buffer reused across layout passes.
@@ -47,7 +47,7 @@ pub enum FontError {
 pub struct TextContext {
     font_ctx: parley::FontContext,
     layout_ctx: parley::LayoutContext<Brush>,
-    /// Width-independent shape cache (spec §10.3, phase 10.B): a bounded LRU of
+    /// Width-independent shape cache: a bounded LRU of
     /// shaped layouts keyed by (text, style), so a width change re-runs
     /// line-breaking only and repeated content shapes once. See
     /// [`crate::shape_cache`].
@@ -119,7 +119,7 @@ impl TextContext {
     /// The shape cache's instrumentation counters (shapes performed,
     /// line-break-only relayouts, full hits, evictions).
     ///
-    /// The observable hook the phase-10 text-cache tests assert against, and a
+    /// The observable hook the shape-cache tests assert against, and a
     /// perf signal otherwise. Plain scalar data — no `parley`/`vello`/`wgpu`
     /// type leaks through (scene-layer purity).
     pub fn shape_cache_stats(&self) -> ShapeCacheStats {
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn same_text_two_widths_shapes_once() {
-        // The core phase-10.B claim: shaping is width-independent. Laying out
+        // The core claim: shaping is width-independent. Laying out
         // the same text+style at two different widths shapes exactly once; the
         // width change re-runs line-breaking only, and a repeated width is a
         // full reuse.

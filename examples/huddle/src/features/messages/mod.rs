@@ -1,7 +1,6 @@
-//! The `messages` feature slice (huddle clean-architecture refactor, task 03):
-//! `domain` ← `data` / `domain` ← `presentation`, per the inward-only
-//! dependency rule (PLAN Design Decisions 1–3). The channel/DM message feed and
-//! its thread view — the app's largest slice.
+//! The `messages` feature slice: `domain` ← `data` / `domain` ←
+//! `presentation`, per the inward-only dependency rule. The channel/DM
+//! message feed and its thread view — the app's largest slice.
 //!
 //! The former flat `features/messages/mod.rs` (controller + use case + feed
 //! models) split across the layers:

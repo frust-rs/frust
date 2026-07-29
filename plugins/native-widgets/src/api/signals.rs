@@ -1,6 +1,6 @@
 //! Events-as-signals: wraps a decoded [`EventPayload`] into the plain,
 //! parameter-shaped callback an app supplies to a builder's `.on_press`/
-//! `.on_toggle`/`.on_change` (native-widgets Phase 1, p1-06) — the seam
+//! `.on_toggle`/`.on_change` — the seam
 //! [`crate::runtime::NativeRuntime::set_callback`] invokes on the platform
 //! main thread.
 //!
@@ -14,8 +14,9 @@
 //! Android's JNI listener callbacks and iOS's target-action both fire on the
 //! platform main thread — the same thread the rest of frust runs on — so an
 //! app closure that writes an `RwSignal` (`move |v| sig.set(v)`, the blessed
-//! idiom) wakes exactly one frust frame
-//! (`crate::runtime`'s crate doc: "the spike's exactly-one-frame chain").
+//! idiom) wakes exactly one frust frame — `frust-reactive`'s signal-write
+//! wake coalesces any number of writes between rebuilds into one
+//! (`docs/ARCHITECTURE.md`'s Signal-driven wake).
 //! `Send + Sync` is required only because [`EventCallback`]'s slot is typed
 //! that way (shared with a notional future multi-thread event source, and
 //! matching every other `Arc<dyn Fn(...) + Send + Sync>` this crate already

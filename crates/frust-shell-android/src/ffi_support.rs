@@ -86,7 +86,7 @@ pub(crate) enum Appearance {
 /// Map the `nativeSetAppearance` JNI boolean (Kotlin's
 /// `(resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
 /// Configuration.UI_MODE_NIGHT_YES`) into an [`Appearance`] — the pure core of
-/// the appearance state-machine transition task 08 wires up.
+/// the appearance state-machine transition.
 #[inline]
 pub(crate) fn appearance_from_dark(dark: bool) -> Appearance {
     if dark {
@@ -96,7 +96,7 @@ pub(crate) fn appearance_from_dark(dark: bool) -> Appearance {
     }
 }
 
-/// The back-press consume decision (device-parity task 06): given the
+/// The back-press consume decision: given the
 /// framework's current [`handles_back`](frust_reactive::handles_back) answer,
 /// whether the native `nativeOnBackPress` callback should consume this press
 /// (routing it into the app via `push_back_press`) and, equivalently, what
@@ -120,7 +120,7 @@ pub(crate) fn should_consume_back_press(handles_back: bool) -> bool {
 /// The indices arrive from Kotlin as **UTF-16 code units** (the Java-native unit
 /// for `Editable`/`Selection`) and are passed through the `AppTree`/shell seam
 /// *unchanged* — the seam itself is UTF-16 (see `EditingState`'s index-boundary
-/// rule); the focused widget / `frust-text` (task 52) converts them to Rust
+/// rule); the focused widget / `frust-text` converts them to Rust
 /// byte offsets at its own boundary. This helper only canonicalises the "none"
 /// sentinel: any out-of-domain negative (`< -1`, e.g. a corrupt platform value)
 /// is clamped to the single `-1` marker, so a bad value can never be misread as a
@@ -256,7 +256,7 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
 }
 
 // ---------------------------------------------------------------------
-// Platform-view command JSON (platform-views task 05): the host-testable
+// Platform-view command JSON: the host-testable
 // core of `nativePlatformViewCommands`.
 //
 // `frust-shell-common` (which owns `ViewCommand`/`PlatformViewState`) is only
@@ -271,7 +271,7 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
 
 /// A plain, `frust-shell-common`/JNI-free view of one platform-view command,
 /// ready to be serialised into the `nativePlatformViewCommands` JSON both
-/// mobile shells serve (platform-views task 05/06's frozen wire contract).
+/// mobile shells serve, byte-identically (a frozen wire contract).
 ///
 /// Rect/clip tuples are `(x, y, width, height)` **physical px** — already
 /// scaled at the mapping site ([`crate::jni_glue`]'s
@@ -374,8 +374,7 @@ fn platform_view_command_json(cmd: &PlatformViewCommandJson) -> String {
 
 /// Serialise a whole not-yet-acknowledged platform-view command backlog into
 /// the `nativePlatformViewCommands` JSON both mobile shells serve
-/// byte-identically (platform-views task 05's frozen contract, task 06's iOS
-/// shell mirrors it exactly):
+/// byte-identically (a frozen contract; the iOS shell mirrors it exactly):
 ///
 /// `{"generation":N,"commands":[{"op":"create","slot":N,"viewType":"...","params":"..."},`
 /// `{"op":"update","slot":N,"rect":[x,y,w,h],"clip":[x,y,w,h]|null,"visible":bool},`
@@ -399,7 +398,7 @@ pub(crate) fn build_platform_view_commands_json(
 }
 
 // ---------------------------------------------------------------------
-// Pipeline-cache persistence (task 13): pure path / diff / IO helpers.
+// Pipeline-cache persistence: pure path / diff / IO helpers.
 //
 // The Android shell persists wgpu's `PipelineCache` blob across launches so
 // second-and-later starts skip Vulkan shader-pipeline compilation (see
@@ -450,7 +449,7 @@ pub(crate) fn write_pipeline_cache_atomic(path: &Path, data: &[u8]) -> std::io::
 }
 
 // ---------------------------------------------------------------------
-// GPU pre-init join resolution (task 19): the adopt-vs-fallback decision.
+// GPU pre-init join resolution: the adopt-vs-fallback decision.
 //
 // `JNI_OnLoad` spawns a background thread that builds a `RenderContext` and
 // creates its device (see `crate::jni_glue`); `nativeInit` joins it. This is the
@@ -460,7 +459,7 @@ pub(crate) fn write_pipeline_cache_atomic(path: &Path, data: &[u8]) -> std::io::
 // ---------------------------------------------------------------------
 
 /// Resolve a joined `JNI_OnLoad` GPU pre-init outcome into the context
-/// `create_handle` uses (task 19). The `joined` argument encodes three cases the
+/// `create_handle` uses. The `joined` argument encodes three cases the
 /// caller has already flattened the thread-join into:
 ///
 /// - `Some(Some(ctx))` — the pre-init thread finished and produced a ready GPU
@@ -482,7 +481,7 @@ pub(crate) fn resolve_preinit<T>(joined: Option<Option<T>>, fresh: impl FnOnce()
 }
 
 /// Publish a surface (re)install's **resolved** translucency onto the shared,
-/// cross-thread flag the UI thread reads each frame (review finding M1).
+/// cross-thread flag the UI thread reads each frame.
 ///
 /// `resolved` is `Some(translucent)` for a successful install — the value
 /// `frust_render::SurfaceRenderer::surface_resolved_translucent` reports for
@@ -775,7 +774,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Platform-view command JSON (platform-views task 05)
+    // Platform-view command JSON
     // -----------------------------------------------------------------
 
     #[test]
@@ -934,10 +933,10 @@ mod tests {
         assert!(!platform_view_commands_up_to_date(5, 6));
     }
 
-    /// The AC's "ack compaction round-trip" host-tested at this crate's
+    /// The "ack compaction round-trip" host-tested at this crate's
     /// boundary: `frust_shell_common::PlatformViewState`'s own compaction
     /// logic is exhaustively unit-tested in that (non-target-gated) crate
-    /// (task 03's `acknowledge_compacts_the_backlog` and friends) — it isn't
+    /// (`acknowledge_compacts_the_backlog` and friends) — it isn't
     /// reachable from this crate's host build at all, since
     /// `frust-shell-common` is only a dependency of `frust-shell-android`
     /// under `cfg(target_os = "android")` (this crate's `Cargo.toml`). What
@@ -971,7 +970,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Pipeline-cache persistence helpers (task 13)
+    // Pipeline-cache persistence helpers
     // -----------------------------------------------------------------
 
     /// A fresh, unique temp directory for a round-trip I/O test. Not cleaned up

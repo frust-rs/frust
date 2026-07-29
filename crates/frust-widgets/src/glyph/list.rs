@@ -1,10 +1,8 @@
-//! Filled by task 24-glyph-content-widgets (GlyphList + GlyphListItem).
-//!
 //! [`glyph_list`]/[`GlyphListView`] + [`GlyphListItem`]: a bordered, rounded
 //! list container whose rows are **data** (not child views) — each a leading
 //! glyph box (a 32px raised square holding an accent glyph char) + a title/sub
 //! text column + an optional right-aligned meta + an optional chevron (the
-//! reference build's `§content` `.list`/`.list-item`).
+//! Glyph design system's `.list`/`.list-item`).
 //!
 //! Because the rows are the widget's own data, it shapes/paints every text run
 //! directly (like [`super::badge`]) and hit-tests presses itself: a press
@@ -271,8 +269,8 @@ impl<State: 'static> View<State> for GlyphListView<State> {
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
-        // Rows are reconciled positionally (v1: positional, per the task's
-        // keyed-rules note); any structural or content change rebuilds the row
+        // Rows are reconciled positionally (v1: no keyed-reconciliation
+        // support here); any structural or content change rebuilds the row
         // set wholesale and drops a mid-gesture capture.
         let changed = prev.items.len() != self.items.len()
             || prev

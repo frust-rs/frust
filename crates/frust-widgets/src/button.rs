@@ -1,4 +1,4 @@
-//! The `Button` interactive widget (spec §6.4): a labelled, rounded pressable
+//! The `Button` interactive widget: a labelled, rounded pressable
 //! that fires an app-state callback on release *inside* its bounds.
 //!
 //! [`button`] is the declarative view-fn; it produces a [`ButtonView`] carrying
@@ -7,9 +7,9 @@
 //! a `Down` inside captures the pointer and paints the pressed state; `Move`
 //! only updates the pressed visual (cursor-inside); the callback fires on `Up`
 //! *only if the release lands inside*. A `Cancel` (platform gesture steal) just
-//! clears the pressed state. See `research/RESEARCH.md`.
+//! clears the pressed state.
 //!
-//! # Style variants (task 22)
+//! # Style variants
 //!
 //! [`ButtonStyle`] (`.style(...)`) adds four variants beside the default
 //! [`ButtonStyle::Primary`] (today's only look, preserved byte-for-byte under
@@ -18,8 +18,8 @@
 //! (error border/text + an error-faint pressed wash), and [`ButtonStyle::Icon`]
 //! (square, `Secondary`-shaped — sized to fit an icon-only label). Each
 //! style's fill/border/label-role mapping is uniform across every design
-//! language (Glyph's own text-vs-fill accent split, task 15, already lands on
-//! these same M3 role names) — see [`ButtonStyle::resolve`]/
+//! language (Glyph's own text-vs-fill accent split already lands on these same
+//! M3 role names) — see [`ButtonStyle::resolve`]/
 //! [`ButtonStyle::label_role`]. `.small()` selects a reduced padding scale;
 //! `.loading(bool)` shows a rotating spinner in place of the label and
 //! suppresses `on_press` while shown (disabled semantics — see
@@ -30,22 +30,21 @@
 //!
 //! Precedence stays token-resolved (`docs/CODE_STANDARDS.md`'s Theming
 //! conventions): every fill/border/label color below is `theme > fallback`
-//! (this task adds no per-instance color override, so the explicit tier of
-//! the usual three-tier precedence has nothing to win over yet — a future
-//! task adding one would slot in above the theme resolution in
+//! (there is no per-instance color override yet, so the explicit tier of
+//! the usual three-tier precedence has nothing to win over — a future
+//! addition would slot in above the theme resolution in
 //! [`ButtonStyle::resolve`]).
 //!
-//! # Press-feedback scale (task 22)
+//! # Press-feedback scale
 //!
 //! A `Down` scales the button to `0.96` over the theme's `durations.instant`
 //! (100ms Glyph/Cupertino, 50ms M3) under the `exit` easing curve; `Up`/
 //! `Cancel` springs it back to `1.0` via the theme's `default_spatial`
 //! spring. [`PressAnim`] is a from-scratch inline of `motion::animated`'s
-//! private `ImplicitAnim` lazy-retarget shape (task 12) — that type is
-//! module-private to `motion::animated`, so this task's note ("inline the
-//! controller approach rather than wrapping, if simpler") is followed
-//! literally rather than exposing it. Like every animated widget in this
-//! crate, the driver only advances **during paint**
+//! private `ImplicitAnim` lazy-retarget shape — that type is
+//! module-private to `motion::animated`, so it's inlined directly here
+//! rather than exposed via a wrapper, for simplicity. Like every animated
+//! widget in this crate, the driver only advances **during paint**
 //! (`docs/CODE_STANDARDS.md`'s Theming & Animation Conventions) — the event
 //! pass (`Down`/`Up`/`Cancel`) only records the *target* scale, since
 //! `EventCtx` carries no theme to resolve a `Timing` from.
@@ -74,8 +73,8 @@ const RADIUS: f64 = 6.0;
 /// Horizontal padding around the label, in logical px. No `Theme` spacing
 /// token exists to resolve this from (`frust-theme` publishes a shape
 /// scale and a type scale, not a padding/spacing scale) — hoisted here as a
-/// named constant per task 6f-10's metric-hardcode-migration pass rather than
-/// left as a bare literal, pending a future spacing-token addition.
+/// named constant rather than left as a bare literal, pending a future
+/// spacing-token addition.
 const PAD_X: f64 = 12.0;
 /// Vertical padding around the label, in logical px. See [`PAD_X`]'s doc
 /// comment — no suitable `Theme` token exists for this metric either.
@@ -121,16 +120,16 @@ const BORDER_WIDTH: f64 = 1.0;
 const BORDER_TOLERANCE: f64 = 0.1;
 
 /// The fixed multiplier applied to a style's resting fill's RGB to synthesize
-/// its pressed fill under a theme (a v1 stand-in reproducing today's press
-/// contrast; M3 tonal state-layers land in phase 6c). `0.82` darkens by
-/// roughly the same amount today's `FILL`→`FILL_PRESSED` step does.
+/// its pressed fill under a theme (a stand-in reproducing today's press
+/// contrast, pending a future M3 tonal state-layers addition). `0.82` darkens
+/// by roughly the same amount today's `FILL`→`FILL_PRESSED` step does.
 const PRESSED_DARKEN: f32 = 0.82;
 
-/// The press-feedback pivot scale while pressed (task 22's `0.96`).
+/// The press-feedback pivot scale while pressed.
 const PRESSED_SCALE: f64 = 0.96;
 /// The rest (unpressed) scale.
 const REST_SCALE: f64 = 1.0;
-/// Unthemed-fallback press-feedback duration (task 22's "100ms"), applied on
+/// Unthemed-fallback press-feedback duration, applied on
 /// both directions when no theme is threaded. A theme instead resolves
 /// `motion.durations.instant`, which differs per baseline (50ms M3, 100ms
 /// Glyph/Cupertino — see `frust-theme::motion`'s module docs).
@@ -182,9 +181,9 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 /// A view-held, typed press callback (erased to [`crate::ErasedCallback`] on build).
 type OnPress<State> = Rc<dyn Fn(&mut State)>;
 
-/// Visual style variant for [`Button`] (task 22). Additive: the default
-/// preserves today's only look byte-for-byte under every theme (acceptance
-/// criterion 1). See the [module docs](self) for the full role-mapping intent.
+/// Visual style variant for [`Button`]. Additive: the default
+/// preserves today's only look byte-for-byte under every theme.
+/// See the [module docs](self) for the full role-mapping intent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ButtonStyle {
     /// Filled `primary` background + `on_primary` label — today's only style.
@@ -245,7 +244,7 @@ impl ButtonStyle {
     /// this style. Themed: per-style `ColorScheme` roles (see the
     /// [module docs](self)). Unthemed: this style's own fallback constants —
     /// [`ButtonStyle::Primary`]'s exactly reproduce [`FILL`]/[`FILL_PRESSED`],
-    /// preserving today's pre-theme rendering (acceptance criterion 1).
+    /// preserving today's pre-theme rendering byte-for-byte.
     fn resolve(self, theme: Option<&Theme>) -> StylePaint {
         match theme {
             Some(theme) => {
@@ -340,7 +339,7 @@ fn resolve_press_timing(theme: Option<&Theme>, pressed: bool) -> Timing {
 
 /// An inlined implicit-scale driver for the press-feedback animation — the
 /// same lazy-retarget shape `motion::animated`'s module-private `ImplicitAnim`
-/// uses (task 12), reproduced here per this module's inlining note (see the
+/// uses, reproduced here per this module's inlining note (see the
 /// [module docs](self)). `Down`/`Up`/`Cancel` (the event pass, which carries
 /// no theme) only call [`PressAnim::set_pressed`]; `paint` (which does carry
 /// one) resolves the direction's [`Timing`] and calls [`PressAnim::advance`],
@@ -433,13 +432,13 @@ pub fn Button<State: 'static, F: Fn(&mut State) + 'static>(
 }
 
 impl<State: 'static> ButtonView<State> {
-    /// Select the visual style (default [`ButtonStyle::Primary`], task 22).
+    /// Select the visual style (default [`ButtonStyle::Primary`]).
     pub fn style(mut self, style: ButtonStyle) -> Self {
         self.style = style;
         self
     }
 
-    /// Use the reduced `.small()` padding scale (task 22).
+    /// Use the reduced `.small()` padding scale.
     pub fn small(mut self) -> Self {
         self.small = true;
         self
@@ -447,7 +446,7 @@ impl<State: 'static> ButtonView<State> {
 
     /// Show a loading spinner in place of the label while `loading` is
     /// `true`, suppressing `on_press` and reporting disabled semantics for as
-    /// long as it's shown (task 22).
+    /// long as it's shown.
     pub fn loading(mut self, loading: bool) -> Self {
         self.loading = loading;
         self
@@ -477,7 +476,7 @@ pub struct ButtonWidget {
     loading: bool,
     /// The press-feedback scale driver — see the [module docs](self).
     press: PressAnim,
-    /// The loading-spinner rotation controller (task 22) — always `repeat()`ing
+    /// The loading-spinner rotation controller — always `repeat()`ing
     /// once started in `build`; only advanced/painted while `loading`.
     spinner: AnimationController,
 }
@@ -689,8 +688,7 @@ impl Widget for ButtonWidget {
             if !reduce_motion {
                 self.spinner.advance(ctx.frame_time());
                 // The loading-spinner is a perpetual decorative loop — its exact
-                // cadence is imperceptible, so the mobile frame gate may pace it
-                // (task 08).
+                // cadence is imperceptible, so the mobile frame gate may pace it.
                 ctx.request_frame_paced();
             }
             self.paint_spinner(ctx, scene, ink);
@@ -762,7 +760,7 @@ impl Widget for ButtonWidget {
         // A button is a single a11y node (Role::Button) labelled by its text; it
         // does not expose its inner label as a separate child node. It advertises
         // the Click action it fires on release — unless loading, which reports
-        // disabled semantics instead (task 22).
+        // disabled semantics instead.
         ctx.push_node(Role::Button, |node| {
             node.set_label(self.label_text.as_str());
             if self.loading {
@@ -882,8 +880,8 @@ mod tests {
 
     /// A recording scene that captures each rounded rect's `(radius, color)`
     /// plus stroke calls' `(width, color)` and push_transform/pop_transform
-    /// counts — extended from the original `RRectRecorder` (task 22) to cover
-    /// the new border/press-scale paint paths.
+    /// counts — extended from the original `RRectRecorder` to cover
+    /// the border/press-scale paint paths.
     #[derive(Default)]
     struct RRectRecorder {
         rrects: Vec<(f64, Color)>,
@@ -966,7 +964,7 @@ mod tests {
         assert_eq!(state.presses, 1);
     }
 
-    // --- task 22: style variants, small/loading, press-scale --------------
+    // --- Style variants, small/loading, press-scale ------------------------
 
     fn styled_widget(style: ButtonStyle) -> ButtonWidget {
         let view = button::<Counter, _>("go", |s: &mut Counter| s.presses += 1).style(style);
@@ -976,10 +974,10 @@ mod tests {
 
     #[test]
     fn default_style_is_primary_and_matches_pre_task22_rendering() {
-        // Acceptance criterion 1: default-style rendering is byte-identical to
-        // today's under both no theme and M3 — proven against the exact
-        // pre-existing assertions above (same constants, same theme roles),
-        // plus an explicit `ButtonStyle::default()` identity check here.
+        // Default-style rendering is byte-identical to today's under both no
+        // theme and M3 — proven against the exact pre-existing assertions
+        // above (same constants, same theme roles), plus an explicit
+        // `ButtonStyle::default()` identity check here.
         assert_eq!(ButtonStyle::default(), ButtonStyle::Primary);
         let mut w = widget();
         assert_eq!(w.style, ButtonStyle::Primary);
@@ -1039,10 +1037,10 @@ mod tests {
 
     #[test]
     fn per_style_fill_border_label_hold_under_glyph_dark_light_and_m3() {
-        // Acceptance criterion 2: the same style -> role mapping (task 22's
-        // whole point, per the module docs' "uniform across languages") reads
-        // straight off `ColorScheme` fields rather than hardcoding a per-
-        // baseline table, so this asserts it against three concrete baselines
+        // The same style -> role mapping (per the module docs' "uniform
+        // across languages") reads straight off `ColorScheme` fields rather
+        // than hardcoding a per-baseline table, so this asserts it against
+        // three concrete baselines
         // rather than just M3 (already covered field-by-field by the
         // `secondary`/`ghost`/`danger`_style_* tests above).
         let baselines = [
@@ -1128,13 +1126,12 @@ mod tests {
 
     /// `reduce_motion` freezes the loading spinner wherever it currently sits
     /// and stops requesting frames — the same skip-animation shape
-    /// `material::loading_indicator`'s morph loop uses (catalog-animation-
-    /// performance bug task 10: without this, an always-`.loading(true)`
-    /// button — e.g. a disabled-look demo — spins forever regardless of the
-    /// header animations-off toggle forcing `Theme.motion.reduce_motion`).
-    /// The spinner requests frames via the paced (CosmeticLoop) class, letting
-    /// the mobile frame gate throttle it to the theme's `cosmetic_loop_rate`
-    /// (task f2, following task 08's pattern).
+    /// `material::loading_indicator`'s morph loop uses: without this, an
+    /// always-`.loading(true)` button — e.g. a disabled-look demo — spins
+    /// forever regardless of a header toggle forcing
+    /// `Theme.motion.reduce_motion`. The spinner requests frames via the
+    /// paced (CosmeticLoop) class, letting the mobile frame gate throttle it
+    /// to the theme's `cosmetic_loop_rate`.
     #[test]
     fn loading_spinner_freezes_and_stops_requesting_frames_under_reduce_motion() {
         let mut w = widget();
@@ -1167,7 +1164,7 @@ mod tests {
     #[test]
     fn press_scale_timeline_down_mid_up_cancel() {
         // Down -> mid-anim scale < 1.0 -> Up restores; a fresh Down -> Cancel
-        // also restores without firing (acceptance criterion 3). Every
+        // also restores without firing. Every
         // `dispatch` below drives the real event path (which itself calls
         // `PressAnim::set_pressed`); the retained driver is then advanced
         // directly at chosen frame times — mirrors `motion::animated`'s test

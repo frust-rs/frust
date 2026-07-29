@@ -1,4 +1,4 @@
-//! The `Radio` interactive widget (spec §6.4): a labelled circular indicator
+//! The `Radio` interactive widget: a labelled circular indicator
 //! that reports a requested selection but is **not** its own source of truth.
 //!
 //! [`radio`] produces a [`RadioView`] carrying the current `selected` value
@@ -14,7 +14,7 @@
 //!
 //! **No group container in v1.** A radio group is app-level: a column of
 //! [`radio`] views sharing one piece of app state that records which is
-//! selected (see the module doc example above and `research/RESEARCH.md`§7).
+//! selected (see the module doc example above).
 //! There is no `RadioGroup` widget here — compare
 //! [`crate::material::button_group`], whose `Role::RadioGroup` semantics
 //! container is a *different*, already-shipped single-select control.

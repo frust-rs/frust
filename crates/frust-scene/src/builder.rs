@@ -20,7 +20,7 @@ impl<'a> SceneBuilder<'a> {
     /// Wraps `scene` for recording, starting with an identity transform.
     ///
     /// The transform stack's backing allocation lives on `scene` itself
-    /// (task 10.E, PLAN.md Phase 10.E) so it's reused across every call
+    /// so it's reused across every call
     /// instead of reallocating a fresh `Vec` per frame — reset here to
     /// `[Affine::IDENTITY]`, identical to a freshly allocated stack.
     pub fn new(scene: &'a mut Scene) -> Self {

@@ -1,5 +1,5 @@
 //! [`ActivityController`] — the mentions feed's async load + local read-state
-//! view model (huddle clean-architecture refactor, task 04; moved verbatim
+//! view model (huddle clean-architecture refactor; moved verbatim
 //! apart from repo threading from the former flat `features/activity/mod.rs`).
 //!
 //! Embeds a [`ControllerCore`] by composition (the clean-signals controller
@@ -39,9 +39,9 @@
 //! `Arc<dyn ActivityRepository + Send + Sync>` via `use_context` the moment it
 //! lazily constructs the controller (production's composition root,
 //! `crate::HuddleApp::init`, publishes it once) — the same cleaner,
-//! `cfg(test)`-free injection task 02 establishes for `ChannelsController`
-//! (no external test crate constructs `ActivityController` directly — see the
-//! completion summary). Internal unit tests below construct
+//! `cfg(test)`-free injection `ChannelsController` already establishes
+//! (no external test crate constructs `ActivityController` directly).
+//! Internal unit tests below construct
 //! [`ActivityController::new`] directly with a `#[cfg(test)]`-only
 //! `FakeActivityRepository` instead (see that module's docs).
 
@@ -131,7 +131,7 @@ impl ActivityController {
                 const { RefCell::new(None) };
         }
         INSTANCE.with(|cell| {
-            // Self-heal (task 22 hardening): a cached controller whose `rows`
+            // Self-heal: a cached controller whose `rows`
             // signal was disposed by a prior owner (reused test thread) returns
             // `None` from `try_get_untracked` and is rebuilt (load re-kicked)
             // rather than handed back to panic on the next read — the same guard

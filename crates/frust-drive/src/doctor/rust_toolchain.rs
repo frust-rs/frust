@@ -1,6 +1,6 @@
 use super::{DoctorCtx, Status, Validation, Validator};
 
-/// Minimum supported `rustc` version (workspace `rust-version`, spec §4).
+/// Minimum supported `rustc` version (matches the workspace `rust-version`).
 const MIN_RUST_VERSION: (u64, u64, u64) = (1, 88, 0);
 
 pub struct RustToolchainValidator;

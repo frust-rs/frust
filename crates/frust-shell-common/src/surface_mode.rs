@@ -1,15 +1,13 @@
-//! HOST-declared translucent-surface slot (task 03; renamed under
-//! review-fix-2 t01, review M3):
+//! HOST-declared translucent-surface slot:
 //! [`declare_host_translucent_surface`]/[`SurfaceModeWatcher::current`], plus
 //! its outward-facing sibling — the RESOLVED slot
-//! ([`publish_resolved_surface_mode`]/[`resolved_surface_mode`], native-widgets
-//! task p1-01) an app or plugin reads to learn what the platform actually gave
+//! ([`publish_resolved_surface_mode`]/[`resolved_surface_mode`]) an app or
+//! plugin reads to learn what the platform actually gave
 //! us, including a refusal (`translucencyRefused`).
 //!
 //! # The gap this closes
 //!
-//! Platform-view compositing (Mode B — see
-//! `workflow/plans/features/frust-platform-views/PLAN.md`) needs the GPU
+//! Platform-view compositing (Mode B) needs the GPU
 //! surface itself to be created with an alpha channel (Android's `EGLConfig`,
 //! iOS's `CAMetalLayer.isOpaque`) so a native sibling view placed *behind* it
 //! can show through wherever frust paints nothing. That surface-format choice
@@ -20,7 +18,7 @@
 //! calls [`declare_host_translucent_surface`] during startup, from the same
 //! branch that already set `SurfaceHolder`'s `PixelFormat.TRANSLUCENT` /
 //! `CAMetalLayer.isOpaque = false` on the native window itself — and each
-//! shell's surface-creation path (task 04) reads
+//! shell's surface-creation path reads
 //! [`SurfaceModeWatcher::current`] **before** configuring the surface.
 //!
 //! # Layering choice
@@ -33,13 +31,14 @@
 //! "last seen" cursor; `current` is an associated function, a plain peek at
 //! the process-wide slot.
 //!
-//! # This latch is a HOST DECLARATION, not the outcome (review M3)
+//! # This latch is a HOST DECLARATION, not the outcome
 //!
 //! Setting this latch is a claim by the host glue that the native window is
 //! *already* configured translucent — **calling it from anywhere else, or
 //! without that window configuration already in place, is a host-template
-//! bug** (review M3's exact vector: an app opting in from Rust alone with no
-//! matching host window config). That is why [`declare_host_translucent_surface`]
+//! bug** (the exact failure vector this guards against: an app opting in
+//! from Rust alone with no matching host window config). That is why
+//! [`declare_host_translucent_surface`]
 //! is not re-exported past `frust-shell-common` — see the Callers section.
 //!
 //! Declaring it doesn't fully decide the outcome either. Each shell
@@ -47,12 +46,12 @@
 //! `frust-render` resolves *that* against the platform's advertised
 //! `CompositeAlphaMode`s at configure time — falling back to an opaque
 //! swapchain (with a `log::warn!`) when the platform advertises no translucent
-//! mode, and the GPU-tier blit fallback (review M2) can further refuse a
+//! mode, and the GPU-tier blit fallback can further refuse a
 //! premultiply-expecting mode it can't reproduce. **The resolved truth lives
 //! at a different seam**: `frust_render::SurfaceRenderer::surface_resolved_translucent`,
 //! read by each shell after every surface (re)install and threaded into
-//! `RenderRoot::set_surface_translucent` (review finding M1) — that seam
-//! still governs paint, unchanged by this rename.
+//! `RenderRoot::set_surface_translucent` — that seam
+//! still governs paint.
 //!
 //! So: read this latch to decide what to *request*; never to decide whether to
 //! paint the Mode B contract (a transparent base clear, a `platform_view`
@@ -61,7 +60,7 @@
 //! `DestOut`-punches every slot rect on an OPAQUE swapchain — black
 //! rectangles instead of a graceful degrade to Mode A.
 //!
-//! # Callers (review M3's fix)
+//! # Callers
 //!
 //! [`declare_host_translucent_surface`] is called **only** by
 //! `frust-shell-android::jni_glue`'s `native_set_surface_mode` and
@@ -70,7 +69,7 @@
 //! branch it sets `PixelFormat.TRANSLUCENT`/`isOpaque = false` and arranges
 //! the native-sibling z-order. It is deliberately **not** re-exported from
 //! the `frust` facade: an app Rust call with no matching host window config
-//! was review M3's reachable black-rectangle vector, so that capability was
+//! is a reachable black-rectangle vector, so that capability was
 //! removed rather than documented around.
 //!
 //! # Latch contract (one-way, v1)
@@ -81,7 +80,7 @@
 //! deliberate, not an oversight: the surface format is fixed at creation (the
 //! platform APIs above expose no supported runtime toggle), so "reverting"
 //! would mean destroying and recreating the whole surface — out of scope for
-//! v1, and nothing in the plan needs it (an app either wants platform-view
+//! v1, and no current use case needs it (an app either wants platform-view
 //! compositing for the process's lifetime, or it doesn't). A future version
 //! needing a live flip would have to plumb a full surface-recreation
 //! round-trip through each shell's `SurfacePhase` state machine
@@ -92,7 +91,7 @@
 //! re-resolves it, and a failed install clears it — which is exactly why the
 //! shells re-read it per frame rather than caching it at construction.
 //!
-//! # The RESOLVED slot (native-widgets task p1-01)
+//! # The RESOLVED slot
 //!
 //! Everything above is the *inward* half: what the host declared, read by the
 //! shells to decide what to request. [`publish_resolved_surface_mode`]/
@@ -173,7 +172,7 @@ static SURFACE_MODE: Mutex<SurfaceMode> = Mutex::new(SurfaceMode::Opaque);
 /// on Android, `ffi_glue::set_surface_mode` on iOS), from the same branch
 /// that actually configured the window — see the module docs' Callers
 /// section. Calling this without that window configuration in place is a
-/// host-template bug, not a supported app-Rust opt-in (review M3).
+/// host-template bug, not a supported app-Rust opt-in.
 ///
 /// Callable from any thread (see the module docs' Thread contract), and
 /// idempotent — calling it more than once, or after the surface already
@@ -351,9 +350,9 @@ mod tests {
         assert_eq!(SurfaceModeWatcher::current(), SurfaceMode::Opaque);
     }
 
-    /// Acceptance criterion #2 (review-fix-2 t01): the default is Opaque
+    /// The default is Opaque
     /// with no host call at all — same assertion as `defaults_to_opaque`
-    /// above, spelled out explicitly since it's the acceptance-mandated
+    /// above, spelled out explicitly since it's the important
     /// case (no `declare_host_translucent_surface()` call anywhere in this
     /// test body).
     #[test]
@@ -396,9 +395,9 @@ mod tests {
         assert_eq!(SurfaceModeWatcher::current(), SurfaceMode::Translucent);
     }
 
-    // --- The RESOLVED slot (native-widgets task p1-01) ---------------------
+    // --- The RESOLVED slot ---------------------------------------------------
 
-    /// Acceptance: nothing published yet reads `Unknown` — the desktop/host
+    /// Nothing published yet reads `Unknown` — the desktop/host
     /// case, and every mobile launch before the first surface resolution.
     #[test]
     fn resolved_defaults_to_unknown() {

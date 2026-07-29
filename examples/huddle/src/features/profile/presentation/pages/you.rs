@@ -1,5 +1,5 @@
 //! You tab (`/you`) — the current user's card and the entry into the settings
-//! stack (Huddle showcase, task 15).
+//! stack.
 //!
 //! The header is the current user's card: a hero-wrapped avatar (tag
 //! `avatar-u1`, the shared-element source for the `/user/:id` profile page), the
@@ -111,7 +111,7 @@ fn avatar_block(initials: String, fill: Color, on_fill: Color) -> AnyView<Huddle
     let tile =
         any(SizedBox(Some(56.0), Some(56.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
     // Center the monogram with the SizedBox+Align idiom (a bare `Align` under a
-    // `Stack` shrink-wraps to the origin — RESEARCH.md issue 1;
+    // `Stack` shrink-wraps to the origin;
     // `profile::presentation::pages::profile`'s `initials_tile` is the
     // precedent).
     let label = any(SizedBox(Some(56.0), Some(56.0)).child(Align(

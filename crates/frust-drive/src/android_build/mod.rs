@@ -1,15 +1,14 @@
-//! Android release build pipeline (spec §12.5, PLAN.md decision 2):
-//! preflight (reusing `android_run`'s checks, minus the device-only `adb`
-//! one) → merge-write `android/local.properties` → gate release builds on a
-//! keystore → compute the `assemble<Flavor><Mode>`/`bundle<Flavor><Mode>`
-//! Gradle task and its `-P` properties → run `./gradlew` → glob-verify and
-//! report the produced artifact(s).
+//! Android release build pipeline: preflight (reusing `android_run`'s
+//! checks, minus the device-only `adb` one) → merge-write
+//! `android/local.properties` → gate release builds on a keystore → compute
+//! the `assemble<Flavor><Mode>`/`bundle<Flavor><Mode>` Gradle task and its
+//! `-P` properties → run `./gradlew` → glob-verify and report the produced
+//! artifact(s).
 
-// `pub(crate)`, not private: task 66's `android_run::run` reuses these
-// helpers directly (task-name/`-P`-property computation, the
-// local.properties merge-write, the release-signing gate, artifact
-// discovery) rather than duplicating the naming/path logic for `frust
-// run`'s Android pipeline.
+// `pub(crate)`, not private: `android_run::run` reuses these helpers
+// directly (task-name/`-P`-property computation, the local.properties
+// merge-write, the release-signing gate, artifact discovery) rather than
+// duplicating the naming/path logic for `frust run`'s Android pipeline.
 pub(crate) mod artifacts;
 pub(crate) mod local_properties;
 pub(crate) mod signing;
@@ -24,7 +23,7 @@ use crate::build_info::BuildInfo;
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::process::{ProcessRunner, tail_lines};
 
-/// The artifact `frust build apk`/`appbundle` requests (spec §12.5).
+/// The artifact `frust build apk`/`appbundle` requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AndroidArtifact {
     /// A `--split-per-abi` (one APK per ABI) or fat APK build, for the
@@ -55,9 +54,9 @@ pub struct BuiltArtifacts {
 /// it to the tty. The CLI (`commands::build`) passes an `on_line` that just
 /// `println!`s each line, preserving its stdout verbatim.
 ///
-/// **Frozen signature** (task 61) — do not change without updating every
-/// caller (`commands::build`, `frust-tui`'s build session) and this doc
-/// comment. The `on_line` sink was added by the tty-garbling fix.
+/// **Frozen signature** — do not change without updating every caller
+/// (`commands::build`, `frust-tui`'s build session) and this doc comment.
+/// The `on_line` sink was added by the tty-garbling fix.
 pub fn build(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
@@ -72,7 +71,7 @@ pub fn build(
 /// `JAVA_HOME` resolution (`preflight::run_without_device_checks`) can be
 /// exercised with a `crate::doctor::FakeEnv` in tests instead of the real
 /// process environment — kept private since [`build`]'s frozen signature
-/// (task 61) has no room for a fifth parameter.
+/// has no room for a fifth parameter.
 fn build_with_env(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
@@ -101,11 +100,11 @@ fn build_with_env(
 
     signing::check_release_signing(&android_dir, info.mode)?;
 
-    // Release-lean preflight (followup F2): a legacy app that predates the
-    // `lean` feature has it dropped here — with a one-time warning routed
-    // through this print-free core's `on_line` sink — so `cargo ndk` is never
-    // handed an undeclared `--features lean` (cargo's opaque hard error). A
-    // declaring app keeps byte-identical features and warns nothing.
+    // Release-lean preflight: a legacy app that predates the `lean` feature
+    // has it dropped here — with a one-time warning routed through this
+    // print-free core's `on_line` sink — so `cargo ndk` is never handed an
+    // undeclared `--features lean` (cargo's opaque hard error). A declaring
+    // app keeps byte-identical features and warns nothing.
     let (features, warning) =
         crate::cargo_manifest::resolve_release_features(project_dir, info.mode);
     if let Some(warning) = warning {
@@ -275,11 +274,11 @@ mod tests {
 
     #[test]
     fn stale_leftover_artifact_errors_instead_of_being_reported_as_built() {
-        // Followup F2: AGP writes every APK shape into the same output
-        // directory, so a leftover from a previous, differently-shaped
-        // build (e.g. a stale split APK) sitting next to the fresh fat APK
-        // this build produced must be caught as an error, never silently
-        // printed as "Built" alongside/instead of the real artifact.
+        // AGP writes every APK shape into the same output directory, so a
+        // leftover from a previous, differently-shaped build (e.g. a stale
+        // split APK) sitting next to the fresh fat APK this build produced
+        // must be caught as an error, never silently printed as "Built"
+        // alongside/instead of the real artifact.
         let dir = unique_project_dir("stale-leftover");
         let android_dir = dir.join("android");
         let out_dir = android_dir.join("app/build/outputs/apk/debug");
@@ -467,10 +466,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Followup F2, legacy direction: a `--release` build against an app whose
-    /// Cargo.toml declares no `lean` feature drops it and warns once through
-    /// `on_line`, and the Gradle invocation carries NO `-Pfrust.cargoFeatures`
-    /// prop — never an undeclared `--features lean` cargo would reject. The
+    /// Legacy direction: a `--release` build against an app whose Cargo.toml
+    /// declares no `lean` feature drops it and warns once through `on_line`,
+    /// and the Gradle invocation carries NO `-Pfrust.cargoFeatures` prop —
+    /// never an undeclared `--features lean` cargo would reject. The
     /// gradlew fixture is registered WITHOUT the cargoFeatures prop, so a
     /// regression that kept `lean` would surface via the absent warning.
     #[test]
@@ -511,7 +510,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Followup F2, declaring direction: an app that declares `lean` keeps it —
+    /// Declaring direction: an app that declares `lean` keeps it —
     /// byte-identical `-Pfrust.cargoFeatures=bGVhbg==` (base64 "lean") — and
     /// warns nothing. The gradlew fixture is registered WITH the cargoFeatures
     /// prop; a regression that dropped `lean` would produce a shorter argv that

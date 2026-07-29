@@ -1,12 +1,12 @@
-//! layer-bench — Phase-0 composite-cost spike bench for the retained-layers
-//! feature (`workflow/plans/features/frust-retained-layers/`).
+//! layer-bench — a composite-cost spike bench for the retained-layers
+//! feature.
 //!
 //! ============================ THROWAWAY LAB ============================
 //! This is a **measurement lab, not shipped API surface.** It deliberately
 //! reaches below the `frust` facade into `frust-core`/`frust-scene`
 //! (`docs/CODE_STANDARDS.md`'s documented escape hatch) to drive vello's
-//! composite primitives directly, so the spike can answer RESEARCH.md's one
-//! unanswered question with device numbers: does compositing pre-rendered
+//! composite primitives directly, so the spike can answer the one
+//! open question with device numbers: does compositing pre-rendered
 //! textures beat re-rasterizing the equivalent vector content in vello 0.9?
 //! Nothing here is meant to become framework code — the real feature (if the
 //! spike says GO) builds a proper `LayerCache` in `frust-render`.
@@ -145,7 +145,7 @@ fn app_logic(state: &mut AppState) -> AnyView<AppState> {
     }))
 }
 
-/// The root [`Component`] (spec §5.5): forces a dark theme and seeds the
+/// The root [`Component`]: forces a dark theme and seeds the
 /// reactive state from the compile-time/runtime configuration.
 #[derive(Default)]
 pub struct LayerBenchApp;
@@ -168,7 +168,7 @@ impl Component for LayerBenchApp {
     }
 }
 
-// The generated app's sole entry point (spec §5.5/§10): one line binds
+// The generated app's sole entry point: one line binds
 // `LayerBenchApp` to all three platforms — the Android JNI exports
 // (`target_os = "android"` only), the iOS C-ABI exports (self-gated to
 // `target_os = "ios"`), and (on desktop) the hidden `__frust_main` that

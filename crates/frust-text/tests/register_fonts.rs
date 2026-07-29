@@ -1,5 +1,5 @@
-//! Integration tests for [`frust_text::TextContext::register_fonts`] (spec
-//! §10.3's font-registration seam, glyph-design-system task 01).
+//! Integration tests for [`frust_text::TextContext::register_fonts`]
+//! (the runtime font-registration seam).
 //!
 //! Test fonts (`tests/fonts/`) are a subsetted copy of "Tuffy" — a
 //! public-domain font (see `tests/fonts/TUFFY-LICENSE.txt`) also used as a

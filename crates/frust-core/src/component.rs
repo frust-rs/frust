@@ -1,4 +1,4 @@
-//! Component: Flutter's `StatefulWidget` analog (spec §5, phase 5.5).
+//! Component: Flutter's `StatefulWidget` analog.
 //!
 //! A [`Component`] is a piece of UI with *retained local state* that lives in
 //! the widget tree, a per-component reactive [`Owner`] (context scoping +
@@ -27,14 +27,14 @@
 //! owner scopes `provide_context`/`use_context` and `on_cleanup`, and is
 //! disposed explicitly at teardown (and defensively on `Drop`).
 //!
-//! # What this phase does NOT do
+//! # What `Component` does NOT do (yet)
 //!
-//! Per-component tracked/reactive scopes and rebuild skipping are deferred
-//! (Phase 7): a component **always** re-runs `build` on rebuild because its
+//! Per-component tracked/reactive scopes and rebuild skipping are not
+//! implemented: a component **always** re-runs `build` on rebuild because its
 //! local state may have changed even when the component value compares equal.
 //! Root-level components are never torn down (the root widget lives for the
 //! app's life), so a root component's `on_cleanup`/owner disposal never runs —
-//! acceptable and documented in the plan risks.
+//! a known, accepted limitation.
 
 use std::any::Any;
 
@@ -187,7 +187,7 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         // The outer `_prev` ComponentView is intentionally unused: the component
         // always re-runs `build` because its retained local state may have
         // changed even when the component value is equal (tracked-scope skipping
-        // is deferred to Phase 7).
+        // is not implemented).
         let owner = element.owner.clone();
         owner.with(|| {
             let new_view = self.component.build(&mut element.state);

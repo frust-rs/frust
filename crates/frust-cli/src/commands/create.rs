@@ -1,4 +1,4 @@
-//! `frust create` — data-driven project scaffolding (spec §12.3).
+//! `frust create` — data-driven project scaffolding.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -19,11 +19,11 @@ pub struct CreateArgs {
     pub template_dir: Option<String>,
     /// `--frust-path` (undocumented, development only).
     pub frust_path: Option<String>,
-    /// `--deeplink-scheme` (task 07).
+    /// `--deeplink-scheme`.
     pub deeplink_scheme: Option<String>,
-    /// `--deeplink-host` (task 07).
+    /// `--deeplink-host`.
     pub deeplink_host: Option<String>,
-    /// `--arch` (task 09): a `scaffold::KNOWN_ARCHES` tag string (e.g.
+    /// `--arch`: a `scaffold::KNOWN_ARCHES` tag string (e.g.
     /// `"clean-signals"`), or `None` for the default template. Kept a plain
     /// `String` rather than `crate::cli::ArchArg` so `scaffold` stays
     /// decoupled from `clap` (mirrors every other field here).
@@ -81,7 +81,7 @@ pub fn run(args: CreateArgs) -> Result<u8> {
 }
 
 /// Resolves `--frust-path`, defaulting to this repo's `crates/frust`
-/// (spec §12.3: a temporary mechanism until Frust crates are
+/// (a temporary mechanism until Frust crates are
 /// published), derived from `frust-cli`'s own compile-time manifest
 /// directory.
 fn resolve_frust_path(overridden: Option<&str>) -> String {
@@ -185,7 +185,7 @@ mod tests {
         }
     }
 
-    /// Task 07: an invalid `--deeplink-scheme` (a full URL, not a bare
+    /// An invalid `--deeplink-scheme` (a full URL, not a bare
     /// scheme) is rejected before any file is written.
     #[test]
     fn run_rejects_invalid_deeplink_scheme_before_writing_any_file() {

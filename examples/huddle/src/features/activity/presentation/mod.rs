@@ -1,5 +1,5 @@
 //! The activity feature's presentation layer (huddle clean-architecture
-//! refactor, task 04).
+//! refactor).
 
 pub mod controllers;
 pub mod pages;
