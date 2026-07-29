@@ -9,8 +9,8 @@
 //! `WindowCompat.getInsetsController(...).hide(systemBars())`, or
 //! `FrustViewController.swift`'s `prefersStatusBarHidden`) — there was no
 //! app-facing Rust API and no cross-platform channel to drive one from. This
-//! module is the Rust-side half; tasks 09 (Android)/10 (iOS) are the platform
-//! delivery, and task 14 threads it into the shell wiring.
+//! module is the Rust-side half; each mobile shell's own FFI layer decodes
+//! and applies it, threaded into that shell's per-frame wiring.
 //!
 //! # Layering choice
 //!
@@ -28,14 +28,14 @@
 //! Like [`crate::theme_override::set_app_theme`], [`set_system_ui_mode`] is
 //! callable from any thread — a plain `Mutex` guards the slot, and each
 //! shell only *observes* it once per frame on its own UI thread via
-//! [`SystemUiWatcher::poll`] (or the FFI-side [`encoded_state`] peek for
-//! tasks 09/10 — see below).
+//! [`SystemUiWatcher::poll`] (or the FFI-side [`encoded_state`] peek —
+//! see below).
 //!
 //! # FFI encoding
 //!
 //! [`encoded_state`] is the single source of the wire format both mobile
-//! shells' FFI getters export verbatim (tasks 09/10); tasks 14/17 own the
-//! Kotlin/Swift decoders against this doc. The packed `u64` is
+//! shells' FFI getters export verbatim; each shell's own Kotlin/Swift
+//! decoder is built against this doc. The packed `u64` is
 //! `(generation << 8) | mode_bits`:
 //!
 //! - low byte, mode discriminant: `0` = [`SystemUiMode::EdgeToEdge`], `1` =
@@ -54,8 +54,7 @@
 //!
 //! # Platform behavior differences
 //!
-//! (See `workflow/plans/features/glyph-refinements/research/RESEARCH.md`
-//! §6.) This module models the full Flutter-parity vocabulary, but neither
+//! This module models the full Flutter-parity vocabulary, but neither
 //! platform can express all five modes faithfully:
 //!
 //! - **Android 16 (API 36+) forces edge-to-edge** and silently ignores every
@@ -141,7 +140,7 @@ pub fn set_system_ui_mode(mode: SystemUiMode) {
 /// A cheap peek at the slot's current `(generation, mode)` pair, for a
 /// caller that wants the raw state without consuming/tracking a
 /// [`SystemUiWatcher`]'s "last seen" cursor — e.g. [`encoded_state`], or an
-/// FFI glue module (tasks 09/10) polling from the platform side.
+/// FFI glue module polling from the platform side.
 pub fn current_system_ui_mode() -> (u64, SystemUiMode) {
     let slot = SYSTEM_UI.lock().unwrap_or_else(|e| e.into_inner());
     (slot.generation, slot.mode)
@@ -149,8 +148,8 @@ pub fn current_system_ui_mode() -> (u64, SystemUiMode) {
 
 /// Pack the slot's current `(generation, mode)` into a single `u64` for an
 /// FFI getter to return verbatim — see the module docs' FFI-encoding
-/// section for the exact bit layout. Tasks 09/10 export this unchanged;
-/// tasks 14/17 implement the Kotlin/Swift decoders against it.
+/// section for the exact bit layout. Each mobile shell exports this
+/// unchanged; its own Kotlin/Swift decoder is built against it.
 pub fn encoded_state() -> u64 {
     let (generation, mode) = current_system_ui_mode();
     let low: u64 = match mode {

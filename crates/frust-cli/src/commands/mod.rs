@@ -1,4 +1,4 @@
-//! Command dispatch (spec §12.1).
+//! Command dispatch.
 
 pub mod build;
 pub mod clean;
@@ -16,8 +16,8 @@ use frust_drive::process::RealProcessRunner;
 ///
 /// The real [`RealProcessRunner`] is constructed here, in one place, and
 /// injected into every drive-touching handler's `run_in` core (the CLI's
-/// sole `Real` construction site — see PLAN.md's injection-normalization
-/// note); `create` takes no runner (it only writes files).
+/// sole `Real` construction site); `create` takes no runner (it only writes
+/// files).
 pub fn dispatch(cli: Cli) -> Result<u8> {
     let verbose = cli.verbose > 0;
     let runner = RealProcessRunner;

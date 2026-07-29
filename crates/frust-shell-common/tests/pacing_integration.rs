@@ -1,11 +1,10 @@
-//! Integration suite (bug plan `catalog-animation-performance`, task 09)
-//! proving pacing (task 06), tick-class aggregation (task 04), and the whole-
+//! Integration suite proving pacing, tick-class aggregation, and the whole-
 //! frame skip gate compose without starvation or stuck frames, and that the
 //! two kill switches (`FRUST_NO_FRAME_GATE`/`FRUST_NO_ANIM_PACING`) isolate
 //! their own mechanism.
 //!
 //! Culling itself — a widget's `request_frame_class` never bubbling out of a
-//! `PaintCtx` at all because `Flex` skipped painting it (task 07) — is proven
+//! `PaintCtx` at all because `Flex` skipped painting it — is proven
 //! at the widget layer in `frust-widgets/tests/cull_pacing.rs`; this suite
 //! treats "offscreen (culled)" as the resulting shell-observable fact
 //! ([`Frame::loop_visible`] `false`): nothing painted, nothing bubbled.
@@ -14,8 +13,8 @@
 //! aggregation feeding [`FrameGate`] here is genuine, not a hand-built
 //! `FrameInputs`.
 //!
-//! Matrix dimensions covered (`research/RESEARCH.md` §C / task 09's spec):
-//! the five tick sources named in the task (paced loop onscreen, paced loop
+//! Matrix dimensions covered:
+//! the five tick sources (paced loop onscreen, paced loop
 //! offscreen/culled, transition, input event, signal write) × {pacing
 //! on/off (the `anim_pacing` flag, mirroring `FRUST_NO_ANIM_PACING`), gate
 //! enabled/disabled (mirroring `FRUST_NO_FRAME_GATE`)} — decomposed into
@@ -54,7 +53,7 @@ struct Frame {
     /// A `TickClass::Transition` widget (a page transition/fling/caret
     /// blink) is active this tick — if the frame actually paints, it
     /// requests an unpaced continuation, dominating a concurrent
-    /// `loop_visible` per task 04's max-lattice.
+    /// `loop_visible` per the `TickClass` max-lattice aggregation rule.
     transition_active: bool,
     /// An event/signal trigger reaching the gate this tick, independent of
     /// paint.
@@ -73,7 +72,7 @@ impl Frame {
         ..Frame::IDLE
     };
 
-    /// The loop scrolled offscreen: task 07's paint-time culling means it is
+    /// The loop scrolled offscreen: paint-time culling means it is
     /// never invoked this tick, so nothing bubbles — the fact proven
     /// directly (via a real `Flex`) in `cull_pacing.rs`. Same shape as
     /// [`Frame::IDLE`]; named separately for the matrix's readability.
@@ -196,9 +195,9 @@ fn run_stream(
 /// (outside this suite's scope — see `FrameInputs::change_flags_pending`)
 /// that bootstraps a fresh animation's first frame. Every cadence assertion
 /// below observes an already-playing loop/transition, the steady-state case
-/// the task's matrix cares about; the from-a-cold-start bootstrap is a
-/// `change_flags_pending`-driven `Run` task 04/06's own unit tests already
-/// cover and is out of scope for this composition suite.
+/// this matrix cares about; the from-a-cold-start bootstrap is a
+/// `change_flags_pending`-driven `Run` already covered by this crate's own
+/// unit tests and is out of scope for this composition suite.
 fn seeded(frame: Frame) -> PaintOutcome {
     paint_for(frame)
 }
@@ -439,7 +438,7 @@ fn transition_dominates_a_concurrent_paced_loop_until_it_settles_then_cadence_dr
     let mut gate = FrameGate::with_flags(true, true);
 
     // Phase 1 (250ms): a transition and a paced loop both request every tick
-    // — the max-lattice aggregation (task 04) makes every one of these ticks
+    // — the max-lattice aggregation makes every one of these ticks
     // Transition-class, so the gate must never pace it away.
     let (transition_runs, outcome_after_transition) = run_stream(
         &mut gate,

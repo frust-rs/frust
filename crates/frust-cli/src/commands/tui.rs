@@ -1,9 +1,8 @@
-//! `frust tui` — launches the TUI workbench (Phase 1 wiring).
+//! `frust tui` — launches the TUI workbench.
 //!
 //! The TUI provides an advanced interactive interface for managing Frust
-//! projects. It handles project detection and supervision in later phases;
-//! for now it shows a welcome screen outside a project and the workbench
-//! inside one (see frust-tui's Phase 1 scope in PLAN.md D2).
+//! projects: project detection and session supervision, showing a welcome
+//! screen outside a project and the full workbench inside one.
 
 use anyhow::Result;
 

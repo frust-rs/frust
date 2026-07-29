@@ -18,7 +18,7 @@
 //! dependency**: the reactive "did any tracked signal change" answer arrives
 //! as the plain [`FrameInputs::signals_dirty`] bool, which the shells fill
 //! themselves by calling `frust_reactive::ReactiveRuntime::take_signals_dirty`
-//! (task 07) after their per-frame `pump_local` (that crate's documented
+//! after their per-frame `pump_local` (that crate's documented
 //! pump-first ordering contract). This keeps shell-common's compiles-everywhere,
 //! reactive-free charter intact (see `docs/ARCHITECTURE.md`'s Layer
 //! Dependencies).
@@ -136,10 +136,10 @@ impl FrameDecision {
 /// runs the frame if **any** is `true`, with two deliberate deltas noted
 /// in the field docs:
 ///
-/// - **Semantics adapter needs** (§C's last item) is *not* a field here:
-///   semantics-publish gating stays shell-side (Android is already
-///   generation-gated via `AppTree::semantics_if_changed`; iOS is handled in
-///   task 18), so it never gates whole-frame production.
+/// - **Semantics adapter needs** is *not* a field here:
+///   semantics-publish gating stays shell-side (both Android and iOS are
+///   generation-gated via `AppTree::semantics_if_changed`), so it never gates
+///   whole-frame production.
 /// - **[`resumed_recently`](Self::resumed_recently)** is the added input for
 ///   the resume warmup (see [`WARMUP_FRAMES`]); the gate also drives this same
 ///   condition internally via [`FrameGate::note_resumed`], so a shell may
@@ -149,25 +149,25 @@ impl FrameDecision {
 /// [`FrameGate::decide`] turns into a [`FrameDecision::Skip`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrameInputs {
-    /// §C: *tracked-signal dirty*. A tracked signal changed since the last
-    /// frame. Source: `frust_reactive::ReactiveRuntime::take_signals_dirty`
-    /// (task 07), read by the shell *after* its per-frame `pump_local` per
+    /// *tracked-signal dirty*. A tracked signal changed since the last
+    /// frame. Source: `frust_reactive::ReactiveRuntime::take_signals_dirty`,
+    /// read by the shell *after* its per-frame `pump_local` per
     /// that crate's pump-first ordering contract.
     pub signals_dirty: bool,
-    /// §C: *events dispatched since last frame*. A pointer/scroll/key/IME
+    /// *events dispatched since last frame*. A pointer/scroll/key/IME
     /// event reached `RenderRoot::event` between frames. Source: a shell-side
     /// latch set by the `nativeOnTouch`/IME entry points and cleared each
-    /// frame (see task 17).
+    /// frame.
     pub events_since_last_frame: bool,
-    /// §C: *active pointer capture*. A gesture is mid-drag and the captured
+    /// *active pointer capture*. A gesture is mid-drag and the captured
     /// widget may animate/track the pointer. Source:
     /// `AppTree`/`RenderRoot::is_pointer_captured`.
     pub pointer_capture_active: bool,
-    /// §C: *focus/IME active surface*. Something holds keyboard/IME focus, so
+    /// *focus/IME active surface*. Something holds keyboard/IME focus, so
     /// caret/selection chrome may need repainting. Source:
     /// `RenderRoot::is_focus_active` (and/or a published `ime_state`).
     pub focus_or_ime_active: bool,
-    /// §C: *last paint's `needs_frame`*. The previous paint advanced an
+    /// *last paint's `needs_frame`*. The previous paint advanced an
     /// animation/transition and asked for another frame. Source:
     /// `PaintOutcome::needs_frame`, latched by the shell from the prior
     /// frame's `AppTree::paint` return.
@@ -181,21 +181,21 @@ pub struct FrameInputs {
     /// signal [`FrameGate::decide_paced`] throttles to the theme's cadence. Any
     /// concurrent transition/input clears it, so the frame runs immediately.
     pub last_needs_frame_paced_only: bool,
-    /// §C: *pending `ChangeFlags`*. A rebuild (or `set_theme`) left layout/
+    /// *pending `ChangeFlags`*. A rebuild (or `set_theme`) left layout/
     /// paint dirtiness undrained. Source:
     /// [`AppTree::has_pending_change_flags`](crate::AppTree::has_pending_change_flags)
     /// (a non-draining peek, so a skipped frame preserves the flags).
     pub change_flags_pending: bool,
-    /// §C: *theme-override/appearance change*. The app-facing theme override
+    /// *theme-override/appearance change*. The app-facing theme override
     /// or the platform light/dark preference changed this tick. Source: the
     /// shell's per-frame `ThemeOverrideWatcher`/appearance poll (see
     /// [`crate::theme_override`]).
     pub theme_or_appearance_changed: bool,
-    /// §C: *surface resize/recreation*. The GPU surface was created, resized,
+    /// *surface resize/recreation*. The GPU surface was created, resized,
     /// or recreated (rotation/backgrounding). Source: the shell's
     /// `nativeOnSurfaceChanged`/`frust_resize` path.
     pub surface_changed_or_resized: bool,
-    /// §C: *accessibility actions*. A platform `accesskit_*` action was
+    /// *accessibility actions*. A platform `accesskit_*` action was
     /// performed this tick, mutating state. Source: the shell's a11y-action
     /// drain feeding `AppTree::perform_accessibility_action`.
     pub a11y_action_performed: bool,

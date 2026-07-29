@@ -1,4 +1,4 @@
-//! The clap half of the build-flag funnel (spec §12.1/12.2).
+//! The clap half of the build-flag funnel.
 //!
 //! `frust-drive` owns the clap-free [`frust_drive::build_info::BuildArgs`]
 //! and the [`frust_drive::build_info::BuildInfo`] validation it feeds; this

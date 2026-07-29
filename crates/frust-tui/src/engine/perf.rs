@@ -1,5 +1,5 @@
-//! Perf-line parsing + the per-session sparkline panel (PLAN.md D5/D6 —
-//! "the unique Frust advantage"): tolerant parsing of `frust-perf` log lines
+//! Perf-line parsing + the per-session sparkline panel: tolerant parsing of
+//! `frust-perf` log lines
 //! (`frust-shell-common::perf`'s summary/raw/startup line grammar, also
 //! documented in `benchmarks/PROTOCOL.md`) into a bounded per-session ring of
 //! recent frame timings plus the latest summary/startup snapshot.
@@ -159,7 +159,7 @@ fn parse_startup(fields: &str) -> StartupSummary {
     StartupSummary { spans }
 }
 
-/// The per-session perf panel state (PLAN.md D5/D6): a bounded ring of
+/// The per-session perf panel state: a bounded ring of
 /// recent per-frame totals (microseconds, from `frust-perf raw` lines —
 /// only ever populated when `FRUST_TRACE_RAW` is on), plus the latest
 /// periodic summary/startup line seen (the summary is always present once

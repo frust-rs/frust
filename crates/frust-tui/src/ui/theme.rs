@@ -4,24 +4,23 @@
 //!
 //! # Sampled brand palette (source of truth)
 //!
-//! TrueColor values are anchored on `docs/assets/branding/` and the design
-//! workbook (`workflow/plans/features/frust-tui/design/tui-design-workbook.html`,
-//! section B0). Hex recorded per token below; the branding PNGs were sampled
+//! TrueColor values are anchored on `docs/assets/branding/`. Hex recorded
+//! per token below; the branding PNGs were sampled
 //! 2026-07-20 (downscaled + dominant-color histogram):
 //!
 //! | Token     | Hex       | Source |
 //! |-----------|-----------|--------|
-//! | `bg`      | `#0D0B09` | near-black background (workbook B0; sampled play-store icon field `#1F1B19` charcoal) |
-//! | `surface` | `#1A1612` | charcoal surface (workbook; play-store `#1F1B19`) |
-//! | `overlay` | `#26201A` | raised overlay / hover wash (workbook) |
-//! | `primary` | `#E1571E` | rust-orange (workbook; gear logo sampled `#E5671C`) |
-//! | `accent`  | `#F0854F` | soft-orange accent / hovered border (workbook) |
-//! | `fg`      | `#EDE5D8` | cream foreground (workbook; badger-stripe off-white) |
-//! | `muted`   | `#9B9080` | muted taupe (workbook) |
-//! | `success` | `#10B981` | ready/green (workbook) |
-//! | `warn`    | `#EAB308` | warn/amber (workbook) |
-//! | `error`   | `#F43F5E` | error/red (workbook) |
-//! | `border`  | `#3A322A` | dim charcoal rule (workbook `#3D362E`/`#3A322A`) |
+//! | `bg`      | `#0D0B09` | near-black background (sampled play-store icon field `#1F1B19` charcoal) |
+//! | `surface` | `#1A1612` | charcoal surface (play-store `#1F1B19`) |
+//! | `overlay` | `#26201A` | raised overlay / hover wash |
+//! | `primary` | `#E1571E` | rust-orange (gear logo sampled `#E5671C`) |
+//! | `accent`  | `#F0854F` | soft-orange accent / hovered border |
+//! | `fg`      | `#EDE5D8` | cream foreground (badger-stripe off-white) |
+//! | `muted`   | `#9B9080` | muted taupe |
+//! | `success` | `#10B981` | ready/green |
+//! | `warn`    | `#EAB308` | warn/amber |
+//! | `error`   | `#F43F5E` | error/red |
+//! | `border`  | `#3A322A` | dim charcoal rule (`#3D362E`/`#3A322A`) |
 //!
 //! The play-store icon's brighter `#CE422B` red-orange and the gear logo's
 //! `#E5671C` bracket the chosen `primary` `#E1571E`.

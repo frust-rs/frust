@@ -1,10 +1,10 @@
-//! The create-project wizard modal (PLAN.md D6b): a shadowed, centered popup
+//! The create-project wizard modal: a shadowed, centered popup
 //! over the welcome/workbench base layer, stepping name → directory →
 //! architecture → an off-thread scaffold. The base layer is rendered with a
 //! *suppressed* `MouseCtx` (see `crate::ui::render`), so only this modal's
-//! regions are live while it is open — the D4 base-layer suppression.
+//! regions are live while it is open — the base-layer suppression.
 //!
-//! Layering (D2): renders `&CreateWizard` and only *registers* interaction; it
+//! Layering: renders `&CreateWizard` and only *registers* interaction; it
 //! never mutates the engine.
 
 use ratatui::Frame;

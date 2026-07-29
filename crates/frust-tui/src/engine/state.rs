@@ -22,7 +22,7 @@ use crate::supervise::SessionId;
 /// that is ever read. Keeps a repo-root walk instant regardless of tree size.
 const MAX_DETECT_DEPTH: u32 = 2;
 
-/// Sidebar drag-to-resize bounds (T04 / D4). Kept **by value** in sync with
+/// Sidebar drag-to-resize bounds. Kept **by value** in sync with
 /// `crate::ui::layout::SIDEBAR_WIDTH` (the default) — the engine stays
 /// render-free, so the two layers share the number, not a symbol (the
 /// `LOG_LINE_CAP` cross-layer-constant precedent).
@@ -39,18 +39,19 @@ pub fn clamp_sidebar_width(width: u16) -> u16 {
 
 /// The top-level screen the workbench is showing.
 ///
-/// The skeleton has two: the [`Screen::Welcome`] splash (no project detected)
-/// and the [`Screen::Workbench`] shell (a project is open). Phase 2 adds the
-/// project switcher, sessions, modals, etc.
+/// This enum has two: the [`Screen::Welcome`] splash (no project detected)
+/// and the [`Screen::Workbench`] shell (a project is open). The project
+/// switcher, sessions, and modals all layer on as separate optional state on
+/// `AppState` rather than additional `Screen` variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    /// Run-from-anywhere splash with the single Create button (D6b).
+    /// Run-from-anywhere splash with the single Create button.
     Welcome,
-    /// The titlebar/sidebar/main/status workbench shell (static in Phase 1).
+    /// The titlebar/sidebar/main/status workbench shell.
     Workbench,
 }
 
-/// The log search/filter overlay state (D5's log-view search/filter).
+/// The log search/filter overlay state.
 ///
 /// While `open`, keystrokes edit `query` live; committing (`Enter`) promotes it
 /// to `filter`, which restricts the visible log lines to those that match.
@@ -77,7 +78,7 @@ pub struct AppState {
     pub hover: Option<RegionId>,
     /// Whether the Create button is showing its pressed chrome.
     pub create_pressed: bool,
-    /// The auto-dismiss toast stack rendered in the status-bar area layer (D5).
+    /// The auto-dismiss toast stack rendered in the status-bar area layer.
     /// Bounded + drop-oldest, aged on the frame tick — see
     /// [`super::toast::Toasts`].
     pub toasts: Toasts,
@@ -87,9 +88,9 @@ pub struct AppState {
     pub palette: Option<Palette>,
     /// The active project root (`projects.first()`, the one the main area
     /// shows), if any. `None` on the welcome screen. Kept alongside
-    /// `projects` for the call sites that only care about "the" open project
-    /// (Phase 2 adds a full switcher letting the user change which one is
-    /// active).
+    /// `projects` for the call sites that only care about "the" open
+    /// project — the full switcher (`project_switcher_open`) lets the user
+    /// change which one is active.
     pub project_root: Option<PathBuf>,
     /// Every project root the bounded [`detect`] walk found, in a
     /// deterministic (name-sorted) order; `projects[0]` is `project_root`.
@@ -115,20 +116,20 @@ pub struct AppState {
     /// The run-config modal, when open (`r`/`Enter` from the devices panel).
     /// While `Some`, it captures input and suppresses background mouse regions.
     pub run_config: Option<RunConfig>,
-    /// Whether the titlebar project-switcher dropdown is open (F5 + D6b).
+    /// Whether the titlebar project-switcher dropdown is open.
     /// While `true`, it captures input and suppresses background mouse
-    /// regions, the same D4 base-layer suppression the run-config modal uses.
+    /// regions, the same base-layer suppression the run-config modal uses.
     pub project_switcher_open: bool,
     /// The highlighted row while the switcher is open (`↑`/`↓` move it,
     /// `Enter` switches to it); meaningless while closed.
     pub project_switcher_cursor: usize,
     /// The create-project wizard, when open (the welcome Create button, or the
     /// workbench "New project" action / `n`). While `Some`, it captures input
-    /// and suppresses background mouse regions — the same D4 base-layer
+    /// and suppresses background mouse regions — the same base-layer
     /// suppression the run-config modal uses.
     pub create_wizard: Option<CreateWizard>,
-    /// The doctor panel's cached validator results + titlebar chip source
-    /// (TUI2-07). Populated by a startup preflight and refreshed on demand;
+    /// The doctor panel's cached validator results + titlebar chip source.
+    /// Populated by a startup preflight and refreshed on demand;
     /// present regardless of whether the panel itself is open.
     pub doctor: DoctorState,
     /// Whether the doctor panel is open (`d` from the workbench, or the
@@ -145,7 +146,7 @@ pub struct AppState {
     /// background mouse regions like the other modals.
     pub clean_confirm: Option<PathBuf>,
     /// The cached component-level toolchain report + titlebar-chip rollup
-    /// source (D6a). Populated by a startup preflight and re-run after a
+    /// source. Populated by a startup preflight and re-run after a
     /// guided-fix session; present regardless of whether the wizard is open.
     pub bootstrap: BootstrapState,
     /// The bootstrap wizard, when open (the `i` key, or a titlebar
@@ -153,51 +154,53 @@ pub struct AppState {
     /// background mouse regions like the other modals.
     pub bootstrap_wizard: Option<BootstrapWizard>,
     /// The Add Plugin dialog, when open (`a`, the sidebar "Add plugin" action,
-    /// or the palette — `frust-secure-storage` Phase 7). While `Some`, it
+    /// or the palette — `frust-secure-storage`). While `Some`, it
     /// captures input and suppresses background mouse regions like the other
     /// modals.
     pub add_plugin: Option<AddPluginDialog>,
-    /// The sidebar width (columns), drag-resizable via the splitter (T04 / D4).
-    /// Clamped to [`SIDEBAR_MIN_WIDTH`]..=[`SIDEBAR_MAX_WIDTH`]. In-memory only
-    /// for now — persistence is T05's settings task (see its requirement 3).
+    /// The sidebar width (columns), drag-resizable via the splitter.
+    /// Clamped to [`SIDEBAR_MIN_WIDTH`]..=[`SIDEBAR_MAX_WIDTH`]. This field is
+    /// the in-memory copy; the persisted value round-trips through
+    /// `tui.toml` (see `persist::load_settings`/`persist::save_sidebar_width`).
     pub sidebar_width: u16,
     /// Whether crossterm mouse capture is on (`Alt+m` / palette toggle). Off
     /// hands the terminal its native text selection back; keyboard operation
-    /// stays complete either way. In-memory only — T05 persists the preference.
+    /// stays complete either way. This field is the in-memory copy; the
+    /// preference is persisted via `persist::save_mouse_capture`.
     pub mouse_capture: bool,
     /// The drag currently in progress (a splitter or scrollbar-thumb grab),
-    /// tracked from press to release so move/up events route to it (T04 / D4).
+    /// tracked from press to release so move/up events route to it.
     pub active_drag: Option<DragKind>,
-    /// The open right-click context menu, if any (T04 / D4). While `Some`, it
+    /// The open right-click context menu, if any. While `Some`, it
     /// captures keyboard nav and suppresses the base layer's mouse regions like
     /// a modal, but renders as a small popup over the (still-visible) workbench.
     pub context_menu: Option<ContextMenu>,
-    /// The follow-tail state a freshly-registered session tab starts in (T05
-    /// settings persistence) — updated whenever the user toggles follow-tail
+    /// The follow-tail state a freshly-registered session tab starts in
+    /// (persisted via `tui.toml` settings) — updated whenever the user toggles follow-tail
     /// on the active session (`Message::ToggleFollow`), so it always reflects
     /// the most recently chosen preference. Loaded from `tui.toml` at startup
     /// (see [`super::persist::load_settings`]); `true` by default.
     pub follow_tail_default: bool,
     /// Whether the sidebar renders as a toggleable floating overlay instead
     /// of its normal inline column — the narrow-terminal responsive
-    /// breakpoint (T05 / D5). Meaningless (ignored) above
+    /// breakpoint. Meaningless (ignored) above
     /// [`crate::ui::layout::NARROW_WIDTH`]; `false` by default so a narrow
     /// terminal starts with the sidebar collapsed, not covering the log view.
     pub sidebar_overlay_open: bool,
-    /// The keyboard/help overlay (`?`), when open (T05 / D5).
+    /// The keyboard/help overlay (`?`), when open.
     pub help_open: bool,
 }
 
 impl AppState {
     /// Build the initial model from the current working directory, merged
-    /// with the persisted recent-projects list (PLAN.md D6b): a bounded walk
+    /// with the persisted recent-projects list: a bounded walk
     /// (see [`Self::detect`]) finds every `frust.toml` marker under the cwd,
     /// then [`super::persist::merge_recent_and_detected`] prepends any
     /// still-existing recently-opened project not already found, deduped —
     /// "recent first, deduped". A cwd-detected project stays the active one
     /// (unsurprising `cd`-into-a-project-then-run behavior); with none
     /// detected, the most-recently-opened project opens instead of the
-    /// welcome screen — "from any directory" per PLAN.md D6b. Only the
+    /// welcome screen — "from any directory". Only the
     /// welcome screen (no active project either way) skips persistence
     /// entirely.
     pub fn new() -> Self {
@@ -332,7 +335,7 @@ impl AppState {
     }
 
     /// The sessions grouped by project, preserving first-seen project order and
-    /// each project's session order — the tab-bar / sidebar grouping (D5). Each
+    /// each project's session order — the tab-bar / sidebar grouping. Each
     /// group is `(project_root, [(flat tab index, &session)])`, where the flat
     /// index is the position in `sessions` (what `SelectTab`/`active_session`
     /// use).

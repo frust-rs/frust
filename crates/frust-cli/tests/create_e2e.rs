@@ -1,5 +1,5 @@
 //! End-to-end test: `frust create`'s output actually builds against the
-//! real `frust` facade crate (spec Phase 1 exit criterion, task 09).
+//! real `frust` facade crate.
 //!
 //! `frust-cli` ships as a binary-only crate (no `lib` target), so this
 //! integration test drives the compiled `frust` binary via
@@ -80,9 +80,9 @@ fn scaffolded_project_builds_against_the_real_facade() {
     let _ = std::fs::remove_dir_all(&dest);
 }
 
-/// Task 09 acceptance criterion 1: `frust create --arch clean-signals`
-/// renders a project whose source actually compiles, on a dev machine with
-/// this checkout plus the sibling `clean-signals-rs` checkout present.
+/// `frust create --arch clean-signals` renders a project whose source
+/// actually compiles, on a dev machine with this checkout plus the sibling
+/// `clean-signals-rs` checkout present.
 ///
 /// Ignored for the same reason as the default-template e2e test above (full
 /// dependency graph compile from a cold target dir), **and** additionally

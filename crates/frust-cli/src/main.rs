@@ -1,4 +1,4 @@
-//! The `frust` CLI binary (spec §12).
+//! The `frust` CLI binary.
 
 mod build_args;
 mod cli;

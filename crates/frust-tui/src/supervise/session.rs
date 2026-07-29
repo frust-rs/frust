@@ -1,6 +1,6 @@
 //! The value vocabulary of a supervised session: its identity
 //! ([`SessionId`]), the parameters that define it ([`SessionSpec`] =
-//! project × device × mode, PLAN D6b), its lifecycle [`SessionState`]
+//! project × device × mode), its lifecycle [`SessionState`]
 //! machine, the [`SessionEvent`]s the [`super::Supervisor`] forwards into
 //! the engine's channel, and the [`LaunchPlan`] a spec resolves into before
 //! it is spawned through the drive's `spawn_streaming` seam.
@@ -30,8 +30,8 @@ pub enum DeviceTarget {
     Device(Device),
 }
 
-/// The parameters that identify and configure a supervised session, per PLAN
-/// D6b: `(project root × device target × BuildInfo)`.
+/// The parameters that identify and configure a supervised session:
+/// `(project root × device target × BuildInfo)`.
 ///
 /// A spec resolves into a [`LaunchPlan`] via [`SessionSpec::launch_plan`]
 /// before the supervisor spawns it.
@@ -56,12 +56,13 @@ impl SessionSpec {
     /// threading the build mode into the cargo profile arg and every
     /// `--define` into the spawned env (the same funnel `frust run`'s desktop
     /// fallback uses — see `docs/ARCHITECTURE.md`'s CLI flow). **Device**
-    /// targets are *not* a single streamable command (their real path is the
-    /// drive's multi-phase build → install → launch → logcat pipeline); that
-    /// wiring lands in TUI2-04, which either hands a purpose-built
-    /// [`LaunchPlan`] to [`super::Supervisor::start_with_plan`] or adds a
-    /// multi-spec entry. Calling `launch_plan` for a device target today
-    /// returns [`LaunchError::DeviceLaunchUnwired`].
+    /// targets are *not* a single streamable command — their real path is the
+    /// drive's multi-phase build → install → launch → logcat pipeline
+    /// ([`DevicePlan`] handed to [`super::Supervisor::start_device`]), which
+    /// [`super::Supervisor::start`] dispatches to directly rather than going
+    /// through this method. Calling `launch_plan` on a device target
+    /// directly (bypassing `Supervisor::start`) returns
+    /// [`LaunchError::DeviceLaunchUnwired`].
     pub fn launch_plan(&self) -> Result<LaunchPlan, LaunchError> {
         match &self.target {
             DeviceTarget::Desktop => Ok(self.desktop_plan()),
@@ -88,7 +89,7 @@ impl SessionSpec {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        // Verified plan gap (PLAN.md D6): the run-config modal builds
+        // A gap this closes: the run-config modal builds
         // `BuildInfo` directly (`RunConfig::build_info`) rather than through
         // `BuildInfo::from_args`, which is what auto-injects
         // `FRUST_TRACE=1` for a `--profile` build — bypassing that
@@ -130,8 +131,7 @@ pub struct DevicePlan {
 /// A concrete, spawnable streaming invocation: the program, its args, the
 /// working directory, and any extra environment for the child only. This is
 /// what the supervisor feeds to `ProcessRunner::spawn_streaming`; keeping it
-/// owned (rather than borrowed) lets it cross onto the spawn thread and lets
-/// TUI2-04 build device plans however it needs.
+/// owned (rather than borrowed) lets it cross onto the spawn thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchPlan {
     /// The program to spawn (e.g. `cargo`).
@@ -148,9 +148,12 @@ pub struct LaunchPlan {
 /// Why a [`SessionSpec`] could not be turned into a [`LaunchPlan`].
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum LaunchError {
-    /// A device target was given, but the multi-phase device pipeline is not
-    /// yet wired into the single-launch API (TUI2-04). Carries the device
-    /// name for the message.
+    /// A device target was given directly to [`SessionSpec::launch_plan`],
+    /// which only resolves a [`DeviceTarget::Desktop`] into a [`LaunchPlan`]
+    /// — a real device session instead goes through
+    /// [`super::Supervisor::start_device`]'s [`DevicePlan`] path, which
+    /// [`super::Supervisor::start`] dispatches to directly. Carries the
+    /// device name for the message.
     #[error(
         "device launch for `{0}` is not wired yet — use `Supervisor::start_with_plan` \
          (TUI2-04 wires the device pipeline)"
@@ -158,7 +161,7 @@ pub enum LaunchError {
     DeviceLaunchUnwired(String),
 }
 
-/// The lifecycle of a supervised session (PLAN D2).
+/// The lifecycle of a supervised session.
 ///
 /// Forward-only through the build phases (`Configuring → Building →
 /// Installing → Running`), terminating in exactly one of [`Exited`] (the

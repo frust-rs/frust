@@ -1,4 +1,4 @@
-//! Recent-projects persistence (PLAN.md D6b's project switcher): a small
+//! Recent-projects persistence for the project switcher: a small
 //! `~/.config/frust/tui.toml` (`$XDG_CONFIG_HOME` respected, per the XDG
 //! base-directory spec's documented fallback) tracking the
 //! most-recently-opened project roots, newest first.
@@ -135,8 +135,8 @@ fn save_recent_project(path: &Path, project: &Path) {
     let _ = fs::write(path, doc.to_string());
 }
 
-/// Merge the persisted recent list with freshly `detect`ed project roots
-/// (PLAN.md D6b): every recent entry that still exists on disk, in recency
+/// Merge the persisted recent list with freshly `detect`ed project roots:
+/// every recent entry that still exists on disk, in recency
 /// order, followed by any detected root not already present — deduped
 /// throughout. A recent entry that no longer exists (moved/deleted since
 /// last use) is silently dropped rather than shown as a dead switcher row.
@@ -155,8 +155,8 @@ pub fn merge_recent_and_detected(recent: &[PathBuf], detected: &[PathBuf]) -> Ve
     out
 }
 
-// ── Settings persistence (T05 / PLAN.md D5/D6: sidebar width, mouse-capture
-// preference, follow-tail default) ─────────────────────────────────────────
+// ── Settings persistence: sidebar width, mouse-capture
+// preference, follow-tail default ───────────────────────────────────────────
 
 /// Persisted workbench preferences (`[settings]` table in `tui.toml`),
 /// alongside the `[recent].projects` array above — a fresh launch's
@@ -165,7 +165,7 @@ pub fn merge_recent_and_detected(recent: &[PathBuf], detected: &[PathBuf]) -> Ve
 /// carries no separate key here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
-    /// The sidebar's drag-resized width (columns), from T04's splitter.
+    /// The sidebar's drag-resized width (columns), from the sidebar splitter.
     pub sidebar_width: u16,
     /// Whether crossterm mouse capture is on.
     pub mouse_capture: bool,
@@ -230,7 +230,7 @@ fn settings_from_doc(doc: &DocumentMut) -> Settings {
 }
 
 /// Persist the sidebar's current width — the runner's enactment of a
-/// completed `SidebarSplitter` drag (T04's deferred note; see
+/// completed `SidebarSplitter` drag (see
 /// `engine::update`'s `DragEnd` handling).
 pub fn save_sidebar_width(width: u16) {
     save_sidebar_width_with(&RealEnv, width);
@@ -482,7 +482,7 @@ mod tests {
     fn a_saved_sidebar_width_is_clamped_to_the_drag_resize_bounds_on_load() {
         let home = unique_temp_home();
         let env = FakeEnv::home(&home);
-        // A value outside the T04 drag-resize bounds (e.g. hand-edited, or a
+        // A value outside the drag-resize bounds (e.g. hand-edited, or a
         // stale value from before the bounds tightened) clamps on load
         // rather than producing an out-of-range sidebar width.
         save_sidebar_width_with(&env, 9999);

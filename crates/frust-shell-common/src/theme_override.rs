@@ -1,4 +1,4 @@
-//! App-facing theme override seam (PLAN.md D2 correction): `frust::set_app_theme`/
+//! App-facing theme override seam: `frust::set_app_theme`/
 //! `clear_app_theme`.
 //!
 //! # The gap this closes
@@ -8,18 +8,18 @@
 //! `use_context::<Theme>()` app-code path) were both shell-owned exclusively,
 //! seeded from the platform's light/dark preference (`WindowEvent::ThemeChanged`,
 //! `nativeSetAppearance`, `frust_set_appearance`). An app that wanted to force
-//! a specific `Theme` (e.g. the widget catalog's Material/Cupertino toggle,
-//! task 14) had nowhere to hook in — the gallery example's brightness toggle
-//! only touched the `provide_context` copy, which no widget reads (a documented
-//! 6a gap this task retires).
+//! a specific `Theme` (e.g. the widget catalog's Material/Cupertino toggle)
+//! had nowhere to hook in — the gallery example's brightness toggle
+//! only touched the `provide_context` copy, which no widget reads (a
+//! documented gap this module closes).
 //!
 //! # Layering choice
 //!
 //! This process-global slot lives in `frust-shell-common`, not
 //! `frust-reactive` or `frust-theme`:
 //!
-//! - **Not `frust-theme`**: that crate is pure data + constructors (spec
-//!   §17) with no process-global/shell-polling concept of its own — adding one
+//! - **Not `frust-theme`**: that crate is pure data + constructors
+//!   with no process-global/shell-polling concept of its own — adding one
 //!   would give the design-token crate a state-management responsibility it
 //!   has never had, and every consumer (including non-shell contexts, if any
 //!   ever exist) would inherit it.
@@ -57,7 +57,7 @@
 //! so a write racing in from a background thread is simply picked up (or not)
 //! on the next frame — there is no tracked-signal wake to get racy about, so
 //! the stricter `push_deep_link`-style panic-off-thread contract buys nothing
-//! here. This is the simpler of the two contracts the task allowed.
+//! here. This is the simpler of the two available contracts.
 //!
 //! # Override-wins-over-appearance rule
 //!
@@ -135,9 +135,8 @@ pub fn theme_override_active() -> bool {
 pub struct ThemeOverrideWatcher {
     /// The slot generation as of the last [`poll`](Self::poll) call. Starts at
     /// `0`, matching the slot's initial generation, so a shell that never
-    /// observes a `set_app_theme`/`clear_app_theme` call never sees a change —
-    /// acceptance criterion 2 (no behavior change when the API is never
-    /// called).
+    /// observes a `set_app_theme`/`clear_app_theme` call never sees a change
+    /// (no behavior change when the API is never called).
     last_generation: u64,
 }
 
@@ -173,7 +172,7 @@ impl ThemeOverrideWatcher {
 ///   called [`clear_app_theme`]): the platform change is ignored entirely —
 ///   `current` (the override theme's own brightness) passes through unchanged.
 /// - Otherwise: `platform` (the newly reported platform preference) wins, the
-///   existing pre-task-04 behavior.
+///   existing pre-override behavior.
 pub fn effective_brightness_for_platform_change(
     override_active: bool,
     current: Brightness,
@@ -268,7 +267,7 @@ mod tests {
     #[test]
     fn effective_brightness_respects_override_wins_rule() {
         // No override: the platform's newly reported preference wins (the
-        // pre-task-04 behavior).
+        // pre-override behavior).
         assert_eq!(
             effective_brightness_for_platform_change(false, Brightness::Light, Brightness::Dark),
             Brightness::Dark
