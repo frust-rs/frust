@@ -157,6 +157,16 @@ const DEFAULT_SETTLE_SPRING: SpringDesc = SpringDesc {
 
 /// The visual shape of a page transition. The navigator maps the active
 /// transition's progress onto per-page geometry through [`resolve_layers`].
+///
+/// `#[allow(unpredictable_function_pointer_comparisons)]`: the derived
+/// `PartialEq`/`Eq` compare a [`PageTransition::Custom`] payload by function
+/// pointer address, which the compiler flags because that address isn't
+/// guaranteed stable across codegen units. Accepted here deliberately — the
+/// contract (documented on `Custom`) is a best-effort "names the same
+/// function" identity check, not a memory-safety- or correctness-critical
+/// comparison; the alternative (dropping `Eq` from the enum) breaks every
+/// other variant's equality for a single edge case.
+#[allow(unpredictable_function_pointer_comparisons)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PageTransition {
     /// Instant switch — no animation. The default.
@@ -195,6 +205,35 @@ pub enum PageTransition {
     /// is a short linear cross-fade, never a zoom or slide). Selectable directly,
     /// but its primary role is the collapse; see [`resolve_layers`]'s arm.
     ReducedCrossfade,
+    /// A caller-supplied transition: a third-party design system's escape hatch
+    /// for authoring its own page transition without a matching built-in
+    /// preset. The function maps **raw** progress (unclamped, so a spring
+    /// overshoot is visible — the same raw `value` [`resolve_layers`] passes
+    /// every built-in preset for position) plus `is_pop` and the page `Size`
+    /// onto the `(entering, leaving)` [`Layer`] pair, exactly as a built-in
+    /// preset's `resolve_layers` arm does; [`resolve_layers`] invokes it
+    /// verbatim, with no clamping or post-processing beyond what every preset
+    /// gets.
+    ///
+    /// A plain function pointer (not `Box<dyn Fn>`) so `Custom` keeps every
+    /// derive `PageTransition` already has (`Copy`/`Eq` included) — a
+    /// `Box<dyn Fn>` cannot implement either. Function pointers compare by
+    /// address, so `PartialEq`/`Eq` stay meaningful: two `Custom` specs are
+    /// equal iff they name the same function.
+    ///
+    /// **Timing.** `Custom` has no [`MotionScheme`] tokens of its own — pair it
+    /// with an explicit [`Timing::Duration`]/[`Timing::Spring`] for a
+    /// caller-chosen timing, or [`Timing::ThemeDefault`] to fall back to the
+    /// documented M3 default (300ms + [`Curve::Emphasized`] —
+    /// [`preset_enter_exit`]'s fallback arm, matching [`make_driver`]'s
+    /// unthemed `ThemeDefault` fallback).
+    ///
+    /// **Reduce-motion.** [`resolve_spec`]'s collapse to
+    /// [`PageTransition::ReducedCrossfade`] applies to `Custom` unchanged and
+    /// unconditionally — a custom transition inherits the accessibility rule
+    /// for free and cannot opt out; under `reduce_motion` the supplied
+    /// function is never called.
+    Custom(fn(progress: f64, is_pop: bool, size: Size) -> (Layer, Layer)),
 }
 
 /// How a transition's `0.0..=1.0` progress is driven.
@@ -440,7 +479,11 @@ pub fn make_driver(timing: Timing) -> (TransitionDriver, SpringDesc) {
 /// than entrances" rule. For [`PageTransition::Glyph`] these are
 /// the theme's `slow`/`fast` durations with the `spatial`/`exit` easings
 /// (340ms spatial in / 150ms exit out); every other
-/// preset reuses its natural [`TransitionSpec::duration`] timing for both.
+/// preset reuses its natural [`TransitionSpec::duration`] timing for both,
+/// including [`PageTransition::Custom`], which has no theme tokens of its own
+/// and so falls back to the documented M3 default (300ms +
+/// [`Curve::Emphasized`], matching [`make_driver`]'s unthemed `ThemeDefault`
+/// fallback).
 pub fn preset_enter_exit(
     preset: PageTransition,
     scheme: Option<&MotionScheme>,
@@ -462,6 +505,12 @@ pub fn preset_enter_exit(
                 Timing::Duration(GLYPH_EXIT, GLYPH_EXIT_CURVE),
             ),
         },
+        PageTransition::Custom(_) => {
+            // No theme tokens of its own: the documented M3 default fallback,
+            // the same one `make_driver` uses for an unresolved `ThemeDefault`.
+            let d = Timing::Duration(M3_DEFAULT_DURATION, Curve::Emphasized);
+            (d, d)
+        }
         other => {
             let d = TransitionSpec::duration(other).timing;
             (d, d)
@@ -741,6 +790,8 @@ pub fn resolve_layers(
                 (entering, leaving)
             }
         }
+
+        PageTransition::Custom(f) => f(p, is_pop, size),
     }
 }
 
@@ -1045,6 +1096,108 @@ mod tests {
         // A non-animated (`None`) spec is left untouched under reduce_motion.
         let none = resolve_spec(TransitionSpec::NONE, Some(&m));
         assert_eq!(none.preset, PageTransition::None);
+    }
+
+    // A distinctive custom preset used by the `Custom` tests below: a vertical
+    // slide (dy only) with no cross-fade, so its output is trivially
+    // distinguishable from every built-in preset's geometry.
+    fn custom_vertical_slide(p: f64, is_pop: bool, size: Size) -> (Layer, Layer) {
+        let dir = if is_pop { -1.0 } else { 1.0 };
+        let entering = Layer {
+            dx: 0.0,
+            dy: dir * (1.0 - p) * size.height,
+            alpha: 1.0,
+            scale: 1.0,
+        };
+        let leaving = Layer::IDENTITY;
+        (entering, leaving)
+    }
+
+    #[test]
+    fn custom_preset_drives_caller_supplied_layers() {
+        let (enter, leave) = resolve_layers(
+            PageTransition::Custom(custom_vertical_slide),
+            0.5,
+            false,
+            SIZE,
+        );
+        // The caller's geometry comes through unmodified — no clamping or
+        // post-processing beyond what every preset gets.
+        let (expected_enter, expected_leave) = custom_vertical_slide(0.5, false, SIZE);
+        assert_eq!(enter, expected_enter);
+        assert_eq!(leave, expected_leave);
+        assert_eq!(enter.dy, 0.5 * SIZE.height);
+        assert_eq!(leave, Layer::IDENTITY);
+
+        // Raw (unclamped) progress passes through verbatim too — an overshoot
+        // past 1.0 is visible in the caller's output, exactly like every
+        // built-in preset's position calculation.
+        let (enter, _leave) = resolve_layers(
+            PageTransition::Custom(custom_vertical_slide),
+            1.2,
+            false,
+            SIZE,
+        );
+        assert!((enter.dy - (-0.2 * SIZE.height)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn custom_preset_falls_back_to_m3_timing_under_theme_default() {
+        // `Custom` has no theme tokens of its own: `preset_enter_exit` and
+        // `resolve_timing` both fall back to the documented M3 default
+        // (300ms + `Curve::Emphasized`) — the same fallback `make_driver` uses
+        // for an unresolved `ThemeDefault` — regardless of whether a theme is
+        // threaded.
+        let expected = Timing::Duration(M3_DEFAULT_DURATION, Curve::Emphasized);
+
+        let (enter, exit) = preset_enter_exit(PageTransition::Custom(custom_vertical_slide), None);
+        assert_eq!(enter, expected);
+        assert_eq!(exit, expected);
+
+        let m = MotionScheme::m3_expressive();
+        let (enter, exit) =
+            preset_enter_exit(PageTransition::Custom(custom_vertical_slide), Some(&m));
+        assert_eq!(enter, expected);
+        assert_eq!(exit, expected);
+
+        let resolved = resolve_timing(
+            Timing::ThemeDefault,
+            PageTransition::Custom(custom_vertical_slide),
+            Some(&m),
+        );
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn custom_preset_collapses_under_reduce_motion() {
+        // Under `reduce_motion`, `resolve_spec`'s collapse to
+        // `ReducedCrossfade` applies to `Custom` unchanged and
+        // unconditionally — the supplied function itself is never called by
+        // `resolve_spec`/`resolve_timing` (only `resolve_layers` ever calls
+        // it, and the navigator only calls `resolve_layers` with the
+        // *resolved* preset, which is `ReducedCrossfade` here, not `Custom`).
+        fn panics_if_called(_p: f64, _is_pop: bool, _size: Size) -> (Layer, Layer) {
+            panic!("Custom's function must not be invoked under reduce_motion");
+        }
+
+        let mut m = MotionScheme::m3_expressive();
+        m.reduce_motion = true;
+        let resolved = resolve_spec(
+            TransitionSpec::themed(PageTransition::Custom(panics_if_called)),
+            Some(&m),
+        );
+        assert_eq!(resolved.preset, PageTransition::ReducedCrossfade);
+        let Timing::Duration(d, curve) = resolved.timing else {
+            panic!("reduced-motion must be a duration crossfade");
+        };
+        assert!(d <= Duration::from_millis(120));
+        assert_eq!(curve, Curve::Linear);
+
+        // Driving the *resolved* spec's layers never touches the caller's
+        // function (it's no longer part of the resolved preset at all).
+        let (entering, leaving) = resolve_layers(resolved.preset, 0.5, false, SIZE);
+        assert_eq!((entering.dx, entering.dy), (0.0, 0.0));
+        assert_eq!((leaving.dx, leaving.dy), (0.0, 0.0));
     }
 
     #[test]
