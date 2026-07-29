@@ -545,6 +545,164 @@ impl ColorScheme {
             surface_tint: SYSTEM_BLUE_DARK,
         }
     }
+
+    /// The neutral, design-language-free light `ColorScheme`: a plain
+    /// achromatic surface/on-surface ramp, plus **one** restrained
+    /// slate-blue accent filling the `primary` family — every other role
+    /// (`secondary`/`tertiary`) stays gray too, since "neutral" means one
+    /// accent, not a second or third hue. See
+    /// [`crate::theme::Theme::neutral`]'s module docs for the design intent
+    /// ("deliberately plain, not half-finished").
+    ///
+    /// **Frust-authored, not sourced from any third-party design system** —
+    /// unlike the M3/Cupertino tables above, there is no external spec to
+    /// cite here; values are chosen for legible contrast against their
+    /// paired ink role (see [`ColorScheme::neutral_dark`]'s doc comment for
+    /// the contrast rationale, verified by
+    /// `neutral_surface_on_surface_contrast_is_legible` in this module's
+    /// tests). `error`/`on_error`/`error_container`/`on_error_container`
+    /// are the one exception kept in real red, reused verbatim from
+    /// [`ColorScheme::m3_baseline_light`] — a functional/semantic signal
+    /// (danger/destructive state), not a "look", the same reasoning
+    /// [`crate::theme::Theme::neutral`] uses to still attach
+    /// [`crate::status::StatusPalette::m3`] rather than a grayscale status
+    /// set.
+    pub const fn neutral_light() -> Self {
+        // A single restrained slate-blue accent (`primary` family only).
+        const ACCENT_LIGHT: Color = Color::from_rgb8(0x3D, 0x5A, 0x73);
+        const ACCENT_DARK: Color = Color::from_rgb8(0x8F, 0xB4, 0xD1);
+
+        Self {
+            primary: ACCENT_LIGHT,
+            on_primary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            primary_container: Color::from_rgb8(0xE3, 0xE9, 0xEE),
+            on_primary_container: Color::from_rgb8(0x1B, 0x2A, 0x35),
+            // "Fixed" roles are brightness-invariant by M3 definition —
+            // the same literal in both `neutral_light`/`neutral_dark`.
+            primary_fixed: ACCENT_LIGHT,
+            primary_fixed_dim: ACCENT_DARK,
+            on_primary_fixed: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            on_primary_fixed_variant: Color::from_rgb8(0x2E, 0x47, 0x59),
+
+            // Plain gray — "one restrained accent" means the primary family
+            // above, not a second hue.
+            secondary: Color::from_rgb8(0x6B, 0x6B, 0x6B),
+            on_secondary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            secondary_container: Color::from_rgb8(0xE4, 0xE4, 0xE4),
+            on_secondary_container: Color::from_rgb8(0x2B, 0x2B, 0x2B),
+            secondary_fixed: Color::from_rgb8(0xE4, 0xE4, 0xE4),
+            secondary_fixed_dim: Color::from_rgb8(0xC7, 0xC7, 0xC7),
+            on_secondary_fixed: Color::from_rgb8(0x2B, 0x2B, 0x2B),
+            on_secondary_fixed_variant: Color::from_rgb8(0x4A, 0x4A, 0x4A),
+
+            // Plain gray — a third hue would defeat the "one accent" floor.
+            tertiary: Color::from_rgb8(0x4A, 0x4A, 0x4A),
+            on_tertiary: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            tertiary_container: Color::from_rgb8(0xD6, 0xD6, 0xD6),
+            on_tertiary_container: Color::from_rgb8(0x26, 0x26, 0x26),
+            tertiary_fixed: Color::from_rgb8(0xD6, 0xD6, 0xD6),
+            tertiary_fixed_dim: Color::from_rgb8(0xB8, 0xB8, 0xB8),
+            on_tertiary_fixed: Color::from_rgb8(0x26, 0x26, 0x26),
+            on_tertiary_fixed_variant: Color::from_rgb8(0x3D, 0x3D, 0x3D),
+
+            // Kept real red — see this constructor's doc comment. Reused
+            // verbatim from `m3_baseline_light`.
+            error: Color::from_rgb8(0xB3, 0x26, 0x1E),
+            on_error: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            error_container: Color::from_rgb8(0xF9, 0xDE, 0xDC),
+            on_error_container: Color::from_rgb8(0x41, 0x0E, 0x0B),
+
+            surface: Color::from_rgb8(0xFA, 0xFA, 0xFA),
+            on_surface: Color::from_rgb8(0x1A, 0x1A, 0x1A),
+            on_surface_variant: Color::from_rgb8(0x5C, 0x5C, 0x5C),
+            surface_dim: Color::from_rgb8(0xE8, 0xE8, 0xE8),
+            surface_bright: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            surface_container_lowest: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            surface_container_low: Color::from_rgb8(0xF5, 0xF5, 0xF5),
+            surface_container: Color::from_rgb8(0xEF, 0xEF, 0xEF),
+            surface_container_high: Color::from_rgb8(0xE7, 0xE7, 0xE7),
+            surface_container_highest: Color::from_rgb8(0xDF, 0xDF, 0xDF),
+
+            outline: Color::from_rgb8(0x8A, 0x8A, 0x8A),
+            outline_variant: Color::from_rgb8(0xD0, 0xD0, 0xD0),
+            shadow: Color::from_rgb8(0x00, 0x00, 0x00),
+            scrim: Color::from_rgb8(0x00, 0x00, 0x00),
+            inverse_surface: Color::from_rgb8(0x2B, 0x2B, 0x2B),
+            inverse_on_surface: Color::from_rgb8(0xF5, 0xF5, 0xF5),
+            inverse_primary: ACCENT_DARK,
+            // Mirrors M3's own convention: surface_tint == primary.
+            surface_tint: ACCENT_LIGHT,
+        }
+    }
+
+    /// The neutral, design-language-free dark `ColorScheme` — the dark-mode
+    /// mirror of [`ColorScheme::neutral_light`]; see that constructor's doc
+    /// comment for the design rationale.
+    ///
+    /// Contrast check (verified in this module's tests): `surface`
+    /// (`#121212`) against `on_surface` (`#F2F2F2`) is ~16.7:1, and
+    /// [`ColorScheme::neutral_light`]'s equivalent pair is ~16.7:1 too —
+    /// both far past the WCAG AA 4.5:1 normal-text floor.
+    pub const fn neutral_dark() -> Self {
+        const ACCENT_LIGHT: Color = Color::from_rgb8(0x3D, 0x5A, 0x73);
+        const ACCENT_DARK: Color = Color::from_rgb8(0x8F, 0xB4, 0xD1);
+
+        Self {
+            primary: ACCENT_DARK,
+            on_primary: Color::from_rgb8(0x16, 0x23, 0x2C),
+            primary_container: Color::from_rgb8(0x22, 0x34, 0x41),
+            on_primary_container: Color::from_rgb8(0xC7, 0xDC, 0xEA),
+            primary_fixed: ACCENT_LIGHT,
+            primary_fixed_dim: ACCENT_DARK,
+            on_primary_fixed: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            on_primary_fixed_variant: Color::from_rgb8(0x2E, 0x47, 0x59),
+
+            secondary: Color::from_rgb8(0xB0, 0xB0, 0xB0),
+            on_secondary: Color::from_rgb8(0x1E, 0x1E, 0x1E),
+            secondary_container: Color::from_rgb8(0x3A, 0x3A, 0x3A),
+            on_secondary_container: Color::from_rgb8(0xE4, 0xE4, 0xE4),
+            secondary_fixed: Color::from_rgb8(0xE4, 0xE4, 0xE4),
+            secondary_fixed_dim: Color::from_rgb8(0xC7, 0xC7, 0xC7),
+            on_secondary_fixed: Color::from_rgb8(0x2B, 0x2B, 0x2B),
+            on_secondary_fixed_variant: Color::from_rgb8(0x4A, 0x4A, 0x4A),
+
+            tertiary: Color::from_rgb8(0xB8, 0xB8, 0xB8),
+            on_tertiary: Color::from_rgb8(0x1E, 0x1E, 0x1E),
+            tertiary_container: Color::from_rgb8(0x38, 0x38, 0x38),
+            on_tertiary_container: Color::from_rgb8(0xD6, 0xD6, 0xD6),
+            tertiary_fixed: Color::from_rgb8(0xD6, 0xD6, 0xD6),
+            tertiary_fixed_dim: Color::from_rgb8(0xB8, 0xB8, 0xB8),
+            on_tertiary_fixed: Color::from_rgb8(0x26, 0x26, 0x26),
+            on_tertiary_fixed_variant: Color::from_rgb8(0x3D, 0x3D, 0x3D),
+
+            // Kept real red — see `neutral_light`'s doc comment. Reused
+            // verbatim from `m3_baseline_dark`.
+            error: Color::from_rgb8(0xF2, 0xB8, 0xB5),
+            on_error: Color::from_rgb8(0x60, 0x14, 0x10),
+            error_container: Color::from_rgb8(0x8C, 0x1D, 0x18),
+            on_error_container: Color::from_rgb8(0xF9, 0xDE, 0xDC),
+
+            surface: Color::from_rgb8(0x12, 0x12, 0x12),
+            on_surface: Color::from_rgb8(0xF2, 0xF2, 0xF2),
+            on_surface_variant: Color::from_rgb8(0xB0, 0xB0, 0xB0),
+            surface_dim: Color::from_rgb8(0x12, 0x12, 0x12),
+            surface_bright: Color::from_rgb8(0x38, 0x38, 0x38),
+            surface_container_lowest: Color::from_rgb8(0x0B, 0x0B, 0x0B),
+            surface_container_low: Color::from_rgb8(0x1C, 0x1C, 0x1C),
+            surface_container: Color::from_rgb8(0x20, 0x20, 0x20),
+            surface_container_high: Color::from_rgb8(0x2A, 0x2A, 0x2A),
+            surface_container_highest: Color::from_rgb8(0x35, 0x35, 0x35),
+
+            outline: Color::from_rgb8(0x8A, 0x8A, 0x8A),
+            outline_variant: Color::from_rgb8(0x47, 0x47, 0x47),
+            shadow: Color::from_rgb8(0x00, 0x00, 0x00),
+            scrim: Color::from_rgb8(0x00, 0x00, 0x00),
+            inverse_surface: Color::from_rgb8(0xE6, 0xE6, 0xE6),
+            inverse_on_surface: Color::from_rgb8(0x2B, 0x2B, 0x2B),
+            inverse_primary: ACCENT_LIGHT,
+            surface_tint: ACCENT_DARK,
+        }
+    }
 }
 
 /// Calculate the relative luminance of a color per WCAG standards.
@@ -862,5 +1020,83 @@ mod tests {
             Color::from_rgb8(0x1D, 0x1B, 0x20),
             "Light accent should pair with dark ink"
         );
+    }
+
+    // ---- Neutral baseline -------------------------------------------------
+
+    /// WCAG contrast ratio between two colors, per the standard `(L1 +
+    /// 0.05) / (L2 + 0.05)` formula (`L1` the lighter of the pair).
+    fn contrast_ratio(a: Color, b: Color) -> f64 {
+        let la = relative_luminance(a);
+        let lb = relative_luminance(b);
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn neutral_surface_on_surface_contrast_is_legible() {
+        // Task acceptance criterion 3: both brightnesses clear the WCAG AA
+        // normal-text floor (4.5:1) for the surface/on-surface pair.
+        const AA_NORMAL_TEXT: f64 = 4.5;
+
+        let light = ColorScheme::neutral_light();
+        assert!(
+            contrast_ratio(light.surface, light.on_surface) >= AA_NORMAL_TEXT,
+            "neutral_light surface/on_surface contrast too low"
+        );
+
+        let dark = ColorScheme::neutral_dark();
+        assert!(
+            contrast_ratio(dark.surface, dark.on_surface) >= AA_NORMAL_TEXT,
+            "neutral_dark surface/on_surface contrast too low"
+        );
+    }
+
+    #[test]
+    fn neutral_light_and_dark_are_distinct() {
+        let light = ColorScheme::neutral_light();
+        let dark = ColorScheme::neutral_dark();
+        assert_ne!(light.surface, dark.surface);
+        assert_ne!(light.on_surface, dark.on_surface);
+        assert_ne!(light.primary, dark.primary);
+    }
+
+    #[test]
+    fn neutral_carries_exactly_one_accent_family() {
+        // "One restrained accent": secondary/tertiary stay achromatic
+        // (r == g == b) in both brightnesses, unlike primary.
+        fn is_achromatic(c: Color) -> bool {
+            let [r, g, b, _] = c.to_rgba8().to_u8_array();
+            r == g && g == b
+        }
+
+        for scheme in [ColorScheme::neutral_light(), ColorScheme::neutral_dark()] {
+            assert!(!is_achromatic(scheme.primary), "primary must be the accent");
+            assert!(is_achromatic(scheme.secondary));
+            assert!(is_achromatic(scheme.tertiary));
+            assert!(is_achromatic(scheme.surface));
+            assert!(is_achromatic(scheme.on_surface));
+        }
+    }
+
+    #[test]
+    fn neutral_fixed_roles_are_brightness_invariant() {
+        let light = ColorScheme::neutral_light();
+        let dark = ColorScheme::neutral_dark();
+        assert_eq!(light.primary_fixed, dark.primary_fixed);
+        assert_eq!(light.primary_fixed_dim, dark.primary_fixed_dim);
+        assert_eq!(
+            light.on_primary_fixed_variant,
+            dark.on_primary_fixed_variant
+        );
+        assert_eq!(light.secondary_fixed, dark.secondary_fixed);
+        assert_eq!(light.tertiary_fixed, dark.tertiary_fixed);
+    }
+
+    #[test]
+    fn neutral_is_const_constructible() {
+        const LIGHT: ColorScheme = ColorScheme::neutral_light();
+        const DARK: ColorScheme = ColorScheme::neutral_dark();
+        assert_ne!(LIGHT.surface, DARK.surface);
     }
 }
