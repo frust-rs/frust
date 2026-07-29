@@ -264,8 +264,8 @@ fn no_plugin_kotlin_uses_the_bare_dev_frust_package() {
          plugins/secure-storage's `dev.frust.securestorage`, plugins/camera's `dev.frust.camera`, \
          plugins/native-widgets's `dev.frust.nativewidgets`); `dev.frust` itself belongs \
          exclusively to the embedding module. There is no exception clause to point at — \
-         frust-native-widgets's time-boxed one was closed by task p3-03, which renamed its JNI \
-         exports to `Java_dev_frust_nativewidgets_*` rather than keep the bare package",
+         frust-native-widgets's time-boxed one was closed when its JNI \
+         exports were renamed to `Java_dev_frust_nativewidgets_*` rather than keep the bare package",
         unexpected.len(),
         unexpected,
     );

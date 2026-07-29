@@ -634,7 +634,7 @@ mod tests {
             1,
             "exactly one private channel",
         );
-        assert_eq!(dms().len(), 9, "9 DMs (one an empty DM — task 22)");
+        assert_eq!(dms().len(), 9, "9 DMs (one an empty DM)");
         assert_eq!(messages().len(), 40, "~40 authored messages");
     }
 
@@ -646,7 +646,7 @@ mod tests {
         );
         assert!(
             messages_for("dm-9").is_empty(),
-            "dm-9 carries no messages (drives the empty-feed state — task 22)"
+            "dm-9 carries no messages (drives the empty-feed state)"
         );
     }
 

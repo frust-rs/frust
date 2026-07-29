@@ -584,21 +584,19 @@ fn domain_never_imports_frust_presentation_or_data() {
             file: "features/settings/domain/models.rs",
             needle: "frust::",
             reason: "compose()'s Theme/Color/ColorScheme/Brightness/DesignLanguage/TypeScale \
-                  value-type imports — theming IS this domain's subject matter (task 05 \
-                  completion summary, Notable Decisions #1)",
+                  value-type imports — theming IS this domain's subject matter",
         },
         Exemption {
             file: "features/settings/domain/accent.rs",
             needle: "frust::",
             reason: "Brightness/Color/ColorScheme/Theme value-type imports, same rationale as \
-                  models.rs above (task 05 completion summary, Notable Decisions #1)",
+                  models.rs above",
         },
         Exemption {
             file: "features/settings/domain/use_cases/set_theme.rs",
             needle: "frust::",
             reason: "set_app_theme/clear_app_theme — the app's single theming side-effect \
-                  call site, the effect this use case exists to apply (task 05 completion \
-                  summary, Notable Decisions #1)",
+                  call site, the effect this use case exists to apply",
         },
     ];
     let mut used = vec![false; frust_exemptions.len()];
@@ -691,8 +689,7 @@ fn presentation_never_imports_data_directly() {
         needle: "::data::",
         reason: "resolve_repo()'s StoreMessageRepository fallback — documented \
                   composition-root reference kept because new/with_latency/for_channel \
-                  must stay signature-stable for external integration-test crates \
-                  (task 03 completion summary, Notable Decisions #1)",
+                  must stay signature-stable for external integration-test crates",
     }];
     let mut used = vec![false; exemptions.len()];
 
@@ -854,8 +851,7 @@ fn no_concrete_repo_type_name_outside_data_layer_or_composition_root() {
         needle: "StoreMessageRepository",
         reason: "resolve_repo()'s composition-root-equivalent fallback (import + \
                   construction) — the same presentation->data edge \
-                  presentation_never_imports_data_directly already allowlists (task 03 \
-                  completion summary, Notable Decisions #1)",
+                  presentation_never_imports_data_directly already allowlists",
     }];
     let mut used = vec![false; exemptions.len()];
 

@@ -158,7 +158,7 @@ fn only_shell_glue_may_declare_host_translucent_surface() {
     assert!(
         failures.is_empty(),
         "host-declared-translucency ban violated ({} hit(s)) — only the generated host's \
-         JNI/C-ABI entry points may declare host translucency (review M3); see \
+         JNI/C-ABI entry points may declare host translucency; see \
          crates/frust-shell-common/src/surface_mode.rs's module docs:\n{}",
         failures.len(),
         failures.join("\n"),
@@ -177,8 +177,8 @@ fn only_shell_app_loops_may_publish_the_resolved_surface_mode() {
     assert!(
         failures.is_empty(),
         "resolved-surface-mode publish ban violated ({} hit(s)) — only each mobile shell's \
-         own per-frame resolved-translucency sync may publish this slot (native-widgets \
-         p1-01); see crates/frust-shell-common/src/surface_mode.rs's module docs:\n{}",
+         own per-frame resolved-translucency sync may publish this slot; see \
+         crates/frust-shell-common/src/surface_mode.rs's module docs:\n{}",
         failures.len(),
         failures.join("\n"),
     );
@@ -212,8 +212,8 @@ fn facade_does_not_reexport_the_translucency_declaration() {
                 && !line.contains("request_translucent_surface")
                 && !line.contains("publish_resolved_surface_mode"),
             "crates/frust/src/lib.rs:{}: facade re-exports a surface-mode WRITER — app Rust \
-             must never be able to set the declaration latch (review M3) or fake a resolved \
-             verdict (p1-01). Line: {}",
+             must never be able to set the declaration latch or fake a resolved \
+             verdict. Line: {}",
             i + 1,
             line.trim()
         );

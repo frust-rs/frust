@@ -1031,8 +1031,8 @@ fn gate_harness_block(
         inflexible(label("GATE HARNESS \u{2014} measurement rig, not a demo")),
         gap(6.0),
         inflexible(caption(
-            "Built for task p1-10's device-gate bars 5/6 (leak + lifecycle, 50-slot stress). \
-             Phase 3 may delete this whole section once the on-device gate has run \u{2014} it \
+            "Built for the device-gate leak + lifecycle bars (50-slot stress). This whole \
+             section may be deleted once the on-device gate has run \u{2014} it \
              proves the registry's teardown-retire path, not a design pattern.",
         )),
     ]);
@@ -1066,7 +1066,7 @@ fn gate_harness_block(
             "Runs its OWN six-control group (separate from the showcase above), so cycling \
              never disturbs that demo. Watch \u{201c}Total live\u{201d} above dip by 6 on every \
              unmount and climb back by 6 on every mount \u{2014} it should settle back down \
-             immediately, not linger for a few frames (that lag is exactly what the p1-09 \
+             immediately, not linger for a few frames (that lag is exactly what the \
              teardown-retire fix eliminated).",
         )),
         gap(6.0),
@@ -1203,7 +1203,7 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     // person gating this page picks the mode, then interacts.
     let writeback_block = block(vec![
         inflexible(label(
-            "Write-back mode (p2-05 bar 8: the rejecting round trip)",
+            "Write-back mode (the rejecting round trip)",
         )),
         gap(6.0),
         inflexible(caption(
@@ -1213,7 +1213,8 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
              the Slider or flip the Switch in EITHER column: the glyph widget snaps back within \
              the frame, and the native one has to be driven back across the wire a frame later. \
              \u{201c}Switch events\u{201d} below must advance by exactly 1 per toggle \u{2014} 2 \
-             would be the re-entrant echo RESEARCH-P2-REFRESH \u{00a7}3's Caveat B warns about.",
+             would be a re-entrant echo, the exact feedback loop write-back mode exists to \
+             catch.",
         )),
         gap(6.0),
         inflexible(writeback_toggle(rejecting)),

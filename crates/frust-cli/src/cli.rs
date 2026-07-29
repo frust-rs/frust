@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use crate::build_args::BuildArgs;
 
 #[derive(Parser, Debug)]
-#[command(name = "frust", version, about = "Tooling for Frust apps (spec §12)")]
+#[command(name = "frust", version, about = "Tooling for Frust apps")]
 pub struct Cli {
     /// Target device id or name (prefix match allowed).
     #[arg(short = 'd', long = "device-id", global = true, value_name = "ID")]

@@ -157,7 +157,7 @@ impl<State: 'static> ListView<State> {
     ) -> Self {
         assert!(
             item_extent > 0.0,
-            "ListView item_extent must be positive (uniform extent, PLAN.md D4)"
+            "ListView item_extent must be positive (uniform extent)"
         );
         Self {
             item_count,

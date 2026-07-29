@@ -347,7 +347,7 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
             "the slot's counter ticks \u{223c}20Hz on its OWN Choreographer/Handler \
              (iOS: Timer) loop \u{2014} independent of any frust frame. This page paints \
              nothing per-frame; the frame gate should read 0fps at rest even while the \
-             counter keeps moving (device-verified in task 11).",
+             counter keeps moving (device-verified).",
         )),
     ]);
 

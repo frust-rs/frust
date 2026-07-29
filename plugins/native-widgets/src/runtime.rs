@@ -1912,7 +1912,7 @@ mod tests {
         assert!(
             runtime.pending_callbacks.is_empty(),
             "without forget_pending_callback the fresh entry would strand \
-             its closure for the process lifetime — the shipped c1-01 defect"
+             its closure for the process lifetime — a defect that once shipped"
         );
         assert_eq!(
             Arc::strong_count(&fresh),

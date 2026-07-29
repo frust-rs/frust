@@ -538,7 +538,7 @@ impl SurfaceRenderer {
         debug_assert_eq!(
             next_phase(self.phase(), SurfaceEvent::Created),
             SurfacePhase::SurfaceReady,
-            "Created must reach SurfaceReady (spec §8.1)"
+            "Created must reach SurfaceReady"
         );
         // Seed the shader-showcase effects engine with a clone of the same
         // pipeline cache handed to vello, so its per-program shader pipelines
@@ -597,7 +597,7 @@ impl SurfaceRenderer {
         debug_assert_eq!(
             next_phase(self.phase(), SurfaceEvent::Destroyed),
             SurfacePhase::NoSurface,
-            "Destroyed must reach NoSurface (spec §8.1)"
+            "Destroyed must reach NoSurface"
         );
         self.state = SurfaceState::NoSurface;
     }
@@ -950,7 +950,7 @@ impl SurfaceRenderer {
                 debug_assert_eq!(
                     next_phase(SurfacePhase::SurfaceReady, SurfaceEvent::Lost),
                     SurfacePhase::SurfaceLost,
-                    "Lost must reach SurfaceLost from SurfaceReady (spec §8.1)"
+                    "Lost must reach SurfaceLost from SurfaceReady"
                 );
                 // Drop the surface and its outstanding resources before returning
                 // so the shell can recreate cleanly. `consecutive_invalid`

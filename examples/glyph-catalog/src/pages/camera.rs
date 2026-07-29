@@ -403,7 +403,7 @@ fn permission_block(
         // device is a transparent proxy-Activity.
         AsyncValue::Ready(PermissionStatus::NeedsUi) => (
             "No foreground activity cached yet for the permission dialog \u{2014} retry once \
-             the app is in the foreground (PLAN.md's permission-plumbing note)."
+             the app is in the foreground."
                 .to_string(),
             true,
         ),

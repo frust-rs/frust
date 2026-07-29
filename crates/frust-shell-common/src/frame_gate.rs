@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(
             ALL_INPUTS.len(),
             11,
-            "the OR-list must have all ten RESEARCH §C-derived inputs plus the \
+            "the OR-list must have all ten wake inputs plus the \
              paced-only signal"
         );
         for field in ALL_INPUTS {

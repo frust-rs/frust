@@ -85,8 +85,8 @@ fn assert_section_identical(header: &str, expect_keys: &[&str]) {
     for key in expect_keys {
         assert!(
             blocks[0].contains_key(*key),
-            "root Cargo.toml's {header} is missing `{key}` — the phase-7 \
-             hardening (task 11) has been removed?"
+            "root Cargo.toml's {header} is missing `{key}` — has the \
+             profile hardening been removed?"
         );
     }
     for (path, other) in manifests.iter().zip(&blocks).skip(1) {
@@ -138,7 +138,7 @@ fn shader_stack_dev_overrides_identical_across_all_three_manifests() {
             other,
             "[profile.dev.package.*] overrides in {} have drifted from the \
              root Cargo.toml — the three manifests must stay identical \
-             (DEVELOPMENT.md, spec §12.9)",
+             (see DEVELOPMENT.md's profile-sync rule)",
             path.display()
         );
     }

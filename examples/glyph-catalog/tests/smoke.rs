@@ -503,7 +503,7 @@ fn interactions_heartbeat_resumes_with_animations_enabled() {
     let (_scene, outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
     assert!(
         !outcome.needs_frame,
-        "task 11: every demo (including the heartbeat) starts stopped — a fresh Interactions \
+        "every demo (including the heartbeat) starts stopped — a fresh Interactions \
          mount must request zero frames",
     );
 

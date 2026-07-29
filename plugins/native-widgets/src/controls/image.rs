@@ -891,7 +891,7 @@ mod tests {
             decode(slot, "").bytes.as_slice().is_none(),
             "retire reaps the R2 entry on Component teardown even though \
              nothing native ever claimed it — without `retire`, R2 would \
-             leak for the process lifetime (the shipped f2-03 defect)"
+             leak for the process lifetime (a defect that once shipped)"
         );
     }
 

@@ -150,7 +150,7 @@ pub fn push_deep_link(url: impl Into<String>) {
         eprintln!(
             "frust-reactive: push_deep_link(\"{url}\") dropped — ReactiveRuntime::init has \
              not run yet. A shell should queue a link platform-side until its native handle \
-             exists (see task 07); reaching this indicates an odd init-ordering race, not normal \
+             exists; reaching this indicates an odd init-ordering race, not normal \
              operation."
         );
         return;
